@@ -1371,11 +1371,57 @@ def run_engagement(
             # caller and the README's egress claim was false for target traffic.
             egress_allowlist=build_engagement_allowlist(slug=slug),
         )
+        # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
+        # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
+        # identity's requests still pass the full safety stack. No refs => None (documented no-op).
+        # Computed BEFORE the seed send so a signed roster can set the ATTACKER identity on it (below).
+        ac_config = access_control_config
+        _seeded = None
+        if enable_access_control and ac_config is None and access_control_refs:
+            from .scanner.access_control import (
+                config_from_cli,
+                config_from_signed_credentials,
+                load_signed_target_credentials,
+            )
+            # W3 autoseed: an OWNER-SIGNED test-credential roster (authority dir) supplies the victim,
+            # ATTACKER + unauthorized-peer identities — no per-run --ac-victim-header / --ac-unauth-header.
+            # It is VERIFIED against the engagement trust root AND bound to THIS slug; a tampered / absent /
+            # out-of-window / cross-engagement roster falls back to the CLI headers.
+            _signed = load_signed_target_credentials(slug)
+            _trust_root = _engage_authority_trust_root(slug) if _signed is not None else None
+            # A tampered / out-of-window / wrong-slug roster fails CLOSED inside
+            # config_from_signed_credentials (returns None) and falls back to the CLI headers below; with no
+            # CLI victim header that yields a non-firing config (no victim swap => the probe cannot mint),
+            # never a FACT from bad creds. `now` is REQUIRED (the window is always enforced) and `slug`
+            # binds the roster to this engagement.
+            if _signed is not None and _trust_root is not None:
+                from datetime import datetime as _dt, timezone as _tz
+                _seeded = config_from_signed_credentials(
+                    ex.gated_fetch, _signed, _trust_root, access_control_refs,
+                    slug=slug, now=_dt.now(_tz.utc))
+            if _seeded is not None:
+                ac_config = _seeded.config
+            else:
+                ac_config = config_from_cli(
+                    ex.gated_fetch, access_control_victim_headers, access_control_refs,
+                    unauth_headers=access_control_unauth_headers)
+
         # #799 — OBSERVE-ONLY seed recorder around the campaign's gated send: capture whether the FIRST
         # (seed) fetch came back with an empty body on a dead connection (status 0 / 5xx-gateway). It only
         # reads the response the crawler already made and returns it unchanged — no new traffic, so the
         # scan output stays byte-identical; the emptiness flag drives the INCONCLUSIVE surface below.
-        _seed_send = ex.gated_fetch
+        #
+        # W3 (red-pen MED): when an OWNER-SIGNED roster seeded the access-control pack, the campaign's own
+        # send IS the IdorCheck ATTACKER view, so it MUST carry the signed ATTACKER identity's headers.
+        # Otherwise the attacker view is anonymous (== the logged-out baseline): the two-identity
+        # differential is unsatisfiable (the check can never mint) or, worse, fails open on a stray session
+        # the crawl happened to carry. All four identities stay header-swaps over the SAME gated executor —
+        # victim/nocred/peer live in ac_config (built over ex.gated_fetch), the attacker is swapped on here.
+        if _seeded is not None:
+            from .scanner.access_control import victim_send_with_headers
+            _seed_send = victim_send_with_headers(ex.gated_fetch, _seeded.attacker_headers)
+        else:
+            _seed_send = ex.gated_fetch
 
         def _seed_recording_send(req: object) -> dict:
             resp = _seed_send(req)
@@ -1390,35 +1436,6 @@ def run_engagement(
                 except Exception:
                     pass
             return resp
-
-        # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
-        # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
-        # identity's requests still pass the full safety stack. No refs => None (documented no-op).
-        ac_config = access_control_config
-        if enable_access_control and ac_config is None and access_control_refs:
-            from .scanner.access_control import (
-                config_from_cli,
-                config_from_signed_credentials,
-                load_signed_target_credentials,
-            )
-            # W3 autoseed: an OWNER-SIGNED test-credential roster (authority dir) supplies the victim +
-            # unauthorized-peer identities — no per-run --ac-victim-header / --ac-unauth-header. It is
-            # VERIFIED against the engagement trust root; a tampered / absent roster falls back to the CLI
-            # headers. The attacker view stays the executor identity, exactly as config_from_cli.
-            _signed = load_signed_target_credentials(slug)
-            _trust_root = _engage_authority_trust_root(slug) if _signed is not None else None
-            # A tampered / out-of-window roster fails CLOSED inside config_from_signed_credentials (returns
-            # None) and falls back to the CLI headers below; with no CLI victim header that yields a
-            # non-firing config (no victim swap => the probe cannot mint), never a FACT from bad creds.
-            _seeded = (
-                config_from_signed_credentials(ex.gated_fetch, _signed, _trust_root, access_control_refs)
-                if _signed is not None and _trust_root is not None else None)
-            if _seeded is not None:
-                ac_config = _seeded.config
-            else:
-                ac_config = config_from_cli(
-                    ex.gated_fetch, access_control_victim_headers, access_control_refs,
-                    unauth_headers=access_control_unauth_headers)
         try:
             return WebScanCampaign(
                 _seed_recording_send,

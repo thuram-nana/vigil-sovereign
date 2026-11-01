@@ -37,6 +37,10 @@ from vigil_core.target_credentials import (
 
 _VICTIM_DISC = "IBAN-BOB-DE89-VICTIM-UNIQUE-3704-0044-0532-0130-00"
 _REF = f"idor:id:2|{_VICTIM_DISC}|1"    # bug_class:ref_param:victim_ref|discriminator|control_ref
+# A fixed clock for rosters with no explicit window (any `now` passes). `now` is REQUIRED — the validity
+# window is always enforced, there is no fail-open skip — and `slug` binds the roster to the engagement.
+_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_SLUG = "bench"
 
 
 def _base_send():
@@ -75,7 +79,7 @@ def _signed_roster(**over):
 def _probe(base: str, path: str):
     base_send = _base_send()
     signed, tr = _signed_roster()
-    seeded = config_from_signed_credentials(base_send, signed, tr, [_REF])
+    seeded = config_from_signed_credentials(base_send, signed, tr, [_REF], slug=_SLUG, now=_NOW)
     assert seeded is not None
     # the attacker view is the campaign's own send — engage swaps the ATTACKER headers onto it, same as the
     # producer swapped the victim/peer headers into the config.
@@ -119,7 +123,8 @@ def test_unverifiable_roster_seeds_nothing() -> None:
     wrong_tr = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=other_kp.public_key_b64)])
     msgs, on_warn = _warns()
-    assert config_from_signed_credentials(_base_send(), signed, wrong_tr, [_REF], on_warn=on_warn) is None
+    assert config_from_signed_credentials(
+        _base_send(), signed, wrong_tr, [_REF], slug=_SLUG, now=_NOW, on_warn=on_warn) is None
     assert any("failed verification" in m for m in msgs)
 
 
@@ -127,23 +132,63 @@ def test_out_of_window_roster_seeds_nothing() -> None:
     past = datetime(2020, 1, 1, tzinfo=timezone.utc)
     signed, tr = _signed_roster(not_before=past, not_after=past + timedelta(hours=1))
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)                 # well after not_after
-    assert config_from_signed_credentials(_base_send(), signed, tr, [_REF], now=now) is None
+    assert config_from_signed_credentials(_base_send(), signed, tr, [_REF], slug=_SLUG, now=now) is None
+    # a NOT-YET-VALID roster (now before not_before) is equally refused — the window is enforced on BOTH ends
+    future = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    signed_nyv, tr_nyv = _signed_roster(not_before=future, not_after=future + timedelta(hours=1))
+    assert config_from_signed_credentials(
+        _base_send(), signed_nyv, tr_nyv, [_REF], slug=_SLUG, now=now) is None
     # inside the window it DOES seed
     signed2, tr2 = _signed_roster(not_before=now - timedelta(hours=1), not_after=now + timedelta(hours=1))
-    assert config_from_signed_credentials(_base_send(), signed2, tr2, [_REF], now=now) is not None
+    assert config_from_signed_credentials(
+        _base_send(), signed2, tr2, [_REF], slug=_SLUG, now=now) is not None
 
 
 def test_missing_mandatory_identity_seeds_nothing() -> None:
     # only a victim, no attacker -> unsound two-identity experiment -> None
     signed, tr = _signed_roster(credentials=[_cred(CredentialRole.VICTIM, "sess=bob-sess")])
     msgs, on_warn = _warns()
-    assert config_from_signed_credentials(_base_send(), signed, tr, [_REF], on_warn=on_warn) is None
+    assert config_from_signed_credentials(
+        _base_send(), signed, tr, [_REF], slug=_SLUG, now=_NOW, on_warn=on_warn) is None
     assert any("victim and an attacker" in m for m in msgs)
 
 
 def test_no_usable_ref_seeds_nothing() -> None:
     signed, tr = _signed_roster()
-    assert config_from_signed_credentials(_base_send(), signed, tr, ["not-an-access-class:x:y"]) is None
+    assert config_from_signed_credentials(
+        _base_send(), signed, tr, ["not-an-access-class:x:y"], slug=_SLUG, now=_NOW) is None
+
+
+def test_cross_engagement_roster_seeds_nothing() -> None:
+    # critic MED: a roster owner-signed for engagement "bench" must NEVER seed a probe against a DIFFERENT
+    # engagement, even under the same (valid) owner trust root — cross-engagement credential reuse.
+    signed, tr = _signed_roster()                                   # engagement_slug="bench"
+    msgs, on_warn = _warns()
+    assert config_from_signed_credentials(
+        _base_send(), signed, tr, [_REF], slug="other-engagement", now=_NOW, on_warn=on_warn) is None
+    assert any("bound to engagement" in m for m in msgs)
+    # the SAME roster still seeds against its own engagement
+    assert config_from_signed_credentials(_base_send(), signed, tr, [_REF], slug=_SLUG, now=_NOW) is not None
+
+
+def test_colliding_identities_seed_nothing() -> None:
+    # critic LOW: if the attacker and victim carry IDENTICAL credentials the two-identity experiment is
+    # unsound (one user), so "the attacker reads the victim's object" is trivially true — a false FACT.
+    same = "sess=same-user"
+    signed, tr = _signed_roster(credentials=[
+        _cred(CredentialRole.ATTACKER, same),
+        _cred(CredentialRole.VICTIM, same),
+        _cred(CredentialRole.UNAUTHORIZED_PEER, "sess=carol-sess")])
+    msgs, on_warn = _warns()
+    assert config_from_signed_credentials(
+        _base_send(), signed, tr, [_REF], slug=_SLUG, now=_NOW, on_warn=on_warn) is None
+    assert any("identical credentials" in m for m in msgs)
+    # a peer that collides with the victim is also refused (the "logged-out" baseline would be the victim)
+    signed2, tr2 = _signed_roster(credentials=[
+        _cred(CredentialRole.ATTACKER, "sess=alice-sess"),
+        _cred(CredentialRole.VICTIM, "sess=bob-sess"),
+        _cred(CredentialRole.UNAUTHORIZED_PEER, "sess=bob-sess")])
+    assert config_from_signed_credentials(_base_send(), signed2, tr2, [_REF], slug=_SLUG, now=_NOW) is None
 
 
 def test_load_signed_target_credentials_roundtrip_absent_and_malformed(tmp_path, monkeypatch) -> None:
@@ -169,6 +214,6 @@ def test_peer_absent_still_seeds_lead_capable_config() -> None:
     signed, tr = _signed_roster(credentials=[
         _cred(CredentialRole.ATTACKER, "sess=alice-sess"),
         _cred(CredentialRole.VICTIM, "sess=bob-sess")])
-    seeded = config_from_signed_credentials(_base_send(), signed, tr, [_REF])
+    seeded = config_from_signed_credentials(_base_send(), signed, tr, [_REF], slug=_SLUG, now=_NOW)
     assert seeded is not None and seeded.config.unauth_send is None
     assert seeded.config.cross_specs[0].victim_discriminator == _VICTIM_DISC

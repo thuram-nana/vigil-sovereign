@@ -442,7 +442,8 @@ def config_from_signed_credentials(
     trust_root: "TrustRoot",
     refs: Iterable[str],
     *,
-    now: "datetime | None" = None,
+    slug: str,
+    now: "datetime",
     id_prefix: str = "ac",
     on_warn: Callable[[str], None] | None = None,
 ) -> "SeededAccessControl | None":
@@ -451,10 +452,14 @@ def config_from_signed_credentials(
     uses ONLY credentials the owner provisioned + signed:
 
       * it VERIFIES ``signed`` against ``trust_root`` and FAILS CLOSED (``None``) on an invalid signature,
-        and (when ``now`` is given) on an out-of-window roster — so an unverified / expired roster can
-        never seed a probe;
+        on a roster bound to a DIFFERENT engagement (``doc.engagement_slug != slug`` — a signed roster for
+        engagement X must never seed a probe against engagement Y, mirroring the GitWriteGrant slug
+        binding), and on an out-of-window roster — ``now`` is REQUIRED (no fail-open default) so the
+        validity window is ALWAYS enforced, with naive timestamps coerced to UTC;
       * the VICTIM and ATTACKER roles are MANDATORY (a two-identity experiment is unsound without a
-        distinct victim and an authenticated attacker); UNAUTHORIZED_PEER is optional (its absence
+        distinct victim and an authenticated attacker) and MUST carry DISTINCT credentials — if any two
+        provisioned identities share a session the experiment is unsound (attacker == victim makes the
+        cross-read trivially true) and it fails closed; UNAUTHORIZED_PEER is optional (its absence
         downgrades the seeded checks to LEAD-only, exactly like ``config_from_cli`` without an unauth
         identity);
       * cross-specs — including the ``victim_discriminator`` + ``control_ref`` that make a FACT sound —
@@ -475,11 +480,25 @@ def config_from_signed_credentials(
         _warn(f"refusing to autoseed access-control: test-credential roster failed verification ({reason})")
         return None
     doc = signed.document
-    if now is not None:
-        if doc.not_before is not None and now < doc.not_before:
+    # Bind the roster to THIS engagement (critic MED): a roster owner-signed for engagement X must never
+    # seed a probe against engagement Y, even under the same owner key (cross-engagement credential reuse).
+    # engagement_slug is inside the signed canonical bytes, so this binding is tamper-evident.
+    if doc.engagement_slug != slug:
+        _warn(f"refusing to autoseed access-control: the signed roster is bound to engagement "
+              f"{doc.engagement_slug!r}, not {slug!r} (cross-engagement roster reuse)")
+        return None
+    # Validity window — ALWAYS enforced (`now` is required, there is no fail-open skip). Naive timestamps
+    # are coerced to UTC so a tz-aware `now` never raises against a naive not_before/not_after.
+    from datetime import timezone as _tz
+    _now = now if now.tzinfo is not None else now.replace(tzinfo=_tz.utc)
+    if doc.not_before is not None:
+        _nb = doc.not_before if doc.not_before.tzinfo is not None else doc.not_before.replace(tzinfo=_tz.utc)
+        if _now < _nb:
             _warn("refusing to autoseed access-control: test-credential roster is not yet valid (not_before)")
             return None
-        if doc.not_after is not None and now >= doc.not_after:
+    if doc.not_after is not None:
+        _na = doc.not_after if doc.not_after.tzinfo is not None else doc.not_after.replace(tzinfo=_tz.utc)
+        if _now >= _na:
             _warn("refusing to autoseed access-control: test-credential roster has expired (not_after)")
             return None
 
@@ -490,6 +509,22 @@ def config_from_signed_credentials(
         _warn("refusing to autoseed access-control: the signed roster must provide BOTH a victim and an "
               "attacker identity (a two-identity experiment is unsound without them)")
         return None
+    # Distinct-identity guard (critic LOW): if any two provisioned identities carry the SAME credentials
+    # the two-identity experiment is unsound — e.g. attacker == victim makes "the attacker reads the
+    # victim's object" trivially true (one user), minting a false FACT. Refuse any collision among the
+    # identities actually present (case-insensitive header-name match).
+    def _ident(hs: tuple[tuple[str, str], ...]) -> frozenset[tuple[str, str]]:
+        return frozenset((n.lower(), v) for n, v in hs)
+    _roles = [("victim", victim_headers), ("attacker", attacker_headers)]
+    if peer_headers:
+        _roles.append(("unauthorized-peer", peer_headers))
+    for _i in range(len(_roles)):
+        for _j in range(_i + 1, len(_roles)):
+            if _ident(_roles[_i][1]) == _ident(_roles[_j][1]):
+                _warn(f"refusing to autoseed access-control: the {_roles[_i][0]} and {_roles[_j][0]} "
+                      f"identities carry identical credentials (a two-identity experiment is unsound when "
+                      f"distinct roles share a session)")
+                return None
 
     specs: list[CrossAccessSpec] = []
     for raw in refs:

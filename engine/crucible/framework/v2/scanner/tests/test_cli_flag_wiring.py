@@ -50,9 +50,11 @@ class _FakeCampaign:
     minimal report from `.run()` — no crawl, no traffic."""
 
     captured: dict = {}
+    captured_send = None
 
     def __init__(self, send, **kwargs) -> None:  # noqa: ANN001
         _FakeCampaign.captured = dict(kwargs)
+        _FakeCampaign.captured_send = send
         self._send = send
 
     def run(self, seed_url: str) -> ScanReport:
@@ -350,3 +352,57 @@ def test_access_control_off_by_default_confirms_no_idor() -> None:
     with _http_server() as base:
         report = WebScanCampaign(loopback_send, max_pages=5, enable_oob=False).run(base + "/")
     assert not any(f.bug_class == "idor" for f in report.active_findings)
+
+
+class _RecordingExecutor(_FakeExecutor):
+    """Records the headers of every request handed to the gated send, so a test can prove which identity
+    the campaign's own send carries. Never sends real traffic."""
+
+    seen_headers: list = []
+
+    def gated_fetch(self, request):  # noqa: ANN001, ANN201
+        _RecordingExecutor.seen_headers.append(list(request.headers))
+        return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
+
+
+def test_run_engagement_signed_roster_puts_attacker_identity_on_campaign_send(
+    capture_engage_campaign, monkeypatch: pytest.MonkeyPatch) -> None:
+    """W3 red-pen MED: when an OWNER-SIGNED roster seeds the access-control pack, the campaign's own send
+    IS the IdorCheck ATTACKER view, so it MUST carry the signed ATTACKER identity's headers. If engage
+    regresses to the anonymous executor, the attacker view == the logged-out baseline (the two-identity
+    differential is unsatisfiable, so the check can never mint). This locks the attacker-identity wiring."""
+    from framework.v2.scanner import access_control as ac_mod
+    from framework.v2.scanner.insertion import HttpRequest
+    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+    from vigil_core.target_credentials import (
+        AccountCredential, CredentialHeader, CredentialRole, TargetCredentials, sign_target_credentials)
+
+    def _cred(role, cookie):  # noqa: ANN001, ANN202
+        return AccountCredential(role=role, auth_headers=[CredentialHeader(name="Cookie", value=cookie)])
+
+    doc = TargetCredentials(engagement_slug="acme", credentials=[
+        _cred(CredentialRole.ATTACKER, "sess=attacker"),
+        _cred(CredentialRole.VICTIM, "sess=victim")])
+    kp = generate_keypair()
+    tr = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="o", name="o", public_key_b64=kp.public_key_b64)])
+    signed = sign_target_credentials(doc, {"o": kp.private_key_b64})
+
+    # the autoseed path reads the roster + trust root from disk — stub both to the in-memory pair
+    monkeypatch.setattr(ac_mod, "load_signed_target_credentials", lambda slug: signed)
+    monkeypatch.setattr(engage_mod, "_engage_authority_trust_root", lambda slug: tr)
+    _RecordingExecutor.seen_headers = []
+    monkeypatch.setattr(engage_mod, "HttpExecutor", _RecordingExecutor)   # overrides the fixture's stub
+
+    engage_mod.run_engagement(
+        "acme", "http://127.0.0.1/", enable_chaining=False,
+        enable_access_control=True, access_control_refs=(f"idor:id:2|{_SECRET}|1",))
+
+    send = _FakeCampaign.captured_send
+    assert send is not None
+    # push a credential-free request through the campaign's own send; the signed ATTACKER cookie is swapped on
+    send(HttpRequest(method="GET", url="http://127.0.0.1/x"))
+    assert _RecordingExecutor.seen_headers, "the campaign send was never exercised"
+    assert ("Cookie", "sess=attacker") in _RecordingExecutor.seen_headers[-1], (
+        "the campaign send did NOT carry the signed attacker identity "
+        f"(saw {_RecordingExecutor.seen_headers[-1]!r}) — the IdorCheck attacker view is anonymous")
