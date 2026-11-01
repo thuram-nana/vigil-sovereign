@@ -404,6 +404,127 @@ def test_openapi_bridge_lets_the_oracle_confirm_a_planted_bug() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 4. the GraphQL discovery-seed wiring (end-to-end) — W2-b dispatch
+#    A query root operation is synthesized into a fuzzable request the real audit
+#    engine exercises; a mutation is surfaced as a LEAD and NEVER auto-sent.
+# ---------------------------------------------------------------------------
+
+_GQL_INTROSPECTION_RESULT = json.dumps({
+    "data": {"__schema": {
+        "queryType": {"name": "Query"},
+        "mutationType": {"name": "Mutation"},
+        "types": [
+            {"name": "Query", "fields": [
+                {"name": "user", "args": [
+                    {"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}},
+                ]},
+            ]},
+            {"name": "Mutation", "fields": [
+                {"name": "deleteUser", "args": [
+                    {"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}},
+                ]},
+            ]},
+        ],
+    }},
+})
+
+
+class _GqlApp(BaseHTTPRequestHandler):
+    """A GraphQL endpoint linked from `/`. It answers an introspection POST with a schema
+    declaring a `user(id)` query root field and a `deleteUser(id)` mutation root field, and
+    records every POST body it receives so the test can prove (a) the query op was synthesized
+    and fuzzed through the real audit engine, and (b) the mutation was never auto-sent."""
+
+    received: list[str] = []
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def _send(self, body: str, ctype: str) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:  # noqa: N802
+        sp = urlsplit(self.path)
+        if sp.path == "/":
+            self._send('<html><body><a href="/graphql">api</a></body></html>', "text/html")
+        elif sp.path == "/graphql":
+            # a GET so the crawler registers the /graphql URL (endpoint discovery)
+            self._send('{"message":"POST a query"}', "application/json")
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        sp = urlsplit(self.path)
+        if sp.path == "/graphql":
+            type(self).received.append(raw)
+            if "__schema" in raw:
+                self._send(_GQL_INTROSPECTION_RESULT, "application/json")
+            else:
+                self._send('{"data":{"user":null}}', "application/json")
+        else:
+            self._send("{}", "application/json")
+
+
+@contextlib.contextmanager
+def _serve_gql() -> Iterator[str]:
+    _GqlApp.received = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _GqlApp)
+    srv.daemon_threads = True
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_graphql_discovery_wires_query_ops_into_audit_and_leaves_mutations_as_leads() -> None:
+    with _serve_gql() as base:
+        report = WebScanCampaign(
+            loopback_send,
+            enable_oob=False,
+            enable_discovery=True,
+            insertion_kinds=(InsertionKind.JSON_VALUE,),
+        ).run(base + "/")
+
+    posts = [b for b in _GqlApp.received if "__schema" not in b]
+    # (a) the QUERY root op was synthesized and reached the audit engine as a POST query
+    assert any('"query"' in b and "user(" in b and "variables" in b for b in posts), \
+        f"query op was not synthesized into an audited request: {posts!r}"
+    # (b) and its /variables/id value was actually FUZZED — more than the one baseline value
+    id_values = set()
+    for b in posts:
+        try:
+            v = json.loads(b).get("variables", {})
+        except Exception:
+            continue
+        if isinstance(v, dict) and "id" in v:
+            id_values.add(repr(v["id"]))
+    assert len(id_values) >= 2, f"the /variables/id point was not fuzzed: {id_values!r}"
+    # the synthesized request joined the discovered audit surface
+    assert "POST /graphql" in set(report.discovered_surfaces)
+
+    # (c) the MUTATION was surfaced as a LEAD ...
+    assert any(lead.startswith("graphql-operation mutation deleteUser")
+               for lead in report.discovery_leads), report.discovery_leads
+    # ... and NEVER auto-sent: `deleteUser` appears only in a synthesized mutation op, which
+    # the wiring refuses to send (state-changing — doctrine: ask before destruction).
+    assert not any("deleteUser" in b for b in _GqlApp.received), \
+        f"a state-changing mutation was auto-sent: {[b for b in _GqlApp.received if 'deleteUser' in b]!r}"
+
+
+# ---------------------------------------------------------------------------
 # 3. the GraphQLOperation -> HttpRequest bridge (pure) — W2-b
 # ---------------------------------------------------------------------------
 
