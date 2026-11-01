@@ -218,6 +218,107 @@
     });
   }
 
+  // ---- Assets: prove ownership (challenge -> verify). Operator-role (run_engagement) only; the owner then
+  //      authorizes the target. Billing roles are refused by the server (honest card below). ----------------
+  function viewAssets() {
+    var body = h("div", {}, [
+      h("h2", { text: "Authorized assets" }),
+      h("p.cust-muted", { text: "Prove you control a host before any assessment can target it. Proving control "
+        + "lets the owner authorize the target; it never runs a test by itself (billing is separate from testing)." }),
+      h("div.card.cust-auth", {}, [
+        field("asset-host", "Host (e.g. app.example.com)", "text"),
+        h("div.row", {}, [h("button.btn.btn-primary", { type: "button", text: "Request ownership challenge",
+          onClick: doChallenge })]),
+        h("div#asset-flow"),
+      ]),
+    ]);
+    return shell(body, "#/assets");
+  }
+  function flowCard(sel, msg) { var e = VUI.$(sel); if (e) { VUI.mount(e, h("div.card.cust-soon", { text: msg })); } }
+  function flowMsg(e, fallback) {
+    if (e && e.status === 403) return "Asset registration requires the testing (operator) role, granted by the "
+      + "owner. Billing roles cannot register or test assets.";
+    if (e && e.data && e.data.error) return String(e.data.error);
+    return fallback;
+  }
+  async function doChallenge() {
+    clearErr();
+    var host = val("asset-host");
+    if (!host) { return err("Enter a host."); }
+    try {
+      var r = await VUI.postJSON(API + "/target/challenge", { host: host });
+      VUI.mount(VUI.$("#asset-flow"), challengeBlock(r));
+    } catch (e) { flowCard("#asset-flow", flowMsg(e, "Could not start the ownership challenge.")); }
+  }
+  function challengeBlock(r) {
+    return h("div", {}, [
+      h("hr"),
+      h("p", { text: "Publish ONE of these for " + (r.host || "") + ", then verify:" }),
+      VUI.card("DNS TXT record", "dns-txt", [kv("Name", r.dns_name), kv("Value", r.dns_value),
+        h("div.row", {}, [h("button.btn", { type: "button", text: "Verify via DNS",
+          onClick: function () { doVerify(r.host, "dns-txt"); } })])]),
+      VUI.card(".well-known file", "https", [kv("URL", r.well_known_url), kv("Body", r.well_known_body),
+        h("div.row", {}, [h("button.btn", { type: "button", text: "Verify via .well-known",
+          onClick: function () { doVerify(r.host, "well-known"); } })])]),
+      h("div#asset-verify"),
+    ]);
+  }
+  async function doVerify(host, method) {
+    try {
+      var r = await VUI.postJSON(API + "/target/verify", { host: host, method: method });
+      VUI.mount(VUI.$("#asset-verify"), h("div.card", {}, h("p", { text: "✓ Ownership verified for "
+        + (r.host || host) + ". The owner-signed target authority is in place." })));
+      VUI.toast("Ownership verified");
+    } catch (e) { flowCard("#asset-verify", flowMsg(e, "Verification did not pass — publish the token and retry.")); }
+  }
+
+  // ---- Assessments: read-only results (operator-role only; org_admin sees the honest 403 card). Launching a
+  //      NEW assessment arrives with the run driver (K4), so it is not offered here yet. --------------------
+  function viewAssessments() {
+    return dataView("#/assessments", "Assessments", API + "/assessments", function (d) {
+      var items = (d && d.assessments) || [];
+      var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
+        + "Launching a new assessment arrives with the run driver." });
+      if (!items.length) {
+        return h("div", {}, [note, h("div.card.cust-soon", { text: "No authorized assessments yet — register and "
+          + "verify an asset, then the owner authorizes the target." })]);
+      }
+      var rows = items.map(function (a) {
+        return h("div.card", {}, [
+          h("div.cust-kv", {}, [h("span.k", { text: a.host }), h("span", { text: (a.findings || 0) + " finding(s)" })]),
+          h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+            onClick: function () { loadFindings(a.slug, a.host); } })]),
+        ]);
+      });
+      return h("div", {}, [note, h("div.cust-grid", {}, rows), h("div#assess-findings")]);
+    });
+  }
+  async function loadFindings(slug, host) {
+    var holder = VUI.$("#assess-findings");
+    if (!holder) { return; }
+    VUI.mount(holder, h("p.cust-muted", { text: "Loading findings for " + host + "…" }));
+    try {
+      var d = await VUI.getJSON(API + "/assessments/findings");
+      if (here() !== "#/assessments") { return; }
+      var fs = ((d && d.findings) || []).filter(function (f) { return f.engagement_slug === slug; });
+      VUI.mount(holder, findingsBlock(host, fs));
+    } catch (e) {
+      VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load findings"
+        + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+    }
+  }
+  function findingsBlock(host, fs) {
+    if (!fs.length) { return h("div.card.cust-soon", { text: "No findings for " + host + "." }); }
+    var cards = fs.map(function (f) {
+      return VUI.card(f.title || f.finding_ref || "Finding", f.severity || null, h("div", {}, [
+        kv("Severity", f.severity), kv("Class", f.bug_class), kv("Surface", f.surface), kv("Confidence", f.confidence),
+        f.summary ? h("p", { text: f.summary }) : null,
+        f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
+      ]));
+    });
+    return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
+  }
+
   // ---- shell --------------------------------------------------------------------------------------
   function navLink(label, hash) {
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
@@ -268,8 +369,8 @@
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
     "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
-    "#/assets": function () { return authed() ? viewSoon("Assets") : viewLogin(); },
-    "#/assessments": function () { return authed() ? viewSoon("Assessments") : viewLogin(); },
+    "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
+    "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
     "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
   };
 
