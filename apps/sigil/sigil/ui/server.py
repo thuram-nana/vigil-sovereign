@@ -1437,6 +1437,15 @@ class Handler(BaseHTTPRequestHandler):
             return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
         if action == "launch_start":
             return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
+        # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
+        if action == "billing_overview":
+            return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "billing_invoices":
+            return p.customer_invoices(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assessment_summary":
+            return p.customer_assessments(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assessment_findings":
+            return p.customer_assessment_findings(requester, str(body.get("org_id", "")), ip=ip)
         return None
 
     def _durability_post(self, path):

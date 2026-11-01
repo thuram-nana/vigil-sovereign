@@ -82,8 +82,15 @@ def _post(opener, port, path, body, *, origin=None):
 def _get(opener, port, path, *, cookie=None):
     h = {"Cookie": cookie} if cookie else {}
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=h)
-    with opener.open(req, timeout=5) as r:
-        return r.status, json.loads(r.read().decode())
+    try:
+        with opener.open(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw
 
 
 def _owner_lease(org_id, host, *, units=5, nonce="edge-nonce-1", now=None):
@@ -406,3 +413,53 @@ def test_serve_customer_cli_unions_allowlist_flags_and_env(monkeypatch):
     assert captured["extra_hosts"] == ("flag.example.com", "app.example.com", "env.example")
     assert captured["extra_origins"] == ("https://flag.example.com", "https://app.example.com")
     assert captured["host"] == "127.0.0.1"
+
+
+# ---- Slice I backend: customer-plane READS over the edge (admit_customer-gated, session-org-scoped) ----
+def test_customer_reads_billing_and_invoices_and_billing_not_testing(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        oid = conf["org_id"]
+        # the signup default role (org_admin) CAN read its own billing + invoices (view_billing/view_invoices)
+        c, ov = _get(op, ep, "/api/customer/billing")
+        assert c == 200 and ov["org_id"] == oid, (c, ov)
+        c, inv = _get(op, ep, "/api/customer/invoices")
+        assert c == 200 and inv["org_id"] == oid and inv["count"] == 0, (c, inv)
+        # BILLING != TESTING: the billing org_admin may NOT read assessment RESULTS (view_assessments is
+        # operator-only) — denied through the edge.
+        assert _get(op, ep, "/api/customer/assessments")[0] == 403
+        assert _get(op, ep, "/api/customer/assessments/findings")[0] == 403
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_operator_member_reads_assessments_over_the_edge(tmp_path, monkeypatch):
+    from sigil.governor.orgs import OrgRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        oid, u = conf["org_id"], conf["username"]
+        OrgRegistry(sov.store()).grant_membership(oid, u, "operator", issued_at=time.time() + 1e6)   # +view_assessments
+        c, summ = _get(op, ep, "/api/customer/assessments")
+        assert c == 200 and summ["org_id"] == oid, (c, summ)
+        c, f = _get(op, ep, "/api/customer/assessments/findings")
+        assert c == 200 and f["org_id"] == oid and f["count"] == 0, (c, f)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_customer_reads_require_a_session(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        for path in ("/api/customer/billing", "/api/customer/invoices", "/api/customer/assessments",
+                     "/api/customer/assessments/findings"):
+            assert _get(_opener(), ep, path)[0] == 401, path    # no session cookie -> refused before the hop
+    finally:
+        sov.shutdown(); edge.shutdown()

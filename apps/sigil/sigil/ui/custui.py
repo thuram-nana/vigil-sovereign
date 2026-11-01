@@ -239,7 +239,26 @@ class CustomerHandler(BaseHTTPRequestHandler):
             # role is the non-authoritative session label; the live per-org role is resolved server-side.
             return self._json({"authenticated": True, "username": rec.get("username"),
                                "org_id": rec.get("org_id")})
+        # customer-plane READS (the Slice-I backend): billing overview / invoices / assessment summary +
+        # findings. org comes from the SERVER-side session, never the query; the provisioner admit_customer-
+        # gates it. SameSite=Strict keeps the session cookie off cross-site GETs, so a cross-site read carries
+        # no session -> 401 (no cross-origin data leak); same-origin reads (the customer SPA) carry the cookie.
+        _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
+                  "/api/customer/assessments": "assessment_summary",
+                  "/api/customer/assessments/findings": "assessment_findings"}
+        if path in _READS:
+            return self._customer_read_relay(_READS[path])
         return self._deny(404, "not found")
+
+    def _customer_read_relay(self, action: str):
+        """Relay a customer-plane READ to the provisioner over the hop, carrying the SESSION org (never a
+        query/body field). A caller with no customer session (or no bound org) is refused before the hop."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
+        return self._json(r, c)
 
     def do_POST(self):
         path = urlparse(self.path).path

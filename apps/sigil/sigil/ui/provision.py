@@ -489,6 +489,39 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host")}
 
+    # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
+    def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:
+        """Shared gate for a customer-plane READ: ``admit_customer(permission)`` for the SESSION org (NO
+        global leg — a customer reads ONLY their own tenant, resolved LIVE so a revoked membership dies on the
+        next request), then the pure projection. ``requester``/``org_id`` are the hop-bound session principal,
+        NEVER a body field. A read takes no lock, mints nothing, and touches no owner key."""
+        if not self.orgs.admit_customer(username=requester, org_id=org_id, permission=permission):
+            raise ProvisionDenied(f"requester may not read this org ({permission})")
+        return projector(self.store, org_id)
+
+    def customer_billing(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        import time as _t
+        from . import billing as _billing
+        return self._customer_read(requester, requester_org_id, "view_billing",
+                                   lambda s, o: _billing.billing_overview(s, o, now=_t.time()))
+
+    def customer_invoices(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        from . import billing as _billing
+        return self._customer_read(requester, requester_org_id, "view_invoices",
+                                   lambda s, o: _billing.billing_invoices(s, o))
+
+    def customer_assessments(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        import time as _t
+        from . import assessments as _assess
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _assess.assessment_summary(s, o, now=_t.time()))
+
+    def customer_assessment_findings(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        import time as _t
+        from . import assessments as _assess
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _assess.assessment_findings(s, o, now=_t.time()))
+
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
                       ip: str = "", now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint
