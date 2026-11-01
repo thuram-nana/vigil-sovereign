@@ -472,6 +472,7 @@ def parse_openapi(doc: dict | str) -> list[ApiOperation]:
     if not isinstance(paths, dict):
         return []
     out: list[ApiOperation] = []
+    doc_budget = [_MAX_DOC_NODES]                        # ONE ceiling shared across ALL operations (OOM guard)
     for path, item in paths.items():
         if not isinstance(item, dict):
             continue
@@ -481,28 +482,36 @@ def parse_openapi(doc: dict | str) -> list[ApiOperation]:
             params: list[str] = []
             types: dict[str, str] = {}
             body_schema: Any = None
+            body_name: "str | None" = None               # a Swagger-2 in:body name kept for the fallback below
             # path-level parameters apply to every operation; operation-level override/extend them.
             for src in (item.get("parameters"), op.get("parameters") if isinstance(op, dict) else None):
                 for name, ptype, is_body, sch in _iter_params(src):
                     if is_body:
                         if body_schema is None and isinstance(sch, dict):
                             body_schema = sch            # Swagger-2 `in: body`
+                            if isinstance(name, str) and name:
+                                body_name = name
                     elif name and name not in params:
                         params.append(name)
                         if ptype:
                             types[name] = ptype
             if isinstance(op, dict):                     # OAS3 requestBody (takes precedence if present)
-                content = (op.get("requestBody") or {})
-                content = content.get("content") if isinstance(content, dict) else None
-                jschema = ((content or {}).get("application/json") or {}).get("schema") \
-                    if isinstance(content, dict) else None
+                rb = op.get("requestBody")               # EACH step dict-guarded: a crafted non-dict at any level
+                content = rb.get("content") if isinstance(rb, dict) else None   # must not raise (whole-scan DoS)
+                appjson = content.get("application/json") if isinstance(content, dict) else None
+                jschema = appjson.get("schema") if isinstance(appjson, dict) else None
                 if isinstance(jschema, dict):
                     body_schema = jschema
+                    body_name = None                     # an OAS3 requestBody has no flat-field fallback name
             request_schema = None
             if isinstance(body_schema, dict):
-                resolved = _deref(data, body_schema, (), 0, [_MAX_SCHEMA_NODES])
+                resolved = _deref(data, body_schema, (), 0, doc_budget)
                 if isinstance(resolved, dict) and resolved:
                     request_schema = resolved
+            if request_schema is None and body_name and body_name not in params:
+                # a Swagger-2 in:body whose schema did not resolve (dangling/remote $ref, or {}) — keep the body
+                # param NAME as a flat field so its body insertion point is not silently lost (pre-W1 surface).
+                params.append(body_name)
             out.append(ApiOperation(method=method.upper(), path=str(path), params=params,
                                     request_schema=request_schema, param_types=types))
     return out
@@ -519,12 +528,13 @@ def _iter_params(params: Any):
             continue
         if p.get("in") == "body":                        # Swagger-2 body parameter
             sch = p.get("schema")
+            bname = p.get("name") if isinstance(p.get("name"), str) and p.get("name") else None
             if isinstance(sch, dict):
-                yield (None, None, True, sch)            # real Swagger-2: the body IS the schema
-            else:
-                name = p.get("name")                     # schema-less shorthand: keep the name as a flat
-                if isinstance(name, str) and name:       # body field (back-compat with the pre-W1 behaviour)
-                    yield (name, None, False, None)
+                yield (bname, None, True, sch)            # real Swagger-2: the body IS the schema (the name is
+                                                          # carried so parse_openapi can fall back to it as a flat
+                                                          # field if the schema does not resolve)
+            elif bname:
+                yield (bname, None, False, None)         # schema-less shorthand: the name IS a flat body field
             continue
         name = p.get("name")
         if not (isinstance(name, str) and name):
@@ -538,9 +548,17 @@ def _iter_params(params: Any):
         yield (name, ptype, False, None)
 
 
-# Bounds for $ref resolution: a hostile/cyclic/huge spec can never blow the stack or the body.
+# Bounds for $ref resolution so a hostile/cyclic/huge/wide spec can never blow the stack, the body, OR
+# aggregate parse memory: _MAX_SCHEMA_DEPTH caps recursion depth; _MAX_DOC_NODES is a DOCUMENT-WIDE ceiling on
+# total resolved nodes (shared across every operation AND every level's width — see parse_openapi/_deref), so
+# K operations that each $ref one wide shared schema cannot multiply into an OOM.
 _MAX_SCHEMA_DEPTH = 8
-_MAX_SCHEMA_NODES = 512
+_MAX_DOC_NODES = 20000
+# Spec-controlled DATA keywords dropped during resolution: their VALUES must never reach our baseline request
+# body (a hostile spec could plant a destructive/injection payload or an unbounded/deeply-nested blob there),
+# and the example builder only needs the STRUCTURE (type/properties/items/required/allOf/…) to synthesize a
+# benign, VIGIL-controlled typed example.
+_DATA_KEYWORDS = frozenset({"enum", "const", "default", "example", "examples"})
 
 
 def _ref_target(root: dict, ref: str) -> "dict | None":
@@ -576,14 +594,28 @@ def _deref(root: dict, schema: Any, seen: "tuple[str, ...]", depth: int, budget:
         return {} if target is None else _deref(root, target, (*seen, ref), depth + 1, budget)
     out: dict = {}
     for k, v in schema.items():
+        if budget[0] <= 0:
+            break                                        # WIDTH bound: stop materializing once the doc budget is spent
+        if k in _DATA_KEYWORDS:
+            continue                                     # drop spec data values (never enter the body; unbounded-safe)
         if k == "properties" and isinstance(v, dict):
-            out[k] = {pk: _deref(root, pv, seen, depth + 1, budget) for pk, pv in v.items()}
+            props: dict = {}
+            for pk, pv in v.items():
+                if budget[0] <= 0:
+                    break
+                props[pk] = _deref(root, pv, seen, depth + 1, budget)
+            out[k] = props
         elif k in ("items", "additionalProperties") and isinstance(v, dict):
             out[k] = _deref(root, v, seen, depth + 1, budget)
         elif k in ("allOf", "anyOf", "oneOf") and isinstance(v, list):
-            out[k] = [_deref(root, s, seen, depth + 1, budget) for s in v]
+            branch: list = []
+            for s in v:
+                if budget[0] <= 0:
+                    break
+                branch.append(_deref(root, s, seen, depth + 1, budget))
+            out[k] = branch
         else:
-            out[k] = v                                   # scalars: type, required, enum, format, …
+            out[k] = v                                   # structural scalars: type, required, format, nullable, …
     return out
 
 

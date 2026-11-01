@@ -25,6 +25,7 @@ from framework.v2.scanner.discovery import (
     ApiOperation,
     CONTENT_WORDLIST,
     JsFindings,
+    _MAX_DOC_NODES,
     discover_content,
     mine_js,
     mine_params,
@@ -327,6 +328,63 @@ def test_parse_openapi_dangling_ref_is_fail_closed() -> None:
         "application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}}}}}}
     op = next(o for o in parse_openapi(doc) if o.path == "/x")
     assert op.request_schema is None                             # unresolved ref -> no typed body (fail-closed)
+
+
+# ---- W1 red-pen hardening (wllz0lhkn): a hostile/malformed spec must never crash or OOM the scan ----------
+def test_parse_openapi_nondict_content_does_not_crash() -> None:
+    # HIGH: a crafted requestBody.content['application/json'] that is NOT a dict must not raise (whole-scan DoS).
+    for bad in ("x", ["a"], 7, True):
+        doc = {"openapi": "3.0.0", "paths": {"/x": {"post": {"requestBody": {"content": {
+            "application/json": bad}}}}}}
+        ops = parse_openapi(doc)                                  # must return, not raise
+        op = next(o for o in ops if o.path == "/x")
+        assert op.request_schema is None, bad
+    # also a non-dict requestBody / content at the higher levels
+    for doc in ({"openapi": "3.0.0", "paths": {"/y": {"post": {"requestBody": "nope"}}}},
+                {"openapi": "3.0.0", "paths": {"/y": {"post": {"requestBody": {"content": "nope"}}}}}):
+        assert any(o.path == "/y" for o in parse_openapi(doc))
+
+
+def test_parse_openapi_strips_spec_data_keywords() -> None:
+    # HIGH+LOW: enum/const/default/example VALUES are dropped at parse — never retained in request_schema,
+    # so they can never reach the baseline body (no injection payload, no deep/wide-blob DoS).
+    doc = {"openapi": "3.0.0", "paths": {"/x": {"post": {"requestBody": {"content": {"application/json": {
+        "schema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["'; DROP TABLE t; --", "safe"], "default": "safe"},
+            "blob": {"type": "object", "example": {"deep": {"deeper": [1, 2, 3]}}},
+        }}}}}}}}}
+    op = next(o for o in parse_openapi(doc) if o.path == "/x")
+    props = op.request_schema["properties"]
+    assert "enum" not in props["mode"] and "default" not in props["mode"]
+    assert props["mode"]["type"] == "string"                     # structure kept, data dropped
+    assert "example" not in props["blob"]
+
+
+def test_parse_openapi_doc_wide_budget_bounds_a_hostile_spec() -> None:
+    # MED: K ops each $ref'ing one wide shared schema must NOT multiply into an OOM — the doc-wide node
+    # budget caps TOTAL resolved nodes well below K*width (later ops truncate once the budget is spent).
+    wide = {"type": "object", "properties": {f"p{i}": {"type": "string"} for i in range(300)}}
+    doc = {"openapi": "3.0.0", "components": {"schemas": {"W": wide}},
+           "paths": {f"/op{k}": {"post": {"requestBody": {"content": {"application/json": {
+               "schema": {"$ref": "#/components/schemas/W"}}}}}} for k in range(200)}}
+    ops = parse_openapi(doc)                                      # completes; must not OOM
+    total_props = sum(len((o.request_schema or {}).get("properties", {})) for o in ops)
+    assert total_props <= _MAX_DOC_NODES + 500, total_props       # bounded (not 200*300 = 60000)
+
+
+def test_parse_openapi_swagger2_body_name_fallback_on_unresolvable_schema() -> None:
+    # MED: a Swagger-2 in:body whose schema does not resolve keeps the body param NAME as a flat field
+    # (pre-W1 body surface preserved, not silently dropped).
+    doc = {"swagger": "2.0", "paths": {"/b": {"post": {"parameters": [
+        {"name": "payload", "in": "body", "schema": {"$ref": "#/definitions/Missing"}}]}}}}
+    op = next(o for o in parse_openapi(doc) if o.path == "/b")
+    assert op.request_schema is None and "payload" in op.params   # name re-attached as a flat field
+    # a RESOLVABLE body schema uses the schema and does NOT leak the name into params
+    doc2 = {"swagger": "2.0", "definitions": {"U": {"type": "object", "properties": {"n": {"type": "string"}}}},
+            "paths": {"/b": {"post": {"parameters": [
+                {"name": "payload", "in": "body", "schema": {"$ref": "#/definitions/U"}}]}}}}
+    op2 = next(o for o in parse_openapi(doc2) if o.path == "/b")
+    assert op2.request_schema is not None and "payload" not in op2.params
 
 
 _INTROSPECTION = {

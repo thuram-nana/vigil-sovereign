@@ -1050,11 +1050,11 @@ def _fill_for(ptype: "str | None", fill: str) -> str:
 
 
 def _scalar_example(schema: dict, fill: str) -> Any:
-    """A benign scalar instance of a resolved leaf schema: `enum` -> its first value; else by `type` —
-    integer/number -> 1, boolean -> True, null -> None, string/unknown -> `fill`. Deterministic."""
-    enum = schema.get("enum")
-    if isinstance(enum, list) and enum:
-        return enum[0]
+    """A benign, VIGIL-CONTROLLED scalar for a resolved leaf schema, by `type`: integer/number -> 1,
+    boolean -> True, null -> None, string/unknown -> `fill`. Deterministic. A spec-provided `enum`/`const`/
+    `default`/`example` is deliberately NOT used (and is stripped at parse in discovery._deref): the baseline
+    must be a value VIGIL chose, never attacker-controllable spec content that could carry a destructive/
+    injection payload — or an arbitrarily deep/wide blob — into our own control request."""
     t = schema.get("type")
     if isinstance(t, list):                               # OAS 3.1 type-array: first non-null
         t = next((x for x in t if x != "null"), None)
@@ -1104,7 +1104,9 @@ def _example_from_schema(schema: Any, fill: str, *, depth: int, budget: list) ->
         out: dict = {}
         if isinstance(props, dict):
             req = schema.get("required")
-            req = set(req) if isinstance(req, list) else set()
+            # only STRING members (a spec-controlled required[] may carry a non-string/unhashable element —
+            # a dict/list would raise TypeError in set(); filtering keeps it a benign ordering hint).
+            req = {r for r in req if isinstance(r, str)} if isinstance(req, list) else set()
             ordered = [k for k in props if k in req] + [k for k in props if k not in req]
             for k in ordered:
                 if budget[0] <= 0:

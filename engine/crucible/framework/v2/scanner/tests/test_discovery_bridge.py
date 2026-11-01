@@ -120,6 +120,28 @@ def test_bridge_body_schema_with_no_free_params_still_sends_the_typed_body() -> 
     assert json.loads(req.body) == {"q": "1"} and req.content_type() == "application/json"
 
 
+def test_bridge_baseline_ignores_spec_enum() -> None:
+    # W1 red-pen HIGH+LOW: a spec-provided enum must NOT appear in the benign baseline body — a hostile spec
+    # could otherwise plant a destructive/injection payload (or an unbounded blob) in our own control request.
+    schema = {"type": "object", "properties": {
+        "mode": {"type": "string", "enum": ["'; DROP TABLE t; --", "safe"]},
+        "n": {"type": "integer", "enum": [999]},
+    }}
+    op = ApiOperation(method="POST", path="/s", params=[], request_schema=schema)
+    body = json.loads(request_from_api_operation(op, "http://h/").body)
+    assert body == {"mode": "1", "n": 1}                         # typed scalars, NEVER the enum value
+
+
+def test_bridge_tolerates_nonstring_required() -> None:
+    # W1 red-pen MED: a spec-controlled required[] with a non-string/unhashable element must not crash
+    # _example_from_schema (it would drop the whole op from the audit surface).
+    schema = {"type": "object", "required": [{"x": 1}, ["y"], "a"],
+              "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}}
+    op = ApiOperation(method="POST", path="/u", params=[], request_schema=schema)
+    body = json.loads(request_from_api_operation(op, "http://h/").body)   # must not raise
+    assert body == {"a": "1", "b": 1}
+
+
 def test_bridge_renders_into_real_insertion_points() -> None:
     """The whole point: the bridged request decomposes into the insertion points the
     audit engine fuzzes — a JSON body field becomes a JSON_VALUE point."""
