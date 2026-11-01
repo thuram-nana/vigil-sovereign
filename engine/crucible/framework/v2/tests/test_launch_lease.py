@@ -114,3 +114,29 @@ def test_engage_hook_refuses_a_customer_slug_without_a_lease(monkeypatch, tmp_pa
     monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda: None)
     with pytest.raises(EngagementRefused):
         _engage_launch_lease_precondition("cust_abc123", "https://apme.cm")
+
+
+def test_engage_hook_resume_revalidates_without_reconsuming(monkeypatch, tmp_path):
+    """K2 resume/consume: ``--resume`` ALWAYS re-runs preflight, so the lease hook re-runs on resume. It must
+    RE-VALIDATE + RE-BIND the lease but NOT re-burn the single-use floor the first arm consumed — else the
+    same issued_at yields the same floor seq and EVERY resumed customer engagement dies as a 'replay',
+    stranding its paid reservation. A FRESH re-arm (resume=False) still refuses (single-use intact); a
+    RESUME (resume=True) passes."""
+    import time as _time
+
+    from framework.v2.engage import EngagementRefused, _engage_launch_lease_precondition
+    owner = generate_keypair()
+    now = _time.time()                                                 # lease window must cover the hook's time.time()
+    base = str(tmp_path)
+    write_credit_lease(base, SLUG, _lease(owner, issued=now), _owner_root(owner))
+    monkeypatch.setenv("VIGIL_BASE_DIR", base)
+    monkeypatch.setattr("framework.v2.common.tenant.tenant_id", lambda: ORG)
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda: _owner_root(owner))
+    seed = f"https://{HOST}"
+    _engage_launch_lease_precondition(SLUG, seed)                      # fresh arm -> consumes the single-use floor
+    with pytest.raises(EngagementRefused):                             # a FRESH re-arm is a replay -> refused
+        _engage_launch_lease_precondition(SLUG, seed)
+    _engage_launch_lease_precondition(SLUG, seed, resume=True)         # a RESUME must NOT refuse (no re-consume)
+    # and resume stays bound: a resume whose tenant/host no longer matches the lease is still fail-closed
+    with pytest.raises(EngagementRefused):
+        _engage_launch_lease_precondition(SLUG, "https://evil.example", resume=True)

@@ -230,7 +230,17 @@ class LaunchGate:
         forged or wire-asserted amount cannot mint a refund (the HIGH the red-pen found). Refund =
         ``units_reserved - clamp(consumed_units, 0, units_reserved)``, granted back to the wallet. Idempotent
         per the lease's (slug, nonce): a re-settle no-ops. ``consumed_units == 0`` is the cancel/release case
-        (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds)."""
+        (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds).
+
+        KNOWN GAP (money-doctrine, tracked as a HARD K4/K5 prerequisite): settling/cancelling refunds the
+        credits but does NOT yet revoke a lease already handed to the offense seam by ``publish_lease`` — it
+        neither tombstones the seam copy nor advances the offense single-use floor, and ``publish_lease`` does
+        not refuse a lease whose reservation is already settled, so a settled lease stays a valid bearer
+        capability. INERT today (nothing arms a customer engagement off the seam — the K4 driver is unbuilt;
+        the red-pen verifiers confirmed the free-run exploit is unreachable in-range), but K4/K5 MUST close it
+        so a settled lease is non-runnable (settlement marker + seam tombstone + the K4 arm re-checking
+        settlement) and MUST assert net-spend == metered-consumption end-to-end before any customer run is
+        triggered."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
         kp = self.owner_key
         if kp is None:

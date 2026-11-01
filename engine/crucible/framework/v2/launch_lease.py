@@ -8,9 +8,14 @@ This module:
     engage path already pins — NEVER the seam-carried ``trust_root``, which a seam-writer could forge), and
   * BINDS it to THIS engagement (``engagement_slug``), THIS target host (``scope_host``), THIS tenant
     (``org_id`` == the process ``CRUCIBLE_TENANT``), within its ``[not_before, not_after)`` window, and
-  * CONSUMES it SINGLE-USE via a strict monotonic ``issued_at`` floor per slug (the arm is the one
+  * CONSUMES it SINGLE-USE via a strict per-slug ``issued_at`` high-water floor (the arm is the one
     authoritative consume; a replay of the same/older lease refuses, a genuine re-lease — newer ``issued_at`` —
-    passes and advances the floor).
+    passes and advances the floor). KNOWN LIMITATION (tracked, K-hardening): ``issued_at`` is the owner-signed
+    WALL-CLOCK time, not a monotonic counter, so two genuine re-leases minted in the same millisecond, or a
+    re-lease after a backward clock step, collide on the integer floor and the later (separately-signed,
+    separately-debited) lease is refused as a 'replay' — a within-tenant, fail-CLOSED availability loss
+    (credits recoverable via cancel), never a replay / fail-open hole. The sound fix is to key single-use on
+    the lease ``nonce`` (the model's single-use token), a deliberate anti-replay-substrate change.
 
 It holds NO key and makes NO money decision (the sovereign plane reserved the credits + minted the lease; the
 offense plane only checks it before traffic). Operator / greenfield runs (a non-``cust_`` slug) require NO
@@ -46,7 +51,13 @@ def _base_dir() -> str:
 
 def is_customer_slug(slug: Any) -> bool:
     """True iff ``slug`` is a customer engagement (``cust_`` prefix). The engage hook consults a lease ONLY for
-    these; every operator / greenfield slug is untouched (byte-identical)."""
+    these; every operator / greenfield slug is untouched (byte-identical). NOTE: this is a CONVENTION, not a
+    structural binding — the sovereign plane always mints customer slugs as ``cust_<hash>``, so it holds in
+    practice, but (a) an operator who explicitly names a ``cust_`` slug is fail-CLOSED-blocked (asked for a
+    lease operators never mint) and (b) were a future customer-launch driver (K4) to arm a customer engagement
+    under a NON-``cust_`` slug, this conjunct would be silently skipped. K4 MUST bind lease-required-ness to a
+    structural customer marker (the customer EngagementAuthority / tenant), not this prefix, and reserve the
+    ``cust_`` prefix against operator use — a hard K4 prerequisite (tracked)."""
     return isinstance(slug, str) and slug.startswith("cust_")
 
 
@@ -128,6 +139,8 @@ def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
     if not (nb <= t < na):
         return False, "lease is outside its validity window"
     if consume:
-        # ms resolution so two legitimate re-leases within one second don't collide on the integer floor.
+        # ms resolution REDUCES (does not eliminate) same-second re-lease collisions on the integer floor;
+        # same-ms re-leases and backward clock steps still collide — see the KNOWN LIMITATION in the module
+        # docstring (fail-closed; the sound fix keys single-use on the nonce, tracked for the K-hardening pass).
         return _advance_floor(base, safe, int(float(doc.issued_at) * 1000))
     return True, "ok"

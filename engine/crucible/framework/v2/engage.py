@@ -424,12 +424,18 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     return trust_root
 
 
-def _engage_launch_lease_precondition(slug: str, seed_url: str) -> None:
+def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool = False) -> None:
     """K2 (arm site, customer launches): a CUSTOMER engagement (``cust_`` slug) must present a VERIFIED
     owner-signed credit-launch lease on the cross-plane seam before it arms — a SEPARATE conjunct from the
     EngagementAuthority (G0). The offense plane VERIFIES the public owner-signed lease against OUR pinned owner
     key (never the seam-carried root), BINDS it to this engagement / target host / tenant (CRUCIBLE_TENANT) /
-    window, and CONSUMES it single-use (strict issued_at floor) — all keyless, before any traffic. A non-
+    window, and (on a FRESH arm) CONSUMES it single-use (strict issued_at floor) — all keyless, before any
+    traffic. On ``resume`` the lease is RE-VALIDATED + RE-BOUND but NOT re-consumed: the first arm already
+    burned the single-use floor for this exact lease, so re-burning it (the same issued_at yields the same
+    floor seq) would refuse EVERY resumed customer engagement as a 'replay' and strand its paid reservation.
+    ``consume`` exists for exactly this check-vs-consume split (the K4 enqueue pre-check also passes
+    consume=False); a resume re-runs inside the same already-charged engagement, never a second fresh launch,
+    and the lease stays bound to slug/host/tenant/window either way (no replay or re-aim is opened). A non-
     ``cust_`` slug (operator / greenfield) requires NO lease and is byte-identical (no lease consulted).
     Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
     from .launch_lease import is_customer_slug, verify_customer_launch_lease
@@ -439,7 +445,7 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str) -> None:
 
     from .common.tenant import tenant_id
     host = urlsplit(seed_url).hostname or ""
-    ok, reason = verify_customer_launch_lease(slug, host, tenant_id())
+    ok, reason = verify_customer_launch_lease(slug, host, tenant_id(), consume=not resume)
     if not ok:
         raise EngagementRefused(
             f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
@@ -1215,7 +1221,10 @@ def run_engagement(
     ledger.start(P_PREFLIGHT)
     try:
         preflight(slug, seed_url)
-        _engage_launch_lease_precondition(slug, seed_url)   # K2: a cust_ launch needs a verified credit lease
+        # K2: a cust_ launch needs a verified credit lease. Thread `resume` so a --resume RE-VALIDATES the
+        # lease (owner-pin + bind + window) but does NOT re-burn the single-use floor the first arm consumed
+        # (else every resumed customer engagement dies as a replay, stranding its paid reservation).
+        _engage_launch_lease_precondition(slug, seed_url, resume=resume)
     except EngagementRefused as e:
         ledger.fail(P_PREFLIGHT)
         if sink is not None:
