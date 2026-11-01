@@ -14,11 +14,14 @@
 (function () {
   "use strict";
   var VUI = window.VUI;
+  var root = document.getElementById("app");
+  // Fail-to-DEGRADE before the first VUI.* dereference: if the shared kit (ui.js) did not load/parse, VUI is
+  // undefined and the very next VUI call (store(), below) would throw at module init, aborting the whole IIFE
+  // and leaving a blank page (noscript does not fire with JS enabled). Show the honest message and stop.
+  if (!VUI) { if (root) { root.textContent = "VIGIL could not load its interface. Please reload."; } return; }
   // Cookie-auth plane: no embedded/sessionStorage token. VUI.postJSON still sends X-Requested-With + cookie.
   window.VIGIL_CFG = { token: "", api: {} };
   var API = "api/customer"; // relative to the mount
-
-  var root = document.getElementById("app");
   var state = VUI.store({ who: null, booted: false });
 
   // ---- tiny helpers -------------------------------------------------------------------------------
@@ -31,7 +34,7 @@
             h("input#" + id, { type: type || "text", autocomplete: "off", spellcheck: "false" })];
   }
   function val(id) { var el = VUI.$("#" + id); return el ? String(el.value || "").trim() : ""; }
-  function err(msg) { VUI.errorBanner(root, msg); }
+  function err(msg) { VUI.errorBanner(msg); }   // kit API is errorBanner(msg, detail?) — a #error-banner body singleton
   function kv(k, v) {
     return h("div.cust-kv", {}, [h("span.k", { text: k }),
       h("span", { text: (v == null || v === "") ? "—" : String(v) })]);
@@ -348,14 +351,22 @@
   }
 
   async function doLogout() {
-    try { await VUI.postJSON(API + "/logout", {}); } catch (e) { /* best-effort */ }
-    await refreshWho();
-    nav("#/login");
-    VUI.toast("Signed out");
+    var posted = true;
+    try { await VUI.postJSON(API + "/logout", {}); } catch (e) { posted = false; }
+    await refreshWho();                          // reflect the ACTUAL server session — never assume it severed
+    if (authed()) {
+      // the logout POST did not take (network error / gate refusal / revoke error) and the cookie is STILL
+      // live — do NOT show "Signed out": that would strand a live session on a shared machine. Tell the truth.
+      nav("#/");
+      err("Sign-out did not complete — you are still signed in. Please try again.");
+    } else {
+      nav("#/login");
+      if (posted) { VUI.toast("Signed out"); }
+    }
   }
 
   // ---- misc ---------------------------------------------------------------------------------------
-  function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(root); }
+  function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
     if (e && e.data && e.data.error) return String(e.data.error);
     if (e && e.status === 429) return "Too many attempts — wait a moment and try again.";
@@ -387,8 +398,7 @@
 
   // ---- boot ---------------------------------------------------------------------------------------
   (async function boot() {
-    if (!VUI) { root.textContent = "VIGIL could not load its UI kit."; return; }
-    render();            // "Loading…" shell
+    render();            // "Loading…" shell (VUI is guaranteed present — guarded at module init above)
     await refreshWho();  // flips booted -> render() via the store subscription
   })();
 })();
