@@ -135,6 +135,9 @@ assert "strix" not in _m, "live.ci_checkout must not import strix at module scop
 import vigil_integration.live.ci_annotate  # W4: the FACT/LEAD-typed PR annotation layer — PURE STDLIB
 assert "framework" not in _m, "live.ci_annotate must not import framework at module scope (pure stdlib, no network)"
 assert "strix" not in _m, "live.ci_annotate must not import strix at module scope"
+import vigil_integration.jobs.ci_runner  # W4: assemble+drive the CI scan — framework (gate/queue) LAZY
+assert "framework" not in _m, "jobs.ci_runner must not import framework at module scope (gate/queue defer it)"
+assert "strix" not in _m, "jobs.ci_runner must not import strix at module scope"
 import vigil_integration.live.github_client  # repo-connect Slice 3a: the gated READ-only GitHub client
 assert "framework" not in _m, "live.github_client must not import framework at module scope (gated client builds it lazily)"
 print(json.dumps({"res": res, "guard": "passed"}))

@@ -2663,6 +2663,72 @@ def _cmd_codescan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ci_scan(args: argparse.Namespace) -> int:
+    """`vigil ci-scan` — the W4 GitHub-Action runner. Normalize the CI run's coordinates into ONE
+    SecurityJob(source="ci"), ENQUEUE it, and drain it through the ONE authorized runner (the hard
+    authorization gate is the SOLE executor — a repo with no verified EngagementAuthority is REFUSED, not
+    scanned). The diff-scoped codescan runs over the LOCAL actions/checkout tree (no clone, no api.github.com);
+    each finding is emitted as a FACT/LEAD-typed GitHub annotation (::error for an oracle-confirmed FACT,
+    ::warning for a LEAD) and a job summary. Exit: 1 if a job FAILED or (with --fail-on <sev>) an
+    oracle-confirmed FACT is at/above that severity; else 0. Reads the standard GITHUB_* env when flags are
+    omitted."""
+    import json as _json
+
+    from .jobs.ci_runner import exit_code, findings_of, run_ci_scan
+    from .jobs.ci_trigger import ci_job_from_github_env, ci_job_from_inputs
+    from .live.ci_annotate import annotation_lines, counts, summary_markdown
+
+    if not str(getattr(args, "queue_root", "") or "").strip():
+        print("vigil ci-scan: --queue-root is required (the durable SecurityJob queue)", file=sys.stderr)
+        return 2
+    try:
+        if str(getattr(args, "repo", "") or "").strip():
+            job = ci_job_from_inputs(repo=args.repo, commit=str(args.commit or "").strip(),
+                                     pr_number=args.pr_number, ci_run_id=str(args.ci_run_id or ""))
+        else:
+            job = ci_job_from_github_env()                 # the standard GitHub Actions environment
+    except ValueError as exc:
+        print(f"vigil ci-scan: {exc}", file=sys.stderr)
+        return 2
+
+    workspace = (str(getattr(args, "workspace", "") or "").strip()
+                 or os.environ.get("GITHUB_WORKSPACE") or ".")
+    base_ref = (str(getattr(args, "base_ref", "") or "").strip()
+                or os.environ.get("GITHUB_BASE_REF") or "HEAD^")
+    head_ref = (str(getattr(args, "head_ref", "") or "").strip() or job.commit
+                or os.environ.get("GITHUB_SHA") or "HEAD")
+
+    # the pinned authority trust root verifies the engagement authority (the gate). None => every job refused.
+    from framework.v2.authority.store import load_authority_root
+    trust_root = load_authority_root()
+
+    try:
+        outcomes = run_ci_scan(
+            job, queue_root=args.queue_root, base_dir=args.base_dir, trust_root=trust_root,
+            workspace=workspace, base_ref=base_ref, head_ref=head_ref, max_files=args.max_files)
+    except Exception as exc:  # noqa: BLE001 — surface a setup failure as a clean non-zero, never a traceback
+        print(f"vigil ci-scan: scan setup failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return 1
+
+    findings = findings_of(outcomes)
+    for line in annotation_lines(findings):           # GitHub picks these up from stdout as PR annotations
+        print(line)
+    summary = summary_markdown(findings, repo=job.repo, commit=job.commit)
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        try:
+            with open(step_summary, "a", encoding="utf-8") as fh:
+                fh.write(summary + "\n")
+        except OSError:
+            pass
+    # the machine-readable run report goes to stderr so stdout carries only the annotations
+    print(_json.dumps({"counts": counts(findings),
+                       "outcomes": [{"state": o.state, "denial_code": o.denial_code,
+                                     "reason": (o.reason or "")[:200]} for o in outcomes]}, indent=2),
+          file=sys.stderr)
+    return exit_code(outcomes, findings, fail_on=str(getattr(args, "fail_on", "") or ""))
+
+
 def _cmd_deploy_acceptance(args: argparse.Namespace) -> int:
     """WS4 — run the per-VM PRODUCTION ACCEPTANCE HARNESS and surface its exit code (a convenience wrapper
     around ``vigil_integration.sovereign_deploy.acceptance``, the self-test a freshly provisioned box runs
@@ -5305,6 +5371,24 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fix-verification oracle: re-run DAA and report whether --ref still fires (exit 0 iff cleared)")
     pcs.add_argument("--ref", default="", help="the finding ref to verify (with --verify)")
     pcs.set_defaults(func=_cmd_codescan)
+
+    pci = sub.add_parser("ci-scan",
+                         help="W4: the GitHub-Action runner — enqueue a CI SecurityJob and drain it through the "
+                              "authorized runner, emitting FACT/LEAD-typed PR annotations (diff-scoped, local)")
+    pci.add_argument("--queue-root", default="", help="the durable SecurityJob queue root (required)")
+    pci.add_argument("--base-dir", default=".vigil-live", help="engagement base dir holding <slug>.spine")
+    pci.add_argument("--workspace", default="", help="the checked-out repo tree (default $GITHUB_WORKSPACE or .)")
+    pci.add_argument("--base-ref", default="", help="diff base rev (default $GITHUB_BASE_REF)")
+    pci.add_argument("--head-ref", default="", help="diff head rev (default the job commit / $GITHUB_SHA)")
+    pci.add_argument("--repo", default="", help="repo id e.g. github.com/org/repo (default from GITHUB_* env)")
+    pci.add_argument("--commit", default="", help="commit SHA under review (default from the event / env)")
+    pci.add_argument("--pr-number", type=int, default=None, help="the PR number (default from the event / env)")
+    pci.add_argument("--ci-run-id", default="", help="the CI run id (audit telemetry only)")
+    pci.add_argument("--max-files", type=int, default=5000)
+    pci.add_argument("--fail-on", default="",
+                     help="fail the build (exit 1) if an ORACLE-CONFIRMED FACT is at/above this severity "
+                          "(critical|high|medium|low); leads never break the build")
+    pci.set_defaults(func=_cmd_ci_scan)
 
     pda = sub.add_parser("deploy-acceptance",
                          help="WS4: run the per-VM PRODUCTION ACCEPTANCE HARNESS against the bundled loopback "
