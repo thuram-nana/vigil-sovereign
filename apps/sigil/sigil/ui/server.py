@@ -471,6 +471,26 @@ class Handler(BaseHTTPRequestHandler):
                                             org_id=org, permission="view_invoices"):
                 return self._deny(403, "not authorized for this org's invoices")
             return self._json(_billing.billing_invoices(store, org))
+        if path in ("/api/assessments", "/api/assessments/findings"):
+            # SaaS tenant-scoped ASSESSMENT RESULTS for ONE org (Slice K6): the oracle-confirmed findings the
+            # org's authorized assessments landed on the spine. SAME composed gate as billing but on
+            # `view_assessments` (operator-tier, NOT org_admin — assessment output is testing-domain, so a
+            # billing tenant-admin does not auto-see security findings). THE IDOR class: the org's engagement-
+            # slug set is derived SERVER-SIDE from its OWN ownership proofs, so a finding for another tenant is
+            # structurally never returned. Read-only; no mint, no secret, no offense import.
+            from . import assessments as _assess
+            from ..governor.orgs import OrgRegistry
+            org = _assess.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_assessments"):
+                return self._deny(403, "not authorized for this org's assessments")
+            import time as _t
+            if path == "/api/assessments":
+                return self._json(_assess.assessment_summary(store, org, now=_t.time()))
+            return self._json(_assess.assessment_findings(store, org, now=_t.time()))
         if path == "/api/billing/orgs":
             # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
             # tenant is a global-owner action, distinct from the per-org overview above.

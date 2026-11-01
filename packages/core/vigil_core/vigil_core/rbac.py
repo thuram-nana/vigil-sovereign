@@ -36,7 +36,12 @@ _OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_
                         # SaaS tenancy — READ an org's OWN billing surface (credit balance / usage / invoices).
                         # operator-tier so it is fail-closed below (a viewer/analyst sees no money data), and so
                         # a per-org `operator` member can read their tenant's billing. Pure reads: no mint path.
-                        "view_billing", "view_usage", "view_invoices"}
+                        "view_billing", "view_usage", "view_invoices",
+                        # SaaS tenancy — READ an org's OWN assessment results (findings / evidence / report,
+                        # Slice K6). Operator-tier (the per-org member who RUNS assessments sees their results),
+                        # and DELIBERATELY NOT in _ORG_ADMIN: assessment output is testing-domain, so a billing
+                        # tenant-admin does not auto-see security findings (billing-authz != testing-authz).
+                        "view_assessments"}
 _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
                       "manage_users", "toggle_protected_guard",
                       # SaaS tenancy — MONEY-MOVING + membership + org-lifecycle administration. Owner-tier
