@@ -91,6 +91,31 @@ def test_operator_gets_a_challenge():
     assert ch["well_known_url"].endswith("/.well-known/vigil-site-verification.txt")
 
 
+# --- SS-4: the customer 'Domains' read is tenant-scoped + testing-axis gated ------------------------
+
+def test_customer_assets_tenant_scoped_and_testing_gated():
+    """The /api/customer/assets read: a member sees ONLY their own org's assets; another tenant sees none;
+    a non-member is denied; and a BILLING-only org_admin (no view_assessments) cannot see the testing-domain
+    asset surface (billing-authz != testing-authz)."""
+    from sigil.ui.provision import ProvisionDenied
+    p, s, orgs = _prov()
+    _seat(orgs, "org_a", "u_op", "operator")         # operator carries view_assessments
+    _seat(orgs, "org_b", "u_b", "operator")
+    _seat(orgs, "org_c", "u_bill", "org_admin")      # billing admin: NO view_assessments
+    ch = p.target_challenge("u_op", "org_a", "apme.cm")
+    p.target_fetcher = _StubFetcher(ch["well_known_body"])
+    p.target_verify("u_op", "org_a", "apme.cm", "well-known")     # org_a now owns apme.cm (proof recorded)
+
+    out = p.customer_assets("u_op", "org_a")                      # org_a's own member
+    assert [a["host"] for a in out["assets"]] == ["apme.cm"]
+    assert "method" in out["assets"][0]                           # a proof is surfaced (status is time-relative)
+    assert p.customer_assets("u_b", "org_b") == {"assets": []}    # a different tenant sees NOTHING of org_a
+    with pytest.raises(ProvisionDenied):                          # a non-member of org_a is refused
+        p.customer_assets("u_b", "org_a")
+    with pytest.raises(ProvisionDenied):                          # billing org_admin cannot read testing assets
+        p.customer_assets("u_bill", "org_c")
+
+
 # --- verify: off-by-default, then the happy path + the refusals ------------------------------------
 
 def test_verify_fail_closed_when_fetcher_disabled():

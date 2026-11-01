@@ -1446,6 +1446,8 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assessments(requester, str(body.get("org_id", "")), ip=ip)
         if action == "assessment_findings":
             return p.customer_assessment_findings(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assets_overview":
+            return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         return None
 
     def _durability_post(self, path):

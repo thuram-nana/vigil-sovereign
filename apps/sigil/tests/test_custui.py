@@ -466,6 +466,26 @@ def test_operator_member_reads_assessments_over_the_edge(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
+def test_customer_assets_read_over_the_edge_and_billing_not_testing(tmp_path, monkeypatch):
+    """SS-4: the /api/customer/assets 'Domains' read is wired on the edge, relays to assets_overview, and is
+    operator-gated — a signup-default BILLING org_admin is denied (billing != testing); an operator member
+    reads their own (empty) tenant-scoped asset list."""
+    from sigil.governor.orgs import OrgRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        oid, u = conf["org_id"], conf["username"]
+        assert _get(op, ep, "/api/customer/assets")[0] == 403          # billing org_admin: no view_assessments
+        OrgRegistry(sov.store()).grant_membership(oid, u, "operator", issued_at=time.time() + 1e6)
+        c, assets = _get(op, ep, "/api/customer/assets")
+        assert c == 200 and assets == {"assets": []}, (c, assets)      # operator: tenant-scoped, empty for now
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 def test_customer_reads_require_a_session(tmp_path, monkeypatch):
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
     try:

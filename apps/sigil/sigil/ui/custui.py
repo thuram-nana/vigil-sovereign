@@ -262,7 +262,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         # no session -> 401 (no cross-origin data leak); same-origin reads (the customer SPA) carry the cookie.
         _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
                   "/api/customer/assessments": "assessment_summary",
-                  "/api/customer/assessments/findings": "assessment_findings"}
+                  "/api/customer/assessments/findings": "assessment_findings",
+                  "/api/customer/assets": "assets_overview"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
         if path.startswith("/api/"):           # an unknown API route 404s — NEVER fall through to the SPA shell

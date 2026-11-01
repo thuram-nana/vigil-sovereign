@@ -536,3 +536,53 @@ class AssetOwnershipRegistry:
             if o == org_id and float(now) < float(as_issued_at(row.get("expires_at"))):
                 out.append(h)
         return sorted(out)
+
+    def assets_overview(self, org_id: str, *, now: float) -> list[dict]:
+        """Per-host ownership status for ALL of ``org_id``'s assets, in host order — the tenant-scoped read
+        behind the customer "Domains" view (SS-4). DEFAULT-DENY to this org: it folds the owner-authenticated
+        proof + challenge spines (the SAME folds the mint/launch gate reads) and surfaces ONLY ``(org_id, *)``
+        rows, so another tenant's assets are STRUCTURALLY absent — never a client-chosen filter. Each host is:
+
+          * ``verified`` — an active, owner-signed proof that is UNEXPIRED at ``now`` (``now < expires_at``);
+          * ``expired``  — an active proof whose owner-signed expiry has passed (re-proving required);
+          * ``pending``  — an outstanding challenge with no active proof (not yet verified, or revoked).
+
+        A record carries ``method`` + ``verified_at`` / ``expires_at`` when proven, and the CURRENT challenge's
+        placement instructions (``dns``/``well_known``/``meta`` + ``marker``) when a challenge is outstanding,
+        so the UI can render retry / re-check steps. Read-only: no lock, no mint, no owner key. ``marker`` is
+        the org's OWN challenge value (what they publish), never another tenant's secret."""
+        if not isinstance(org_id, str) or not org_id:
+            return []
+        n = float(now)
+        proofs = {h: row for (o, h), row in self._fold_proofs().items() if o == org_id}
+        challenges = {h: row for (o, h), row in self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).items()
+                      if o == org_id}
+        out: list[dict] = []
+        for h in sorted(set(proofs) | set(challenges)):
+            prow = proofs.get(h)
+            rec: dict = {"host": h}
+            if prow is not None:
+                exp = float(as_issued_at(prow.get("expires_at")))
+                rec.update({"method": str(prow.get("method") or ""),
+                            "verified_at": float(as_issued_at(prow.get("verified_at"))),
+                            "expires_at": exp,
+                            "status": "verified" if n < exp else "expired"})
+            else:
+                rec["status"] = "pending"
+            crow = challenges.get(h)
+            if crow is not None:
+                tok = str(crow.get("token") or "")
+                marker = expected_marker(tok)
+                rec["challenge"] = {"dns_name": dns_txt_name(h), "dns_value": marker,
+                                    "well_known_url": well_known_url(h), "well_known_body": marker,
+                                    "meta_tag": meta_tag(tok), "marker": marker}
+            out.append(rec)
+        return out
+
+
+def assets_overview(store, org_id: str, *, now: float) -> dict:
+    """Projector for the customer-plane ``/api/customer/assets`` read: the tenant-scoped per-host ownership
+    status for ``org_id``. A thin wrapper over :meth:`AssetOwnershipRegistry.assets_overview` so the
+    provisioner's ``_customer_read`` gate can call it exactly like ``billing_overview`` / ``assessment_summary``
+    (``admit_customer`` has ALREADY authorized ``org_id`` as the session's own tenant before this runs)."""
+    return {"assets": AssetOwnershipRegistry(store).assets_overview(org_id, now=float(now))}

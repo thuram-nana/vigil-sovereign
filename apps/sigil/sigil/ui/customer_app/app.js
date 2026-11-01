@@ -221,21 +221,66 @@
     });
   }
 
-  // ---- Assets: prove ownership (challenge -> verify). Operator-role (run_engagement) only; the owner then
-  //      authorizes the target. Billing roles are refused by the server (honest card below). ----------------
+  // ---- Assets / Domains: the status surface (verified / pending / expired) + prove ownership
+  //      (challenge -> verify). The server scopes the list to THIS workspace (admit_customer, never a
+  //      client-sent org id) and gates it on the testing (operator) role — a billing role gets the honest
+  //      403 card from dataView. Proving control lets the owner authorize the target; it never runs a test. --
   function viewAssets() {
-    var body = h("div", {}, [
-      h("h2", { text: "Authorized assets" }),
-      h("p.cust-muted", { text: "Prove you control a host before any assessment can target it. Proving control "
-        + "lets the owner authorize the target; it never runs a test by itself (billing is separate from testing)." }),
-      h("div.card.cust-auth", {}, [
-        field("asset-host", "Host (e.g. app.example.com)", "text"),
-        h("div.row", {}, [h("button.btn.btn-primary", { type: "button", text: "Request ownership challenge",
-          onClick: doChallenge })]),
-        h("div#asset-flow"),
-      ]),
-    ]);
-    return shell(body, "#/assets");
+    return dataView("#/assets", "Authorized assets", API + "/assets", function (d) {
+      var assets = (d && d.assets) || [];
+      return h("div", {}, [
+        h("p.cust-muted", { text: "Prove you control a host before any assessment can target it. Proving control "
+          + "lets the owner authorize the target; it never runs a test by itself (billing is separate from testing)." }),
+        assetsList(assets),
+        h("div.card.cust-register", {}, [
+          h("h3", { text: "Register a new host" }),
+          field("asset-host", "Host (e.g. app.example.com)", "text"),
+          h("div.row", {}, [h("button.btn.btn-primary", { type: "button", text: "Request ownership challenge",
+            onClick: function () { doChallenge(); } })]),
+          h("div#asset-flow"),
+        ]),
+      ]);
+    });
+  }
+  function statusBadge(st) {
+    var label = st === "verified" ? "✓ Verified" : st === "expired" ? "⚠ Expired" : "… Pending";
+    return h("span.cust-badge.cust-badge-" + (st === "verified" || st === "expired" ? st : "pending"),
+      { text: label });
+  }
+  function assetsList(assets) {
+    if (!assets.length) {
+      return h("div.card.cust-soon", { text: "No hosts registered yet — register one below, publish the token, "
+        + "then verify to prove control." });
+    }
+    var cards = assets.map(function (a) {
+      var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: a.host }), statusBadge(a.status)])];
+      if (a.method) {
+        rows.push(kv("Method", a.method));
+        rows.push(kv("Verified", fmtDate(a.verified_at)));
+        rows.push(kv(a.status === "expired" ? "Expired" : "Expires", fmtDate(a.expires_at)));
+      }
+      if (a.status === "expired") {
+        rows.push(h("p.cust-muted", { text: "This proof has lapsed — re-check or re-issue a challenge to renew it." }));
+      } else if (a.status === "pending") {
+        rows.push(h("p.cust-muted", { text: "Not yet verified — publish the token, then re-check." }));
+      }
+      var actions = [];
+      if (a.challenge) {
+        actions.push(h("button.btn", { type: "button", text: "Re-check now",
+          onClick: function () { showChallenge(assign({ host: a.host }, a.challenge)); } }));
+      }
+      actions.push(h("button.btn", { type: "button", text: "Re-issue challenge",
+        onClick: function () { doChallenge(a.host); } }));
+      rows.push(h("div.row", {}, actions));
+      return h("div.card", {}, rows);
+    });
+    return h("div", {}, [h("h3", { text: "Your hosts" }), h("div.cust-grid", {}, cards)]);
+  }
+  function assign(base, extra) {                       // ES5-safe shallow merge (no Object.assign assumption)
+    var o = {}, k;
+    for (k in base) { if (Object.prototype.hasOwnProperty.call(base, k)) o[k] = base[k]; }
+    for (k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) o[k] = extra[k]; }
+    return o;
   }
   function flowCard(sel, msg) { var e = VUI.$(sel); if (e) { VUI.mount(e, h("div.card.cust-soon", { text: msg })); } }
   function flowMsg(e, fallback) {
@@ -244,13 +289,17 @@
     if (e && e.data && e.data.error) return String(e.data.error);
     return fallback;
   }
-  async function doChallenge() {
+  function showChallenge(r) {
+    var holder = VUI.$("#asset-flow");
+    if (holder) { VUI.mount(holder, challengeBlock(r)); try { holder.scrollIntoView({ block: "nearest" }); } catch (e) {} }
+  }
+  async function doChallenge(hostArg) {
     clearErr();
-    var host = val("asset-host");
+    var host = hostArg || val("asset-host");
     if (!host) { return err("Enter a host."); }
     try {
       var r = await VUI.postJSON(API + "/target/challenge", { host: host });
-      VUI.mount(VUI.$("#asset-flow"), challengeBlock(r));
+      showChallenge(r);
     } catch (e) { flowCard("#asset-flow", flowMsg(e, "Could not start the ownership challenge.")); }
   }
   function challengeBlock(r) {
@@ -272,9 +321,8 @@
   async function doVerify(host, method) {
     try {
       var r = await VUI.postJSON(API + "/target/verify", { host: host, method: method });
-      VUI.mount(VUI.$("#asset-verify"), h("div.card", {}, h("p", { text: "✓ Ownership verified for "
-        + (r.host || host) + ". The owner-signed target authority is in place." })));
-      VUI.toast("Ownership verified");
+      VUI.toast("Ownership verified for " + (r.host || host));
+      if (here() === "#/assets") render();           // refresh the status list -> the host now shows "Verified"
     } catch (e) { flowCard("#asset-verify", flowMsg(e, "Verification did not pass — publish the token and retry.")); }
   }
 

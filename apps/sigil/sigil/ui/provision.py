@@ -523,6 +523,16 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _assess.assessment_findings(s, o, now=_t.time()))
 
+    def customer_assets(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """Per-host ownership status (verified / pending / expired) for the SESSION org's assets — the read
+        behind the customer 'Domains' view (SS-4). Tenant-scoped by ``_customer_read``'s ``admit_customer``
+        (NO global leg, live membership re-check); the ``org_id`` is the hop-bound session principal, never a
+        body field, so org A can never read org B's assets."""
+        import time as _t
+        from ..governor import asset_ownership as _own
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _own.assets_overview(s, o, now=_t.time()))
+
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
                       ip: str = "", now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint

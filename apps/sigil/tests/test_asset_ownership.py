@@ -338,3 +338,57 @@ def test_hostname_re_matches_target_authorization_literal():
 def test_tenant_re_matches_orgs_literal():
     from sigil.governor import orgs as og
     assert ao._TENANT_RE.pattern == og._TENANT_RE.pattern
+
+
+# --- SS-4: assets_overview (the customer 'Domains' status read) -------------------------------------
+
+def test_assets_overview_statuses_and_challenge_block():
+    """verified (active + unexpired), expired (active + lapsed), pending (challenge, no proof) — and every
+    host with an outstanding challenge carries the placement instructions the UI shows for retry/re-check."""
+    s = _store(); reg = _reg(s)
+    chv = reg.issue_challenge("acme", "verified.cm", issued_at=_issue())
+    reg.verify_and_record("acme", "verified.cm", method=METHOD_DNS_TXT, observed=_dns(chv.marker),
+                          now=1000.0, ttl_seconds=3600.0)                 # expires 4600
+    che = reg.issue_challenge("acme", "expired.net", issued_at=_issue())
+    reg.verify_and_record("acme", "expired.net", method=METHOD_WELL_KNOWN, observed=che.marker,
+                          now=1000.0, ttl_seconds=100.0)                  # expires 1100
+    chp = reg.issue_challenge("acme", "pending.io", issued_at=_issue())   # never verified
+
+    by = {r["host"]: r for r in reg.assets_overview("acme", now=2000.0)}  # past 1100, before 4600
+    assert set(by) == {"verified.cm", "expired.net", "pending.io"}
+    assert by["verified.cm"]["status"] == "verified"
+    assert by["verified.cm"]["method"] == METHOD_DNS_TXT
+    assert by["verified.cm"]["verified_at"] == 1000.0 and by["verified.cm"]["expires_at"] == 4600.0
+    assert by["expired.net"]["status"] == "expired"               # active proof, past its owner-signed expiry
+    assert by["pending.io"]["status"] == "pending" and "method" not in by["pending.io"]
+    # placement instructions are the org's OWN challenge marker (retry / re-check), per method
+    assert by["pending.io"]["challenge"]["dns_name"] == "_vigil-challenge.pending.io"
+    assert by["pending.io"]["challenge"]["marker"] == chp.marker
+    assert by["verified.cm"]["challenge"]["marker"] == chv.marker  # a verified host can still be re-checked
+
+
+def test_assets_overview_is_tenant_scoped():
+    """org A's assets are STRUCTURALLY absent from org B's overview — the fold surfaces only (org_id, *)."""
+    s = _store(); reg = _reg(s)
+    ch = reg.issue_challenge("orga", "a-only.cm", issued_at=_issue())
+    reg.verify_and_record("orga", "a-only.cm", method=METHOD_DNS_TXT, observed=_dns(ch.marker),
+                          now=1000.0, ttl_seconds=3600.0)
+    assert [r["host"] for r in reg.assets_overview("orga", now=1500.0)] == ["a-only.cm"]
+    assert reg.assets_overview("orgb", now=1500.0) == []          # org B sees NOTHING of org A
+    assert reg.assets_overview("", now=1500.0) == []              # empty org id -> nothing (fail-closed)
+    # the module-level projector wraps the registry read under {"assets": [...]} (same shape the edge relays);
+    # it builds a registry on the DEFAULT persisted owner key, so its end-to-end key-consistent path is
+    # exercised by test_provision_target::test_customer_assets_tenant_scoped_and_testing_gated.
+    assert ao.assets_overview(s, "orgb", now=1500.0) == {"assets": []}
+
+
+def test_assets_overview_revoked_proof_becomes_pending():
+    """A revoked proof is not 'verified' — it drops to 'pending' (re-proving required), never silently stays."""
+    s = _store(); reg = _reg(s)
+    ch = reg.issue_challenge("acme", "revoked.cm", issued_at=_issue())
+    reg.verify_and_record("acme", "revoked.cm", method=METHOD_DNS_TXT, observed=_dns(ch.marker),
+                          now=1000.0, ttl_seconds=3600.0)
+    assert reg.assets_overview("acme", now=1500.0)[0]["status"] == "verified"
+    reg.revoke_proof("acme", "revoked.cm")
+    row = reg.assets_overview("acme", now=1500.0)[0]
+    assert row["status"] == "pending" and "method" not in row
