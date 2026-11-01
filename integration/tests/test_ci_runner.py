@@ -11,7 +11,13 @@ Pins:
 from __future__ import annotations
 
 from vigil_integration.jobs.authorize import GateOutcome
-from vigil_integration.jobs.ci_runner import exit_code, findings_of, run_ci_scan
+from vigil_integration.jobs.ci_runner import (
+    FAIL_ON_CHOICES,
+    exit_code,
+    findings_of,
+    run_ci_scan,
+    status_note,
+)
 from vigil_integration.jobs.ci_trigger import ci_job_from_inputs
 
 _ALLOW = lambda job: GateOutcome(True, "test-allow")              # noqa: E731
@@ -83,3 +89,32 @@ def test_exit_code_gates_on_failure_and_on_confirmed_facts_only() -> None:
     assert exit_code(done, fact_high, fail_on="critical") == 0 # ...but not --fail-on critical
     assert exit_code(done, lead_crit, fail_on="high") == 0     # a Critical LEAD NEVER breaks the build
     assert exit_code([_O("refused")], [], fail_on="high") == 0 # refused is a normal state, not a failure
+
+
+def test_exit_code_fails_closed_on_an_unknown_fail_on(tmp_path=None) -> None:
+    """W4 red-pen MED: a typo'd --fail-on must NOT silently disable the gate (fail-OPEN). An unknown
+    non-empty severity is treated as the strictest threshold — any confirmed FACT trips it."""
+    class _O:
+        def __init__(self, state):
+            self.state, self.reason, self.denial_code = state, "", ""
+    done = [_O("done")]
+    fact_low = [{"severity": "Low", "static_oracle_confirmed": True}]
+    lead_crit = [{"severity": "Critical"}]
+    assert exit_code(done, fact_low, fail_on="hgih") == 1      # typo -> fail-CLOSED (gates on any FACT)
+    assert exit_code(done, [], fail_on="hgih") == 0            # ...but no findings -> still clean
+    assert exit_code(done, lead_crit, fail_on="hgih") == 0     # ...and a LEAD still never breaks the build
+    assert "high" in FAIL_ON_CHOICES and "" not in FAIL_ON_CHOICES
+
+
+def test_status_note_surfaces_non_scanned_states() -> None:
+    class _O:
+        def __init__(self, state, reason="", denial_code=""):
+            self.state, self.reason, self.denial_code = state, reason, denial_code
+    assert status_note([_O("done")]) == ""                     # a real scan ran -> no banner
+    assert status_note([]).startswith("NOT SCANNED THIS RUN")  # empty drain (duplicate/empty queue)
+    refused = status_note([_O("refused", denial_code="no-authority")])
+    assert refused.startswith("NOT SCANNED") and "REFUSED" in refused and "no-authority" in refused
+    failed = status_note([_O("failed", reason="boom")])
+    assert failed.startswith("NOT SCANNED") and "FAILED" in failed and "boom" in failed
+    # a done job alongside a refused one is still a real scan (findings are authoritative)
+    assert status_note([_O("refused"), _O("done")]) == ""

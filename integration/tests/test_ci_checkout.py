@@ -97,12 +97,42 @@ def test_unsafe_refs_are_refused_at_build_time(tmp_path) -> None:
             make_ci_changed_files(base_ref="main", head_ref=bad, workspace=str(tmp_path))
 
 
-def test_changed_files_argv_is_a_three_dot_name_only_diff(tmp_path) -> None:
+def test_changed_files_argv_is_a_nul_delimited_three_dot_name_only_diff(tmp_path) -> None:
     seen = {}
 
     def _cap(argv, *, timeout=60.0, **kw):
         seen["argv"] = argv
-        return _FakeRun(0, "a.py\n")
+        return _FakeRun(0, "a.py\0")           # NUL-delimited output
 
-    make_ci_changed_files(base_ref="B", head_ref="H", workspace=str(tmp_path), _runner=_cap)(_JOB)
-    assert seen["argv"] == ["git", "-C", str(tmp_path.resolve()), "diff", "--name-only", "B...H", "--"]
+    cf = make_ci_changed_files(base_ref="B", head_ref="H", workspace=str(tmp_path), _runner=_cap)(_JOB)
+    # -z is present (so git never quotes a special name) and the trailing NUL does not add an empty path
+    assert seen["argv"] == ["git", "-C", str(tmp_path.resolve()), "diff", "-z", "--name-only", "B...H", "--"]
+    assert cf == {"a.py"}
+
+
+def test_changed_files_round_trips_a_non_ascii_name_via_nul(tmp_path) -> None:
+    """Regression for the W4 red-pen HIGH: a non-ASCII changed file must be returned as its REAL on-disk
+    path (matching the filesystem-walk af.path run_codescan scopes on), not git's quoted/octal-escaped
+    `--name-only` form — otherwise its findings are silently dropped from the diff scope."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "normal.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    (repo / "café.py").write_text("y = 2\n", encoding="utf-8")    # non-ASCII name
+    (repo / "normal.py").write_text("x = 42\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pr")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+    cf = make_ci_changed_files(base_ref=base, head_ref=head, workspace=str(repo),
+                               _runner=_real_git_runner)
+    changed = cf(_JOB)
+    # the REAL path (what a filesystem walk yields), not git's quoted "caf\303\251.py"
+    assert "café.py" in changed, changed
+    assert "normal.py" in changed
+    assert not any("\\303" in p or p.startswith('"') for p in changed)   # no octal-escaped / quoted form

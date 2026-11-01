@@ -2674,12 +2674,18 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
     omitted."""
     import json as _json
 
-    from .jobs.ci_runner import exit_code, findings_of, run_ci_scan
+    from .jobs.ci_runner import FAIL_ON_CHOICES, exit_code, findings_of, run_ci_scan, status_note
     from .jobs.ci_trigger import ci_job_from_github_env, ci_job_from_inputs
-    from .live.ci_annotate import annotation_lines, counts, summary_markdown
+    from .live.ci_annotate import annotation_lines, counts, summary_markdown, warning_annotation
 
     if not str(getattr(args, "queue_root", "") or "").strip():
         print("vigil ci-scan: --queue-root is required (the durable SecurityJob queue)", file=sys.stderr)
+        return 2
+    fail_on = str(getattr(args, "fail_on", "") or "").strip().lower()
+    if fail_on and fail_on not in FAIL_ON_CHOICES:
+        # fail-closed on a misconfigured gate: reject a typo'd severity rather than silently not gating.
+        print(f"vigil ci-scan: --fail-on must be one of {', '.join(FAIL_ON_CHOICES)} (or empty for no gate); "
+              f"got {fail_on!r}", file=sys.stderr)
         return 2
     try:
         if str(getattr(args, "repo", "") or "").strip():
@@ -2693,8 +2699,18 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
 
     workspace = (str(getattr(args, "workspace", "") or "").strip()
                  or os.environ.get("GITHUB_WORKSPACE") or ".")
-    base_ref = (str(getattr(args, "base_ref", "") or "").strip()
-                or os.environ.get("GITHUB_BASE_REF") or "HEAD^")
+    base_ref = str(getattr(args, "base_ref", "") or "").strip()
+    if not base_ref:
+        gh_base = (os.environ.get("GITHUB_BASE_REF") or "").strip()
+        # GITHUB_BASE_REF is the base BRANCH NAME; in a detached-HEAD actions/checkout it resolves only as
+        # origin/<name>. NEVER fall back to HEAD^ — that silently diffs just the last commit (a mis-scope),
+        # and a bare branch name does not resolve. Fail closed when no base is determinable.
+        base_ref = f"origin/{gh_base}" if gh_base else ""
+    if not base_ref:
+        print("vigil ci-scan: no base ref to diff against — pass --base-ref <rev> (or run on a pull_request "
+              "where GITHUB_BASE_REF is set). Refusing to guess a base; a wrong base silently mis-scopes.",
+              file=sys.stderr)
+        return 2
     head_ref = (str(getattr(args, "head_ref", "") or "").strip() or job.commit
                 or os.environ.get("GITHUB_SHA") or "HEAD")
 
@@ -2711,9 +2727,14 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
         return 1
 
     findings = findings_of(outcomes)
+    # A refused/failed/empty run must NEVER look like a clean pass (findings=[] is identical to an
+    # authorized scan that found nothing) — surface it as a visible annotation AND a summary banner.
+    note = status_note(outcomes)
+    if note:
+        print(warning_annotation(note))
     for line in annotation_lines(findings):           # GitHub picks these up from stdout as PR annotations
         print(line)
-    summary = summary_markdown(findings, repo=job.repo, commit=job.commit)
+    summary = summary_markdown(findings, repo=job.repo, commit=job.commit, banner=note)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         try:
@@ -2722,11 +2743,11 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
         except OSError:
             pass
     # the machine-readable run report goes to stderr so stdout carries only the annotations
-    print(_json.dumps({"counts": counts(findings),
+    print(_json.dumps({"counts": counts(findings), "status_note": note,
                        "outcomes": [{"state": o.state, "denial_code": o.denial_code,
                                      "reason": (o.reason or "")[:200]} for o in outcomes]}, indent=2),
           file=sys.stderr)
-    return exit_code(outcomes, findings, fail_on=str(getattr(args, "fail_on", "") or ""))
+    return exit_code(outcomes, findings, fail_on=fail_on)
 
 
 def _cmd_deploy_acceptance(args: argparse.Namespace) -> int:

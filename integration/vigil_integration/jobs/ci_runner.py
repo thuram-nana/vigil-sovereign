@@ -67,6 +67,29 @@ def findings_of(outcomes: "list") -> "list[dict]":
     return out
 
 
+def status_note(outcomes: "list") -> str:
+    """A human banner when the scan did NOT actually run to completion, else ``""``. A refused job (no
+    verified authority), a failed job, or an empty drain (a duplicate re-run / nothing queued) must NEVER
+    be reported as a clean pass — findings=[] looks identical to an authorized scan that found nothing, so
+    the CLI surfaces this banner in the annotations AND the job summary (the W4 red-pen's false-assurance
+    finding)."""
+    outs = list(outcomes or [])
+    if any(getattr(o, "state", "") == "done" for o in outs):
+        return ""                               # a real scan ran — findings (incl. none) are authoritative
+    if not outs:
+        return "NOT SCANNED THIS RUN — nothing was drained (a duplicate re-run of an already-scanned commit, or an empty queue)."
+    refused = next((o for o in outs if getattr(o, "state", "") == "refused"), None)
+    if refused is not None:
+        return (f"NOT SCANNED — the scan was REFUSED by the authorization gate "
+                f"(denial: {getattr(refused, 'denial_code', '') or 'unspecified'}). A verified "
+                f"EngagementAuthority for this repo is required; this is NOT a clean result.")
+    failed = next((o for o in outs if getattr(o, "state", "") == "failed"), None)
+    if failed is not None:
+        return f"NOT SCANNED — the scan job FAILED: {(getattr(failed, 'reason', '') or '')[:200]}"
+    states = ", ".join(sorted({getattr(o, "state", "?") for o in outs}))
+    return f"NOT SCANNED — no scan completed (job states: {states}); this is NOT a clean result."
+
+
 def exit_code(outcomes: "list", findings: "list[dict]", *, fail_on: str = "") -> int:
     """The CI process exit code: ``1`` if any job FAILED (a worker/gate error a CI driver must notice), or
     if ``--fail-on <severity>`` is set and an ORACLE-CONFIRMED FACT is at or above that severity (LEADs are
@@ -77,16 +100,26 @@ def exit_code(outcomes: "list", findings: "list[dict]", *, fail_on: str = "") ->
 
     if any(getattr(o, "state", "") == "failed" for o in (outcomes or [])):
         return 1
-    threshold = _SEVERITY_RANK.get(str(fail_on or "").strip().lower(), -1)
-    if threshold < 0:
-        return 0
+    want = str(fail_on or "").strip().lower()
+    if not want:
+        return 0                               # no gate requested
+    # FAIL-CLOSED: an UNKNOWN (e.g. typo'd) severity must NOT silently disable the gate — the operator
+    # clearly intended to gate. Treat it as the strictest threshold (gate on ANY confirmed FACT), so a
+    # misconfiguration fails the build (a false red) rather than passing it (a false green).
+    threshold = _SEVERITY_RANK.get(want, 0)
     for f in findings or []:
         if not is_fact(f):
-            continue  # gate only on confirmed FACTs
+            continue  # gate only on confirmed FACTs — a LEAD never breaks the build
         rank = _SEVERITY_RANK.get(str(f.get("severity") or "").strip().lower(), 0)
         if rank >= threshold:
             return 1
     return 0
 
 
-__all__ = ["make_ci_scan_runner", "run_ci_scan", "findings_of", "exit_code"]
+#: the severities ``--fail-on`` accepts (empty = no gate); the CLI validates against this so a typo is a
+#: clean usage error, and :func:`exit_code` additionally fails closed on any unknown value.
+FAIL_ON_CHOICES: tuple[str, ...] = ("critical", "high", "medium", "low")
+
+
+__all__ = ["make_ci_scan_runner", "run_ci_scan", "findings_of", "exit_code", "status_note",
+           "FAIL_ON_CHOICES"]

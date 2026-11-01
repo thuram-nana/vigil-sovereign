@@ -89,13 +89,20 @@ def make_ci_changed_files(*, base_ref: str, head_ref: str, workspace: str,
         ws = _validated_dir(workspace)
         # argv-list, no shell; refs are pre-validated non-flags; the trailing `--` ends options so nothing
         # downstream is read as a flag. Three-dot range = the PR's changed files (merge-base diff).
-        r = runner([git_bin, "-C", ws, "diff", "--name-only", f"{base}...{head}", "--"], timeout=timeout)
+        # `-z` is LOAD-BEARING: `--name-only` WITHOUT it quotes+octal-escapes a non-ASCII name (default
+        # core.quotePath) and ALWAYS quotes a name with a newline/tab/quote/backslash — e.g. `café.py` ->
+        # `"caf\303\251.py"`. Those quoted strings never equal the real on-disk `af.path` (a filesystem
+        # walk) that run_codescan diff-scopes on, so EVERY finding in such a file would be silently dropped
+        # (a false-clean the fail-closed contract forbids). `-z` emits the raw path bytes NUL-delimited,
+        # ignoring core.quotePath, so every name round-trips exactly; no `.strip()` (it would corrupt a
+        # legitimate leading/trailing-space name).
+        r = runner([git_bin, "-C", ws, "diff", "-z", "--name-only", f"{base}...{head}", "--"], timeout=timeout)
         if getattr(r, "exit_code", None) != 0:
             raise CiCheckoutError(
                 f"git diff {base}...{head} failed (exit {getattr(r, 'exit_code', None)}): "
                 f"{(getattr(r, 'stderr', '') or '')[:200]}")
         out = getattr(r, "stdout", "") or ""
-        return {ln.strip() for ln in out.splitlines() if ln.strip()}
+        return {p for p in out.split("\0") if p}      # NUL-delimited; drop the trailing empty element
     return changed_files
 
 

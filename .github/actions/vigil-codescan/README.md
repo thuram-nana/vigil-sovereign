@@ -37,7 +37,7 @@ jobs:
 
 | input | default | meaning |
 |---|---|---|
-| `queue-root` | `.vigil-queue` | durable SecurityJob queue root (workspace-local is fine for one-shot CI) |
+| `queue-root` | `.vigil-queue` | SecurityJob queue root. The default is a per-run, **ephemeral** workspace path — fine for a one-shot scan (it gives idempotency *within* a run). Cross-run / cross-path exactly-once (coalescing a CI re-run with a webhook-handled commit) needs this pointed at a **persisted/shared** store. |
 | `base-dir` | `.vigil-live` | engagement base dir holding the signed `<slug>.spine` |
 | `fail-on` | `""` | fail (exit 1) on an **oracle-confirmed FACT** at/above this severity (`critical\|high\|medium\|low`); leads never break the build |
 | `max-files` | `5000` | max files the analyzers scan |

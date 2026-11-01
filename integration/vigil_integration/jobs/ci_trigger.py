@@ -13,8 +13,12 @@ Pure stdlib + ``.model`` — no ``framework`` import, no ``sigil`` import, no ne
 
 ``repo`` is spelled ``<host>/<owner>/<repo>`` to MATCH the webhook path's ``github.com/<full_name>``, and
 the ``delivery_id`` is the SHARED content-addressed :func:`work_delivery_id` over ``(repo, pr, commit)``
-— NOT the CI run id — so a CI re-run of the same ``(repo, pr, commit)``, and a webhook-handled commit,
-coalesce to ONE unit of work in the queue's permanent delivery seen-set (exactly-once ACROSS paths).
+— NOT the CI run id — so a CI job and a webhook job for the same ``(repo, pr, commit)`` carry the IDENTICAL
+delivery key. That coalesces them in the queue's permanent delivery seen-set **to the extent the queue is
+shared** — i.e. exactly-once across the CI/webhook/reconcile paths holds only when they enqueue into the
+SAME durable ``queue-root``. The W4 Action's default ``queue-root`` is a per-run, ephemeral path under the
+Actions workspace, so there it gives idempotency WITHIN a run (a duplicate enqueue is a no-op), not
+cross-run/cross-path dedup — point ``queue-root`` at a persisted/shared store to get that.
 """
 
 from __future__ import annotations

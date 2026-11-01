@@ -50,6 +50,11 @@ runs:
         # <repo>/.github/actions/vigil-codescan, so the repo root is three levels up. Put VIGIL's
         # offense + core source on PYTHONPATH so `framework` and `vigil_integration` import.
         VIGIL_ROOT="$(cd "${{ github.action_path }}/../../.." && pwd)"
+        # Install VIGIL's third-party runtime deps (pydantic, cryptography, …). Without this a clean
+        # setup-python runner has no pydantic, and `vigil ci-scan` dies at import (load_authority_root ->
+        # framework.v2.authority.store -> `from pydantic import ValidationError`) with EVERY check red.
+        # The pinned lock covers both framework and vigil_core (same pydantic/cryptography pins).
+        python -m pip install -r "$VIGIL_ROOT/engine/crucible/framework/v2/requirements.lock.txt"
         {
           echo "PYTHONPATH=$VIGIL_ROOT/engine/crucible:$VIGIL_ROOT/integration:$VIGIL_ROOT/packages/core/vigil_core:$VIGIL_ROOT/apps/sigil${PYTHONPATH:+:$PYTHONPATH}"
         } >> "$GITHUB_ENV"

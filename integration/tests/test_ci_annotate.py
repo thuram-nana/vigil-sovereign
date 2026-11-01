@@ -15,6 +15,7 @@ from vigil_integration.live.ci_annotate import (
     counts,
     is_fact,
     summary_markdown,
+    warning_annotation,
 )
 
 # An oracle-CONFIRMED FACT.
@@ -68,7 +69,21 @@ def test_counts_and_summary_markdown_shape() -> None:
 
 
 def test_markdown_neutralizes_table_breakout() -> None:
-    nasty = {"title": "a | b `c`", "bug_class": "x", "severity": "Low", "location": "p.py:1",
+    nasty = {"title": "a | b `c` [x](y)", "bug_class": "x", "severity": "Low", "location": "p.py:1",
              "static_oracle_confirmed": False}
     md = summary_markdown([nasty])
-    assert "a \\| b 'c'" in md                # pipe escaped, backtick neutralized — no table break-out
+    # pipe escaped, backtick neutralized, inline-link brackets escaped — no table break-out / link injection
+    assert "a \\| b 'c' \\[x\\](y)" in md
+
+
+def test_summary_banner_surfaces_a_not_scanned_status() -> None:
+    md = summary_markdown([], repo="github.com/o/r", banner="NOT SCANNED — the scan was REFUSED (no-authority).")
+    assert "[!WARNING]" in md and "NOT SCANNED" in md and "REFUSED" in md
+    # without a banner, no warning block
+    assert "[!WARNING]" not in summary_markdown([], repo="github.com/o/r")
+
+
+def test_warning_annotation_is_an_escaped_standalone_command() -> None:
+    line = warning_annotation("x\n::error::INJECTED % danger")
+    assert line.startswith("::warning title=VIGIL::")
+    assert "\n" not in line and "%25" in line        # no raw newline (no injected 2nd command); % escaped

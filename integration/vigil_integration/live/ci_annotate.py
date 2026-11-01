@@ -78,9 +78,18 @@ def annotation_lines(findings: "list[dict[str, Any]] | None") -> "list[str]":
     return out
 
 
+def warning_annotation(message: str) -> str:
+    """A standalone ``::warning`` workflow command (not tied to a file), for surfacing a NOT-SCANNED /
+    refused / failed STATUS in the checks UI — so an unscanned run is never reported only on stderr."""
+    return f"::warning title=VIGIL::{_esc_data(_bound(message, 400))}"
+
+
 def _md(value: Any) -> str:
-    """Bound + neutralize markdown table / code-span metacharacters in attacker-influenceable text."""
-    return _bound(value, 300).replace("|", "\\|").replace("`", "'")
+    """Bound + neutralize markdown table / code-span / inline-link metacharacters in attacker-influenceable
+    text (pipe would break the table, backtick a code span, and ``[`` / ``]`` an inline link)."""
+    return (_bound(value, 300)
+            .replace("\\", "\\\\").replace("|", "\\|").replace("`", "'")
+            .replace("[", "\\[").replace("]", "\\]"))
 
 
 def counts(findings: "list[dict[str, Any]] | None") -> "dict[str, Any]":
@@ -95,12 +104,17 @@ def counts(findings: "list[dict[str, Any]] | None") -> "dict[str, Any]":
     return {"facts": facts, "leads": len(fs) - facts, "total": len(fs), "by_severity": by_sev}
 
 
-def summary_markdown(findings: "list[dict[str, Any]] | None", *, repo: str = "", commit: str = "") -> str:
-    """A GitHub job-summary markdown: a header line, the FACT/LEAD counts, then a typed table per tier."""
+def summary_markdown(findings: "list[dict[str, Any]] | None", *, repo: str = "", commit: str = "",
+                     banner: str = "") -> str:
+    """A GitHub job-summary markdown: a header line, an optional STATUS banner (a not-scanned/refused/
+    failed warning so an unscanned run is never reported as a clean pass), the FACT/LEAD counts, then a
+    typed table per tier."""
     fs = list(findings or [])
     facts = [f for f in fs if is_fact(f)]
     leads = [f for f in fs if not is_fact(f)]
     lines = ["## VIGIL code security scan", ""]
+    if str(banner or "").strip():
+        lines += ["> [!WARNING]", "> " + _bound(banner, 400), ""]
     hdr = []
     if repo:
         hdr.append(f"**repo** `{_md(repo)}`")
@@ -122,4 +136,4 @@ def summary_markdown(findings: "list[dict[str, Any]] | None", *, repo: str = "",
     return "\n".join(lines).rstrip() + "\n"
 
 
-__all__ = ["is_fact", "annotation_lines", "summary_markdown", "counts"]
+__all__ = ["is_fact", "annotation_lines", "summary_markdown", "counts", "warning_annotation"]
