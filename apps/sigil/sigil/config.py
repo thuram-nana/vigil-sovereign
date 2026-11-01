@@ -234,9 +234,9 @@ def ownership_verify_enabled() -> bool:
 
 
 def ownership_fetcher():
-    """The configured ownership-proof fetcher: the SSRF-hardened WellKnownFetcher when enabled, else None
-    (fail-closed — the provisioner's target_verify refuses). Lazily imports the stdlib-only fetcher so
-    `config` stays import-light."""
+    """The configured ownership-proof fetcher (SSRF-hardened; serves both the well-known HTTP file and the
+    dns-txt-over-DoH methods) when enabled, else None (fail-closed — the provisioner's target_verify
+    refuses). Lazily imports the stdlib-only fetcher so `config` stays import-light."""
     if not ownership_verify_enabled():
         return None
     from .ui.ownership_fetch import WellKnownFetcher
