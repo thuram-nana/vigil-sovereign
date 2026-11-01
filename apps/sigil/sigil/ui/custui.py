@@ -29,7 +29,8 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -42,8 +43,24 @@ from ..bridge.daemon import bind_ok  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
-_CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+# Strict CSP for the self-contained customer SPA — the SAME shape as the operator bundle (_BUNDLE_CSP) and the
+# public site: self-only scripts/styles (the shared kit uses addEventListener + CSSOM, never inline handlers
+# or inline <style>), data: images for inline icons, no framing, no off-site form posts. Set as a RESPONSE
+# HEADER (never a <meta>), uniformly on JSON and SPA responses alike.
+_CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+        "object-src 'none'; img-src 'self' data:")
 _MAX_BODY = 65536
+# The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
+# the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
+# routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
+_APP_ROOT = Path(__file__).resolve().parent / "customer_app"
+_MAX_APP_BYTES = 4 * 1024 * 1024
+_APP_CTYPES = {
+    ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+    ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
+}
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -248,7 +265,42 @@ class CustomerHandler(BaseHTTPRequestHandler):
                   "/api/customer/assessments/findings": "assessment_findings"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
-        return self._deny(404, "not found")
+        if path.startswith("/api/"):           # an unknown API route 404s — NEVER fall through to the SPA shell
+            return self._deny(404, "not found")
+        return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
+
+    def _resolve_app(self, urlpath: str):
+        """Map a URL path to a safe file under `_APP_ROOT`, or None. "/" -> index.html; any other path is an
+        EXACT static asset (the SPA is hash-routed, so there are no deep routes and NO index.html fallback —
+        an unknown path returns None -> 404, never a masked shell). Path-traversal is refused: the candidate
+        must `resolve()` to within the resolved root. Returns (abs_path, content_type) or None."""
+        rel = unquote(urlparse(urlpath).path).lstrip("/")
+        root = _APP_ROOT
+        cand = (root / "index.html") if rel in ("", "/") else (root / rel)
+        try:
+            rp = cand.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if rp != root and not rp.is_relative_to(root):
+            return None                        # traversal guard — must stay within the content root
+        if rp.is_file():
+            return rp, _APP_CTYPES.get(rp.suffix.lower(), "application/octet-stream")
+        return None
+
+    def _serve_app(self, path: str):
+        """Serve the self-contained customer SPA (static, traversal-safe, strict-CSP, size-capped). The edge
+        holds no key and the SPA carries no token — it authenticates by the `vigil_customer_session` cookie."""
+        hit = self._resolve_app(path)
+        if hit is None:
+            return self._deny(404, "not found")
+        rp, ctype = hit
+        try:
+            data = rp.read_bytes()
+        except OSError:
+            return self._deny(404, "not found")
+        if len(data) > _MAX_APP_BYTES:
+            return self._deny(413, "asset too large")
+        self._send(200, data, ctype)           # same strict CSP / nosniff / no-referrer headers as every response
 
     def _customer_read_relay(self, action: str):
         """Relay a customer-plane READ to the provisioner over the hop, carrying the SESSION org (never a

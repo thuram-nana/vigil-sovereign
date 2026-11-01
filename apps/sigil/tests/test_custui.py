@@ -93,6 +93,17 @@ def _get(opener, port, path, *, cookie=None):
             return e.code, raw
 
 
+def _get_raw(port, path, *, cookie=None):
+    """A RAW GET returning (status, headers-dict, body-bytes) — for the static SPA (non-JSON) responses."""
+    h = {"Cookie": cookie} if cookie else {}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
 def _owner_lease(org_id, host, *, units=5, nonce="edge-nonce-1", now=None):
     """Mint an owner-signed ``CreditLaunchLease`` directly (no gate) with the SAME owner key the cockpit uses
     (``ensure_owner_keypair`` in ``_stack``). This exercises the edge's cancel/settle RELAY + its tenant
@@ -463,3 +474,42 @@ def test_customer_reads_require_a_session(tmp_path, monkeypatch):
             assert _get(_opener(), ep, path)[0] == 401, path    # no session cookie -> refused before the hop
     finally:
         sov.shutdown(); edge.shutdown()
+
+
+# ---- Slice I: the keyless edge serves its own hash-routed customer SPA (static, strict-CSP) ----------
+def test_customer_spa_shell_and_assets_served_with_strict_csp(tmp_path):
+    # static GETs need no provisioner — build a bare edge (any provision_base; it is never called here)
+    edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "s"))
+    try:
+        code, hdr, body = _get_raw(ep, "/")                      # the SPA shell at the mount root
+        assert code == 200 and "text/html" in hdr.get("Content-Type", ""), (code, hdr)
+        assert b'<div id="app"' in body and b"app.js" in body    # it IS the app shell
+        # strict CSP + nosniff on the SPA response; NO inline-script allowance; NO token/secret in the page
+        csp = hdr.get("Content-Security-Policy", "")
+        assert "default-src 'self'" in csp and "'unsafe-inline'" not in csp, csp
+        assert hdr.get("X-Content-Type-Options") == "nosniff"
+        assert b"__VIGIL_TOKEN__" not in body and b"data-token" not in body
+        # every vendored asset serves with the right content-type (relative refs resolve against the mount)
+        for asset, ctype in (("/app.js", "javascript"), ("/ui.js", "javascript"),
+                             ("/tokens.css", "text/css"), ("/components.css", "text/css"), ("/app.css", "text/css")):
+            c, h2, b2 = _get_raw(ep, asset)
+            assert c == 200 and ctype in h2.get("Content-Type", "") and b2, (asset, c, h2.get("Content-Type"))
+    finally:
+        edge.shutdown()
+
+
+def test_customer_spa_traversal_refused_and_unknown_api_does_not_leak_the_shell(tmp_path):
+    edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "s"))
+    try:
+        # URL-encoded ..-traversal (bypasses client-side normalization) must never escape customer_app/
+        for p in ("/%2e%2e/custui.py", "/%2e%2e/%2e%2e/config.py", "/sub/%2e%2e/%2e%2e/%2e%2e/custui.py"):
+            c, _, _ = _get_raw(ep, p)
+            assert c == 404, (p, c)
+        # an unknown /api/* route 404s as JSON and must NOT fall through to the SPA shell (no HTML leak)
+        c, hdr, body = _get_raw(ep, "/api/customer/nope")
+        assert c == 404 and b'<div id="app"' not in body, (c, body[:80])
+        # and a real API GET still answers JSON (not the shell): whoami with no cookie -> {authenticated:false}
+        c2, h2, b2 = _get_raw(ep, "/api/customer/whoami")
+        assert c2 == 200 and "application/json" in h2.get("Content-Type", "") and b'"authenticated"' in b2
+    finally:
+        edge.shutdown()
