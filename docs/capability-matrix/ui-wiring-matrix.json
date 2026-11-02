@@ -311,10 +311,10 @@
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 28,
-      "pending": 6,
-      "ui-driven": 165
+      "pending": 0,
+      "ui-driven": 171
     },
-    "ui_calls": 159
+    "ui_calls": 165
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -370,16 +370,16 @@
       "method": "GET",
       "path": "/api/assessments",
       "plane": "sovereign",
-      "reason": "tenant assessment summary (Slice K6) \u2014 vigil-ui screen lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "exact",
       "method": "GET",
       "path": "/api/assessments/findings",
       "plane": "sovereign",
-      "reason": "tenant assessment findings (Slice K6) \u2014 vigil-ui screen lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "exact",
@@ -410,32 +410,32 @@
       "method": "GET",
       "path": "/api/billing/invoices",
       "plane": "sovereign",
-      "reason": "owner billing-admin invoices (Slice H) \u2014 vigil-ui screen lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "exact",
       "method": "GET",
       "path": "/api/billing/orgs",
       "plane": "sovereign",
-      "reason": "owner billing-admin tenant picker \u2014 vigil-ui screen lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "exact",
       "method": "GET",
       "path": "/api/billing/overview",
       "plane": "sovereign",
-      "reason": "owner billing-admin overview \u2014 vigil-ui screen lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "exact",
       "method": "GET",
       "path": "/api/billing/plans",
       "plane": "sovereign",
-      "reason": "pricing catalog projection \u2014 the pricing page lands in the frontend slice",
-      "status": "pending"
+      "reason": "",
+      "status": "ui-driven"
     },
     {
       "kind": "prefix",
@@ -2585,6 +2585,16 @@
       "plane": "sovereign"
     },
     {
+      "method": "GET",
+      "path": "/api/assessments",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/assessments/findings",
+      "plane": "sovereign"
+    },
+    {
       "method": "POST",
       "path": "/api/backup",
       "plane": "sovereign"
@@ -2597,6 +2607,26 @@
     {
       "method": "GET",
       "path": "/api/backup/list",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/invoices",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/orgs",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/overview",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/plans",
       "plane": "sovereign"
     },
     {

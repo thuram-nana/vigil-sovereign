@@ -139,15 +139,13 @@ INTENTIONALLY_HEADLESS_VERBS = {
 # never mislabels an in-flight wiring as "intentionally no button".
 # ==================================================================================================
 PENDING_UI_WIRING = {
-    # SaaS billing read API (Slice B): tenant-scoped, admit-gated, READ-ONLY. The owner billing-admin SCREEN
-    # that drives these lands in the frontend-consolidation slice — so they are UI-driven in-flight, not
-    # headless-by-design. (Tracked here rather than INTENTIONALLY_HEADLESS so the ledger does not mislabel them.)
-    (P_SOV, "/api/billing/overview"): "owner billing-admin overview — vigil-ui screen lands in the frontend slice",
-    (P_SOV, "/api/billing/orgs"): "owner billing-admin tenant picker — vigil-ui screen lands in the frontend slice",
-    (P_SOV, "/api/billing/plans"): "pricing catalog projection — the pricing page lands in the frontend slice",
-    (P_SOV, "/api/billing/invoices"): "owner billing-admin invoices (Slice H) — vigil-ui screen lands in the frontend slice",
-    (P_SOV, "/api/assessments"): "tenant assessment summary (Slice K6) — vigil-ui screen lands in the frontend slice",
-    (P_SOV, "/api/assessments/findings"): "tenant assessment findings (Slice K6) — vigil-ui screen lands in the frontend slice",
+    # (empty) — the Slice-B/H/K6 billing + assessment read projections that were parked here are now GENUINELY
+    # wired by the Slice-J1 operator cockpit screens in packages/vigil-ui/app.js (renderBilling + loadBilling*
+    # call /api/billing/{plans,orgs,overview,invoices}; renderTenantAssess + loadTassess* call /api/assessments
+    # and /api/assessments/findings), so extract_ui_calls now detects them and route_status reports them
+    # ui-driven on their own callers — no longer "pending". Future in-flight wirings go here, then move out
+    # once their app.js caller lands, so the ledger never labels a wired route "pending" or an unwired one
+    # "intentionally no button".
 }
 PENDING_UI_WIRING_VERBS = {}
 
