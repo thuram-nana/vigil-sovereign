@@ -129,6 +129,9 @@ assert "framework" not in _m, "jobs.reconciliation must not import framework at 
 import vigil_integration.jobs.ci_trigger  # W4: the CI trigger adapter — PURE STDLIB (produces SecurityJob, never runs)
 assert "framework" not in _m, "jobs.ci_trigger must not import framework at module scope (pure stdlib adapter)"
 assert "strix" not in _m, "jobs.ci_trigger must not import strix at module scope"
+import vigil_integration.jobs.launch_trigger  # K4-2: the customer-launch trigger — framework (verify) LAZY (produces, never runs)
+assert "framework" not in _m, "jobs.launch_trigger must not import framework at module scope (verify is lazy)"
+assert "strix" not in _m, "jobs.launch_trigger must not import strix at module scope"
 import vigil_integration.live.ci_checkout  # W4: the CI-local checkout + changed-files seams (git-local, no API)
 assert "framework" not in _m, "live.ci_checkout must not import framework at module scope (stdlib + injected runner)"
 assert "strix" not in _m, "live.ci_checkout must not import strix at module scope"

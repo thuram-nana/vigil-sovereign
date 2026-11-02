@@ -90,6 +90,29 @@ def test_slug_is_a_safe_single_component_and_deterministic() -> None:
     assert j.slug == j.slug.lower()                                  # lowercased, path-safe
 
 
+def test_engagement_slug_override_drives_the_slug_verbatim_when_safe() -> None:
+    # K4-2: a customer launch job already knows its owner-signed cust_<hash> engagement slug; the override
+    # IS the slug (so the queue scheduler slug + per-slug run lease key to that exact engagement), not a
+    # repo-derived mangle. An empty override keeps the repo-derived slug (W4 byte-identical).
+    assert _job(engagement_slug="").slug.startswith("repo-")             # W4 path unchanged
+    cust = _job(repo="apme.cm", engagement_slug="cust_abc123")
+    assert cust.slug == "cust_abc123"                                    # verbatim, not repo-derived
+    assert SecurityJob.from_params(cust.to_params()).slug == "cust_abc123"   # round-trips through the queue params
+
+
+def test_engagement_slug_override_is_ignored_when_path_unsafe_fail_safe() -> None:
+    # A non-single-safe-component override (separators / .. / control / spaces / uppercase) is IGNORED and
+    # the repo-derived slug is used — fail-safe: a bad override can NEVER traverse a path, and a job under
+    # the wrong slug simply finds no verified authority and is refused at the gate.
+    for bad in ("../evil", "a/b", "a\\b", "..", "has space", "UPPER"):
+        j = _job(repo="github.com/acme/widget", engagement_slug=bad)
+        assert j.slug.startswith("repo-") and ".." not in j.slug and "/" not in j.slug
+    # normalize CLIPS to 80 chars, so an 81-char input becomes a valid 80-char slug and IS used (still safe);
+    # the property's own length guard is exercised by a DIRECT over-length construction (bypassing the clip).
+    assert _job(repo="apme.cm", engagement_slug="a" * 81).slug == "a" * 80   # clipped-then-used, path-safe
+    assert SecurityJob(repo="github.com/acme/widget", engagement_slug="a" * 200).slug.startswith("repo-")
+
+
 def test_to_from_params_roundtrips_and_is_total_on_garbage() -> None:
     j = _job(pr_number=12, extra={"installation_id": 42})
     assert SecurityJob.from_params(j.to_params()) == j
