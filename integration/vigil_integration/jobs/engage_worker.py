@@ -72,6 +72,29 @@ def _default_run_engagement(*, slug: str, seed_url: str, **kw: Any) -> Any:
     return run_engagement(slug, seed_url, **kw)
 
 
+def _launch_governance_signers(base_dir: Any) -> "list[tuple[str, str]]":
+    """Load the STABLE offense-governance signer for this ``base_dir`` as ``[(key_id, priv_b64)]`` — the same
+    key the sovereign launch step (``ui.launch_governance``) owner-DELEGATED at launch, so the crossing + the
+    completion signal this worker emits verify under that delegation. vigil_core-only (no framework); the key
+    is loaded-or-created under the engagement base (sealed under the vault when provisioned)."""
+    from vigil_integration.live.governance_identity import (
+        DEFAULT_GOVERNANCE_KEY_FILE, GOVERNANCE_KEY_ID, load_or_create_governance_keypair,
+    )
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    kp = load_or_create_governance_keypair(path=str(Path(base) / DEFAULT_GOVERNANCE_KEY_FILE))
+    return [(GOVERNANCE_KEY_ID, kp.private_key_b64)]
+
+
+def _completion_spool(base_dir: Any, completion_spool_dir: Any) -> str:
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    return str(completion_spool_dir) if completion_spool_dir is not None else str(Path(base) / "completion-spool")
+
+
+def _finding_spool(base_dir: Any, finding_spool_dir: Any) -> str:
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    return str(finding_spool_dir) if finding_spool_dir is not None else str(Path(base) / "finding-spool")
+
+
 def make_engage_worker(
     *,
     base_dir: Any = None,
@@ -80,6 +103,10 @@ def make_engage_worker(
     profile_kwargs: "Optional[dict[str, Any]]" = None,
     prod_execution_enabled: "Optional[Callable[[], bool]]" = None,
     now: Any = None,
+    finding_spool_dir: Any = None,
+    completion_spool_dir: Any = None,
+    signers: "Optional[list]" = None,
+    emit_completion: bool = True,
 ) -> "Callable[[SecurityJob], Any]":
     """Build the customer-launch worker: ``(SecurityJob) -> result``. Invoked ONLY by ``JobRunner.run_one``,
     i.e. only after ``build_customer_launch_gate`` allowed the job. It loads the VERIFIED customer authority
@@ -127,5 +154,39 @@ def make_engage_worker(
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
         kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
-        return runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
+        # K4-5d(B): the completion SEAM. Load the owner-delegated offense-governance signers BEFORE the arm
+        # (fail-closed — a run that could never settle must not consume the lease), then:
+        #   run succeeds → cross the confirmed FACTs (best-effort) + emit a COMPLETED settle signal (REQUIRED —
+        #                  the billing trigger: the sovereign settle-drain reads it and settles to consumption);
+        #   run raises   → emit a FAILED settle signal (consumed=0, full refund) then RE-RAISE, so JobRunner
+        #                  still marks the job failed + release_delivery (re-driveable), and the paid reservation
+        #                  is refunded rather than stranded as consumed.
+        # Both signals are governance-SIGNED and verified sovereign-side against the launch's owner delegation
+        # (ui.launch_governance). No nonce ⇒ no settle binding ⇒ no emit (defensive; launch jobs always carry one).
+        do_settle = bool(emit_completion and nonce)
+        sgnrs = (signers if signers is not None else _launch_governance_signers(base_dir)) if do_settle else None
+        try:
+            result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
+        except Exception:  # noqa: BLE001 — a run FAILURE refunds (FAILED settle) then re-raises; interrupts pass through
+            if do_settle:
+                try:
+                    from .completion_signal import emit_completion_signal
+                    emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="failed",
+                                           signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir))
+                except Exception:  # noqa: BLE001 — a failed-settle emit is best-effort; never mask the run error
+                    pass
+            raise
+        if do_settle:
+            try:                                                   # cross FACTs — best-effort (never blocks settle)
+                from .findings_crossing import cross_confirmed_findings, findings_from_report
+                found = findings_from_report(getattr(result, "report", None))
+                if found:
+                    cross_confirmed_findings(found, engagement_slug=job.slug, signers=sgnrs,
+                                             spool_dir=_finding_spool(base_dir, finding_spool_dir))
+            except Exception:  # noqa: BLE001 — crossing is best-effort; a crossing error must not block the settle
+                pass
+            from .completion_signal import emit_completion_signal
+            emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="completed",
+                                   signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir))
+        return result
     return _worker

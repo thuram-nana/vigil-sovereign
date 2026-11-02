@@ -486,9 +486,26 @@ class Provisioner:
         r = LaunchGate(self.store).publish_lease(signed_lease=signed_lease, expect_org_id=requester_org_id)
         if not r.get("ok"):
             raise ProvisionDenied(str(r.get("error") or "launch start refused"))
+        # K4-5d(A): provision the per-slug owner-signed OFFENSE_GOVERNANCE_ROLE delegation that the SOVEREIGN
+        # settle/finding drains verify this launch's completion + crossed FACTs against — scoped to the cust_
+        # slug, lapsing with the lease window + a settle grace. Fail-closed: a launch that cannot provision its
+        # settle delegation is NOT reported started (the run could not later settle); a retry re-publishes +
+        # re-provisions idempotently.
+        from vigil_core import SignedCreditLaunchLease
+        from .launch_governance import LAUNCH_DELEGATION_GRACE_SECONDS, provision_launch_governance
+        try:
+            lease_doc = SignedCreditLaunchLease.model_validate(signed_lease).document
+            deleg_path = provision_launch_governance(
+                slug=str(r["slug"]),
+                not_after=int(lease_doc.not_after.timestamp()) + LAUNCH_DELEGATION_GRACE_SECONDS)
+        except Exception as e:  # noqa: BLE001 — a provisioning failure is a clean refusal, never a half-started launch
+            self._audit("launch_start", requester=requester, org_id=requester_org_id,
+                        target=str(r.get("slug", "")), outcome="deleg_failed", critical=True)
+            raise ProvisionDenied(
+                f"could not provision the launch governance delegation: {type(e).__name__}") from e
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
-        return {"slug": r.get("slug"), "scope_host": r.get("scope_host")}
+        return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
 
     # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
     def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:

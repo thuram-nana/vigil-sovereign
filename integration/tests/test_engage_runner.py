@@ -307,3 +307,78 @@ def test_runner_refuses_a_live_customer_by_default_and_runs_only_when_enabled(mo
     out2 = r2.run_one()
     assert out2.state == "done", out2.reason                         # the realistic LIVE production path runs
     assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+
+
+# ---- K4-5d(B): the completion SEAM — the worker emits a governance-signed settle signal ----------------
+
+def _gov_root(base):
+    """The TrustRoot over the base's STABLE offense-governance key — what ui.launch_governance owner-delegates
+    to at launch, and what the sovereign settle-drain verifies the worker's completion against."""
+    import os
+    from vigil_core import AuthorizerKey, TrustRoot
+    from vigil_integration.live.governance_identity import (
+        DEFAULT_GOVERNANCE_KEY_FILE, GOVERNANCE_KEY_ID, load_or_create_governance_keypair,
+    )
+    kp = load_or_create_governance_keypair(path=os.path.join(base, DEFAULT_GOVERNANCE_KEY_FILE))
+    return TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id=GOVERNANCE_KEY_ID, name=GOVERNANCE_KEY_ID, public_key_b64=kp.public_key_b64)])
+
+
+def _completion_envelopes(cs):
+    import json
+    from pathlib import Path
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted((Path(cs) / "incoming").glob("*.json"))]
+
+
+def test_worker_emits_a_verifiable_completed_settle_signal(monkeypatch, tmp_path):
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 0})
+    assert w(_job()) == {"facts": 0}
+    from vigil_core import EngagementCompletion, SignedEngagementCompletion, verify_engagement_completion
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1
+    assert envs[0]["document"] == {"engagement_slug": SLUG, "nonce": "n1", "outcome": "completed"}
+    signed = SignedEngagementCompletion(
+        document=EngagementCompletion.model_validate(envs[0]["document"]), signatures=envs[0]["signatures"])
+    ok, reason = verify_engagement_completion(signed, _gov_root(base))   # verifies under the base's gov key
+    assert ok, reason
+
+
+def test_worker_emits_a_failed_settle_signal_then_reraises(monkeypatch, tmp_path):
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+
+    def _boom(**kw):
+        raise RuntimeError("engine blew up")
+
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs, run=_boom)
+    with pytest.raises(RuntimeError, match="engine blew up"):      # the run error still propagates (JobRunner -> failed)
+        w(_job())
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "failed"   # a crashed run refunds (consumed=0)
+
+
+def test_worker_emit_disabled_emits_no_settle_signal(monkeypatch, tmp_path):
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 0}, emit_completion=False)
+    w(_job())
+    assert not _completion_envelopes(cs)                            # emit_completion=False → no settle trigger
+
+
+def test_worker_settle_signal_binds_the_jobs_nonce(monkeypatch, tmp_path):
+    # the completion binds THIS launch's (slug, nonce) so a settle-drain settles the right lease, not a re-lease.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 0})
+    w(_job(nonce="n2"))
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1 and envs[0]["document"]["nonce"] == "n2" and envs[0]["document"]["engagement_slug"] == SLUG
