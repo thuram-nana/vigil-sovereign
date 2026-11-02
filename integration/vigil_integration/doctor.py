@@ -819,6 +819,50 @@ from vigil_core.doctor import REQUIRED_CONTROLS as _PRODUCTION_GATE
 from vigil_core.doctor import render_gate_block as _render_gate_block
 
 
+def _posture_customer_execution() -> "tuple[str, str]":
+    """K4-6: the customer-launch PRODUCTION-EXECUTION flag HOLD. Reports DISABLED (the safe default — the K4
+    flag is off, so a LIVE customer target is refused at the launch gate + worker) or ENABLED (the owner set
+    VIGIL_CUSTOMER_PROD_EXECUTION). FATAL-2: reads only `vigil_core.posture` (no sigil/framework). Fails SOFT
+    to UNKNOWN. Under the production gate, ENABLED is a refuse-to-start (see `_customer_execution_hold`)."""
+    try:
+        from vigil_core.posture import customer_prod_execution_enabled
+        if customer_prod_execution_enabled():
+            return "ENABLED", ("VIGIL_CUSTOMER_PROD_EXECUTION is set — production-target customer execution is "
+                               "armed")
+        return "DISABLED", ("VIGIL_CUSTOMER_PROD_EXECUTION is unset — production-target customer execution is "
+                            "held off (a LIVE customer target is refused at the launch gate + worker)")
+    except Exception as exc:  # noqa: BLE001 — FAIL SOFT: an unreadable flag is UNKNOWN, never a crash
+        return "UNKNOWN", f"could not read the customer-execution flag: {type(exc).__name__}: {exc}"
+
+
+# The K4 acceptance matrix that must be GREEN before VIGIL_CUSTOMER_PROD_EXECUTION may be flipped on in
+# production — the documented flip criteria (the refusal names them). This is a flag-HOLD: flipping is a
+# deliberate, gated owner act taken only once every row below is proven, NOT something this control does.
+_CUSTOMER_EXECUTION_FLIP_CRITERIA = (
+    "the full K4 acceptance matrix must be green first — security (the WARDEN gate chain + the never-liftable "
+    "egress floor hold on a cust_ run; a forged lease / finding / completion is refused), tenant-isolation "
+    "(findings + settles land only in the owning org; a cross-tenant lease/completion is refused), authz "
+    "(no owner-signed authority + lease ⇒ no arm; billing never authorizes testing), billing (reserve + "
+    "settle idempotent exactly-once; net-spend == consumption; a settled lease cannot re-arm or double-refund), "
+    "and operational (requeue_stale recovery; cancel ⇒ full refund + tombstone + later-arm refused) — and the "
+    "flip is then a deliberate owner act, not a default"
+)
+
+
+def _customer_execution_hold(armed: bool) -> "str | None":
+    """The K4-6 flag-HOLD interlock: under an ARMED production posture, a flipped-on customer-execution flag is
+    a refuse-to-start (defence in depth over the gate + worker runtime refusal — a production deploy must not
+    start running customer engagements until the acceptance matrix is green). Returns the refusal message, or
+    ``None`` when inert (NOT armed, or the flag is held off / unreadable). Never flips the flag."""
+    if not armed:
+        return None                                      # OPT-IN: inert unless VIGIL_POSTURE selects production
+    state, _detail = _posture_customer_execution()
+    if state != "ENABLED":
+        return None                                      # DISABLED (the held default) / UNKNOWN ⇒ no hold breach
+    return ("customer-execution is ENABLED — " + _CUSTOMER_EXECUTION_FLIP_CRITERIA +
+            " (refuses `vigil up` / `vigil engage` while VIGIL_CUSTOMER_PROD_EXECUTION is set under this posture)")
+
+
 def production_posture() -> "str | None":
     """The raw VIGIL_POSTURE value IFF it selects the production gate (case-insensitive `production` / `prod`),
     else None. The SINGLE source of truth for 'is the refuse-to-start gate armed?' — every caller keys on
@@ -1187,6 +1231,13 @@ def collect(repo_root) -> dict:
         for e in gate["unmet"]:
             _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {e['control']} is {e['state']} — "
                    f"{e['requirement']} (refuses `vigil up` / `vigil engage` until satisfied)")
+        # 9b) K4-6 — the customer-launch production-execution flag HOLD (a refuse-to-start, defence in depth
+        #     over the launch gate + worker runtime refusal). Production-target customer execution stays
+        #     DISABLED until the acceptance matrix is green + a deliberate owner flip. This PR does NOT flip it.
+        ce_hold = _customer_execution_hold(gate["armed"])
+        if ce_hold is not None:
+            report["customer_execution_hold"] = {"state": "ENABLED", "detail": _CUSTOMER_EXECUTION_FLIP_CRITERIA}
+            _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {ce_hold}")
     # 10) Integrity (W6-7) — continuously verify the property the product EXISTS to guarantee: the spine
     #    hash-chain / attestation. Runs the boundary-safe integrity verifier over the sovereign spine home
     #    (SIGIL_HOME): chain integrity, signed-head freshness, the anti-rollback floor, clock skew, plus the
