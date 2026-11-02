@@ -166,6 +166,13 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+# Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
+# purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
+# an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
+# seals at enroll + unseals at verify; only the sealed blob ever reaches the spine (the plaintext is shown to
+# the customer ONCE at enrollment, never persisted).
+CUSTOMER_TOTP_SEAL_CONTEXT = b"sigil/customer.totp"
+CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP (username, step) replay ledger
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is

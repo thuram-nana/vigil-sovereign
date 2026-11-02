@@ -498,6 +498,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
+        if action in ("mfa/totp/enroll", "mfa/verify"):
+            return self._mfa(action, body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
@@ -560,6 +562,22 @@ class CustomerHandler(BaseHTTPRequestHandler):
         else:
             payload["lease"] = body.get("lease")
             c, r = self._provision("launch_cancel", requester, payload)
+        return self._json(r, c)
+
+    def _mfa(self, action: str, body: dict):
+        """Customer MFA (E3b TOTP): the acting REQUESTER is taken from the SERVER-side session — NEVER the
+        body. MFA is ACCOUNT-level (a customer enrolls/verifies their OWN factor, not an org's), so the gate
+        is simply an authenticated session. `mfa/totp/enroll` returns the otpauth:// URI + the one-time secret
+        for the customer to add to their authenticator app (shown once, never persisted plaintext);
+        `mfa/verify` proves a fresh TOTP code (the step-up / second-factor primitive E3c consumes)."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        if action == "mfa/totp/enroll":
+            c, r = self._provision("mfa_enroll_totp", requester, {"ip": self._ip()})
+        else:
+            c, r = self._provision("mfa_verify", requester, {"code": body.get("code", ""), "ip": self._ip()})
         return self._json(r, c)
 
 

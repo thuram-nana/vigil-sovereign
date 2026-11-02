@@ -1429,6 +1429,12 @@ class Handler(BaseHTTPRequestHandler):
         if action == "oidc_finish":
             return p.oidc_finish(code=str(body.get("code", "")), code_verifier=str(body.get("code_verifier", "")),
                                  nonce=str(body.get("nonce", "")), ip=ip)
+        # E3b — customer MFA (TOTP). requester is the HMAC-bound hop principal (the session username), NEVER
+        # a body field: a customer enrolls/verifies MFA for THEIR OWN account only (account-level, not org).
+        if action == "mfa_enroll_totp":
+            return p.enroll_totp(requester, ip=ip)
+        if action == "mfa_verify":
+            return p.verify_mfa(requester, code=str(body.get("code", "")))
         if action == "member_grant":
             return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
                                   str(body.get("role", "")), ip=ip)

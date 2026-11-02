@@ -27,6 +27,7 @@ FATAL-2: sovereign-side (`assert_no_offense` at import); no framework/strix.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import math
 import secrets
@@ -112,7 +113,7 @@ class Provisioner:
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
-                 customer_credentials=None, oidc_provider=None,
+                 customer_credentials=None, oidc_provider=None, mfa_replay=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -127,6 +128,9 @@ class Provisioner:
         # ONLY when `customer_oidc_enabled()` (default OFF ⇒ None ⇒ `oidc_finish` fail-closed, no egress).
         self.customer_credentials = customer_credentials
         self.oidc_provider = oidc_provider
+        # Slice E3b — the per-customer TOTP (username, step) replay ledger (a TotpReplayLedger). None ⇒ TOTP
+        # verification fail-closed (a broken/absent ledger can never silently DISABLE the replay guard).
+        self.mfa_replay = mfa_replay
         # Slice G0 — the ownership-proof FETCHER (reads a customer's published well-known token). None ⇒
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
@@ -439,6 +443,71 @@ class Provisioner:
         if self.signup_cap_limiter is not None:             # count this signup toward the cap (post-commit)
             self.signup_cap_limiter.record_failure("signup:global", now=now)
         return username
+
+    # -- customer MFA: TOTP enroll + verify (E3b) ---------------------------------------------------
+    def enroll_totp(self, requester: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
+        """E3b — enroll (or re-enroll) a TOTP second factor for the requesting customer's OWN account. MFA is
+        account-level (per customer username), NOT per-org, so the gate is simply that the requester is an
+        ACTIVE customer (the edge binds requester from the SESSION, never the body). Generates a fresh secret,
+        SEALS it via the owner vault (only the sealed blob reaches the spine — the plaintext is returned ONCE
+        for the customer to add to their authenticator app, NEVER persisted), owner-signs the credential (the
+        per-(username,"totp") high-water LWW supersedes any prior TOTP), and returns the otpauth:// URI +
+        the secret. Fail-closed when customer MFA is not wired."""
+        if self.customer_credentials is None:
+            raise ProvisionError("customer MFA is not enabled on this deployment")
+        acct = self.customers.customer(requester)
+        if acct is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .. import config
+        from ..governor import totp as _totp
+        from ..platform.vault import owner_vault
+        secret = _totp.generate_secret()
+        try:
+            blob = owner_vault().seal_secret(secret.encode("utf-8"), context=config.CUSTOMER_TOTP_SEAL_CONTEXT)
+        except Exception:  # noqa: BLE001 — VaultLocked (unprovisioned) / seal fault → clean refusal, not a 500
+            raise ProvisionError("MFA enrollment is unavailable (the owner vault is not provisioned)") from None
+        sealed_b64 = base64.b64encode(blob).decode("ascii")
+        with self._lock:
+            self.customer_credentials.enroll_totp(requester, sealed_secret=sealed_b64,
+                                                  issued_at=self._next_issued())
+            self._audit("mfa_enroll_totp", requester=requester, target=requester, outcome="enrolled",
+                        critical=True)
+        uri = _totp.provisioning_uri(secret, account_name=(acct.email or requester), issuer="VIGIL")
+        return {"ok": True, "method": "totp", "provisioning_uri": uri, "secret": secret}
+
+    def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
+        """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
+        primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an
+        enrolled TOTP; the sealed secret must open under the customer TOTP context; the code must verify
+        within the ±1-step skew; and the (username, step) must be UNSPENT in the replay ledger (a TOTP code
+        is valid for its whole step, so a sniffed code is otherwise replayable). Returns {ok, method} on
+        success; raises ProvisionDenied otherwise. (E3c stamps the session mfa_at from this success and
+        enforces freshness at the sensitive ops.)"""
+        t = self._now() if now is None else float(now)
+        if self.customer_credentials is None or self.mfa_replay is None:
+            raise ProvisionError("customer MFA is not enabled on this deployment")
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        cred = self.customer_credentials.totp_for(requester)
+        if cred is None or not cred.sealed_secret:
+            raise ProvisionDenied("no TOTP factor is enrolled")
+        from .. import config
+        from ..governor import totp as _totp
+        from ..platform.vault import owner_vault
+        try:
+            secret = owner_vault().unseal_secret(base64.b64decode(cred.sealed_secret),
+                                                 context=config.CUSTOMER_TOTP_SEAL_CONTEXT).decode("utf-8")
+        except Exception:  # noqa: BLE001 — sealed secret unreadable (vault locked / tamper / wrong context)
+            raise ProvisionDenied("second-factor verification is unavailable") from None
+        step = _totp.verify(secret, code, at=t, window=1)
+        if step is None:
+            raise ProvisionDenied("invalid or expired TOTP code")
+        # Replay guard: consume AFTER a successful verify (an invalid code never touches the ledger), so a
+        # code already spent for its (username, step) is refused — mirrors the operator _check_totp ledger.
+        if not self.mfa_replay.consume(requester, step):
+            raise ProvisionDenied("this TOTP code was already used")
+        self._audit("mfa_verify", requester=requester, target=requester, outcome="ok")
+        return {"ok": True, "method": "totp"}
 
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
@@ -798,6 +867,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
+    from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
     # with the host-ALLOWLISTED egress transport; the client secret + the token/JWKS egress live ONLY here
     # (never the keyless edge). A misconfig (missing client_id/redirect) leaves it None ⇒ oidc_finish refuses
@@ -842,6 +912,8 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         # branch resolves through it) + the Google-OIDC provider (None unless customer_oidc_enabled()).
         customer_credentials=CustomerCredentialRegistry(store),
         oidc_provider=oidc_provider,
+        # E3b — the per-customer TOTP replay ledger (its own marker dir under SIGIL_HOME; fail-closed).
+        mfa_replay=TotpReplayLedger(config.CUSTOMER_MFA_REPLAY_DIR),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         expose_dev_tokens=expose_dev_tokens,

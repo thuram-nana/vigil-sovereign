@@ -28,10 +28,13 @@ from urllib.parse import parse_qs, urlparse
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from sigil.governor import totp as _totp
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.spine.store import SpineStore
 from sigil.ui.custui import CUSTOMER_COOKIE, build_customer_server
 from sigil.ui.server import build_server
+
+from test_secrets_sealed import make_fake_tpm   # fake-TPM vault provisioner (for the MFA seal)
 
 TOKEN = "owner-shared-token-xyz789"
 HOP = "test-provision-hop-key-xyz"
@@ -767,5 +770,48 @@ def test_oidc_callback_email_unverified_lands_signed_out(tmp_path, monkeypatch):
                                cookie=f"vigil_customer_oidc_sid={sid}")
         assert st == 302 and hdr.get("Location") == "/#oidc=err"     # failure → signed-out landing
         assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")  # NO session minted
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+# ======================================================================================================
+# E3b-1 — customer TOTP MFA over the edge (enroll → verify a fresh code; session-bound; account-level)
+# ======================================================================================================
+def _stack_vault(tmp_path, monkeypatch):
+    """A provisioned (fake-TPM) owner vault + the sovereign/edge stack — so the provisioner can SEAL the TOTP
+    secret. The vault is provisioned BEFORE the stack so the owner key is sealed from the start."""
+    from sigil.platform import vault as vaultmod
+    v = vaultmod.Vault(tmp_path / "ownervault", make_fake_tpm())
+    v.provision()
+    monkeypatch.setattr(vaultmod, "_owner_vault", v)
+    return _stack(tmp_path, monkeypatch)
+
+
+def test_mfa_totp_enroll_and_verify_over_the_edge(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "mfa@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        # enroll a TOTP factor — the edge relays to the provisioner, which seals the secret under the vault
+        c, r = _post(op, ep, "/api/customer/mfa/totp/enroll", {})
+        assert c == 200 and r["ok"] and r["provisioning_uri"].startswith("otpauth://totp/") and r["secret"], (c, r)
+        # verify a fresh code for that secret (the step-up / second-factor proof primitive)
+        code = _totp.code_now(r["secret"], at=time.time())
+        c, r2 = _post(op, ep, "/api/customer/mfa/verify", {"code": code})
+        assert c == 200 and r2["ok"], (c, r2)
+        # the SAME code replayed is refused (the per-(username, step) replay ledger)
+        c, r3 = _post(op, ep, "/api/customer/mfa/verify", {"code": code})
+        assert c == 403, (c, r3)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_mfa_requires_a_session(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        assert _post(_opener(), ep, "/api/customer/mfa/totp/enroll", {})[0] == 401
+        assert _post(_opener(), ep, "/api/customer/mfa/verify", {"code": "123456"})[0] == 401
     finally:
         sov.shutdown(); edge.shutdown()
