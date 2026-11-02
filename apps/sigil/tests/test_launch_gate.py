@@ -238,6 +238,30 @@ def test_settle_tombstones_and_marks_the_lease_unrunnable():
     assert pub2["ok"] is False and "settled" in pub2["error"].lower()  # cannot resurrect a settled lease
 
 
+def test_settle_does_not_clobber_a_concurrent_newer_re_lease():
+    """K4-1 red-pen fold: settling an OLD lease must NOT tombstone a concurrently-published NEWER re-lease's
+    bundle (same slug, new nonce). The old lease's own (slug,nonce) marker still revokes it; the newer lease
+    stays an un-settled, runnable bearer capability on the seam (nonce-matched tombstone)."""
+    import os
+    from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    g = _gate(s)
+    base = os.environ["VIGIL_BASE_DIR"]
+    r1 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2000.0)
+    r2 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2100.0)
+    assert r1["ok"] and r2["ok"] and r1["slug"] == r2["slug"] and r1["nonce"] != r2["nonce"]
+    slug = r1["slug"]
+    assert g.publish_lease(signed_lease=r1["lease"], expect_org_id="org_a")["ok"]
+    assert g.publish_lease(signed_lease=r2["lease"], expect_org_id="org_a")["ok"]   # overwrites with the NEWER bundle
+    # settle the OLD lease r1 — marks r1's nonce settled, must NOT remove r2's published bundle
+    assert g.settle_launch(signed_lease=r1["lease"], consumed_units=0, now=3000.0, expect_org_id="org_a")["ok"]
+    assert is_lease_settled(base, slug, r1["nonce"]) is True
+    assert is_lease_settled(base, slug, r2["nonce"]) is False          # the newer re-lease is NOT settled
+    bundle = read_credit_lease(base, slug)
+    assert bundle is not None and bundle.signed_lease.document.nonce == r2["nonce"]  # r2's bundle survives
+
+
 # --- red-pen fold: the refund is bound to the OWNER-SIGNED lease, never a wire amount ---------------
 
 def test_settle_rejects_a_forged_lease_no_free_credits():

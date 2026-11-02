@@ -189,3 +189,32 @@ def test_settled_lease_is_not_runnable(monkeypatch):
     ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=False)
     assert not ok and "settled" in reason.lower()                      # enqueue pre-check refuses it
     assert not LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=True)[0]  # arm too
+
+
+def test_arm_fails_closed_when_settlement_status_is_unreadable(monkeypatch):
+    """K4-1 red-pen fold: the arm's settlement re-check is FAIL-CLOSED — if is_lease_settled raises (a latent
+    coupling; it is total today), the arm REFUSES rather than falling through to consume the lease."""
+    import vigil_integration.live.credit_lease_broker as B
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _lease(owner))
+
+    def _boom(*a, **k):
+        raise RuntimeError("settlement marker store exploded")
+
+    monkeypatch.setattr(B, "is_lease_settled", _boom)
+    for consume in (False, True):                                      # BOTH the enqueue pre-check AND the arm
+        ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=consume)
+        assert not ok and "unreadable" in reason.lower()               # refused, never a fall-through-to-consume
+
+
+def test_re_lease_new_nonce_runnable_after_old_nonce_settled(monkeypatch):
+    """K4-1 red-pen fold: a genuine re-lease (new nonce) is still a runnable capability after the OLD nonce was
+    settled — settlement is keyed on (slug, nonce), so a cancel/settle of n1 never poisons a re-issued n2."""
+    from vigil_integration.live.credit_lease_broker import record_lease_settlement
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _lease(owner, nonce="n1"))
+    record_lease_settlement(base, SLUG, "n1")                          # settle/cancel the OLD lease
+    assert not LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=False)[0]  # n1 refused
+    write_credit_lease(base, SLUG, _lease(owner, nonce="n2", issued=2000.0), _owner_root(owner))  # genuine re-lease
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, consume=False)
+    assert ok, reason                                                  # n2 is a fresh, un-settled runnable capability

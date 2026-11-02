@@ -307,7 +307,7 @@ class LaunchGate:
                     record_lease_settlement, tombstone_credit_lease,
                 )
                 record_lease_settlement(self._seam_base(), s, non)
-                tombstone_credit_lease(self._seam_base(), s)
+                tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
             except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no refund yet)
                 return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
                         f"{type(e).__name__}"}

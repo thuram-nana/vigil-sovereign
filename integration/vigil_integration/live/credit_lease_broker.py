@@ -265,12 +265,26 @@ def is_lease_settled(base_dir: Any, slug: str, nonce: Any) -> bool:
     return str(nonce) in _read_settled_nonces(path)
 
 
-def tombstone_credit_lease(base_dir: Any, slug: str) -> bool:
+def tombstone_credit_lease(base_dir: Any, slug: str, expect_nonce: Any = None) -> bool:
     """Remove the published lease bundle for ``slug`` from the seam, so ``read_credit_lease`` returns None.
-    Idempotent + total: True if a bundle was removed, False if none/unsafe, never raises on a missing file."""
+    Idempotent + total: True if a bundle was removed, False if none/unsafe, never raises on a missing file.
+
+    When ``expect_nonce`` is given, the bundle is removed ONLY if its signed ``nonce`` MATCHES — so settling an
+    OLD lease (K4-1 red-pen LOW) never clobbers a concurrently-published NEWER re-lease's bundle (same slug,
+    new nonce): a non-matching OR unreadable bundle is left in place and False is returned. The old lease's
+    revocation still holds via its own ``(slug, nonce)`` settlement marker, so this only avoids a within-tenant
+    availability footgun, never weakens revocation. ``expect_nonce=None`` removes unconditionally (back-compat)."""
     path = lease_path(base_dir, slug)
     if path is None or not path.is_file():
         return False
+    if expect_nonce is not None:
+        bundle = _read_lease_file(path)
+        try:
+            on_disk = str(bundle.signed_lease.document.nonce) if bundle is not None else None
+        except Exception:  # noqa: BLE001 — an unreadable bundle: treat as non-matching, leave it (fail-safe)
+            on_disk = None
+        if on_disk != str(expect_nonce):
+            return False     # a different (newer re-lease) or unreadable bundle — do NOT clobber it
     try:
         os.unlink(str(path))
         return True

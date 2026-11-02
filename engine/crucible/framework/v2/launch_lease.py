@@ -176,8 +176,12 @@ def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
     try:
         if is_lease_settled(base, safe, doc.nonce):
             return False, "lease has been settled/canceled (no longer a runnable launch capability)"
-    except Exception as e:  # noqa: BLE001 — an unreadable marker falls through (the floor/tombstone are primary)
-        pass
+    except Exception as e:  # noqa: BLE001 — FAIL-CLOSED (K4-1 red-pen): if settlement status is UNREADABLE we
+        # REFUSE rather than fall through to consume. is_lease_settled is total today (absent/malformed ⇒ False,
+        # never raises), so this pins a latent fail-OPEN coupling in the arming precondition — it is not a
+        # behaviour change on any currently-reachable input, and the arm must never proceed when its
+        # anti-replay/revocation state cannot be trusted.
+        return False, f"credit-lease settlement status unreadable (fail-closed): {type(e).__name__}"
     if consume:
         # ms resolution REDUCES (does not eliminate) same-second re-lease collisions on the integer floor;
         # same-ms re-leases and backward clock steps still collide — see the KNOWN LIMITATION in the module

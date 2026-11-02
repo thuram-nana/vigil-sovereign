@@ -68,6 +68,19 @@ def test_tombstone_removes_the_published_bundle():
     assert B.tombstone_credit_lease(base, "cust_abc123") is False     # idempotent: no file -> False, never raises
 
 
+def test_tombstone_nonce_matched_never_clobbers_a_newer_re_lease():
+    # K4-1 red-pen LOW: settling an OLD lease (nonce n1) must not remove a concurrently-published NEWER
+    # re-lease's bundle (same slug, nonce n2). The old lease's own (slug,nonce) settlement marker still
+    # revokes it; the newer bundle stays a runnable bearer capability (only an availability footgun avoided).
+    base = tempfile.mkdtemp()
+    s2, t2 = _signed(nonce="n2")                                      # the NEWER re-lease is what is published
+    B.write_credit_lease(base, "cust_abc123", s2, t2)
+    assert B.tombstone_credit_lease(base, "cust_abc123", expect_nonce="n1") is False  # old nonce -> no clobber
+    assert B.read_credit_lease(base, "cust_abc123") is not None       # the n2 bundle survives
+    assert B.tombstone_credit_lease(base, "cust_abc123", expect_nonce="n2") is True   # matching nonce -> removed
+    assert B.read_credit_lease(base, "cust_abc123") is None
+
+
 def test_settlement_unsafe_slug_is_fail_closed():
     base = tempfile.mkdtemp()
     with pytest.raises(ValueError):
