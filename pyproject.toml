@@ -71,6 +71,8 @@ paths_to_mutate = [
     "packages/core/vigil_core/vigil_core/chain.py",
     "packages/core/vigil_core/vigil_core/canonical.py",
     "packages/core/vigil_core/vigil_core/crypto.py",
+    "packages/core/vigil_core/vigil_core/engagement_completion.py",
+    "packages/core/vigil_core/vigil_core/posture.py",
 ]
 # The suite mutmut re-runs to decide KILLED/SURVIVED for each mutant (security-critical coverage, not
 # the whole monorepo — a full mutation run over every suite would be intractable).
