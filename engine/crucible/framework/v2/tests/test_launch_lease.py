@@ -18,7 +18,11 @@ import framework.v2.launch_lease as LL
 from vigil_core import (
     AuthorizerKey, CreditLaunchLease, TrustRoot, generate_keypair, sign_credit_launch_lease,
 )
-from vigil_integration.live.credit_lease_broker import write_credit_lease
+# crucible-core runs framework/v2 WITHOUT the integration package (two-env boundary); this test seeds a lease
+# via the integration broker, so skip it cleanly there — it belongs to the integration leg's coverage. The
+# sovereign/integration leg has vigil_integration, so importorskip returns the module and the test runs fully.
+_clb = pytest.importorskip("vigil_integration.live.credit_lease_broker")
+write_credit_lease = _clb.write_credit_lease
 
 SLUG = "cust_abc123"
 HOST = "apme.cm"

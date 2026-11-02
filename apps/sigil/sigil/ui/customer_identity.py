@@ -90,7 +90,10 @@ class PasswordIdentityProvider(IdentityProvider):
     def __init__(self, customers: Any) -> None:
         self._customers = customers
 
-    def verify(self, *, email: str, password: str, **_ctx: Any) -> CustomerIdentity:
+    # Heterogeneous-dispatch ABC: each provider's verify takes its OWN ctx; the base declares a **ctx marker,
+    # so mypy's Liskov [override] check on the narrowed keyword args does not apply (callers pass each method's
+    # own ctx — a password login never flows through the OIDC provider, and vice versa).
+    def verify(self, *, email: str, password: str, **_ctx: Any) -> CustomerIdentity:  # type: ignore[override]
         acct = self._customers.verify_login(email, password)
         if acct is None:
             raise IdentityRefused("invalid email or password")
@@ -125,7 +128,9 @@ class GoogleOidcIdentityProvider(IdentityProvider):
         self._jwks_fetcher = jwks_fetcher
         self._now = now_fn or time.time
 
-    def verify(self, *, code: str, code_verifier: str, nonce: str, **_ctx: Any) -> CustomerIdentity:
+    def verify(  # type: ignore[override]  # heterogeneous-dispatch ABC (see PasswordIdentityProvider.verify)
+        self, *, code: str, code_verifier: str, nonce: str, **_ctx: Any
+    ) -> CustomerIdentity:
         from . import oidc as _oidc
         try:
             token_resp = _oidc.exchange_code(self._config, code, code_verifier=code_verifier,

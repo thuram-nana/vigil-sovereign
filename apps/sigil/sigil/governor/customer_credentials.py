@@ -69,7 +69,7 @@ _MATERIAL_ORDER = ("cose_alg", "public_key_spki_b64", "uv", "sealed_secret", "fe
 
 
 def _cred_core(payload: dict) -> "tuple[str, ...]":
-    fields = _BASE_CORE
+    fields: tuple[str, ...] = _BASE_CORE
     for f in _MATERIAL_ORDER:
         if f in payload:
             fields += (f,)
