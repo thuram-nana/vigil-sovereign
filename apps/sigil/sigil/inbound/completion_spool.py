@@ -15,7 +15,19 @@ quarantined and never crashes or hangs ``drain()``, and a byte-identical replay 
 over ``settle_launch``'s own ``(slug, nonce)`` idempotency). FAIL-CLOSED: a bad delegation refuses the whole
 drain at construction; a forged/unverifiable/out-of-scope/nonce-mismatched signal is quarantined, nothing
 settled. SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no
-``framework``/offense import.
+``framework``/offense import (``assert_no_offense`` at import enforces it).
+
+Red-pen fold (K4-5b): (A) the settle/tombstone WRITE now shares the drain's ``base_dir`` with the lease READ
+(the gate is built ``LaunchGate(store, base_dir=...)``), so a completed run's tombstone lands in the SAME
+tree the drain reads — a later differently-outcomed completion for the same ``(slug, nonce)`` can no longer
+re-settle (the double-refund the split enabled); (B) the owner-signed delegation is RE-VERIFIED against the
+current clock on EVERY ``drain()`` (not cached from construction, mirroring ``spool_watcher``), so a long-lived
+watcher stops settling the moment the delegation lapses — an expired/retired governance key can no longer
+mint refunds / confirm charges; (C) a non-tautological TENANT cross-check binds the owner-signed lease's own
+``(org_id, scope_host)`` back to the delegated ``cust_`` slug (``_customer_slug``), so a lease filed under a
+mismatched slug is refused; (D) ``_read_regular`` reads to EOF (a short read can no longer truncate a valid
+envelope); (K) ``_reclaim_working`` recovers a file stranded by a mid-drain crash so a settlement is never
+silently lost.
 """
 
 from __future__ import annotations
@@ -24,12 +36,17 @@ import hashlib
 import json
 import os
 import stat
+import sys as _sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from sigil.spine.store import SpineStore
 from sigil.ui.launch_gate import LaunchGate
+
+from ..reuse import assert_no_offense
+
+assert_no_offense()  # SOVEREIGN plane: this settle-drain must never pull the offense engine (FATAL-2)
 
 _SEAM_SCHEMA = "vigil-engagement-completion-seam-v1"
 _MAX_BYTES = 65_536                                   # a completion envelope is small; bound hostile files
@@ -41,9 +58,10 @@ class CompletionSpoolError(RuntimeError):
 
 class CompletionSpoolWatcher:
     """Drains an inbound engagement-completion settle spool through ``settle_launch``, fail-closed. The
-    governance trust root is DERIVED from an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation at
-    construction (an invalid delegation refuses the whole drain — no settle is ever driven under an
-    un-owner-delegated key)."""
+    governance trust root is DERIVED from an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation — verified at
+    construction (fail-fast on a wrong owner / wrong role / already-expired delegation) AND RE-DERIVED against
+    the current clock on every ``drain()`` (so an expired delegation stops admitting mid-lifetime; no settle is
+    ever driven under an un-owner-delegated or lapsed key)."""
 
     def __init__(self, store: SpineStore, *, spool_dir: "str | os.PathLike", owner_pubkey: str,
                  delegation: Any, scope: str, base_dir: Optional[str] = None,
@@ -51,17 +69,26 @@ class CompletionSpoolWatcher:
         if not owner_pubkey:
             raise ValueError("owner_pubkey is required — a settle spool cannot be drained without the owner root")
         from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, DelegationError, verify_delegation
+        self._owner_pubkey = str(owner_pubkey)
+        self._delegation = delegation
+        self.scope = str(scope)
+        self._now = now_fn
+        # Construction-time fail-fast: a wrong-owner / wrong-role / already-expired delegation refuses the
+        # whole watcher now (never cached for later use — drain() re-derives the root per call, finding B).
         try:
-            self._root = verify_delegation(delegation, trusted_owner_pubkey=owner_pubkey,
-                                           now=int(now_fn()), role=OFFENSE_GOVERNANCE_ROLE, scope=scope)
+            verify_delegation(delegation, trusted_owner_pubkey=self._owner_pubkey, now=int(now_fn()),
+                              role=OFFENSE_GOVERNANCE_ROLE, scope=self.scope)
         except DelegationError as exc:
             raise ValueError(
                 f"offense-governance delegation invalid — refusing to drive any settle under it: {exc}") from exc
         self.store = store
-        self.scope = str(scope)
-        self._base_dir = base_dir
-        self._now = now_fn
-        self._gate = LaunchGate(store)
+        # (A) RESOLVE the seam base ONCE and share it between the lease READ and the gate's settle/tombstone
+        # WRITE, so they can never diverge. Previously the gate was built with no base_dir, so its revoke wrote
+        # to $VIGIL_BASE_DIR while the read used this base_dir — with the two differing, the lease was never
+        # tombstoned in the read tree and a second differently-outcomed completion re-settled (double refund).
+        self._base_dir = str(base_dir) if base_dir is not None else (
+            os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+        self._gate = LaunchGate(store, base_dir=self._base_dir)
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
         self.working = self.spool / "working"       # a file is CLAIMED here (out of incoming) before acting
@@ -71,12 +98,24 @@ class CompletionSpoolWatcher:
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
 
+    # -- the current governance root (re-derived per drain against the live clock, finding B) ------
+    def _current_root(self) -> Optional[Any]:
+        """Re-derive the governance trust root from the owner-signed delegation against the CURRENT clock. An
+        expired / now-invalid delegation returns ``None`` (the drain then settles NOTHING this round and leaves
+        ``incoming/`` untouched, so a renewed delegation settles them later — a transient hold, never a drop)."""
+        from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, DelegationError, verify_delegation
+        try:
+            return verify_delegation(self._delegation, trusted_owner_pubkey=self._owner_pubkey,
+                                     now=int(self._now()), role=OFFENSE_GOVERNANCE_ROLE, scope=self.scope)
+        except DelegationError:
+            return None
+
     # -- one envelope → settle (fail-closed) -------------------------------------------------------
-    def _settle_one(self, text: str) -> Optional[dict]:
-        """Verify one completion envelope and settle its lease. Returns the ``settle_launch`` result dict on a
-        settle, or ``None`` on a safe no-op (no published lease for the slug — nothing to settle). Raises
-        ``CompletionSpoolError`` on any refusal (malformed / unverifiable / out-of-scope / nonce-mismatch);
-        nothing is settled."""
+    def _settle_one(self, text: str, root: Any) -> Optional[dict]:
+        """Verify one completion envelope (against the freshly-derived ``root``) and settle its lease. Returns
+        the ``settle_launch`` result dict on a settle, or ``None`` on a safe no-op (no published lease for the
+        slug — nothing to settle). Raises ``CompletionSpoolError`` on any refusal (malformed / unverifiable /
+        out-of-scope / nonce-mismatch / tenant-mismatch); nothing is settled."""
         from vigil_core import EngagementCompletion, SignedEngagementCompletion, verify_engagement_completion
         from vigil_integration.live.credit_lease_broker import read_credit_lease
         try:
@@ -91,7 +130,7 @@ class CompletionSpoolWatcher:
                 signatures=obj.get("signatures") or [])
         except Exception as exc:  # noqa: BLE001 — a malformed document/signatures block is a refusal
             raise CompletionSpoolError(f"malformed completion document/signatures: {exc}") from exc
-        ok, reason = verify_engagement_completion(signed, self._root)
+        ok, reason = verify_engagement_completion(signed, root)
         if not ok:
             raise CompletionSpoolError(f"completion signal does not verify under the delegated governance root: {reason}")
         doc = signed.document
@@ -99,8 +138,7 @@ class CompletionSpoolWatcher:
         if self.scope != "*" and doc.engagement_slug != self.scope:
             raise CompletionSpoolError(
                 f"completion engagement_slug {doc.engagement_slug!r} is outside the delegated scope {self.scope!r}")
-        bundle = read_credit_lease(self._base_dir if self._base_dir is not None
-                                   else os.environ.get("VIGIL_BASE_DIR") or ".vigil-live", doc.engagement_slug)
+        bundle = read_credit_lease(self._base_dir, doc.engagement_slug)
         if bundle is None:
             return None                              # no published lease (already settled/absent) → safe no-op
         lease_doc = bundle.signed_lease.document
@@ -109,6 +147,16 @@ class CompletionSpoolWatcher:
         if str(lease_doc.nonce) != str(doc.nonce):
             raise CompletionSpoolError(
                 f"completion nonce {doc.nonce!r} != published lease nonce {lease_doc.nonce!r} (stale/mismatched)")
+        # (C) NON-TAUTOLOGICAL TENANT CROSS-CHECK: the owner-signed lease's OWN (org_id, scope_host) must hash
+        # back to the slug it is filed under / the delegated scope (cust_<h> == _customer_slug(org, host)). This
+        # is the real cross-tenant guard — settle_launch's expect_org_id is derived from the same lease and so
+        # can never fire from this caller; this binds the authentic signed org+host to the delegated scope, so a
+        # lease filed under a mismatched slug (or any org/host that does not hash to this scope) is refused.
+        from sigil.ui.target_authorization import _customer_slug
+        if _customer_slug(str(lease_doc.org_id), str(lease_doc.scope_host)) != str(doc.engagement_slug):
+            raise CompletionSpoolError(
+                f"published lease (org={lease_doc.org_id!r}, host={lease_doc.scope_host!r}) does not hash to the "
+                f"completion slug {doc.engagement_slug!r} — refusing a tenant-mismatched settle")
         consumed = self._consumed(doc.outcome.value, int(lease_doc.units_reserved))
         result = self._gate.settle_launch(
             signed_lease=bundle.signed_lease.model_dump(mode="json"), consumed_units=consumed,
@@ -135,9 +183,19 @@ class CompletionSpoolWatcher:
                 raise OSError("not a regular file (symlink/FIFO/device refused)")
             if st.st_size > _MAX_BYTES:
                 raise OSError(f"file exceeds {_MAX_BYTES} bytes")
-            data = os.read(fd, _MAX_BYTES + 1)
+            # (D) read to EOF — a single os.read may short-read and truncate a valid envelope (mirrors the
+            # sibling spool_watcher / billing_spool / webhook_drain read loops).
+            chunks: "list[bytes]" = []
+            remaining = _MAX_BYTES + 1
+            while remaining > 0:
+                b = os.read(fd, remaining)
+                if not b:
+                    break
+                chunks.append(b)
+                remaining -= len(b)
         finally:
             os.close(fd)
+        data = b"".join(chunks)
         if len(data) > _MAX_BYTES:
             raise OSError(f"file exceeds {_MAX_BYTES} bytes")
         try:
@@ -163,12 +221,36 @@ class CompletionSpoolWatcher:
         except OSError:
             pass
 
+    def _reclaim_working(self) -> None:
+        """(K) Crash recovery: move any file stranded in ``working/`` (a claim interrupted before it was
+        archived / quarantined — a mid-drain crash) back to ``incoming/`` so it is reprocessed. The downstream
+        dedup (processed/ sha256 + ``settle_launch``'s own ``(slug, nonce)`` idempotency) makes a re-process
+        safe, so this can never double-settle a completed one — it only ensures a settlement is never SILENTLY
+        LOST (which, for a refund/charge, is money)."""
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return
+        for f in stale:
+            try:
+                os.replace(f, self.incoming / f.name)
+            except OSError:
+                self._safe_unlink(f)
+
     def drain(self) -> dict:
-        """Process every file in ``incoming/`` once. Returns ``{settled, noop, rejected, deduped}``. Each file
-        is atomically CLAIMED into ``working/`` before acting (a re-run never double-processes), read as a
-        bounded regular UTF-8 file, and deduped on the sha256 of the READ BYTES. A settle or a safe no-op both
-        archive to ``processed/`` (handled); any failure → ``rejected/``, nothing settled. Never raises on one
-        bad file; never blocks on a hostile one."""
+        """Process every file in ``incoming/`` once. Returns ``{settled, noop, rejected, deduped}``. Begins with
+        a crash-recovery sweep of ``working/`` (finding K) and a per-drain RE-VERIFY of the delegation against
+        the current clock (finding B: an expired delegation settles NOTHING and leaves ``incoming/`` untouched
+        for a later renewed drain). Each file is atomically CLAIMED into ``working/`` before acting (a re-run
+        never double-processes), read as a bounded regular UTF-8 file, and deduped on the sha256 of the READ
+        BYTES. A settle or a safe no-op both archive to ``processed/`` (handled); any failure → ``rejected/``,
+        nothing settled. Never raises on one bad file; never blocks on a hostile one."""
+        self._reclaim_working()
+        root = self._current_root()
+        if root is None:
+            _sys.stderr.write("vigil settle-drain: WARNING offense-governance delegation is not currently valid "
+                              "(expired / out-of-horizon) — settling nothing this drain (will retry on renewal)\n")
+            return {"settled": 0, "noop": 0, "rejected": 0, "deduped": 0}
         settled = noop = rejected = deduped = 0
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
@@ -193,7 +275,7 @@ class CompletionSpoolWatcher:
                 deduped += 1
                 continue
             try:
-                result = self._settle_one(text)
+                result = self._settle_one(text, root)
             except CompletionSpoolError as exc:
                 self._quarantine(claimed, f"settle refused: {exc}")
                 rejected += 1
@@ -211,3 +293,17 @@ class CompletionSpoolWatcher:
             except OSError:
                 self._safe_unlink(claimed)
         return {"settled": settled, "noop": noop, "rejected": rejected, "deduped": deduped}
+
+    def watch(self, *, interval: float = 2.0, sleep: Optional[Callable[[float], None]] = None) -> None:
+        """Drain in a loop forever (Ctrl-C / SIGTERM to stop). A single bad drain NEVER kills the daemon: an
+        unexpected error is reported to stderr and the loop continues. The delegation is re-verified against the
+        live clock each ``drain()`` (finding B), so a long-lived watcher stops settling when it lapses. ``sleep``
+        is injectable for tests."""
+        _sleep = sleep or time.sleep
+        while True:
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                _sys.stderr.write("vigil settle-drain: WARNING drain error (continuing): "
+                                  f"{type(exc).__name__}: {exc}\n")
+            _sleep(interval)

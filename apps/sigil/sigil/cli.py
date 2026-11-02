@@ -1133,6 +1133,44 @@ def cmd_inbound(a) -> None:
         print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
 
 
+def cmd_settle_drain(a) -> None:
+    """Drain / watch the engagement-completion SETTLE spool (K4-5b): a keyless governance-signed completion →
+    ``settle_launch`` (owner-keyed; the keyless worker cannot mint a refund). Owner-tied + fail-closed: each
+    completion verifies under an owner-signed OFFENSE_GOVERNANCE delegation (RE-VERIFIED against the live clock
+    each drain, so a lapsed delegation stops settling), binds the published lease's nonce + tenant (the lease's
+    own (org,host) must hash to the delegated cust_ slug), and settles credits to consumption (completed ⇒ the
+    full reserved units; canceled/failed ⇒ full refund). A forged / out-of-scope / nonce- or tenant-mismatched
+    completion is quarantined — nothing settled. There is NO network ingest endpoint — the seam is a directory
+    drained by this local command. The settle WRITE shares --base-dir with the lease READ."""
+    from pathlib import Path
+
+    from .governor.identity import owner_pubkey as _owner_pubkey
+    from .inbound.completion_spool import CompletionSpoolWatcher
+
+    owner = _owner_pubkey()
+    if not owner:
+        print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_core.delegation import DelegationCert
+        deleg = DelegationCert.model_validate_json(Path(a.delegation).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"could not load the offense-governance delegation: {e}", file=sys.stderr)
+        sys.exit(2)
+    watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
+                                     delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
+    if getattr(a, "settle_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → settle_launch (scope={a.scope}); Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
+
+
 def cmd_knowledge(a) -> None:
     """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
     owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
@@ -2282,6 +2320,22 @@ def main(argv=None) -> None:
     pinb.add_argument("--scope", default="*", help="engagement scope to confine ingest to (default: * = any)")
     pinb.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pinb.set_defaults(fn=cmd_inbound)
+    psd = sub.add_parser("settle-drain",
+                         help="drain/watch the engagement-completion SETTLE spool onto settle_launch "
+                              "(owner-keyed, fail-closed; completed⇒charge, canceled/failed⇒refund; no "
+                              "network endpoint). The K4-5 settle-on-completion seam.")
+    psd.add_argument("settle_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    psd.add_argument("--spool", required=True, help="the settle spool directory (its incoming/ is drained)")
+    psd.add_argument("--delegation", required=True,
+                     help="owner-signed OFFENSE_GOVERNANCE delegation JSON scoped to the cust_ engagement slug")
+    psd.add_argument("--scope", required=True,
+                     help="the cust_ engagement slug this drain is confined to (must match the delegation scope; "
+                          "* only if the delegation itself is wildcard-scoped)")
+    psd.add_argument("--base-dir", default="",
+                     help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
+                          "(default: $VIGIL_BASE_DIR)")
+    psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    psd.set_defaults(fn=cmd_settle_drain)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
