@@ -72,11 +72,11 @@ def _rig(monkeypatch, owner, *, env="twin", issued_by="customer:org_a", write_le
     return base
 
 
-def _job(*, tenant=ORG, seed_host=HOST):
+def _job(*, tenant=ORG, seed_host=HOST, nonce="n1"):
     return SecurityJob.normalize(
-        source="api", repo=HOST, engagement_slug=SLUG, tenant_id=tenant,
-        delivery_id=launch_delivery_id(SLUG, "n1"),
-        extra={"seed_url": f"https://{seed_host}", "host": seed_host, "nonce": "n1", "org_id": ORG})
+        source="api", repo=HOST, engagement_slug=SLUG, tenant_id=tenant, commit=nonce,
+        delivery_id=launch_delivery_id(SLUG, nonce),
+        extra={"seed_url": f"https://{seed_host}", "host": seed_host, "nonce": nonce, "org_id": ORG})
 
 
 # ---- the gate: a fail-closed conjunction --------------------------------------------------------------
@@ -169,11 +169,12 @@ def test_gate_does_not_burn_the_single_use_floor(monkeypatch):
 
 def test_worker_seeds_authoritatively_from_scope_ignoring_a_tampered_extra(monkeypatch):
     owner = generate_keypair()
-    _rig(monkeypatch, owner, env="twin")
+    base = _rig(monkeypatch, owner, env="twin")
     calls = []
-    w = make_engage_worker(trust_root=object(), run=lambda **kw: calls.append(kw) or {"facts": 0})
+    w = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 0})
     assert w(_job(seed_host="evil.example")) == {"facts": 0}          # a TAMPERED extra seed
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]    # ...is ignored — seed is the authority host
+    # ...is ignored — the seed is the authority host; a first arm is a fresh (non-resume) consume.
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
 
 
 def test_worker_refuses_a_live_target_when_the_flag_is_off(monkeypatch):
@@ -187,10 +188,26 @@ def test_worker_refuses_a_live_target_when_the_flag_is_off(monkeypatch):
 
 def test_worker_refuses_an_operator_authority(monkeypatch):
     owner = generate_keypair()
-    _rig(monkeypatch, owner, issued_by="owner")
-    w = make_engage_worker(trust_root=object(), run=lambda **kw: {"facts": 0})
+    base = _rig(monkeypatch, owner, issued_by="owner")
+    w = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: {"facts": 0})
     with pytest.raises(RuntimeError, match="not a customer engagement authority"):
         w(_job())
+
+
+def test_worker_resumes_on_re_drive_and_fresh_arms_a_new_nonce(monkeypatch):
+    # K4-5a crash-after-arm fix: the FIRST arm of a (slug,nonce) is fresh (resume=False → consumes the
+    # single-use floor); a RE-DRIVE of the SAME (slug,nonce) RESUMES (resume=True → re-validates WITHOUT
+    # re-burning the floor), so a crash-after-consume re-delivery is not stranded as a 'replay'; a genuine
+    # re-lease (NEW nonce) arms fresh again.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    calls = []
+    w = make_engage_worker(trust_root=object(), base_dir=base,
+                           run=lambda **kw: calls.append(kw) or {"facts": 0})
+    w(_job(nonce="n1"))                                  # first attempt → fresh arm
+    w(_job(nonce="n1"))                                  # re-drive SAME (slug, nonce) → resume
+    w(_job(nonce="n2"))                                  # genuine re-lease (new nonce) → fresh arm again
+    assert [c["resume"] for c in calls] == [False, True, False]
 
 
 def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
@@ -198,14 +215,15 @@ def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
     # read (no injected callable). Env unset -> a LIVE customer arm is refused; env enabled -> it runs.
     monkeypatch.delenv("VIGIL_CUSTOMER_PROD_EXECUTION", raising=False)
     owner = generate_keypair()
-    _rig(monkeypatch, owner, env="live")
-    w = make_engage_worker(trust_root=object(), run=lambda **kw: {"facts": 0})   # NO injected flag
+    base = _rig(monkeypatch, owner, env="live")
+    w = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: {"facts": 0})   # NO injected flag
     with pytest.raises(RuntimeError, match="production-target customer execution is disabled"):
         w(_job())
     monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")          # explicit owner opt-in via the REAL env
     calls = []
-    w2 = make_engage_worker(trust_root=object(), run=lambda **kw: calls.append(kw) or {"facts": 1})
-    assert w2(_job())["facts"] == 1 and calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]
+    w2 = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 1})
+    assert w2(_job())["facts"] == 1
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
 
 
 # ---- the runner: execution SOLELY via run_one ---------------------------------------------------------
@@ -222,7 +240,7 @@ def test_runner_drives_an_authorized_launch_through_run_one(monkeypatch, tmp_pat
     assert runner.queue.enqueue(job).enqueued is True
     out = runner.run_one()
     assert out.state == "done", out.reason
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]  # the engage worker ran under the lease
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]  # engage worker ran under the lease
 
 
 def test_runner_refuses_a_job_with_no_authority_worker_never_runs(monkeypatch, tmp_path):
@@ -288,4 +306,4 @@ def test_runner_refuses_a_live_customer_by_default_and_runs_only_when_enabled(mo
     r2.queue.enqueue(LaunchTrigger(base_dir=base, now=1000.0).poll()[0])
     out2 = r2.run_one()
     assert out2.state == "done", out2.reason                         # the realistic LIVE production path runs
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]

@@ -25,9 +25,37 @@ module scope, NO ``sigil`` import, NO execution at import (two-env boundary).
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .model import SecurityJob
+
+_ATTEMPTS_DIRNAME = ".engage-attempts"
+
+
+def _mark_attempt_and_is_redrive(base_dir: Any, slug: str, nonce: str) -> bool:
+    """Record a durable per-``(slug, nonce)`` arm-attempt marker and return whether an attempt was ALREADY
+    recorded (a RE-DRIVE). Atomic ``O_EXCL`` create: the FIRST attempt creates it and returns ``False`` (a
+    fresh arm — ``run_engagement`` consumes the single-use floor); any later attempt finds it and returns
+    ``True`` (resume — the arm re-validates WITHOUT re-burning the floor, so a crash-after-consume re-delivery
+    is not stranded as a 'replay'). FAIL-SAFE: if the marker store is unusable, returns ``False`` (a fresh arm
+    — it never silently resumes an un-attempted lease, preserving single-use; the degenerate case falls back
+    to today's fail-closed behaviour). The marker name is ``sha256(slug\\x00nonce)`` so it is path-safe for any
+    slug/nonce, and a genuine re-lease (new nonce) gets a NEW marker ⇒ a fresh arm."""
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    key = hashlib.sha256((str(slug) + "\x00" + str(nonce)).encode("utf-8")).hexdigest()
+    try:
+        d = Path(base) / _ATTEMPTS_DIRNAME
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(d / f"{key}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        return False                                   # THIS call created it → first attempt → fresh arm
+    except FileExistsError:
+        return True                                    # already recorded → re-drive → resume
+    except OSError:
+        return False                                   # fail-safe: cannot record → fresh arm (never auto-resume)
 
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
 #: (``add_customer_target``), so the engine's destructive-confirm gate already refuses destructive tools; the
@@ -87,14 +115,17 @@ def make_engage_worker(
                 "engage worker: production-target customer execution is disabled (K4 flag off) — refusing a "
                 "LIVE customer-target arm until VIGIL_CUSTOMER_PROD_EXECUTION is explicitly enabled")
         seed_url = f"https://{host}"                               # AUTHORITATIVE seed (authority scope, not extra)
+        # K4-5a crash-after-arm fix: a FRESH arm consumes the single-use floor; a RE-DRIVE must RESUME (the
+        # arm re-validates + re-binds the lease WITHOUT re-burning the floor), else a worker crash AFTER the
+        # arm consumed but before completion strands the paid reservation as a 'replay' on re-delivery. The
+        # durable per-(slug,nonce) attempt marker distinguishes the two: the FIRST attempt arms fresh, any
+        # later attempt resumes. Single-use integrity is preserved — resume still re-validates owner-pin /
+        # bind / settlement, and two concurrent arms of one slug are serialized by the per-slug run lease; the
+        # marker only governs whether THIS (slug,nonce) re-burns its own floor. No nonce ⇒ fresh arm (safe).
+        nonce = str((job.extra or {}).get("nonce") or "")
+        resume = _mark_attempt_and_is_redrive(base_dir, job.slug, nonce) if nonce else False
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
-        # KNOWN LIMITATION (tracked, K4-5): this is always a FRESH arm — run_engagement's lease precondition
-        # consumes the single-use floor (resume defaults False). If the engine crashes AFTER the arm consumed
-        # but before completion, a re-drive re-arms the SAME issued_at and the floor refuses it as a 'replay',
-        # stranding the paid reservation. The sound fix (pass resume=True on a re-drive so the arm re-validates
-        # WITHOUT re-consuming — the K2 resume semantics) belongs in K4-5, which owns the run lifecycle +
-        # completion→settle seam and can distinguish a fresh launch from a resumed one. It is a within-tenant,
-        # fail-CLOSED availability loss (credits recoverable via cancel), never a replay / fail-open hole.
-        return runner(slug=job.slug, seed_url=seed_url, **kwargs)
+        kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
+        return runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
     return _worker
