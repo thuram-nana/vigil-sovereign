@@ -64,6 +64,56 @@ def _base():
     return os.environ["VIGIL_BASE_DIR"]
 
 
+def _seat_member(store, *, org, host, credits=100):
+    """Seat a member + wallet credits + ownership proof + a customer authority (no reserve/publish)."""
+    orgs = OrgRegistry(store)
+    orgs.create_org(org, org, owner="u", issued_at=float(next(_iss)))
+    orgs.grant_membership(org, "u", "operator", issued_at=float(next(_iss)))
+    WalletRegistry(store).grant(org, credits, "trial", entry_id=f"trial:{org}", issued_at=float(next(_iss)))
+    reg = AssetOwnershipRegistry(store)
+    ch = reg.issue_challenge(org, host, issued_at=float(next(_iss)))
+    reg.verify_and_record(org, host, method=METHOD_DNS_TXT, observed=[ch.marker], now=NOW, ttl_seconds=1e12)
+    assert add_customer_target(host, org_id=org, store=store, now=NOW)["ok"]
+
+
+def test_launch_start_provisions_delegation_before_publishing_no_orphan_lease(monkeypatch):
+    # K4-5 red-pen fold (MED): launch_start must provision the per-slug settle delegation BEFORE publishing the
+    # runnable lease, so a provisioning failure leaves NO published-but-unsettleable lease (orphan lease).
+    import sigil.ui.launch_governance as _lg
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store()
+    ensure_owner_keypair()
+    _seat_member(s, org="org_a", host="apme.cm")
+    r = LaunchGate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=NOW)
+    assert r["ok"], r
+
+    def _boom(**kw):
+        raise RuntimeError("deleg provisioning failed")
+
+    monkeypatch.setattr(_lg, "provision_launch_governance", _boom)
+    with pytest.raises(ProvisionDenied):
+        build_provisioner(s).launch_start("u", "org_a", r["lease"])
+    assert read_credit_lease(_base(), r["slug"]) is None            # provision failed FIRST → lease NOT published
+
+
+def test_launch_start_happy_path_provisions_then_publishes(monkeypatch):
+    from sigil.ui.provision import build_provisioner
+    from vigil_core.delegation import DelegationCert
+    s = _store()
+    ensure_owner_keypair()
+    _seat_member(s, org="org_a", host="apme.cm")
+    r = LaunchGate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=NOW)
+    out = build_provisioner(s).launch_start("u", "org_a", r["lease"])
+    assert out["slug"] == r["slug"] and out.get("governance_delegation")
+    assert read_credit_lease(_base(), r["slug"]) is not None        # published
+    # the provisioned delegation is real + verifies under the owner key for THIS slug
+    from sigil.governor.identity import owner_pubkey
+    from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, verify_delegation
+    cert = DelegationCert.model_validate_json(Path(out["governance_delegation"]).read_text(encoding="utf-8"))
+    assert verify_delegation(cert, trusted_owner_pubkey=owner_pubkey(), now=int(NOW),
+                             role=OFFENSE_GOVERNANCE_ROLE, scope=r["slug"]) is not None
+
+
 def _seat_and_reserve(store, owner, *, org, host, units=30, credits=100):
     """Seat a member + wallet + ownership proof + customer authority, then reserve + PUBLISH a lease, then
     PROVISION the per-slug launch governance delegation (what provision.launch_start does). Returns the

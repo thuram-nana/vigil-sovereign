@@ -483,26 +483,31 @@ class Provisioner:
                                             permission="run_engagement"):
                 self._audit("launch_start", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
-        r = LaunchGate(self.store).publish_lease(signed_lease=signed_lease, expect_org_id=requester_org_id)
-        if not r.get("ok"):
-            raise ProvisionDenied(str(r.get("error") or "launch start refused"))
-        # K4-5d(A): provision the per-slug owner-signed OFFENSE_GOVERNANCE_ROLE delegation that the SOVEREIGN
-        # settle/finding drains verify this launch's completion + crossed FACTs against — scoped to the cust_
-        # slug, lapsing with the lease window + a settle grace. Fail-closed: a launch that cannot provision its
-        # settle delegation is NOT reported started (the run could not later settle); a retry re-publishes +
-        # re-provisions idempotently.
+        # K4-5d(A) + red-pen fold: provision the per-slug owner-signed OFFENSE_GOVERNANCE_ROLE delegation (that
+        # the SOVEREIGN settle/finding drains verify this launch's completion + crossed FACTs against, scoped to
+        # the cust_ slug, lapsing with the lease window + a settle grace) BEFORE publishing the runnable lease.
+        # Ordering matters: a provisioning failure must leave NO published-but-unsettleable lease (an orphan
+        # lease the poller would arm + never settle). An orphan DELEGATION — if the later publish is refused —
+        # is harmless (the drains need a published lease to act). Fail-closed: a launch that cannot provision
+        # its settle delegation is NOT reported started; a retry re-provisions + re-publishes idempotently.
         from vigil_core import SignedCreditLaunchLease
         from .launch_governance import LAUNCH_DELEGATION_GRACE_SECONDS, provision_launch_governance
         try:
             lease_doc = SignedCreditLaunchLease.model_validate(signed_lease).document
+        except Exception as e:  # noqa: BLE001 — a malformed lease is a clean refusal
+            raise ProvisionDenied("launch start requires the signed launch lease from reserve_launch") from e
+        try:
             deleg_path = provision_launch_governance(
-                slug=str(r["slug"]),
+                slug=str(lease_doc.engagement_slug),
                 not_after=int(lease_doc.not_after.timestamp()) + LAUNCH_DELEGATION_GRACE_SECONDS)
-        except Exception as e:  # noqa: BLE001 — a provisioning failure is a clean refusal, never a half-started launch
+        except Exception as e:  # noqa: BLE001 — a provisioning failure is a clean refusal, BEFORE any publish
             self._audit("launch_start", requester=requester, org_id=requester_org_id,
-                        target=str(r.get("slug", "")), outcome="deleg_failed", critical=True)
+                        target=str(lease_doc.engagement_slug), outcome="deleg_failed", critical=True)
             raise ProvisionDenied(
                 f"could not provision the launch governance delegation: {type(e).__name__}") from e
+        r = LaunchGate(self.store).publish_lease(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch start refused"))
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
