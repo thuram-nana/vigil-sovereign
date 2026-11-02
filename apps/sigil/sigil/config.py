@@ -173,6 +173,12 @@ MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-man
 # the customer ONCE at enrollment, never persisted).
 CUSTOMER_TOTP_SEAL_CONTEXT = b"sigil/customer.totp"
 CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP (username, step) replay ledger
+# Slice E3b-2 — customer passkey (WebAuthn). The single-use registration/assertion challenge ledger (edge) +
+# the NON-SIGNED per-credential sign-count clone-floor ledger (provisioner; a monotonic high-water, NOT an
+# owner-signed record — a passkey login is a pure signature check with no owner re-sign). OFF by default:
+# with customer_passkey_enabled() false the edge's passkey routes are absent and nothing is minted.
+CUSTOMER_PASSKEY_CHALLENGE_DIR = _customer / "passkey_challenges"   # single-use WebAuthn challenges (edge)
+CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-credential_id monotonic sign-count floor
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
@@ -366,6 +372,28 @@ def customer_oidc_settings() -> dict:
     base = _customer_oidc_base()
     base["client_secret"] = (os.environ.get("VIGIL_CUSTOMER_OIDC_CLIENT_SECRET") or "")
     return base
+
+
+# --- customer passkey (WebAuthn, Slice E3b-2 — SHIPPED OFF BY DEFAULT) ----------------
+def customer_passkey_enabled() -> bool:
+    """True iff customer passkey (WebAuthn) login is ON (`VIGIL_CUSTOMER_PASSKEY_ENABLED` affirmative). OFF by
+    default: the edge's /api/customer/passkey/* routes are not served and nothing is minted."""
+    return (os.environ.get("VIGIL_CUSTOMER_PASSKEY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_passkey_rp_id() -> str:
+    """The WebAuthn Relying-Party id (the registrable customer domain, e.g. `app.vigil.example`) the
+    authenticator binds its assertion to (authenticatorData.rpIdHash == sha256(rp_id)). Empty ⇒ passkey
+    verification fail-closed (the provisioner refuses)."""
+    return (os.environ.get("VIGIL_CUSTOMER_PASSKEY_RP_ID") or "").strip()
+
+
+def customer_passkey_origins() -> tuple:
+    """The exact browser origins a customer passkey assertion/registration may carry in clientDataJSON.origin
+    (comma-separated `VIGIL_CUSTOMER_PASSKEY_ORIGINS`, e.g. `https://app.vigil.example`). The WebAuthn core
+    binds the origin cryptographically, so this is the phishing-resistance allowlist; empty ⇒ fail-closed."""
+    raw = os.environ.get("VIGIL_CUSTOMER_PASSKEY_ORIGINS") or ""
+    return tuple(o.strip().rstrip("/") for o in raw.split(",") if o.strip())
 
 
 # --- external binaries (resolved; never an operator-specific absolute path) -----------

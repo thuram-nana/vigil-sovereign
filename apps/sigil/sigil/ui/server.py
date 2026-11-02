@@ -1435,6 +1435,21 @@ class Handler(BaseHTTPRequestHandler):
             return p.enroll_totp(requester, ip=ip)
         if action == "mfa_verify":
             return p.verify_mfa(requester, code=str(body.get("code", "")))
+        # E3b-2 — customer passkey (WebAuthn). enroll binds to the SESSION requester (account-level);
+        # login is a public bootstrap (no requester — the credential_id resolves the customer), like
+        # oidc_finish. The registration/assertion material rides the body (b64url strings + the int cose_alg).
+        if action == "passkey_enroll":
+            return p.enroll_passkey(requester, credential_id=str(body.get("credential_id", "")),
+                                    public_key_spki_b64=str(body.get("public_key_spki_b64", "")),
+                                    cose_alg=body.get("cose_alg"), uv=bool(body.get("uv")),
+                                    client_data_json=str(body.get("client_data_json", "")),
+                                    expected_challenge=str(body.get("challenge", "")))
+        if action == "passkey_login":
+            return p.passkey_login(credential_id=str(body.get("credential_id", "")),
+                                   authenticator_data=str(body.get("authenticator_data", "")),
+                                   client_data_json=str(body.get("client_data_json", "")),
+                                   signature=str(body.get("signature", "")),
+                                   expected_challenge=str(body.get("challenge", "")), ip=ip)
         if action == "member_grant":
             return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
                                   str(body.get("role", "")), ip=ip)

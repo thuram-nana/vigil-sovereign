@@ -106,6 +106,8 @@ class CustomerServer(ThreadingHTTPServer):
         # edge holds the PKCE verifier + nonce here (non-secret, browser-binding/anti-replay material); the
         # client secret + the egress stay in the provisioner.
         self.oidc_state_dir = Path(str(sessions_dir)).parent / "customer-oidc-state"
+        # E3b-2 — the edge's single-use WebAuthn challenge ledger (passkey enroll + login), a SIBLING dir.
+        self.passkey_challenge_dir = Path(str(sessions_dir)).parent / "customer-passkey-challenges"
         port = self.server_address[1]
 
         def _hp(h: str) -> str:
@@ -500,6 +502,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
+        if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
+                      "passkey/login/challenge", "passkey/login/verify"):
+            return self._passkey(action, body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
@@ -578,6 +583,67 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("mfa_enroll_totp", requester, {"ip": self._ip()})
         else:
             c, r = self._provision("mfa_verify", requester, {"code": body.get("code", ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _passkey_challenge_store(self):
+        """The edge's single-use WebAuthn challenge ledger (reuses the stdlib ChallengeLedger)."""
+        from .login_challenges import ChallengeLedger
+        return ChallengeLedger(self.server.passkey_challenge_dir)
+
+    def _passkey(self, action: str, body: dict):
+        """Customer passkey (E3b-2 WebAuthn). ENROLL is session-gated (the requester is the session username,
+        account-level — never a body field). LOGIN is a public bootstrap (no session): the credential_id
+        resolves the customer at the provisioner, and a successful assertion MINTS a customer session (never
+        an operator bearer). Every challenge is single-use (minted here, CONSUMED before the hop — the replay
+        guard); every POST is already CSRF/Origin-gated by do_POST. Routes absent when passkey is disabled."""
+        from .. import config as _config
+        if not _config.customer_passkey_enabled():
+            return self._deny(404, "not found")
+        store = self._passkey_challenge_store()
+        # --- LOGIN (no session) ---
+        if action == "passkey/login/challenge":
+            ch = secrets.token_urlsafe(32)
+            try:
+                store.issue(ch)
+            except Exception:  # noqa: BLE001 — a ledger I/O / capacity error must not leak internals
+                return self._deny(500, "could not mint a passkey challenge")
+            return self._json({"challenge": ch})
+        if action == "passkey/login/verify":
+            ch = str(body.get("challenge", ""))
+            if not ch or not store.consume(ch):
+                return self._deny(401, "unknown, expired, or already-used passkey challenge")
+            c, r = self._provision("passkey_login", "", {
+                "credential_id": body.get("credential_id", ""),
+                "authenticator_data": body.get("authenticator_data", ""),
+                "client_data_json": body.get("client_data_json", ""),
+                "signature": body.get("signature", ""), "challenge": ch, "ip": self._ip()})
+            if c == 200 and isinstance(r, dict) and r.get("username"):
+                orgs = r.get("orgs") or []
+                active = orgs[0] if orgs else None             # server-bound active org (switch is a later slice)
+                self._mint(r["username"], active)
+                r = {**r, "active_org": active}
+            return self._json(r, c)
+        # --- ENROLL (session required; account-level) ---
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        if action == "passkey/enroll/challenge":
+            ch = secrets.token_urlsafe(32)
+            try:
+                store.issue(ch)
+            except Exception:  # noqa: BLE001
+                return self._deny(500, "could not mint a passkey challenge")
+            return self._json({"challenge": ch})
+        # passkey/enroll/verify
+        ch = str(body.get("challenge", ""))
+        if not ch or not store.consume(ch):
+            return self._deny(401, "unknown, expired, or already-used passkey challenge")
+        c, r = self._provision("passkey_enroll", requester, {
+            "credential_id": body.get("credential_id", ""),
+            "public_key_spki_b64": body.get("public_key_spki_b64", ""),
+            "cose_alg": body.get("cose_alg"), "uv": bool(body.get("uv")),
+            "client_data_json": body.get("client_data_json", ""), "challenge": ch, "ip": self._ip()})
         return self._json(r, c)
 
 

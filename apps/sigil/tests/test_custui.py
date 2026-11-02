@@ -64,7 +64,11 @@ def _stack(tmp_path, monkeypatch):
     from sigil import config
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
     monkeypatch.setenv("VIGIL_PROVISION_DEV_TOKENS", "1")   # dev-token exposure is now off-by-default (CO13)
-    for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
+    # isolate every SIGIL_HOME-rooted provisioner ledger to the test tmp dir — including the E3b MFA replay +
+    # the passkey sign-count floor, else their persistent markers leak stale state across test runs (a stale
+    # (username,step) or a stale sign-count floor would spuriously refuse a fresh enroll/login).
+    for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
+                 "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     path = tempfile.mktemp(suffix=".jsonl")
     SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
@@ -779,8 +783,15 @@ def test_oidc_callback_email_unverified_lands_signed_out(tmp_path, monkeypatch):
 # ======================================================================================================
 def _stack_vault(tmp_path, monkeypatch):
     """A provisioned (fake-TPM) owner vault + the sovereign/edge stack — so the provisioner can SEAL the TOTP
-    secret. The vault is provisioned BEFORE the stack so the owner key is sealed from the start."""
+    secret. The vault is provisioned BEFORE the stack so the owner key is sealed from the start.
+
+    A stale sealed `spine.dek` in SIGIL_HOME (sealed under a PRIOR run's now-gone fake-TPM KEK) would fail to
+    open under our fresh KEK, so we drop it first — the spine here is a brand-new tempfile, so there is no
+    sealed data to lose; a fresh DEK is regenerated + sealed under our KEK. Order-independent + CI-clean."""
+    from sigil import config
     from sigil.platform import vault as vaultmod
+    (config.SIGIL_HOME / "spine" / "keys" / "spine.dek").unlink(missing_ok=True)
+    vaultmod.reset_owner_vault_for_test()
     v = vaultmod.Vault(tmp_path / "ownervault", make_fake_tpm())
     v.provision()
     monkeypatch.setattr(vaultmod, "_owner_vault", v)
@@ -813,5 +824,99 @@ def test_mfa_requires_a_session(tmp_path, monkeypatch):
     try:
         assert _post(_opener(), ep, "/api/customer/mfa/totp/enroll", {})[0] == 401
         assert _post(_opener(), ep, "/api/customer/mfa/verify", {"code": "123456"})[0] == 401
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+# ======================================================================================================
+# E3b-2 — customer passkey (WebAuthn) over the edge: enroll (session) + a full login that mints a session
+# ======================================================================================================
+from test_customer_passkey import ORIGIN as PK_ORIGIN  # noqa: E402
+from test_customer_passkey import RP as PK_RP  # noqa: E402
+from test_customer_passkey import SoftAuthenticator  # noqa: E402
+
+
+def _stack_passkey(tmp_path, monkeypatch, *, enabled=True):
+    if enabled:
+        monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_RP_ID", PK_RP)
+    monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ORIGINS", PK_ORIGIN)
+    return _stack(tmp_path, monkeypatch)
+
+
+def test_passkey_enroll_then_login_mints_a_customer_session(tmp_path, monkeypatch):
+    sov, edge, ep, sp = _stack_passkey(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "pk@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        auth = SoftAuthenticator()
+        cid = "cred-edge-abc123"
+        # ENROLL: challenge -> register -> verify (session-bound)
+        ch = _post(op, ep, "/api/customer/passkey/enroll/challenge", {})[1]["challenge"]
+        reg = auth.register(ch)
+        c, r = _post(op, ep, "/api/customer/passkey/enroll/verify",
+                     {"credential_id": cid, "public_key_spki_b64": reg["public_key_spki_b64"],
+                      "cose_alg": reg["cose_alg"], "uv": False, "client_data_json": reg["client_data_json"],
+                      "challenge": ch})
+        assert c == 200 and r["ok"] and r["credential_id"] == cid, (c, r)
+        # a FRESH browser (no session) logs in with the passkey
+        op2 = _opener()
+        lch = _post(op2, ep, "/api/customer/passkey/login/challenge", {})[1]["challenge"]
+        a = auth.assert_(lch, count=7)
+        c, r = _post(op2, ep, "/api/customer/passkey/login/verify",
+                     {"credential_id": cid, "authenticator_data": a["authenticator_data"],
+                      "client_data_json": a["client_data_json"], "signature": a["signature"], "challenge": lch})
+        assert c == 200 and r["username"].startswith("cust_") and r.get("active_org"), (c, r)
+        # the login minted a working CUSTOMER session
+        c, who = _get(op2, ep, "/api/customer/whoami")
+        assert who["authenticated"] is True and who["username"] == r["username"]
+        # ISOLATION: that customer session is NOT an operator on the cockpit
+        jar = op2.handlers[[type(h).__name__ for h in op2.handlers].index("HTTPCookieProcessor")].cookiejar
+        sid = next(ck.value for ck in jar if ck.name == CUSTOMER_COOKIE)
+        _, op_who = _get(urllib.request.build_opener(), sp, "/api/whoami", cookie=f"sigil_session={sid}")
+        assert op_who.get("authenticated") in (False, None), op_who
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_passkey_login_challenge_is_single_use(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack_passkey(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "pk2@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        auth = SoftAuthenticator()
+        cid = "cred-su-1"
+        ch = _post(op, ep, "/api/customer/passkey/enroll/challenge", {})[1]["challenge"]
+        reg = auth.register(ch)
+        _post(op, ep, "/api/customer/passkey/enroll/verify",
+              {"credential_id": cid, "public_key_spki_b64": reg["public_key_spki_b64"],
+               "cose_alg": reg["cose_alg"], "uv": False, "client_data_json": reg["client_data_json"],
+               "challenge": ch})
+        op2 = _opener()
+        lch = _post(op2, ep, "/api/customer/passkey/login/challenge", {})[1]["challenge"]
+        a = auth.assert_(lch, count=3)
+        payload = {"credential_id": cid, "authenticator_data": a["authenticator_data"],
+                   "client_data_json": a["client_data_json"], "signature": a["signature"], "challenge": lch}
+        assert _post(op2, ep, "/api/customer/passkey/login/verify", payload)[0] == 200    # first use wins
+        assert _post(op2, ep, "/api/customer/passkey/login/verify", payload)[0] == 401    # replayed challenge spent
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_passkey_routes_404_when_disabled_and_enroll_requires_session(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack_passkey(tmp_path, monkeypatch, enabled=False)
+    try:
+        monkeypatch.delenv("VIGIL_CUSTOMER_PASSKEY_ENABLED", raising=False)
+        assert _post(_opener(), ep, "/api/customer/passkey/login/challenge", {})[0] == 404
+        assert _post(_opener(), ep, "/api/customer/passkey/enroll/challenge", {})[0] == 404
+    finally:
+        sov.shutdown(); edge.shutdown()
+    sov, edge, ep, _ = _stack_passkey(tmp_path, monkeypatch)       # enabled, but no session for enroll
+    try:
+        assert _post(_opener(), ep, "/api/customer/passkey/enroll/challenge", {})[0] == 401
     finally:
         sov.shutdown(); edge.shutdown()

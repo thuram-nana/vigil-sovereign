@@ -39,7 +39,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
-                                METHOD_GOOGLE_OIDC, PasswordIdentityProvider)
+                                METHOD_GOOGLE_OIDC, METHOD_PASSKEY, PasswordIdentityProvider)
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
@@ -113,7 +113,7 @@ class Provisioner:
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
-                 customer_credentials=None, oidc_provider=None, mfa_replay=None,
+                 customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -131,6 +131,9 @@ class Provisioner:
         # Slice E3b — the per-customer TOTP (username, step) replay ledger (a TotpReplayLedger). None ⇒ TOTP
         # verification fail-closed (a broken/absent ledger can never silently DISABLE the replay guard).
         self.mfa_replay = mfa_replay
+        # Slice E3b-2 — the per-credential WebAuthn sign-count clone-floor ledger (NON-SIGNED, monotonic).
+        # None ⇒ passkey login fail-closed.
+        self.signcount = signcount
         # Slice G0 — the ownership-proof FETCHER (reads a customer's published well-known token). None ⇒
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
@@ -351,6 +354,11 @@ class Provisioner:
                 return None
             return self.customer_credentials.by_federated(identity.federated_iss or "",
                                                           identity.federated_sub or "")
+        if identity.method == METHOD_PASSKEY:
+            if self.customer_credentials is None:
+                return None
+            cred = self.customer_credentials.by_credential_id(identity.credential_id or "")
+            return cred.username if cred is not None else None
         return None
 
     # -- Google OIDC login (E2b) -------------------------------------------------------------------
@@ -508,6 +516,96 @@ class Provisioner:
             raise ProvisionDenied("this TOTP code was already used")
         self._audit("mfa_verify", requester=requester, target=requester, outcome="ok")
         return {"ok": True, "method": "totp"}
+
+    # -- customer passkey: WebAuthn enroll + login (E3b-2) -------------------------------------------
+    def enroll_passkey(self, requester: str, *, credential_id: str, public_key_spki_b64: str, cose_alg,
+                       uv: bool, client_data_json: str, expected_challenge: str,
+                       now: "Optional[float]" = None) -> dict:
+        """E3b-2 — register a WebAuthn passkey for the requesting customer's OWN account (account-level; the
+        requester is the session/hop principal, never a body field). ``verify_registration`` validates the
+        clientDataJSON (type == webauthn.create, challenge, origin in the configured allowlist); the credential
+        public key is the WebAuthn-L2 ``getPublicKey()`` DER SubjectPublicKeyInfo the browser supplied (so NO
+        attestation-CBOR parse — a bad key only fails that customer's own later login). Owner-signs the
+        credential via the E2a ``enroll_passkey`` (its GLOBAL uniqueness refuses a credential_id already bound
+        to another customer — the anti-hijack crypto backing). Fail-closed when passkey is not configured."""
+        from . import webauthn as _wa
+        if self.customer_credentials is None:
+            raise ProvisionError("customer passkey is not enabled on this deployment")
+        acct = self.customers.customer(requester)
+        if acct is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .. import config
+        origins = config.customer_passkey_origins()
+        if not origins:
+            raise ProvisionError("customer passkey is not configured (no allowed origins)")
+        if not isinstance(cose_alg, int) or isinstance(cose_alg, bool) or int(cose_alg) not in _wa.SUPPORTED_ALGS:
+            raise ProvisionDenied("unsupported passkey algorithm")
+        try:
+            cdj = _wa.b64url_decode(client_data_json)
+            spki = base64.b64decode(str(public_key_spki_b64 or ""), validate=True)
+        except Exception:  # noqa: BLE001 — malformed registration material → clean refusal
+            raise ProvisionDenied("malformed passkey registration") from None
+        if not spki:
+            raise ProvisionDenied("empty passkey public key")
+        reason = _wa.verify_registration(client_data_json=cdj, expected_challenge=expected_challenge,
+                                         allowed_origins=origins)
+        if reason is not None:
+            raise ProvisionDenied(f"passkey registration refused ({reason})")
+        with self._lock:
+            try:
+                self.customer_credentials.enroll_passkey(
+                    requester, credential_id, cose_alg=int(cose_alg),
+                    public_key_spki_b64=str(public_key_spki_b64), uv=bool(uv), issued_at=self._next_issued())
+            except ValueError as e:                            # global-uniqueness / shape refusal
+                raise ProvisionDenied(str(e)) from None
+            self._audit("passkey_enroll", requester=requester, target=requester, outcome="enrolled",
+                        critical=True)
+        return {"ok": True, "method": "passkey", "credential_id": credential_id}
+
+    def passkey_login(self, *, credential_id: str, authenticator_data: str, client_data_json: str,
+                      signature: str, expected_challenge: str, ip: str = "",
+                      now: "Optional[float]" = None) -> dict:
+        """E3b-2 — a full passkey LOGIN (a standalone method, like OIDC). Resolve the customer by
+        ``credential_id`` (fail-closed on 0 / an ambiguous >1 — A's credential never resolves to B), VERIFY the
+        WebAuthn assertion (signature over authenticatorData ‖ sha256(clientDataJSON); clientData
+        type/challenge/origin; rpIdHash == sha256(rp_id); user-presence; the sign-count clone-floor), BUMP the
+        non-signed floor, then the SHARED ``finish_login`` tail -> {username, orgs} the keyless edge mints a
+        CUSTOMER cookie from (never an operator bearer). A PURE signature check — NO owner re-sign. Fail-closed
+        when passkey is not enabled/configured."""
+        t = self._now() if now is None else float(now)
+        from . import webauthn as _wa
+        if self.customer_credentials is None or self.signcount is None:
+            raise ProvisionError("customer passkey is not enabled on this deployment")
+        self._rate_guard(f"passkey:ip:{ip}", now=t)            # best-effort per-ip throttle
+        from .. import config
+        rp_id, origins = config.customer_passkey_rp_id(), config.customer_passkey_origins()
+        if not rp_id or not origins:
+            raise ProvisionError("customer passkey is not configured")
+        cred = self.customer_credentials.by_credential_id(credential_id)
+        if cred is None or not cred.public_key_spki_b64 or cred.cose_alg is None:
+            self.rate_limiter.record_failure(f"passkey:ip:{ip}", now=t)
+            self._audit("passkey_login", outcome="denied")
+            raise ProvisionDenied("passkey not recognised")
+        try:
+            spki = base64.b64decode(cred.public_key_spki_b64)
+            ad = _wa.b64url_decode(authenticator_data)
+            cdj = _wa.b64url_decode(client_data_json)
+            sig = _wa.b64url_decode(signature)
+        except Exception:  # noqa: BLE001 — malformed assertion material → clean refusal
+            raise ProvisionDenied("malformed passkey assertion") from None
+        res = _wa.verify_assertion(
+            spki_der=spki, cose_alg=int(cred.cose_alg), authenticator_data=ad, client_data_json=cdj,
+            signature=sig, expected_challenge=expected_challenge, allowed_origins=origins, rp_id=rp_id,
+            stored_sign_count=self.signcount.floor(credential_id), require_uv=False)
+        if not res.ok:
+            self.rate_limiter.record_failure(f"passkey:ip:{ip}", now=t)
+            self._audit("passkey_login", outcome=f"denied:{res.reason}")
+            raise ProvisionDenied("passkey assertion could not be verified")
+        self.rate_limiter.record_success(f"passkey:ip:{ip}")
+        self.signcount.bump(credential_id, res.sign_count)       # advance the non-signed clone-floor
+        result = self.finish_login(CustomerIdentity(method=METHOD_PASSKEY, credential_id=credential_id))
+        self._audit("passkey_login", requester=result["username"], target=result["username"], outcome="ok")
+        return result
 
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
@@ -867,6 +965,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
+    from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
     # with the host-ALLOWLISTED egress transport; the client secret + the token/JWKS egress live ONLY here
@@ -914,6 +1013,8 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         oidc_provider=oidc_provider,
         # E3b — the per-customer TOTP replay ledger (its own marker dir under SIGIL_HOME; fail-closed).
         mfa_replay=TotpReplayLedger(config.CUSTOMER_MFA_REPLAY_DIR),
+        # E3b-2 — the per-credential WebAuthn sign-count clone-floor ledger (non-signed, monotonic).
+        signcount=SignCountLedger(config.CUSTOMER_PASSKEY_SIGNCOUNT_DIR),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         expose_dev_tokens=expose_dev_tokens,
