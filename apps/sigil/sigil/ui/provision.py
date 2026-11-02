@@ -37,6 +37,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
+from .customer_identity import CustomerIdentity, IdentityRefused, PasswordIdentityProvider  # noqa: E402
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
@@ -272,23 +273,50 @@ class Provisioner:
 
     # -- login / recovery --------------------------------------------------------------------------
     def login(self, email: str, password: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
-        """Verify email+password (constant-time via the decoy). Rate-limited + locked out on repeated
-        failure (per-email AND per-ip). Returns {username, orgs:[...]} (the orgs the customer is an active
-        member of — the edge binds ONE as the session's active org). Raises on lockout / bad credentials."""
+        """Verify email+password (constant-time via the decoy) THROUGH the PasswordIdentityProvider, then the
+        shared `finish_login` tail. Rate-limited + locked out on repeated failure (per-email AND per-ip).
+        Returns {username, orgs:[...]} (the orgs the customer is an active member of — the edge binds ONE as
+        the session's active org). Raises on lockout / bad credentials. Behaviour is identical to the pre-E3a
+        inline path; the provider + finish_login seam is what Google-OIDC / passkey login reuse (E2/E3)."""
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"login:email:{email_l}", f"login:ip:{ip}", now=t)
-        acct = self.customers.verify_login(email_l, password)
-        if acct is None:
+        try:
+            identity = PasswordIdentityProvider(self.customers).verify(email=email_l, password=password)
+        except IdentityRefused:
             self.rate_limiter.record_failure(f"login:email:{email_l}", now=t)
             self.rate_limiter.record_failure(f"login:ip:{ip}", now=t)
             self._audit("login", target=email_l, outcome="denied")
             raise ProvisionDenied("invalid email or password")
         self.rate_limiter.record_success(f"login:email:{email_l}")
         self.rate_limiter.record_success(f"login:ip:{ip}")
-        orgs = [m.org_id for m in self.orgs.memberships() if m.username == acct.username]
-        self._audit("login", requester=acct.username, target=acct.username, outcome="ok")
-        return {"username": acct.username, "orgs": sorted(orgs)}
+        result = self.finish_login(identity)
+        self._audit("login", requester=result["username"], target=result["username"], outcome="ok")
+        return result
+
+    def finish_login(self, identity: CustomerIdentity) -> dict:
+        """The SHARED login tail every method (password / Google-OIDC / passkey) funnels through: resolve a
+        provider-verified identity to {username, orgs} — the exact shape the keyless edge mints a customer
+        cookie session from (`custui._mint`). Identity is proof of WHO only: the username is resolved from the
+        owner-signed CustomerRegistry (NEVER a claim) and the orgs from the owner-signed memberships. No role
+        is ever read off `identity`, and a customer never carries a global role (`CustomerPrincipal`). FAIL-
+        CLOSED: a verified identity that maps to no ACTIVE customer is refused (mirrors the operator OIDC
+        callback's no-owner-signed-account -> refuse)."""
+        username = self._resolve_customer_username(identity)
+        if username is None or self.customers.customer(username) is None:
+            raise ProvisionDenied("no active customer for this verified identity")
+        orgs = [m.org_id for m in self.orgs.memberships() if m.username == username]
+        return {"username": username, "orgs": sorted(orgs)}
+
+    def _resolve_customer_username(self, identity: CustomerIdentity) -> "Optional[str]":
+        """Map a verified CustomerIdentity to a CustomerRegistry username by its resolution key. Password
+        resolves by the (already-verified) email. The STABLE `(iss,sub)` federated binding and the passkey
+        `credential_id` resolve through the owner-signed customer-credential registry — wired in E2a/E3b;
+        until then an OIDC/passkey identity resolves to None (fail-closed, no login) by design."""
+        if identity.method == PasswordIdentityProvider.method:
+            acct = self.customers.by_email(identity.email or "")
+            return acct.username if acct is not None else None
+        return None
 
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
