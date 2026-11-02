@@ -117,6 +117,17 @@ def test_stepup_is_checked_after_admit_not_before(monkeypatch):
     assert not isinstance(ei.value, ProvisionStepUpRequired)
 
 
+def test_launch_reserve_gates_stepup_after_admit(monkeypatch):
+    # E3c red-pen fold: launch_reserve must refuse a requester who lacks run_engagement by ADMIT (ProvisionDenied),
+    # never by step-up (non-negotiable #5 + consistency with the other 5 ops). The signup-default admin is an
+    # org_admin WITHOUT run_engagement (billing != testing), so with step-up ON + no fresh mfa_at it must get the
+    # authority denial, NOT ProvisionStepUpRequired (which the pre-fold step-up-before-admit ordering produced).
+    p, admin, _target, org = _prov(monkeypatch, stepup=True)
+    with pytest.raises(ProvisionDenied) as ei:
+        p.launch_reserve(admin, org, "acme.example", now=NOW)
+    assert not isinstance(ei.value, ProvisionStepUpRequired)
+
+
 # ---- every sensitive op threads the mfa_at kwarg (no silent skip) ------------------------------------
 def test_all_sensitive_ops_accept_the_mfa_at_kwarg():
     for name in ("launch_reserve", "launch_cancel", "launch_start", "target_verify",

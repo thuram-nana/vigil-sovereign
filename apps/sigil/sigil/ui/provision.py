@@ -779,9 +779,20 @@ class Provisioner:
         `units` are SERVER-decided (``config.LAUNCH_UNITS``), never customer-supplied (money doctrine). Returns
         the signed lease for the edge to relay; the offense launch verifies it before any traffic."""
         t = self._now() if now is None else float(now)
-        self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
         from .. import config
         from .launch_gate import LaunchGate
+        # E3c red-pen fold: gate step-up AFTER authority, never before (non-negotiable #5 — a non-member is
+        # refused by admit, NOT told to step up) and consistent with launch_cancel/launch_start. launch_reserve
+        # has no local admit (the authoritative one lives in LaunchGate.reserve_launch), so do a run_engagement
+        # admit check here FIRST, then the step-up freshness gate; the LaunchGate then re-runs the full chain
+        # (admit + ownership + authority + credits) authoritatively.
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied("requester may not launch assessments for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: AFTER admit (no-op unless enforcement is on)
         r = LaunchGate(self.store).reserve_launch(
             requester=requester, org_id=requester_org_id, host=host, units=config.LAUNCH_UNITS, now=t)
         if not r.get("ok"):
