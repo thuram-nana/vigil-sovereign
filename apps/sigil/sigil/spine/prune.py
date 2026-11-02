@@ -201,6 +201,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice E2a customer credentials) the SAME floor for governor.customer_credential: an active passkey/
+    # TOTP/OIDC-link whose only owner-signed grant sits below K must be carried into the seed, or the prune
+    # drops it AND resets the per-(username, cred_key) high-water (re-opening credential replay-resurrection).
+    stranded_creds = stranded_active_customer_credentials(store, archived, K)
+    if stranded_creds:
+        raise PruneUnsafe(f"K={K} would strand active customer credential(s) {stranded_creds}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(username, cred_key) anti-replay high-water); lower K or resolve")
     # (c, SaaS plan credits) the SAME floor for governor.plan_grant/plan_debit: a prune must carry every below-K
     # tenant's per-period tranche totals AND the consumed-entry_id set into the seed, or it would ZERO an
     # unexpired plan tranche (lose granted allotment) AND drop the anti-replay seen-set (re-opening plan-grant
@@ -444,6 +452,48 @@ def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> 
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.ownership_proof_state_map()
     carried = {(row[0], row[1]) for row in seed.ownership_proof_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice E2a) — the ACTIVE customer credentials (`governor/customer_credentials.py`) whose only
+    owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
+    set a hard prune would silently vanish, resetting the per-(username, cred_key) anti-replay high-water and
+    re-opening the LWW replay-resurrection (a revoked passkey / TOTP / OIDC link resurrected). EMPTY in the
+    happy path — `SnapshotState.build()` carries every VERIFIED-active credential. Mirrors
+    `stranded_active_ownership_proofs`. Returns keys as ``cred_key@username``. VERIFIED-active only (a
+    forged/unsigned `active` grant is not counted, so it can never block a prune). Read-only."""
+    from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL, _cred_core
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    c_state: dict[tuple, str] = {}
+    c_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _CRED_SIGNAL:
+            continue
+        u, ck, rst = p.get("username"), p.get("cred_key"), p.get("state")
+        if not (isinstance(u, str) and u and isinstance(ck, str) and ck):
+            continue
+        key = (u, ck)
+        if rst == "revoked":
+            c_state[key] = "revoked"
+        elif rst == "active" and verify_signed(p, _cred_core(p), resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > c_issued.get(key, NO_HIGHWATER):
+                c_issued[key], c_state[key] = at, "active"
+    active = {k for k, v in c_state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.customer_credential_state_map()
+    carried = {(row[0], row[1]) for row in seed.customer_credential_row
                if seed_state.get((row[0], row[1])) == "active"}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
