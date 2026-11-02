@@ -42,12 +42,13 @@ FATAL-2: SOVEREIGN-side, ``assert_no_offense()`` at import; imports only the sha
 ``reuse``) + the sovereign governor siblings (``authn`` / ``identity`` / ``key_history``) + the categorical
 ``vigil_core.hard_guardrail`` floor. No ``framework``/``strix`` import.
 
-DEFERRED (explicitly, to the Slice G snapshot bump): the hard-prune SNAPSHOT SEED. This fold is a
-genesis-scan fold (correct over the full live window); it does not yet seed per-(org_id, host) state from
-``spine.snapshot.SnapshotState`` the way ``orgs._fold_*`` does, so a hard prune below a revoked proof is not
-yet protected by a stranding tripwire. The owner-signed ``expires_at`` bounds the blast radius of any such
-replay to the proof's remaining validity. The snapshot-leaf rows + tripwire land with the G schema bump
-(``_MAX_SNAPSHOT_SCHEMA`` -> v3), keyed to merge order.
+HARD-PRUNE SNAPSHOT SEED (G0 close-out): the proof fold ``_fold_proofs`` mirrors ``orgs._fold_*`` EXACTLY,
+including the snapshot seed — it seeds the per-(org_id, host) state / anti-replay high-water / row from the
+committed ``spine.snapshot.SnapshotState`` (v3) and then folds the LIVE window only, so an active proof whose
+only grant was hard-pruned SURVIVES (its high-water is never reset) rather than re-opening the LWW
+replay-resurrection the G0 red-pen flagged. The owner-signed ``expires_at`` still bounds the blast radius of
+any replay to the proof's remaining validity. (The CHALLENGE fold is a plain genesis scan — a pruned,
+ephemeral challenge is simply re-requested.)
 """
 from __future__ import annotations
 

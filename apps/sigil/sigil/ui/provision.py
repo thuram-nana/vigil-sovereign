@@ -484,7 +484,7 @@ class Provisioner:
         SEALS it via the owner vault (only the sealed blob reaches the spine — the plaintext is returned ONCE
         for the customer to add to their authenticator app, NEVER persisted), owner-signs the credential (the
         per-(username,"totp") high-water LWW supersedes any prior TOTP), and returns the otpauth:// URI +
-        the secret. Fail-closed when customer MFA is not wired."""
+        the secret. Fail-closed when customer MFA is not enabled on this deployment."""
         if self.customer_credentials is None:
             raise ProvisionError("customer MFA is not enabled on this deployment")
         acct = self.customers.customer(requester)

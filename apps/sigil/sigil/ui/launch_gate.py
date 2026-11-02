@@ -232,15 +232,14 @@ class LaunchGate:
         per the lease's (slug, nonce): a re-settle no-ops. ``consumed_units == 0`` is the cancel/release case
         (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds).
 
-        KNOWN GAP (money-doctrine, tracked as a HARD K4/K5 prerequisite): settling/cancelling refunds the
-        credits but does NOT yet revoke a lease already handed to the offense seam by ``publish_lease`` — it
-        neither tombstones the seam copy nor advances the offense single-use floor, and ``publish_lease`` does
-        not refuse a lease whose reservation is already settled, so a settled lease stays a valid bearer
-        capability. INERT today (nothing arms a customer engagement off the seam — the K4 driver is unbuilt;
-        the red-pen verifiers confirmed the free-run exploit is unreachable in-range), but K4/K5 MUST close it
-        so a settled lease is non-runnable (settlement marker + seam tombstone + the K4 arm re-checking
-        settlement) and MUST assert net-spend == metered-consumption end-to-end before any customer run is
-        triggered."""
+        MONEY-DOCTRINE CLOSE-OUT (K4-1): settling/cancelling refunds the credits AND makes the lease
+        non-runnable. settle records a ``(slug, nonce)`` settlement marker and tombstones the seam copy
+        (below, nonce-matched so a newer re-lease is never clobbered); ``publish_lease`` refuses a lease whose
+        reservation is already settled; and the keyless arm re-checks settlement in
+        ``verify_customer_launch_lease`` before it burns the single-use floor — so a settled lease is no
+        longer a live bearer capability. The ``reserved - refund == consumed`` net-spend invariant is
+        load-bearing on this refund path, and K4-5 settle-on-completion asserts net-spend ==
+        metered-consumption end-to-end."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
         kp = self.owner_key
         if kp is None:
