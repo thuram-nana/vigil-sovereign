@@ -138,7 +138,7 @@
       { id: "settings", label: "Settings", icon: "gear", owner: true, perm: "config_nonsecret", ready: true },
       { id: "users", label: "Users & Roles", icon: "key", owner: true, perm: "manage_users", ready: true },
       { id: "billing", label: "Billing Admin", icon: "book", owner: true, perm: "manage_org", ready: true },
-      { id: "tenantassess", label: "Tenant Assessments", icon: "find", owner: true, perm: "view_assessments", ready: true },
+      { id: "tenantassess", label: "Tenant Assessments", icon: "find", owner: true, perm: "manage_org", ready: true },
       { id: "governance", label: "Governance", icon: "shield", ready: true },
     ]},
     { group: "LEARN", items: [
@@ -12258,6 +12258,11 @@
     try { return new Date(sec * 1000).toISOString().slice(0, 19).replace("T", " ") + "Z"; }
     catch (e) { return String(sec); }
   }
+  // " (N)" when the full set is shown, " (N of TOTAL)" when the server page-capped it (no silent truncation).
+  function _jCount(shown, total) {
+    if (total == null) return "";
+    return " (" + ((shown < total) ? (shown + " of " + total) : String(total)) + ")";
+  }
 
   function renderBilling(screen) {
     V.mount(screen, [
@@ -12352,7 +12357,7 @@
           V.tile("Plan credits (live)", String(cr.plan_live != null ? cr.plan_live : "—"), null, null),
           V.tile("Wallet available", String(w.available != null ? w.available : "—"),
             "granted " + String(w.granted || 0) + " · debited " + String(w.debited || 0), null),
-          V.tile("Account", ov.active ? "active" : "inactive", null, ov.active ? "ok" : "danger"),
+          V.tile("Account", ov.active ? "active" : "inactive", (sub ? "subscription" : "prepaid"), ov.active ? "ok" : "danger"),
         ]));
         blocks.push(sub
           ? h("div.card", { style: { marginTop: "12px" } }, [
@@ -12371,7 +12376,7 @@
         var invs = (inv.invoices) || [];
         blocks.push(h("div.card", { style: { marginTop: "12px" } }, [
           h("div.card-h", null, [h("span.label", null, "billing history"),
-            h("h3", null, "Invoices" + (inv.count != null ? (" (" + inv.count + ")") : ""))]),
+            h("h3", null, "Invoices" + _jCount(invs.length, inv.count))]),
           invs.length ? h("div.scroll-x", null, h("table.tbl", null, [
             h("thead", null, h("tr", null, [h("th", null, "issued"), h("th", null, "invoice_id"), h("th", null, "kind"),
               h("th", null, "amount"), h("th", null, "credits")])),
@@ -12456,7 +12461,7 @@
         var fs = (fnd.findings) || [];
         blocks.push(h("div.card", { style: { marginTop: "12px" } }, [
           h("div.card-h", null, [h("span.label", null, "oracle-confirmed"),
-            h("h3", null, "Findings" + (fnd.count != null ? (" (" + fnd.count + ")") : ""))]),
+            h("h3", null, "Findings" + _jCount(fs.length, fnd.count))]),
           fs.length ? h("div.scroll-x", null, h("table.tbl", null, [
             h("thead", null, h("tr", null, [h("th", null, "slug"), h("th", null, "bug class"), h("th", null, "severity"),
               h("th", null, "title"), h("th", null, "ref")])),
