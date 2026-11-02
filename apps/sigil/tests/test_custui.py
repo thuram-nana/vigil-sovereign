@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
@@ -38,6 +39,28 @@ from test_secrets_sealed import make_fake_tpm   # fake-TPM vault provisioner (fo
 
 TOKEN = "owner-shared-token-xyz789"
 HOP = "test-provision-hop-key-xyz"
+
+
+@pytest.fixture(autouse=True)
+def _scrub_shared_owner_state():
+    """These full-stack tests call ensure_owner_keypair()/build_server() against the shared SIGIL_HOME, so
+    they leave an owner keypair there with NO sealed vault KEK. In the shared-SIGIL_HOME CI process (the P7
+    governor job / the full apps/sigil run) that half-provisioned home breaks the later-collected
+    test_ui_durability, whose backup can only self-provision a KEK on a CLEAN home. Scrub the owner-key +
+    vault state before AND after each test (the same before/after idiom test_ui_durability uses for its own
+    HEAD/SPINE state) so the shared home is left pristine; every helper here re-provisions what it needs."""
+    import shutil
+    from sigil import config
+    from sigil.platform import vault as _vault
+
+    def _scrub():
+        shutil.rmtree(config.KEYS_DIR, ignore_errors=True)
+        shutil.rmtree(config.SIGIL_HOME / "vault", ignore_errors=True)
+        _vault.reset_owner_vault_for_test()
+
+    _scrub()
+    yield
+    _scrub()
 
 
 def _sovereign(spine_path):

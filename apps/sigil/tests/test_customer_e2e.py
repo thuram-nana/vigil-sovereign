@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.request
 
+import pytest
 from sigil.governor.accounts import AccountsRegistry
 from sigil.governor.customers import CustomerRegistry
 from sigil.governor.orgs import OrgRegistry
@@ -34,6 +35,28 @@ from test_customer_passkey import ORIGIN as PK_ORIGIN
 from test_customer_passkey import RP as PK_RP
 from test_customer_passkey import SoftAuthenticator
 from test_secrets_sealed import make_fake_tpm
+
+
+@pytest.fixture(autouse=True)
+def _scrub_shared_owner_state():
+    """_full_stack calls ensure_owner_keypair()/build_server() against the shared SIGIL_HOME, leaving an
+    owner keypair there with NO sealed vault KEK. In the shared-SIGIL_HOME CI process (the P7 governor job /
+    the full apps/sigil run) that half-provisioned home breaks the later-collected test_ui_durability, whose
+    backup can only self-provision a KEK on a CLEAN home. Scrub the owner-key + vault state before AND after
+    each test (the same before/after idiom test_ui_durability uses for its own HEAD/SPINE state) so the
+    shared home is left pristine; _full_stack re-provisions its own tmp fake-TPM vault + owner key."""
+    import shutil
+    from sigil import config
+    from sigil.platform import vault as _vault
+
+    def _scrub():
+        shutil.rmtree(config.KEYS_DIR, ignore_errors=True)
+        shutil.rmtree(config.SIGIL_HOME / "vault", ignore_errors=True)
+        _vault.reset_owner_vault_for_test()
+
+    _scrub()
+    yield
+    _scrub()
 
 
 def _full_stack(tmp_path, monkeypatch):
