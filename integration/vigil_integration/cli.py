@@ -3262,9 +3262,21 @@ def _enforce_production_gate(action: str) -> "int | None":
     from . import doctor as _doctor
     repo = pathlib.Path(__file__).resolve().parents[2]
     result = _doctor.evaluate_production_gate(repo)
-    if result["ok"]:
+    # K4-6: ALSO enforce the customer-execution flag HOLD at the actual START path (not only `vigil doctor`'s
+    # collect()). Without this, a production deploy with VIGIL_CUSTOMER_PROD_EXECUTION flipped on would pass the
+    # REQUIRED_CONTROLS gate and START running customer engagements — the hold would be shown by `vigil doctor`
+    # but never refuse `vigil up` / `vigil engage`. Inert unless the production posture is armed (the hold
+    # returns None when not armed / flag held off).
+    ce_hold = _doctor._customer_execution_hold(bool(result.get("armed")))
+    if result["ok"] and ce_hold is None:
         return None
-    print(_doctor.production_gate_message(result, action=action), file=sys.stderr)
+    msgs = []
+    if not result["ok"]:
+        msgs.append(_doctor.production_gate_message(result, action=action))
+    if ce_hold is not None:
+        msgs.append(f"vigil {action}: REFUSED (fail-closed) — PRODUCTION posture "
+                    f"(VIGIL_POSTURE={result.get('posture')}): {ce_hold}")
+    print("\n".join(msgs), file=sys.stderr)
     return 2
 
 

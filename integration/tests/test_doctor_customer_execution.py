@@ -46,3 +46,25 @@ def test_hold_refuses_when_armed_and_flag_on_and_documents_flip_criteria(monkeyp
     for dimension in ("security", "tenant-isolation", "authz", "billing", "operational"):
         assert dimension in msg
     assert "deliberate owner act" in msg                         # the flip is gated + deliberate, never a default
+
+
+def test_start_gate_enforces_the_hold_not_only_vigil_doctor(monkeypatch):
+    # red-pen fold: the hold must refuse the ACTUAL `vigil up`/`engage` start path (_enforce_production_gate),
+    # not only `vigil doctor`'s collect(). Make the REQUIRED_CONTROLS gate PASS + armed, so the customer-
+    # execution hold is the SOLE refusal, and assert the start gate refuses (returns 2) when the flag is on.
+    from vigil_integration import cli
+    monkeypatch.setattr(dmod, "evaluate_production_gate",
+                        lambda repo: {"ok": True, "armed": True, "posture": "production", "unmet": []})
+    monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")
+    assert cli._enforce_production_gate("up") == 2                # the START path refuses (the hold now enforces)
+    monkeypatch.delenv("VIGIL_CUSTOMER_PROD_EXECUTION", raising=False)
+    assert cli._enforce_production_gate("up") is None            # flag held off → start proceeds (hold inert)
+
+
+def test_start_gate_hold_is_inert_when_posture_not_armed(monkeypatch):
+    # not production posture → the hold is inert even with the flag on (the start gate proceeds on an otherwise-ok gate)
+    from vigil_integration import cli
+    monkeypatch.setattr(dmod, "evaluate_production_gate",
+                        lambda repo: {"ok": True, "armed": False, "posture": None, "unmet": []})
+    monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")
+    assert cli._enforce_production_gate("up") is None            # not armed → inert → proceeds
