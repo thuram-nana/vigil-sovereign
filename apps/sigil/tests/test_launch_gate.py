@@ -205,6 +205,39 @@ def test_settle_is_idempotent():
     assert _avail(s, "org_a") == 90                        # refunded exactly once, not twice
 
 
+def test_settle_invariant_refuses_an_overclaiming_plan_debit_record(monkeypatch):
+    """K4-1 money-doctrine invariant (load-bearing clause): if the owner-signed reserve debit record over-claims
+    the plan bucket relative to the signed lease (from_plan > reserved), the naive bucket split would grant an
+    inflated plan_refund while silently skipping the resulting NEGATIVE wallet_refund — a net OVER-refund. The
+    invariant must FIRE and refuse (fail-closed, NOTHING refunded), so net spend never falls below consumption."""
+    s = _store()
+    r = _reserve(s)                                            # reserves 30 of 100 -> available 70
+    g = _gate(s)
+    reserved = int(r["units_reserved"])
+    # a drifted/forged debit record claiming MORE was debited from the (expiring) plan tranche than the lease reserves
+    monkeypatch.setattr(g.meter.plan, "debited_entry", lambda oid, eid: (reserved + 50, 9e12))
+    out = g.settle_launch(signed_lease=r["lease"], consumed_units=0, now=3000.0)
+    assert out["ok"] is False and "invariant" in out["error"]  # refused, not an over-refund
+    assert _avail(s, "org_a") == 70                            # NOTHING moved — net spend can't drop below consumption
+
+
+def test_settle_tombstones_and_marks_the_lease_unrunnable():
+    """K4-1 / K5: settling a lease must make it non-runnable BEFORE anything can arm off it — tombstone the
+    published seam bundle (read_credit_lease -> None) AND durably mark (slug,nonce) settled, and refuse to
+    re-publish a settled lease (no resurrecting a spent bearer capability)."""
+    import os
+    from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
+    s = _store(); r = _reserve(s); g = _gate(s)
+    base = os.environ["VIGIL_BASE_DIR"]
+    assert g.publish_lease(signed_lease=r["lease"], expect_org_id="org_a")["ok"]
+    assert read_credit_lease(base, r["slug"]) is not None             # published -> a runnable bearer capability
+    assert g.settle_launch(signed_lease=r["lease"], consumed_units=0, now=3000.0, expect_org_id="org_a")["ok"]
+    assert read_credit_lease(base, r["slug"]) is None                 # tombstoned on settle
+    assert is_lease_settled(base, r["slug"], r["nonce"]) is True       # ...and durably marked settled
+    pub2 = g.publish_lease(signed_lease=r["lease"], expect_org_id="org_a")
+    assert pub2["ok"] is False and "settled" in pub2["error"].lower()  # cannot resurrect a settled lease
+
+
 # --- red-pen fold: the refund is bound to the OWNER-SIGNED lease, never a wire amount ---------------
 
 def test_settle_rejects_a_forged_lease_no_free_credits():

@@ -41,11 +41,22 @@ __all__ = [
     "write_credit_lease",
     "read_credit_lease",
     "list_credit_leases",
+    "settlements_root",
+    "settlement_path",
+    "record_lease_settlement",
+    "is_lease_settled",
+    "tombstone_credit_lease",
 ]
 
 _LEASE_DIRNAME = "credit-launch-leases"
 _LEASE_SCHEMA = "vigil-credit-launch-lease-seam-v1"
 _SCHEMA_VERSION = 1
+
+# K4-1 / K5 close-out: a settled/canceled lease MUST NOT remain a runnable bearer capability. settle_launch
+# records the settled (slug, nonce) in a SIBLING dir (never collides with the leases glob) and TOMBSTONES the
+# published bundle; the keyless arm + the sovereign publish_lease both refuse a settled nonce.
+_SETTLE_DIRNAME = "credit-lease-settlements"
+_SETTLE_SCHEMA = "vigil-credit-lease-settlement-v1"
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -193,3 +204,75 @@ def list_credit_leases(base_dir: Any) -> list[CreditLeaseBundle]:
     except OSError:
         pass
     return out
+
+
+# ---------------------------------------------------------------------------------------------------
+# settlement markers + tombstones (K4-1 / K5 money-doctrine close-out)
+# ---------------------------------------------------------------------------------------------------
+
+
+def settlements_root(base_dir: Any) -> Path:
+    """The settlement-marker root ``<base>/credit-lease-settlements`` (a SIBLING of the leases dir, so a
+    ``*.json`` glob of the leases dir never picks up a marker)."""
+    return Path(base_dir) / _SETTLE_DIRNAME
+
+
+def settlement_path(base_dir: Any, slug: str) -> Optional[Path]:
+    """The settlement-marker path for ``slug``, or None if the slug is unsafe as a path component."""
+    safe = _safe_component(slug)
+    if not safe:
+        return None
+    return _contained_child(settlements_root(base_dir), f"{safe}.json")
+
+
+def _read_settled_nonces(path: Path) -> list[str]:
+    """The settled-nonce list from a marker file; [] on any read/parse/kind error (fail-closed to 'unknown')."""
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(obj, dict) or obj.get("kind") != _SETTLE_SCHEMA:
+        return []
+    nonces = obj.get("nonces")
+    return [str(n) for n in nonces] if isinstance(nonces, list) else []
+
+
+def record_lease_settlement(base_dir: Any, slug: str, nonce: Any) -> Path:
+    """Durably mark the lease ``(slug, nonce)`` SETTLED — after this the arm (``verify_customer_launch_lease``)
+    and ``publish_lease`` refuse that nonce. Idempotent: re-recording a nonce rewrites the same set. Raises
+    ValueError on an unsafe slug (never writes outside the settlements dir)."""
+    safe = _safe_component(slug)
+    if not safe:
+        raise ValueError(f"unsafe lease slug: {slug!r}")
+    path = _contained_child(settlements_root(base_dir), f"{safe}.json")
+    if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
+        raise ValueError(f"unsafe lease slug (escapes settlements dir): {slug!r}")
+    merged = sorted(set(_read_settled_nonces(path) if path.is_file() else []) | {str(nonce)})
+    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _SETTLE_SCHEMA,
+                              "slug": safe, "nonces": merged})
+    return path
+
+
+def is_lease_settled(base_dir: Any, slug: str, nonce: Any) -> bool:
+    """True iff the lease ``(slug, nonce)`` was POSITIVELY recorded settled. Absent/unsafe/malformed marker →
+    False: the tombstone + the single-use issued_at floor are the primary revocation, this durable marker is
+    the belt-and-braces for a stale/re-published copy, and a same-host attacker tampering seam files is already
+    outside the threat model (the owner signature is the trust anchor, not this operational state). Total;
+    never raises."""
+    path = settlement_path(base_dir, slug)
+    if path is None or not path.is_file():
+        return False
+    return str(nonce) in _read_settled_nonces(path)
+
+
+def tombstone_credit_lease(base_dir: Any, slug: str) -> bool:
+    """Remove the published lease bundle for ``slug`` from the seam, so ``read_credit_lease`` returns None.
+    Idempotent + total: True if a bundle was removed, False if none/unsafe, never raises on a missing file."""
+    path = lease_path(base_dir, slug)
+    if path is None or not path.is_file():
+        return False
+    try:
+        os.unlink(str(path))
+        return True
+    except OSError:
+        return False

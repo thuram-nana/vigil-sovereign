@@ -285,7 +285,32 @@ class LaunchGate:
         plan_pe = plan_deb[1] if plan_deb else None
         plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
         wallet_refund = refund - plan_refund               # the rest (wallet portion + any plan over-consumption)
+        # MONEY-DOCTRINE INVARIANT (K4-1): net spend == metered consumption and NEITHER bucket is over-refunded.
+        # The sum/net-spend clauses hold by construction (wallet_refund := refund - plan_refund; refund :=
+        # reserved - consumed); the load-bearing clause is ``plan_refund < 0 or wallet_refund < 0``, which FIRES
+        # when the owner-signed reserve debit record over-claims the plan bucket relative to the signed lease
+        # (from_plan > reserved). Without it an inflated plan_refund would be granted while a NEGATIVE
+        # wallet_refund is silently skipped (``if wallet_refund > 0``) — a net OVER-refund / under-charge. A drift
+        # here is an internal inconsistency, not a wire value: refuse (fail-closed, no credits moved) rather than
+        # move the wrong amount, so net spend can never fall below metered consumption.
+        if (plan_refund < 0 or wallet_refund < 0 or plan_refund + wallet_refund != refund
+                or reserved - refund != consumed):
+            return {"ok": False, "error": "internal: refund invariant violated (bucket split / net-spend)"}
         with self._lock:
+            # K4-1 / K5 close-out: REVOKE the lease as a bearer capability BEFORE refunding — mark (slug, nonce)
+            # settled (the keyless arm + publish_lease refuse it) and tombstone the published seam bundle. Order
+            # matters and is fail-CLOSED: if we cannot DURABLY record the revocation we do NOT refund, so a lease
+            # is never left refunded-but-still-runnable (the documented gap this slice closes). Idempotent: a
+            # re-settle re-marks the same nonce + finds no bundle, and the refund grants dedupe on entry_id.
+            try:
+                from vigil_integration.live.credit_lease_broker import (
+                    record_lease_settlement, tombstone_credit_lease,
+                )
+                record_lease_settlement(self._seam_base(), s, non)
+                tombstone_credit_lease(self._seam_base(), s)
+            except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no refund yet)
+                return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
+                        f"{type(e).__name__}"}
             if plan_refund > 0 and plan_pe is not None:
                 self.meter.plan.grant(oid, plan_refund, period_end=plan_pe,
                                       entry_id=f"settle-plan:{s}:{non}", issued_at=now_ts)
@@ -323,7 +348,12 @@ class LaunchGate:
         if expect_org_id is not None and doc.org_id != expect_org_id:
             return {"ok": False, "error": "this lease belongs to a different org"}
         try:
-            from vigil_integration.live.credit_lease_broker import write_credit_lease
+            from vigil_integration.live.credit_lease_broker import is_lease_settled, write_credit_lease
+            # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
+            # bearer capability is resurrected on the seam.
+            if is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
+                return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
+                        "re-published"}
             write_credit_lease(self._seam_base(), doc.engagement_slug, signed, owner_root)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}

@@ -144,7 +144,7 @@ def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
         return False, "no owner authority trust root to verify the lease against (fail-closed)"
     try:
         from vigil_core import verify_credit_launch_lease
-        from vigil_integration.live.credit_lease_broker import read_credit_lease
+        from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
     except Exception as e:  # noqa: BLE001
         return False, f"lease seam/verify unavailable (fail-closed): {type(e).__name__}"
     bundle = read_credit_lease(base, safe)
@@ -169,6 +169,15 @@ def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
         return False, f"lease window unreadable (fail-closed): {type(e).__name__}"
     if not (nb <= t < na):
         return False, "lease is outside its validity window"
+    # K4-1 / K5: a lease whose (slug, nonce) was SETTLED/CANCELED is no longer a runnable launch capability —
+    # refuse on BOTH the arm (consume=True) and the enqueue pre-check (consume=False). Belt-and-braces beyond
+    # the seam tombstone (which already removes the bundle so read_credit_lease returns None in the common
+    # case); this catches a stale/re-published copy.
+    try:
+        if is_lease_settled(base, safe, doc.nonce):
+            return False, "lease has been settled/canceled (no longer a runnable launch capability)"
+    except Exception as e:  # noqa: BLE001 — an unreadable marker falls through (the floor/tombstone are primary)
+        pass
     if consume:
         # ms resolution REDUCES (does not eliminate) same-second re-lease collisions on the integer floor;
         # same-ms re-leases and backward clock steps still collide — see the KNOWN LIMITATION in the module

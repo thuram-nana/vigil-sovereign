@@ -47,6 +47,34 @@ def test_write_read_round_trip_and_verifies():
     assert got.signed_lease.document.units_reserved == 10
 
 
+# --- K4-1 / K5 close-out: settlement markers + tombstones ---------------------------------------------
+def test_settlement_marker_record_is_idempotent_and_checked():
+    base = tempfile.mkdtemp()
+    assert B.is_lease_settled(base, "cust_abc123", "n1") is False     # absent -> not settled
+    B.record_lease_settlement(base, "cust_abc123", "n1")
+    B.record_lease_settlement(base, "cust_abc123", "n1")              # idempotent re-record
+    assert B.is_lease_settled(base, "cust_abc123", "n1") is True
+    assert B.is_lease_settled(base, "cust_abc123", "n2") is False     # a DIFFERENT nonce (re-lease) is not settled
+    assert B.list_credit_leases(base) == []                          # the sibling marker dir never pollutes the leases glob
+
+
+def test_tombstone_removes_the_published_bundle():
+    base = tempfile.mkdtemp()
+    signed, tr = _signed()
+    B.write_credit_lease(base, "cust_abc123", signed, tr)
+    assert B.read_credit_lease(base, "cust_abc123") is not None
+    assert B.tombstone_credit_lease(base, "cust_abc123") is True
+    assert B.read_credit_lease(base, "cust_abc123") is None           # no longer a runnable bearer capability
+    assert B.tombstone_credit_lease(base, "cust_abc123") is False     # idempotent: no file -> False, never raises
+
+
+def test_settlement_unsafe_slug_is_fail_closed():
+    base = tempfile.mkdtemp()
+    with pytest.raises(ValueError):
+        B.record_lease_settlement(base, "../evil", "n1")
+    assert B.is_lease_settled(base, "../evil", "n1") is False          # unsafe slug -> False, never joined into a path
+
+
 def test_only_public_material_on_disk():
     base = tempfile.mkdtemp()
     signed, tr = _signed()

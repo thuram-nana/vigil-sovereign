@@ -177,3 +177,15 @@ def test_engage_hook_gates_a_customer_authority_under_a_noncust_slug(monkeypatch
                         lambda slug, root, *a, **k: types.SimpleNamespace(issued_by="customer:org_a"))
     with pytest.raises(EngagementRefused):
         _engage_launch_lease_precondition("weird-noncust-slug", "https://apme.cm")
+
+
+# ---- K4-1 / K5: a settled/canceled lease is no longer runnable at the arm -----------------------------
+def test_settled_lease_is_not_runnable(monkeypatch):
+    from vigil_integration.live.credit_lease_broker import record_lease_settlement
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _lease(owner, nonce="n1"))
+    assert LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=False)[0]
+    record_lease_settlement(base, SLUG, "n1")                           # settle/cancel marks this (slug,nonce)
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=False)
+    assert not ok and "settled" in reason.lower()                      # enqueue pre-check refuses it
+    assert not LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0, consume=True)[0]  # arm too
