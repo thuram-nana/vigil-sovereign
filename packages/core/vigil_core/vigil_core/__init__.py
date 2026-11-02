@@ -50,6 +50,10 @@ from .authority import (
     EngagementAuthority, SignedAuthority, TargetEnvironment, authority_signing_bytes,
     sign_engagement_authority, verify_engagement_authority,
 )
+from .monitoring_authority import (
+    MonitoringAuthority, MonitoringMode, SignedMonitoringAuthority, monitoring_authority_signing_bytes,
+    sign_monitoring_authority, verify_monitoring_authority,
+)
 from .target_credentials import (
     CredentialHeader, CredentialRole, SignedTargetCredentials, TargetCredentials, AccountCredential,
     sign_target_credentials, target_credentials_signing_bytes, verify_target_credentials,
@@ -96,6 +100,8 @@ __all__ = [
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "EngagementAuthority", "SignedAuthority", "TargetEnvironment", "authority_signing_bytes",
     "sign_engagement_authority", "verify_engagement_authority",
+    "MonitoringAuthority", "MonitoringMode", "SignedMonitoringAuthority", "monitoring_authority_signing_bytes",
+    "sign_monitoring_authority", "verify_monitoring_authority",
     "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",
     "AccountCredential", "sign_target_credentials", "target_credentials_signing_bytes",
     "verify_target_credentials",
