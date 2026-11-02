@@ -89,5 +89,12 @@ def make_engage_worker(
         seed_url = f"https://{host}"                               # AUTHORITATIVE seed (authority scope, not extra)
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
+        # KNOWN LIMITATION (tracked, K4-5): this is always a FRESH arm — run_engagement's lease precondition
+        # consumes the single-use floor (resume defaults False). If the engine crashes AFTER the arm consumed
+        # but before completion, a re-drive re-arms the SAME issued_at and the floor refuses it as a 'replay',
+        # stranding the paid reservation. The sound fix (pass resume=True on a re-drive so the arm re-validates
+        # WITHOUT re-consuming — the K2 resume semantics) belongs in K4-5, which owns the run lifecycle +
+        # completion→settle seam and can distinguish a fresh launch from a resumed one. It is a within-tenant,
+        # fail-CLOSED availability loss (credits recoverable via cancel), never a replay / fail-open hole.
         return runner(slug=job.slug, seed_url=seed_url, **kwargs)
     return _worker

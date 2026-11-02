@@ -83,6 +83,13 @@ def launch_jobs_from_seam(base_dir: Any, *, now: Optional[float] = None) -> "lis
         try:
             job = SecurityJob.normalize(
                 source="api", repo=host, engagement_slug=slug, tenant_id=tenant,
+                # commit carries the lease NONCE so the work-fingerprint (tenant, repo, commit, profile,
+                # policy) is per-LAUNCH, not per-engagement. Without it every launch of the same (org, host)
+                # hashes identically (commit=""), so a genuine re-lease (new nonce) racing an in-flight launch
+                # would collide on `duplicate_fingerprint`, be dropped, and — its delivery marker kept — never
+                # re-enqueue: a separately-paid launch stranded forever. A launch has no git commit, so this
+                # overload is inert to the worker (it seeds from the verified authority scope, never job.commit).
+                commit=nonce,
                 delivery_id=launch_delivery_id(slug, nonce),
                 extra={"seed_url": _seed_url_for(host), "host": host, "nonce": nonce, "org_id": tenant})
         except ValueError:  # an empty host (no target) or other invalid field — fail-closed, no job

@@ -122,6 +122,23 @@ def test_trigger_poll_coalesces_in_the_durable_queue(monkeypatch, tmp_path):
     assert claimed is not None and claimed.job.slug == SLUG and claimed.job.extra["host"] == HOST
 
 
+def test_a_changed_nonce_re_enqueues_and_never_coalesces_a_distinct_re_lease(monkeypatch, tmp_path):
+    # MED (red-pen): a genuine re-lease (NEW nonce) must re-enqueue even while an earlier launch of the SAME
+    # engagement is still in-flight — a DISTINCT delivery_id AND a DISTINCT work-fingerprint (commit=nonce),
+    # so a separately-paid launch is never silently dropped on duplicate_fingerprint.
+    from vigil_integration.jobs.queue import SecurityJobQueue
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _lease(owner, nonce="n1"))
+    q = SecurityJobQueue(str(tmp_path / "q"))
+    j1 = launch_jobs_from_seam(base, now=1000.0)[0]
+    assert q.enqueue(j1).enqueued is True                            # launch n1 enqueues and is in-flight
+    write_credit_lease(base, SLUG, _lease(owner, nonce="n2", issued=2000.0), _owner_root(owner))  # genuine re-lease
+    j2 = launch_jobs_from_seam(base, now=2000.0)[0]
+    assert j2.delivery_id != j1.delivery_id and j2.fingerprint != j1.fingerprint   # distinct on BOTH dedup keys
+    assert q.enqueue(j2).enqueued is True                            # the re-lease is NOT coalesced/dropped
+    assert q.pending_count() == 2                                    # both separately-paid launches queued
+
+
 def test_trigger_poll_is_total_on_a_flaky_seam():
     # a non-existent / unreadable base never crashes the drain — poll() returns [] (model.drain also guards)
     assert LaunchTrigger(base_dir="/nonexistent/\x00bad", now=1000.0).poll() == []

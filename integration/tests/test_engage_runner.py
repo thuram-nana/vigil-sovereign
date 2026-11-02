@@ -129,6 +129,32 @@ def test_gate_refuses_a_live_target_when_the_flag_is_off_and_allows_when_on(monk
     assert on.allowed is True, on.reason                     # a LIVE target is allowed once the owner opts in
 
 
+def test_gate_refuses_a_live_target_via_the_REAL_default_env_read(monkeypatch):
+    # HIGH (red-pen): the fail-closed DEFAULT must be exercised through the REAL posture read, not only an
+    # injected callable — else a fail-OPEN wiring regression (default callable wrong) ships green. No
+    # prod_execution_enabled injected here; the env is UNSET, so the real customer_prod_execution_enabled()
+    # must return False and the gate must refuse the LIVE customer target.
+    monkeypatch.delenv("VIGIL_CUSTOMER_PROD_EXECUTION", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="live")
+    out = build_customer_launch_gate(trust_root=object(), base_dir=base, now=1000.0)(_job())  # NO injected flag
+    assert out.allowed is False and out.denial_code == "customer_prod_disabled"
+    monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")          # explicit owner opt-in via the REAL env
+    on = build_customer_launch_gate(trust_root=object(), base_dir=base, now=1000.0)(_job())
+    assert on.allowed is True, on.reason
+
+
+def test_gate_binds_host_from_authority_scope_ignoring_a_tampered_extra(monkeypatch):
+    # MED (red-pen): the gate must bind the lease-verify host + authorize_action target from the VERIFIED
+    # authority scope[0], never the advisory job.extra. A job whose extra claims a different host still
+    # authorizes against the authority host (the lease exists for the authority host) — proving extra is
+    # ignored (had the gate used extra='evil.example', it would look for a lease there and refuse).
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")                      # lease + authority are for HOST (apme.cm)
+    out = build_customer_launch_gate(trust_root=object(), base_dir=base, now=1000.0)(_job(seed_host="evil.example"))
+    assert out.allowed is True, out.reason                           # bound to the authority host, not the tampered extra
+
+
 def test_gate_does_not_burn_the_single_use_floor(monkeypatch):
     # the scheduling-time gate uses consume=False, so the engine ARM (consume=True) can still consume once.
     from framework.v2.launch_lease import verify_customer_launch_lease
@@ -165,6 +191,21 @@ def test_worker_refuses_an_operator_authority(monkeypatch):
     w = make_engage_worker(trust_root=object(), run=lambda **kw: {"facts": 0})
     with pytest.raises(RuntimeError, match="not a customer engagement authority"):
         w(_job())
+
+
+def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
+    # HIGH (red-pen): the worker's EXECUTION-boundary flag re-check must be exercised through the REAL posture
+    # read (no injected callable). Env unset -> a LIVE customer arm is refused; env enabled -> it runs.
+    monkeypatch.delenv("VIGIL_CUSTOMER_PROD_EXECUTION", raising=False)
+    owner = generate_keypair()
+    _rig(monkeypatch, owner, env="live")
+    w = make_engage_worker(trust_root=object(), run=lambda **kw: {"facts": 0})   # NO injected flag
+    with pytest.raises(RuntimeError, match="production-target customer execution is disabled"):
+        w(_job())
+    monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")          # explicit owner opt-in via the REAL env
+    calls = []
+    w2 = make_engage_worker(trust_root=object(), run=lambda **kw: calls.append(kw) or {"facts": 1})
+    assert w2(_job())["facts"] == 1 and calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]
 
 
 # ---- the runner: execution SOLELY via run_one ---------------------------------------------------------
@@ -225,3 +266,26 @@ def test_runner_worker_error_marks_failed_and_releases_delivery(monkeypatch, tmp
     assert out.state == "failed" and "engine blew up" in out.reason
     # a FAILED run released its permanent delivery marker, so the same (slug, nonce) can be re-driven
     assert runner.queue.enqueue(job).enqueued is True
+
+
+def test_runner_refuses_a_live_customer_by_default_and_runs_only_when_enabled(monkeypatch, tmp_path):
+    # MED (red-pen): the REALISTIC customer shape is env='live' (add_customer_target always mints LIVE). Drive
+    # BOTH the real default (unset env → refused end-to-end) AND the owner-enabled path (engine runs → done).
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="live")
+    monkeypatch.setenv("CRUCIBLE_TENANT", ORG)
+    monkeypatch.delenv("VIGIL_CUSTOMER_PROD_EXECUTION", raising=False)
+    ran = []
+    r1 = make_engage_scan_runner(str(tmp_path / "q1"), base_dir=base, trust_root=object(), now=1000.0,
+                                 run=lambda **kw: ran.append(kw), assert_tenant=lambda: None)
+    r1.queue.enqueue(LaunchTrigger(base_dir=base, now=1000.0).poll()[0])
+    out = r1.run_one()
+    assert out.state == "refused" and out.denial_code == "customer_prod_disabled" and not ran   # default off
+    monkeypatch.setenv("VIGIL_CUSTOMER_PROD_EXECUTION", "1")          # deliberate gated owner opt-in
+    calls = []
+    r2 = make_engage_scan_runner(str(tmp_path / "q2"), base_dir=base, trust_root=object(), now=1000.0,
+                                 run=lambda **kw: calls.append(kw) or {"facts": 2}, assert_tenant=lambda: None)
+    r2.queue.enqueue(LaunchTrigger(base_dir=base, now=1000.0).poll()[0])
+    out2 = r2.run_one()
+    assert out2.state == "done", out2.reason                         # the realistic LIVE production path runs
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}"}]
