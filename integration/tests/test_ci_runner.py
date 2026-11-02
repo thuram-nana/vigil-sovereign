@@ -10,6 +10,8 @@ Pins:
 
 from __future__ import annotations
 
+import pytest
+
 from vigil_integration.jobs.authorize import GateOutcome
 from vigil_integration.jobs.ci_runner import (
     FAIL_ON_CHOICES,
@@ -19,6 +21,11 @@ from vigil_integration.jobs.ci_runner import (
     status_note,
 )
 from vigil_integration.jobs.ci_trigger import ci_job_from_inputs
+
+# run_ci_scan drains through SecurityJobQueue, which lazy-imports framework.v2.engagement_scheduler
+# (jobs/queue.py); framework is NOT on the sovereign-only two-env leg, so skip cleanly there and run in the
+# offense/integration CI leg (same posture as test_webhook_drain / test_jobs_securityjob_slice1).
+pytest.importorskip("framework.v2.engagement_scheduler", reason="framework (offense) not importable in the sovereign leg")
 
 _ALLOW = lambda job: GateOutcome(True, "test-allow")              # noqa: E731
 _DENY = lambda job: GateOutcome(False, "test-deny", "policy")     # noqa: E731

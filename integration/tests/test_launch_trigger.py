@@ -17,6 +17,8 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from vigil_core import (
     AuthorizerKey, CreditLaunchLease, TrustRoot, generate_keypair, sign_credit_launch_lease,
 )
@@ -24,6 +26,12 @@ from vigil_integration.jobs.launch_trigger import (
     LaunchTrigger, launch_delivery_id, launch_jobs_from_seam,
 )
 from vigil_integration.live.credit_lease_broker import record_lease_settlement, write_credit_lease
+
+# These tests exercise the launch-trigger's framework-side verify (they monkeypatch
+# framework.v2.authority.store and import framework.v2.launch_lease). framework is NOT on the sovereign-only
+# two-env leg, so skip cleanly there and run in the offense/integration CI leg — the same posture as
+# test_findings_crossing / test_jobs_securityjob_slice1.
+pytest.importorskip("framework.v2.authority.store", reason="framework (offense) not importable in the sovereign leg")
 
 SLUG = "cust_abc123"
 HOST = "apme.cm"

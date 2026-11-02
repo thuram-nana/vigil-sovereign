@@ -33,6 +33,10 @@ from vigil_integration.jobs.queue import SecurityJobQueue
 from vigil_integration.launch_drain import LaunchSeamDrain
 from vigil_integration.live.credit_lease_broker import record_lease_settlement, write_credit_lease
 
+# The drain's keyless verify imports framework LAZILY; framework is NOT on the sovereign-only two-env leg,
+# so skip cleanly there and run in the offense/integration CI leg (same posture as test_launch_trigger).
+pytest.importorskip("framework.v2.authority.store", reason="framework (offense) not importable in the sovereign leg")
+
 SLUG = "cust_abc123"
 HOST = "apme.cm"
 ORG = "org_a"

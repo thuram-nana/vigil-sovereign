@@ -32,6 +32,11 @@ from vigil_integration.jobs.launch_trigger import LaunchTrigger, launch_delivery
 from vigil_integration.jobs.model import SecurityJob
 from vigil_integration.live.credit_lease_broker import record_lease_settlement, write_credit_lease
 
+# The gate/worker import framework LAZILY (framework.v2.authority.store etc.); framework is NOT on the
+# sovereign-only two-env leg, so skip cleanly there and run in the offense/integration CI leg (same posture
+# as test_launch_trigger / test_jobs_securityjob_slice1).
+pytest.importorskip("framework.v2.authority.store", reason="framework (offense) not importable in the sovereign leg")
+
 SLUG, HOST, ORG = "cust_abc123", "apme.cm", "org_a"
 
 
