@@ -132,6 +132,12 @@ assert "strix" not in _m, "jobs.ci_trigger must not import strix at module scope
 import vigil_integration.jobs.launch_trigger  # K4-2: the customer-launch trigger — framework (verify) LAZY (produces, never runs)
 assert "framework" not in _m, "jobs.launch_trigger must not import framework at module scope (verify is lazy)"
 assert "strix" not in _m, "jobs.launch_trigger must not import strix at module scope"
+import vigil_integration.jobs.engage_worker  # K4-3: the customer-launch worker — framework (engage/authority) LAZY
+assert "framework" not in _m, "jobs.engage_worker must not import framework at module scope (engage is lazy)"
+assert "strix" not in _m, "jobs.engage_worker must not import strix at module scope"
+import vigil_integration.jobs.launch_runner  # K4-3: assemble the customer-launch execution path — framework LAZY
+assert "framework" not in _m, "jobs.launch_runner must not import framework at module scope (gate/worker/queue defer it)"
+assert "strix" not in _m, "jobs.launch_runner must not import strix at module scope"
 import vigil_integration.live.ci_checkout  # W4: the CI-local checkout + changed-files seams (git-local, no API)
 assert "framework" not in _m, "live.ci_checkout must not import framework at module scope (stdlib + injected runner)"
 assert "strix" not in _m, "live.ci_checkout must not import strix at module scope"
