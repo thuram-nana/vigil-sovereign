@@ -35,27 +35,39 @@ from .model import SecurityJob
 _ATTEMPTS_DIRNAME = ".engage-attempts"
 
 
-def _mark_attempt_and_is_redrive(base_dir: Any, slug: str, nonce: str) -> bool:
-    """Record a durable per-``(slug, nonce)`` arm-attempt marker and return whether an attempt was ALREADY
-    recorded (a RE-DRIVE). Atomic ``O_EXCL`` create: the FIRST attempt creates it and returns ``False`` (a
-    fresh arm — ``run_engagement`` consumes the single-use floor); any later attempt finds it and returns
-    ``True`` (resume — the arm re-validates WITHOUT re-burning the floor, so a crash-after-consume re-delivery
-    is not stranded as a 'replay'). FAIL-SAFE: if the marker store is unusable, returns ``False`` (a fresh arm
-    — it never silently resumes an un-attempted lease, preserving single-use; the degenerate case falls back
-    to today's fail-closed behaviour). The marker name is ``sha256(slug\\x00nonce)`` so it is path-safe for any
-    slug/nonce, and a genuine re-lease (new nonce) gets a NEW marker ⇒ a fresh arm."""
+#: A customer launch re-drives (resume) on a transient worker failure up to this many arm attempts; the LAST
+#: attempt is TERMINAL — only its failure emits a refunding FAILED completion. This bounds the FAILED emit to
+#: a terminal abandonment so a transient-fail-then-succeed (re-drive) never spools a FAILED that would RACE
+#: the eventual COMPLETED into a free run, AND a permanently-failing launch still terminates (the terminal
+#: FAILED settles + tombstones the lease, so the launch poller stops re-enqueuing it).
+_MAX_ARM_ATTEMPTS = 3
+
+
+def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> int:
+    """Record a durable per-``(slug, nonce)`` arm attempt and return its 1-based ATTEMPT COUNT. Numbered
+    ``O_EXCL`` markers under ``.engage-attempts``: the Nth call creates ``<key>.<N>`` and returns N. Count 1 is
+    a FRESH arm (``run_engagement`` consumes the single-use floor); count > 1 is a RE-DRIVE (resume — the arm
+    re-validates WITHOUT re-burning the floor, so a crash-after-consume re-delivery is not stranded as a
+    'replay'); count >= ``_MAX_ARM_ATTEMPTS`` is the TERMINAL attempt (its failure is a real abandonment, not a
+    transient retry). FAIL-SAFE: an unusable marker store returns 1 (a FRESH, NON-terminal arm — it never
+    silently resumes an un-attempted lease, and never reports TERMINAL off a broken store, so a transient
+    failure is never mis-refunded). The key is ``sha256(slug\\x00nonce)``; a genuine re-lease (new nonce) gets a
+    NEW key ⇒ a fresh count."""
     base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
     key = hashlib.sha256((str(slug) + "\x00" + str(nonce)).encode("utf-8")).hexdigest()
     try:
         d = Path(base) / _ATTEMPTS_DIRNAME
         d.mkdir(parents=True, exist_ok=True)
-        fd = os.open(d / f"{key}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(fd)
-        return False                                   # THIS call created it → first attempt → fresh arm
-    except FileExistsError:
-        return True                                    # already recorded → re-drive → resume
+        for n in range(1, _MAX_ARM_ATTEMPTS + 2):      # 1..MAX+1; the first free slot is THIS attempt's number
+            try:
+                fd = os.open(d / f"{key}.{n}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(fd)
+                return n
+            except FileExistsError:
+                continue
+        return _MAX_ARM_ATTEMPTS + 1                    # all slots taken ⇒ beyond max (terminal)
     except OSError:
-        return False                                   # fail-safe: cannot record → fresh arm (never auto-resume)
+        return 1                                       # fail-safe: fresh, NON-terminal arm (never auto-resume)
 
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
 #: (``add_customer_target``), so the engine's destructive-confirm gate already refuses destructive tools; the
@@ -150,7 +162,9 @@ def make_engage_worker(
         # bind / settlement, and two concurrent arms of one slug are serialized by the per-slug run lease; the
         # marker only governs whether THIS (slug,nonce) re-burns its own floor. No nonce ⇒ fresh arm (safe).
         nonce = str((job.extra or {}).get("nonce") or "")
-        resume = _mark_attempt_and_is_redrive(base_dir, job.slug, nonce) if nonce else False
+        attempt = _mark_attempt(base_dir, job.slug, nonce) if nonce else 1
+        resume = attempt > 1                                       # a re-drive resumes (K4-5a), never re-burns the floor
+        terminal = attempt >= _MAX_ARM_ATTEMPTS                    # the LAST attempt: its failure is a real abandonment
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
         kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
@@ -167,8 +181,12 @@ def make_engage_worker(
         sgnrs = (signers if signers is not None else _launch_governance_signers(base_dir)) if do_settle else None
         try:
             result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
-        except Exception:  # noqa: BLE001 — a run FAILURE refunds (FAILED settle) then re-raises; interrupts pass through
-            if do_settle:
+        except Exception:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
+            # Emit a refunding FAILED completion ONLY on the TERMINAL attempt. A transient failure (attempt <
+            # _MAX_ARM_ATTEMPTS) re-drives WITHOUT a premature refund, so it can never spool a FAILED that RACES
+            # the eventual COMPLETED into a free run (the K4-5 red-pen HIGH). The terminal FAILED settles +
+            # tombstones the lease, so a permanently-failing launch still terminates (the poller stops re-driving).
+            if do_settle and terminal:
                 try:
                     from .completion_signal import emit_completion_signal
                     emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="failed",

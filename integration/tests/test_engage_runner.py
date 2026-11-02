@@ -347,7 +347,10 @@ def test_worker_emits_a_verifiable_completed_settle_signal(monkeypatch, tmp_path
     assert ok, reason
 
 
-def test_worker_emits_a_failed_settle_signal_then_reraises(monkeypatch, tmp_path):
+def test_worker_failed_emit_is_terminal_only_not_on_a_transient_redrive(monkeypatch, tmp_path):
+    # K4-5 red-pen fold (HIGH free-run): a transient failure RE-DRIVES without emitting a refunding FAILED
+    # (which would race the eventual COMPLETED into a free run). Only the TERMINAL attempt's failure refunds.
+    from vigil_integration.jobs.engage_worker import _MAX_ARM_ATTEMPTS
     owner = generate_keypair()
     base = _rig(monkeypatch, owner, env="twin")
     cs = str(tmp_path / "completion-spool")
@@ -356,10 +359,37 @@ def test_worker_emits_a_failed_settle_signal_then_reraises(monkeypatch, tmp_path
         raise RuntimeError("engine blew up")
 
     w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs, run=_boom)
-    with pytest.raises(RuntimeError, match="engine blew up"):      # the run error still propagates (JobRunner -> failed)
-        w(_job())
+    for _ in range(_MAX_ARM_ATTEMPTS - 1):                         # attempts 1..MAX-1 are transient re-drives
+        with pytest.raises(RuntimeError, match="engine blew up"):
+            w(_job(nonce="nX"))
+    assert not _completion_envelopes(cs)                          # NO premature refund emitted during re-drive
+    with pytest.raises(RuntimeError, match="engine blew up"):      # the MAX-th attempt is TERMINAL abandonment
+        w(_job(nonce="nX"))
     envs = _completion_envelopes(cs)
-    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "failed"   # a crashed run refunds (consumed=0)
+    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "failed"   # terminal abandonment refunds (consumed=0)
+
+
+def test_worker_transient_fail_then_success_emits_only_completed_no_free_run(monkeypatch, tmp_path):
+    # K4-5 red-pen fold (HIGH free-run): a run that fails once (transient) then SUCCEEDS on re-drive must emit
+    # ONLY a COMPLETED (charge) — never a FAILED that could settle-first and refund the completed run.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    calls = {"n": 0}
+
+    def _flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {"facts": 1}
+
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs, run=_flaky)
+    with pytest.raises(RuntimeError, match="transient"):           # attempt 1 fails (transient, < MAX) → no emit
+        w(_job(nonce="nY"))
+    assert not _completion_envelopes(cs)                           # NO refund spooled on the transient failure
+    assert w(_job(nonce="nY")) == {"facts": 1}                     # attempt 2 (resume) succeeds
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "completed"   # ONLY completed → no free-run race
 
 
 def test_worker_emit_disabled_emits_no_settle_signal(monkeypatch, tmp_path):
