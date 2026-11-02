@@ -17,6 +17,7 @@ it hops to the Provisioner. FATAL-2: sovereign-only, ``assert_no_offense()`` at 
 """
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -96,3 +97,56 @@ class PasswordIdentityProvider(IdentityProvider):
         # Mailbox control was proven at signup (the single-use verify token); a password customer's email is
         # verified by construction.
         return CustomerIdentity(method=METHOD_PASSWORD, email=acct.email, email_verified=True)
+
+
+class GoogleOidcIdentityProvider(IdentityProvider):
+    """Google OIDC (and any asymmetric OIDC IdP). ``verify`` exchanges the authorization ``code`` (with the
+    PKCE ``code_verifier``) at the token endpoint, RE-EXECUTES the id_token signature + every registered-claim
+    check against the IdP JWKS (``ui/oidc.py`` — asymmetric-only; ``alg:none``/HS* refused by construction;
+    single-use ``nonce`` bound at login defeats replay), and THEN applies the customer-plane gate:
+
+      * ``email_verified`` MUST be the JSON boolean ``True`` — a string ``"true"``, a ``1``, or an absent
+        claim is REFUSED. The customer plane AUTO-PROVISIONS on a first verified sign-in, so a laxly-"verified"
+        email would be an account-provisioning vector (claim an unverified address);
+      * the STABLE ``(iss, sub)`` pair is the binding the Provisioner resolves/auto-provisions against; the
+        ``email`` is a provisioning hint only (and the anti-takeover collision key), never the binding.
+
+    DOCTRINE — identity, not authority: returns a ``CustomerIdentity`` carrying ``(iss, sub, email,
+    email_verified=True)`` and NO role. The owner key, the ``client_secret`` and the egress all live on the
+    Provisioner side (this runs there); the verification primitives (``exchange_code`` / ``verify_id_token`` /
+    ``JwksProvider``) are INJECTED so tests use a local fake IdP with no network and production injects the
+    host-allowlisted transport (``oidc.host_allowlisted_transport``). ``config`` is a ``ui.oidc.OidcConfig``."""
+
+    method = METHOD_GOOGLE_OIDC
+
+    def __init__(self, config, *, http_post, jwks_fetcher, now_fn=None):
+        self._config = config
+        self._http_post = http_post
+        self._jwks_fetcher = jwks_fetcher
+        self._now = now_fn or time.time
+
+    def verify(self, *, code: str, code_verifier: str, nonce: str, **_ctx: Any) -> CustomerIdentity:
+        from . import oidc as _oidc
+        try:
+            token_resp = _oidc.exchange_code(self._config, code, code_verifier=code_verifier,
+                                             http_post=self._http_post)
+            provider = _oidc.JwksProvider(self._config.jwks_uri, fetcher=self._jwks_fetcher)
+            claims = _oidc.verify_id_token(
+                token_resp["id_token"], jwks_keys=provider.keys(), issuer=self._config.issuer,
+                client_id=self._config.client_id, expected_nonce=nonce,
+                allowed_algs=self._config.signing_algs, now=float(self._now()),
+                skew=self._config.clock_skew_seconds)
+        except _oidc.OidcError as e:
+            raise IdentityRefused(f"google id_token verification failed: {e}") from e
+        except Exception as e:  # noqa: BLE001 — an IdP/network fault is a fail-closed refusal, never a crash
+            raise IdentityRefused("google token exchange or verification failed") from e
+        iss = str(claims.get("iss", "")).strip()
+        sub = str(claims.get("sub", "")).strip()
+        if not iss or not sub:
+            raise IdentityRefused("verified id_token carries no (iss, sub) binding")
+        # STRICT: the JSON boolean True ONLY. `is True` rejects the string "true", 1, and an absent claim.
+        if claims.get("email_verified") is not True:
+            raise IdentityRefused("google identity is not email_verified")
+        email = str(claims.get("email", "")).strip().lower() or None
+        return CustomerIdentity(method=METHOD_GOOGLE_OIDC, email=email, email_verified=True,
+                                federated_iss=iss, federated_sub=sub)

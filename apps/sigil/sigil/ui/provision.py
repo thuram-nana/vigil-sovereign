@@ -37,7 +37,8 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from .customer_identity import CustomerIdentity, IdentityRefused, PasswordIdentityProvider  # noqa: E402
+from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
+                                METHOD_GOOGLE_OIDC, PasswordIdentityProvider)
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
@@ -89,6 +90,21 @@ def _signup_username(token: str) -> str:
     return "cust_" + hashlib.sha256(("u:" + str(token)).encode("utf-8")).hexdigest()[:24]
 
 
+def _federated_username(iss: str, sub: str) -> str:
+    """The customer username a Google auto-provision DETERMINISTICALLY maps to — a pure function of the
+    STABLE `(iss, sub)` pair (domain-separated `"f:"`, distinct from the `"u:"`/`"o:"` email-signup spaces).
+    Determinism makes a crashed-and-retried `oidc_finish` re-target the SAME account/org (idempotent-forward,
+    like `confirm_signup`), and lets the anti-takeover collision check distinguish a retry of THIS federated
+    provision (same derived username) from a genuine email collision with a different account."""
+    return "cust_" + hashlib.sha256(("f:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
+
+
+def _federated_org_id(iss: str, sub: str) -> str:
+    """The org id a Google auto-provision DETERMINISTICALLY maps to (pure function of `(iss, sub)`,
+    domain-separated `"fo:"`). A valid `_TENANT_RE` tenant id; idempotent re-target on a retry."""
+    return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
+
+
 class Provisioner:
     """The owner-signed signing service. Registries + ledgers are INJECTED (the registries carry the owner
     key; the edge never constructs this). `expose_dev_tokens` is a DEV-ONLY escape hatch that returns the
@@ -96,6 +112,7 @@ class Provisioner:
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
+                 customer_credentials=None, oidc_provider=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -104,6 +121,12 @@ class Provisioner:
         self.wallet = wallet
         self.email_tokens = email_tokens
         self.rate_limiter = rate_limiter
+        # Slice E2a/E2b — the owner-signed customer-credential registry (the (iss,sub) / passkey substrate)
+        # and the Google-OIDC identity provider. `customer_credentials` is wired whenever the provisioner is
+        # built (cheap, and `finish_login`'s federated branch resolves through it); `oidc_provider` is wired
+        # ONLY when `customer_oidc_enabled()` (default OFF ⇒ None ⇒ `oidc_finish` fail-closed, no egress).
+        self.customer_credentials = customer_credentials
+        self.oidc_provider = oidc_provider
         # Slice G0 — the ownership-proof FETCHER (reads a customer's published well-known token). None ⇒
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
@@ -310,13 +333,112 @@ class Provisioner:
 
     def _resolve_customer_username(self, identity: CustomerIdentity) -> "Optional[str]":
         """Map a verified CustomerIdentity to a CustomerRegistry username by its resolution key. Password
-        resolves by the (already-verified) email. The STABLE `(iss,sub)` federated binding and the passkey
-        `credential_id` resolve through the owner-signed customer-credential registry — wired in E2a/E3b;
-        until then an OIDC/passkey identity resolves to None (fail-closed, no login) by design."""
+        resolves by the (already-verified) email. A Google-OIDC identity resolves by the STABLE `(iss, sub)`
+        federated binding through the owner-signed customer-credential registry (`by_federated`, fail-closed
+        on 0 or an ambiguous >1) — NEVER by the email (an email is only a provisioning hint, so a different
+        Google account that happens to share an email can never resolve to someone else's customer). The
+        passkey `credential_id` branch arrives in E3b. A method with no wired substrate resolves to None
+        (fail-closed, no login) — so the E3a rig (no `customer_credentials`) still refuses an OIDC login."""
         if identity.method == PasswordIdentityProvider.method:
             acct = self.customers.by_email(identity.email or "")
             return acct.username if acct is not None else None
+        if identity.method == METHOD_GOOGLE_OIDC:
+            if self.customer_credentials is None:
+                return None
+            return self.customer_credentials.by_federated(identity.federated_iss or "",
+                                                          identity.federated_sub or "")
         return None
+
+    # -- Google OIDC login (E2b) -------------------------------------------------------------------
+    def oidc_finish(self, *, code: str, code_verifier: str, nonce: str, ip: str = "",
+                    now: "Optional[float]" = None) -> dict:
+        """E2b — the SECRET-bearing Google-OIDC login tail. The keyless edge already verified the browser
+        binding (single-use state + sid-cookie hash) and hops {code, code_verifier, nonce}; THIS owner-key-
+        holding service does the secret-bearing token exchange + id_token verification (via
+        `GoogleOidcIdentityProvider` — strict `email_verified`, `(iss, sub)` binding, egress host-allowlisted),
+        then resolves the verified identity:
+
+          * an EXISTING `(iss, sub)` federated binding → log that customer in (the common case after the
+            first sign-in);
+          * a FIRST verified sign-in → AUTO-PROVISION a fresh PASSWORDLESS customer + org + trial under the
+            SAME global signup cap, and owner-sign the `(iss, sub)` binding. ANTI-TAKEOVER (NON-NEGOTIABLE):
+            NEVER auto-attach to an existing PASSWORD account by a matching email — an email collision is
+            refused (the human already owns that mailbox's VIGIL account; linking Google to it requires an
+            explicit in-session verified link, a later slice). The binding is `(iss, sub)`, never the email.
+
+        Then the SHARED `finish_login` tail → {username, orgs} the keyless edge mints a CUSTOMER cookie from
+        (never an operator bearer; `CustomerPrincipal` carries no global role). Fail-closed when customer
+        Google sign-in is not enabled/configured (`oidc_provider is None`). The check-then-provision is atomic
+        under the spine lock, so two concurrent first-sign-ins of the same Google account mint exactly one
+        customer + trial."""
+        t = self._now() if now is None else float(now)
+        if self.oidc_provider is None or self.customer_credentials is None:
+            raise ProvisionError("customer Google sign-in is not enabled on this deployment")
+        self._rate_guard(f"oidc:ip:{ip}", now=t)            # best-effort per-ip throttle on the federated attempt
+        try:
+            identity = self.oidc_provider.verify(code=code, code_verifier=code_verifier, nonce=nonce)
+        except IdentityRefused:
+            self.rate_limiter.record_failure(f"oidc:ip:{ip}", now=t)
+            self._audit("oidc_login", outcome="denied")
+            raise ProvisionDenied("google sign-in could not be verified")
+        self.rate_limiter.record_success(f"oidc:ip:{ip}")
+        iss = identity.federated_iss or ""
+        sub = identity.federated_sub or ""
+        with self._lock:
+            # the (iss,sub) binding is the key — resolved atomically with the potential auto-provision so two
+            # concurrent first-sign-ins can't double-mint. An existing binding is a straight login; a missing
+            # one auto-provisions (the anti-takeover email-collision gate lives inside).
+            if self.customer_credentials.by_federated(iss, sub) is None:
+                self._link_or_provision_federated(identity, now=t)
+        result = self.finish_login(identity)                # re-resolves by (iss,sub) live; role-free tail
+        self._audit("oidc_login", requester=result["username"], target=result["username"], outcome="ok")
+        return result
+
+    def _link_or_provision_federated(self, identity: CustomerIdentity, *, now: float) -> str:
+        """Caller holds the lock and has confirmed NO existing `(iss, sub)` binding. AUTO-PROVISION a fresh
+        passwordless customer + org + trial for this verified Google identity and owner-sign the `(iss, sub)`
+        binding — OR reconcile an in-flight retry (the deterministic federated account already exists, e.g. a
+        crash between `create` and `link_federated`). ANTI-TAKEOVER: refuse when the verified email is already
+        bound to a DIFFERENT customer (never auto-attach Google to a password account by email); ONLY the
+        account this federated identity DETERMINISTICALLY maps to may share the email (the idempotent-retry
+        case). Bounded by the GLOBAL signup cap (shared with email signup — one Sybil ceiling on real money).
+        Returns the (new or reconciled) username."""
+        iss = identity.federated_iss or ""
+        sub = identity.federated_sub or ""
+        email = (identity.email or "").strip().lower()
+        username = _federated_username(iss, sub)
+        org_id = _federated_org_id(iss, sub)
+        # ANTI-TAKEOVER (NON-NEGOTIABLE): an email already owned by a DIFFERENT customer is NEVER auto-linked.
+        # Only THIS federated identity's own deterministic account may carry the email (an idempotent retry).
+        if email:
+            existing = self.customers.by_email(email)
+            if existing is not None and existing.username != username:
+                self._audit("oidc_login", target=email, outcome="email_collision")
+                raise ProvisionDenied(
+                    "an account already exists for this email; sign in with your password, then link Google")
+        # GLOBAL signup cap (anti-trial-farming) — the SAME ceiling email signup uses, checked under the lock.
+        if self.signup_cap_limiter is not None:
+            capped = self.signup_cap_limiter.locked("signup:global", now=now)
+            if capped is not None:
+                raise ProvisionRateLimited(capped)
+        # idempotent-forward mints: LWW on the deterministic ids; wallet dedups on the deterministic entry_id;
+        # the passwordless customer is created ONLY if absent (a retry reuses it). password=None ⇒ an
+        # OIDC-only customer (no scrypt hash on the spine); the email is the verified Google mailbox.
+        if self.customers.customer(username) is None:
+            self.customers.create(email or f"{username}@google-oidc.local", password=None, username=username,
+                                  issued_at=self._next_issued())
+        self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
+        self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
+        self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=f"trial:{org_id}",
+                          source_ref="signup-google", issued_at=self._next_issued())
+        # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
+        # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
+        self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
+        self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created-google",
+                    critical=True)
+        if self.signup_cap_limiter is not None:             # count this signup toward the cap (post-commit)
+            self.signup_cap_limiter.record_failure("signup:global", now=now)
+        return username
 
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
@@ -657,18 +779,45 @@ class Provisioner:
                 "not_after": result["not_after"]}
 
 
-def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time) -> Provisioner:
+def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time,
+                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None) -> Provisioner:
     """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
     the persisted owner identity — THIS is the only process that holds it), the filesystem email-token +
     login-rate-limit ledgers rooted under SIGIL_HOME (config), and the configured EmailSender
     (OFF-by-default NullEmailSender unless SIGIL_EMAIL_* is set). The keyless customer edge NEVER calls
-    this; it reaches the sovereign provisioner routes over loopback + the hop key."""
+    this; it reaches the sovereign provisioner routes over loopback + the hop key.
+
+    `customer_oidc_http_post` / `customer_oidc_jwks_fetcher` are OPTIONAL injection hooks for the customer
+    Google-OIDC provider (mirrors the operator `oidc_http_post`/`oidc_jwks_fetcher`): when BOTH are None
+    (production) the provider uses the HOST-ALLOWLISTED egress transport; a test injects both (a local fake
+    IdP) so no network is touched."""
     from .. import config
+    from ..governor.customer_credentials import CustomerCredentialRegistry
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
+    # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
+    # with the host-ALLOWLISTED egress transport; the client secret + the token/JWKS egress live ONLY here
+    # (never the keyless edge). A misconfig (missing client_id/redirect) leaves it None ⇒ oidc_finish refuses
+    # (fail-closed) WITHOUT breaking password login — build_provisioner must never raise for the common paths.
+    oidc_provider = None
+    if config.customer_oidc_enabled():
+        from .customer_identity import GoogleOidcIdentityProvider
+        from .oidc import OidcConfig, OidcError, host_allowlisted_transport
+        try:
+            oidc_cfg = OidcConfig.from_settings(config.customer_oidc_settings())
+        except OidcError:
+            oidc_cfg = None
+        if oidc_cfg is not None:
+            # production ⇒ the allowlisted transport (both hooks None); a test injects BOTH (a fake IdP).
+            if customer_oidc_http_post is None and customer_oidc_jwks_fetcher is None:
+                poster, fetcher = host_allowlisted_transport(config.CUSTOMER_OIDC_EGRESS_ALLOWLIST)
+            else:
+                poster, fetcher = customer_oidc_http_post, customer_oidc_jwks_fetcher
+            oidc_provider = GoogleOidcIdentityProvider(oidc_cfg, http_post=poster, jwks_fetcher=fetcher,
+                                                       now_fn=now_fn)
     return Provisioner(
         store,
         customers=CustomerRegistry(store),
@@ -689,6 +838,10 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
         # (config.ownership_fetcher() returns None otherwise ⇒ target_verify fail-closed). No surprise egress.
         target_fetcher=config.ownership_fetcher(),
+        # E2a/E2b — the owner-signed customer-credential registry (always wired; finish_login's federated
+        # branch resolves through it) + the Google-OIDC provider (None unless customer_oidc_enabled()).
+        customer_credentials=CustomerCredentialRegistry(store),
+        oidc_provider=oidc_provider,
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         expose_dev_tokens=expose_dev_tokens,

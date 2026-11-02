@@ -22,15 +22,17 @@ Stdlib + sovereign `reuse`/`config`/`sessions` + `vigil_core` only — no framew
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import json
+import secrets
 import socket
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -43,6 +45,11 @@ from ..bridge.daemon import bind_ok  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
+# E2b — the SHORT-LIVED Google-OIDC browser-binding cookie: HttpOnly, SameSite=Lax (must ride the IdP's
+# top-level GET redirect back to us), Path-scoped to /api/customer/oidc, Max-Age 600s. Its sha256 is bound to
+# the single-use `state` at login and re-checked at the callback (anti login-CSRF). DISTINCT from the session
+# cookie AND from the operator plane's `sigil_oidc_sid`.
+_OIDC_SID_COOKIE = "vigil_customer_oidc_sid"
 # Strict CSP for the self-contained customer SPA — the SAME shape as the operator bundle (_BUNDLE_CSP) and the
 # public site: self-only scripts/styles (the shared kit uses addEventListener + CSSOM, never inline handlers
 # or inline <style>), data: images for inline icons, no framing, no off-site form posts. Set as a RESPONSE
@@ -94,6 +101,11 @@ class CustomerServer(ThreadingHTTPServer):
         self.hop_key = str(hop_key or "")
         self.provision_base = str(provision_base).rstrip("/")
         self.sessions = SessionLedger(sessions_dir)
+        # E2b — the edge's OWN single-use OIDC state ledger (state↔nonce↔PKCE verifier↔sid_hash), a SIBLING
+        # dir of the session ledger (its own dir, so a test's temp sessions dir gets an isolated ledger). The
+        # edge holds the PKCE verifier + nonce here (non-secret, browser-binding/anti-replay material); the
+        # client secret + the egress stay in the provisioner.
+        self.oidc_state_dir = Path(str(sessions_dir)).parent / "customer-oidc-state"
         port = self.server_address[1]
 
         def _hp(h: str) -> str:
@@ -266,6 +278,14 @@ class CustomerHandler(BaseHTTPRequestHandler):
                   "/api/customer/assets": "assets_overview"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
+        # Both are served ONLY when customer_oidc_enabled() — otherwise the routes are absent (404), so the
+        # edge is byte-identical to a build without customer OIDC (mirrors the operator route-gating).
+        if path in ("/api/customer/oidc/login", "/api/customer/oidc/callback"):
+            from .. import config as _config
+            if not _config.customer_oidc_enabled():
+                return self._deny(404, "not found")
+            return self._oidc_login() if path.endswith("/login") else self._oidc_callback()
         if path.startswith("/api/"):           # an unknown API route 404s — NEVER fall through to the SPA shell
             return self._deny(404, "not found")
         return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
@@ -312,6 +332,113 @@ class CustomerHandler(BaseHTTPRequestHandler):
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
         return self._json(r, c)
+
+    # --- Google OIDC (E2b): the keyless edge drives the browser-facing half; the secret stays provisioner-side
+    def _oidc_state_store(self):
+        """The edge's single-use OIDC state ledger (state↔nonce↔PKCE verifier↔sid_hash), rooted at the
+        server's `oidc_state_dir`. Reuses the sovereign `ui.oidc.OidcStateStore` (stdlib-only; FATAL-2 clean)."""
+        from .oidc import OidcStateStore
+        return OidcStateStore(self.server.oidc_state_dir)
+
+    def _oidc_sid_cookie(self) -> str:
+        """The value of the short-lived OIDC browser-binding cookie on THIS request (or "" — fail-closed)."""
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        try:
+            from http.cookies import SimpleCookie
+            jar = SimpleCookie()
+            jar.load(raw)
+            m = jar.get(_OIDC_SID_COOKIE)
+            return m.value if m else ""
+        except Exception:  # noqa: BLE001 — a malformed Cookie header is "no binding", never a crash
+            return ""
+
+    def _oidc_login(self):
+        """GET /api/customer/oidc/login — 302 to Google's authorize endpoint with a fresh single-use
+        state+nonce+PKCE-S256 challenge, setting the HttpOnly SameSite=Lax sid cookie whose hash binds the
+        state to THIS browser. Built from the NON-SECRET public config only (the client secret never reaches
+        this keyless edge). Same-origin/Host gated like every edge route; a misconfigured OIDC fails LOUD (500)."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        from .. import config as _config
+        from . import oidc as _oidc
+        try:
+            cfg = _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
+        except _oidc.OidcError:
+            return self._deny(500, "customer google sign-in is enabled but misconfigured")
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        verifier = _oidc.generate_pkce_verifier()
+        challenge = _oidc.pkce_challenge_s256(verifier)
+        sid = secrets.token_urlsafe(32)
+        sid_hash = hashlib.sha256(sid.encode("utf-8")).hexdigest()
+        try:
+            self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
+        except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
+            return self._deny(500, "could not mint an oidc login state")
+        location = _oidc.build_authorize_url(cfg, state, nonce, code_challenge=challenge)
+        cookie = (f"{_OIDC_SID_COOKIE}={sid}; Path=/api/customer/oidc; Max-Age=600; HttpOnly; SameSite=Lax"
+                  + ("; Secure" if is_production_posture() else ""))
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")       # the state/nonce never leak via Referer
+        self.end_headers()
+
+    def _oidc_callback(self):
+        """GET /api/customer/oidc/callback?code&state — Google redirects here. HOST-gated only (NOT
+        Origin/Referer-gated: an IdP top-level redirect legitimately carries a foreign Referer and no Origin;
+        the anti-CSRF binding is the single-use state + the HttpOnly sid-cookie hash, which an attacker cannot
+        forge). Steps, each fail-closed:
+          1. CONSUME the single-use state → bound (nonce, PKCE verifier, sid_hash); replay/unknown → refuse.
+          2. SESSION-BIND: the presenting browser's sid cookie must hash to the bound sid_hash (anti login-CSRF).
+          3. HOP {code, code_verifier, nonce} to the provisioner's secret-bearing oidc_finish → {username, orgs}.
+          4. On success MINT a CUSTOMER session cookie (never an operator bearer) and 302 into the SPA."""
+        if self.headers.get("Host", "") not in self.server.allowed_hosts:
+            return self._deny(403, "denied (host)")
+        q = parse_qs(urlparse(self.path).query)
+        err = (q.get("error", [""])[0] or "")
+        if err:
+            return self._json({"authenticated": False, "error": f"idp returned an error: {str(err)[:120]}"}, 401)
+        code = q.get("code", [""])[0] or ""
+        state = q.get("state", [""])[0] or ""
+        rec = self._oidc_state_store().consume(state)
+        if rec is None:
+            return self._json({"authenticated": False,
+                               "error": "unknown, expired, or already-used oidc state"}, 401)
+        presented = self._oidc_sid_cookie()
+        if not rec.sid_hash or not presented or not hmac.compare_digest(
+                hashlib.sha256(presented.encode("utf-8")).hexdigest(), rec.sid_hash):
+            return self._json({"authenticated": False,
+                               "error": "oidc state is not bound to this browser session"}, 401)
+        # HOP the single-use grant to the provisioner (principal "" — this IS the login; the hop key alone
+        # gates it). The provisioner does the secret-bearing exchange + verify + auto-provision/anti-takeover.
+        c, r = self._provision("oidc_finish", "", {"code": code, "code_verifier": rec.verifier,
+                                                   "nonce": rec.nonce, "ip": self._ip()})
+        if c == 200 and isinstance(r, dict) and r.get("username"):
+            orgs = r.get("orgs") or []
+            active = orgs[0] if orgs else None               # server-bound active org (switch is a later slice)
+            self._mint(r["username"], active)                # sets the CUSTOMER session cookie (never operator)
+            return self._redirect_to_app()                   # 302 into the hash-routed SPA, carrying the session
+        return self._redirect_to_app(ok=False)               # a refusal lands the browser back on the app
+
+    def _redirect_to_app(self, *, ok: bool = True):
+        """End the top-level OIDC flow with a 302 into the SPA root. On success the `_mint`-set session cookie
+        rides along (so the SPA is immediately authenticated); on failure no cookie is set and the SPA shows
+        the signed-out state. A terse `#oidc=err` fragment on failure lets the SPA surface a generic message
+        without leaking why (and without a raw JSON page in the user's browser)."""
+        self.send_response(302)
+        self.send_header("Location", "/" if ok else "/#oidc=err")
+        self.send_header("Content-Length", "0")
+        sc = getattr(self, "_pending_set_cookie", None)
+        if ok and sc:
+            self.send_header("Set-Cookie", sc)
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
 
     def do_POST(self):
         path = urlparse(self.path).path

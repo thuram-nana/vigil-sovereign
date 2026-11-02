@@ -13,13 +13,20 @@ edge pointed at it. Load-bearing invariants (a false-green is the sharpest isola
 """
 from __future__ import annotations
 
+import base64
+import http.client
 import http.cookiejar
+import http.cookies
 import json
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qs, urlparse
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.spine.store import SpineStore
@@ -576,3 +583,189 @@ def test_customer_spa_traversal_refused_and_unknown_api_does_not_leak_the_shell(
         assert c2 == 200 and "application/json" in h2.get("Content-Type", "") and b'"authenticated"' in b2
     finally:
         edge.shutdown()
+
+
+# ======================================================================================================
+# E2b — the customer Google-OIDC round trip over the edge (edge 302 → fake IdP → callback → hop → _mint)
+# ======================================================================================================
+_GOOGLE_ISS = "https://accounts.google.com"
+
+
+def _b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+class _MiniIdP:
+    """A loopback fake Google: one RS256 key, its JWKS, and an id_token minter. Injected into the SOVEREIGN
+    provisioner (customer_oidc_http_post / _jwks_fetcher) so the edge round-trip touches NO network."""
+
+    def __init__(self):
+        self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.kid = "mini-kid"
+        self.next_id_token = None
+
+    def _jwk(self):
+        n = self._key.public_key().public_numbers()
+        return {"kty": "RSA", "kid": self.kid, "use": "sig", "alg": "RS256",
+                "n": _b64u(n.n.to_bytes((n.n.bit_length() + 7) // 8, "big")),
+                "e": _b64u(n.e.to_bytes((n.e.bit_length() + 7) // 8, "big"))}
+
+    def http_post(self, _url, _form):          # the mock token endpoint
+        return {"id_token": self.next_id_token, "token_type": "Bearer"}
+
+    def jwks_fetcher(self, _url):              # the mock JWKS endpoint
+        return {"keys": [self._jwk()]}
+
+    def mint(self, *, nonce, sub="g-sub-1", email="g@gmail.com", email_verified=True):
+        now = int(time.time())
+        claims = {"iss": _GOOGLE_ISS, "aud": "client-123", "sub": sub, "exp": now + 300, "iat": now,
+                  "nonce": nonce, "email": email, "email_verified": email_verified}
+        header = {"alg": "RS256", "typ": "JWT", "kid": self.kid}
+        h, p = _b64u(json.dumps(header).encode()), _b64u(json.dumps(claims).encode())
+        sig = self._key.sign(f"{h}.{p}".encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
+        return f"{h}.{p}.{_b64u(sig)}"
+
+
+def _stack_oidc(tmp_path, monkeypatch, idp, *, enabled=True):
+    """A sovereign cockpit with customer-OIDC enabled + a fake IdP injected, plus the custui edge over the hop."""
+    from sigil import config
+    monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
+    if enabled:
+        monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_CLIENT_ID", "client-123")
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_REDIRECT_URI", "http://127.0.0.1/api/customer/oidc/callback")
+    for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
+        monkeypatch.setattr(config, attr, tmp_path / attr.lower())
+    path = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    ensure_owner_keypair()
+    sov = build_server(token=TOKEN, port=0, spine_path=path,
+                       customer_oidc_http_post=idp.http_post, customer_oidc_jwks_fetcher=idp.jwks_fetcher)
+    threading.Thread(target=sov.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    sport = sov.server_address[1]
+    edge, eport = _edge(f"http://127.0.0.1:{sport}", str(tmp_path / "custsessions"))
+    return sov, edge, eport, sport
+
+
+def _edge_raw(port, path, *, cookie=None):
+    """A no-redirect GET to the edge (http.client never follows 302) → (status, headers, body)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    h = {"Host": f"127.0.0.1:{port}"}
+    if cookie:
+        h["Cookie"] = cookie
+    conn.request("GET", path, headers=h)
+    r = conn.getresponse()
+    body = r.read()
+    out = (r.status, dict(r.getheaders()), body)
+    conn.close()
+    return out
+
+
+def _oidc_login(ep):
+    """GET the edge /oidc/login (no redirect-follow); capture state+nonce from the authorize URL + the sid cookie."""
+    st, hdr, _ = _edge_raw(ep, "/api/customer/oidc/login")
+    assert st == 302, (st, hdr)
+    loc = hdr.get("Location")
+    params = parse_qs(urlparse(loc).query)
+    sid = http.cookies.SimpleCookie(hdr.get("Set-Cookie"))["vigil_customer_oidc_sid"].value
+    return params["state"][0], params["nonce"][0], sid, loc
+
+
+def test_oidc_login_302s_to_the_idp_and_sets_the_lax_sid_cookie(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, _MiniIdP())
+    try:
+        st, hdr, _ = _edge_raw(ep, "/api/customer/oidc/login")
+        assert st == 302
+        loc = hdr.get("Location")
+        assert loc.startswith("https://accounts.google.com/o/oauth2/v2/auth?")   # the pinned authorize endpoint
+        q = parse_qs(urlparse(loc).query)
+        assert q["client_id"] == ["client-123"] and q["code_challenge_method"] == ["S256"]
+        assert q["response_type"] == ["code"] and q["state"] and q["nonce"] and q["code_challenge"]
+        setck = hdr.get("Set-Cookie")
+        assert "vigil_customer_oidc_sid=" in setck and "HttpOnly" in setck and "SameSite=Lax" in setck
+        assert "Path=/api/customer/oidc" in setck                 # path-scoped to the OIDC routes only
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_oidc_routes_are_404_when_disabled(tmp_path, monkeypatch):
+    # with the toggle OFF the edge's OIDC routes are absent (byte-identical to a build without customer OIDC)
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, _MiniIdP(), enabled=False)
+    try:
+        monkeypatch.delenv("VIGIL_CUSTOMER_OIDC_ENABLED", raising=False)
+        assert _edge_raw(ep, "/api/customer/oidc/login")[0] == 404
+        assert _edge_raw(ep, "/api/customer/oidc/callback?code=x&state=y")[0] == 404
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_oidc_full_round_trip_mints_a_customer_session_never_an_operator(tmp_path, monkeypatch):
+    idp = _MiniIdP()
+    sov, edge, ep, sp = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        state, nonce, sid, _ = _oidc_login(ep)
+        idp.next_id_token = idp.mint(nonce=nonce, sub="g-sub-1", email="founder@gmail.com")
+        st, hdr, _ = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
+                               cookie=f"vigil_customer_oidc_sid={sid}")
+        assert st == 302 and hdr.get("Location") == "/", (st, hdr)   # success → into the SPA
+        setck = hdr.get("Set-Cookie") or ""
+        assert f"{CUSTOMER_COOKIE}=" in setck, setck                  # a CUSTOMER session cookie was minted
+        session = http.cookies.SimpleCookie(setck)[CUSTOMER_COOKIE].value
+        # the minted session authenticates the customer on the edge, bound to the auto-provisioned org
+        c, who = _get(_opener(), ep, "/api/customer/whoami", cookie=f"{CUSTOMER_COOKIE}={session}")
+        assert who["authenticated"] is True and who["username"].startswith("cust_") and who["org_id"]
+        # ISOLATION: that customer session presented to the operator cockpit as sigil_session → NOT an operator
+        plain = urllib.request.build_opener()
+        _, op_who = _get(plain, sp, "/api/whoami", cookie=f"sigil_session={session}")
+        assert op_who.get("authenticated") in (False, None), op_who
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_oidc_callback_wrong_browser_sid_is_refused(tmp_path, monkeypatch):
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        state, nonce, _sid, _ = _oidc_login(ep)
+        idp.next_id_token = idp.mint(nonce=nonce)
+        # a DIFFERENT browser's sid (login-CSRF / injected auth response) must not satisfy the state binding
+        st, hdr, body = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
+                                  cookie="vigil_customer_oidc_sid=some-other-browser-sid")
+        assert st == 401 and CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or ""), (st, hdr)
+        assert b"not bound to this browser" in body
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_oidc_callback_replayed_state_is_refused(tmp_path, monkeypatch):
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        state, nonce, sid, _ = _oidc_login(ep)
+        idp.next_id_token = idp.mint(nonce=nonce)
+        first = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
+                          cookie=f"vigil_customer_oidc_sid={sid}")
+        assert first[0] == 302                                       # the first callback succeeds
+        idp.next_id_token = idp.mint(nonce=nonce)                    # re-mint; the state is the single-use guard
+        replay = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
+                           cookie=f"vigil_customer_oidc_sid={sid}")
+        assert replay[0] == 401 and b"already-used oidc state" in replay[2]   # single-use state spent
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_oidc_callback_email_unverified_lands_signed_out(tmp_path, monkeypatch):
+    # an id_token whose email_verified is false → the provisioner refuses → the edge redirects to the
+    # signed-out state (no customer session minted), never an auto-provisioned account.
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        state, nonce, sid, _ = _oidc_login(ep)
+        idp.next_id_token = idp.mint(nonce=nonce, email_verified=False)
+        st, hdr, _ = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
+                               cookie=f"vigil_customer_oidc_sid={sid}")
+        assert st == 302 and hdr.get("Location") == "/#oidc=err"     # failure → signed-out landing
+        assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")  # NO session minted
+    finally:
+        sov.shutdown(); edge.shutdown()

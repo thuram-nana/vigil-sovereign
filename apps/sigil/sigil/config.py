@@ -292,6 +292,75 @@ def oidc_settings() -> dict:
         "clock_skew_seconds": _int_env("SIGIL_OIDC_CLOCK_SKEW_SECONDS", 60),
     }
 
+
+# --- CUSTOMER Google OIDC login (Slice E2b — SHIPPED OFF BY DEFAULT, a DISJOINT toggle) ----
+# The self-serve CUSTOMER plane's federated login ("Sign in with Google"), entirely separate from the
+# operator OIDC above (different env toggle, different routes, different terminal mint — a customer session,
+# NEVER an operator bearer). OFF by default: with `customer_oidc_enabled()` false the custui edge's
+# /api/customer/oidc/* routes are NOT served and the provisioner makes NO outbound call (byte-identical to a
+# build without it). The config is SPLIT so the owner secret never reaches the keyless edge: the edge reads
+# only `customer_oidc_public_settings()` (endpoints + client_id + redirect + scopes, client_secret forced
+# blank) to build the authorize redirect; the `client_secret` + the token/JWKS EGRESS live ONLY in the
+# provisioner (`customer_oidc_settings()`), bounded by the host allowlist below. Google endpoints are pinned
+# as defaults (overridable for a private test IdP), but the allowlist is what actually bounds the egress.
+_GOOGLE_OIDC_ISSUER = "https://accounts.google.com"
+_GOOGLE_OIDC_AUTHORIZE = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_OIDC_TOKEN = "https://oauth2.googleapis.com/token"
+_GOOGLE_OIDC_JWKS = "https://www.googleapis.com/oauth2/v3/certs"
+# The outbound host allowlist for the provisioner's customer-OIDC token + JWKS calls (enforced by the
+# injected poster/fetcher — the keyless edge never makes an OIDC egress). A token_endpoint/jwks_uri steered
+# off these hosts is REFUSED, so a misconfiguration (or a hostile override) cannot turn the provisioner into
+# an SSRF proxy against an internal address. Pinned to Google's auth/token/JWKS hosts.
+CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
+    "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"})
+
+
+def customer_oidc_enabled() -> bool:
+    """True iff customer Google-OIDC login is ON (`VIGIL_CUSTOMER_OIDC_ENABLED` ∈ {1,true,yes,on,enabled}).
+    OFF by default and INDEPENDENT of the operator `SIGIL_OIDC_ENABLED`. When OFF the edge's
+    /api/customer/oidc/* routes are not served and the provisioner builds no OIDC provider (no egress)."""
+    return (os.environ.get("VIGIL_CUSTOMER_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def _customer_oidc_base() -> dict:
+    """The NON-SECRET customer-OIDC settings (Google-pinned by default, overridable via `VIGIL_CUSTOMER_OIDC_*`).
+    NEVER reads the client secret. `username_claim` is fixed to the immutable `sub` — the customer binding is
+    the stable `(iss, sub)` pair (never a mutable claim)."""
+    g = os.environ.get
+    return {
+        "issuer": (g("VIGIL_CUSTOMER_OIDC_ISSUER") or _GOOGLE_OIDC_ISSUER).strip(),
+        "client_id": (g("VIGIL_CUSTOMER_OIDC_CLIENT_ID") or "").strip(),
+        "redirect_uri": (g("VIGIL_CUSTOMER_OIDC_REDIRECT_URI") or "").strip(),
+        "authorize_endpoint": (g("VIGIL_CUSTOMER_OIDC_AUTHORIZE_ENDPOINT") or _GOOGLE_OIDC_AUTHORIZE).strip(),
+        "token_endpoint": (g("VIGIL_CUSTOMER_OIDC_TOKEN_ENDPOINT") or _GOOGLE_OIDC_TOKEN).strip(),
+        "jwks_uri": (g("VIGIL_CUSTOMER_OIDC_JWKS_URI") or _GOOGLE_OIDC_JWKS).strip(),
+        # `openid email` — we need the verified `email` + `email_verified` claims for auto-provision/anti-takeover.
+        "scopes": (g("VIGIL_CUSTOMER_OIDC_SCOPES") or "openid email").strip(),
+        "username_claim": "sub",                                   # binding is (iss, sub); never a mutable claim
+        "signing_algs": [a.strip().upper() for a in (g("VIGIL_CUSTOMER_OIDC_SIGNING_ALGS") or "RS256,ES256").split(",")
+                         if a.strip()],
+        "clock_skew_seconds": _int_env("VIGIL_CUSTOMER_OIDC_CLOCK_SKEW_SECONDS", 60),
+    }
+
+
+def customer_oidc_public_settings() -> dict:
+    """What the KEYLESS EDGE reads — the non-secret settings with `client_secret` EXPLICITLY blank. The edge
+    builds an `OidcConfig(client_secret="")` from this to form the authorize 302; it never reads the secret
+    env var at all (the secret lives ONLY in the provisioner's `customer_oidc_settings()`)."""
+    base = _customer_oidc_base()
+    base["client_secret"] = ""
+    return base
+
+
+def customer_oidc_settings() -> dict:
+    """What the PROVISIONER reads — the non-secret settings PLUS the client secret, for the token exchange.
+    Consulted ONLY when `customer_oidc_enabled()` and ONLY on the provisioner side; the secret never reaches
+    the keyless edge."""
+    base = _customer_oidc_base()
+    base["client_secret"] = (os.environ.get("VIGIL_CUSTOMER_OIDC_CLIENT_SECRET") or "")
+    return base
+
+
 # --- external binaries (resolved; never an operator-specific absolute path) -----------
 _CLAUDE_FALLBACK = Path.home() / ".local" / "bin" / "claude"
 _REPO_ROOT = Path(__file__).resolve().parents[1]         # <repo>/sigil/config.py → <repo>

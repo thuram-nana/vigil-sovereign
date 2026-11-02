@@ -85,7 +85,8 @@ class UIServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
-                 extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None):
+                 extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None,
+                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -123,6 +124,11 @@ class UIServer(ThreadingHTTPServer):
         # enabled AND a callback is actually processed). Never touched when OIDC is off.
         self.oidc_http_post = oidc_http_post           # (url, form) -> dict  (token exchange)
         self.oidc_jwks_fetcher = oidc_jwks_fetcher     # (url) -> dict        (JWKS fetch)
+        # E2b — the SAME injectable hooks for the CUSTOMER Google-OIDC provider the provisioner builds per
+        # request (`_provision_post` -> build_provisioner). Both None (production) ⇒ the host-allowlisted
+        # egress; a test injects both (a fake IdP) so the edge OIDC round-trip never touches the network.
+        self.customer_oidc_http_post = customer_oidc_http_post
+        self.customer_oidc_jwks_fetcher = customer_oidc_jwks_fetcher
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -1380,7 +1386,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(400, "bad request: body must be an object")
         except ValueError as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
-        p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens())
+        p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens(),
+                              customer_oidc_http_post=self.server.customer_oidc_http_post,
+                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher)
         try:
             result = self._provision_dispatch(p, action, principal, body)
         except ProvisionRateLimited as e:
@@ -1415,6 +1423,12 @@ class Handler(BaseHTTPRequestHandler):
             return p.request_recover(str(body.get("email", "")), ip=ip)
         if action == "recover_confirm":
             return p.confirm_recover(str(body.get("token", "")), new_password=str(body.get("new_password", "")))
+        # E2b — Google-OIDC login finish: the secret-bearing token exchange + verify + auto-provision /
+        # anti-takeover, then {username, orgs}. A public bootstrap (no requester — the hop key alone gates it,
+        # like login/signup); the edge already verified the single-use state + sid-cookie browser binding.
+        if action == "oidc_finish":
+            return p.oidc_finish(code=str(body.get("code", "")), code_verifier=str(body.get("code_verifier", "")),
+                                 nonce=str(body.get("nonce", "")), ip=ip)
         if action == "member_grant":
             return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
                                   str(body.get("role", "")), ip=ip)
@@ -1655,16 +1669,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
                  allowed_hosts=(), allowed_origins=(), oidc_http_post=None,
-                 oidc_jwks_fetcher=None) -> UIServer:
+                 oidc_jwks_fetcher=None, customer_oidc_http_post=None,
+                 customer_oidc_jwks_fetcher=None) -> UIServer:
     """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
     ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
     ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist.
     ``oidc_http_post``/``oidc_jwks_fetcher`` are OPTIONAL injection hooks (default None → real urllib
-    egress) so a test can drive the OIDC callback against an in-process mock IdP with no network."""
+    egress) so a test can drive the OIDC callback against an in-process mock IdP with no network.
+    ``customer_oidc_http_post``/``customer_oidc_jwks_fetcher`` are the SAME hooks for the customer
+    Google-OIDC provider the provisioner builds per request (E2b — default None ⇒ the host-allowlisted egress)."""
     return UIServer((host, port), Handler, token=token,
                     spine_path=Path(spine_path) if spine_path else SPINE_PATH,
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,
-                    oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher)
+                    oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher,
+                    customer_oidc_http_post=customer_oidc_http_post,
+                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher)
 
 
 def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
