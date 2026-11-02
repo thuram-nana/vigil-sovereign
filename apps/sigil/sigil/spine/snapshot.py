@@ -716,14 +716,17 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                             p_granted[ptkey] = p_granted.get(ptkey, 0) + pc
                         else:
                             p_debited[ptkey] = p_debited.get(ptkey, 0) + pc
-        # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; past_due/canceled
-        #     honored on sight) — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
+        # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; down-states:
+        #     owner-manual 0.0 honored on sight, webhook-driven freshness-gated vs the active high-water)
+        #     — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
         if sig == _SUB_SIGNAL:
             soid = p.get("org_id")
             if isinstance(soid, str) and soid:
                 sst = p.get("status")
                 if sst in _SUB_DOWN:
-                    sub_state[soid] = sst
+                    sdat = as_issued_at(p.get("issued_at"))     # mirror _fold: 0.0 on sight; else fresher-only
+                    if sdat <= 0.0 or sdat > sub_issued.get(soid, NO_HIGHWATER):
+                        sub_state[soid] = sst
                 elif sst == _SUB_ACTIVE and verify_signed(p, _SUBS_CORE, vpk):
                     at = as_issued_at(p.get("issued_at"))
                     if at > sub_issued.get(soid, NO_HIGHWATER):

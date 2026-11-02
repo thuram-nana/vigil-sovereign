@@ -13,11 +13,18 @@ idiom as orgs/accounts:
     / allotment and `status=active`. A replayed/stale subscribe (issued_at <= high-water) is ignored, so a
     captured "active" grant cannot be replayed to resurrect a lapsed plan (the same replay-resurrection guard
     the identity wave closed) — and it survives a hard prune via the `SnapshotState` seed.
-  * `mark_past_due` / `cancel` (the SAFE / access-REDUCING direction, dunning) are honored on sight — even
-    unsigned, carrying a FIXED `issued_at` of 0.0 — and only move `status` DOWN (payment failed → past_due;
-    subscription ended → canceled), retaining the plan/period the last active set. Gating the fail-safe
-    direction would make it fail OPEN (a tenant whose payment lapsed could keep access). A later owner-signed
-    FRESH `subscribe` (payment recovered / renewal) overrides a past_due/canceled back to active.
+  * `mark_past_due` / `cancel` (the SAFE / access-REDUCING direction, dunning) only move `status` DOWN
+    (payment failed → past_due; subscription ended → canceled), retaining the plan/period the last active set.
+    They come in TWO forms, by `issued_at`:
+      - the OWNER-MANUAL latch (fixed `issued_at` 0.0) is honored ON SIGHT — even unsigned — because gating the
+        fail-safe direction would make it fail OPEN (a tenant whose payment lapsed could keep access);
+      - the WEBHOOK-DRIVEN form (H4: a Flutterwave failed-charge event drives `mark_past_due`) carries the
+        provider event's own `created` as a POSITIVE `issued_at`, and is applied only if FRESHER than the last
+        honored activation. So an at-least-once / out-of-order / replayed failed-charge webhook can never
+        re-suspend a tenant who already recovered (the fresh `active` won), while a genuine CURRENT failure —
+        which always post-dates the activation it follows — still latches; the gate never fails OPEN.
+    A later owner-signed FRESH `subscribe` (payment recovered / renewal) overrides a past_due/canceled back to
+    active.
 
 DRIVES THE OFFENSE LIFECYCLE (later slice): the offense-plane `entitlement.deployment.DeploymentLifecycle`
 (DRAFT/ACTIVE/SUSPENDED/EXPIRED/REVOKED) is a separate m-of-n-signed object; a future bridge maps this
@@ -145,21 +152,29 @@ class SubscriptionRegistry:
                    "reason": f"subscription {oid} -> plan {pid} (active, allotment {al})"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
-    def mark_past_due(self, org_id: str) -> int:
-        """Move a tenant to `past_due` (dunning: a payment failed) — the SAFE direction, honored on sight with
-        a FIXED `issued_at` of 0.0. Retains the plan/period; only lowers access. A later owner-signed FRESH
-        `subscribe` (payment recovered) restores `active`."""
-        return self._append_down(org_id, STATUS_PAST_DUE)
+    def mark_past_due(self, org_id: str, *, issued_at: float = 0.0) -> int:
+        """Move a tenant to `past_due` (dunning: a payment failed) — the SAFE (access-reducing) direction.
+
+        `issued_at` selects the freshness semantics (see the module docstring + `_fold`):
+          * the DEFAULT 0.0 is the OWNER-MANUAL latch: honored ON SIGHT, un-gated (fail-SAFE).
+          * a POSITIVE `issued_at` is the WEBHOOK-DRIVEN form (H4) — pass the provider event's own `created`.
+            The fold applies it only if FRESHER than the last honored activation, so a stale / out-of-order /
+            replayed failed-charge webhook can never re-suspend a tenant who has since recovered. A genuine
+            current failure always post-dates its activation, so it still latches (never fails OPEN).
+        Retains the plan/period; only lowers access. A later owner-signed FRESH `subscribe` restores `active`."""
+        return self._append_down(org_id, STATUS_PAST_DUE, issued_at=issued_at)
 
     def cancel(self, org_id: str) -> int:
-        """Cancel a subscription — the SAFE direction (honored on sight, fixed `issued_at` 0.0). Idempotent and
-        replay-safe; a replayed cancel merely re-cancels."""
-        return self._append_down(org_id, STATUS_CANCELED)
+        """Cancel a subscription — the SAFE direction, OWNER-MANUAL latch (honored on sight, fixed `issued_at`
+        0.0). Idempotent and replay-safe; a replayed cancel merely re-cancels. (Webhook-driven cancel is not
+        wired: a bare `subscription.cancelled` webhook cannot name the victim tenant soundly — see billing.py —
+        so a cancelled plan instead EXPIRES at period_end via the meter's non-rollover check.)"""
+        return self._append_down(org_id, STATUS_CANCELED, issued_at=0.0)
 
-    def _append_down(self, org_id: str, status: str) -> int:
+    def _append_down(self, org_id: str, status: str, *, issued_at: float = 0.0) -> int:
         oid = org_tenant_id(org_id)
         core = {"signal": SUBSCRIPTION_SIGNAL, "org_id": oid, "plan_id": "", "period_start": 0.0,
-                "period_end": 0.0, "allotment": 0, "status": status, "issued_at": 0.0}
+                "period_end": 0.0, "allotment": 0, "status": status, "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto", "reason": f"subscription {oid} -> {status} (governed latch)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
@@ -193,7 +208,14 @@ class SubscriptionRegistry:
                 continue
             st = p.get("status")
             if st in _DOWN_STATES:
-                status[oid] = st                              # safe direction: honored on sight
+                # SAFE (access-reducing) direction. A FIXED 0.0 issued_at is the owner-manual latch: honored ON
+                # SIGHT (never fail-open). A POSITIVE issued_at is a WEBHOOK-driven down-state (H4) carrying the
+                # provider event's `created`: applied only if FRESHER than the last honored activation, so a
+                # stale / out-of-order / replayed failed-charge webhook cannot re-suspend a recovered tenant
+                # (the fold does NOT advance `issued` here — that stays the active high-water it compares to).
+                dat = as_issued_at(p.get("issued_at"))
+                if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
+                    status[oid] = st
             elif st == STATUS_ACTIVE:
                 if not verify_signed(p, _SUB_CORE, resolver.at(rec.seq)):
                     continue                                  # fail-closed: unsigned/forged/wrong-epoch

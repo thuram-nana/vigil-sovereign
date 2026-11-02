@@ -25,7 +25,8 @@ import tempfile
 import pytest
 
 from sigil.governor.authn import signed_payload
-from sigil.governor.subscription import STATUS_ACTIVE, STATUS_CANCELED, SUBSCRIPTION_SIGNAL, SubscriptionRegistry
+from sigil.governor.subscription import (STATUS_ACTIVE, STATUS_CANCELED, STATUS_PAST_DUE, SUBSCRIPTION_SIGNAL,
+                                         SubscriptionRegistry)
 from sigil.reuse import generate_keypair
 from sigil.spine import prune
 from sigil.spine.manifest import read_manifest
@@ -284,3 +285,28 @@ def test_check_prune_safe_reraises_a_nonempty_subscription_floor_wiring_only(tmp
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "strand" in str(e.value).lower() and "ghost-tenant" in str(e.value)
+
+
+def _assert_build_eq_scan(store, oid, expected):
+    scan = _reg(store)._fold().get(oid)
+    scan_status = scan.status if scan is not None else None
+    built = build(list(store.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
+    assert scan_status == expected, f"scan status {scan_status!r} != {expected!r}"
+    assert built.subscription_state_map().get(oid) == expected, \
+        f"build status {built.subscription_state_map().get(oid)!r} != {expected!r}"
+
+
+def test_build_fold_mirrors_scan_for_webhook_freshness_gated_down_states():
+    # build()'s down-state freshness gate must mirror SubscriptionRegistry._fold() EXACTLY (build() == scan): a
+    # STALE webhook past_due (issued_at < the active high-water) is ignored by BOTH; a FRESH one is honored by
+    # BOTH; the owner-manual 0.0 latch is honored on sight by BOTH. A drift would bake a wrong status into a
+    # pruned snapshot seed (the whole point of mirroring the fold in build()).
+    store = _store()
+    r = _reg(store)
+    r.subscribe("acme", "pro", 6000, period_start=100.0, period_end=1100.0, issued_at=100.0)
+    r.mark_past_due("acme", issued_at=50.0)        # STALE (< 100) -> ignored by both
+    _assert_build_eq_scan(store, "acme", STATUS_ACTIVE)
+    r.mark_past_due("acme", issued_at=200.0)       # FRESH (> 100) -> honored by both
+    _assert_build_eq_scan(store, "acme", STATUS_PAST_DUE)
+    r.mark_past_due("acme")                        # owner-manual 0.0 -> honored on sight (already past_due; stays)
+    _assert_build_eq_scan(store, "acme", STATUS_PAST_DUE)

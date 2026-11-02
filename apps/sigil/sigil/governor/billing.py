@@ -520,12 +520,15 @@ class FlutterwaveBillingProvider(BillingProvider):
     transaction `id` (stable across at-least-once duplicate deliveries), which the signer carries as the ledger
     entry_id. The verifier does the only I/O; everything here is pure.
 
-    SCOPE (this slice): we mint ONLY on a re-verified successful `charge.completed` (top-up or plan period). We do
-    NOT act on `subscription.cancelled` / failed-charge webhooks — the body cannot name the victim tenant soundly
-    and the verify endpoint is per-transaction, not per-subscription, so there is no authoritative
-    subscription→org mapping yet. A lapsed/cancelled plan EXPIRES at period_end via the meter's active-subscription
-    check (non-rollover) — the safe, body-independent outcome. Webhook-driven cancel/dunning returns in the
-    outbound-surfaces slice once an authoritative subscription→org mapping exists.
+    SCOPE: we act ONLY on a re-verified `charge.completed`, taking EVERY tenant/money/status field from the
+    AUTHORITATIVE verify object (never the body). A SUCCESSFUL charge mints (top-up or plan period). A definitively
+    FAILED RECURRING charge (verified status `failed` + a `payment_plan`) drives DUNNING — EVENT_PAYMENT_FAILED, so
+    the subscription latches to past_due (access-reducing, reversible; H4). Both are sound because the org is taken
+    from the RE-VERIFIED tx_ref we set at our own checkout, so a verif-hash holder cannot name a victim tenant. We
+    still do NOT act on a bare `subscription.cancelled` webhook — with no transaction to re-verify there is no
+    authoritative subscription→org mapping — so a cancelled plan instead EXPIRES at period_end via the meter's
+    active-subscription check (non-rollover), the safe body-independent outcome; webhook-driven cancel awaits that
+    mapping (a reconcile capability).
 
     NOTE (sandbox-confirm): exact field shapes (meta echo as dict vs list, `payment_plan` presence on a plan
     charge, `created_at` string format) should be confirmed against a Flutterwave sandbox; this handles the
@@ -571,14 +574,16 @@ class FlutterwaveBillingProvider(BillingProvider):
         # Flutterwave's `verif-hash` authenticates ONLY the caller (plaintext secret equality); it does NOT sign
         # the body, so NOTHING in `obj` is trustworthy here beyond "which transaction id to go re-verify". Every
         # field that decides money or a tenant (org_id, plan-vs-topup, timestamp, status) is taken from the
-        # AUTHORITATIVE `/v3/transactions/{id}/verify` object only. We therefore mint solely on a `charge.completed`
-        # whose transaction INDEPENDENTLY re-verifies as successful.
+        # AUTHORITATIVE `/v3/transactions/{id}/verify` object only. We therefore act solely on a `charge.completed`
+        # whose transaction INDEPENDENTLY re-verifies: a `successful` one MINTS (top-up or plan period); a
+        # definitively `failed` RECURRING one (a `payment_plan` charge) drives DUNNING (EVENT_PAYMENT_FAILED ->
+        # past_due; H4) — sound because org/status/timestamp all come from the verify object, so a verif-hash holder
+        # cannot name a victim (the tx_ref is one we set at our own checkout).
         #
-        # We deliberately do NOT act on `subscription.cancelled` / failed-charge webhooks (no webhook-driven cancel
-        # or dunning): the body cannot name the victim tenant soundly, and the verify endpoint is per-TRANSACTION,
-        # not per-subscription, so there is no authoritative subscription→org mapping yet (that lands in the
-        # outbound-surfaces slice). Until then a lapsed/cancelled plan simply EXPIRES at period_end via the meter's
-        # active-subscription check (non-rollover) — the safe, body-independent outcome.
+        # We deliberately do NOT act on a bare `subscription.cancelled` webhook (no webhook-driven CANCEL): with no
+        # transaction to re-verify, the verify endpoint is per-TRANSACTION, not per-subscription, so there is no
+        # authoritative subscription→org mapping yet (that lands with a reconcile capability). Until then a
+        # cancelled plan simply EXPIRES at period_end via the meter's active-subscription check (non-rollover).
         if obj.get("event") != "charge.completed":
             return None
         data_raw = obj.get("data")
@@ -586,27 +591,46 @@ class FlutterwaveBillingProvider(BillingProvider):
         if txid is None:
             return None                               # the body is trusted ONLY for the transaction id to verify
         verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the ONLY trust source
-        if not isinstance(verified, dict) or verified.get("status") != "successful":
-            return None                               # unverifiable / not successful -> mint nothing
-        vid = verified.get("id")                      # the idempotency anchor is the CANONICAL verified id, NEVER
-        if vid is None:                               # the body's spelling: two body spellings of one real tx that
-            return None                               # /verify maps to the same id must collapse to ONE grant (the
-        event_id = str(vid)                           # body is trusted ONLY to name which tx to fetch); fail-closed.
+        if not isinstance(verified, dict):
+            return None                               # unverifiable -> act on nothing
+        status = verified.get("status")
+        vid = verified.get("id")                      # the idempotency / audit anchor is the CANONICAL verified id,
+        if vid is None:                               # NEVER the body's spelling (two spellings of one real tx that
+            return None                               # /verify collapses to one id must collapse to ONE action);
+        event_id = str(vid)                           # fail-closed without it.
         org = _flw_org_id(verified)                   # tenant from the VERIFIED object only (never the body)
         if org is None:
-            return None                               # successful but no recoverable tenant -> never mint on a guess
+            return None                               # no recoverable tenant -> never act on a guess
         created = _flw_created(verified)              # stable epoch from the VERIFIED object; fail-closed if absent
         if created is None:
             return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
-        amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
-        if verified.get("payment_plan"):              # plan-vs-topup decided by the VERIFIED object only
-            return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
-                                price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
-                                currency=ccy, data={"tx_ref": tx_ref})
-        return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
-                            price_id=_flw_price_id(verified), amount_minor=amt_minor, currency=ccy,
-                            data={"tx_ref": tx_ref})
+        if status == "successful":
+            amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
+            if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
+                return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
+                                    price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
+                                    currency=ccy, data={"tx_ref": tx_ref})
+            return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
+                                price_id=_flw_price_id(verified), amount_minor=amt_minor, currency=ccy,
+                                data={"tx_ref": tx_ref})
+        # H4 — webhook-driven DUNNING (access-REDUCING only). A charge that AUTHORITATIVELY re-verifies as `failed`
+        # AND carries a `payment_plan` is a failed RECURRING (subscription) debit -> emit EVENT_PAYMENT_FAILED so the
+        # signer latches the subscription to past_due (REVERSIBLE: a later successful renewal re-activates). SOUND
+        # because org + status + timestamp all come from the RE-VERIFIED object, never the untrusted body — a
+        # verif-hash holder cannot name a victim (the tx_ref it would need is one WE set at our own checkout). The
+        # `created` rides through as the down-latch's freshness key (subscription._fold), so a stale / out-of-order /
+        # replayed failure cannot re-suspend a recovered tenant. A failed ONE-TIME top-up carries no payment_plan and
+        # reduces nothing -> no-op. A non-terminal status (pending/...) -> no-op (never reduce on a non-definitive
+        # answer; a TRANSIENT verify failure RAISES out of the verifier per its contract, never reaching here as a
+        # definitive non-success). We still do NOT act on a bare `subscription.cancelled` webhook: with no
+        # transaction to re-verify there is no sound subscription->org mapping, and such a plan already EXPIRES at
+        # period_end (non-rollover) — webhook-driven cancel awaits that mapping (a reconcile capability).
+        if status == "failed" and verified.get("payment_plan"):
+            return BillingEvent(event_id=event_id, kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
+                                price_id=str(verified.get("payment_plan") or ""),
+                                data={"tx_ref": tx_ref, "dunning": "payment_failed"})
+        return None
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
@@ -719,7 +743,9 @@ class BillingSigner:
         if event.kind == EVENT_SUBSCRIPTION_CANCELED:
             return self.subscriptions.cancel(oid)     # safe direction, honored on sight, replay-safe
         if event.kind == EVENT_PAYMENT_FAILED:
-            return self.subscriptions.mark_past_due(oid)
+            # Webhook-driven dunning (H4): carry the provider event's `created` as the down-latch freshness key so
+            # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
+            return self.subscriptions.mark_past_due(oid, issued_at=event.created)
         ent = self.catalog.get(event.price_id)
         if ent is None:
             return None                               # unknown price -> no entitlement -> mint nothing

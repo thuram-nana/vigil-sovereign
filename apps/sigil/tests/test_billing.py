@@ -496,10 +496,10 @@ def test_flutterwave_subscription_active_then_lapses_at_period_end():
     assert meter.available("acme", now=1500.0) == 0                 # period elapsed -> plan credits lapse
 
 
-def test_flutterwave_does_not_act_on_cancel_or_failed_webhooks():
-    # SECURITY (red-pen #1/#3): Flutterwave's verif-hash authenticates only the caller, NOT the body, so a
-    # `subscription.cancelled` / failed-charge webhook cannot name a victim tenant soundly. This slice therefore
-    # mints NOTHING on those events — a verif-hash holder must not be able to cancel/past_due any named org.
+def test_flutterwave_failed_recurring_charge_marks_past_due():
+    # H4: a definitively-FAILED RECURRING (payment_plan) charge that RE-VERIFIES drives DUNNING -> past_due. The
+    # tenant/status/timestamp are taken from the AUTHORITATIVE verify object (the tx_ref WE set at checkout), never
+    # the body — so a verif-hash holder cannot name a victim: only a REAL failed charge on a tenant's own plan duns.
     table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
@@ -507,14 +507,73 @@ def test_flutterwave_does_not_act_on_cancel_or_failed_webhooks():
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
     assert subs.subscription("acme").status == STATUS_ACTIVE
-    # a failed plan charge -> NOT dunning (we do not act on failed charges) -> still active
-    assert signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0) is None
-    assert subs.subscription("acme").status == STATUS_ACTIVE, "a failed-charge webhook must not past_due in 4b"
-    # a cancellation webhook naming acme in the (unauthenticated) body -> ignored -> still active
+    assert signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0) is not None
+    assert subs.subscription("acme").status == STATUS_PAST_DUE, "a re-verified failed recurring charge must past_due"
+
+
+def test_flutterwave_cancel_webhook_is_still_ignored():
+    # H4 SCOPE BOUND: a bare `subscription.cancelled` webhook carries no transaction to re-verify, so there is no
+    # authoritative subscription->org mapping — we must NOT cancel a victim named only in the unauthenticated body.
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
     body = json.dumps({"event": "subscription.cancelled",
                        "data": {"id": "sub_1", "tx_ref": "vigil:acme:n2", "created_at": 300.0}}).encode()
     assert signer.ingest(body, _FLW_SECRET, now=300.0) is None
     assert subs.subscription("acme").status == STATUS_ACTIVE, "a cancel webhook must not cancel a named victim"
+
+
+def test_flutterwave_failed_topup_does_not_dun():
+    # A failed ONE-TIME top-up (no payment_plan) reduces nothing — there is no subscription to past_due -> no-op.
+    table = {"9920": {"id": 9920, "status": "failed", "tx_ref": "vigil:acme:n9", "created_at": 200.0,
+                      "meta": {"price_id": "price_topup_200"}}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9920), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme") is None, "a failed top-up must not create or past_due any subscription"
+
+
+def test_flutterwave_failed_charge_without_recoverable_org_is_noop():
+    # fail-closed: a failed plan charge whose verify object names NO recoverable tenant (no tx_ref / meta) duns
+    # NOBODY — we never act on a guess.
+    table = {"9921": {"id": 9921, "status": "failed", "payment_plan": "flwplan_pro", "created_at": 200.0}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9921), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme") is None
+
+
+def test_flutterwave_pending_charge_does_not_dun():
+    # A NON-DEFINITIVE status (pending) must NOT reduce access — we dun only on a definitively `failed` verify.
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"},
+             "9922": {"id": 9922, "status": "pending", "tx_ref": "vigil:acme:n2", "payment_plan": "flwplan_pro",
+                      "created_at": 200.0}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
+    assert signer.ingest(_flw_wh("charge.completed", 9922), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme").status == STATUS_ACTIVE
+
+
+def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
+    # THE freshness invariant (H4): the failed-charge webhook carries the verify object's `created` as the
+    # down-latch freshness key. After a tenant RECOVERS (a later successful renewal), a STALE / replayed /
+    # out-of-order failed charge from BEFORE the recovery must NOT re-suspend them (at-least-once + unordered
+    # webhook delivery make this real). A GENUINE current failure still duns (it post-dates its activation).
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"},
+             "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
+                      "created_at": 200.0},
+             "9914": {"id": 9914, "status": "successful", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
+                      "payment_plan": "flwplan_pro"}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)   # active @100
+    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0)   # failed @200 -> past_due
+    assert subs.subscription("acme").status == STATUS_PAST_DUE
+    signer.ingest(_flw_wh("charge.completed", 9914), _FLW_SECRET, now=300.0)   # renewal @300 -> active (recovered)
+    assert subs.subscription("acme").status == STATUS_ACTIVE
+    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=400.0)   # STALE replay of the @200 failure
+    assert subs.subscription("acme").status == STATUS_ACTIVE, \
+        "a stale failed-charge replay must not re-suspend a recovered tenant"
 
 
 def test_flutterwave_org_comes_from_verified_not_the_body():
