@@ -3930,6 +3930,32 @@ def _cmd_webhook_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_launch_drain(args: argparse.Namespace) -> int:
+    """`vigil launch-drain` — poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per
+    currently-valid published owner-signed lease (K4-5c, the sibling of `webhook-drain`). Each lease passes
+    the keyless `verify_customer_launch_lease(consume=False)` pre-check (owner-pin + bind + K4-1 settlement
+    re-check, floor NOT burned) inside the trigger; the job is ENQUEUED, NEVER executed here — execution is
+    SOLELY the authorized runner's (`JobRunner.run_one` → `authorize_job` + the K4-3 customer-launch gate).
+    Idempotent by the queue's content-addressed delivery_id (re-polls coalesce; a settled lease drains to
+    nothing); a transient enqueue failure is deferred to the next drain. Imports no framework at module
+    scope (the queue + the keyless verify defer it), so the two-env boundary holds."""
+    import json
+
+    from . import launch_drain
+
+    drain = launch_drain.LaunchSeamDrain(base_dir=args.base_dir, queue_root=args.queue_root)
+    if args.watch:
+        print(f"  polling customer launch leases on {args.base_dir} → SecurityJob queue "
+              f"({args.queue_root}); Ctrl-C to stop")
+        try:
+            drain.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(drain.drain(), indent=2))
+    return 0
+
+
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     """`vigil reconcile` — the SAFETY-NET poller (Slice 2b): per connected repo, list the PRs changed since
     a resume checkpoint and ENQUEUE a SecurityJob for each; it is NEVER executed here (the authorized runner
@@ -5796,6 +5822,20 @@ def build_parser() -> argparse.ArgumentParser:
     pwd.add_argument("--watch", action="store_true", help="keep draining as new deliveries arrive; Ctrl-C to stop")
     pwd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pwd.set_defaults(func=_cmd_webhook_drain)
+
+    pxd = sub.add_parser("launch-drain",
+                         help="poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per "
+                              "currently-valid published owner-signed lease (enqueue-only; the authorized "
+                              "runner executes behind the customer-launch gate). Fail-closed; idempotent by "
+                              "the content-addressed (slug, nonce) delivery_id; a settled lease drains to none.")
+    pxd.add_argument("--base-dir", required=True,
+                     help="the credit-lease seam root the sovereign plane publishes leases to (= VIGIL_BASE_DIR)")
+    pxd.add_argument("--queue-root", required=True,
+                     help="the SecurityJob queue root (shared with `webhook-drain` / `reconcile`; durable FIFO "
+                          "+ delivery/fingerprint dedup markers)")
+    pxd.add_argument("--watch", action="store_true", help="keep polling as new leases are published; Ctrl-C to stop")
+    pxd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
+    pxd.set_defaults(func=_cmd_launch_drain)
 
     prc = sub.add_parser("reconcile",
                          help="safety-net reconciliation: per connected repo, list PRs changed since the "

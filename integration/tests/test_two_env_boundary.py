@@ -144,6 +144,9 @@ assert "strix" not in _m, "jobs.findings_crossing must not import strix at modul
 import vigil_integration.jobs.completion_signal  # K4-5b: the keyless engagement-complete settle signal — vigil_core only
 assert "framework" not in _m, "jobs.completion_signal must not import framework at module scope (vigil_core signed record)"
 assert "strix" not in _m, "jobs.completion_signal must not import strix at module scope"
+import vigil_integration.launch_drain  # K4-5c: the customer-launch seam poller — framework LAZY (queue + verify defer it)
+assert "framework" not in _m, "launch_drain must not import framework at module scope (queue + poll verify defer it)"
+assert "strix" not in _m, "launch_drain must not import strix at module scope"
 import vigil_integration.live.ci_checkout  # W4: the CI-local checkout + changed-files seams (git-local, no API)
 assert "framework" not in _m, "live.ci_checkout must not import framework at module scope (stdlib + injected runner)"
 assert "strix" not in _m, "live.ci_checkout must not import strix at module scope"
