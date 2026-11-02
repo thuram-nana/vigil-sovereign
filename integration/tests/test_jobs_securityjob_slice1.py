@@ -141,6 +141,30 @@ def test_enqueue_dedups_by_delivery_id(tmp_path: Path) -> None:
     assert q.pending_count() == 1
 
 
+def test_enqueue_rolls_back_the_delivery_marker_on_a_claim_error(tmp_path: Path, monkeypatch) -> None:
+    # K4-5 red-pen fold (LOW): a non-FileExistsError OSError during the FINGERPRINT claim (AFTER the delivery
+    # marker is created) must roll back the delivery marker — else it is orphaned and a retry of the same
+    # delivery coalesces as duplicate_delivery and NEVER re-enqueues (a lost job, breaking launch_drain's
+    # deferred-retry invariant). Before the fix the claim was outside the rollback-guarded try.
+    q = SecurityJobQueue(tmp_path)
+    real = q._claim_marker
+    calls = {"n": 0}
+
+    def _flaky(marker):
+        calls["n"] += 1
+        if calls["n"] == 2:                       # the 2nd claim (the fingerprint) fails with a disk error
+            raise OSError("disk error during fingerprint claim")
+        return real(marker)
+
+    monkeypatch.setattr(q, "_claim_marker", _flaky)
+    with pytest.raises(OSError):
+        q.enqueue(_job(delivery_id="dx", commit="c1"))
+    monkeypatch.setattr(q, "_claim_marker", real)
+    # the delivery marker was rolled back (not orphaned) → a clean retry of the SAME delivery re-enqueues
+    assert q.enqueue(_job(delivery_id="dx", commit="c1")).enqueued is True
+    assert q.pending_count() == 1
+
+
 def test_enqueue_dedups_by_fingerprint(tmp_path: Path) -> None:
     q = SecurityJobQueue(tmp_path)
     assert q.enqueue(_job(delivery_id="a", commit="c1")).enqueued is True

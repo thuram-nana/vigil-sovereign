@@ -97,14 +97,25 @@ def _launch_governance_signers(base_dir: Any) -> "list[tuple[str, str]]":
     return [(GOVERNANCE_KEY_ID, kp.private_key_b64)]
 
 
-def _completion_spool(base_dir: Any, completion_spool_dir: Any) -> str:
+def _completion_spool(base_dir: Any, completion_spool_dir: Any, slug: str) -> str:
+    """The completion settle-spool this worker emits to. An explicit ``completion_spool_dir`` is used as-is
+    (the caller controls it). The DEFAULT is PER-SLUG — ``base/completion-spool/<slug>/`` — so each tenant's
+    completions land in their OWN spool (K4-5 red-pen MED): a per-slug-scoped settle-drain then reads only its
+    own tenant's completions and can never atomically-claim + quarantine (destroy) another tenant's valid
+    completion out of a shared incoming/ dir."""
+    if completion_spool_dir is not None:
+        return str(completion_spool_dir)
     base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
-    return str(completion_spool_dir) if completion_spool_dir is not None else str(Path(base) / "completion-spool")
+    return str(Path(base) / "completion-spool" / str(slug))
 
 
-def _finding_spool(base_dir: Any, finding_spool_dir: Any) -> str:
+def _finding_spool(base_dir: Any, finding_spool_dir: Any, slug: str) -> str:
+    """The FACT finding-spool this worker crosses to. Explicit path used as-is; the DEFAULT is PER-SLUG
+    (``base/finding-spool/<slug>/``) for the same per-tenant isolation as the completion spool."""
+    if finding_spool_dir is not None:
+        return str(finding_spool_dir)
     base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
-    return str(finding_spool_dir) if finding_spool_dir is not None else str(Path(base) / "finding-spool")
+    return str(Path(base) / "finding-spool" / str(slug))
 
 
 def make_engage_worker(
@@ -190,7 +201,7 @@ def make_engage_worker(
                 try:
                     from .completion_signal import emit_completion_signal
                     emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="failed",
-                                           signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir))
+                                           signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir, job.slug))
                 except Exception:  # noqa: BLE001 — a failed-settle emit is best-effort; never mask the run error
                     pass
             raise
@@ -200,11 +211,11 @@ def make_engage_worker(
                 found = findings_from_report(getattr(result, "report", None))
                 if found:
                     cross_confirmed_findings(found, engagement_slug=job.slug, signers=sgnrs,
-                                             spool_dir=_finding_spool(base_dir, finding_spool_dir))
+                                             spool_dir=_finding_spool(base_dir, finding_spool_dir, job.slug))
             except Exception:  # noqa: BLE001 — crossing is best-effort; a crossing error must not block the settle
                 pass
             from .completion_signal import emit_completion_signal
             emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="completed",
-                                   signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir))
+                                   signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir, job.slug))
         return result
     return _worker

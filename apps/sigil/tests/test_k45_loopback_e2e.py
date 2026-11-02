@@ -212,21 +212,58 @@ def test_completed_then_launch_cancel_cannot_double_refund():
     assert _avail(s, "org_a") == 70            # NOT refunded to 100 — the completed/charged run stays charged
 
 
-def test_tenant_isolation_one_orgs_drain_settles_only_its_own_lease():
-    # orgA and orgB each reserve + provision their OWN launch delegation. orgA's completion (under orgA's
-    # delegation, scoped to orgA's slug) settles ONLY orgA; the SAME drain cannot settle orgB's lease.
+def test_launch_cancel_refuses_a_started_launch_but_refunds_a_reservation(monkeypatch):
+    # K4-5 red-pen fold (MED): a customer cancel (full refund) is valid ONLY for a reserved-but-NOT-started
+    # launch. Once STARTED (published, may have armed+run), cancel is refused — it must settle through its
+    # completion — so a run that ran can't be full-refunded. Reserve+cancel (pre-start) still refunds.
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store()
+    ensure_owner_keypair()
+    _seat_member(s, org="org_a", host="apme.cm", credits=100)
+    # pre-start: a reserved-but-not-started launch cancels for a full refund
+    r1 = LaunchGate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=NOW)
+    assert _avail(s, "org_a") == 70
+    out = build_provisioner(s).launch_cancel("u", "org_a", r1["lease"])
+    assert out["refunded"] == 30 and _avail(s, "org_a") == 100         # not started → full refund
+    # started: publish (start) a fresh reservation, then a cancel is REFUSED (must settle through completion)
+    r2 = LaunchGate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=40, now=NOW)
+    assert _avail(s, "org_a") == 60
+    p = build_provisioner(s)
+    p.launch_start("u", "org_a", r2["lease"])                          # STARTED (published to the seam)
+    with pytest.raises(ProvisionDenied, match="started"):
+        p.launch_cancel("u", "org_a", r2["lease"])
+    assert _avail(s, "org_a") == 60                                    # NOT refunded — a started run settles on completion
+
+
+def _slug_spool(slug):
+    return str(Path(_base()) / "completion-spool" / slug)   # the worker's per-slug default completion spool
+
+
+def test_tenant_isolation_per_slug_spools_no_cross_tenant_destruction():
+    # K4-5 red-pen fold (MED): the worker's DEFAULT per-slug completion spool (base/completion-spool/<slug>/)
+    # means two tenants' completions land in SEPARATE spools, so a per-slug-scoped drain reads only its own and
+    # can NEVER claim+quarantine (destroy) another tenant's valid completion. orgA's drain settles orgA; orgB's
+    # completion stays intact in orgB's own spool and its own drain settles it — both charged, neither lost.
     s = _store()
     owner = ensure_owner_keypair()
     ra, dela = _seat_and_reserve(s, owner, org="org_a", host="a.example", units=30, credits=100)
     rb, delb = _seat_and_reserve(s, owner, org="org_b", host="b.example", units=40, credits=100)
     assert ra["slug"] != rb["slug"] == _customer_slug("org_b", "b.example")
-    spool = tempfile.mkdtemp()
-    # orgB emits a (valid, under orgB's gov key) completion for orgB's slug — but into orgA's scoped drain:
-    _worker_emits(rb["slug"], rb["nonce"], "completed", spool)
-    out = _settle_drain(s, owner, dela, ra["slug"], spool)           # drain scoped to orgA's slug
-    assert out["settled"] == 0 and out["rejected"] == 1              # orgB's slug is outside orgA's scope → refused
-    assert _avail(s, "org_b") == 60 and _avail(s, "org_a") == 70     # neither settled (both still held)
-    # ...and orgA's own completion settles orgA correctly, leaving orgB untouched
-    _worker_emits(ra["slug"], ra["nonce"], "completed", spool)
-    assert _settle_drain(s, owner, dela, ra["slug"], spool)["settled"] == 1
-    assert _avail(s, "org_a") == 70 and _avail(s, "org_b") == 60     # orgA consumed; orgB still held — isolated
+    _worker_emits(ra["slug"], ra["nonce"], "completed", _slug_spool(ra["slug"]))   # per-slug spools
+    _worker_emits(rb["slug"], rb["nonce"], "completed", _slug_spool(rb["slug"]))
+    # orgA's drain reads ONLY orgA's spool → settles orgA; orgB's spool is untouched (no cross-tenant claim)
+    outa = _settle_drain(s, owner, dela, ra["slug"], _slug_spool(ra["slug"]))
+    assert outa == {"settled": 1, "noop": 0, "rejected": 0, "deduped": 0}, outa
+    assert _avail(s, "org_a") == 70 and _avail(s, "org_b") == 60      # orgA charged; orgB intact + still held
+    # orgB's completion was NOT destroyed by orgA's drain — orgB's own drain settles it
+    outb = _settle_drain(s, owner, delb, rb["slug"], _slug_spool(rb["slug"]))
+    assert outb["settled"] == 1 and _avail(s, "org_b") == 60          # orgB charged (40 consumed, no refund)
+
+
+def test_worker_default_completion_spool_is_per_slug(monkeypatch):
+    # the DEFAULT (no completion_spool_dir) routes to base/completion-spool/<slug> — the per-slug isolation.
+    from vigil_integration.jobs.engage_worker import _completion_spool, _finding_spool
+    base = tempfile.mkdtemp()
+    assert _completion_spool(base, None, "cust_abc").endswith("/completion-spool/cust_abc")
+    assert _finding_spool(base, None, "cust_abc").endswith("/finding-spool/cust_abc")
+    assert _completion_spool(base, "/explicit/path", "cust_abc") == "/explicit/path"   # explicit used as-is

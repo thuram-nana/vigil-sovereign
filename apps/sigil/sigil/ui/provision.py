@@ -463,6 +463,27 @@ class Provisioner:
                                             permission="run_engagement"):
                 self._audit("launch_cancel", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
+        # K4-5 red-pen fold (MED): a cancel is a FULL refund (consumed=0), valid ONLY for a reserved-but-NOT-
+        # STARTED launch ("a launch they will not run"). A STARTED (published) launch has been handed to the
+        # offense plane and may already have ARMED (consumed the single-use floor + run); full-refunding it
+        # would refund a run that ran (free run). A started launch MUST settle through its own completion
+        # (charged) or failure (refunded), never this customer cancel. Refuse once the lease is on the seam.
+        from vigil_core import SignedCreditLaunchLease
+        try:
+            _cdoc = SignedCreditLaunchLease.model_validate(signed_lease).document
+        except Exception as e:  # noqa: BLE001 — a malformed lease is a clean refusal
+            raise ProvisionDenied("launch cancel requires the signed launch lease from reserve_launch") from e
+        try:
+            from .target_authorization import _base_dir
+            from vigil_integration.live.credit_lease_broker import read_credit_lease
+            _pub = read_credit_lease(_base_dir(), str(_cdoc.engagement_slug))
+        except Exception:  # noqa: BLE001 — a seam-read failure must not DENY a legitimate pre-start cancel; the
+            _pub = None     # settle_launch is_lease_settled guard is the hard backstop against a double refund
+        if _pub is not None and str(_pub.signed_lease.document.nonce) == str(_cdoc.nonce):
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(_cdoc.engagement_slug), outcome="refused_started")
+            raise ProvisionDenied(
+                "this launch has been started and must settle through its completion; it cannot be cancelled")
         r = LaunchGate(self.store).settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
                                                  expect_org_id=requester_org_id)
         if not r.get("ok"):
