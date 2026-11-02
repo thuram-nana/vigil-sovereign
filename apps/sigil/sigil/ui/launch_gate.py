@@ -304,8 +304,20 @@ class LaunchGate:
             # re-settle re-marks the same nonce + finds no bundle, and the refund grants dedupe on entry_id.
             try:
                 from vigil_integration.live.credit_lease_broker import (
-                    record_lease_settlement, tombstone_credit_lease,
+                    is_lease_settled, record_lease_settlement, tombstone_credit_lease,
                 )
+                # IDEMPOTENCY (K4-5 red-pen HIGH): a settle is a no-op for an already-settled (slug, nonce),
+                # REGARDLESS of this call's consumed value. The refund-grant entry-id dedup alone does NOT
+                # protect a refund=0 (COMPLETED) first-settle — it writes NO grant, so a LATER launch_cancel
+                # (consumed=0 => refund=reserved) would be the FIRST writer of settle-wallet:{s}:{non} and
+                # FULLY REFUND a charged, completed run (a free run / net-spend != consumption). The settlement
+                # MARKER is written by EVERY settle (incl. refund=0), so guard on it here, atomically under the
+                # lock, so settle_launch is truly idempotent per (slug, nonce) independent of the amount. NOTE:
+                # launch_cancel's gate and the settle-drain's gate must share the settlement root — both default
+                # to _base_dir(), so they align in the default deployment.
+                if is_lease_settled(self._seam_base(), s, non):
+                    return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
+                            "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
                 record_lease_settlement(self._seam_base(), s, non)
                 tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
             except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no refund yet)

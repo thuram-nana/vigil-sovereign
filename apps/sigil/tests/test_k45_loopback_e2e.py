@@ -193,6 +193,25 @@ def test_cancel_then_late_completed_cannot_double_settle():
     assert _avail(s, "org_a") == 100                                 # still fully refunded — not re-consumed
 
 
+def test_completed_then_launch_cancel_cannot_double_refund():
+    # K4-5 red-pen HIGH: a COMPLETED settle (refund=0) must make a LATER launch_cancel (a DIRECT
+    # settle_launch(consumed=0) that bypasses the seam read) an idempotent NO-OP — else the charged, completed
+    # run is FULLY REFUNDED (free run). Guarded by the is_lease_settled check inside settle_launch (the
+    # settlement marker is written on EVERY settle, including a refund=0 COMPLETED).
+    s = _store()
+    owner = ensure_owner_keypair()
+    r, deleg = _seat_and_reserve(s, owner, org="org_a", host="apme.cm", units=30, credits=100)
+    assert _avail(s, "org_a") == 70
+    spool = tempfile.mkdtemp()
+    _worker_emits(r["slug"], r["nonce"], "completed", spool)
+    assert _settle_drain(s, owner, deleg, r["slug"], spool)["settled"] == 1     # COMPLETED: charged, refund 0
+    assert _avail(s, "org_a") == 70 and is_lease_settled(_base(), r["slug"], r["nonce"])
+    # a DIRECT launch_cancel-style settle (consumed=0) for the SAME (slug,nonce) — must be an idempotent no-op
+    out = LaunchGate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=NOW, expect_org_id="org_a")
+    assert out["ok"] and out["action"] == "launch_already_settled" and out["refunded"] == 0
+    assert _avail(s, "org_a") == 70            # NOT refunded to 100 — the completed/charged run stays charged
+
+
 def test_tenant_isolation_one_orgs_drain_settles_only_its_own_lease():
     # orgA and orgB each reserve + provision their OWN launch delegation. orgA's completion (under orgA's
     # delegation, scoped to orgA's slug) settles ONLY orgA; the SAME drain cannot settle orgB's lease.
