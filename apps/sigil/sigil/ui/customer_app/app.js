@@ -267,7 +267,7 @@
       var actions = [];
       if (a.challenge) {
         actions.push(h("button.btn", { type: "button", text: "Re-check now",
-          onClick: function () { showChallenge(assign({ host: a.host }, a.challenge)); } }));
+          onClick: function () { showChallenge(assign(a.challenge, { host: a.host })); } }));
       }
       actions.push(h("button.btn", { type: "button", text: "Re-issue challenge",
         onClick: function () { doChallenge(a.host); } }));

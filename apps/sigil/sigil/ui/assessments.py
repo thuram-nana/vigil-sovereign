@@ -53,7 +53,7 @@ def _org_slug_set(store, org_id: str, *, now: float) -> set[str]:
     """The engagement-slug set that belongs to ``org_id`` — derived SERVER-SIDE from the org's OWN current
     ownership proofs, never a client value. A finding is this org's iff its signed engagement_slug is here."""
     from .target_authorization import _customer_slug
-    hosts = AssetOwnershipRegistry(store).proven_hosts(org_id, now=now)
+    hosts = AssetOwnershipRegistry(store, owner_key=None).proven_hosts(org_id, now=now)
     return {_customer_slug(org_id, h) for h in hosts}
 
 
@@ -96,7 +96,7 @@ def assessment_summary(store, org_id: str, *, now: float) -> dict[str, Any]:
     the host, whether a current owner-signed launch authority/proof backs it, and how many findings it carries.
     Tenant-scoped identically (the slug set is the org's own). The customer app lists assessments from this."""
     from .target_authorization import _customer_slug
-    hosts = AssetOwnershipRegistry(store).proven_hosts(org_id, now=now)
+    hosts = AssetOwnershipRegistry(store, owner_key=None).proven_hosts(org_id, now=now)
     by_slug = {_customer_slug(org_id, h): h for h in hosts}
     counts: dict[str, int] = {s: 0 for s in by_slug}
     if by_slug:

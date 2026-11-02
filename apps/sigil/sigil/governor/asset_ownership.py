@@ -330,10 +330,19 @@ class OwnershipProof:
 # AccountsRegistry (owner signing key + trusted pubkey default to the persisted owner identity; tests inject).
 # ---------------------------------------------------------------------------------------------------
 
+#: Sentinel for ``owner_key``: DISTINGUISH "not supplied → load the owner signing key from the vault" (the
+#: default, for signing paths) from an EXPLICIT ``owner_key=None`` → "no signing key", a pure-READ
+#: construction that must NOT unseal the vault — least-privilege on the sovereign root key on
+#: customer-pollable read paths (SS-4 red-pen LOW; reads authenticate under ``trusted_pubkey`` only).
+_LOAD_FROM_VAULT = object()
+
+
 class AssetOwnershipRegistry:
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
+    def __init__(self, store, *, owner_key=_LOAD_FROM_VAULT, trusted_pubkey: Optional[str] = None):
         self.store = store
-        self.owner_key = owner_key if owner_key is not None else owner_keypair()
+        # Signing paths leave owner_key unset → load it from the vault (a TPM unseal when sealed). A pure-read
+        # caller passes owner_key=None explicitly → the owner PRIVATE key is never touched on that path.
+        self.owner_key = owner_keypair() if owner_key is _LOAD_FROM_VAULT else owner_key
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
 
     # -- owner mutations ----------------------------------------------------------------------------
@@ -585,4 +594,4 @@ def assets_overview(store, org_id: str, *, now: float) -> dict:
     status for ``org_id``. A thin wrapper over :meth:`AssetOwnershipRegistry.assets_overview` so the
     provisioner's ``_customer_read`` gate can call it exactly like ``billing_overview`` / ``assessment_summary``
     (``admit_customer`` has ALREADY authorized ``org_id`` as the session's own tenant before this runs)."""
-    return {"assets": AssetOwnershipRegistry(store).assets_overview(org_id, now=float(now))}
+    return {"assets": AssetOwnershipRegistry(store, owner_key=None).assets_overview(org_id, now=float(now))}

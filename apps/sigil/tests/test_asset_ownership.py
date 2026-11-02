@@ -392,3 +392,21 @@ def test_assets_overview_revoked_proof_becomes_pending():
     reg.revoke_proof("acme", "revoked.cm")
     row = reg.assets_overview("acme", now=1500.0)[0]
     assert row["status"] == "pending" and "method" not in row
+
+
+def test_read_only_construction_skips_the_owner_private_key_load(monkeypatch):
+    # SS-4 red-pen LOW (least-privilege on the sovereign root key): a customer-pollable READ must never unseal
+    # the owner signing key. owner_key=None builds a pure-read registry that never calls owner_keypair(); the
+    # DEFAULT construction still loads it (signing paths need it) — the sentinel distinguishes the two.
+    s = _store()
+    calls = {"n": 0}
+    real = ao.owner_keypair
+    monkeypatch.setattr(ao, "owner_keypair", lambda: (calls.__setitem__("n", calls["n"] + 1), real())[1])
+    ro = AssetOwnershipRegistry(s, owner_key=None, trusted_pubkey=OP)   # read-only across every read method
+    ro.assets_overview("acme", now=1.0); ro.proven_hosts("acme", now=1.0)
+    ro.proof("acme", "apme.cm"); ro.has_current_proof("acme", "apme.cm", now=1.0); ro.challenge("acme", "apme.cm")
+    assert calls["n"] == 0, "a read-only registry must not load the owner private key"
+    ao.assets_overview(s, "acme", now=1.0)                             # the /api/customer/assets projector
+    assert calls["n"] == 0, "the assets_overview projector must not load the owner private key"
+    AssetOwnershipRegistry(s)                                          # default (signing) construction DOES load
+    assert calls["n"] == 1, "default construction still loads the owner key from the vault"
