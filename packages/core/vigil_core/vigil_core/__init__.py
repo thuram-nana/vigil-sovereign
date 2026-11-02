@@ -54,6 +54,10 @@ from .monitoring_authority import (
     MonitoringAuthority, MonitoringMode, SignedMonitoringAuthority, monitoring_authority_signing_bytes,
     sign_monitoring_authority, verify_monitoring_authority,
 )
+from .engagement_completion import (
+    EngagementCompletion, EngagementOutcome, SignedEngagementCompletion,
+    engagement_completion_signing_bytes, sign_engagement_completion, verify_engagement_completion,
+)
 from .target_credentials import (
     CredentialHeader, CredentialRole, SignedTargetCredentials, TargetCredentials, AccountCredential,
     sign_target_credentials, target_credentials_signing_bytes, verify_target_credentials,
@@ -102,6 +106,8 @@ __all__ = [
     "sign_engagement_authority", "verify_engagement_authority",
     "MonitoringAuthority", "MonitoringMode", "SignedMonitoringAuthority", "monitoring_authority_signing_bytes",
     "sign_monitoring_authority", "verify_monitoring_authority",
+    "EngagementCompletion", "EngagementOutcome", "SignedEngagementCompletion",
+    "engagement_completion_signing_bytes", "sign_engagement_completion", "verify_engagement_completion",
     "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",
     "AccountCredential", "sign_target_credentials", "target_credentials_signing_bytes",
     "verify_target_credentials",
