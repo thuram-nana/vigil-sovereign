@@ -253,8 +253,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
         except (urllib.error.URLError, OSError):
             return 502, {"error": "provisioner unreachable"}
 
-    def _mint(self, username: str, org_id) -> None:
-        sid = self.server.sessions.create(str(username), _CUSTOMER_SESSION_ROLE, org_id=org_id)
+    def _mint(self, username: str, org_id, *, mfa_at=None, mfa_method=None) -> None:
+        # E3c — `mfa_at`/`mfa_method` stamp a FRESH step-up at mint: a passkey LOGIN is itself a fresh second
+        # factor, so it mints an already-stepped-up session; password/signup/OIDC mint with None (no factor).
+        sid = self.server.sessions.create(str(username), _CUSTOMER_SESSION_ROLE, org_id=org_id,
+                                          mfa_at=mfa_at, mfa_method=mfa_method)
         if sid:
             self._set_cookie(sid)
 
@@ -516,7 +519,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
-                   "member_username": body.get("member_username", ""), "ip": self._ip()}
+                   "member_username": body.get("member_username", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
         if action == "member/grant":
             payload["role"] = body.get("role", "")
             c, r = self._provision("member_grant", requester, payload)
@@ -535,7 +539,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
-                   "host": body.get("host", ""), "ip": self._ip()}
+                   "host": body.get("host", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
         if action == "target/challenge":
             c, r = self._provision("target_challenge", requester, payload)
         else:
@@ -557,7 +562,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         # dict[str, object]: the lease (cancel) is a nested object, not a str — so the payload is not str-valued
-        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()}
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
         if action == "launch/reserve":
             payload["host"] = body.get("host", "")              # session org, never body-supplied
             c, r = self._provision("launch_reserve", requester, payload)
@@ -583,6 +589,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("mfa_enroll_totp", requester, {"ip": self._ip()})
         else:
             c, r = self._provision("mfa_verify", requester, {"code": body.get("code", ""), "ip": self._ip()})
+            # E3c step-up: a verified TOTP stamps mfa_at onto the LIVE session (the edge half — mfa_at is
+            # SERVER-set from `now`, never a client field), so the sensitive ops see a fresh second factor.
+            if c == 200 and isinstance(r, dict) and r.get("ok"):
+                sid = self._cookie()
+                if sid:
+                    self.server.sessions.stamp_mfa(sid, mfa_at=time.time(), mfa_method="totp")
         return self._json(r, c)
 
     def _passkey_challenge_store(self):
@@ -620,7 +632,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             if c == 200 and isinstance(r, dict) and r.get("username"):
                 orgs = r.get("orgs") or []
                 active = orgs[0] if orgs else None             # server-bound active org (switch is a later slice)
-                self._mint(r["username"], active)
+                # a fresh passkey LOGIN is itself a fresh second factor → mint an already-stepped-up session (E3c)
+                self._mint(r["username"], active, mfa_at=time.time(), mfa_method="passkey")
                 r = {**r, "active_org": active}
             return self._json(r, c)
         # --- ENROLL (session required; account-level) ---

@@ -179,6 +179,20 @@ CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP
 # with customer_passkey_enabled() false the edge's passkey routes are absent and nothing is minted.
 CUSTOMER_PASSKEY_CHALLENGE_DIR = _customer / "passkey_challenges"   # single-use WebAuthn challenges (edge)
 CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-credential_id monotonic sign-count floor
+# Slice E3c — step-up MFA. How recently a customer must have proven a fresh factor (TOTP code / passkey
+# assertion) for a sensitive op (launch / target-verify / member grant+revoke) to proceed when enforcement
+# is ON. The session's `mfa_at` is stamped by the edge on a fresh factor proof; the provisioner refuses a
+# sensitive op whose session mfa_at is older than this window (or absent).
+CUSTOMER_STEPUP_WINDOW_SECONDS = _int_env("VIGIL_CUSTOMER_STEPUP_WINDOW_SECONDS", 300)   # 5 minutes
+
+
+def customer_stepup_required() -> bool:
+    """True iff step-up MFA enforcement is ON (`VIGIL_CUSTOMER_STEPUP_REQUIRED` affirmative). OFF by default
+    (the codebase's posture-flag pattern): when OFF the sensitive customer ops are BYTE-IDENTICAL to pre-E3c
+    (no mfa_at check); when ON, a customer must have stepped up with a FRESH factor (within
+    `CUSTOMER_STEPUP_WINDOW_SECONDS`) before a launch / target-verify / member grant+revoke — so a paid or
+    offense op always rides a recent second-factor proof."""
+    return (os.environ.get("VIGIL_CUSTOMER_STEPUP_REQUIRED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is

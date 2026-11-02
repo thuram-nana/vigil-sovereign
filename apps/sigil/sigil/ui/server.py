@@ -1359,7 +1359,8 @@ class Handler(BaseHTTPRequestHandler):
         this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
         proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
         from .. import config as _config
-        from .provision import ProvisionDenied, ProvisionError, ProvisionRateLimited, build_provisioner
+        from .provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited,
+                                ProvisionStepUpRequired, build_provisioner)
         action = path[len("/api/provision/"):]
         principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
         ts = self.headers.get("X-VIGIL-Provision-Ts", "") or ""
@@ -1393,6 +1394,10 @@ class Handler(BaseHTTPRequestHandler):
             result = self._provision_dispatch(p, action, principal, body)
         except ProvisionRateLimited as e:
             return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
+        except ProvisionStepUpRequired as e:
+            # E3c — a fresh second factor is required; the SPA prompts for one and retries. 401 + a flag so the
+            # edge/SPA can distinguish this from an authority denial (403).
+            return self._json({"error": str(e)[:200], "step_up_required": True}, 401)
         except ProvisionDenied as e:
             return self._deny(403, f"denied: {str(e)[:200]}")
         except ProvisionError as e:
@@ -1452,10 +1457,10 @@ class Handler(BaseHTTPRequestHandler):
                                    expected_challenge=str(body.get("challenge", "")), ip=ip)
         if action == "member_grant":
             return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
-                                  str(body.get("role", "")), ip=ip)
+                                  str(body.get("role", "")), ip=ip, mfa_at=body.get("mfa_at"))
         if action == "member_revoke":
             return p.revoke_member(requester, str(body.get("org_id", "")),
-                                   str(body.get("member_username", "")), ip=ip)
+                                   str(body.get("member_username", "")), ip=ip, mfa_at=body.get("mfa_at"))
         # Slice G0 — asset-ownership target registration. requester is the HMAC-bound hop principal (Finding
         # D); org_id comes from the edge's SERVER-side session (never a free body field a customer chose);
         # host/method are the customer's requested target. Gated in-service on admit_customer(run_engagement).
@@ -1463,15 +1468,18 @@ class Handler(BaseHTTPRequestHandler):
             return p.target_challenge(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
         if action == "target_verify":
             return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
-                                   str(body.get("method", "")), ip=ip)
+                                   str(body.get("method", "")), ip=ip, mfa_at=body.get("mfa_at"))
         # Slice G — offense-launch credit reservation. requester is the hop principal; org from the edge
         # session; host (reserve) / lease (cancel) from the body. units are server-decided (config.LAUNCH_UNITS).
         if action == "launch_reserve":
-            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip,
+                                    mfa_at=body.get("mfa_at"))
         if action == "launch_cancel":
-            return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
+            return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                   mfa_at=body.get("mfa_at"))
         if action == "launch_start":
-            return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
+            return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                  mfa_at=body.get("mfa_at"))
         # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
         if action == "billing_overview":
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)

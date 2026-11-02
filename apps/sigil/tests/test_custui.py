@@ -920,3 +920,54 @@ def test_passkey_routes_404_when_disabled_and_enroll_requires_session(tmp_path, 
         assert _post(_opener(), ep, "/api/customer/passkey/enroll/challenge", {})[0] == 401
     finally:
         sov.shutdown(); edge.shutdown()
+
+
+# ======================================================================================================
+# E3c — step-up MFA over the edge: a sensitive op is gated until a fresh factor is proven (flag ON)
+# ======================================================================================================
+def test_stepup_gates_a_sensitive_op_until_a_fresh_factor(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")       # enforcement ON for this test
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)         # provisioned vault for the TOTP seal
+    try:
+        admin = _opener()
+        ta = _post(admin, ep, "/api/customer/signup/request", {"email": "admin@acme.com"})[1]["dev_token"]
+        _post(admin, ep, "/api/customer/signup/confirm",
+              {"token": ta, "password": "customer-pw-1", "org_name": "Acme"})
+        mate = _opener()
+        tm = _post(mate, ep, "/api/customer/signup/request", {"email": "mate@acme.com"})[1]["dev_token"]
+        m = _post(mate, ep, "/api/customer/signup/confirm",
+                  {"token": tm, "password": "customer-pw-2", "org_name": "Mate"})[1]
+        # with step-up ON and no fresh factor, the admin's member/grant is REFUSED with step_up_required
+        c, r = _post(admin, ep, "/api/customer/member/grant",
+                     {"member_username": m["username"], "role": "analyst"})
+        assert c == 401 and r.get("step_up_required") is True, (c, r)
+        # enroll TOTP + step up — the edge stamps mfa_at onto the admin's live session
+        enr = _post(admin, ep, "/api/customer/mfa/totp/enroll", {})[1]
+        code = _totp.code_now(enr["secret"], at=time.time())
+        assert _post(admin, ep, "/api/customer/mfa/verify", {"code": code})[0] == 200
+        # now the SAME grant proceeds (the session carries a fresh mfa_at within the window)
+        c, r = _post(admin, ep, "/api/customer/member/grant",
+                     {"member_username": m["username"], "role": "analyst"})
+        assert c == 200 and r["role"] == "analyst", (c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_stepup_off_by_default_sensitive_op_unchanged(tmp_path, monkeypatch):
+    # default (flag OFF): a sensitive op proceeds with NO step-up — byte-identical to pre-E3c.
+    monkeypatch.delenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", raising=False)
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        admin = _opener()
+        ta = _post(admin, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        _post(admin, ep, "/api/customer/signup/confirm",
+              {"token": ta, "password": "customer-pw-1", "org_name": "Acme"})
+        mate = _opener()
+        tm = _post(mate, ep, "/api/customer/signup/request", {"email": "b@acme.com"})[1]["dev_token"]
+        m = _post(mate, ep, "/api/customer/signup/confirm",
+                  {"token": tm, "password": "customer-pw-2", "org_name": "Mate"})[1]
+        c, r = _post(admin, ep, "/api/customer/member/grant",
+                     {"member_username": m["username"], "role": "analyst"})
+        assert c == 200 and r["role"] == "analyst", (c, r)         # no step-up needed when the flag is off
+    finally:
+        sov.shutdown(); edge.shutdown()

@@ -67,6 +67,13 @@ class ProvisionRateLimited(ProvisionError):
         self.retry_after = retry_after
 
 
+class ProvisionStepUpRequired(ProvisionError):
+    """E3c — a sensitive op needs a FRESH step-up second factor (the session's `mfa_at` is absent/stale and
+    step-up enforcement is ON). The HTTP layer maps it to 401 with `step_up_required=True` so the SPA prompts
+    for a factor and retries. A subclass of ProvisionError (NOT ProvisionDenied) so the transport can map it
+    distinctly from an authority denial."""
+
+
 def new_org_id() -> str:
     """A fresh, SERVER-generated org id that is a valid `_TENANT_RE` tenant id (canonical, collision-
     resistant, never derived from a customer-supplied label — so an org_id can never collide or traverse).
@@ -197,6 +204,23 @@ class Provisioner:
         locked = self.rate_limiter.check(*keys, now=now)
         if locked is not None:
             raise ProvisionRateLimited(locked)
+
+    def _require_stepup(self, mfa_at, *, now: float) -> None:
+        """E3c — refuse a sensitive op unless the session proved a FRESH second factor within the window. A
+        NO-OP when enforcement is off (`customer_stepup_required()` False) — BYTE-IDENTICAL to pre-E3c, so the
+        existing launch/target/member flows are unchanged by default. When ON, `mfa_at` (the session's step-up
+        stamp, carried by the edge from the SERVER-side session — never a client body field) must be present
+        and within `CUSTOMER_STEPUP_WINDOW_SECONDS` of `now`; otherwise raise ProvisionStepUpRequired (the edge
+        prompts for a factor + retries). Fail-closed: a missing / non-numeric / non-positive mfa_at refuses."""
+        from .. import config
+        if not config.customer_stepup_required():
+            return
+        try:
+            at = float(mfa_at)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= 0.0 or (now - at) > float(config.CUSTOMER_STEPUP_WINDOW_SECONDS):
+            raise ProvisionStepUpRequired("a fresh second-factor (step-up) is required for this operation")
 
     def _member_rate_guard(self, org_id: str, *, now: float) -> None:
         """Guard-AND-COUNT one member-management op (grant/revoke) against the per-org member limiter. A no-op
@@ -650,7 +674,7 @@ class Provisioner:
 
     # -- member management (the milestone: an org_admin manages THEIR org) --------------------------
     def grant_member(self, requester: str, requester_org_id: str, member_username: str, role: str, *,
-                     ip: str = "", now: "Optional[float]" = None) -> dict:
+                     ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """An `org_admin` adds/changes a teammate's role in THEIR org. The service checks
         `admit_customer(requester, org_id, manage_members)` FIRST (fail-closed, before any signature), caps
         the role to the customer-grantable set (never operator/owner → no offense-adjacent authority), then
@@ -671,6 +695,7 @@ class Provisioner:
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
                             target=member_username, outcome="denied")
                 raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
             # P6: meter AUTHORIZED churn only — the rate guard records AFTER admit_customer, so a non-admin
             # cannot burn the per-org member budget and lock the real admin out (the limiter's finding).
             self._member_rate_guard(requester_org_id, now=t)
@@ -687,7 +712,7 @@ class Provisioner:
         return {"org_id": requester_org_id, "username": member_username, "role": role, "seq": seq}
 
     def revoke_member(self, requester: str, requester_org_id: str, member_username: str, *,
-                      ip: str = "", now: "Optional[float]" = None) -> dict:
+                      ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """R1 — AUTHENTICATED ordinary revocation: an `org_admin` removes a teammate from THEIR org. The
         service checks `admit_customer(requester, org_id, manage_members)` (so a revoke is never an
         anonymous unsigned record), rate-limits, audits, THEN owner-signs the revoke. The unsigned-honored
@@ -706,6 +731,7 @@ class Provisioner:
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
                             target=member_username, outcome="denied")
                 raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
             self._member_rate_guard(requester_org_id, now=t)   # P6: meter AUTHORIZED churn only (after admit)
             admins = self._org_admin_usernames(requester_org_id)
             if member_username in admins and len(admins) <= 1:
@@ -745,7 +771,7 @@ class Provisioner:
                 "meta_tag": ch.meta_tag, "marker": ch.marker}
 
     def launch_reserve(self, requester: str, requester_org_id: str, host: str, *,
-                       ip: str = "", now: "Optional[float]" = None) -> dict:
+                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Reserve credits + mint a launch lease for ONE offense launch against (org, host). Delegates to the
         LaunchGate, which composes admit_customer(run_engagement) + a current ownership proof + a verifying
         owner-signed EngagementAuthority + a sufficient credit balance, then reserves + mints under the spine
@@ -753,6 +779,7 @@ class Provisioner:
         `units` are SERVER-decided (``config.LAUNCH_UNITS``), never customer-supplied (money doctrine). Returns
         the signed lease for the edge to relay; the offense launch verifies it before any traffic."""
         t = self._now() if now is None else float(now)
+        self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
         from .. import config
         from .launch_gate import LaunchGate
         r = LaunchGate(self.store).reserve_launch(
@@ -767,7 +794,7 @@ class Provisioner:
                                   "lease", "trust_root") if k in r}
 
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
-                      ip: str = "", now: "Optional[float]" = None) -> dict:
+                      ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
         admit_customer(run_engagement) AND the lease's org MUST match the requester's session org
         (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The refund is bound to the
@@ -780,6 +807,7 @@ class Provisioner:
                                             permission="run_engagement"):
                 self._audit("launch_cancel", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
         # K4-5 red-pen fold (MED): a cancel is a FULL refund (consumed=0), valid ONLY for a reserved-but-NOT-
         # STARTED launch ("a launch they will not run"). A STARTED (published) launch has been handed to the
         # offense plane and may already have ARMED (consumed the single-use floor + run); full-refunding it
@@ -809,7 +837,8 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="canceled", critical=True)
         return {"slug": r.get("slug"), "refunded": r.get("refunded")}
 
-    def launch_start(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "") -> dict:
+    def launch_start(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                     mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Start a reserved launch — publish the owner-signed lease to the cross-plane seam so the offense
         plane can run the engagement (Slice K3). Gated on admit_customer(run_engagement) AND the lease's org
         MUST match the requester's session org (``expect_org_id`` — a customer cannot start another tenant's
@@ -821,6 +850,7 @@ class Provisioner:
                                             permission="run_engagement"):
                 self._audit("launch_start", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=(self._now() if now is None else float(now)))  # E3c step-up
         # K4-5d(A) + red-pen fold: provision the per-slug owner-signed OFFENSE_GOVERNANCE_ROLE delegation (that
         # the SOVEREIGN settle/finding drains verify this launch's completion + crossed FACTs against, scoped to
         # the cust_ slug, lapsing with the lease window + a settle grace) BEFORE publishing the runnable lease.
@@ -894,7 +924,7 @@ class Provisioner:
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
 
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
-                      ip: str = "", now: "Optional[float]" = None) -> dict:
+                      ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint
         the owner-signed LIVE non-destructive target authority — the self-serve billing != testing bridge.
 
@@ -914,6 +944,7 @@ class Provisioner:
                 self._audit("target_verify", requester=requester, org_id=requester_org_id,
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not register assessment targets for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
         from .ownership_fetch import OwnershipFetchError
         try:
             observed = self.target_fetcher.fetch(method, host, now=t)   # network I/O — NO lock held
