@@ -378,6 +378,15 @@ def add_target(
     # broker's own _safe_component stays as the defence-in-depth backstop.
     if not s or all(c == "." for c in s):
         return {"ok": False, "error": "could not derive a path-safe slug (try an explicit slug)"}
+    # K4-0: RESERVE the ``cust_`` prefix for customer self-serve authorities (``add_customer_target``,
+    # issued_by ``customer:<org>``, billing-backed + lease-gated). An operator authority (issued_by ``owner``)
+    # must never carry a ``cust_`` slug — else it would masquerade as a customer engagement to the offense
+    # arm's structural customer gate (``customer_engagement_requires_lease``). ``_slug_for`` permits ``_`` via
+    # an explicit slug, so this is the enforcement point. Host-derived operator slugs never hit this (a DNS
+    # label has no underscore); only an explicit ``cust_``-named operator slug is refused.
+    if s.startswith("cust_"):
+        return {"ok": False, "error": "the 'cust_' slug prefix is reserved for customer self-serve "
+                "authorities (billing-backed, lease-gated); an operator target may not use it"}
 
     t = now() if callable(now) else (now if now is not None else datetime.now(timezone.utc))
     if not isinstance(t, datetime):

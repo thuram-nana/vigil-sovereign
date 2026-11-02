@@ -140,3 +140,40 @@ def test_engage_hook_resume_revalidates_without_reconsuming(monkeypatch, tmp_pat
     # and resume stays bound: a resume whose tenant/host no longer matches the lease is still fail-closed
     with pytest.raises(EngagementRefused):
         _engage_launch_lease_precondition(SLUG, "https://evil.example", resume=True)
+
+
+# ---- K4-0: structural customer gate (issued_by, not the cust_ string) ---------------------------------
+def test_customer_engagement_requires_lease_is_structural(monkeypatch):
+    import types
+    # cust_ fast-path: True with no owner root / authority machinery at all (matches the K2 arm fail-closed)
+    assert LL.customer_engagement_requires_lease("cust_x") is True
+    # a NON-cust_ slug whose VERIFIED authority is customer-issued -> True (closes hole b: no skip-by-rename)
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda *a, **k: object())
+    monkeypatch.setattr("framework.v2.authority.store.load_verified_authority",
+                        lambda slug, root, *a, **k: types.SimpleNamespace(issued_by="customer:org_a"))
+    assert LL.customer_engagement_requires_lease("weird-noncust-slug") is True
+    # an operator authority (issued_by "owner") -> False (operator path byte-identical: no lease)
+    monkeypatch.setattr("framework.v2.authority.store.load_verified_authority",
+                        lambda slug, root, *a, **k: types.SimpleNamespace(issued_by="owner"))
+    assert LL.customer_engagement_requires_lease("pentest-main") is False
+    # no verifiable authority (greenfield) -> False; and no owner root -> False (both fail-closed to no-lease)
+    monkeypatch.setattr("framework.v2.authority.store.load_verified_authority",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no authority")))
+    assert LL.customer_engagement_requires_lease("greenfield") is False
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda *a, **k: None)
+    assert LL.customer_engagement_requires_lease("greenfield") is False
+
+
+def test_engage_hook_gates_a_customer_authority_under_a_noncust_slug(monkeypatch, tmp_path):
+    """K4-0 hole (b): a customer engagement that (hypothetically) ran under a NON-cust_ slug is no longer
+    silently un-gated — the structural issued_by marker makes it require a lease, so an empty seam refuses it."""
+    import types
+
+    from framework.v2.engage import EngagementRefused, _engage_launch_lease_precondition
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))                 # empty seam -> no lease
+    monkeypatch.setattr("framework.v2.common.tenant.tenant_id", lambda: ORG)
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda *a, **k: object())
+    monkeypatch.setattr("framework.v2.authority.store.load_verified_authority",
+                        lambda slug, root, *a, **k: types.SimpleNamespace(issued_by="customer:org_a"))
+    with pytest.raises(EngagementRefused):
+        _engage_launch_lease_precondition("weird-noncust-slug", "https://apme.cm")

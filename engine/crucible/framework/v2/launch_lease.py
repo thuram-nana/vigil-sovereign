@@ -61,6 +61,37 @@ def is_customer_slug(slug: Any) -> bool:
     return isinstance(slug, str) and slug.startswith("cust_")
 
 
+def customer_engagement_requires_lease(slug: Any, *, trust_root: Any = None) -> bool:
+    """STRUCTURAL replacement for :func:`is_customer_slug` as the lease‑required gate (K4‑0): an engagement
+    requires a customer ``CreditLaunchLease`` iff it is a CUSTOMER engagement, determined from the OWNER‑SIGNED
+    ``EngagementAuthority`` (``issued_by`` starts ``"customer:"`` — baked into the signed bytes by
+    ``add_customer_target``), with the ``cust_`` prefix kept as a fail‑closed FAST‑PATH. This closes the two
+    holes the ``is_customer_slug`` docstring flagged: (a) ``cust_`` is RESERVED against operator use
+    (``add_target`` refuses a ``cust_`` slug, so a verified NON‑customer authority can never carry one), and
+    (b) a customer authority under a NON‑``cust_`` slug STILL requires a lease (the K2 conjunct can no longer
+    be skipped by renaming the slug).
+
+      * ``cust_`` prefix  → True (fast‑path; no authority load; preserves today's fail‑closed ``cust_``
+        behaviour even when no owner root / authority is loadable — matches the K2 arm tests);
+      * otherwise         → True iff a VERIFIED owner‑signed authority for ``slug`` is customer‑issued; ANY
+        load/verify failure (operator / greenfield: no verifiable customer authority) → False, so those paths
+        stay byte‑identical (no lease consulted, no raise).
+
+    Verify‑only, keyless, fail‑closed; never raises. ``trust_root`` is injectable for tests; production uses
+    the pinned owner root (``load_authority_root``), exactly as the lease verify does."""
+    if is_customer_slug(slug):
+        return True
+    try:
+        from .authority.store import load_authority_root, load_verified_authority
+        root = trust_root if trust_root is not None else load_authority_root()
+        if root is None:
+            return False
+        doc = load_verified_authority(str(slug), root)
+        return str(getattr(doc, "issued_by", "")).startswith("customer:")
+    except Exception:  # noqa: BLE001 — no verifiable customer authority ⇒ not a customer engagement (byte-identical)
+        return False
+
+
 def _advance_floor(base: Any, safe_slug: str, seq: int) -> "tuple[bool, str]":
     """STRICT single-use floor: refuse ``seq <= prior`` (a replay of this/an older lease), else advance to
     ``seq``. The load→strict-check→advance runs under :func:`highwater_lock`, so two concurrent arms of the same

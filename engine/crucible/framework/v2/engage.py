@@ -435,11 +435,13 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool 
     floor seq) would refuse EVERY resumed customer engagement as a 'replay' and strand its paid reservation.
     ``consume`` exists for exactly this check-vs-consume split (the K4 enqueue pre-check also passes
     consume=False); a resume re-runs inside the same already-charged engagement, never a second fresh launch,
-    and the lease stays bound to slug/host/tenant/window either way (no replay or re-aim is opened). A non-
-    ``cust_`` slug (operator / greenfield) requires NO lease and is byte-identical (no lease consulted).
-    Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
-    from .launch_lease import is_customer_slug, verify_customer_launch_lease
-    if not is_customer_slug(slug):
+    and the lease stays bound to slug/host/tenant/window either way (no replay or re-aim is opened). An
+    engagement that is NOT a customer engagement — no ``cust_`` slug AND no verified owner-signed customer
+    authority (``issued_by`` ``customer:``), per ``customer_engagement_requires_lease`` (K4‑0, the structural
+    gate that replaces the bare ``cust_`` prefix) — requires NO lease and is byte-identical (no lease
+    consulted). Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
+    from .launch_lease import customer_engagement_requires_lease, verify_customer_launch_lease
+    if not customer_engagement_requires_lease(slug):
         return
     from urllib.parse import urlsplit
 
