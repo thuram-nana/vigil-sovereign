@@ -528,6 +528,11 @@ jobs:
               integration/tests/test_jobs_securityjob_slice1.py \
               integration/tests/test_webhook_drain.py \
               integration/tests/test_reconciliation.py \
+              integration/tests/test_launch_trigger.py \
+              integration/tests/test_launch_drain.py \
+              integration/tests/test_engage_runner.py \
+              integration/tests/test_ci_runner.py \
+              integration/tests/test_findings_crossing.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \
