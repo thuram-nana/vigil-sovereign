@@ -490,6 +490,12 @@
    "file": "037-a14-bump-litellm-1-90-1-1-100-4-in-the-vendored.patch",
    "sha256": "bc5ca13e4add91065b396b5e1434050172772e207efbbb0d0e72c3af21f33bab",
    "subject": "A14: bump litellm 1.90.1 -> 1.100.4 in the vendored strix uv.lock"
+  },
+  {
+   "commit": "da19c4d619ac22b633b4dfbfd985742b1a5512b7",
+   "file": "038-supply-chain-a14-bump-pyasn1-0-6-4-0-6-5-in-vend.patch",
+   "sha256": "d55e0987f58cf9425218a23ed20d18e0954eb38a18ac6d069679d568ae51579e",
+   "subject": "supply-chain(A14): bump pyasn1 0.6.4 -> 0.6.5 in vendor/strix/uv.lock"
   }
  ],
  "schema": 1,
@@ -736,7 +742,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "3f06329fc976da9cd65210927f6cd094680adde4412a3f3b043b9e78fc2796fb"
+  "vendor/strix/uv.lock": "678118c847f6f5f053c8b240947104ba4efe02ffe972d81d70ee39b7049fe1d4"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
