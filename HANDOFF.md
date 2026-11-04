@@ -68,6 +68,34 @@ passed:
 - Note: pass an **absolute** interpreter path via `VIGIL_LE_PYTHON` (the harness `cd`s into the clean checkout,
   so a relative `.venv-offense/bin/python` fails rc=127).
 
+### Milestone 3 — B (sandbox money-loop) + A (#3 cron) investigation ✅ (evidence gathered)
+
+**B — money-loop (sandbox):**
+- Suites green: `test_billing.py` + `test_billing_spool.py` + `test_k45_loopback_e2e.py` + `test_catalog.py`
+  = 88 tests pass. Money-doctrine chain verified (verif-hash → inert spool → drainer → mandatory server-side
+  re-verify → catalog-keyed sovereign mint → wallet credit → gate → billing≠testing).
+- Live HTTP front-door is `vigil_integration.uiproxy` `POST /webhooks/billing` — **default-OFF**, enabled via
+  `VIGIL_BILLING_WEBHOOK_SPOOL` (spool dir) + `VIGIL_BILLING_WEBHOOK_SECRET` (verif-hash, off-spine). The
+  customer edge `custui` is also **default-OFF** in `vigil up`; opt in with `--with-saas`. `vigil up` stands up
+  cleanly at one origin (127.0.0.1:8770, sovereign token-gated); `/customer` 502s until `--with-saas`.
+- **Blocked for a faithful live drive:** Flutterwave's real sandbox-API re-verify needs owner sandbox keys
+  (not present; will not store). Money-SAFE by construction either way (under-credit recoverable, never
+  over-credit). NEXT: `vigil up --with-saas` + billing webhook env → POST a signed sandbox webhook → observe
+  spool→drain→mint→credit→gate, using the mock verifier as the documented deterministic sandbox.
+
+**A — #3 livefire cron root-cause (partial; needs the job log to finalize):**
+- `tools/livefire/range.sh up src` → content ids match manifest (PASS locally).
+- `range.sh up all && range.sh verify` → **PASS locally** (all planted weaknesses fired, all controls silent;
+  dvwa/juice/mutillidae/vampi/vulnapp confirmed; meridian/webgoat brought-up-only by design).
+- Pinned dvwa digest resolves; Docker Hub pulls work from here.
+- **Conclusion:** the nightly cron failure is environmental on the GitHub runner, not a code regression (only
+  one recent commit touches `tools/livefire`, a merge). Four nightly jobs run on `schedule`
+  (`livefire-full`, `livefire-range`, `livefire-k8s-rbac`, `livefire-secret-github`; the last SKIPs cleanly
+  without a PAT). Most probable: Docker Hub anonymous pull-rate-limit (`livefire-range`), from-source nikto /
+  Go install (`livefire-full`), or k3s stand-up (`livefire-k8s-rbac`).
+- **To finalize:** need the failing run's job log (runs 41620914942 / 41815807225) — no Actions-log tool in
+  this toolset. Owner to enable the Actions tool or paste which job+step is red.
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
@@ -86,10 +114,10 @@ passed:
 
 ## Exact next step
 
-Live-stack HTTP drive of the customer loop (`vigil up` / custui edge) + scripted adversarial probes
-(RBAC/console-isolation/session/IDOR/step-up). **Live money-loop drive is gated on owner confirming
-Flutterwave sandbox/test mode (question b).** Then `make gate` + ruff + ratchet. Reserve Opus multi-lens
-red-pen for post-Nov-6.
+`vigil up --with-saas` with `VIGIL_BILLING_WEBHOOK_SPOOL`/`_SECRET` set → POST a signed sandbox webhook to
+`/webhooks/billing` → observe spool→drain→mint→credit→credit-gate→billing≠testing over real HTTP (mock verifier
+= documented deterministic sandbox). Then `make gate` + ruff + ratchet. Reserve Opus multi-lens red-pen for
+post-Nov-6. Finalize #3 once the failing job log is available.
 
 ## Blockers / open questions to owner
 
