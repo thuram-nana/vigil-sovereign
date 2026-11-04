@@ -424,6 +424,36 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     return trust_root
 
 
+def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool = False) -> None:
+    """K2 (arm site, customer launches): a CUSTOMER engagement (``cust_`` slug) must present a VERIFIED
+    owner-signed credit-launch lease on the cross-plane seam before it arms — a SEPARATE conjunct from the
+    EngagementAuthority (G0). The offense plane VERIFIES the public owner-signed lease against OUR pinned owner
+    key (never the seam-carried root), BINDS it to this engagement / target host / tenant (CRUCIBLE_TENANT) /
+    window, and (on a FRESH arm) CONSUMES it single-use (strict issued_at floor) — all keyless, before any
+    traffic. On ``resume`` the lease is RE-VALIDATED + RE-BOUND but NOT re-consumed: the first arm already
+    burned the single-use floor for this exact lease, so re-burning it (the same issued_at yields the same
+    floor seq) would refuse EVERY resumed customer engagement as a 'replay' and strand its paid reservation.
+    ``consume`` exists for exactly this check-vs-consume split (the K4 enqueue pre-check also passes
+    consume=False); a resume re-runs inside the same already-charged engagement, never a second fresh launch,
+    and the lease stays bound to slug/host/tenant/window either way (no replay or re-aim is opened). An
+    engagement that is NOT a customer engagement — no ``cust_`` slug AND no verified owner-signed customer
+    authority (``issued_by`` ``customer:``), per ``customer_engagement_requires_lease`` (K4‑0, the structural
+    gate that replaces the bare ``cust_`` prefix) — requires NO lease and is byte-identical (no lease
+    consulted). Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
+    from .launch_lease import customer_engagement_requires_lease, verify_customer_launch_lease
+    if not customer_engagement_requires_lease(slug):
+        return
+    from urllib.parse import urlsplit
+
+    from .common.tenant import tenant_id
+    host = urlsplit(seed_url).hostname or ""
+    ok, reason = verify_customer_launch_lease(slug, host, tenant_id(), consume=not resume)
+    if not ok:
+        raise EngagementRefused(
+            f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
+            f"The lease is reserved + started on the sovereign plane and re-verified here keyless before traffic.")
+
+
 def _engage_oob_authority(slug: str) -> dict:
     """The OUT-OF-BAND OOB material (collector pins + owner-signed TTL/skew replay policy) from the SIGNED
     engagement authority, as WebScanCampaign kwargs. This CONSUMES ``authority.oob_collector_pubkey`` and
@@ -1193,6 +1223,10 @@ def run_engagement(
     ledger.start(P_PREFLIGHT)
     try:
         preflight(slug, seed_url)
+        # K2: a cust_ launch needs a verified credit lease. Thread `resume` so a --resume RE-VALIDATES the
+        # lease (owner-pin + bind + window) but does NOT re-burn the single-use floor the first arm consumed
+        # (else every resumed customer engagement dies as a replay, stranding its paid reservation).
+        _engage_launch_lease_precondition(slug, seed_url, resume=resume)
     except EngagementRefused as e:
         ledger.fail(P_PREFLIGHT)
         if sink is not None:
@@ -1339,11 +1373,57 @@ def run_engagement(
             # caller and the README's egress claim was false for target traffic.
             egress_allowlist=build_engagement_allowlist(slug=slug),
         )
+        # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
+        # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
+        # identity's requests still pass the full safety stack. No refs => None (documented no-op).
+        # Computed BEFORE the seed send so a signed roster can set the ATTACKER identity on it (below).
+        ac_config = access_control_config
+        _seeded = None
+        if enable_access_control and ac_config is None and access_control_refs:
+            from .scanner.access_control import (
+                config_from_cli,
+                config_from_signed_credentials,
+                load_signed_target_credentials,
+            )
+            # W3 autoseed: an OWNER-SIGNED test-credential roster (authority dir) supplies the victim,
+            # ATTACKER + unauthorized-peer identities — no per-run --ac-victim-header / --ac-unauth-header.
+            # It is VERIFIED against the engagement trust root AND bound to THIS slug; a tampered / absent /
+            # out-of-window / cross-engagement roster falls back to the CLI headers.
+            _signed = load_signed_target_credentials(slug)
+            _trust_root = _engage_authority_trust_root(slug) if _signed is not None else None
+            # A tampered / out-of-window / wrong-slug roster fails CLOSED inside
+            # config_from_signed_credentials (returns None) and falls back to the CLI headers below; with no
+            # CLI victim header that yields a non-firing config (no victim swap => the probe cannot mint),
+            # never a FACT from bad creds. `now` is REQUIRED (the window is always enforced) and `slug`
+            # binds the roster to this engagement.
+            if _signed is not None and _trust_root is not None:
+                from datetime import datetime as _dt, timezone as _tz
+                _seeded = config_from_signed_credentials(
+                    ex.gated_fetch, _signed, _trust_root, access_control_refs,
+                    slug=slug, now=_dt.now(_tz.utc))
+            if _seeded is not None:
+                ac_config = _seeded.config
+            else:
+                ac_config = config_from_cli(
+                    ex.gated_fetch, access_control_victim_headers, access_control_refs,
+                    unauth_headers=access_control_unauth_headers)
+
         # #799 — OBSERVE-ONLY seed recorder around the campaign's gated send: capture whether the FIRST
         # (seed) fetch came back with an empty body on a dead connection (status 0 / 5xx-gateway). It only
         # reads the response the crawler already made and returns it unchanged — no new traffic, so the
         # scan output stays byte-identical; the emptiness flag drives the INCONCLUSIVE surface below.
-        _seed_send = ex.gated_fetch
+        #
+        # W3 (red-pen MED): when an OWNER-SIGNED roster seeded the access-control pack, the campaign's own
+        # send IS the IdorCheck ATTACKER view, so it MUST carry the signed ATTACKER identity's headers.
+        # Otherwise the attacker view is anonymous (== the logged-out baseline): the two-identity
+        # differential is unsatisfiable (the check can never mint) or, worse, fails open on a stray session
+        # the crawl happened to carry. All four identities stay header-swaps over the SAME gated executor —
+        # victim/nocred/peer live in ac_config (built over ex.gated_fetch), the attacker is swapped on here.
+        if _seeded is not None:
+            from .scanner.access_control import victim_send_with_headers
+            _seed_send = victim_send_with_headers(ex.gated_fetch, _seeded.attacker_headers)
+        else:
+            _seed_send = ex.gated_fetch
 
         def _seed_recording_send(req: object) -> dict:
             resp = _seed_send(req)
@@ -1358,16 +1438,6 @@ def run_engagement(
                 except Exception:
                     pass
             return resp
-
-        # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
-        # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
-        # identity's requests still pass the full safety stack. No refs => None (documented no-op).
-        ac_config = access_control_config
-        if enable_access_control and ac_config is None and access_control_refs:
-            from .scanner.access_control import config_from_cli
-            ac_config = config_from_cli(
-                ex.gated_fetch, access_control_victim_headers, access_control_refs,
-                unauth_headers=access_control_unauth_headers)
         try:
             return WebScanCampaign(
                 _seed_recording_send,

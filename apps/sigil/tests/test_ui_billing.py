@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 from sigil.governor.identity import ensure_owner_keypair
+from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.metering import PlanCreditLedger, refill_active_subscription
 from sigil.governor.orgs import OrgRegistry
 from sigil.governor.subscription import SubscriptionRegistry
@@ -219,5 +220,74 @@ def test_dunning_past_due_reads_not_live_plan_zero():
         assert body["active"] is False and body["credits"]["plan_live"] == 0
         assert body["credits"]["available"] == 200
         assert body["subscription"]["status"] == "past_due"
+    finally:
+        srv.shutdown()
+
+
+# ---- Slice H: the org-scoped invoices read (the IDOR class) ------------------------------------------
+def _seed_inv():
+    """Two orgs with billing HISTORY: acme has two invoices, other has one; alice is operator@acme. Lets the
+    invoices read assert tenant-scoping (a per-org member reads ONLY their tenant's lines — the IDOR class)."""
+    path = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    owner = ensure_owner_keypair()
+    store = SpineStore(path)
+    orgs = OrgRegistry(store, owner_key=owner)
+    inv = InvoiceRegistry(store, owner_key=owner)
+    it = iter(range(1, 10_000))
+    orgs.create_org("acme", "Acme Corp", owner="owner", issued_at=float(next(it)))
+    orgs.create_org("other", "Other Inc", owner="owner", issued_at=float(next(it)))
+    orgs.grant_membership("acme", "alice", "operator", issued_at=float(next(it)))
+    inv.record("acme", invoice_id="a_sub", kind="subscription", price_id="pro", amount_minor=4900,
+               currency="USD", credits=6000, period_start=0.0, period_end=1000.0, issued_at=100.0)
+    inv.record("acme", invoice_id="a_top", kind="topup", price_id="t200", amount_minor=999, currency="USD",
+               credits=200, issued_at=300.0)
+    inv.record("other", invoice_id="o_top", kind="topup", price_id="t200", amount_minor=999, currency="USD",
+               credits=200, issued_at=50.0)
+    return path
+
+
+def test_owner_reads_a_tenants_invoices():
+    srv, port = _serve(_seed_inv())
+    try:
+        code, body = _get(port, "/api/billing/invoices?org=acme")
+        assert code == 200, (code, body)
+        assert body["org_id"] == "acme" and body["count"] == 2
+        assert [i["invoice_id"] for i in body["invoices"]] == ["a_top", "a_sub"]      # newest-first (issued_at)
+        assert body["invoices"][1]["amount_minor"] == 4900 and body["invoices"][1]["currency"] == "USD"
+        code, other = _get(port, "/api/billing/invoices?org=other")
+        assert code == 200 and other["count"] == 1 and other["invoices"][0]["invoice_id"] == "o_top"
+    finally:
+        srv.shutdown()
+
+
+def test_invoices_missing_or_invalid_org_is_400():
+    srv, port = _serve(_seed_inv())
+    try:
+        assert _get(port, "/api/billing/invoices")[0] == 400
+        assert _get(port, "/api/billing/invoices?org=bad%2Fslash")[0] == 400
+    finally:
+        srv.shutdown()
+
+
+def test_invoices_unauthenticated_is_401():
+    srv, port = _serve(_seed_inv())
+    try:
+        assert _get(port, "/api/billing/invoices?org=acme", token=None)[0] == 401
+    finally:
+        srv.shutdown()
+
+
+def test_per_org_member_reads_only_their_tenant_invoices():
+    # THE IDOR class (the competitor's cross-tenant invoice read), defended: alice is operator@acme ONLY.
+    srv, port = _serve(_seed_inv())
+    try:
+        alice = _bearer(port, "alice", "viewer")                        # global viewer, operator in acme
+        code, body = _get(port, "/api/billing/invoices?org=acme", token=alice)
+        assert code == 200 and body["count"] == 2, (code, body)         # her own tenant: allowed
+        assert all(i["invoice_id"].startswith("a_") for i in body["invoices"])   # never other's "o_" line
+        assert _get(port, "/api/billing/invoices?org=other", token=alice)[0] == 403   # cross-tenant: denied
+        bob = _bearer(port, "bob", "viewer")                            # no membership anywhere
+        assert _get(port, "/api/billing/invoices?org=acme", token=bob)[0] == 403
     finally:
         srv.shutdown()

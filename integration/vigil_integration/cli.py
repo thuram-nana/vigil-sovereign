@@ -2663,6 +2663,93 @@ def _cmd_codescan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ci_scan(args: argparse.Namespace) -> int:
+    """`vigil ci-scan` — the W4 GitHub-Action runner. Normalize the CI run's coordinates into ONE
+    SecurityJob(source="ci"), ENQUEUE it, and drain it through the ONE authorized runner (the hard
+    authorization gate is the SOLE executor — a repo with no verified EngagementAuthority is REFUSED, not
+    scanned). The diff-scoped codescan runs over the LOCAL actions/checkout tree (no clone, no api.github.com);
+    each finding is emitted as a FACT/LEAD-typed GitHub annotation (::error for an oracle-confirmed FACT,
+    ::warning for a LEAD) and a job summary. Exit: 1 if a job FAILED or (with --fail-on <sev>) an
+    oracle-confirmed FACT is at/above that severity; else 0. Reads the standard GITHUB_* env when flags are
+    omitted."""
+    import json as _json
+
+    from .jobs.ci_runner import FAIL_ON_CHOICES, exit_code, findings_of, run_ci_scan, status_note
+    from .jobs.ci_trigger import ci_job_from_github_env, ci_job_from_inputs
+    from .live.ci_annotate import annotation_lines, counts, summary_markdown, warning_annotation
+
+    if not str(getattr(args, "queue_root", "") or "").strip():
+        print("vigil ci-scan: --queue-root is required (the durable SecurityJob queue)", file=sys.stderr)
+        return 2
+    fail_on = str(getattr(args, "fail_on", "") or "").strip().lower()
+    if fail_on and fail_on not in FAIL_ON_CHOICES:
+        # fail-closed on a misconfigured gate: reject a typo'd severity rather than silently not gating.
+        print(f"vigil ci-scan: --fail-on must be one of {', '.join(FAIL_ON_CHOICES)} (or empty for no gate); "
+              f"got {fail_on!r}", file=sys.stderr)
+        return 2
+    try:
+        if str(getattr(args, "repo", "") or "").strip():
+            job = ci_job_from_inputs(repo=args.repo, commit=str(args.commit or "").strip(),
+                                     pr_number=args.pr_number, ci_run_id=str(args.ci_run_id or ""))
+        else:
+            job = ci_job_from_github_env()                 # the standard GitHub Actions environment
+    except ValueError as exc:
+        print(f"vigil ci-scan: {exc}", file=sys.stderr)
+        return 2
+
+    workspace = (str(getattr(args, "workspace", "") or "").strip()
+                 or os.environ.get("GITHUB_WORKSPACE") or ".")
+    base_ref = str(getattr(args, "base_ref", "") or "").strip()
+    if not base_ref:
+        gh_base = (os.environ.get("GITHUB_BASE_REF") or "").strip()
+        # GITHUB_BASE_REF is the base BRANCH NAME; in a detached-HEAD actions/checkout it resolves only as
+        # origin/<name>. NEVER fall back to HEAD^ — that silently diffs just the last commit (a mis-scope),
+        # and a bare branch name does not resolve. Fail closed when no base is determinable.
+        base_ref = f"origin/{gh_base}" if gh_base else ""
+    if not base_ref:
+        print("vigil ci-scan: no base ref to diff against — pass --base-ref <rev> (or run on a pull_request "
+              "where GITHUB_BASE_REF is set). Refusing to guess a base; a wrong base silently mis-scopes.",
+              file=sys.stderr)
+        return 2
+    head_ref = (str(getattr(args, "head_ref", "") or "").strip() or job.commit
+                or os.environ.get("GITHUB_SHA") or "HEAD")
+
+    # the pinned authority trust root verifies the engagement authority (the gate). None => every job refused.
+    from framework.v2.authority.store import load_authority_root
+    trust_root = load_authority_root()
+
+    try:
+        outcomes = run_ci_scan(
+            job, queue_root=args.queue_root, base_dir=args.base_dir, trust_root=trust_root,
+            workspace=workspace, base_ref=base_ref, head_ref=head_ref, max_files=args.max_files)
+    except Exception as exc:  # noqa: BLE001 — surface a setup failure as a clean non-zero, never a traceback
+        print(f"vigil ci-scan: scan setup failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return 1
+
+    findings = findings_of(outcomes)
+    # A refused/failed/empty run must NEVER look like a clean pass (findings=[] is identical to an
+    # authorized scan that found nothing) — surface it as a visible annotation AND a summary banner.
+    note = status_note(outcomes)
+    if note:
+        print(warning_annotation(note))
+    for line in annotation_lines(findings):           # GitHub picks these up from stdout as PR annotations
+        print(line)
+    summary = summary_markdown(findings, repo=job.repo, commit=job.commit, banner=note)
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        try:
+            with open(step_summary, "a", encoding="utf-8") as fh:
+                fh.write(summary + "\n")
+        except OSError:
+            pass
+    # the machine-readable run report goes to stderr so stdout carries only the annotations
+    print(_json.dumps({"counts": counts(findings), "status_note": note,
+                       "outcomes": [{"state": o.state, "denial_code": o.denial_code,
+                                     "reason": (o.reason or "")[:200]} for o in outcomes]}, indent=2),
+          file=sys.stderr)
+    return exit_code(outcomes, findings, fail_on=fail_on)
+
+
 def _cmd_deploy_acceptance(args: argparse.Namespace) -> int:
     """WS4 — run the per-VM PRODUCTION ACCEPTANCE HARNESS and surface its exit code (a convenience wrapper
     around ``vigil_integration.sovereign_deploy.acceptance``, the self-test a freshly provisioned box runs
@@ -3175,9 +3262,21 @@ def _enforce_production_gate(action: str) -> "int | None":
     from . import doctor as _doctor
     repo = pathlib.Path(__file__).resolve().parents[2]
     result = _doctor.evaluate_production_gate(repo)
-    if result["ok"]:
+    # K4-6: ALSO enforce the customer-execution flag HOLD at the actual START path (not only `vigil doctor`'s
+    # collect()). Without this, a production deploy with VIGIL_CUSTOMER_PROD_EXECUTION flipped on would pass the
+    # REQUIRED_CONTROLS gate and START running customer engagements — the hold would be shown by `vigil doctor`
+    # but never refuse `vigil up` / `vigil engage`. Inert unless the production posture is armed (the hold
+    # returns None when not armed / flag held off).
+    ce_hold = _doctor._customer_execution_hold(bool(result.get("armed")))
+    if result["ok"] and ce_hold is None:
         return None
-    print(_doctor.production_gate_message(result, action=action), file=sys.stderr)
+    msgs = []
+    if not result["ok"]:
+        msgs.append(_doctor.production_gate_message(result, action=action))
+    if ce_hold is not None:
+        msgs.append(f"vigil {action}: REFUSED (fail-closed) — PRODUCTION posture "
+                    f"(VIGIL_POSTURE={result.get('posture')}): {ce_hold}")
+    print("\n".join(msgs), file=sys.stderr)
     return 2
 
 
@@ -3317,6 +3416,7 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   with_gesture=getattr(args, "with_gesture", False),
                   with_telemetry=getattr(args, "with_telemetry", False),
                   telemetry_interval=getattr(args, "telemetry_interval", 15),
+                  with_saas=getattr(args, "with_saas", False),
                   proxy_only=getattr(args, "proxy_only", False),
                   sovereign_addr=getattr(args, "sovereign_addr", ""),
                   offense_console_addr=getattr(args, "offense_console_addr", ""),
@@ -3832,6 +3932,32 @@ def _cmd_webhook_drain(args: argparse.Namespace) -> int:
     drain = webhook_drain.WebhookSpoolDrain(spool_dir=args.spool, queue_root=args.queue_root)
     if args.watch:
         print(f"  draining webhook deliveries from {args.spool}/incoming → SecurityJob queue "
+              f"({args.queue_root}); Ctrl-C to stop")
+        try:
+            drain.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(drain.drain(), indent=2))
+    return 0
+
+
+def _cmd_launch_drain(args: argparse.Namespace) -> int:
+    """`vigil launch-drain` — poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per
+    currently-valid published owner-signed lease (K4-5c, the sibling of `webhook-drain`). Each lease passes
+    the keyless `verify_customer_launch_lease(consume=False)` pre-check (owner-pin + bind + K4-1 settlement
+    re-check, floor NOT burned) inside the trigger; the job is ENQUEUED, NEVER executed here — execution is
+    SOLELY the authorized runner's (`JobRunner.run_one` → `authorize_job` + the K4-3 customer-launch gate).
+    Idempotent by the queue's content-addressed delivery_id (re-polls coalesce; a settled lease drains to
+    nothing); a transient enqueue failure is deferred to the next drain. Imports no framework at module
+    scope (the queue + the keyless verify defer it), so the two-env boundary holds."""
+    import json
+
+    from . import launch_drain
+
+    drain = launch_drain.LaunchSeamDrain(base_dir=args.base_dir, queue_root=args.queue_root)
+    if args.watch:
+        print(f"  polling customer launch leases on {args.base_dir} → SecurityJob queue "
               f"({args.queue_root}); Ctrl-C to stop")
         try:
             drain.watch(interval=args.interval)
@@ -5305,6 +5431,24 @@ def build_parser() -> argparse.ArgumentParser:
     pcs.add_argument("--ref", default="", help="the finding ref to verify (with --verify)")
     pcs.set_defaults(func=_cmd_codescan)
 
+    pci = sub.add_parser("ci-scan",
+                         help="W4: the GitHub-Action runner — enqueue a CI SecurityJob and drain it through the "
+                              "authorized runner, emitting FACT/LEAD-typed PR annotations (diff-scoped, local)")
+    pci.add_argument("--queue-root", default="", help="the durable SecurityJob queue root (required)")
+    pci.add_argument("--base-dir", default=".vigil-live", help="engagement base dir holding <slug>.spine")
+    pci.add_argument("--workspace", default="", help="the checked-out repo tree (default $GITHUB_WORKSPACE or .)")
+    pci.add_argument("--base-ref", default="", help="diff base rev (default $GITHUB_BASE_REF)")
+    pci.add_argument("--head-ref", default="", help="diff head rev (default the job commit / $GITHUB_SHA)")
+    pci.add_argument("--repo", default="", help="repo id e.g. github.com/org/repo (default from GITHUB_* env)")
+    pci.add_argument("--commit", default="", help="commit SHA under review (default from the event / env)")
+    pci.add_argument("--pr-number", type=int, default=None, help="the PR number (default from the event / env)")
+    pci.add_argument("--ci-run-id", default="", help="the CI run id (audit telemetry only)")
+    pci.add_argument("--max-files", type=int, default=5000)
+    pci.add_argument("--fail-on", default="",
+                     help="fail the build (exit 1) if an ORACLE-CONFIRMED FACT is at/above this severity "
+                          "(critical|high|medium|low); leads never break the build")
+    pci.set_defaults(func=_cmd_ci_scan)
+
     pda = sub.add_parser("deploy-acceptance",
                          help="WS4: run the per-VM PRODUCTION ACCEPTANCE HARNESS against the bundled loopback "
                               "MERIDIAN range (exit 0 = handover-ready; non-zero = handover BLOCKED)")
@@ -5442,6 +5586,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "OFF by default. Read-only, loopback, no egress — a pure projection of the spine.")
     pu.add_argument("--telemetry-interval", type=int, default=15,
                     help="with --with-telemetry: seconds between spine snapshots (default 15)")
+    pu.add_argument("--with-saas", action="store_true",
+                    help="also run the SaaS planes (E1): the keyless customer edge (custui, the /customer "
+                         "mount's backend) + the keyless public site (pubui, :8735). OFF by default. Mints a "
+                         "per-run provisioning hop key handed ONLY to the cockpit + the edge (never the "
+                         "offense children); binds both loopback. Front the public site on its own public "
+                         "vhost (deploy/reverse-proxy/vigil-public.*).")
     pu.add_argument("--services", action="store_true",
                     help="also bring up the docker egress-gateway topology (create the networks + gateway "
                          "container if none exist; idempotent). The EGRESS-GATE leg fails CLOSED: if it does "
@@ -5684,6 +5834,20 @@ def build_parser() -> argparse.ArgumentParser:
     pwd.add_argument("--watch", action="store_true", help="keep draining as new deliveries arrive; Ctrl-C to stop")
     pwd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pwd.set_defaults(func=_cmd_webhook_drain)
+
+    pxd = sub.add_parser("launch-drain",
+                         help="poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per "
+                              "currently-valid published owner-signed lease (enqueue-only; the authorized "
+                              "runner executes behind the customer-launch gate). Fail-closed; idempotent by "
+                              "the content-addressed (slug, nonce) delivery_id; a settled lease drains to none.")
+    pxd.add_argument("--base-dir", required=True,
+                     help="the credit-lease seam root the sovereign plane publishes leases to (= VIGIL_BASE_DIR)")
+    pxd.add_argument("--queue-root", required=True,
+                     help="the SecurityJob queue root (shared with `webhook-drain` / `reconcile`; durable FIFO "
+                          "+ delivery/fingerprint dedup markers)")
+    pxd.add_argument("--watch", action="store_true", help="keep polling as new leases are published; Ctrl-C to stop")
+    pxd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
+    pxd.set_defaults(func=_cmd_launch_drain)
 
     prc = sub.add_parser("reconcile",
                          help="safety-net reconciliation: per connected repo, list PRs changed since the "

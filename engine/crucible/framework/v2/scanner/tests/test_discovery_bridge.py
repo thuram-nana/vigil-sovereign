@@ -31,13 +31,15 @@ from urllib.parse import urlsplit
 from framework.v2.scanner import (
     HttpRequest,
     InsertionKind,
+    RequestTemplate,
     WebScanCampaign,
     request_from_api_operation,
+    request_from_graphql_operation,
 )
 from framework.v2.scanner.campaign import WebScanCampaign as _Camp
 from framework.v2.scanner.cli import loopback_send
 from framework.v2.scanner.crawler import CrawlResult, Page
-from framework.v2.scanner.discovery import ApiOperation
+from framework.v2.scanner.discovery import ApiOperation, GraphQLArg, GraphQLOperation
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,68 @@ def test_bridge_no_free_params_is_bare_request() -> None:
     op = ApiOperation(method="GET", path="/ping", params=[])
     req = request_from_api_operation(op, "http://h/")
     assert req.method == "GET" and req.url == "http://h/ping" and req.body is None
+
+
+def test_bridge_builds_a_typed_nested_body_from_the_request_schema() -> None:
+    """W1 — a requestBody schema renders a TYPED, NESTED baseline body (not a flat {name:"1"}), so the
+    insertion engine fuzzes every nested leaf. Query params ride alongside, spec-typed; it is deterministic."""
+    from framework.v2.scanner.insertion import InsertionKind as _IK
+    from framework.v2.scanner.insertion import RequestTemplate
+
+    schema = {"type": "object", "required": ["name"], "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"},
+        "active": {"type": "boolean"},
+        "address": {"type": "object", "properties": {"city": {"type": "string"}}},
+        "tags": {"type": "array", "items": {"type": "string"}},
+    }}
+    op = ApiOperation(method="POST", path="/api/submit", params=["dry"],
+                      request_schema=schema, param_types={"dry": "boolean"})
+    req = request_from_api_operation(op, "http://h/")
+    # typed + nested, not a flat {name:"1"}
+    assert json.loads(req.body) == {"name": "1", "age": 1, "active": True,
+                                    "address": {"city": "1"}, "tags": ["1"]}
+    assert req.content_type() == "application/json"
+    assert ("Content-Length", str(len(req.body.encode("utf-8")))) in req.headers
+    # the non-body (query) param rides alongside the body, spec-typed (boolean -> "true")
+    assert "dry=true" in req.url
+    # deterministic: same op -> same bytes
+    assert request_from_api_operation(op, "http://h/").body == req.body
+    # the NESTED leaves are now real JSON_VALUE insertion points (the coverage win)
+    names = {p.name for p in RequestTemplate(req).insertion_points(kinds=[_IK.JSON_VALUE])}
+    assert "/name" in names
+    assert any(n.startswith("/address") for n in names), names      # nested object leaf exposed
+    assert any(n.startswith("/tags") for n in names), names         # array element leaf exposed
+
+
+def test_bridge_body_schema_with_no_free_params_still_sends_the_typed_body() -> None:
+    # a documented requestBody with NO query params must NOT fall back to a bare request.
+    op = ApiOperation(method="POST", path="/api/submit", params=[],
+                      request_schema={"type": "object", "properties": {"q": {"type": "string"}}})
+    req = request_from_api_operation(op, "http://h/")
+    assert json.loads(req.body) == {"q": "1"} and req.content_type() == "application/json"
+
+
+def test_bridge_baseline_ignores_spec_enum() -> None:
+    # W1 red-pen HIGH+LOW: a spec-provided enum must NOT appear in the benign baseline body — a hostile spec
+    # could otherwise plant a destructive/injection payload (or an unbounded blob) in our own control request.
+    schema = {"type": "object", "properties": {
+        "mode": {"type": "string", "enum": ["'; DROP TABLE t; --", "safe"]},
+        "n": {"type": "integer", "enum": [999]},
+    }}
+    op = ApiOperation(method="POST", path="/s", params=[], request_schema=schema)
+    body = json.loads(request_from_api_operation(op, "http://h/").body)
+    assert body == {"mode": "1", "n": 1}                         # typed scalars, NEVER the enum value
+
+
+def test_bridge_tolerates_nonstring_required() -> None:
+    # W1 red-pen MED: a spec-controlled required[] with a non-string/unhashable element must not crash
+    # _example_from_schema (it would drop the whole op from the audit surface).
+    schema = {"type": "object", "required": [{"x": 1}, ["y"], "a"],
+              "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}}
+    op = ApiOperation(method="POST", path="/u", params=[], request_schema=schema)
+    body = json.loads(request_from_api_operation(op, "http://h/").body)   # must not raise
+    assert body == {"a": "1", "b": 1}
 
 
 def test_bridge_renders_into_real_insertion_points() -> None:
@@ -337,3 +401,216 @@ def test_openapi_bridge_lets_the_oracle_confirm_a_planted_bug() -> None:
     # the bridged JSON body field, confirmed the same way
     assert any(f.param == "/name" and "/api/submit" in (f.endpoint or "") for f in xss), \
         f"JSON-body bridge did not reach the oracle: {[(f.param, f.endpoint) for f in xss]}"
+
+
+# ---------------------------------------------------------------------------
+# 4. the GraphQL discovery-seed wiring (end-to-end) — W2-b dispatch
+#    A query root operation is synthesized into a fuzzable request the real audit
+#    engine exercises; a mutation is surfaced as a LEAD and NEVER auto-sent.
+# ---------------------------------------------------------------------------
+
+def _gql_introspection_for(query: str) -> str:
+    """A SELECTION-FAITHFUL introspection response: a spec-compliant server returns ONLY the
+    fields the query selected, so this returns `fields[].args` only when the query selected
+    `args{` and `__schema.mutationType` only when the query selected `mutationType`. This is the
+    guard against the W2 red-pen's HIGH finding — if the production `_GQL_INTROSPECTION` ever
+    regresses to a name-only query, this mock stops returning args/mutationType and the wiring
+    test's `variables`/fuzz assertions fail, instead of certifying an inert feature green."""
+    want_args = "args{" in query
+    want_mut = "mutationType" in query
+    user_field: dict = {"name": "user"}
+    del_field: dict = {"name": "deleteUser"}
+    if want_args:
+        id_arg = [{"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}}]
+        user_field["args"] = id_arg
+        del_field["args"] = id_arg
+    schema: dict = {
+        "queryType": {"name": "Query"},
+        "types": [
+            {"name": "Query", "fields": [user_field]},
+            {"name": "Mutation", "fields": [del_field]},
+        ],
+    }
+    if want_mut:
+        schema["mutationType"] = {"name": "Mutation"}
+    return json.dumps({"data": {"__schema": schema}})
+
+
+class _GqlApp(BaseHTTPRequestHandler):
+    """A GraphQL endpoint linked from `/`. It answers an introspection POST with a
+    SELECTION-FAITHFUL schema (see `_gql_introspection_for`) declaring a `user(id)` query root
+    field and a `deleteUser(id)` mutation root field, and records every POST body it receives so
+    the test can prove (a) the query op was synthesized and fuzzed through the real audit engine,
+    and (b) the mutation was never auto-sent."""
+
+    received: list[str] = []
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def _send(self, body: str, ctype: str) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:  # noqa: N802
+        sp = urlsplit(self.path)
+        if sp.path == "/":
+            self._send('<html><body><a href="/graphql">api</a></body></html>', "text/html")
+        elif sp.path == "/graphql":
+            # a GET so the crawler registers the /graphql URL (endpoint discovery)
+            self._send('{"message":"POST a query"}', "application/json")
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        sp = urlsplit(self.path)
+        if sp.path == "/graphql":
+            type(self).received.append(raw)
+            if "__schema" in raw:
+                self._send(_gql_introspection_for(raw), "application/json")
+            else:
+                self._send('{"data":{"user":null}}', "application/json")
+        else:
+            self._send("{}", "application/json")
+
+
+@contextlib.contextmanager
+def _serve_gql() -> Iterator[str]:
+    _GqlApp.received = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _GqlApp)
+    srv.daemon_threads = True
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_production_introspection_query_requests_args_and_mutationtype() -> None:
+    """Regression guard for the W2 red-pen HIGH: the discovery pass's introspection query MUST
+    select `args` and `mutationType`, or a spec-compliant server returns neither and W2 synthesis
+    is inert (no `variables` object, no `/variables/<arg>` points) — a believed-working coverage
+    capability that structurally cannot run. (The e2e test below only exercises the real feature
+    because the mock is selection-faithful; this pins the production query shape directly.)"""
+    from framework.v2.scanner.campaign import _GQL_INTROSPECTION
+    assert "args{" in _GQL_INTROSPECTION, _GQL_INTROSPECTION
+    assert "mutationType" in _GQL_INTROSPECTION, _GQL_INTROSPECTION
+
+
+def test_graphql_discovery_wires_query_ops_into_audit_and_leaves_mutations_as_leads() -> None:
+    with _serve_gql() as base:
+        report = WebScanCampaign(
+            loopback_send,
+            enable_oob=False,
+            enable_discovery=True,
+            insertion_kinds=(InsertionKind.JSON_VALUE,),
+        ).run(base + "/")
+
+    posts = [b for b in _GqlApp.received if "__schema" not in b]
+    # (a) the QUERY root op was synthesized and reached the audit engine as a POST query
+    assert any('"query"' in b and "user(" in b and "variables" in b for b in posts), \
+        f"query op was not synthesized into an audited request: {posts!r}"
+    # (b) and its /variables/id value was actually FUZZED — more than the one baseline value
+    id_values = set()
+    for b in posts:
+        try:
+            v = json.loads(b).get("variables", {})
+        except Exception:
+            continue
+        if isinstance(v, dict) and "id" in v:
+            id_values.add(repr(v["id"]))
+    assert len(id_values) >= 2, f"the /variables/id point was not fuzzed: {id_values!r}"
+    # the synthesized request joined the discovered audit surface
+    assert "POST /graphql" in set(report.discovered_surfaces)
+
+    # (c) the MUTATION was surfaced as a LEAD ...
+    assert any(lead.startswith("graphql-operation mutation deleteUser")
+               for lead in report.discovery_leads), report.discovery_leads
+    # ... and NEVER auto-sent: `deleteUser` appears only in a synthesized mutation op, which
+    # the wiring refuses to send (state-changing — doctrine: ask before destruction).
+    assert not any("deleteUser" in b for b in _GqlApp.received), \
+        f"a state-changing mutation was auto-sent: {[b for b in _GqlApp.received if 'deleteUser' in b]!r}"
+
+
+# ---------------------------------------------------------------------------
+# 3. the GraphQLOperation -> HttpRequest bridge (pure) — W2-b
+# ---------------------------------------------------------------------------
+
+
+def test_graphql_bridge_builds_a_parameterized_query_with_fuzzable_variables() -> None:
+    """A discovered Query root field with typed args becomes a parameterized POST whose argument values ride
+    a JSON ``variables`` object — so the EXISTING JSON decomposer exposes each ``/variables/<arg>`` as its own
+    fuzzable point. No GraphQL-aware insertion kind; the injection classes stay LEAD-capped (this bridge adds
+    no oracle). Deterministic: identical bytes every call."""
+    op = GraphQLOperation(
+        name="user",
+        kind="query",
+        args=[
+            GraphQLArg(name="id", type_name="ID"),
+            GraphQLArg(name="n", type_name="Int"),
+            GraphQLArg(name="ok", type_name="Boolean"),
+        ],
+    )
+    req = request_from_graphql_operation(op, "http://h/")
+
+    assert req.method == "POST"
+    assert req.url == "http://h/graphql"
+    assert req.content_type() == "application/json"
+    assert ("Content-Length", str(len(req.body.encode("utf-8")))) in req.headers
+
+    payload = json.loads(req.body)
+    # the query is parameterized: typed $var decls on the op, $var binds on the field, a __typename leaf
+    assert payload["query"] == (
+        "query($id: ID, $n: Int, $ok: Boolean)"
+        "{user(id: $id, n: $n, ok: $ok){__typename}}"
+    )
+    # typed, VIGIL-controlled baseline values (ID/String->fill, Int/Float->1, Boolean->True)
+    assert payload["variables"] == {"id": "1", "n": 1, "ok": True}
+
+    # the whole point: each argument is an independent, fuzzable JSON value point
+    pts = RequestTemplate(req).insertion_points(kinds=[InsertionKind.JSON_VALUE])
+    names = {p.name for p in pts}
+    assert {"/variables/id", "/variables/n", "/variables/ok"} <= names, names
+    # determinism — same operation, same bytes
+    assert request_from_graphql_operation(op, "http://h/").body == req.body
+
+
+def test_graphql_bridge_mutation_and_argless_are_well_formed() -> None:
+    """An argless root field emits no ``variables`` key (nothing to parameterize), and a mutation is rendered
+    as ``mutation{…}`` so the upstream destructive-confirm gate recognizes it as state-changing. Unknown /
+    input-object arg types fall back to a ``String`` variable the string fill satisfies; a list arg is wrapped
+    ``[...]``."""
+    argless = GraphQLOperation(name="deleteUser", kind="mutation")
+    req = request_from_graphql_operation(argless, "http://h/")
+    payload = json.loads(req.body)
+    assert payload == {"query": "mutation{deleteUser{__typename}}"}
+    assert "variables" not in payload  # no args -> no variables object
+
+    # unknown/input-object type -> String variable; list -> [String]; the fill satisfies both
+    typed = GraphQLOperation(
+        name="createOrder",
+        kind="mutation",
+        args=[
+            GraphQLArg(name="input", type_name="OrderInput"),      # input object -> String
+            GraphQLArg(name="tags", type_name="String", is_list=True),  # list -> [String]
+        ],
+    )
+    p2 = json.loads(request_from_graphql_operation(typed, "http://h/").body)
+    assert p2["query"] == (
+        "mutation($input: String, $tags: [String])"
+        "{createOrder(input: $input, tags: $tags){__typename}}"
+    )
+    assert p2["variables"] == {"input": "1", "tags": "1"}
+    # the mutation keyword is present verbatim for the destructive-confirm gate to match
+    assert p2["query"].startswith("mutation")

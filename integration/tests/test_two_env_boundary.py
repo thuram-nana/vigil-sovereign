@@ -75,6 +75,9 @@ assert "strix" not in _m, "approval_broker must not import strix at module scope
 import vigil_integration.live.authorization_broker  # Phase 1: the target-authorization seam (both planes)
 assert "framework" not in _m, "authorization_broker must not import framework at module scope"
 assert "strix" not in _m, "authorization_broker must not import strix at module scope"
+import vigil_integration.live.credit_lease_broker  # Slice K: the credit-launch-lease seam (both planes)
+assert "framework" not in _m, "credit_lease_broker must not import framework at module scope"
+assert "strix" not in _m, "credit_lease_broker must not import strix at module scope"
 import vigil_integration.live.cloud_live_posture  # Wave #4 Track B: the live cloud-capture FACT minter
 assert "framework" not in _m, "cloud_live_posture must not import framework at module scope"
 assert "strix" not in _m, "cloud_live_posture must not import strix at module scope"
@@ -123,6 +126,36 @@ import vigil_integration.webhook_drain  # repo-connect Slice 2: inbound webhook 
 assert "framework" not in _m, "webhook_drain must not import framework at module scope (queue defers it)"
 import vigil_integration.jobs.reconciliation  # repo-connect Slice 2b: the reconciliation safety-net poller
 assert "framework" not in _m, "jobs.reconciliation must not import framework at module scope (queue defers it)"
+import vigil_integration.jobs.ci_trigger  # W4: the CI trigger adapter — PURE STDLIB (produces SecurityJob, never runs)
+assert "framework" not in _m, "jobs.ci_trigger must not import framework at module scope (pure stdlib adapter)"
+assert "strix" not in _m, "jobs.ci_trigger must not import strix at module scope"
+import vigil_integration.jobs.launch_trigger  # K4-2: the customer-launch trigger — framework (verify) LAZY (produces, never runs)
+assert "framework" not in _m, "jobs.launch_trigger must not import framework at module scope (verify is lazy)"
+assert "strix" not in _m, "jobs.launch_trigger must not import strix at module scope"
+import vigil_integration.jobs.engage_worker  # K4-3: the customer-launch worker — framework (engage/authority) LAZY
+assert "framework" not in _m, "jobs.engage_worker must not import framework at module scope (engage is lazy)"
+assert "strix" not in _m, "jobs.engage_worker must not import strix at module scope"
+import vigil_integration.jobs.launch_runner  # K4-3: assemble the customer-launch execution path — framework LAZY
+assert "framework" not in _m, "jobs.launch_runner must not import framework at module scope (gate/worker/queue defer it)"
+assert "strix" not in _m, "jobs.launch_runner must not import strix at module scope"
+import vigil_integration.jobs.findings_crossing  # K4-4: cross a cust_ run's FACTs — framework (confirm_and_certify) LAZY
+assert "framework" not in _m, "jobs.findings_crossing must not import framework at module scope (confirm_and_certify is lazy)"
+assert "strix" not in _m, "jobs.findings_crossing must not import strix at module scope"
+import vigil_integration.jobs.completion_signal  # K4-5b: the keyless engagement-complete settle signal — vigil_core only
+assert "framework" not in _m, "jobs.completion_signal must not import framework at module scope (vigil_core signed record)"
+assert "strix" not in _m, "jobs.completion_signal must not import strix at module scope"
+import vigil_integration.launch_drain  # K4-5c: the customer-launch seam poller — framework LAZY (queue + verify defer it)
+assert "framework" not in _m, "launch_drain must not import framework at module scope (queue + poll verify defer it)"
+assert "strix" not in _m, "launch_drain must not import strix at module scope"
+import vigil_integration.live.ci_checkout  # W4: the CI-local checkout + changed-files seams (git-local, no API)
+assert "framework" not in _m, "live.ci_checkout must not import framework at module scope (stdlib + injected runner)"
+assert "strix" not in _m, "live.ci_checkout must not import strix at module scope"
+import vigil_integration.live.ci_annotate  # W4: the FACT/LEAD-typed PR annotation layer — PURE STDLIB
+assert "framework" not in _m, "live.ci_annotate must not import framework at module scope (pure stdlib, no network)"
+assert "strix" not in _m, "live.ci_annotate must not import strix at module scope"
+import vigil_integration.jobs.ci_runner  # W4: assemble+drive the CI scan — framework (gate/queue) LAZY
+assert "framework" not in _m, "jobs.ci_runner must not import framework at module scope (gate/queue defer it)"
+assert "strix" not in _m, "jobs.ci_runner must not import strix at module scope"
 import vigil_integration.live.github_client  # repo-connect Slice 3a: the gated READ-only GitHub client
 assert "framework" not in _m, "live.github_client must not import framework at module scope (gated client builds it lazily)"
 print(json.dumps({"res": res, "guard": "passed"}))

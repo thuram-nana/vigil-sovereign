@@ -56,8 +56,10 @@ CREDIT_GRANT_SIGNAL = "governor.credit_grant"
 CREDIT_DEBIT_SIGNAL = "governor.credit_debit"
 
 # The kinds of grant that may credit a wallet. `trial` = the free-trial grant at signup; `subscription_refill`
-# = the per-period plan allotment; `topup` = a paid credit purchase (anytime, incl. the pay-to-complete moment).
-GRANT_KINDS = frozenset({"trial", "subscription_refill", "topup"})
+# = the per-period plan allotment; `topup` = a paid credit purchase (anytime, incl. the pay-to-complete moment);
+# `refund` = returning the UNUSED portion of a launch reservation on settlement/cancel (Slice G; reserve debits
+# the spend cap, settle grants back cap - consumed, so net spend == metered consumption).
+GRANT_KINDS = frozenset({"trial", "subscription_refill", "topup", "refund"})
 
 # The owner-signed authenticated CORE of each record. `entry_id` is inside it so a captured record cannot be
 # re-stamped with a fresh idempotency key to bypass the seen-set. `credits`/`org_id` are inside it so a grant

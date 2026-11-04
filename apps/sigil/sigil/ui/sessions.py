@@ -107,10 +107,21 @@ class SessionLedger:
         return live
 
     def create(self, username: str, role: str, *, is_owner: bool = False,
-               now: "Optional[float]" = None) -> "Optional[str]":
+               org_id: "Optional[str]" = None, mfa_at: "Optional[float]" = None,
+               mfa_method: "Optional[str]" = None, now: "Optional[float]" = None) -> "Optional[str]":
         """Mint a FRESH session id (rotation is inherent — a new id every call, so a caller can never pin a
         pre-chosen id → no session fixation), persist its record 0600, and return the id. Sweeps + caps
-        first. Returns None if the ledger is full or the write failed (the caller then sets no cookie)."""
+        first. Returns None if the ledger is full or the write failed (the caller then sets no cookie).
+
+        `org_id` (Slice E1) binds a CUSTOMER session to its active org, SERVER-side, from the owner-signed
+        membership — never a client field. It is written ONLY when provided, so an operator session (org_id
+        None) keeps a byte-identical record shape; a customer op reads `rec.get("org_id")` and gates via
+        `admit_customer`. It is read-time context only — it never affects TTL or the expiry logic.
+
+        `mfa_at`/`mfa_method` (Slice E3c step-up) stamp WHEN + HOW the session last proved a fresh second
+        factor — written ONLY when provided (a fresh passkey LOGIN sets them at mint; a TOTP step-up stamps
+        them later via `stamp_mfa`), so a session without them keeps a byte-identical shape. Read-time context
+        only (the provisioner checks `now - mfa_at <= window`); never affects TTL/expiry."""
         t = time.time() if now is None else float(now)
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self._sweep(t) >= self.max_sessions:
@@ -118,9 +129,32 @@ class SessionLedger:
         sid = secrets.token_urlsafe(32)
         rec = {"username": str(username), "role": str(role), "is_owner": bool(is_owner),
                "created": t, "last_seen": t, "absolute_deadline": t + self.absolute_ttl}
+        if org_id is not None:
+            rec["org_id"] = str(org_id)                # customer session only; absent ⇒ operator (byte-identical)
+        if mfa_at is not None:
+            rec["mfa_at"] = float(mfa_at)              # E3c step-up freshness stamp (absent ⇒ no step-up yet)
+            rec["mfa_method"] = str(mfa_method or "")
         if not self._write_atomic(self._marker(sid), rec):
             return None
         return sid
+
+    def stamp_mfa(self, sid: str, *, mfa_at: float, mfa_method: str, now: "Optional[float]" = None) -> bool:
+        """Stamp a FRESH second-factor proof onto a LIVE session IN PLACE (E3c step-up) — the TOTP step-up
+        path, where the session already exists and must gain `mfa_at` without rotating its id. Resolves the
+        session live (fail-closed: a dead/expired session is not stamped), updates `mfa_at`/`mfa_method`, and
+        atomically replaces the record (preserving username/org/TTL). Returns True iff stamped. The `mfa_at`
+        is SERVER-set (the edge passes `now`), never a client field."""
+        if not isinstance(sid, str) or not sid:
+            return False
+        t = time.time() if now is None else float(now)
+        marker = self._marker(sid)
+        rec = self._read(marker)
+        if rec is None or self._expired(rec, t):
+            return False                               # no live session to stamp (fail-closed)
+        rec["mfa_at"] = float(mfa_at)
+        rec["mfa_method"] = str(mfa_method or "")
+        self._unlink(marker)                           # atomic replace (no in-place edit), mirrors resolve()
+        return self._write_atomic(marker, rec)
 
     def resolve(self, sid: str, *, now: "Optional[float]" = None) -> "Optional[dict]":
         """Return the session record for a live, unexpired session, or None (fail-closed). Enforces idle AND
@@ -163,4 +197,26 @@ class SessionLedger:
                 continue
             self._unlink(entry.path)
             n += 1
+        return n
+
+    def revoke_all_for_user(self, username: str) -> int:
+        """Invalidate every live session belonging to ONE user — the password-reset / account-compromise
+        response (a reset must sever any session a thief, or a stale attacker, still holds). Scans the ledger
+        and unlinks each marker whose record `username` matches. Returns the count removed. A blank username
+        matches NOTHING (fail-closed — never a wildcard that signs everyone out). Used by the customer edge
+        after `confirm_recover` (the edge half of the second-review session-invalidation seam)."""
+        if not isinstance(username, str) or not username:
+            return 0
+        n = 0
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for entry in entries:
+            if entry.name.endswith(".tmp"):
+                continue
+            rec = self._read(Path(entry.path))
+            if isinstance(rec, dict) and rec.get("username") == username:
+                self._unlink(entry.path)
+                n += 1
         return n

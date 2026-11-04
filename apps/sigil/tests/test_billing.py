@@ -23,10 +23,12 @@ import tempfile
 
 import pytest
 
-from sigil.governor.billing import (CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED_TOPUP, CAP_VERIFY_WEBHOOK,
-                                     EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED,
-                                     EVENT_TOPUP, BillingSigner, Entitlement, FlutterwaveBillingProvider,
-                                     MockBillingProvider, StripeBillingProvider, UnsupportedCapability)
+from sigil.governor.billing import (CAP_HOSTED_CHECKOUT, CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED_TOPUP,
+                                     CAP_VERIFY_WEBHOOK, EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE,
+                                     EVENT_SUBSCRIPTION_CANCELED, EVENT_TOPUP, BillingSigner, CheckoutSession,
+                                     Entitlement, FlutterwaveBillingProvider, MockBillingProvider,
+                                     StripeBillingProvider, UnsupportedCapability)
+from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.metering import CreditMeter, PlanCreditLedger
 from sigil.governor.subscription import (STATUS_ACTIVE, STATUS_CANCELED, STATUS_PAST_DUE,
                                           SubscriptionRegistry)
@@ -57,6 +59,131 @@ def _rig():
 def _mk(mock, d):
     body = json.dumps(d).encode()
     return body, mock.sign(body)
+
+
+def _inv_rig(expected=None):
+    """A mock-provider rig WITH an invoice ledger + the owner catalog's expected amounts, so the signer records
+    one owner-signed billing-history line per value-granting mint (Slice H). `expected` defaults to a priced
+    catalog; pass {} to model an unpriced catalog. Returns (store, invoices, mock, signer)."""
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
+    inv = InvoiceRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    catalog = {
+        "price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200),
+        "price_pro": Entitlement(kind=EVENT_SUBSCRIPTION_ACTIVE, plan_id="pro", allotment=6000, period_s=1000.0),
+    }
+    exp = {"price_topup_200": (4900, "USD"), "price_pro": (9900, "USD")} if expected is None else expected
+    mock = MockBillingProvider("sek")
+    signer = BillingSigner(mock, wallet=w, subscriptions=subs, plan=plan, catalog=catalog,
+                           expected=exp, invoices=inv)
+    return s, inv, mock, signer
+
+
+# ---- Slice H: a value-granting mint ALSO records an owner-signed invoice (catalog-priced, idempotent) -----
+def test_topup_emits_an_invoice_with_the_catalog_amount():
+    _s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None
+    invs = inv.invoices("acme")
+    assert len(invs) == 1
+    i = invs[0]
+    # MONEY DOCTRINE: the mock event carries NO amount (amount_minor defaults to 0), yet the line records the
+    # owner-CATALOG price (4900 USD) — the amount is catalog-derived, never read off the wire.
+    assert (i.kind, i.price_id, i.amount_minor, i.currency, i.credits) == \
+        ("topup", "price_topup_200", 4900, "USD", 200)
+    signer.ingest(body, sig, now=100.0)                 # replay (same event_id)
+    assert len(inv.invoices("acme")) == 1, "a replayed webhook must not duplicate the invoice line"
+
+
+def test_subscription_emits_an_invoice_with_the_period():
+    _s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 500.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=500.0) is not None
+    invs = inv.invoices("acme")
+    assert len(invs) == 1
+    i = invs[0]
+    assert (i.kind, i.price_id, i.amount_minor, i.credits) == ("subscription", "price_pro", 9900, 6000)
+    assert (i.period_start, i.period_end) == (500.0, 1500.0)   # created, created + period_s
+
+
+def test_dunning_and_cancel_events_record_no_invoice():
+    _s, inv, mock, signer = _inv_rig()
+    for kind in (EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_CANCELED):
+        body, sig = _mk(mock, {"event_id": f"d_{kind}", "kind": kind, "org_id": "acme", "created": 100.0,
+                               "price_id": ""})
+        signer.ingest(body, sig, now=100.0)
+    assert inv.invoices("acme") == [], "a dunning/cancel event is not a charge — it records no billing line"
+
+
+def test_invoice_amount_is_zero_when_the_catalog_does_not_price_it():
+    # when the owner catalog does not price a price_id (no `expected` entry), the line records amount 0 but STILL
+    # records the credits/plan — the money amount is never guessed from the wire (fail-closed to 0).
+    _s, inv, mock, signer = _inv_rig(expected={})
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    signer.ingest(body, sig, now=100.0)
+    i = inv.invoices("acme")[0]
+    assert (i.amount_minor, i.currency, i.credits) == (0, "", 200)
+
+
+def test_pathological_event_id_mints_nothing_on_both_value_paths():
+    # red-pen FINDING 1: an event_id too long / with control chars must fail the WHOLE value-granting event
+    # CLOSED (mint nothing), SYMMETRIC across top-up and subscription — never the half-mint where a subscription
+    # commits (subscribe/refill don't touch event_id) while only its invoice silently drops.
+    from sigil.governor.subscription import SubscriptionRegistry
+    s, inv, mock, signer = _inv_rig()
+    bad = "x" * 200
+    body, sig = _mk(mock, {"event_id": bad, "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is None               # top-up: mint nothing
+    body, sig = _mk(mock, {"event_id": bad, "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 100.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=100.0) is None               # subscription: mint nothing (was half-mint)
+    assert SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP).subscription("acme") is None  # NOT active
+    assert inv.invoices("acme") == []
+
+
+def test_whitespace_only_event_id_mints_nothing_on_both_value_paths():
+    # red-pen completeness-critic: a whitespace-only event_id (" ") must fail CLOSED at apply()'s bound (which
+    # now .strip()s to match the ledgers) — never pass apply() yet strip to "" inside record()/grant() and
+    # half-mint a subscription. Symmetric across top-up and subscription.
+    from sigil.governor.subscription import SubscriptionRegistry
+    s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "   ", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is None
+    body, sig = _mk(mock, {"event_id": " ", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 100.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=100.0) is None
+    assert SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP).subscription("acme") is None  # NOT active
+    assert inv.invoices("acme") == []
+
+
+def test_stale_out_of_order_subscription_records_no_invoice():
+    # red-pen FINDING 2: an older subscription event delivered AFTER a newer one (distinct event_id, smaller
+    # created) is a stale LWW no-op mint -> it must record NO invoice line (the history must never show a period
+    # the plan ledger never granted).
+    s, inv, mock, signer = _inv_rig()
+    b1, s1 = _mk(mock, {"event_id": "evt_new", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 200.0, "price_id": "price_pro"})
+    assert signer.ingest(b1, s1, now=200.0) is not None
+    b2, s2 = _mk(mock, {"event_id": "evt_old", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 100.0, "price_id": "price_pro"})      # out of order, distinct id
+    signer.ingest(b2, s2, now=200.0)
+    assert [i.invoice_id for i in inv.invoices("acme")] == ["evt_new"], "the stale event must record no invoice"
+
+
+def test_no_invoice_ledger_is_backward_compatible():
+    # a signer built WITHOUT an invoice ledger (the pre-H default) still mints money and emits no invoice.
+    _s, w, _subs, _plan, _m, mock, signer = _rig()
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None and w.available("acme") == 200
+    assert signer.invoices is None
 
 
 # ---- the signer: verify-then-mint, catalog amounts, idempotency, mapping ------------------------------
@@ -369,10 +496,10 @@ def test_flutterwave_subscription_active_then_lapses_at_period_end():
     assert meter.available("acme", now=1500.0) == 0                 # period elapsed -> plan credits lapse
 
 
-def test_flutterwave_does_not_act_on_cancel_or_failed_webhooks():
-    # SECURITY (red-pen #1/#3): Flutterwave's verif-hash authenticates only the caller, NOT the body, so a
-    # `subscription.cancelled` / failed-charge webhook cannot name a victim tenant soundly. This slice therefore
-    # mints NOTHING on those events — a verif-hash holder must not be able to cancel/past_due any named org.
+def test_flutterwave_failed_recurring_charge_marks_past_due():
+    # H4: a definitively-FAILED RECURRING (payment_plan) charge that RE-VERIFIES drives DUNNING -> past_due. The
+    # tenant/status/timestamp are taken from the AUTHORITATIVE verify object (the tx_ref WE set at checkout), never
+    # the body — so a verif-hash holder cannot name a victim: only a REAL failed charge on a tenant's own plan duns.
     table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
@@ -380,14 +507,73 @@ def test_flutterwave_does_not_act_on_cancel_or_failed_webhooks():
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
     assert subs.subscription("acme").status == STATUS_ACTIVE
-    # a failed plan charge -> NOT dunning (we do not act on failed charges) -> still active
-    assert signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0) is None
-    assert subs.subscription("acme").status == STATUS_ACTIVE, "a failed-charge webhook must not past_due in 4b"
-    # a cancellation webhook naming acme in the (unauthenticated) body -> ignored -> still active
+    assert signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0) is not None
+    assert subs.subscription("acme").status == STATUS_PAST_DUE, "a re-verified failed recurring charge must past_due"
+
+
+def test_flutterwave_cancel_webhook_is_still_ignored():
+    # H4 SCOPE BOUND: a bare `subscription.cancelled` webhook carries no transaction to re-verify, so there is no
+    # authoritative subscription->org mapping — we must NOT cancel a victim named only in the unauthenticated body.
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
     body = json.dumps({"event": "subscription.cancelled",
                        "data": {"id": "sub_1", "tx_ref": "vigil:acme:n2", "created_at": 300.0}}).encode()
     assert signer.ingest(body, _FLW_SECRET, now=300.0) is None
     assert subs.subscription("acme").status == STATUS_ACTIVE, "a cancel webhook must not cancel a named victim"
+
+
+def test_flutterwave_failed_topup_does_not_dun():
+    # A failed ONE-TIME top-up (no payment_plan) reduces nothing — there is no subscription to past_due -> no-op.
+    table = {"9920": {"id": 9920, "status": "failed", "tx_ref": "vigil:acme:n9", "created_at": 200.0,
+                      "meta": {"price_id": "price_topup_200"}}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9920), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme") is None, "a failed top-up must not create or past_due any subscription"
+
+
+def test_flutterwave_failed_charge_without_recoverable_org_is_noop():
+    # fail-closed: a failed plan charge whose verify object names NO recoverable tenant (no tx_ref / meta) duns
+    # NOBODY — we never act on a guess.
+    table = {"9921": {"id": 9921, "status": "failed", "payment_plan": "flwplan_pro", "created_at": 200.0}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9921), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme") is None
+
+
+def test_flutterwave_pending_charge_does_not_dun():
+    # A NON-DEFINITIVE status (pending) must NOT reduce access — we dun only on a definitively `failed` verify.
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"},
+             "9922": {"id": 9922, "status": "pending", "tx_ref": "vigil:acme:n2", "payment_plan": "flwplan_pro",
+                      "created_at": 200.0}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
+    assert signer.ingest(_flw_wh("charge.completed", 9922), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme").status == STATUS_ACTIVE
+
+
+def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
+    # THE freshness invariant (H4): the failed-charge webhook carries the verify object's `created` as the
+    # down-latch freshness key. After a tenant RECOVERS (a later successful renewal), a STALE / replayed /
+    # out-of-order failed charge from BEFORE the recovery must NOT re-suspend them (at-least-once + unordered
+    # webhook delivery make this real). A GENUINE current failure still duns (it post-dates its activation).
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"},
+             "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
+                      "created_at": 200.0},
+             "9914": {"id": 9914, "status": "successful", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
+                      "payment_plan": "flwplan_pro"}}
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)   # active @100
+    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0)   # failed @200 -> past_due
+    assert subs.subscription("acme").status == STATUS_PAST_DUE
+    signer.ingest(_flw_wh("charge.completed", 9914), _FLW_SECRET, now=300.0)   # renewal @300 -> active (recovered)
+    assert subs.subscription("acme").status == STATUS_ACTIVE
+    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=400.0)   # STALE replay of the @200 failure
+    assert subs.subscription("acme").status == STATUS_ACTIVE, \
+        "a stale failed-charge replay must not re-suspend a recovered tenant"
 
 
 def test_flutterwave_org_comes_from_verified_not_the_body():
@@ -505,3 +691,169 @@ def test_contract_require_raises_on_undeclared_capability():
         missing = next(c for c in ("totally_made_up_cap",) if not p.supports(c))
         with pytest.raises(UnsupportedCapability):
             p.require(missing)
+
+
+# ================= Slice F — outbound hosted checkout + inbound amount cross-check =================
+_EXPECTED = {"price_topup_200": (20000, "USD"), "flwplan_pro": (5000, "XAF")}
+
+
+def _ok_creator(captured=None, link="https://checkout.flutterwave.com/pay/abc"):
+    def cc(payload):
+        if captured is not None:
+            captured["payload"] = dict(payload)
+        return {"status": "success", "data": {"link": link}}
+    return cc
+
+
+def test_create_checkout_binds_tenant_and_uses_catalog_amount():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    sess = flw.create_checkout("acme-corp", "price_topup_200", expected=_EXPECTED,
+                               customer_email="a@acme.com", redirect_url="https://app.vigil/return", nonce="N1")
+    assert isinstance(sess, CheckoutSession)
+    assert sess.tx_ref == "vigil:acme-corp:N1"                    # tenant bound into the one echoed field
+    assert sess.amount_minor == 20000 and sess.currency == "USD"  # from the CATALOG, never the caller
+    assert sess.hosted_link == "https://checkout.flutterwave.com/pay/abc"
+    p = cap["payload"]
+    assert p["tx_ref"] == "vigil:acme-corp:N1"
+    assert p["amount"] == 200.0                                   # 20000 minor USD -> 200.00 major (catalog, not caller)
+    assert p["currency"] == "USD"
+    assert p["meta"] == {"org_id": "acme-corp", "price_id": "price_topup_200"}   # redundant tenant+price binding
+    assert p["customer"] == {"email": "a@acme.com"} and p["redirect_url"] == "https://app.vigil/return"
+
+
+def test_create_checkout_zero_decimal_currency_amount_is_whole():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    flw.create_checkout("acme", "flwplan_pro", expected=_EXPECTED, nonce="N2")
+    assert cap["payload"]["amount"] == 5000 and cap["payload"]["currency"] == "XAF"   # XAF: 0 decimals, minor == major
+
+
+def test_create_checkout_refuses_unknown_price():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    with pytest.raises(ValueError):                                # caller cannot price an offering outside the catalog
+        flw.create_checkout("acme", "price_not_in_catalog", expected=_EXPECTED)
+
+
+def test_create_checkout_without_creator_refuses_not_simulates():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))   # no checkout_creator injected
+    assert flw.supports(CAP_HOSTED_CHECKOUT)                        # capability is declared...
+    with pytest.raises(UnsupportedCapability):                      # ...but it refuses rather than simulating a checkout
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_refuses_non_https_or_failed_link():
+    for bad in ({"status": "success", "data": {"link": "http://evil/pay"}},
+                {"status": "success", "data": {"link": "javascript:alert(1)"}},
+                {"status": "success", "data": {}},
+                {"status": "error", "message": "bad", "data": {"link": "https://checkout.flutterwave.com/x"}},
+                None):
+        flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=lambda p, r=bad: r)
+        with pytest.raises(UnsupportedCapability):
+            flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_refuses_invalid_org():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    for bad_org in ("has:colon", "has space", ""):                 # an invalid/foreign tenant id is refused fail-closed
+        with pytest.raises(ValueError):
+            flw.create_checkout(bad_org, "price_topup_200", expected=_EXPECTED)
+
+
+def _flw_rig_expected(table, expected):
+    _s, w, subs, plan, _m, _mock, _signer = _rig()
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier(table))
+    signer = BillingSigner(flw, wallet=w, subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)},
+                           expected=expected)
+    return w, signer
+
+
+def test_inbound_underpaid_charge_mints_nothing():
+    # verified amount 150.00 USD = 15000 minor < 20000 expected -> refuse (anti-underpay defense-in-depth).
+    table = {"71": {"id": 71, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 150.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 71), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
+
+
+def test_inbound_wrong_currency_mints_nothing():
+    table = {"72": {"id": 72, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "EUR",
+                    "amount": 200.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 72), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
+
+
+def test_inbound_exact_catalog_amount_mints():
+    table = {"73": {"id": 73, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 200.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 73), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme") == 200                              # exact catalog amount -> mints the catalog credits
+
+
+def test_inbound_cross_check_skipped_when_no_expected_configured():
+    # backward-compatible: with NO `expected` map, an underpaid charge still mints on the price_id binding alone
+    # (the primary doctrine). The cross-check is a defense-in-depth add, off unless the owner wires expected_amounts.
+    table = {"74": {"id": 74, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 1.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, None)                     # expected=None -> no cross-check
+    assert signer.ingest(_flw_wh("charge.completed", 74), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme") == 200
+
+
+# ---- Slice F red-pen fold (LOW hardening): link sanitizer, fail-closed creator, price guard, binding round-trip
+def test_create_checkout_refuses_crlf_userinfo_and_foreign_host_links():
+    for bad_link in ("https://checkout.flutterwave.com/pay\r\nSet-Cookie: x=y",   # CRLF -> header-split
+                     "https://checkout.flutterwave.com/p ay",                      # embedded whitespace
+                     "https://user:pass@checkout.flutterwave.com/pay",             # embedded credentials
+                     "https://evil.example/pay",                                   # foreign host
+                     "https://flutterwave.com.evil.example/pay",                   # suffix-spoofed host
+                     "https://evilflutterwave.com/pay"):                           # no dot boundary
+        flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}),
+                                         checkout_creator=lambda p, L=bad_link: {"status": "success",
+                                                                                 "data": {"link": L}})
+        with pytest.raises(UnsupportedCapability):
+            flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_fails_closed_when_creator_raises():
+    def boom(payload):
+        raise RuntimeError("TLS handshake failed: secret-ish internals")                 # outbound POST failure
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=boom)
+    with pytest.raises(UnsupportedCapability) as ei:
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+    assert "secret-ish internals" not in str(ei.value)                                   # provider internals NOT leaked
+
+
+def test_create_checkout_refuses_zero_negative_or_empty_catalog_price():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    for bad in ({"p": (0, "USD")}, {"p": (-100, "USD")}, {"p": (5000, "")}):              # mispriced catalog entry
+        with pytest.raises(ValueError):
+            flw.create_checkout("acme", "p", expected=bad)
+
+
+def test_create_checkout_rejects_colon_in_explicit_nonce():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    with pytest.raises(ValueError):
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED, nonce="bad:nonce")   # delimiter poison
+
+
+def test_create_checkout_default_nonce_and_binding_round_trip():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    sess = flw.create_checkout("acme-corp", "price_topup_200", expected=_EXPECTED)        # NO explicit nonce
+    prefix, org, nonce = sess.tx_ref.split(":", 2)
+    assert prefix == "vigil" and org == "acme-corp" and nonce and ":" not in nonce        # default nonce well-formed
+    assert cap["payload"]["meta"]["org_id"] == "acme-corp"                                 # tx_ref org == meta org
+    # ROUND-TRIP: a paid charge carrying THIS tx_ref mints to the SAME org, never another.
+    _s, w, subs, plan, _m, _mock, _signer = _rig()
+    table = {"500": {"id": 500, "status": "successful", "tx_ref": sess.tx_ref, "currency": "USD",
+                     "amount": 200.0, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    signer = BillingSigner(FlutterwaveBillingProvider(_FLW_SECRET, _verifier(table)), wallet=w,
+                           subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)})
+    assert signer.ingest(_flw_wh("charge.completed", 500), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme-corp") == 200 and w.available("victim-org") == 0

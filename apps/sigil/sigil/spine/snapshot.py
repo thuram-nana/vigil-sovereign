@@ -51,7 +51,15 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 1   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil"
+_MAX_SNAPSHOT_SCHEMA = 5   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+#                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
+#                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
+#                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
+#                            governor.customer_credential (customer_credential_state/issued/row). Every bump is
+#                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
+#                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
+#                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
+#                            all empty).
 
 
 class SnapshotState(BaseModel):
@@ -59,7 +67,9 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 5   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    #                           3->4 Slice H (governor.invoice billing history). Every snapshot this build emits
+    #                           carries the v4 keys; a pre-bump build refuses it cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
     trusted_pubkey: str = ""          # owner pubkey the pubkey-dependent folds were computed under
@@ -116,6 +126,17 @@ class SnapshotState(BaseModel):
     #                                   second factor) or its DEADLINE (a pruned account silently never-expiring).
     #                                   Carried for every honored-active username (incl. ones later revoked —
     #                                   dropped at read time by account_state, exactly as the scan).
+    customer_state: list = []         # [[username, "active"|"revoked"], ...] — governor.customer LWW
+    #                                   (revoke=any, active=owner-verified + FRESH). Keep revoked. A DISJOINT
+    #                                   namespace from account_state (a customer is never an operator account).
+    customer_issued: list = []        # [[username, issued_at], ...] — PER-USERNAME active-grant high-water.
+    #                                   Missing row ⇒ -inf bottom. MUST cross a prune, or the first hard prune
+    #                                   resets it and a captured owner-signed `active` customer grant becomes
+    #                                   replay-resurrectable (identical invariant to account_issued).
+    customer_cred: list = []          # [[username, email, password_hash], ...] — the fields to REBUILD an
+    #                                   active `CustomerAccount` from the seed (issued_at joins from
+    #                                   customer_issued; state="active"). password_hash is None for an
+    #                                   OIDC/passkey-only customer; carried so a pruned customer keeps its login.
     org_state: list = []              # [[org_id, "active"|"revoked"], ...] — governor.org LWW (keep revoked).
     org_issued: list = []             # [[org_id, issued_at], ...] — PER-ORG active-grant high-water. Missing
     #                                   row ⇒ the -inf bottom. MUST cross a prune, or the first hard prune
@@ -129,6 +150,25 @@ class SnapshotState(BaseModel):
     #                                   Same cross-a-prune invariant as account_issued, per membership key.
     membership_row: list = []         # [[org_id, username, role], ...] — the fields to REBUILD an active
     #                                   `Membership` from the seed (issued_at joins from membership_issued).
+    ownership_proof_state: list = []  # [[org_id, host, "active"|"revoked"], ...] — governor.asset_ownership_proof
+    #                                   LWW, keyed PER-(org_id, host). Keep revoked (Slice G0 schema v3).
+    ownership_proof_issued: list = [] # [[org_id, host, issued_at], ...] — PER-(org_id, host) active high-water.
+    #                                   Same cross-a-prune invariant as account_issued: MUST cross a prune or a
+    #                                   captured owner-signed `active` proof becomes replay-resurrectable, which
+    #                                   would resurrect a REVOKED/expired engagement authorization basis.
+    ownership_proof_row: list = []    # [[org_id, host, method, token_sha256, verified_at, expires_at], ...] — the
+    #                                   fields to REBUILD an active `OwnershipProof` (issued_at joins from
+    #                                   ownership_proof_issued; state="active"). expires_at is owner-signed.
+    customer_credential_state: list = []  # [[username, cred_key, "active"|"revoked"], ...] —
+    #                                   governor.customer_credential LWW, keyed PER-(username, cred_key). Keep
+    #                                   revoked (Slice E2a schema v5; mirrors ownership_proof).
+    customer_credential_issued: list = []  # [[username, cred_key, issued_at], ...] — PER-(username, cred_key)
+    #                                   active high-water. MUST cross a prune, or a captured owner-signed active
+    #                                   credential becomes replay-resurrectable (a revoked passkey/TOTP/OIDC link
+    #                                   could be resurrected) — the same invariant as ownership_proof_issued.
+    customer_credential_row: list = []  # [[username, cred_key, kind, cose_alg, public_key_spki_b64, uv,
+    #                                   sealed_secret, federated_iss, federated_sub, issued_at], ...] — the fields
+    #                                   to REBUILD an active CustomerCredential from the seed (state="active").
     wallet_granted: list = []         # [[org_id, granted_total], ...] — Σ honored SaaS credit GRANTS per
     #                                   tenant (governor.credit_grant). balance = granted - debited is a
     #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
@@ -146,6 +186,12 @@ class SnapshotState(BaseModel):
     subscription_row: list = []       # [[org_id, plan_id, period_start, period_end, allotment], ...] — the plan
     #                                   fields to REBUILD the Subscription from the seed (status joins from
     #                                   subscription_state).
+    invoice_row: list = []            # [[org_id, invoice_id, kind, price_id, amount_minor, currency, credits,
+    #                                   period_start, period_end, issued_at], ...] — governor.invoice billing
+    #                                   HISTORY (Slice H schema v4). ADDITIVE append-only (NOT LWW), idempotent
+    #                                   per (org_id, invoice_id). MUST cross a prune or the first hard prune would
+    #                                   LOSE historical invoices AND drop the consumed invoice_id set (re-opening
+    #                                   invoice replay); `InvoiceRegistry._fold` rebuilds the Invoice from it.
     plan_granted: list = []           # [[org_id, period_end, granted_total], ...] — Σ honored PLAN-credit GRANTS
     #                                   per (tenant, billing period) (governor.plan_grant). A per-period tranche
     #                                   remainder (granted - debited) is spendable only until period_end, so (like
@@ -182,6 +228,14 @@ class SnapshotState(BaseModel):
     #   account_cred stays a raw list-of-rows: `AccountsRegistry._fold` rebuilds the Account objects from it
     #   (joining issued_at from account_issued_map), keeping the `Account` import out of this leaf module.
 
+    def customer_state_map(self) -> dict[Any, str]:
+        return {row[0]: row[1] for row in self.customer_state}
+
+    def customer_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.customer_issued}
+    #   customer_cred stays a raw list-of-rows: `CustomerRegistry._fold` rebuilds the CustomerAccount objects
+    #   from it (joining issued_at from customer_issued_map), keeping the import out of this leaf module.
+
     def org_state_map(self) -> dict[Any, str]:
         return {row[0]: row[1] for row in self.org_state}
 
@@ -197,6 +251,24 @@ class SnapshotState(BaseModel):
         return {(row[0], row[1]): row[2] for row in self.membership_issued}
     #   membership_row is a raw list-of-rows: `OrgRegistry._fold_memberships` rebuilds the Membership objects
     #   from it (joining issued_at from membership_issued_map), keyed PER-(org_id, username).
+
+    def ownership_proof_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.ownership_proof_state}
+
+    def ownership_proof_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.ownership_proof_issued}
+    #   ownership_proof_row is a raw list-of-rows: `AssetOwnershipRegistry._fold_proofs` rebuilds the
+    #   OwnershipProof objects from it (joining issued_at from ownership_proof_issued_map), keyed
+    #   PER-(org_id, host), so a pruned proof survives and its anti-replay high-water is not reset.
+
+    def customer_credential_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.customer_credential_state}
+
+    def customer_credential_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.customer_credential_issued}
+    #   customer_credential_row is a raw list-of-rows: `CustomerCredentialRegistry._fold` rebuilds the
+    #   CustomerCredential objects from it, keyed PER-(username, cred_key), so a pruned passkey/TOTP/OIDC link
+    #   survives and its anti-replay high-water is not reset.
 
     def wallet_granted_map(self) -> dict[Any, int]:
         return {row[0]: row[1] for row in self.wallet_granted}
@@ -359,6 +431,14 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # derived per-grant from the payload — mirror the SAME helper the live scan uses, else a KEYED grant
     # (signed over 8 fields) would fail a static 7-field verify here and be dropped from the seed.
     from ..governor.accounts import _core_fields as _acct_core_fields
+    # governor.customer — a DISJOINT owner-signed identity namespace (Slice E1). Its signed core is also
+    # CONDITIONAL on password_hash, so mirror the SAME helper the live scan uses (same drift guard as acct).
+    from ..governor.customers import SIGNAL as _CUST_SIGNAL
+    from ..governor.customers import _core_fields as _cust_core_fields
+    # governor.customer_credential — the per-customer passkey/TOTP/OIDC-link substrate (Slice E2a). Its signed
+    # core is CONDITIONAL on the credential material; mirror the SAME helper the live fold uses (drift guard).
+    from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL
+    from ..governor.customer_credentials import _cred_core as _cred_core_fields
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
@@ -370,6 +450,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # the account core above); the fold below carries them across a prune exactly as it does accounts.
     from ..governor.orgs import (ORG_SIGNAL as _ORG_SIGNAL, MEMBERSHIP_SIGNAL as _MEM_SIGNAL,
                                  _ORG_CORE, _MEMBERSHIP_CORE)
+    # asset-ownership proof signed-core imported from the live module (never restated — same drift guard as the
+    # org cores); the fold carries the per-(org_id, host) proof state + high-water across a prune like memberships
+    # so a captured owner-signed active proof cannot resurrect a revoked one after the first hard prune (Slice G0).
+    from ..governor.asset_ownership import PROOF_SIGNAL as _PROOF_SIGNAL, _PROOF_CORE
     # SaaS wallet signed-core tuples + the credits clamp imported from the live module (never restated — same
     # drift guard as the org cores above); the fold below carries the balance + anti-replay seen-set across a
     # prune exactly as it does accounts/orgs.
@@ -386,6 +470,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL as _SUB_SIGNAL, _SUB_CORE as _SUBS_CORE,
                                          STATUS_ACTIVE as _SUB_ACTIVE, _DOWN_STATES as _SUB_DOWN,
                                          _as_allotment as _sub_as_allotment)
+    # invoice billing-history signed-core imported from the live module (never restated — same drift guard); the
+    # fold below carries the ADDITIVE per-(org, invoice_id) history rows across a prune like the wallet seen-set.
+    from ..governor.invoices import (INVOICE_SIGNAL as _INV_SIGNAL, _INVOICE_CORE as _INV_CORE,
+                                     _as_nonneg_int as _inv_as_nonneg)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -415,12 +503,24 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                            (row[7] if len(row) > 7 else None)]
                                   for row in s.account_cred} if s else {}   # 5/6/7/8 = user_pubkey / totp_secret /
     #                                                                         password_hash / expires_at (None legacy)
+    cust_state: dict[Any, str] = dict(s.customer_state_map()) if s else {}
+    cust_issued: dict[Any, float] = dict(s.customer_issued_map()) if s else {}
+    cust_cred: dict[Any, list] = {row[0]: [row[1], (row[2] if len(row) > 2 else None)]
+                                  for row in s.customer_cred} if s else {}   # [email, password_hash] (None legacy)
     org_state: dict[Any, str] = dict(s.org_state_map()) if s else {}
     org_issued: dict[Any, float] = dict(s.org_issued_map()) if s else {}
     org_row: dict[Any, list] = {row[0]: [row[1], row[2]] for row in s.org_row} if s else {}  # org_id->[name,owner]
     mem_state: dict[tuple, str] = dict(s.membership_state_map()) if s else {}
     mem_issued: dict[tuple, float] = dict(s.membership_issued_map()) if s else {}
     mem_row: dict[tuple, Any] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
+    op_state: dict[tuple, str] = dict(s.ownership_proof_state_map()) if s else {}   # (org,host) -> state (LWW)
+    op_issued: dict[tuple, float] = dict(s.ownership_proof_issued_map()) if s else {}   # (org,host) -> high-water
+    op_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5]]
+                                 for r in s.ownership_proof_row} if s else {}   # ->[method,sha,verified,expires]
+    cc_state: dict[tuple, str] = dict(s.customer_credential_state_map()) if s else {}   # (user,cred_key) -> state
+    cc_issued: dict[tuple, float] = dict(s.customer_credential_issued_map()) if s else {}   # (user,cred_key) -> hw
+    cc_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]
+                                 for r in s.customer_credential_row} if s else {}   # ->[kind,alg,pk,uv,seal,iss,sub,at]
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
@@ -430,6 +530,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     sub_state: dict[Any, str] = dict(s.subscription_state_map()) if s else {}   # org_id -> status (LWW)
     sub_issued: dict[Any, float] = dict(s.subscription_issued_map()) if s else {}   # org_id -> active high-water
     sub_row: dict[Any, list] = {r[0]: [r[1], r[2], r[3], r[4]] for r in s.subscription_row} if s else {}
+    # invoice history: (org_id, invoice_id) -> [kind, price_id, amount_minor, currency, credits, p_start, p_end,
+    # issued_at]. ADDITIVE append-only (NOT LWW); the key presence IS the idempotency seen-set (mirror wallet).
+    inv_rows: dict[tuple, list] = ({(r[0], r[1]): list(r[2:10]) for r in s.invoice_row
+                                    if isinstance(r, (list, tuple)) and len(r) >= 10} if s else {})
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -541,6 +645,20 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"),
                                        p.get("user_pubkey"), p.get("totp_secret"), p.get("password_hash"),
                                        p.get("expires_at")]
+        # --- governor.customer LWW + PER-USERNAME anti-replay high-water (mirrors the ACCT fold above
+        #     EXACTLY — a DISJOINT signal/namespace, so a customer survives a prune with its high-water
+        #     intact and never collides with an operator account). revoke=any; active=owner-verified+FRESH.
+        if sig == _CUST_SIGNAL:
+            cstate = p.get("state")
+            if cstate == "revoked":
+                cust_state[p.get("username")] = "revoked"
+            elif cstate == "active" and verify_signed(p, _cust_core_fields(p), vpk):
+                ckey = p.get("username")
+                at = as_issued_at(p.get("issued_at"))
+                if at > cust_issued.get(ckey, NO_HIGHWATER):   # mirror _fold: stale/replayed active ⇒ no effect
+                    cust_issued[ckey] = at
+                    cust_state[ckey] = "active"
+                    cust_cred[ckey] = [p.get("email"), p.get("password_hash")]   # None pw ⇒ OIDC/passkey-only
         # --- governor.org LWW + PER-ORG anti-replay high-water (mirrors the ACCT fold above EXACTLY, so an
         #     active org whose only grant is pruned survives and its high-water is NOT reset — the fix for the
         #     org replay-resurrection HIGH). revoke=any (safe direction); active=owner-verified + FRESH. ---
@@ -571,6 +689,44 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         mem_issued[mkey] = at
                         mem_state[mkey] = "active"
                         mem_row[mkey] = p.get("role")
+        # --- governor.asset_ownership_proof LWW + PER-(org_id, host) high-water (mirrors the MEM fold EXACTLY,
+        #     so an active ownership proof whose only grant is pruned survives and its high-water is NOT reset —
+        #     the fix for the proof replay-resurrection flagged by the G0 red-pen). Keep revoked (safe dir). ---
+        if sig == _PROOF_SIGNAL:
+            oid = p.get("org_id")
+            host = p.get("host")
+            if isinstance(oid, str) and oid and isinstance(host, str) and host:
+                opkey = (oid, host)
+                pst = p.get("state")
+                if pst == "revoked":
+                    op_state[opkey] = "revoked"
+                elif pst == "active" and verify_signed(p, _PROOF_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > op_issued.get(opkey, NO_HIGHWATER):
+                        op_issued[opkey] = at
+                        op_state[opkey] = "active"
+                        op_row[opkey] = [p.get("method"), p.get("token_sha256"),
+                                         p.get("verified_at"), p.get("expires_at")]
+        # --- governor.customer_credential LWW + PER-(username, cred_key) high-water (mirrors the ownership_proof
+        #     fold EXACTLY, so an active passkey/TOTP/OIDC-link whose only grant is pruned survives and its
+        #     high-water is NOT reset — else a captured owner-signed active credential becomes replay-
+        #     resurrectable). verify under the CONDITIONAL core (same drift guard as acct/customer). ---
+        if sig == _CRED_SIGNAL:
+            ccu = p.get("username")
+            cck = p.get("cred_key")
+            if isinstance(ccu, str) and ccu and isinstance(cck, str) and cck:
+                cckey = (ccu, cck)
+                ccst = p.get("state")
+                if ccst == "revoked":
+                    cc_state[cckey] = "revoked"
+                elif ccst == "active" and verify_signed(p, _cred_core_fields(p), vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > cc_issued.get(cckey, NO_HIGHWATER):
+                        cc_issued[cckey] = at
+                        cc_state[cckey] = "active"
+                        cc_row[cckey] = [p.get("kind"), p.get("cose_alg"), p.get("public_key_spki_b64"),
+                                         p.get("uv"), p.get("sealed_secret"), p.get("federated_iss"),
+                                         p.get("federated_sub"), at]
         # --- SaaS credit wallet: ADDITIVE grant/debit ledger, idempotent per (org_id, entry_id) — mirrors
         #     WalletRegistry._fold EXACTLY (verify under the key valid at the seq; a record whose key is already
         #     in w_seen is ignored, the replay/double-count guard; credits clamped >= 0). Both signals share the
@@ -608,14 +764,17 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                             p_granted[ptkey] = p_granted.get(ptkey, 0) + pc
                         else:
                             p_debited[ptkey] = p_debited.get(ptkey, 0) + pc
-        # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; past_due/canceled
-        #     honored on sight) — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
+        # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; down-states:
+        #     owner-manual 0.0 honored on sight, webhook-driven freshness-gated vs the active high-water)
+        #     — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
         if sig == _SUB_SIGNAL:
             soid = p.get("org_id")
             if isinstance(soid, str) and soid:
                 sst = p.get("status")
                 if sst in _SUB_DOWN:
-                    sub_state[soid] = sst
+                    sdat = as_issued_at(p.get("issued_at"))     # mirror _fold: 0.0 on sight; else fresher-only
+                    if sdat <= 0.0 or sdat > sub_issued.get(soid, NO_HIGHWATER):
+                        sub_state[soid] = sst
                 elif sst == _SUB_ACTIVE and verify_signed(p, _SUBS_CORE, vpk):
                     at = as_issued_at(p.get("issued_at"))
                     if at > sub_issued.get(soid, NO_HIGHWATER):
@@ -625,6 +784,21 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                          float(as_issued_at(p.get("period_start"))),
                                          float(as_issued_at(p.get("period_end"))),
                                          _sub_as_allotment(p.get("allotment"))]
+        # --- governor.invoice: ADDITIVE append-only billing history, idempotent per (org_id, invoice_id) —
+        #     mirrors InvoiceRegistry._fold EXACTLY (first mint of an invoice_id wins; verify under the key valid
+        #     at the seq). Carried across a prune so a pruned invoice line is not lost and cannot be replayed. ---
+        if sig == _INV_SIGNAL:
+            ioid = p.get("org_id")
+            iid = p.get("invoice_id")
+            if isinstance(ioid, str) and ioid and isinstance(iid, str) and iid:
+                ikey = (ioid, iid)
+                if ikey not in inv_rows and verify_signed(p, _INV_CORE, vpk):
+                    inv_rows[ikey] = [str(p.get("kind") or ""), str(p.get("price_id") or ""),
+                                      _inv_as_nonneg(p.get("amount_minor")), str(p.get("currency") or ""),
+                                      _inv_as_nonneg(p.get("credits")),
+                                      float(as_issued_at(p.get("period_start"))),
+                                      float(as_issued_at(p.get("period_end"))),
+                                      float(as_issued_at(p.get("issued_at")))]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -670,12 +844,22 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None), (c[4] if len(c) > 4 else None),
                        (c[5] if len(c) > 5 else None), (c[6] if len(c) > 6 else None)]
                       for u, c in acct_cred.items()],
+        customer_state=[[u, v] for u, v in cust_state.items()],
+        customer_issued=[[u, i] for u, i in cust_issued.items()],
+        customer_cred=[[u, c[0], (c[1] if len(c) > 1 else None)] for u, c in cust_cred.items()],
         org_state=[[o, v] for o, v in org_state.items()],
         org_issued=[[o, i] for o, i in org_issued.items()],
         org_row=[[o, r[0], r[1]] for o, r in org_row.items()],
         membership_state=[[k[0], k[1], v] for k, v in mem_state.items()],
         membership_issued=[[k[0], k[1], i] for k, i in mem_issued.items()],
         membership_row=[[k[0], k[1], r] for k, r in mem_row.items()],
+        ownership_proof_state=[[k[0], k[1], v] for k, v in op_state.items()],
+        ownership_proof_issued=[[k[0], k[1], i] for k, i in op_issued.items()],
+        ownership_proof_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in op_row.items()],
+        customer_credential_state=[[k[0], k[1], v] for k, v in cc_state.items()],
+        customer_credential_issued=[[k[0], k[1], i] for k, i in cc_issued.items()],
+        customer_credential_row=[[k[0], k[1], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]
+                                 for k, r in cc_row.items()],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],
@@ -685,6 +869,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         subscription_state=[[o, v] for o, v in sub_state.items()],
         subscription_issued=[[o, i] for o, i in sub_issued.items()],
         subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in sub_row.items()],
+        invoice_row=[[k[0], k[1], *r] for k, r in inv_rows.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

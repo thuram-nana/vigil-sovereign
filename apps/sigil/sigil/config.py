@@ -139,6 +139,137 @@ GRAPH_DIR = SIGIL_HOME / "graph"                          # base; holds current/
 
 # --- identity / scope -----------------------------------------------------------------
 SCOPE = os.environ.get("SIGIL_SCOPE", "sigil")          # the owner's single scope
+
+# ---- SaaS customer plane (Slice E1) -------------------------------------------------------------
+# The keyless customer edge + the owner-signed provisioner live behind these. All default OFF/empty, so a
+# sovereign install is byte-identical until the customer plane is turned on (`vigil up` mints the hop key).
+CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
+COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
+PUBLIC_UI_PORT = _int_env("VIGIL_PUBLIC_PORT", 8735)    # the keyless/cookieless public marketing+tools site
+CVE_CATALOG_PATH = SIGIL_HOME / "cve" / "catalog.db"    # the public CVE catalog (populated by `sigil cve ingest`)
+_customer = SIGIL_HOME / "customer"
+
+
+def sovereign_provision_base() -> str:
+    """The loopback base URL the keyless customer edge calls to reach the sovereign provisioner routes
+    (`/api/provision/*`) over the hop key. Loopback by construction — the edge and the cockpit run on the
+    same host; the edge holds NO owner key, only `VIGIL_PROVISION_HOP_KEY`. Overridable via
+    `VIGIL_PROVISION_BASE` (e.g. a private-tunnel address) for a split deployment."""
+    return os.environ.get("VIGIL_PROVISION_BASE", f"http://127.0.0.1:{COCKPIT_UI_PORT}")
+CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
+EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
+LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers
+TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial grant (never on-the-wire)
+# Anti-farming ceilings on the provisioner's owner-signed mints. The signup cap is a GLOBAL per-rolling-day
+# ceiling on self-serve signups (each mints a real trial credit — a Sybil ceiling on real money); the member
+# limiter is a per-org ceiling on grant/revoke churn. Both are SEPARATE LoginRateLimiter instances rooted
+# here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
+SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
+MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+# Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
+# purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
+# an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
+# seals at enroll + unseals at verify; only the sealed blob ever reaches the spine (the plaintext is shown to
+# the customer ONCE at enrollment, never persisted).
+CUSTOMER_TOTP_SEAL_CONTEXT = b"sigil/customer.totp"
+CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP (username, step) replay ledger
+# Slice E3b-2 — customer passkey (WebAuthn). The single-use registration/assertion challenge ledger (edge) +
+# the NON-SIGNED per-credential sign-count clone-floor ledger (provisioner; a monotonic high-water, NOT an
+# owner-signed record — a passkey login is a pure signature check with no owner re-sign). OFF by default:
+# with customer_passkey_enabled() false the edge's passkey routes are absent and nothing is minted.
+CUSTOMER_PASSKEY_CHALLENGE_DIR = _customer / "passkey_challenges"   # single-use WebAuthn challenges (edge)
+CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-credential_id monotonic sign-count floor
+# Slice E3c — step-up MFA. How recently a customer must have proven a fresh factor (TOTP code / passkey
+# assertion) for a sensitive op (launch / target-verify / member grant+revoke) to proceed when enforcement
+# is ON. The session's `mfa_at` is stamped by the edge on a fresh factor proof; the provisioner refuses a
+# sensitive op whose session mfa_at is older than this window (or absent).
+CUSTOMER_STEPUP_WINDOW_SECONDS = _int_env("VIGIL_CUSTOMER_STEPUP_WINDOW_SECONDS", 300)   # 5 minutes
+
+
+def customer_stepup_required() -> bool:
+    """True iff step-up MFA enforcement is ON (`VIGIL_CUSTOMER_STEPUP_REQUIRED` affirmative). OFF by default
+    (the codebase's posture-flag pattern): when OFF the sensitive customer ops are BYTE-IDENTICAL to pre-E3c
+    (no mfa_at check); when ON, a customer must have stepped up with a FRESH factor (within
+    `CUSTOMER_STEPUP_WINDOW_SECONDS`) before a launch / target-verify / member grant+revoke — so a paid or
+    offense op always rides a recent second-factor proof."""
+    return (os.environ.get("VIGIL_CUSTOMER_STEPUP_REQUIRED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
+MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
+# Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
+# decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
+# later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
+LAUNCH_UNITS = _int_env("VIGIL_LAUNCH_UNITS", 10)
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    """A strict, fail-closed boolean env read: only the affirmative tokens below (case-insensitive) are True;
+    anything else — including a typo — is the default. Used for opt-in DEV escape hatches that must never
+    turn on by accident."""
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def provision_hop_key() -> str:
+    """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
+    handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail
+    CLOSED (no customer provisioning until the key is provisioned)."""
+    return os.environ.get("VIGIL_PROVISION_HOP_KEY", "")
+
+
+def provision_expose_dev_tokens() -> bool:
+    """DEV-ONLY: whether the provision HTTP surface may echo the email verify/recover token in its response
+    (so a dev install can complete signup/recovery without an SMTP relay).
+
+    FAIL-CLOSED by default (the red-pen's CO13): echoing the token to the browser lets anyone self-verify
+    WITHOUT mailbox control — i.e. a trial without email verification = Sybil farming, which breaks the
+    NON-NEGOTIABLE anti-Sybil invariant. So this is OFF unless EXPLICITLY opted in with
+    `VIGIL_PROVISION_DEV_TOKENS`, and is suppressed outright under BOTH the production AND the (explicitly
+    hardened) governed posture, and whenever a real SMTP sender is configured (the token is emailed, never
+    surfaced). It must NEVER default open merely because no posture/SMTP is set."""
+    from vigil_core.posture import is_governed_posture, is_production_posture
+    if is_production_posture() or is_governed_posture():
+        return False
+    if email_enabled():
+        return False
+    return _bool_env("VIGIL_PROVISION_DEV_TOKENS", False)
+
+
+def email_enabled() -> bool:
+    """True iff an SMTP sender is configured (`SIGIL_EMAIL_HOST` set) — mirrors the OIDC opt-in. OFF by
+    default: a dev/sovereign install uses NullEmailSender and surfaces a verify/recover token only on an
+    explicit dev flag, NEVER in production."""
+    return bool(os.environ.get("SIGIL_EMAIL_HOST", "").strip())
+
+
+def email_sender():
+    """The configured EmailSender: a stdlib SmtpEmailSender behind `SIGIL_EMAIL_*`, else the OFF-by-default
+    NullEmailSender. Lazily imports the (stdlib-only) channel so `config` stays import-light."""
+    from .ui.email_channel import NullEmailSender, SmtpEmailSender
+    if not email_enabled():
+        return NullEmailSender()
+    return SmtpEmailSender(os.environ["SIGIL_EMAIL_HOST"], _int_env("SIGIL_EMAIL_PORT", 587),
+                           from_addr=os.environ.get("SIGIL_EMAIL_FROM", "noreply@vigil.local"),
+                           username=os.environ.get("SIGIL_EMAIL_USER") or None,
+                           password=os.environ.get("SIGIL_EMAIL_PASSWORD") or None)
+def ownership_verify_enabled() -> bool:
+    """True iff the operator enabled self-serve asset-ownership verification (`VIGIL_OWNERSHIP_VERIFY`). OFF
+    by default — the sovereign plane makes NO outbound fetch to a customer-named host unless the operator
+    explicitly opts into this egress (mirrors the email / OIDC opt-ins). While off, target_verify fail-closed."""
+    return _bool_env("VIGIL_OWNERSHIP_VERIFY", False)
+
+
+def ownership_fetcher():
+    """The configured ownership-proof fetcher (SSRF-hardened; serves both the well-known HTTP file and the
+    dns-txt-over-DoH methods) when enabled, else None (fail-closed — the provisioner's target_verify
+    refuses). Lazily imports the stdlib-only fetcher so `config` stays import-light."""
+    if not ownership_verify_enabled():
+        return None
+    from .ui.ownership_fetch import WellKnownFetcher
+    return WellKnownFetcher()
+
+
 OWNER_KEY_ID = os.environ.get("SIGIL_OWNER_KEY_ID", "owner")
 
 
@@ -187,6 +318,97 @@ def oidc_settings() -> dict:
                          if a.strip()],
         "clock_skew_seconds": _int_env("SIGIL_OIDC_CLOCK_SKEW_SECONDS", 60),
     }
+
+
+# --- CUSTOMER Google OIDC login (Slice E2b — SHIPPED OFF BY DEFAULT, a DISJOINT toggle) ----
+# The self-serve CUSTOMER plane's federated login ("Sign in with Google"), entirely separate from the
+# operator OIDC above (different env toggle, different routes, different terminal mint — a customer session,
+# NEVER an operator bearer). OFF by default: with `customer_oidc_enabled()` false the custui edge's
+# /api/customer/oidc/* routes are NOT served and the provisioner makes NO outbound call (byte-identical to a
+# build without it). The config is SPLIT so the owner secret never reaches the keyless edge: the edge reads
+# only `customer_oidc_public_settings()` (endpoints + client_id + redirect + scopes, client_secret forced
+# blank) to build the authorize redirect; the `client_secret` + the token/JWKS EGRESS live ONLY in the
+# provisioner (`customer_oidc_settings()`), bounded by the host allowlist below. Google endpoints are pinned
+# as defaults (overridable for a private test IdP), but the allowlist is what actually bounds the egress.
+_GOOGLE_OIDC_ISSUER = "https://accounts.google.com"
+_GOOGLE_OIDC_AUTHORIZE = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_OIDC_TOKEN = "https://oauth2.googleapis.com/token"
+_GOOGLE_OIDC_JWKS = "https://www.googleapis.com/oauth2/v3/certs"
+# The outbound host allowlist for the provisioner's customer-OIDC token + JWKS calls (enforced by the
+# injected poster/fetcher — the keyless edge never makes an OIDC egress). A token_endpoint/jwks_uri steered
+# off these hosts is REFUSED, so a misconfiguration (or a hostile override) cannot turn the provisioner into
+# an SSRF proxy against an internal address. Pinned to Google's auth/token/JWKS hosts.
+CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
+    "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"})
+
+
+def customer_oidc_enabled() -> bool:
+    """True iff customer Google-OIDC login is ON (`VIGIL_CUSTOMER_OIDC_ENABLED` ∈ {1,true,yes,on,enabled}).
+    OFF by default and INDEPENDENT of the operator `SIGIL_OIDC_ENABLED`. When OFF the edge's
+    /api/customer/oidc/* routes are not served and the provisioner builds no OIDC provider (no egress)."""
+    return (os.environ.get("VIGIL_CUSTOMER_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def _customer_oidc_base() -> dict:
+    """The NON-SECRET customer-OIDC settings (Google-pinned by default, overridable via `VIGIL_CUSTOMER_OIDC_*`).
+    NEVER reads the client secret. `username_claim` is fixed to the immutable `sub` — the customer binding is
+    the stable `(iss, sub)` pair (never a mutable claim)."""
+    g = os.environ.get
+    return {
+        "issuer": (g("VIGIL_CUSTOMER_OIDC_ISSUER") or _GOOGLE_OIDC_ISSUER).strip(),
+        "client_id": (g("VIGIL_CUSTOMER_OIDC_CLIENT_ID") or "").strip(),
+        "redirect_uri": (g("VIGIL_CUSTOMER_OIDC_REDIRECT_URI") or "").strip(),
+        "authorize_endpoint": (g("VIGIL_CUSTOMER_OIDC_AUTHORIZE_ENDPOINT") or _GOOGLE_OIDC_AUTHORIZE).strip(),
+        "token_endpoint": (g("VIGIL_CUSTOMER_OIDC_TOKEN_ENDPOINT") or _GOOGLE_OIDC_TOKEN).strip(),
+        "jwks_uri": (g("VIGIL_CUSTOMER_OIDC_JWKS_URI") or _GOOGLE_OIDC_JWKS).strip(),
+        # `openid email` — we need the verified `email` + `email_verified` claims for auto-provision/anti-takeover.
+        "scopes": (g("VIGIL_CUSTOMER_OIDC_SCOPES") or "openid email").strip(),
+        "username_claim": "sub",                                   # binding is (iss, sub); never a mutable claim
+        "signing_algs": [a.strip().upper() for a in (g("VIGIL_CUSTOMER_OIDC_SIGNING_ALGS") or "RS256,ES256").split(",")
+                         if a.strip()],
+        "clock_skew_seconds": _int_env("VIGIL_CUSTOMER_OIDC_CLOCK_SKEW_SECONDS", 60),
+    }
+
+
+def customer_oidc_public_settings() -> dict:
+    """What the KEYLESS EDGE reads — the non-secret settings with `client_secret` EXPLICITLY blank. The edge
+    builds an `OidcConfig(client_secret="")` from this to form the authorize 302; it never reads the secret
+    env var at all (the secret lives ONLY in the provisioner's `customer_oidc_settings()`)."""
+    base = _customer_oidc_base()
+    base["client_secret"] = ""
+    return base
+
+
+def customer_oidc_settings() -> dict:
+    """What the PROVISIONER reads — the non-secret settings PLUS the client secret, for the token exchange.
+    Consulted ONLY when `customer_oidc_enabled()` and ONLY on the provisioner side; the secret never reaches
+    the keyless edge."""
+    base = _customer_oidc_base()
+    base["client_secret"] = (os.environ.get("VIGIL_CUSTOMER_OIDC_CLIENT_SECRET") or "")
+    return base
+
+
+# --- customer passkey (WebAuthn, Slice E3b-2 — SHIPPED OFF BY DEFAULT) ----------------
+def customer_passkey_enabled() -> bool:
+    """True iff customer passkey (WebAuthn) login is ON (`VIGIL_CUSTOMER_PASSKEY_ENABLED` affirmative). OFF by
+    default: the edge's /api/customer/passkey/* routes are not served and nothing is minted."""
+    return (os.environ.get("VIGIL_CUSTOMER_PASSKEY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_passkey_rp_id() -> str:
+    """The WebAuthn Relying-Party id (the registrable customer domain, e.g. `app.vigil.example`) the
+    authenticator binds its assertion to (authenticatorData.rpIdHash == sha256(rp_id)). Empty ⇒ passkey
+    verification fail-closed (the provisioner refuses)."""
+    return (os.environ.get("VIGIL_CUSTOMER_PASSKEY_RP_ID") or "").strip()
+
+
+def customer_passkey_origins() -> tuple:
+    """The exact browser origins a customer passkey assertion/registration may carry in clientDataJSON.origin
+    (comma-separated `VIGIL_CUSTOMER_PASSKEY_ORIGINS`, e.g. `https://app.vigil.example`). The WebAuthn core
+    binds the origin cryptographically, so this is the phishing-resistance allowlist; empty ⇒ fail-closed."""
+    raw = os.environ.get("VIGIL_CUSTOMER_PASSKEY_ORIGINS") or ""
+    return tuple(o.strip().rstrip("/") for o in raw.split(",") if o.strip())
+
 
 # --- external binaries (resolved; never an operator-specific absolute path) -----------
 _CLAUDE_FALLBACK = Path.home() / ".local" / "bin" / "claude"

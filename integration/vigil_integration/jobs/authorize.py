@@ -18,6 +18,7 @@ the EXACT per-repo + PR-write conjuncts land in a later slice.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime as _datetime, timezone as _timezone
 from typing import Any, Callable, Optional
 
 from .model import SecurityJob
@@ -183,6 +184,87 @@ def build_repo_gate(
         # None (fail-open), so a tripped switch would not stop a repo job unless we supply one here.
         ks = killswitch if killswitch is not None else KillSwitch(job.slug)
         decision = authorize_action(authority, req, killswitch=ks, now=now)
+        return GateOutcome(bool(decision.allowed), decision.reason or "",
+                           getattr(decision, "denial_code", "") or "")
+    return _gate
+
+
+def build_customer_launch_gate(
+    trust_root: Any = None,
+    *,
+    killswitch: Any = None,
+    now: Any = None,
+    base_dir: Any = None,
+    prod_execution_enabled: Optional[Callable[[], bool]] = None,
+) -> Callable[[SecurityJob], GateOutcome]:
+    """The CUSTOMER-LAUNCH authorization gate (slice K4-3) — the scheduling-boundary decision for a paying
+    customer's self-serve engagement. A CONJUNCTION, fail-closed on the first failure:
+
+      1. a CRYPTOGRAPHICALLY-VERIFIED **customer** ``EngagementAuthority`` for the job's slug (the
+         ``cust_<hash>`` slug): ``issued_by`` MUST start ``"customer:"`` — this gate refuses an operator
+         authority, so the customer-launch path can never run an operator engagement;
+      2. the owner-signed ``CreditLaunchLease`` (billing≠testing): ``verify_customer_launch_lease(
+         consume=False)`` — owner-PINNED verify + bind (slug / host / tenant / window) + the K4-1 SETTLEMENT
+         re-check — at the scheduling boundary, WITHOUT burning the single-use floor (the engine arm inside
+         ``run_engagement`` is the ONE authoritative consume);
+      3. the K4 production-disable flag: a ``LIVE`` customer target is REFUSED while
+         ``customer_prod_execution_enabled()`` is False (TWIN / STAGING / loopback proceed); and
+      4. ``authorize_action`` over the verified authority (scope + window + kill-switch) for the authority's
+         EXACT-host scope.
+
+    The target HOST is bound AUTHORITATIVELY from the verified authority's scope (``scope[0]``), NEVER from
+    the advisory ``job.extra`` carrier, so a tampered seam value cannot widen scope. The tenant is bound by
+    ``authorize_job``'s ``_reconcile_tenant`` (``job.tenant_id`` == ``CRUCIBLE_TENANT``) BEFORE this gate, and
+    here again via the lease's ``org_id`` == ``job.tenant_id`` — so lease.org == job.tenant == process tenant.
+    Keyless, mints nothing; a None/absent trust root, an unverifiable / non-customer authority, a failed lease
+    pre-check, or a flag-off LIVE target all REFUSE. Mirrors ``build_repo_gate`` so a caller swaps it into
+    ``authorize_job`` unchanged."""
+    def _gate(job: SecurityJob) -> GateOutcome:
+        from framework.v2.authority.gate import authorize_action
+        from framework.v2.authority.killswitch import KillSwitch
+        from framework.v2.authority.models import ActionRequest
+        from framework.v2.authority.store import load_authority_root, load_verified_authority
+        from framework.v2.launch_lease import verify_customer_launch_lease
+        from vigil_core.authority import TargetEnvironment
+        from vigil_core.posture import customer_prod_execution_enabled
+
+        root = trust_root if trust_root is not None else load_authority_root()
+        if root is None:
+            return GateOutcome(False, "no authority trust root pinned — refusing (fail-closed)", "no_trust_root")
+        try:
+            authority = load_verified_authority(job.slug, root)
+        except Exception as e:  # noqa: BLE001 — unverifiable / absent authority ⇒ refuse
+            return GateOutcome(False, f"no verified authority for {job.slug!r}: {type(e).__name__}: {e}",
+                               "unverified_authority")
+        if authority is None:
+            return GateOutcome(False, f"no verified authority for {job.slug!r}", "unverified_authority")
+        # (1) STRUCTURAL customer gate: this path authorizes ONLY a customer engagement, never an operator one.
+        if not str(getattr(authority, "issued_by", "")).startswith("customer:"):
+            return GateOutcome(False, "not a customer engagement authority (issued_by != 'customer:') — the "
+                               "customer-launch gate refuses an operator authority", "not_customer")
+        scope = list(getattr(authority, "scope", None) or [])
+        host = scope[0] if scope else ""
+        if not host:
+            return GateOutcome(False, "customer authority has no scope host (fail-closed)", "no_scope_host")
+        # (3) K4 production-disable: a LIVE customer target needs the explicit owner opt-in.
+        enabled = prod_execution_enabled or customer_prod_execution_enabled
+        if authority.environment == TargetEnvironment.LIVE and not enabled():
+            return GateOutcome(False, "production-target customer execution is disabled (K4 flag off) — a LIVE "
+                               "customer engagement is refused until the acceptance matrix is green and the "
+                               "owner enables VIGIL_CUSTOMER_PROD_EXECUTION", "customer_prod_disabled")
+        # (2) the owner-signed CreditLaunchLease (consume=False — scheduling pre-check, single-use floor NOT burned)
+        ok, reason = verify_customer_launch_lease(job.slug, host, (job.tenant_id or None),
+                                                  base_dir=base_dir, now=now, consume=False)
+        if not ok:
+            return GateOutcome(False, f"credit-launch lease refused: {reason}", "no_lease")
+        # (4) authority scope + window + kill-switch over the EXACT-host target. ``now`` is the POSIX-float
+        # lease convention (what verify_customer_launch_lease takes); authorize_action wants a datetime, so
+        # convert here — None flows through unchanged to mean "the real current time" in both.
+        req = ActionRequest(target=host, action_kind="offense", destructive=False,
+                            description=f"customer launch of {host} (job {job.fingerprint[:12]})")
+        ks = killswitch if killswitch is not None else KillSwitch(job.slug)
+        now_dt = _datetime.fromtimestamp(float(now), tz=_timezone.utc) if now is not None else None
+        decision = authorize_action(authority, req, killswitch=ks, now=now_dt)
         return GateOutcome(bool(decision.allowed), decision.reason or "",
                            getattr(decision, "denial_code", "") or "")
     return _gate

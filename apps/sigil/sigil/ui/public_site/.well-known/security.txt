@@ -1,0 +1,6 @@
+# VIGIL — coordinated vulnerability disclosure
+Contact: mailto:thuram@thuramnana.com
+Preferred-Languages: en
+Canonical: https://www.vigil.example/.well-known/security.txt
+Policy: https://www.vigil.example/support
+# Safe harbour applies to good-faith research per our disclosure policy.

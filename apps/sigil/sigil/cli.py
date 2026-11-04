@@ -921,6 +921,90 @@ def cmd_serve(a) -> None:
           allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
+def cmd_serve_public(a) -> None:
+    """Start the keyless/cookieless PUBLIC site (`pubui`, :8735) — marketing, tools, trust, blog, and the
+    read-only CVE browser. Serves only static files + a read-only /api/cve over the local catalog; holds no
+    key, sets no cookie, makes no outbound request at request time. Binds a bind_ok address (loopback default;
+    a PRIVATE address behind a reverse proxy for a public domain) — FAIL-CLOSED (exit 2) on a public bind."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+    host = a.host or _os.environ.get("VIGIL_PUBLIC_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the public site binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the marketing vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    from .ui.pubui import serve_public
+    serve_public(host=host, port=a.port)
+
+
+def cmd_serve_customer(a) -> None:
+    """Start the keyless CUSTOMER edge (`custui`, :8734) — the self-serve tenant app's self-authenticating
+    front door. Holds NO owner key: it owns the `vigil_customer_session` cookie + its own session ledger and
+    reaches the sovereign provisioner only over loopback + the `VIGIL_PROVISION_HOP_KEY` hop (empty ⇒ every
+    provisioning route fails CLOSED). Binds a bind_ok address (loopback default; a PRIVATE address behind a
+    reverse proxy for a customer domain) — FAIL-CLOSED (exit 2) on a public bind. Because it sets a session
+    cookie, serving a real domain needs that Host/Origin on its anti-rebind allowlist (`--allow-host`/
+    `--allow-origin`, also `$VIGIL_CUSTOMER_ALLOWED_HOSTS`/`$VIGIL_CUSTOMER_ALLOWED_ORIGINS`). Mirrors
+    `cmd_serve` / `cmd_serve_public`."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+
+    def _multi(flag_vals, env_name):
+        # union of a repeatable flag and a comma-separated env var; blanks dropped (same as cmd_serve)
+        out: list[str] = list(flag_vals or [])
+        out += [s.strip() for s in _os.environ.get(env_name, "").split(",") if s.strip()]
+        return tuple(dict.fromkeys(out))   # de-dup, order-preserving
+
+    host = a.host or _os.environ.get("VIGIL_CUSTOMER_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the customer edge binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the customer vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    allowed_hosts = _multi(a.allow_host, "VIGIL_CUSTOMER_ALLOWED_HOSTS")
+    allowed_origins = _multi(a.allow_origin, "VIGIL_CUSTOMER_ALLOWED_ORIGINS")
+    from .ui.custui import serve_customer
+    serve_customer(host=host, port=a.port, extra_hosts=allowed_hosts, extra_origins=allowed_origins)
+
+
+def cmd_cve(a) -> None:
+    """Build/inspect the PUBLIC CVE catalog that the public site's /cve browser reads.
+
+    `ingest` pulls the public advisory feeds into the catalog (CISA-KEV bulk by default — the fast, complete
+    exploited-in-the-wild set; add --epss for probability overlay, and --nvd-enrich N to enrich the N newest
+    KEV entries with CVSS from NVD, paced for NVD's unauthenticated rate limit). This is the one standing
+    outbound path the public catalog needs; it never runs at page-request time."""
+    from . import config
+    from .cve.catalog import CveCatalogStore
+    store = CveCatalogStore(str(config.CVE_CATALOG_PATH))
+    if a.action == "stats":
+        import json as _json
+        print(_json.dumps(store.stats(), indent=2))
+        return
+    # action == "ingest"
+    from .cve import ingest as _ing
+    print(f"  ingesting public CVE feeds → {config.CVE_CATALOG_PATH}")
+    n = _ing.ingest_kev(store)
+    print(f"  CISA-KEV: {n} records merged (total {store.count()})")
+    if getattr(a, "epss", False):
+        try:
+            e = _ing.ingest_epss_bulk(store)
+            print(f"  EPSS: {e} records overlaid")
+        except Exception as exc:  # noqa: BLE001 — a feed hiccup is not fatal to the rest
+            print(f"  EPSS: skipped ({exc})", file=sys.stderr)
+    if getattr(a, "nvd_enrich", 0):
+        ids = [r["id"] for r in store.query(per_page=int(a.nvd_enrich), order="published_desc")["items"]]
+        try:
+            c = _ing.enrich_nvd(store, ids, limit=int(a.nvd_enrich))
+            print(f"  NVD enrich: {c} of {len(ids)} enriched with CVSS")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  NVD enrich: skipped ({exc})", file=sys.stderr)
+    print(f"  done — catalog holds {store.count()} CVEs ({store.stats().get('kev', 0)} known-exploited)")
+
+
 def cmd_bridge_serve(a) -> None:
     """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
     (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
@@ -1047,6 +1131,44 @@ def cmd_inbound(a) -> None:
     else:
         r = watcher.drain()
         print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
+
+
+def cmd_settle_drain(a) -> None:
+    """Drain / watch the engagement-completion SETTLE spool (K4-5b): a keyless governance-signed completion →
+    ``settle_launch`` (owner-keyed; the keyless worker cannot mint a refund). Owner-tied + fail-closed: each
+    completion verifies under an owner-signed OFFENSE_GOVERNANCE delegation (RE-VERIFIED against the live clock
+    each drain, so a lapsed delegation stops settling), binds the published lease's nonce + tenant (the lease's
+    own (org,host) must hash to the delegated cust_ slug), and settles credits to consumption (completed ⇒ the
+    full reserved units; canceled/failed ⇒ full refund). A forged / out-of-scope / nonce- or tenant-mismatched
+    completion is quarantined — nothing settled. There is NO network ingest endpoint — the seam is a directory
+    drained by this local command. The settle WRITE shares --base-dir with the lease READ."""
+    from pathlib import Path
+
+    from .governor.identity import owner_pubkey as _owner_pubkey
+    from .inbound.completion_spool import CompletionSpoolWatcher
+
+    owner = _owner_pubkey()
+    if not owner:
+        print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_core.delegation import DelegationCert
+        deleg = DelegationCert.model_validate_json(Path(a.delegation).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"could not load the offense-governance delegation: {e}", file=sys.stderr)
+        sys.exit(2)
+    watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
+                                     delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
+    if getattr(a, "settle_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → settle_launch (scope={a.scope}); Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
 
 
 def cmd_knowledge(a) -> None:
@@ -2198,6 +2320,22 @@ def main(argv=None) -> None:
     pinb.add_argument("--scope", default="*", help="engagement scope to confine ingest to (default: * = any)")
     pinb.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pinb.set_defaults(fn=cmd_inbound)
+    psd = sub.add_parser("settle-drain",
+                         help="drain/watch the engagement-completion SETTLE spool onto settle_launch "
+                              "(owner-keyed, fail-closed; completed⇒charge, canceled/failed⇒refund; no "
+                              "network endpoint). The K4-5 settle-on-completion seam.")
+    psd.add_argument("settle_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    psd.add_argument("--spool", required=True, help="the settle spool directory (its incoming/ is drained)")
+    psd.add_argument("--delegation", required=True,
+                     help="owner-signed OFFENSE_GOVERNANCE delegation JSON scoped to the cust_ engagement slug")
+    psd.add_argument("--scope", required=True,
+                     help="the cust_ engagement slug this drain is confined to (must match the delegation scope; "
+                          "* only if the delegation itself is wildcard-scoped)")
+    psd.add_argument("--base-dir", default="",
+                     help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
+                          "(default: $VIGIL_BASE_DIR)")
+    psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    psd.set_defaults(fn=cmd_settle_drain)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
@@ -2286,6 +2424,30 @@ def main(argv=None) -> None:
     psv.add_argument("--revoke-token", action="store_true",
                      help="delete the persistent bootstrap token and exit (next start mints a fresh one)")
     psv.set_defaults(fn=cmd_serve)
+    psp = sub.add_parser("serve-public", help="start the keyless public site (marketing/tools/trust/blog/CVE; "
+                                              "loopback default; reverse proxy for a public domain)")
+    psp.add_argument("--port", type=int, default=None, help="bind port (default 8735; $VIGIL_PUBLIC_PORT)")
+    psp.add_argument("--host", default=None, help="bind address ($VIGIL_PUBLIC_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psp.set_defaults(fn=cmd_serve_public)
+    psc = sub.add_parser("serve-customer", help="start the keyless customer edge (self-serve tenant app; "
+                                                "loopback default; reverse proxy for a customer domain)")
+    psc.add_argument("--port", type=int, default=None, help="bind port (default 8734; $VIGIL_CUSTOMER_PORT)")
+    psc.add_argument("--host", default=None, help="bind address ($VIGIL_CUSTOMER_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psc.add_argument("--allow-host", action="append", default=[],
+                     help="reverse-proxy Host to accept, e.g. app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_HOSTS, comma-separated). Anti-DNS-rebinding allowlist")
+    psc.add_argument("--allow-origin", action="append", default=[],
+                     help="reverse-proxy Origin to accept, e.g. https://app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_ORIGINS, comma-separated)")
+    psc.set_defaults(fn=cmd_serve_customer)
+    pcve = sub.add_parser("cve", help="build/inspect the public CVE catalog the /cve browser reads")
+    pcve.add_argument("action", choices=["ingest", "stats"])
+    pcve.add_argument("--epss", action="store_true", help="(ingest) overlay FIRST EPSS exploitation probability")
+    pcve.add_argument("--nvd-enrich", type=int, default=0, metavar="N",
+                      help="(ingest) enrich the N newest entries with CVSS from NVD (paced for its rate limit)")
+    pcve.set_defaults(fn=cmd_cve)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)

@@ -36,7 +36,12 @@ _OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_
                         # SaaS tenancy — READ an org's OWN billing surface (credit balance / usage / invoices).
                         # operator-tier so it is fail-closed below (a viewer/analyst sees no money data), and so
                         # a per-org `operator` member can read their tenant's billing. Pure reads: no mint path.
-                        "view_billing", "view_usage", "view_invoices"}
+                        "view_billing", "view_usage", "view_invoices",
+                        # SaaS tenancy — READ an org's OWN assessment results (findings / evidence / report,
+                        # Slice K6). Operator-tier (the per-org member who RUNS assessments sees their results),
+                        # and DELIBERATELY NOT in _ORG_ADMIN: assessment output is testing-domain, so a billing
+                        # tenant-admin does not auto-see security findings (billing-authz != testing-authz).
+                        "view_assessments"}
 _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
                       "manage_users", "toggle_protected_guard",
                       # SaaS tenancy — MONEY-MOVING + membership + org-lifecycle administration. Owner-tier
@@ -45,8 +50,21 @@ _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offen
                       # them WITHIN one org to a tenant-admin. They are DISJOINT from `offense_authority` on
                       # purpose — billing/org authority NEVER implies testing authority (see orgs.admit).
                       "manage_billing", "manage_members", "manage_org"}
+
+# A PER-ORG tenant-admin role (Slice E0) — NOT part of the global linear chain
+# (viewer<analyst<operator<owner) and NEVER a grantable global account role; it exists ONLY as an
+# owner-signed per-org membership (governor/orgs.py). It carries tenant-scoped BILLING + MEMBERSHIP
+# administration — the "own org" scoping comes from the `org_id` the composed `admit` gate binds, not from
+# the permission name, so a customer tenant-admin manages ONLY their own org. It DELIBERATELY omits
+# `run_engagement` and `offense_authority`, so a paying tenant-admin can manage their org's money + members
+# yet can NEVER authorize a security assessment (billing-authz != testing-authz, STRUCTURALLY — not merely
+# by policy). It is a non-cumulative addition to PERMISSIONS: `org_admin ⊆ owner` (owner stays the ceiling)
+# and the four cumulative roles above are unchanged, so `role_can` (a pure membership test) is unaffected.
+_ORG_ADMIN = frozenset({"read", "view_billing", "view_usage", "view_invoices",
+                        "manage_billing", "manage_members"})
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
+    "org_admin": _ORG_ADMIN,
 }
 
 

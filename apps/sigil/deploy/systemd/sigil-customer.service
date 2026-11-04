@@ -1,0 +1,77 @@
+# SIGIL customer edge (custui) — systemd USER service
+# =============================================================================
+# Runs `sigil serve-customer`, the KEYLESS self-serve tenant app (signup/login,
+# billing, invoices, asset-ownership proof, assessment findings). Bind + port +
+# allowlist + the provisioner hop key come from the env file so the unit is generic.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │  THE CUSTOMER EDGE NEVER BINDS A PUBLIC INTERFACE.                         │
+# │                                                                            │
+# │  VIGIL_CUSTOMER_BIND must be loopback (default 127.0.0.1) or a PRIVATE     │
+# │  WireGuard/Tailscale IP. `sigil serve-customer` fails closed (exit 2) on a │
+# │  public / 0.0.0.0 / unspecified bind. To reach the app by a real domain,   │
+# │  run a reverse proxy (deploy/reverse-proxy/vigil-customer.*) that          │
+# │  terminates TLS and forwards to this private bind, and add that domain to  │
+# │  VIGIL_CUSTOMER_ALLOWED_HOSTS / VIGIL_CUSTOMER_ALLOWED_ORIGINS (the edge   │
+# │  SETS A COOKIE, so its anti-rebind + CSRF gates must know the public host).│
+# │                                                                            │
+# │  THE EDGE HOLDS NO OWNER KEY. It reaches the sovereign provisioner only    │
+# │  over loopback + VIGIL_PROVISION_HOP_KEY; an empty hop key fails every     │
+# │  provisioning route CLOSED (signup/login/recover). Run the provisioner     │
+# │  (the key-holding sovereign process) on the same host.                     │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# INSTALL (user-level, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/sigil-customer.service ~/.config/systemd/user/
+#   cp deploy/customer.env.example           ~/.sigil/customer.env    # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-customer
+#   # keep it running after logout (optional): loginctl enable-linger "$USER"
+#
+# Logs → the journal:  journalctl --user -u sigil-customer -f
+
+[Unit]
+Description=SIGIL customer edge (custui)
+Documentation=file:%h/sigil/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Bind + port + allowlist + the provisioner hop key + SIGIL_HOME come from the env file (the leading '-'
+# means a missing file does not fail the unit; the edge defaults to loopback, but WITHOUT the hop key every
+# provisioning route fails closed — set VIGIL_PROVISION_HOP_KEY in the env file).
+EnvironmentFile=-%h/.sigil/customer.env
+Environment=SIGIL_LOG_LEVEL=INFO
+
+WorkingDirectory=%h/.sigil
+# Allowlist is taken from $VIGIL_CUSTOMER_ALLOWED_HOSTS / $VIGIL_CUSTOMER_ALLOWED_ORIGINS in the env file
+# (the serve-customer CLI unions those env vars with any --allow-host/--allow-origin flags).
+ExecStart=%h/.sigil/venv/bin/sigil serve-customer --host ${VIGIL_CUSTOMER_BIND} --port ${VIGIL_CUSTOMER_PORT}
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil serve-customer --host ${VIGIL_CUSTOMER_BIND} --port ${VIGIL_CUSTOMER_PORT}
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (least privilege without cutting off what the edge needs) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE — deliberately NOT set (would break the edge):
+#   PrivateNetwork=yes  → hides a WireGuard interface AND the loopback hop to the provisioner.
+#   ProtectHome=yes     → hides ~/.sigil (the customer session ledger lives there).
+
+[Install]
+WantedBy=default.target

@@ -24,6 +24,8 @@ module-path = [
     "packages/core/vigil_core/vigil_core/chain.py",
     "packages/core/vigil_core/vigil_core/canonical.py",
     "packages/core/vigil_core/vigil_core/crypto.py",
+    "packages/core/vigil_core/vigil_core/engagement_completion.py",
+    "packages/core/vigil_core/vigil_core/posture.py",
 ]
 timeout = 30.0
 excluded-modules = []

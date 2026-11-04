@@ -160,3 +160,32 @@ def test_tenants_isolated():
     assert r.subscription("orga").status == STATUS_ACTIVE
     assert r.subscription("orgb").status == STATUS_CANCELED
     assert r.active_subscription("orgb") is None
+
+
+def test_webhook_past_due_is_freshness_gated_vs_the_active_high_water():
+    # H4: a WEBHOOK-sourced down-state carries the provider event's `created` as issued_at and is applied only if
+    # FRESHER than the last honored activation — so a stale/replayed failed charge cannot re-suspend a recovered
+    # tenant — while the OWNER-MANUAL latch (issued_at 0.0) stays honored on sight.
+    r = _reg(_store())
+    r.subscribe("acme", "pro", 6000, period_start=100.0, period_end=1100.0, issued_at=100.0)   # active, high-water 100
+    r.mark_past_due("acme", issued_at=50.0)                 # STALE webhook failure (< 100) -> ignored
+    assert r.subscription("acme").status == STATUS_ACTIVE, "a stale webhook past_due must not lower a fresher active"
+    r.mark_past_due("acme", issued_at=200.0)                # genuine current failure (> 100) -> applied
+    assert r.subscription("acme").status == STATUS_PAST_DUE
+    r.subscribe("acme", "pro", 6000, period_start=300.0, period_end=1300.0, issued_at=300.0)   # recovered, high-water 300
+    assert r.subscription("acme").status == STATUS_ACTIVE
+    r.mark_past_due("acme", issued_at=200.0)                # STALE replay (< 300) after recovery -> ignored
+    assert r.subscription("acme").status == STATUS_ACTIVE, "a stale replay must not re-suspend a recovered tenant"
+
+
+def test_owner_manual_latch_still_honored_on_sight_over_a_fresher_active():
+    # The owner-manual 0.0 latch must stay UN-gated (fail-SAFE): even against a very fresh active, an owner
+    # mark_past_due / cancel (issued_at 0.0) still lowers access on sight.
+    r = _reg(_store())
+    r.subscribe("acme", "pro", 6000, period_start=1000.0, period_end=2000.0, issued_at=1000.0)
+    r.mark_past_due("acme")                                 # default 0.0 -> honored on sight
+    assert r.subscription("acme").status == STATUS_PAST_DUE
+    r.subscribe("acme", "pro", 6000, period_start=3000.0, period_end=4000.0, issued_at=3000.0)  # recover
+    assert r.subscription("acme").status == STATUS_ACTIVE
+    r.cancel("acme")                                        # owner cancel (0.0) -> honored on sight vs a fresh active
+    assert r.subscription("acme").status == STATUS_CANCELED

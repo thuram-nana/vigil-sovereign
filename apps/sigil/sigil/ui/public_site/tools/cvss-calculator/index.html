@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVSS 3.1 calculator — VIGIL</title>
+<meta name="description" content="A fast, client-side CVSS v3.1 base-score calculator. Runs entirely in your browser — nothing is sent anywhere — and gives you the score, severity, and a shareable vector string.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/tools/cvss-calculator/cvss.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap">
+    <p class="eyebrow"><a href="/tools" class="muted">Tools</a> › CVSS calculator</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-2)">CVSS v3.1 calculator</h1>
+    <p class="muted" style="max-width:62ch; margin:0 0 var(--sp-5)">Base-metric score, severity, and vector
+      string. Runs entirely in your browser — nothing you select is sent anywhere. Share a result with the
+      <code>?vector=</code> link.</p>
+
+    <div class="cvss">
+      <form id="cvss-form" class="cvss__metrics" aria-label="CVSS base metrics">
+        <!-- groups are populated by cvss.js from the spec; this is the no-JS fallback notice -->
+        <noscript><p class="muted">This calculator needs JavaScript (it runs locally; no data leaves your
+          device).</p></noscript>
+      </form>
+
+      <aside class="cvss__out card" aria-live="polite">
+        <div class="cvss__score"><span id="cvss-score" class="n">—</span>
+          <span id="cvss-sev" class="chip">Base score</span></div>
+        <div class="cvss__vector">
+          <label for="cvss-vector-str" class="l">Vector</label>
+          <input id="cvss-vector-str" class="cvss__vinput" readonly value="CVSS:3.1/…" aria-label="CVSS vector string">
+          <div class="btn-row" style="margin-top:var(--sp-3)">
+            <button type="button" id="cvss-copy" class="btn btn--ghost">Copy vector</button>
+            <button type="button" id="cvss-link" class="btn btn--ghost">Copy link</button>
+            <button type="button" id="cvss-reset" class="btn btn--ghost">Reset</button>
+          </div>
+          <p id="cvss-sub" class="l" style="margin-top:var(--sp-3)">Impact — · Exploitability —</p>
+        </div>
+      </aside>
+    </div>
+
+    <hr class="rule">
+    <div class="prose">
+      <h2>About this score</h2>
+      <p>This implements the public <strong>FIRST.org CVSS v3.1 base-metric</strong> equations, re-derived
+        from the specification. Base metrics describe the intrinsic qualities of a vulnerability; temporal and
+        environmental metrics (which adjust for exploit maturity and your own environment) are not included in
+        this base calculator.</p>
+      <p>VIGIL carries the CVSS vector as a first-class field on every finding, but a severity number is never
+        a verdict on its own — a finding becomes a <span class="chip chip--fact"><i class="dot"></i>FACT</span>
+        only when a deterministic oracle proves it exploitable. <a href="/trust">See how the proof works →</a></p>
+    </div>
+  </div>
+</main>
+
+<script src="/tools/cvss-calculator/cvss.js"></script>
+</body>
+</html>

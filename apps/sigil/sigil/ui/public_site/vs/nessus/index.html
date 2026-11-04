@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIGIL vs. Nessus</title>
+<meta name="description" content="An honest comparison of VIGIL and Nessus: breadth-first vulnerability scanning vs. exploit-validated findings with zero false positives. Where each wins.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow"><a href="/vs" class="muted">Compare</a> › Nessus</p>
+      <h1>VIGIL vs. Nessus</h1>
+      <p class="lede">Nessus is a mature, breadth-first vulnerability scanner — enormous plugin coverage for
+        network and host CVEs and compliance checks. But a scanner <em>flags</em>; it rarely <em>proves</em>.
+        VIGIL exploit-validates: it turns "this version looks vulnerable" into a signed FACT — or an honest
+        LEAD — so your team stops drowning in maybe-findings. Use Nessus for inventory breadth; use VIGIL to
+        prove what's actually exploitable.</p>
+    </div>
+  </section>
+
+  <section class="section--tight"><div class="wrap">
+    <div class="matrix-scroll"><table class="matrix">
+      <thead><tr><th scope="col">Capability</th><th scope="col" class="vigil">VIGIL</th><th scope="col">Nessus</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Finding model</th><td class="vigil yes">Exploit-validated FACT / honest LEAD</td><td class="partial">Version/signature match → flag</td></tr>
+        <tr><th scope="row">False-positive posture</th><td class="vigil yes">Zero by construction</td><td class="no">Known triage burden</td></tr>
+        <tr><th scope="row">Network/host CVE breadth</th><td class="partial">Growing; proves vulnerable deps via SBOM + version oracle</td><td class="yes">Vast plugin coverage</td></tr>
+        <tr><th scope="row">Web/API exploitation depth</th><td class="vigil yes">Deep (injection oracles, auth chains, business logic)</td><td class="no">Shallow web coverage</td></tr>
+        <tr><th scope="row">Cloud / Kubernetes</th><td class="vigil yes">S3/IAM paths, achieved-state, K8s &amp; mesh posture</td><td class="partial">Config audits via add-ons</td></tr>
+        <tr><th scope="row">Proof you can re-verify offline</th><td class="vigil yes">Yes — signed, third-party-checkable</td><td class="no">Report only</td></tr>
+        <tr><th scope="row">Compliance</th><td class="vigil yes">Findings mapped to 10 frameworks (about your systems)</td><td class="yes">Audit/CIS policies</td></tr>
+        <tr><th scope="row">Source + CI/CD</th><td class="vigil yes">Code scan, PR review, SARIF 2.1.0</td><td class="no">Not its domain</td></tr>
+        <tr><th scope="row">Delivery</th><td class="vigil yes">Self-hosted, air-gappable, BYO-LLM</td><td class="yes">Self-hosted / Tenable cloud</td></tr>
+        <tr><th scope="row">Licensing</th><td class="vigil">Source-available (PolyForm + Commercial)</td><td>Commercial</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="margin-top:var(--sp-3); font-size:var(--fs-xs)">Honesty bounds: VIGIL's host/CVE
+      breadth is narrower than Nessus's plugin corpus today; its strength is proving exploitability, not
+      enumerating every known signature. Cloud coverage is targeted (S3/IAM/achieved-state/K8s), not full CSPM.</p>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="grid grid--2">
+      <div class="card"><h3>Where Nessus wins</h3><p>Sheer breadth of network/host vulnerability signatures,
+        asset inventory, and compliance policy scanning, backed by a huge, long-maintained plugin feed. For a
+        broad "what's out there" sweep, it's a workhorse.</p></div>
+      <div class="card"><h3>Where VIGIL wins</h3><p>It proves. A VIGIL FACT is an exploit that fired, signed
+        and re-verifiable offline — zero false positives by construction — with real web/API/cloud
+        exploitation depth, source + CI coverage, and a sovereign, BYO-LLM deployment.</p></div>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <p class="eyebrow">FAQ</p>
+    <div class="prose">
+      <h3>Should I drop my scanner?</h3>
+      <p>No. Keep breadth tools for inventory. VIGIL's job is to cut the maybe-pile down to proven,
+        exploitable issues — and it can take a scanner's lead as a starting point.</p>
+      <h3>How is "zero false positives" possible?</h3>
+      <p>A finding is only a FACT when a deterministic oracle fires over real target data. Everything else is
+        labelled a LEAD. The model is never trusted for the verdict. <a href="/trust">See the proof model →</a></p>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap"><div class="band">
+    <h2>Stop triaging maybes.</h2>
+    <p>Request access and see exploit-validated findings on your own surface.</p>
+    <div class="btn-row" style="justify-content:center">
+      <a class="btn btn--primary" href="/support">Request access</a>
+      <a class="btn btn--ghost" href="/vs/burp-suite">VIGIL vs. Burp Suite →</a>
+    </div>
+  </div></div></section>
+</main>
+</body>
+</html>

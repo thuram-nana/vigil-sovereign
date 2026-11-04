@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <title>VIGIL</title>
+  <!-- Self-contained + strict-CSP. The CSP / nosniff / no-referrer headers are set by the edge as RESPONSE
+       HEADERS (never a <meta>). Asset refs are RELATIVE (no leading slash) so they resolve against the mount
+       in dev (served under /customer/) and in prod (served at / on the separate customer origin). No CDN, no
+       inline script, no embedded token — the customer plane authenticates by the vigil_customer_session
+       cookie, so there is zero secret in the page. -->
+  <link rel="stylesheet" href="tokens.css" />
+  <link rel="stylesheet" href="components.css" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<!-- Config via CSP-safe data-* attributes (read by the external app.js at boot — no inline script). -->
+<body data-plane="customer">
+  <noscript>VIGIL requires JavaScript. It talks only to this site (no external calls).</noscript>
+  <div id="app" aria-live="polite"></div>
+  <script src="ui.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -31,11 +31,17 @@ numeric id or an admin route is a LEAD, never a fact.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Iterable
+from typing import TYPE_CHECKING, Callable, ClassVar, Iterable
 
 from ..verify.adapter import FindingContext
 from .checks import Check, IdorCheck, Send
 from .insertion import HttpRequest, InsertionPoint, RequestTemplate
+
+if TYPE_CHECKING:  # annotation-only — the autoseeder imports vigil_core lazily (offense-plane, FATAL-2-safe)
+    from datetime import datetime
+
+    from vigil_core.models import TrustRoot
+    from vigil_core.target_credentials import SignedTargetCredentials
 
 # The seven access-control classes this pack seeds. Each routes to the ACHIEVED-STATE oracle.
 ACCESS_CONTROL_CLASSES: tuple[str, ...] = (
@@ -410,6 +416,159 @@ def config_from_cli(
     unauth_send = victim_send_with_headers(base_send, tuple(unauth_hdrs)) if unauth_hdrs else None
     return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
                                nocred_send=nocred_send, unauth_send=unauth_send, id_prefix=id_prefix)
+
+
+# ---------------------------------------------------------------------------
+# W3 — autoseed from an OWNER-SIGNED test-credential roster (vigil_core.target_credentials)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SeededAccessControl:
+    """The autoseeder's output: the :class:`AccessControlConfig` (victim / nocred / unauthorized-peer
+    identities + cross-specs) PLUS the ATTACKER identity's headers. The config carries every identity
+    EXCEPT the attacker, because the attacker view is the campaign's own ``send`` (passed to
+    ``IdorCheck.probe``) — so the caller (engage) swaps ``attacker_headers`` onto that gated send, exactly
+    as it swaps victim headers here. The oracle is unchanged; this only produces, from signed credentials,
+    the config ``config_from_cli`` produces by hand."""
+
+    config: AccessControlConfig
+    attacker_headers: tuple[tuple[str, str], ...] = ()
+
+
+def config_from_signed_credentials(
+    base_send: Send,
+    signed: "SignedTargetCredentials",
+    trust_root: "TrustRoot",
+    refs: Iterable[str],
+    *,
+    slug: str,
+    now: "datetime",
+    id_prefix: str = "ac",
+    on_warn: Callable[[str], None] | None = None,
+) -> "SeededAccessControl | None":
+    """Build a :class:`SeededAccessControl` from an OWNER-SIGNED test-credential roster — the
+    signed-credential replacement for ``config_from_cli``'s hand-passed CLI headers (W3). The autoseeder
+    uses ONLY credentials the owner provisioned + signed:
+
+      * it VERIFIES ``signed`` against ``trust_root`` and FAILS CLOSED (``None``) on an invalid signature,
+        on a roster bound to a DIFFERENT engagement (``doc.engagement_slug != slug`` — a signed roster for
+        engagement X must never seed a probe against engagement Y, mirroring the GitWriteGrant slug
+        binding), and on an out-of-window roster — ``now`` is REQUIRED (no fail-open default) so the
+        validity window is ALWAYS enforced, with naive timestamps coerced to UTC;
+      * the VICTIM and ATTACKER roles are MANDATORY (a two-identity experiment is unsound without a
+        distinct victim and an authenticated attacker) and MUST carry DISTINCT credentials — if any two
+        provisioned identities share a session the experiment is unsound (attacker == victim makes the
+        cross-read trivially true) and it fails closed; UNAUTHORIZED_PEER is optional (its absence
+        downgrades the seeded checks to LEAD-only, exactly like ``config_from_cli`` without an unauth
+        identity);
+      * cross-specs — including the ``victim_discriminator`` + ``control_ref`` that make a FACT sound —
+        come from ``refs`` (operator-provided), NEVER synthesized from observed data (that would weaken
+        the oracle; see the W3 red flag).
+
+    All identities are header-swaps over the SAME gated ``base_send`` (never a safety-stack bypass), and
+    confirmation stays with the UNCHANGED achieved-state oracle. Returns ``None`` (the caller seeds
+    nothing) on a verification/window failure, a missing mandatory role, or no usable ref."""
+    from vigil_core.target_credentials import CredentialRole, verify_target_credentials
+
+    def _warn(msg: str) -> None:
+        if on_warn is not None:
+            on_warn(msg)
+
+    ok, reason = verify_target_credentials(signed, trust_root)
+    if not ok:
+        _warn(f"refusing to autoseed access-control: test-credential roster failed verification ({reason})")
+        return None
+    doc = signed.document
+    # Bind the roster to THIS engagement (critic MED): a roster owner-signed for engagement X must never
+    # seed a probe against engagement Y, even under the same owner key (cross-engagement credential reuse).
+    # engagement_slug is inside the signed canonical bytes, so this binding is tamper-evident.
+    if doc.engagement_slug != slug:
+        _warn(f"refusing to autoseed access-control: the signed roster is bound to engagement "
+              f"{doc.engagement_slug!r}, not {slug!r} (cross-engagement roster reuse)")
+        return None
+    # Validity window — ALWAYS enforced (`now` is required, there is no fail-open skip). Naive timestamps
+    # are coerced to UTC so a tz-aware `now` never raises against a naive not_before/not_after.
+    from datetime import timezone as _tz
+    _now = now if now.tzinfo is not None else now.replace(tzinfo=_tz.utc)
+    if doc.not_before is not None:
+        _nb = doc.not_before if doc.not_before.tzinfo is not None else doc.not_before.replace(tzinfo=_tz.utc)
+        if _now < _nb:
+            _warn("refusing to autoseed access-control: test-credential roster is not yet valid (not_before)")
+            return None
+    if doc.not_after is not None:
+        _na = doc.not_after if doc.not_after.tzinfo is not None else doc.not_after.replace(tzinfo=_tz.utc)
+        if _now >= _na:
+            _warn("refusing to autoseed access-control: test-credential roster has expired (not_after)")
+            return None
+
+    victim_headers = tuple(doc.headers_for(CredentialRole.VICTIM))
+    attacker_headers = tuple(doc.headers_for(CredentialRole.ATTACKER))
+    peer_headers = tuple(doc.headers_for(CredentialRole.UNAUTHORIZED_PEER))
+    if not victim_headers or not attacker_headers:
+        _warn("refusing to autoseed access-control: the signed roster must provide BOTH a victim and an "
+              "attacker identity (a two-identity experiment is unsound without them)")
+        return None
+    # Distinct-identity guard (critic LOW): if any two provisioned identities carry the SAME credentials
+    # the two-identity experiment is unsound — e.g. attacker == victim makes "the attacker reads the
+    # victim's object" trivially true (one user), minting a false FACT. Refuse any collision among the
+    # identities actually present (case-insensitive header-name match).
+    def _ident(hs: tuple[tuple[str, str], ...]) -> frozenset[tuple[str, str]]:
+        return frozenset((n.lower(), v) for n, v in hs)
+    _roles = [("victim", victim_headers), ("attacker", attacker_headers)]
+    if peer_headers:
+        _roles.append(("unauthorized-peer", peer_headers))
+    for _i in range(len(_roles)):
+        for _j in range(_i + 1, len(_roles)):
+            if _ident(_roles[_i][1]) == _ident(_roles[_j][1]):
+                _warn(f"refusing to autoseed access-control: the {_roles[_i][0]} and {_roles[_j][0]} "
+                      f"identities carry identical credentials (a two-identity experiment is unsound when "
+                      f"distinct roles share a session)")
+                return None
+
+    specs: list[CrossAccessSpec] = []
+    for raw in refs:
+        spec = parse_cross_spec(raw)
+        if spec is None:
+            _warn(f"ignoring malformed ref {raw!r} "
+                  f"(expected bug_class:ref_param:victim_ref[|discriminator[|control_ref]])")
+            continue
+        specs.append(spec)
+    if not specs:
+        return None
+
+    victim_send = victim_send_with_headers(base_send, victim_headers)
+    # Strip ALL provisioned identity header names (attacker/victim/peer) + the common auth headers, so the
+    # logged-out baseline is genuinely credential-free regardless of which header carries each identity.
+    strip_names = tuple({name for name, _ in (*attacker_headers, *victim_headers, *peer_headers)})
+    nocred_send = nocred_send_stripping(base_send, strip_names)
+    unauth_send = victim_send_with_headers(base_send, peer_headers) if peer_headers else None
+    config = AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
+                                 nocred_send=nocred_send, unauth_send=unauth_send, id_prefix=id_prefix)
+    return SeededAccessControl(config=config, attacker_headers=attacker_headers)
+
+
+def load_signed_target_credentials(slug: str) -> "SignedTargetCredentials | None":
+    """Load + parse the owner-signed test-credential roster for ``slug``
+    (``common.paths.target_credentials_path``), or ``None`` when it is absent / unreadable / malformed.
+
+    Parsing is NOT verification — the caller (:func:`config_from_signed_credentials`) verifies the parsed
+    roster against the engagement trust root. A missing/garbage file is a quiet ``None`` so an engagement
+    with no roster simply falls back to the operator's CLI headers (``config_from_cli``). Offense-plane
+    (``vigil_core`` + ``common.paths`` imported lazily, FATAL-2-safe)."""
+    from pydantic import ValidationError
+
+    from vigil_core.target_credentials import SignedTargetCredentials
+
+    from ..common import paths as _paths
+    try:
+        raw = _paths.target_credentials_path(slug).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        return SignedTargetCredentials.model_validate_json(raw)
+    except (ValidationError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------

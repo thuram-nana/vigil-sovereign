@@ -9,9 +9,11 @@ from __future__ import annotations
 import pytest
 
 from vigil_core.posture import (
+    CUSTOMER_PROD_EXECUTION_ENV,
     GOVERNED_ENV,
     LEGACY_OWNER_TOKEN_ENV,
     POSTURE_ENV,
+    customer_prod_execution_enabled,
     is_governed_posture,
     is_production_posture,
     legacy_owner_token_disabled,
@@ -75,3 +77,15 @@ def test_governed_posture_refuses_the_legacy_owner_token_without_the_egress_lock
     assert legacy_owner_token_grants_owner({GOVERNED_ENV: "1", LEGACY_OWNER_TOKEN_ENV: "1"}) is False
     # ...but governed does NOT arm the production posture, so external egress is not forced off (decoupled).
     assert is_production_posture({GOVERNED_ENV: "1"}) is False
+
+
+def test_customer_prod_execution_is_disabled_by_default_and_needs_an_explicit_optin():
+    # K4: production-target customer execution is DISABLED unless explicitly opted in (fail-closed).
+    assert customer_prod_execution_enabled({}) is False                       # unset ⇒ disabled
+    assert customer_prod_execution_enabled({CUSTOMER_PROD_EXECUTION_ENV: ""}) is False
+    for truthy in ("1", "on", "true", "yes", "enabled", "TRUE", "  on  "):
+        assert customer_prod_execution_enabled({CUSTOMER_PROD_EXECUTION_ENV: truthy}) is True
+    for falsy in ("0", "off", "false", "no", "disabled", "maybe", "2", "prod"):
+        assert customer_prod_execution_enabled({CUSTOMER_PROD_EXECUTION_ENV: falsy}) is False
+    # DECOUPLED from VIGIL_POSTURE: arming production does NOT enable customer prod execution (and vice-versa).
+    assert customer_prod_execution_enabled({POSTURE_ENV: "production"}) is False

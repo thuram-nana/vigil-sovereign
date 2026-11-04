@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI proposes, the oracle disposes — VIGIL</title>
+<meta name="description" content="Why VIGIL never trusts a language model for a verdict, and how a finding earns the word FACT: a deterministic oracle fires over real target data, or it stays a LEAD.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <article class="wrap prose">
+    <p class="eyebrow"><a href="/blog" class="muted">Blog</a> › Doctrine</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">AI proposes, the oracle disposes</h1>
+    <p class="muted">By the VIGIL team · Doctrine</p>
+
+    <p>Most "AI pentester" tools have the same quiet problem: a language model decides whether something is a
+      vulnerability. Models are brilliant at proposing ideas and terrible at being trusted for a verdict —
+      they hallucinate, they flatter, they round "maybe" up to "yes". Ship that to a security team and you've
+      built a very fast way to generate false positives.</p>
+
+    <p>VIGIL is built on the opposite rule. The model is a <em>navigator</em>: it reads the target, forms
+      hypotheses, and chooses what to try next. It is never the judge. A hypothesis becomes a
+      <span class="chip chip--fact"><i class="dot"></i>FACT</span> only when a <strong>deterministic
+      oracle</strong> — code, not a model — fires over data a real, authorized target produced. If no oracle
+      fires, the result is an honest <span class="chip chip--lead"><i class="dot"></i>LEAD</span>: worth a
+      look, never dressed up as confirmed.</p>
+
+    <h2>What an oracle is</h2>
+    <p>An oracle is a small, deterministic check with a yes/no answer about a specific observed effect: a
+      value that could only appear if an injection executed; a state transition that could only happen if an
+      access-control boundary was crossed; a differential across identities that proves one user reached
+      another's object. It runs on the evidence, and it is reproducible.</p>
+
+    <h2>Why this gives zero false positives by construction</h2>
+    <p>If a FACT requires an oracle to fire, then a false positive would require a <em>deterministic</em>
+      check to be wrong about an effect it directly observed — not a model to be over-confident. Some bug
+      classes don't yet have a sound oracle; for those, VIGIL deliberately emits a LEAD rather than guess.
+      The ratio of FACTs to LEADs is a number we'd rather keep honest than inflate.</p>
+
+    <h2>The part we're proudest of: you don't have to trust us</h2>
+    <p>Every FACT ships as a proof-carrying <em>certificate</em> — the inputs, the oracle, and the observed
+      result. Hand that bundle to a third party and they re-run the check <strong>with zero VIGIL code
+      installed</strong> and get the same verdict:</p>
+    <pre><code>python3 -m framework.v2 verify ./evidence/&lt;finding&gt;.json</code></pre>
+    <p>That one property — a finding that re-proves itself, offline, to a skeptic — is the whole thesis.
+      It's why a VIGIL report shrinks your triage queue instead of growing it, and it's the bar we hold every
+      new detector to.</p>
+
+    <p><a href="/trust">See the proof model in the trust center →</a> &nbsp;·&nbsp;
+       <a href="/vs">How VIGIL compares →</a></p>
+  </article>
+</main>
+</body>
+</html>

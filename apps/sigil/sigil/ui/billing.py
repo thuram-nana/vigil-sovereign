@@ -20,6 +20,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
+from ..governor.invoices import InvoiceRegistry  # noqa: E402
 from ..governor.metering import CreditMeter, PlanCreditLedger  # noqa: E402
 from ..governor.orgs import OrgRegistry, org_tenant_id  # noqa: E402
 from ..governor.subscription import SubscriptionRegistry  # noqa: E402
@@ -64,6 +65,23 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
         "active": active is not None,                   # is the plan live right now (in-period + active)?
         "now": now,
     }
+
+
+def _invoice_json(inv) -> dict[str, Any]:
+    return {"invoice_id": inv.invoice_id, "kind": inv.kind, "price_id": inv.price_id,
+            "amount_minor": inv.amount_minor, "currency": inv.currency, "credits": inv.credits,
+            "period_start": inv.period_start, "period_end": inv.period_end, "issued_at": inv.issued_at}
+
+
+def billing_invoices(store, org_id: str, *, limit: int = 200) -> dict[str, Any]:
+    """The billing HISTORY (invoices) for ONE org, newest-first (Slice H). PURE read; tenant-scoped by org_id —
+    returns ONLY that org's lines (the IDOR class). Assumes the caller was already authorized for `org_id` by
+    the route (the route's `admit`/`admit_customer` gate + this org-scoping is the IDOR defense: a line for
+    another tenant is structurally never in the fold result for this org). `limit` caps the returned page;
+    `count` is the true total so a client can page, without ever leaking another tenant's lines."""
+    invs = InvoiceRegistry(store).invoices(org_id)
+    n = max(1, min(int(limit), 1000))
+    return {"org_id": org_id, "invoices": [_invoice_json(i) for i in invs[:n]], "count": len(invs)}
 
 
 def org_list(store) -> list[dict[str, Any]]:

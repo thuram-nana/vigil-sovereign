@@ -159,6 +159,13 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded:
         raise PruneUnsafe(f"K={K} would strand active account(s) {stranded}: their only owner-signed grant "
                           f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice E1) the SAME referential floor for the DISJOINT governor.customer identity namespace: an
+    # active customer whose only owner-signed grant sits below K must be carried into the seed, or the prune
+    # would vanish it AND reset its per-username anti-replay high-water (re-opening the replay-resurrection HIGH).
+    stranded_custs = stranded_active_customers(store, archived, K)
+    if stranded_custs:
+        raise PruneUnsafe(f"K={K} would strand active customer(s) {stranded_custs}: their only owner-signed "
+                          f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
     # (c, enterprise-identity) the SAME referential floor for owner-signed orgs + memberships (governor/orgs.py):
     # an active org/membership whose only grant sits below K must be carried into the snapshot seed, or the
     # prune would vanish it AND reset its anti-replay high-water (re-opening the replay-resurrection HIGH).
@@ -169,6 +176,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_mems:
         raise PruneUnsafe(f"K={K} would strand active membership(s) {stranded_mems}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice G0 asset-ownership) the SAME floor for governor.asset_ownership_proof: an active ownership
+    # proof whose only owner-signed grant sits below K must be carried into the seed, or the prune drops it
+    # AND resets the per-(org,host) anti-replay high-water (re-opening the proof replay-resurrection that would
+    # resurrect a revoked engagement-authorization basis — the G0 red-pen forward-risk).
+    stranded_proofs = stranded_active_ownership_proofs(store, archived, K)
+    if stranded_proofs:
+        raise PruneUnsafe(f"K={K} would strand active ownership proof(s) {stranded_proofs}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -185,6 +201,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice E2a customer credentials) the SAME floor for governor.customer_credential: an active passkey/
+    # TOTP/OIDC-link whose only owner-signed grant sits below K must be carried into the seed, or the prune
+    # drops it AND resets the per-(username, cred_key) high-water (re-opening credential replay-resurrection).
+    stranded_creds = stranded_active_customer_credentials(store, archived, K)
+    if stranded_creds:
+        raise PruneUnsafe(f"K={K} would strand active customer credential(s) {stranded_creds}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(username, cred_key) anti-replay high-water); lower K or resolve")
     # (c, SaaS plan credits) the SAME floor for governor.plan_grant/plan_debit: a prune must carry every below-K
     # tenant's per-period tranche totals AND the consumed-entry_id set into the seed, or it would ZERO an
     # unexpired plan tranche (lose granted allotment) AND drop the anti-replay seen-set (re-opening plan-grant
@@ -194,6 +218,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand plan-credit tranche(s) for tenant(s) {stranded_plan}: a below-K "
                           f"tranche balance or consumed entry_id would not be carried into the snapshot seed "
                           f"(zeroing an unexpired tranche or re-opening plan-grant replay); lower K or resolve")
+    # (c, SaaS invoices) the SAME floor for governor.invoice billing history (Slice H): a prune must carry every
+    # below-K invoice line into the seed, or it would LOSE historical invoices AND drop the consumed invoice_id
+    # set (re-opening invoice replay — a pruned invoice re-appended above K would duplicate the line). Fail-closed.
+    stranded_invs = stranded_invoices(store, archived, K)
+    if stranded_invs:
+        raise PruneUnsafe(f"K={K} would strand invoice(s) for tenant(s) {stranded_invs}: a below-K billing-history "
+                          f"line would not be carried into the snapshot seed (losing the invoice or re-opening "
+                          f"invoice replay); lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -280,6 +312,45 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
     return sorted(str(u) for u in (active - carried))
 
 
+def stranded_active_customers(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice E1) — the SAME referential floor for `governor.customer` (the DISJOINT customer identity
+    namespace): an ACTIVE customer whose only owner-signed grant sits in the pruned prefix [0..K) and would
+    NOT be carried into the snapshot seed is one a hard prune would silently vanish (and whose per-username
+    anti-replay high-water it would reset, re-opening the LWW replay-resurrection HIGH). EMPTY in the happy
+    path; a non-empty result fails the prune CLOSED. Mirrors `stranded_active_accounts` EXACTLY: a
+    VERIFIED-active below-K fold diffed against the seed the prune actually persists (round-tripped through
+    `model_dump`/`model_validate`, so a seed serialization regression is caught too). Read-only."""
+    from ..governor.customers import SIGNAL as _CUST_SIGNAL
+    from ..governor.customers import _core_fields as _cust_core_fields   # conditional password_hash core
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    state: dict[Any, str] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _CUST_SIGNAL:
+            continue
+        u, rst = p.get("username"), p.get("state")
+        if rst == "revoked":
+            state[u] = "revoked"
+        elif rst == "active" and verify_signed(p, _cust_core_fields(p), resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > issued.get(u, NO_HIGHWATER):
+                issued[u], state[u] = at, "active"
+    active = {u for u, v in state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.customer_state_map()
+    carried = {row[0] for row in seed.customer_cred if seed_state.get(row[0]) == "active"}
+    return sorted(str(u) for u in (active - carried))
+
+
 def stranded_active_org_entities(store, archived: list[Segment], K: int) -> tuple[list[str], list[str]]:
     """§7(c, enterprise-identity) — the ACTIVE orgs / memberships (`governor/orgs.py`) whose only owner-signed
     grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the set a hard
@@ -340,6 +411,91 @@ def stranded_active_org_entities(store, archived: list[Segment], K: int) -> tupl
                     if m_seed_state.get((row[0], row[1])) == "active"}
     return (sorted(str(o) for o in (active_orgs - orgs_carried)),
             sorted(f"{k[1]}@{k[0]}" for k in (active_mems - mems_carried)))
+
+
+def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice G0) — the ACTIVE asset-ownership proofs (`governor/asset_ownership.py`) whose only
+    owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
+    set a hard prune would silently vanish, resetting the per-(org_id, host) anti-replay high-water and
+    re-opening the LWW replay-resurrection the G0 red-pen flagged. EMPTY in the happy path —
+    `SnapshotState.build()` carries every VERIFIED-active proof. Mirrors `stranded_active_org_entities`.
+    Returns proof keys as ``host@org_id``. VERIFIED-active only (a forged/unsigned `active` grant is not
+    counted, so it can never block a prune). Read-only."""
+    from ..governor.asset_ownership import PROOF_SIGNAL, _PROOF_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    p_state: dict[tuple, str] = {}
+    p_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != PROOF_SIGNAL:
+            continue
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == "revoked":
+            p_state[key] = "revoked"
+        elif rst == "active" and verify_signed(p, _PROOF_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > p_issued.get(key, NO_HIGHWATER):
+                p_issued[key], p_state[key] = at, "active"
+    active = {k for k, v in p_state.items() if v == "active"}
+    # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.ownership_proof_state_map()
+    carried = {(row[0], row[1]) for row in seed.ownership_proof_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice E2a) — the ACTIVE customer credentials (`governor/customer_credentials.py`) whose only
+    owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
+    set a hard prune would silently vanish, resetting the per-(username, cred_key) anti-replay high-water and
+    re-opening the LWW replay-resurrection (a revoked passkey / TOTP / OIDC link resurrected). EMPTY in the
+    happy path — `SnapshotState.build()` carries every VERIFIED-active credential. Mirrors
+    `stranded_active_ownership_proofs`. Returns keys as ``cred_key@username``. VERIFIED-active only (a
+    forged/unsigned `active` grant is not counted, so it can never block a prune). Read-only."""
+    from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL, _cred_core
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    c_state: dict[tuple, str] = {}
+    c_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _CRED_SIGNAL:
+            continue
+        u, ck, rst = p.get("username"), p.get("cred_key"), p.get("state")
+        if not (isinstance(u, str) and u and isinstance(ck, str) and ck):
+            continue
+        key = (u, ck)
+        if rst == "revoked":
+            c_state[key] = "revoked"
+        elif rst == "active" and verify_signed(p, _cred_core(p), resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > c_issued.get(key, NO_HIGHWATER):
+                c_issued[key], c_state[key] = at, "active"
+    active = {k for k, v in c_state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.customer_credential_state_map()
+    carried = {(row[0], row[1]) for row in seed.customer_credential_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
 
 def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]:
@@ -458,6 +614,55 @@ def stranded_active_plan_tranches(store, archived: list[Segment], K: int) -> lis
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))                  # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
+
+
+def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, SaaS invoices) — the tenants (`governor/invoices.py`) whose below-K billing-history line(s) would
+    NOT be carried into the snapshot seed: the set a hard prune would silently LOSE (the invoice gone from the
+    history) and/or whose consumed `invoice_id`s it would drop (re-opening invoice replay — a pruned invoice
+    re-appended above K would duplicate the line). EMPTY in the happy path — `SnapshotState.build()` carries
+    every below-K invoice row. Fail-closed tripwire mirroring `stranded_active_wallets` (append-only rows rather
+    than running totals); verified under the owner key valid at each seq; the seed round-trips through
+    `model_dump`/`model_validate` so a seed-emission regression is caught. Read-only."""
+    from ..governor.invoices import INVOICE_SIGNAL, _INVOICE_CORE, _as_nonneg_int
+    from ..governor import key_history as _kh
+    from ..governor.authn import as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    # the FULL below-K rows a genesis fold yields, reconstructed with build()'s EXACT coercions so a correct
+    # build round-trips EQUAL (first-mint-wins per (org, invoice_id)). Value-aware — not key-only — so a seed
+    # that keeps the (org, invoice_id) key but corrupts amount/currency/credits/period is still caught.
+    below_rows: dict[tuple, list] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != INVOICE_SIGNAL:
+            continue
+        oid, iid = p.get("org_id"), p.get("invoice_id")
+        if not (isinstance(oid, str) and oid and isinstance(iid, str) and iid):
+            continue
+        key = (oid, iid)
+        if key in below_rows:
+            continue
+        if not verify_signed(p, _INVOICE_CORE, resolver.at(r.seq)):
+            continue
+        below_rows[key] = [oid, iid, str(p.get("kind") or ""), str(p.get("price_id") or ""),
+                           _as_nonneg_int(p.get("amount_minor")), str(p.get("currency") or ""),
+                           _as_nonneg_int(p.get("credits")), float(as_issued_at(p.get("period_start"))),
+                           float(as_issued_at(p.get("period_end"))), float(as_issued_at(p.get("issued_at")))]
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    # VALUE-AWARE comparison gated to the >=10-field shape the fold actually CONSUMES (invoices._fold / the
+    # build re-seed both require len>=10) — mirrors stranded_active_wallets' value-equality. A key the seed
+    # drops, keeps with a corrupted value, or emits as a short (<10) row the fold would silently discard is all
+    # flagged (key-only + len>=2 before this missed exactly those seed-emission regressions the guard exists for).
+    seed_rows = {(row[0], row[1]): [row[i] for i in range(10)] for row in seed.invoice_row
+                 if isinstance(row, (list, tuple)) and len(row) >= 10}
+    stranded: set = {key[0] for key, full in below_rows.items() if seed_rows.get(key) != full}
+    return sorted(str(o) for o in stranded)
 
 
 def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:

@@ -131,6 +131,12 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "inbox.json": "ENVOY in-flight message queue — operational scratch, not recovery state",
     "actor": "in-flight browser-actor step journals — operational scratch, off the trust root",
     "operator": "in-flight operator plan/journal pre-images — operational scratch, off the trust root",
+    "customer": "ephemeral customer-edge operational markers (cookie sessions + single-use email "
+                "verify/recover tokens + login/signup/member rate-limit lockouts) — the AUTHORITATIVE "
+                "customer accounts/orgs/memberships/wallet are owner-signed on the spine (captured); these "
+                "regenerate (re-login / re-request / limits reset), never recovery state",
+    "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
+           "public data, no trust or memory state",
 }
 EXCLUDED_TOP_LEVEL = frozenset(_EXCLUSION_REASONS)
 

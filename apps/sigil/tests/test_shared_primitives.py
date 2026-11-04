@@ -5,6 +5,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from sigil.agents.base import Tier
 from sigil.agents.kernel_classify import KernelClassifier
 from sigil.config import kernel_bin
@@ -15,6 +17,17 @@ from sigil.spine.tail import Broadcaster, SpineTailer
 from sigil.spine.verify import verify_record
 
 _KERNEL = kernel_bin()   # the built kernel (env → repo-relative → PATH), or None → real-oracle tests skip
+
+
+@pytest.fixture(autouse=True)
+def _isolate_floor(monkeypatch, tmp_path):
+    """Isolate the durable anti-rollback FLOOR so the keyed-anchor tests read NO foreign floor. A shared
+    SIGIL_HOME can hold a floor signed by a DIFFERENT owner key than these tests' ephemeral keys; load_floor
+    then (CORRECTLY) makes classify_head refuse it as TAMPERING — a false red that is purely an environment
+    artifact, not a code defect. Pointing FLOOR_PATH at an empty temp dir ⇒ load_floor() returns None (the
+    no-floor condition these injected-head tailer tests assume). FLOOR_PATH is an import-time constant, so a
+    SIGIL_HOME env change cannot reach it — patch the bound name load_floor() reads."""
+    monkeypatch.setattr("sigil.spine.floor.FLOOR_PATH", tmp_path / "floor.json")
 
 
 def _store():

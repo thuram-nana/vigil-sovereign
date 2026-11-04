@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVE database — VIGIL</title>
+<meta name="description" content="Browse CVEs with VIGIL's honest edge: known-exploited (CISA-KEV) and exploitation-probability (EPSS) signals, not just a severity number. Filter by severity, year, and exploited-in-the-wild status.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/cve/cve.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap">
+    <p class="eyebrow">CVE database</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-2)">CVEs, ranked by what's actually exploited</h1>
+    <p class="muted" style="max-width:66ch; margin:0 0 var(--sp-5)">Most CVE lists sort by a severity number.
+      We lead with the signals that predict real risk: <strong>known exploited in the wild</strong> (CISA-KEV)
+      and <strong>exploitation probability</strong> (EPSS). VIGIL can take it one step further and
+      <em>prove</em> whether a pinned version in your stack is actually affected.</p>
+
+    <div id="cve-stats" class="stats" style="margin-bottom:var(--sp-5)"></div>
+
+    <form id="cve-filters" class="cve-filters" aria-label="Filter CVEs">
+      <input type="search" id="f-q" class="cve-input" placeholder="Search id or description…" aria-label="Search">
+      <select id="f-sev" class="cve-input" aria-label="Severity">
+        <option value="">Any severity</option><option value="critical">Critical</option>
+        <option value="high">High</option><option value="medium">Medium</option>
+        <option value="low">Low</option></select>
+      <select id="f-year" class="cve-input" aria-label="Year"><option value="">Any year</option></select>
+      <select id="f-order" class="cve-input" aria-label="Sort">
+        <option value="published_desc">Newest</option><option value="epss_desc">EPSS ↓</option>
+        <option value="cvss_desc">CVSS ↓</option></select>
+      <label class="cve-check"><input type="checkbox" id="f-kev"> Known exploited (KEV)</label>
+    </form>
+
+    <div id="cve-list" aria-live="polite"><p class="muted">Loading…</p></div>
+    <nav id="cve-pager" class="cve-pager" aria-label="Pagination"></nav>
+  </div>
+</main>
+<script src="/cve/cve.js"></script>
+</body>
+</html>

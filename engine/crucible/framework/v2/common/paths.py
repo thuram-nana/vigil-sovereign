@@ -410,6 +410,13 @@ def authority_path(slug: str) -> Path:
     return authority_dir() / f"{slug}.authority.json"
 
 
+def target_credentials_path(slug: str) -> Path:
+    """The owner-SIGNED test-credential roster for an engagement (W3 autoseed source). Lives beside the
+    engagement authority in the owner-only authority dir — it holds authorization-sensitive secrets, so it
+    is NEVER committed (gitignored like targets/<slug>/loot/credentials.md)."""
+    return authority_dir() / f"{_safe_slug(slug)}.credentials.json"
+
+
 def _safe_slug(slug: str) -> str:
     """Filesystem-safe form of a gateway/engagement slug — no path separators, traversal, or control
     chars, bounded. Used for EVERY slug-keyed control file (mode, kill-switch, registry) so an

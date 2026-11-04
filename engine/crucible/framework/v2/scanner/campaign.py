@@ -96,10 +96,21 @@ _OPENAPI_SPEC_PATHS: tuple[str, ...] = (
     "api-docs", "swagger/v1/swagger.json",
 )
 
-# The minimal GraphQL introspection query (same shape as scanner.graphql's) — enough
-# to recover the schema's type/field names for LEAD surfacing. Sent only to endpoints
-# the crawl already reached that look like a GraphQL endpoint.
-_GQL_INTROSPECTION = '{"query":"query{__schema{queryType{name} types{name fields{name}}}}"}'
+# The GraphQL introspection query the discovery pass sends to each reached GraphQL endpoint.
+# It must request EVERYTHING the structured parser (discovery.parse_graphql_operations) reads,
+# because a spec-compliant server returns ONLY the selected fields: so it asks for the
+# `mutationType` (root classification — a mutation is state-changing and withheld from auto-
+# fuzzing) and, for every root field, its `args{name type{...}}` — otherwise W2 synthesis is
+# inert (no args -> no `variables` object -> no `/variables/<arg>` points to fuzz). The
+# `ofType` chain is nested to peel NON_NULL/LIST wrappers (within `_GQL_UNWRAP_DEPTH`=10). It
+# is a superset of the old name-only query, so `parse_graphql_schema` still recovers the flat
+# type/field names for LEAD surfacing.
+_GQL_INTROSPECTION = (
+    '{"query":"query{__schema{queryType{name} mutationType{name} '
+    'types{name fields{name args{name type{kind name '
+    'ofType{kind name ofType{kind name ofType{kind name '
+    'ofType{kind name ofType{kind name ofType{kind name}}}}}}}}}}}}"}'
+)
 
 
 class ScanReport(BaseModel):
@@ -1228,9 +1239,10 @@ class WebScanCampaign:
         Deterministic and bounded; robust to missing/partial documents (a 404 or garbage
         body simply yields nothing for that source)."""
         from .discovery import (
-            mine_params, parse_graphql_schema, parse_openapi, parse_robots, parse_sitemap,
+            mine_params, parse_graphql_operations, parse_graphql_schema, parse_openapi,
+            parse_robots, parse_sitemap,
         )
-        from .insertion import request_from_api_operation
+        from .insertion import request_from_api_operation, request_from_graphql_operation
 
         sp = urlsplit(seed_url)
         base = f"{sp.scheme}://{sp.netloc}/"
@@ -1299,9 +1311,21 @@ class WebScanCampaign:
         for name in names[: self.discovery_max_params]:
             _queue_get(f"{base}?{name}=1")
 
-        # 5. GraphQL schema (LEAD-only): introspect any GraphQL endpoint the crawl reached
-        #    and surface the recovered type/field names. GraphQL fields are not REST
-        #    insertion points, so these are references, not audit requests.
+        # 5. GraphQL (introspect once per endpoint, reuse the one response three ways):
+        #    (a) the recovered type/field NAMES stay LEAD-only references (unchanged);
+        #    (b) each QUERY root operation is bridged (W2) into a concrete, fuzzable request
+        #        whose typed args ride a JSON `variables` object the EXISTING JSON insertion
+        #        engine decomposes — so the audit checks fuzz the argument VALUES (field/
+        #        argument injection surfaced as LEADs; this adds NO oracle). A query is
+        #        read-only by the GraphQL contract, so fuzzing it is as safe as the
+        #        introspection query already sent, and rides the same gated send + scope;
+        #    (c) a MUTATION is STATE-CHANGING, so it is surfaced as a LEAD only and NEVER
+        #        auto-sent — synthesizing destructive traffic waits on an explicit
+        #        destructive-confirm (doctrine §VI/§VIII: ask before destruction).
+        #    GraphQL ops all POST to one `/graphql` path (body-distinguished), so they are
+        #    appended with an OPERATION-name de-dupe rather than _queue's surface key (which
+        #    would collapse them to one); the audit loop fuzzes each request object regardless.
+        seen_gql: set[str] = set()
         for endpoint in self._graphql_endpoints(seed_url, crawl)[:4]:
             gql = HttpRequest(
                 method="POST", url=endpoint,
@@ -1314,8 +1338,36 @@ class WebScanCampaign:
                 body = resp.get("body", "") if isinstance(resp, dict) else ""
             except Exception:
                 continue
-            for gql_name in parse_graphql_schema(body if isinstance(body, str) else "")[:32]:
+            body = body if isinstance(body, str) else ""
+            for gql_name in parse_graphql_schema(body)[:32]:
                 leads.append(f"graphql-schema {endpoint}: {gql_name}")
+            # endpoint already scope-filtered by _graphql_endpoints; re-check (defense in depth).
+            if not scope.in_scope(endpoint):
+                continue
+            gql_path = urlsplit(endpoint).path or "/graphql"
+            n_queries = 0
+            for gop in parse_graphql_operations(body):
+                dedupe = f"{endpoint}\x00{gop.kind}\x00{gop.name}"
+                if dedupe in seen_gql:
+                    continue
+                seen_gql.add(dedupe)
+                if gop.kind == "mutation":
+                    leads.append(f"graphql-operation mutation {gop.name} @ {endpoint}")
+                    continue
+                if n_queries >= self.discovery_max_ops:
+                    continue
+                try:
+                    req = request_from_graphql_operation(gop, endpoint, path=gql_path)
+                except Exception:
+                    continue
+                # Re-scope the FINAL synthesized URL (mirrors _queue's defense in depth): never
+                # rely solely on the downstream egress floor, and never trust that the endpoint's
+                # own path round-trips through urljoin unchanged (a `//`-prefixed path would
+                # escape the authority). An out-of-scope synthesized URL is dropped, not sent.
+                if not scope.in_scope(req.url):
+                    continue
+                extra.append(req)
+                n_queries += 1
 
         return extra, leads
 

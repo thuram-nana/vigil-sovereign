@@ -190,3 +190,18 @@ def test_drain_never_stores_the_secret_on_disk():
     for d in ("incoming", "working", "processed", "rejected"):
         for f in (root / d).glob("*"):
             assert _SECRET not in f.read_text(encoding="utf-8", errors="ignore"), f"secret leaked into {f}"
+
+
+def test_drain_failed_recurring_charge_marks_past_due():
+    # H4 end-to-end through the drain: a re-verified FAILED recurring (payment_plan) charge drains to a mint (not
+    # a noop) and latches the (active) subscription to past_due — the webhook-driven dunning path, fail-closed.
+    from sigil.governor.subscription import STATUS_PAST_DUE, SubscriptionRegistry
+    table = {"9977": {"id": 9977, "status": "failed", "tx_ref": "vigil:acme:n7", "payment_plan": "flwplan_pro",
+                      "created_at": 500.0}}
+    s, _w, watcher, root = _rig(table)
+    subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    subs.subscribe("acme", "pro", 6000, period_start=100.0, period_end=1100.0, issued_at=100.0)  # active @100
+    _spool(root, _body(9977))
+    res = watcher.drain()
+    assert res["minted"] == 1 and res["rejected"] == 0 and res["noop"] == 0
+    assert subs.subscription("acme").status == STATUS_PAST_DUE

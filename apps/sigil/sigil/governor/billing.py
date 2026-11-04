@@ -37,10 +37,12 @@ import hmac
 import json
 import math
 import os
+import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlsplit
 
 from ..reuse import assert_no_offense
 
@@ -93,6 +95,8 @@ class BillingEvent:
     org_id: str
     created: float                 # the provider's event timestamp (used as the deterministic issued_at)
     price_id: str = ""             # the paid price/plan id (catalog key); "" when not applicable
+    amount_minor: int = 0          # the VERIFIED paid amount in minor units (Slice F cross-check); 0 if unknown
+    currency: str = ""             # ISO-4217 of the verified amount; "" when the provider did not populate one
     data: Mapping[str, Any] = field(default_factory=dict)   # extra normalised fields (verbatim, untrusted detail)
 
 
@@ -328,6 +332,93 @@ class MockBillingProvider(BillingProvider):
 # INJECTED so this module stays offline-testable and the deterministic signer never performs I/O.
 TransactionVerifier = Callable[[str], Optional[Mapping[str, Any]]]
 
+# A hosted-checkout creator (Slice F): given the Flutterwave /v3/payments request body (which WE build), perform
+# the owner-provisioned outbound HTTPS POST and return the parsed JSON response (or None). INJECTED so this module
+# stays offline-testable and performs NO I/O itself — the exact sibling of TransactionVerifier on the inbound side.
+CheckoutCreator = Callable[[Mapping[str, Any]], Optional[Mapping[str, Any]]]
+
+# ISO-4217 minor-unit exponents that are NOT 2, to convert between the catalog's minor units and the major-unit
+# number a provider `amount` field carries. Everything unlisted is 2 decimals (USD, EUR, NGN, GBP, …).
+_ZERO_DECIMAL_CCY = frozenset({"BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX",
+                               "VND", "VUV", "XAF", "XOF", "XPF"})
+_THREE_DECIMAL_CCY = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
+
+
+def _ccy_decimals(ccy: str) -> int:
+    c = (ccy or "").strip().upper()
+    if c in _ZERO_DECIMAL_CCY:
+        return 0
+    if c in _THREE_DECIMAL_CCY:
+        return 3
+    return 2
+
+
+def _to_major(amount_minor: int, ccy: str):
+    """Minor units -> the major-unit number a provider `amount` field carries (an int for a 0-decimal currency)."""
+    d = _ccy_decimals(ccy)
+    return int(amount_minor) if d == 0 else int(amount_minor) / (10 ** d)
+
+
+def _flw_amount_minor(verified: Mapping[str, Any]) -> "tuple[int, str]":
+    """`(amount_minor, currency)` from a Flutterwave VERIFIED object, fail-closed to `(0, ccy_or_"")`. The verified
+    `amount` is in MAJOR units; converted to minor via the ISO exponent so it compares against the owner catalog's
+    `amount_minor`. A non-finite / unparseable amount yields 0 (which the signer's cross-check refuses when an
+    expected price exists for the price_id)."""
+    ccy = verified.get("currency")
+    ccy = ccy.strip().upper() if isinstance(ccy, str) else ""
+    amt = verified.get("amount")
+    if amt is None or not ccy:
+        return 0, ccy
+    try:
+        f = float(amt)
+        if not math.isfinite(f):
+            return 0, ccy
+        return int(round(f * (10 ** _ccy_decimals(ccy)))), ccy
+    except (TypeError, ValueError):
+        return 0, ccy
+
+
+def _flw_checkout_link(resp: object) -> Optional[str]:
+    """The hosted-checkout URL from a Flutterwave /v3/payments response, fail-closed. Success shape:
+    `{"status":"success","data":{"link":"https://checkout.flutterwave.com/..."}}`. HARDENED (red-pen): accept ONLY
+    an https link on the Flutterwave hosted-checkout domain, carrying NO whitespace / control characters (so a
+    smuggled CR/LF can never split a later `Location:` header) and NO embedded credentials — a missing / non-https
+    / `data:` / `javascript:` / foreign-host / control-char link is refused (never hand the browser a hostile or
+    header-splitting URL, even from a compromised/MITM'd provider response)."""
+    if not isinstance(resp, Mapping) or resp.get("status") != "success":
+        return None
+    data = resp.get("data")
+    link = data.get("link") if isinstance(data, Mapping) else None
+    if not isinstance(link, str) or not link.startswith("https://"):
+        return None
+    if any(ord(c) < 0x21 or ord(c) == 0x7f for c in link):     # whitespace / control chars (CRLF response-split)
+        return None
+    try:
+        u = urlsplit(link)
+    except ValueError:
+        return None
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or "@" in (u.netloc or "") or not host:   # no userinfo; must have a host
+        return None
+    if host != "flutterwave.com" and not host.endswith(".flutterwave.com"):
+        return None                                            # pin the provider's hosted-checkout domain
+    return link
+
+
+@dataclass(frozen=True)
+class CheckoutSession:
+    """A created hosted-checkout session (Slice F). `tx_ref` (= `vigil:<org>:<nonce>`) binds the tenant into the ONE
+    field Flutterwave echoes on the webhook + verify, so the inbound mint recovers the SAME tenant and can never be
+    re-aimed at another org. `amount_minor`/`currency`/`price_id` are the OWNER-CATALOG values this checkout will
+    collect — never caller-supplied."""
+    tx_ref: str
+    hosted_link: str
+    org_id: str
+    price_id: str
+    amount_minor: int
+    currency: str
+
+
 # tx_ref convention: we set it when creating a checkout/charge so the tenant is recoverable from the one field
 # Flutterwave guarantees to echo everywhere. Format: "vigil:<org_id>:<nonce>" (org_id has no ':').
 _TX_REF_PREFIX = "vigil"
@@ -429,19 +520,23 @@ class FlutterwaveBillingProvider(BillingProvider):
     transaction `id` (stable across at-least-once duplicate deliveries), which the signer carries as the ledger
     entry_id. The verifier does the only I/O; everything here is pure.
 
-    SCOPE (this slice): we mint ONLY on a re-verified successful `charge.completed` (top-up or plan period). We do
-    NOT act on `subscription.cancelled` / failed-charge webhooks — the body cannot name the victim tenant soundly
-    and the verify endpoint is per-transaction, not per-subscription, so there is no authoritative
-    subscription→org mapping yet. A lapsed/cancelled plan EXPIRES at period_end via the meter's active-subscription
-    check (non-rollover) — the safe, body-independent outcome. Webhook-driven cancel/dunning returns in the
-    outbound-surfaces slice once an authoritative subscription→org mapping exists.
+    SCOPE: we act ONLY on a re-verified `charge.completed`, taking EVERY tenant/money/status field from the
+    AUTHORITATIVE verify object (never the body). A SUCCESSFUL charge mints (top-up or plan period). A definitively
+    FAILED RECURRING charge (verified status `failed` + a `payment_plan`) drives DUNNING — EVENT_PAYMENT_FAILED, so
+    the subscription latches to past_due (access-reducing, reversible; H4). Both are sound because the org is taken
+    from the RE-VERIFIED tx_ref we set at our own checkout, so a verif-hash holder cannot name a victim tenant. We
+    still do NOT act on a bare `subscription.cancelled` webhook — with no transaction to re-verify there is no
+    authoritative subscription→org mapping — so a cancelled plan instead EXPIRES at period_end via the meter's
+    active-subscription check (non-rollover), the safe body-independent outcome; webhook-driven cancel awaits that
+    mapping (a reconcile capability).
 
     NOTE (sandbox-confirm): exact field shapes (meta echo as dict vs list, `payment_plan` presence on a plan
     charge, `created_at` string format) should be confirmed against a Flutterwave sandbox; this handles the
     documented shapes and fails closed on anything it cannot validate. Mobile Money / card / checkout creation
     and refunds are declared capabilities exercised by the outbound flows (next slice)."""
 
-    def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False):
+    def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False,
+                 checkout_creator: "Optional[CheckoutCreator]" = None):
         if not isinstance(secret_hash, str) or not secret_hash:
             raise ValueError("Flutterwave webhook secret hash is required")
         if not callable(verifier):
@@ -450,6 +545,9 @@ class FlutterwaveBillingProvider(BillingProvider):
         self._secret_hash = secret_hash
         self._verifier = verifier
         self._noauth_approved = bool(noauth_approved)
+        # Slice F: the outbound hosted-checkout poster (owner-provisioned HTTPS). None ⇒ create_checkout refuses
+        # (never silently simulates a checkout). Injected so this module does no I/O and stays offline-testable.
+        self._checkout_creator = checkout_creator
 
     def capabilities(self) -> frozenset[str]:
         caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
@@ -476,14 +574,16 @@ class FlutterwaveBillingProvider(BillingProvider):
         # Flutterwave's `verif-hash` authenticates ONLY the caller (plaintext secret equality); it does NOT sign
         # the body, so NOTHING in `obj` is trustworthy here beyond "which transaction id to go re-verify". Every
         # field that decides money or a tenant (org_id, plan-vs-topup, timestamp, status) is taken from the
-        # AUTHORITATIVE `/v3/transactions/{id}/verify` object only. We therefore mint solely on a `charge.completed`
-        # whose transaction INDEPENDENTLY re-verifies as successful.
+        # AUTHORITATIVE `/v3/transactions/{id}/verify` object only. We therefore act solely on a `charge.completed`
+        # whose transaction INDEPENDENTLY re-verifies: a `successful` one MINTS (top-up or plan period); a
+        # definitively `failed` RECURRING one (a `payment_plan` charge) drives DUNNING (EVENT_PAYMENT_FAILED ->
+        # past_due; H4) — sound because org/status/timestamp all come from the verify object, so a verif-hash holder
+        # cannot name a victim (the tx_ref is one we set at our own checkout).
         #
-        # We deliberately do NOT act on `subscription.cancelled` / failed-charge webhooks (no webhook-driven cancel
-        # or dunning): the body cannot name the victim tenant soundly, and the verify endpoint is per-TRANSACTION,
-        # not per-subscription, so there is no authoritative subscription→org mapping yet (that lands in the
-        # outbound-surfaces slice). Until then a lapsed/cancelled plan simply EXPIRES at period_end via the meter's
-        # active-subscription check (non-rollover) — the safe, body-independent outcome.
+        # We deliberately do NOT act on a bare `subscription.cancelled` webhook (no webhook-driven CANCEL): with no
+        # transaction to re-verify, the verify endpoint is per-TRANSACTION, not per-subscription, so there is no
+        # authoritative subscription→org mapping yet (that lands with a reconcile capability). Until then a
+        # cancelled plan simply EXPIRES at period_end via the meter's active-subscription check (non-rollover).
         if obj.get("event") != "charge.completed":
             return None
         data_raw = obj.get("data")
@@ -491,24 +591,103 @@ class FlutterwaveBillingProvider(BillingProvider):
         if txid is None:
             return None                               # the body is trusted ONLY for the transaction id to verify
         verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the ONLY trust source
-        if not isinstance(verified, dict) or verified.get("status") != "successful":
-            return None                               # unverifiable / not successful -> mint nothing
-        vid = verified.get("id")                      # the idempotency anchor is the CANONICAL verified id, NEVER
-        if vid is None:                               # the body's spelling: two body spellings of one real tx that
-            return None                               # /verify maps to the same id must collapse to ONE grant (the
-        event_id = str(vid)                           # body is trusted ONLY to name which tx to fetch); fail-closed.
+        if not isinstance(verified, dict):
+            return None                               # unverifiable -> act on nothing
+        status = verified.get("status")
+        vid = verified.get("id")                      # the idempotency / audit anchor is the CANONICAL verified id,
+        if vid is None:                               # NEVER the body's spelling (two spellings of one real tx that
+            return None                               # /verify collapses to one id must collapse to ONE action);
+        event_id = str(vid)                           # fail-closed without it.
         org = _flw_org_id(verified)                   # tenant from the VERIFIED object only (never the body)
         if org is None:
-            return None                               # successful but no recoverable tenant -> never mint on a guess
+            return None                               # no recoverable tenant -> never act on a guess
         created = _flw_created(verified)              # stable epoch from the VERIFIED object; fail-closed if absent
         if created is None:
             return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
-        if verified.get("payment_plan"):              # plan-vs-topup decided by the VERIFIED object only
-            return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
-                                price_id=str(verified.get("payment_plan") or ""), data={"tx_ref": tx_ref})
-        return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
-                            price_id=_flw_price_id(verified), data={"tx_ref": tx_ref})
+        if status == "successful":
+            amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
+            if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
+                return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
+                                    price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
+                                    currency=ccy, data={"tx_ref": tx_ref})
+            return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
+                                price_id=_flw_price_id(verified), amount_minor=amt_minor, currency=ccy,
+                                data={"tx_ref": tx_ref})
+        # H4 — webhook-driven DUNNING (access-REDUCING only). A charge that AUTHORITATIVELY re-verifies as `failed`
+        # AND carries a `payment_plan` is a failed RECURRING (subscription) debit -> emit EVENT_PAYMENT_FAILED so the
+        # signer latches the subscription to past_due (REVERSIBLE: a later successful renewal re-activates). SOUND
+        # because org + status + timestamp all come from the RE-VERIFIED object, never the untrusted body — a
+        # verif-hash holder cannot name a victim (the tx_ref it would need is one WE set at our own checkout). The
+        # `created` rides through as the down-latch's freshness key (subscription._fold), so a stale / out-of-order /
+        # replayed failure cannot re-suspend a recovered tenant. A failed ONE-TIME top-up carries no payment_plan and
+        # reduces nothing -> no-op. A non-terminal status (pending/...) -> no-op (never reduce on a non-definitive
+        # answer; a TRANSIENT verify failure RAISES out of the verifier per its contract, never reaching here as a
+        # definitive non-success). We still do NOT act on a bare `subscription.cancelled` webhook: with no
+        # transaction to re-verify there is no sound subscription->org mapping, and such a plan already EXPIRES at
+        # period_end (non-rollover) — webhook-driven cancel awaits that mapping (a reconcile capability).
+        if status == "failed" and verified.get("payment_plan"):
+            return BillingEvent(event_id=event_id, kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
+                                price_id=str(verified.get("payment_plan") or ""),
+                                data={"tx_ref": tx_ref, "dunning": "payment_failed"})
+        return None
+
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None) -> CheckoutSession:
+        """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
+
+        MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
+        i.e. `catalog.expected_amounts()`), NEVER from the caller — a customer can name neither a price nor an
+        amount, and an unknown price_id is REFUSED rather than charged at a caller-chosen figure. TENANT BINDING
+        (consistency, NOT authorization): the org is validated for FORMAT (`org_tenant_id`, fail-closed) and bound
+        into BOTH `tx_ref = vigil:<org>:<nonce>` AND `meta.org_id`, so the inbound mint credits exactly the org
+        named at checkout and the two bindings can never disagree. This does NOT authorize the caller to name that
+        org — the CHECKOUT ENDPOINT MUST gate first with `OrgRegistry.admit_customer(requester, org_id, <billing
+        permission>)` (admit-first, as the provisioner does) so a customer cannot open a checkout that funds
+        another tenant. This primitive BINDS; the edge AUTHORIZES. Fail-closed throughout: no creator, an invalid
+        org, an unknown/empty price, a creator that raises, or a response without an https hosted link on the
+        provider domain RAISES (`UnsupportedCapability`/`ValueError`) — never a half-formed, unpriced, or
+        wrongly-attributed checkout."""
+        self.require(CAP_HOSTED_CHECKOUT)
+        if self._checkout_creator is None:
+            raise UnsupportedCapability("hosted checkout requires an injected checkout_creator (the outbound "
+                                        "HTTPS poster); refusing to simulate a checkout")
+        try:
+            org = org_tenant_id(org_id)               # canonical tenant id; fail-closed on an invalid/foreign org
+        except ValueError as exc:
+            raise ValueError(f"invalid org_id for checkout: {exc}") from None
+        exp = expected.get(price_id) if hasattr(expected, "get") else None
+        if exp is None:
+            raise ValueError(f"unknown price_id {price_id!r}: not in the owner catalog — checkout refused "
+                             "(the catalog, never the caller, decides what may be charged)")
+        amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
+        if amount_minor <= 0 or not currency:
+            raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        n = nonce or secrets.token_urlsafe(18)
+        if not isinstance(n, str) or ":" in n or not n:
+            raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
+        tx_ref = f"{_TX_REF_PREFIX}:{org}:{n}"
+        payload: "dict[str, Any]" = {
+            "tx_ref": tx_ref,
+            "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
+            "currency": currency,
+            "meta": {"org_id": org, "price_id": price_id},  # redundant tenant+price binding (belt-and-suspenders)
+        }
+        if redirect_url:
+            payload["redirect_url"] = str(redirect_url)
+        if customer_email:
+            payload["customer"] = {"email": str(customer_email)}
+        try:
+            resp = self._checkout_creator(payload)
+        except Exception as exc:  # noqa: BLE001 — any outbound failure (timeout/TLS/connection-reset/5xx) is a
+            raise UnsupportedCapability(                       # REFUSAL, re-raised as the documented contract type;
+                f"checkout creation failed ({type(exc).__name__})") from None   # provider internals are dropped
+        link = _flw_checkout_link(resp)
+        if not link:
+            raise UnsupportedCapability("checkout creation failed: the provider returned no https hosted link")
+        return CheckoutSession(tx_ref=tx_ref, hosted_link=link, org_id=org, price_id=price_id,
+                               amount_minor=amount_minor, currency=currency)
 
 
 @dataclass(frozen=True)
@@ -529,12 +708,24 @@ class BillingSigner:
     owner-controlled price→entitlement `catalog`. Deterministic + idempotent; never mints from an unverified
     event and never lets an on-the-wire amount decide money (only the catalog does)."""
 
-    def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement]):
+    def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
+                 expected: "Optional[Mapping[str, Any]]" = None, invoices=None):
         self.provider = provider
         self.wallet = wallet
         self.subscriptions = subscriptions
         self.plan = plan
+        # Slice H: the optional per-tenant invoice / billing-history ledger. When injected, each value-granting
+        # mint ALSO records one owner-signed billing-history line (idempotent by the SAME provider event_id, so a
+        # webhook replay folds once — no duplicate charge). None keeps every existing caller byte-identical (no
+        # invoice emitted). The money amount on the line is the owner-CATALOG price (`expected`), NEVER the wire
+        # amount — the money doctrine, identical to how the catalog (not the webhook) decides the entitlement.
+        self.invoices = invoices
         self.catalog = dict(catalog)
+        # Slice F: the owner catalog's EXPECTED (amount_minor, currency) per price_id (= catalog.expected_amounts()),
+        # for the defense-in-depth underpay / wrong-currency cross-check in apply(). Empty ⇒ the cross-check is
+        # skipped (backward-compatible; the primary binding is still "the catalog decides the entitlement for the
+        # price_id we set at checkout").
+        self._expected = {str(k): (int(v[0]), str(v[1]).upper()) for k, v in dict(expected or {}).items()}
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
@@ -552,14 +743,42 @@ class BillingSigner:
         if event.kind == EVENT_SUBSCRIPTION_CANCELED:
             return self.subscriptions.cancel(oid)     # safe direction, honored on sight, replay-safe
         if event.kind == EVENT_PAYMENT_FAILED:
-            return self.subscriptions.mark_past_due(oid)
+            # Webhook-driven dunning (H4): carry the provider event's `created` as the down-latch freshness key so
+            # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
+            return self.subscriptions.mark_past_due(oid, issued_at=event.created)
         ent = self.catalog.get(event.price_id)
         if ent is None:
             return None                               # unknown price -> no entitlement -> mint nothing
+        # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
+        # amount below the owner catalog's expected price (or in the wrong currency): belt-and-suspenders on top of
+        # "the price_id we set at checkout". Fires only when (a) an expected price is configured for this price_id
+        # AND (b) the event carries a verified amount (currency present) — a provider that does not populate the
+        # amount is still bound by the price_id -> entitlement mapping, not silently refused here.
+        if event.kind in (EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE):
+            exp = self._expected.get(event.price_id)
+            if exp is not None and event.currency:
+                if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
+                    return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
+            # Red-pen FINDING 1: event_id is the idempotency anchor for the wallet entry_id (top-up) AND the
+            # invoice_id (both value paths), but verify_and_parse only checks it is a non-empty str. Bound it to
+            # the SAME shape the wallet/invoice ledgers require (<= 128, non-control) HERE, so a pathological id
+            # fails the WHOLE value-granting event CLOSED (mint nothing) — symmetric across top-up and
+            # subscription — instead of the asymmetric half-mint (top-up's wallet.grant raised and aborted, but
+            # subscribe/refill never touch event_id, so the subscription committed while only its invoice raised).
+            # .strip() to match the ledger validators EXACTLY (_check_entry_id/_check_invoice_id both strip then
+            # require non-empty): a whitespace-only event_id (" ") would otherwise pass this bound yet strip to ""
+            # inside invoice.record() and raise AFTER the subscription mint committed — re-opening the half-mint
+            # this bound closes (red-pen completeness-critic). Stripping fails it CLOSED here, symmetric.
+            eid = str(event.event_id or "").strip()
+            if not eid or len(eid) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in eid):
+                return None
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:
             # idempotent by event_id: a duplicate delivery reuses the same wallet entry_id -> folded once.
-            return self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
-                                     entry_id=event.event_id, issued_at=event.created)
+            seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
+                                    entry_id=event.event_id, issued_at=event.created)
+            if seq is not None:                       # record the history line only for a mint that took effect
+                self._record_invoice(oid, event, "topup", credits=int(ent.credits))
+            return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0:
             period_end = event.created + float(ent.period_s)
@@ -573,5 +792,40 @@ class BillingSigner:
             # finds the tranche already present and no-ops. A genuine RENEWAL (new event, greater `created`) made
             # the subscribe above fresh -> the period advanced -> the bridge grants the new period's tranche (the
             # prior tranche simply expires: non-rollover).
-            return refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
+            seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
+            # Red-pen FINDING 2: record the invoice ONLY when the plan refill actually GRANTED (seq is not None).
+            # An out-of-order / stale subscription event (a distinct event_id with a non-increasing `created`)
+            # makes subscribe a LWW no-op and refill a no-op -> seq is None -> NO invoice, so the billing history
+            # never shows a period/credits the plan ledger did not deliver (a true replay dedups by event_id).
+            if seq is not None:
+                self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
+                                     period_start=event.created, period_end=period_end)
+            return seq
         return None
+
+    def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
+                        period_start: float = 0.0, period_end: float = 0.0) -> None:
+        """Record ONE owner-signed billing-history line for a value-granting mint that TOOK EFFECT (Slice H).
+        No-op when no invoice ledger is injected. The caller invokes this ONLY after the mint's seq is not None
+        (red-pen FINDING 2), and ``event.event_id`` is already bounded by ``apply`` before the mint (red-pen
+        FINDING 1), so the (org, event_id) line is written for exactly the mints that delivered value.
+
+        MONEY DOCTRINE: the line's ``amount_minor``/``currency`` are the owner-CATALOG expected price for
+        ``event.price_id`` (``self._expected``), NEVER the wire amount — when the catalog does not price it, the
+        line carries amount 0 (the credits/plan are still recorded). The owner-catalog money fields are coerced
+        to ``record()``-safe values here (a malformed expected amount/currency — an owner CONFIG error — DEGRADES
+        the line's money to 0/'' rather than raising after money has already moved), and ``org_id``/``kind``/
+        ``credits`` are valid by construction at this point, so this never raises on validation. A genuine
+        store-IO fault still propagates (it was never a ValueError and never silently swallowed): the money mint
+        has committed, and the provider's at-least-once retry re-records the line idempotently."""
+        if self.invoices is None:
+            return
+        exp = self._expected.get(event.price_id)
+        amount_minor, currency = (exp[0], exp[1]) if exp is not None else (0, "")
+        # Coerce the owner-catalog money fields to values record() accepts, so an owner misconfiguration degrades
+        # the money on this history line instead of dropping a committed mint's line entirely (FINDING 1 spirit).
+        amount_minor = amount_minor if isinstance(amount_minor, int) and amount_minor >= 0 else 0
+        currency = currency if (isinstance(currency, str) and currency.isalpha() and len(currency) <= 8) else ""
+        self.invoices.record(oid, invoice_id=event.event_id, kind=kind, price_id=event.price_id,
+                             amount_minor=amount_minor, currency=currency, credits=credits,
+                             period_start=period_start, period_end=period_end, issued_at=event.created)

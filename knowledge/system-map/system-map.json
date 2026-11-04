@@ -67,6 +67,33 @@
       ]
     },
     {
+      "description": "Owner billing administration — the pricing catalog, the tenant directory, and each tenant's credit balance, subscription and invoice history. Read-only projections; every tenant projection is re-authorized server-side (manage_org for the tenant directory, view_billing / view_invoices per tenant).",
+      "group": "MANAGE",
+      "id": "billing",
+      "label": "Billing Admin",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "billing",
+        "billing admin",
+        "invoices",
+        "invoice history",
+        "credits",
+        "credit balance",
+        "wallet",
+        "subscription",
+        "subscriptions",
+        "plan",
+        "plans",
+        "pricing",
+        "pricing catalog",
+        "tenant billing",
+        "revenue",
+        "charges",
+        "payment history"
+      ]
+    },
+    {
       "description": "The reasoning brain — the propose-only decision engine (an ordered attack chain of gated LEADs), intelligence, memory, priors, and the capability catalog.",
       "group": "MANAGE",
       "id": "brain",
@@ -577,6 +604,25 @@
       ]
     },
     {
+      "description": "Per-tenant assessment summaries and oracle-confirmed findings, projected to the owner console. Read-only; the server re-authorizes each tenant projection (view_assessments) and a tenant sees only its own findings.",
+      "group": "MANAGE",
+      "id": "tenantassess",
+      "label": "Tenant Assessments",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "tenant assessments",
+        "tenant findings",
+        "customer assessments",
+        "customer findings",
+        "per-tenant findings",
+        "tenant scan results",
+        "saas findings",
+        "org findings",
+        "tenant security findings"
+      ]
+    },
+    {
       "description": "A governed local terminal — ask in English or type a command; the AI proposes, the allowlist and gate decide, you approve, and only local read-only commands run (every run signed).",
       "group": "DO",
       "id": "terminal",
@@ -652,5 +698,5 @@
       ]
     }
   ],
-  "source_sha": "aa3c7315f6ba3f91c14918edf32882905358082573d1608559f7c7f8fe8cc264"
+  "source_sha": "b1b0e44c33f812b7f428b855c875ab90f6bf4959bc69d6444e54d3d698079ff9"
 }

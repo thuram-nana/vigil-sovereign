@@ -227,6 +227,30 @@ templates.
 > token, kept to the terminal/journal — never embedded where a cross-origin page
 > can read it). Keep it private, exactly like the standalone cockpit token.
 
+### The PUBLIC site (a separate origin — `sigil serve-public`)
+
+The public marketing/tools/trust/CVE site is **not** the operator cockpit and must
+not share its origin. It is served by `pubui` — keyless, cookieless, offense-free,
+static files plus a read-only `/api/cve` over the local catalog — on its own port:
+
+```bash
+sigil cve ingest                                   # optional: populate the CVE catalog (the ONE
+                                                   # standing outbound path; never at request time)
+sigil serve-public --host 127.0.0.1 --port 8735    # binds loopback; fails closed on a public bind
+```
+
+Front it with TLS on your **public** hostname using
+`deploy/reverse-proxy/vigil-public.Caddyfile` (or `vigil-public.nginx.conf`), which
+forwards to `127.0.0.1:8735`. Because this plane holds no key and sets no cookie,
+there is no session to protect with a Host/Origin allowlist — the only invariant is
+the loopback/private bind + TLS at the edge. A clean production split:
+
+```
+vigil.example.com         →  pubui    127.0.0.1:8735   (public: everyone can see)
+console.vigil.example.com →  vigil up  127.0.0.1:8770   (operator cockpit; keep private/SSO/VPN)
+app.vigil.example.com     →  custui    127.0.0.1:8734   (tenant app; its own vhost)
+```
+
 ---
 
 ## Checklist
@@ -241,3 +265,6 @@ templates.
       forwarded as `Host`, SSE paths (`/sovereign/api/stream`, `/offense/api/events`,
       `/offense/api/blackboard`) buffering-off + long read timeout, and
       `CRUCIBLE_API_KEY` set when the offense api is internet-fronted.
+- [ ] Public site (`sigil serve-public`) on its **own** public origin, loopback bind,
+      TLS at the edge (`vigil-public.Caddyfile`/`vigil-public.nginx.conf`) — never
+      sharing the operator cockpit's hostname.
