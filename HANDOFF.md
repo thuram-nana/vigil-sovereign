@@ -54,6 +54,20 @@
   `test_k45_loopback_e2e.py` (reserve→settle-to-consumption, refund, no double-settle/refund, per-slug tenant
   isolation) all pass.
 
+### Milestone 2 — loopback-engagement harness (FACT → offline re-verify leg of #25) ✅
+
+Ran `tools/loopback-engagement/run_loopback_engagement.sh` (hermetic; target = `infra/loopback/vulnapp.py`
+on 127.0.0.1; offense venv; clean-checkout re-verify dir = a `git worktree` at HEAD). All four asserted legs
+passed:
+- **POSITIVE:** 3 oracle-confirmed FACTs (error_based_sqli 0.88, boolean_sqli 0.95, xss 0.95); full corpus
+  (11 built-in + 138 library checks); all carry re-verifiable certificates.
+- **RE-VERIFY:** `framework.v2 verify` reproduced 3/3 certificates **offline on the independent checkout**.
+- **TAMPER:** a relabelled cert (error_based_sqli → remote_code_execution_TAMPER_never_proved) was REJECTED
+  (CLAIM-MISMATCH, verify rc=2) — proves the re-verify gate is not a no-op.
+- **NEGATIVE:** patched twin (`vulnapp --safe`) → 0 confirmed findings over the full corpus = sound clean.
+- Note: pass an **absolute** interpreter path via `VIGIL_LE_PYTHON` (the harness `cd`s into the clean checkout,
+  so a relative `.venv-offense/bin/python` fails rc=127).
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
@@ -70,15 +84,20 @@
 5. **#42** AEGIS-SaaS productization (deferred — ask owner; red-pen after Nov 6).
 6. Deploy/ops polish (marketing vhost; NVD/EPSS enrichment; edge wiring).
 
-## Blockers / open questions to owner
-
-- (a) Can the GitHub **Actions** read tool be enabled? Otherwise #3 = "paste me the job logs".
-- (b) Confirm **Flutterwave sandbox/test mode** only for #25 (no production payment target).
-
 ## Exact next step
 
-Stand up the live stack and drive one real end-to-end customer journey over HTTP against the running custui
-edge, capturing evidence; then run the loopback-engagement harness. Record results here and checkpoint.
+Live-stack HTTP drive of the customer loop (`vigil up` / custui edge) + scripted adversarial probes
+(RBAC/console-isolation/session/IDOR/step-up). **Live money-loop drive is gated on owner confirming
+Flutterwave sandbox/test mode (question b).** Then `make gate` + ruff + ratchet. Reserve Opus multi-lens
+red-pen for post-Nov-6.
+
+## Blockers / open questions to owner
+
+- **WRITE ACCESS (blocking checkpoint-push):** this session's GitHub token appears read-only — `git push` 403
+  and MCP `create_branch` 403. Local commits are safe but unpushed. Need a write-scoped token or the exact
+  `claude/…-<session-id>` branch name the push-token is scoped to. Thread id: `thread_01Pea9mWEbcrKAviJaWCmbL4`.
+- (a) Can the GitHub **Actions** read tool be enabled? Otherwise #3 = "paste me the job logs".
+- (b) Confirm **Flutterwave sandbox/test mode** only for #25 (no production payment target).
 
 ## Conventions reminder
 
