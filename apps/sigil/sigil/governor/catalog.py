@@ -36,6 +36,8 @@ from .billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, Entitlement  # noqa
 from .subscription import _check_plan_id  # noqa: E402  (mirror the mint-path plan_id validator — fail-closed at import, red-pen D/C2)
 
 _PERIOD_MONTH_S = 30 * 24 * 3600.0          # a monthly subscription period, in seconds
+_AEGIS_OBSERVE_PER_HOST = 4900             # PLACEHOLDER per-protected-host monthly price (minor units)
+_AEGIS_RESPOND_PER_HOST = 9900
 _KNOWN_KINDS = frozenset({EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE})
 
 
@@ -52,6 +54,8 @@ class CatalogEntry:
     plan_id: str = ""          # subscription plan id (EVENT_SUBSCRIPTION_ACTIVE)
     allotment: int = 0         # subscription per-period credit allotment
     period_s: float = 0.0      # subscription period length in seconds
+    monitor_hosts: int = 0     # AEGIS monitoring plan: protected-host slots included (0 = not a monitoring plan)
+    monitor_respond: bool = False  # AEGIS monitoring plan tier includes respond (mode=block)
 
     def entitlement(self) -> Entitlement:
         """The sovereign Entitlement the signer mints for this price_id."""
@@ -67,7 +71,17 @@ class CatalogEntry:
         else:
             out.update(plan_id=self.plan_id, allotment=self.allotment,
                        period_days=round(self.period_s / 86400.0, 2))
+            if self.monitor_hosts:
+                out.update(monitor_hosts=self.monitor_hosts, monitor_respond=self.monitor_respond)
         return out
+
+
+@dataclass(frozen=True)
+class MonitoringPlan:
+    """What a monitoring subscription buys: protected-host slots + whether respond (block) is included."""
+    plan_id: str
+    host_slots: int
+    respond: bool
 
 
 # ==================================================================================================
@@ -84,6 +98,20 @@ _CATALOG: tuple[CatalogEntry, ...] = (
                  plan_id="pro", allotment=6_000, period_s=_PERIOD_MONTH_S),
     CatalogEntry("vigil_team_monthly", EVENT_SUBSCRIPTION_ACTIVE, "Team (monthly)", 29900, "USD",
                  plan_id="team", allotment=20_000, period_s=_PERIOD_MONTH_S),
+    # AEGIS monitoring: priced PER PROTECTED HOST PER MONTH (amount = per-host price x included hosts). No credit
+    # allotment (allotment=0 => no plan-credit refill); the plan buys host slots, and the respond tier buys block.
+    CatalogEntry("vigil_aegis_observe_1h_monthly", EVENT_SUBSCRIPTION_ACTIVE, "AEGIS Observe, 1 host (monthly)",
+                 1 * _AEGIS_OBSERVE_PER_HOST, "USD", plan_id="aegis_observe_1h", period_s=_PERIOD_MONTH_S,
+                 monitor_hosts=1),
+    CatalogEntry("vigil_aegis_observe_5h_monthly", EVENT_SUBSCRIPTION_ACTIVE, "AEGIS Observe, 5 hosts (monthly)",
+                 5 * _AEGIS_OBSERVE_PER_HOST, "USD", plan_id="aegis_observe_5h", period_s=_PERIOD_MONTH_S,
+                 monitor_hosts=5),
+    CatalogEntry("vigil_aegis_respond_1h_monthly", EVENT_SUBSCRIPTION_ACTIVE, "AEGIS Respond, 1 host (monthly)",
+                 1 * _AEGIS_RESPOND_PER_HOST, "USD", plan_id="aegis_respond_1h", period_s=_PERIOD_MONTH_S,
+                 monitor_hosts=1, monitor_respond=True),
+    CatalogEntry("vigil_aegis_respond_5h_monthly", EVENT_SUBSCRIPTION_ACTIVE, "AEGIS Respond, 5 hosts (monthly)",
+                 5 * _AEGIS_RESPOND_PER_HOST, "USD", plan_id="aegis_respond_5h", period_s=_PERIOD_MONTH_S,
+                 monitor_hosts=5, monitor_respond=True),
 )
 
 
@@ -102,10 +130,15 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
                 and e.currency.isupper()):
             raise ValueError(f"catalog entry {e.price_id!r}: currency must be an uppercase ISO-4217 alpha-3 code")
         if e.kind == EVENT_TOPUP:
-            if e.credits <= 0 or e.plan_id or e.allotment or e.period_s:
+            if e.credits <= 0 or e.plan_id or e.allotment or e.period_s or e.monitor_hosts or e.monitor_respond:
                 raise ValueError(f"top-up {e.price_id!r}: needs credits>0 and no plan/allotment/period")
         else:  # EVENT_SUBSCRIPTION_ACTIVE
-            if not e.plan_id or e.allotment <= 0 or not math.isfinite(e.period_s) or e.period_s <= 0.0 or e.credits:
+            if isinstance(e.monitor_hosts, bool) or not isinstance(e.monitor_hosts, int) or e.monitor_hosts < 0:
+                raise ValueError(f"subscription {e.price_id!r}: monitor_hosts must be a non-negative int")
+            if e.monitor_respond and not e.monitor_hosts:
+                raise ValueError(f"subscription {e.price_id!r}: monitor_respond requires monitor_hosts>0")
+            min_allot = 0 if e.monitor_hosts else 1      # a monitoring plan buys host slots, not credits
+            if not e.plan_id or e.allotment < min_allot or not math.isfinite(e.period_s) or e.period_s <= 0.0 or e.credits:
                 raise ValueError(f"subscription {e.price_id!r}: needs plan_id + allotment>0 + finite period_s>0, no credits")
             # mirror the mint-path validator (subscription._check_plan_id): a malformed-but-nonempty plan_id must
             # fail HERE at import, never detonate inside subscribe() at webhook-mint time (red-pen D/C2).
@@ -116,6 +149,23 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
 
 
 _validate(_CATALOG)
+
+
+_plan_seen: set[str] = set()
+for _e in _CATALOG:
+    if _e.monitor_hosts:
+        if _e.plan_id in _plan_seen:
+            raise ValueError(f"monitoring plan_id must be unique: {_e.plan_id!r}")
+        _plan_seen.add(_e.plan_id)
+
+
+def monitoring_plan(plan_id: str) -> "MonitoringPlan | None":
+    """The catalog's monitoring entitlement for a subscription plan_id (None if it is not a monitoring plan).
+    The CATALOG decides what a plan buys — never a client field."""
+    for e in _CATALOG:
+        if e.monitor_hosts and e.plan_id == plan_id:
+            return MonitoringPlan(plan_id=e.plan_id, host_slots=e.monitor_hosts, respond=e.monitor_respond)
+    return None
 
 
 def entitlements() -> dict[str, Entitlement]:

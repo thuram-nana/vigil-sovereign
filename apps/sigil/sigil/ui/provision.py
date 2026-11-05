@@ -939,6 +939,25 @@ class Provisioner:
             self._audit(action, requester=requester, org_id=org_id, target=host, outcome="denied")
             raise ProvisionDenied("requester may not manage monitoring for this org")
 
+    def _monitor_plan_admit(self, reg, org_id: str, host: str, mode: str, now: float) -> None:
+        """AE-5 billing gate (server-side; the CATALOG decides money): the session org needs an ACTIVE, in-period
+        monitoring subscription with a free host slot (re-authorizing an already-granted host reuses its slot),
+        and mode=block needs a plan tier that includes respond. Raises ValueError (refused + audited)."""
+        from ..governor.asset_ownership import _check_host
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_authority import MODE_BLOCK
+        from ..governor.subscription import SubscriptionRegistry
+        sub = SubscriptionRegistry(self.store).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if plan is None:
+            raise ValueError("an active monitoring plan is required")
+        if mode == MODE_BLOCK and not plan.respond:
+            raise ValueError("block mode requires a monitoring plan that includes respond")
+        h = _check_host(host)
+        used = {g.host for g in reg.grants(org_id) if g.covers(now)} - {h}
+        if len(used) >= plan.host_slots:
+            raise ValueError("no free protected-host slot on the monitoring plan")
+
     def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
                           window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
         """Owner-sign + publish a DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag →
@@ -967,6 +986,7 @@ class Provisioner:
             try:
                 m = _check_mode(mode)
                 reg = MonitoringAuthorityRegistry(self.store)
+                self._monitor_plan_admit(reg, requester_org_id, host, m, t)
                 g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=t + window, now=t,
                               issued_at=self._next_issued())
             except ValueError as e:

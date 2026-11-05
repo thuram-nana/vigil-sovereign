@@ -39,7 +39,8 @@ def test_catalog_validates_and_projects():
         if e.kind == EVENT_TOPUP:
             assert e.credits > 0 and not e.plan_id
         else:
-            assert e.plan_id and e.allotment > 0 and e.period_s > 0 and not e.credits
+            assert e.plan_id and e.period_s > 0 and not e.credits
+            assert e.allotment > 0 or cat.monitoring_plan(e.plan_id) is not None
     plans = cat.plans()
     assert {p["price_id"] for p in plans} == set(ents)
     assert all({"price_id", "kind", "name", "amount_minor", "currency"} <= set(p) for p in plans)
