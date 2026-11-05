@@ -198,6 +198,17 @@ Verified against the actual tree (several handoff notes are STALE — built in #
 GENUINE remaining #4 build items: W5 oracle, offboarding single-cascade, E0 billing perms (+ the pending ops/docs).
 Each touches money/auth → gets the per-slice build→mutation-verify→red-pen; heavy red-pen deferred to post-Nov-6.
 
+- **E0 per-org billing perms: SUBSTANTIALLY PRESENT** — a per-org `org_admin` role exists ("Slice E0: billing +
+  member admin for THIS org, never run_engagement/offense_authority"); billing reads gated by `view_billing`
+  permission, per-org scoped (`server.py:459` `org_role_can(... permission="view_billing")`). Functionality
+  (own-billing view/manage, capped below testing authority) exists; just not named
+  `view_own_billing`/`manage_own_billing`. → naming/doc confirmation, not a missing feature. (TODO: confirm the
+  mutation/manage side uses a perm too.)
+
+GENUINE remaining #4 build items (narrowed): **W5 oracle** (absent), **one offboarding cascade** (partial today),
+**ops sweeps/runbooks + make-gate determinism + egress/kill-switch decision**. Each = its own slice + PR; heavy
+red-pen deferred to post-Nov-6.
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
