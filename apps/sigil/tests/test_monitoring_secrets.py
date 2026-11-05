@@ -60,11 +60,28 @@ def test_resolver_is_exact_pair_and_fail_closed(sdir):
     assert M.resolve_report_secret("org_a", "app.example.com", sdir / "nope") is None
 
 
-def test_resolver_refuses_group_readable_symlink_short_oversized(sdir):
+def _report_loose_mode(monkeypatch, target, extra_bits):
+    """The resolver SEES group/world bits on ``target`` without a permissive secret file ever being written:
+    ``os.fstat`` reports the extra bits for that inode only (the file itself stays 0600)."""
+    real = os.fstat
+    ino = os.stat(target).st_ino
+
+    def fstat(fd):
+        st = real(fd)
+        if st.st_ino != ino:
+            return st
+        fields = list(st)
+        fields[0] = st.st_mode | extra_bits
+        return os.stat_result(fields)
+    monkeypatch.setattr(os, "fstat", fstat)
+
+
+def test_resolver_refuses_group_readable_symlink_short_oversized(sdir, monkeypatch):
     p = M.provision_report_secret("org_a", "app.example.com", sdir)
-    os.chmod(p, 0o640)
-    assert M.resolve_report_secret("org_a", "app.example.com", sdir) is None
-    os.chmod(p, 0o600)
+    with monkeypatch.context() as m:
+        _report_loose_mode(m, p, 0o040)
+        assert M.resolve_report_secret("org_a", "app.example.com", sdir) is None
+    assert M.resolve_report_secret("org_a", "app.example.com", sdir) is not None   # control: 0600 resolves
     p.write_text("short\n")
     assert M.resolve_report_secret("org_a", "app.example.com", sdir) is None
     p.write_text("x" * 5000)

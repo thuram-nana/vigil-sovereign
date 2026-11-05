@@ -11,11 +11,27 @@ from framework.v2.aegis import gateway as G
 SECRET = "a" * 64
 
 
-def _secret_file(tmp_path, content=SECRET, mode=0o600, name="report.secret"):
+def _secret_file(tmp_path, content=SECRET, name="report.secret"):
     p = tmp_path / name
     p.write_text(content + "\n")
-    os.chmod(p, mode)
+    os.chmod(p, 0o600)
     return p
+
+
+def _report_loose_mode(monkeypatch, target, extra_bits):
+    """Make the loader SEE group/world permission bits on ``target`` without ever writing a permissive secret
+    file to disk: ``os.fstat`` reports the extra bits for that inode only (the file itself stays 0600)."""
+    real = os.fstat
+    ino = os.stat(target).st_ino
+
+    def fstat(fd):
+        st = real(fd)
+        if st.st_ino != ino:
+            return st
+        fields = list(st)
+        fields[0] = st.st_mode | extra_bits
+        return os.stat_result(fields)
+    monkeypatch.setattr(os, "fstat", fstat)
 
 
 class _Stop(Exception):
@@ -41,10 +57,12 @@ def test_loader_reads_stripped_secret(tmp_path):
     assert C.load_monitoring_secret(str(_secret_file(tmp_path))) == SECRET.encode()
 
 
-@pytest.mark.parametrize("mode", [0o640, 0o604, 0o644, 0o660])
-def test_loader_refuses_group_or_world_readable(tmp_path, mode):
+@pytest.mark.parametrize("extra_bits", [0o040, 0o004, 0o044, 0o060])
+def test_loader_refuses_group_or_world_readable(tmp_path, monkeypatch, extra_bits):
+    sf = _secret_file(tmp_path)
+    _report_loose_mode(monkeypatch, sf, extra_bits)
     with pytest.raises(ValueError, match="owner-only"):
-        C.load_monitoring_secret(str(_secret_file(tmp_path, mode=mode)))
+        C.load_monitoring_secret(str(sf))
 
 
 def test_loader_refuses_short_secret(tmp_path):
@@ -91,8 +109,9 @@ def test_default_is_legacy_gateway(captured):
         assert captured.get(k) is None
 
 
-def test_bad_secret_file_exits_2_without_serving(tmp_path, captured, capsys):
-    sf = _secret_file(tmp_path, mode=0o644)
+def test_bad_secret_file_exits_2_without_serving(tmp_path, captured, capsys, monkeypatch):
+    sf = _secret_file(tmp_path)
+    _report_loose_mode(monkeypatch, sf, 0o044)
     rc = C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--saas-tenant", "org_a",
                  "--saas-host", "app.example.com", "--monitoring-spool", str(tmp_path / "s"),
                  "--monitoring-secret-file", str(sf)])
