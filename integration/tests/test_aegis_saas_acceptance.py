@@ -67,7 +67,11 @@ class _Sovereign:
     def __init__(self, tmp: Path):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("VIGIL_", "SIGIL_"))}
         self.env.update({
-            "PYTHONPATH": os.pathsep.join(str(_REPO / p) for p in ("apps/sigil", "packages/core/vigil_core")),
+            # The sovereign child needs sigil + its sovereign-safe siblings (vigil_integration's inert seams,
+            # vigil_core) explicitly — never whatever happens to be installed in the parent's venv. (CI's offense
+            # leg has no vigil_integration installed; relying on the parent env passed locally and failed P5.)
+            "PYTHONPATH": os.pathsep.join(str(_REPO / p) for p in ("apps/sigil", "integration",
+                                                                   "packages/core/vigil_core")),
             "SIGIL_HOME": str(tmp / "sigil_home"), "VIGIL_BASE_DIR": str(tmp / "base"),
             "SIGIL_SPINE_DIR": str(tmp / "spine"), "VIGIL_MONITORING_PUBLISH_DIR": str(tmp / "pub"),
             "VIGIL_CUSTOMER_MONITORING_ENABLED": "1", "AEGIS_ACC_STORE": str(tmp / "spine.jsonl")})
