@@ -85,7 +85,15 @@ def _rig():
     _seat(orgs, "org_b", "bob", "org_admin")
     _prove(s, "org_a", "apme.cm")
     _prove(s, "org_b", "beta.cm")
+    _subscribe(s, "org_a", "aegis_respond_5h")
+    _subscribe(s, "org_b", "aegis_respond_5h")
     return p, s, orgs
+
+
+def _subscribe(store, org, plan_id, *, period_end=1e12):
+    from sigil.governor.subscription import SubscriptionRegistry
+    SubscriptionRegistry(store).subscribe(org, plan_id, 0, period_start=0.0, period_end=period_end,
+                                          issued_at=float(next(_iss)))
 
 
 # --- positive path + artifact ------------------------------------------------------------------------
