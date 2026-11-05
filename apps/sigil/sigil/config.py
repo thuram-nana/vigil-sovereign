@@ -221,6 +221,16 @@ def monitoring_publish_dir() -> Path:
     return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "monitoring_authority"
 
 
+def monitoring_secrets_dir() -> Path:
+    """Where the sovereign keeps the per-(org, host) AEGIS-SaaS monitoring REPORT secrets (AE-6). These are
+    shared HMAC secrets (one copy goes to that tenant's managed gateway as a 0600 file); never published.
+    `VIGIL_MONITORING_SECRETS_DIR` overrides; default under the live data dir."""
+    override = (os.environ.get("VIGIL_MONITORING_SECRETS_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "report_secrets"
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     """A strict, fail-closed boolean env read: only the affirmative tokens below (case-insensitive) are True;
     anything else — including a typo — is the default. Used for opt-in DEV escape hatches that must never

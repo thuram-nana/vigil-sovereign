@@ -1171,6 +1171,62 @@ def cmd_settle_drain(a) -> None:
               f"{r['deduped']} deduped")
 
 
+def _monitoring_flag_or_exit(verb: str) -> None:
+    from . import config
+    if not config.customer_monitoring_enabled():
+        print(f"{verb}: AEGIS-SaaS monitoring is OFF (set VIGIL_CUSTOMER_MONITORING_ENABLED=1)", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_monitoring_secret(a) -> None:
+    """Provision (or rotate) the per-(org, host) AEGIS-SaaS monitoring REPORT secret (AE-6). Prints only the
+    secret FILE path (copy it, 0600, to that tenant's managed gateway as --monitoring-secret-file) — never the
+    secret itself. Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED."""
+    from . import config
+    from .governor.monitoring_secrets import provision_report_secret
+    _monitoring_flag_or_exit("monitoring-secret")
+    try:
+        path = provision_report_secret(a.org, a.host, a.secrets_dir or config.monitoring_secrets_dir(),
+                                       rotate=a.rotate)
+    except (OSError, ValueError) as e:
+        print(f"monitoring-secret: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(f"  report secret for ({a.org}, {a.host}) -> {path}")
+
+
+def cmd_monitoring_drain(a) -> None:
+    """Drain / watch the AEGIS-SaaS monitoring-report spool (AE-4b/AE-6), mirroring settle-drain: each sealed
+    report must verify under its (org, host) report secret, be fresh, and re-bind to an ACTIVE monitoring
+    authority, else it is quarantined. No network ingest endpoint. Default-OFF behind
+    VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key (the registry is read verify-only)."""
+    import time as _time
+
+    from . import config
+    from .governor.monitoring_authority import MonitoringAuthorityRegistry
+    from .governor.monitoring_secrets import resolver
+    from .inbound.monitoring_spool import MonitoringSpoolWatcher
+    _monitoring_flag_or_exit("monitoring-drain")
+    store = SpineStore()
+    watcher = MonitoringSpoolWatcher(store, spool_dir=a.spool,
+                                     secret_for=resolver(a.secrets_dir or config.monitoring_secrets_dir()),
+                                     authority=MonitoringAuthorityRegistry(store, owner_key=None))
+
+    def _once() -> None:
+        r = watcher.drain()
+        print(f"  drained: {r['recorded']} recorded, {r['rejected']} rejected, {r['deduped']} deduped")
+
+    if getattr(a, "monitoring_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming -> monitoring events; Ctrl-C to stop")
+        try:
+            while True:
+                _once()
+                _time.sleep(a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        _once()
+
+
 def cmd_knowledge(a) -> None:
     """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
     owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
@@ -2336,6 +2392,24 @@ def main(argv=None) -> None:
                           "(default: $VIGIL_BASE_DIR)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
+    pmd = sub.add_parser("monitoring-drain",
+                         help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "
+                              "(per-(org,host) MAC + freshness + active authority; fail-closed; default-OFF)")
+    pmd.add_argument("monitoring_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pmd.add_argument("--spool", required=True, help="the monitoring spool directory (its incoming/ is drained)")
+    pmd.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pmd.set_defaults(fn=cmd_monitoring_drain)
+    pms = sub.add_parser("monitoring-secret",
+                         help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret "
+                              "(prints the 0600 file path, never the secret; default-OFF)")
+    pms.add_argument("--org", required=True, help="tenant org_id")
+    pms.add_argument("--host", required=True, help="the protected host (bare DNS name)")
+    pms.add_argument("--rotate", action="store_true", help="replace an existing secret")
+    pms.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pms.set_defaults(fn=cmd_monitoring_secret)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
