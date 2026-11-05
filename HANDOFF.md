@@ -21,3 +21,16 @@
   certificate verdict (request AND response side). Red-pen found a real HIGH (auth keyed on client Host header
   => bypass / cross-host) — FIXED + regression-tested; MED (response-side untested) FIXED. Full aegis suite 0 fail.
 - NEXT: AE-4 verdict crossing -> tenant Monitoring surface; AE-5 catalog plan; AE-6 deploy; AE-7 acceptance.
+- AE-4..AE-7 + billing folds: AE-4a a6d871c (gateway sealed metadata-only reports); AE-4b/5/6/7 built in parallel
+  worktrees, merged at 826d2ef; AE-5 fold acff3e0 (separate monitoring subscription line, period clamp, down-path
+  cascade, plan enforcement + renewal re-mint, reconcile sweep, flag-off catalog hiding, slot predicate) and fold 2
+  6cc5a04 (down-event routing by full catalog, 72h renewal grace). Reviews: AE-5/7 4+1 lenses x 3 skeptics found
+  3 HIGH + 4 MED (all fixed); re-reviews clean. Verified here: monitoring/billing suites green, acceptance 8/8,
+  ruff + ratchet green; full SIGIL suite 2426 pass (2 known env-only fails).
+- PR #996 (AEGIS-SaaS -> main) OPEN. Owner authorized merge once ALL checks green. Status at checkpoint: all
+  blocking checks green so far; RED: "pre-commit hooks (advisory)" — every hook + full-tree gitleaks 8.28.0 +
+  negative controls PASS on a clean checkout of this branch (likely transient hook-env build), re-running on this
+  commit; "CodeQL" (default setup, advisory) reports new alerts that this toolset cannot read (no code-scanning
+  access) — needs owner: grant access to fix/triage, or decide dismissal (dismissal requires owner approval).
+- Parallel close-out PRs open (NOT authorized to merge): #992 livefire nikto, #993 billing-drain CLI,
+  #994 ops sweeps (review caught + fixed a refund-of-completed-work money bug), #995 ops runbooks.
