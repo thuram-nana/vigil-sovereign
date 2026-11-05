@@ -168,7 +168,8 @@ def test_oversized_symlink_and_non_regular_files_refused(tmp_path, pinned):
 
 
 @pytest.mark.parametrize("bad", ["", " ", "../etc/passwd", "/abs/path", "a/b", "[::1]", "1.2.3.4:80:90",
-                                 "x\x00y", "host?q", "h" * 300, None, 123])
+                                 "x\x00y", "host?q", "h" * 300, None, 123,
+                                 "apme.cm:evil", "apme.cm:", "apme.cm:44a"])
 def test_crafted_hosts_are_refused_without_touching_the_fs(tmp_path, pinned, bad):
     r = M.check_monitoring_authority("org_a", bad, publish_dir=tmp_path, now=1500.0)
     assert not r.ok and r.reason == "invalid host", r            # refused BEFORE any filesystem lookup
