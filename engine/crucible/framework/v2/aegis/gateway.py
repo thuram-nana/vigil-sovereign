@@ -793,7 +793,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1", port: int = 8080,
                   slug: str = "aegis-gateway",
                   on_verdict: Callable[[Verdict], None] | None = None,
-                  saas_tenant: str | None = None, saas_host: str | None = None) -> ThreadingHTTPServer:
+                  saas_tenant: str | None = None, saas_host: str | None = None,
+                  monitoring_spool: str | None = None,
+                  monitoring_secret: bytes | None = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -801,6 +803,19 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
     is read-only: it inspects and forwards, never blocking. ``slug`` names the gateway for the
     kill-switch and the audit trail."""
     httpd = ThreadingHTTPServer((host, port), AegisGatewayHandler)
+    # AEGIS-SaaS AE-4: a tenant gateway may additionally spool sealed, metadata-only monitoring reports for the
+    # sovereign Monitoring surface. Both the spool and its per-(tenant, host) report secret are required together,
+    # and only a tenant-bound gateway reports (a legacy gateway's sinks are unchanged).
+    if (monitoring_spool is None) != (monitoring_secret is None):
+        raise ValueError("monitoring_spool and monitoring_secret must be configured together")
+    if monitoring_spool is not None and not saas_tenant:
+        raise ValueError("monitoring reports require a tenant-bound gateway (saas_tenant + saas_host)")
     httpd.settings = GatewaySettings(upstream, config, slug=slug, on_verdict=on_verdict,  # type: ignore[attr-defined]
                                      saas_tenant=saas_tenant, saas_host=saas_host)
+    if monitoring_spool is not None:
+        from .monitoring_report import SpoolReporter, compose_sinks
+        st = httpd.settings  # type: ignore[attr-defined]
+        st.monitoring_reporter = SpoolReporter(monitoring_spool, org_id=st.saas_tenant, host=st.saas_host,
+                                               secret=monitoring_secret)
+        st.on_verdict = compose_sinks(on_verdict, st.monitoring_reporter)
     return httpd
