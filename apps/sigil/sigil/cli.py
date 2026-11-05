@@ -1171,6 +1171,40 @@ def cmd_settle_drain(a) -> None:
               f"{r['deduped']} deduped")
 
 
+def cmd_ops_sweep(a) -> None:
+    """Read-only-by-default operator sweeps. ``reservations``: abandoned (unsettled past not_after + TTL) credit
+    reservations -> report; ``--apply`` full-refunds them via the existing owner-keyed ``settle_launch`` path
+    (exactly-once per (slug, nonce)) and additionally requires VIGIL_OPS_SWEEP_APPLY_ENABLED=1 (default OFF).
+    ``tx-refs``: dangling Flutterwave checkouts (no webhook drained) -> report only."""
+    import os
+    import time as _time
+
+    from . import ops_sweeps
+
+    now = float(a.now) if a.now is not None else _time.time()
+    if a.sweep_cmd == "reservations":
+        if a.apply and os.environ.get("VIGIL_OPS_SWEEP_APPLY_ENABLED") != "1":
+            print("--apply refused: set VIGIL_OPS_SWEEP_APPLY_ENABLED=1 to allow refunds (default OFF)",
+                  file=sys.stderr)
+            sys.exit(2)
+        from .ui.launch_gate import LaunchGate
+        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or None))
+        if gate.owner_key is None:
+            print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+            sys.exit(2)
+        out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply)
+    else:
+        if a.apply:
+            print("tx-refs is report-only; --apply is not supported", file=sys.stderr)
+            sys.exit(2)
+        if not a.checkouts or not a.spool:
+            print("tx-refs requires --checkouts and --spool", file=sys.stderr)
+            sys.exit(2)
+        out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(a.checkouts), spool_dir=a.spool,
+                                                now=now, ttl_s=a.ttl)
+    print(json.dumps(out, indent=2, sort_keys=True))
+
+
 def cmd_knowledge(a) -> None:
     """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
     owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
@@ -2336,6 +2370,19 @@ def main(argv=None) -> None:
                           "(default: $VIGIL_BASE_DIR)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
+    pos = sub.add_parser("ops-sweep",
+                         help="read-only operator sweeps: abandoned credit reservations (--apply full-refunds "
+                              "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / dangling Flutterwave "
+                              "tx_refs (report only)")
+    pos.add_argument("sweep_cmd", choices=["reservations", "tx-refs"])
+    pos.add_argument("--ttl", type=float, default=86400.0,
+                     help="grace seconds past lease not_after / checkout start before an item is flagged")
+    pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")
+    pos.add_argument("--base-dir", default="", help="(reservations) the credit-lease seam root")
+    pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
+    pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
+    pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
+    pos.set_defaults(fn=cmd_ops_sweep)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
