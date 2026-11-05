@@ -116,7 +116,7 @@ class GatewaySettings:
 
     def __init__(self, upstream: str, config: AegisConfig, *, slug: str = "aegis-gateway",
                  on_verdict: Callable[[Verdict], None] | None = None,
-                 saas_tenant: str | None = None) -> None:
+                 saas_tenant: str | None = None, saas_host: str | None = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"upstream must be an http(s) URL with a host, got {upstream!r}")
@@ -130,6 +130,17 @@ class GatewaySettings:
         # against that tenant's owner-signed monitoring authority (AE-2). None = the legacy self-hosted gateway,
         # whose behaviour is byte-identical to before.
         self.saas_tenant = saas_tenant or None
+        # The PROTECTED host this tenant gateway is deployed for — the exact host the owner-signed grant names.
+        # FIXED per gateway: authorization never reads the client-controlled Host header (which the gateway does
+        # not route on — every request goes to the one configured upstream). Required whenever saas_tenant is set.
+        self.saas_host = None
+        if self.saas_tenant is not None:
+            from .monitoring_authority_check import normalize_host
+            h = normalize_host(saas_host or "")
+            if h is None:
+                raise ValueError("a SaaS (tenant-bound) gateway requires a valid saas_host: the protected host its "
+                                 "monitoring authority names")
+            self.saas_host = h
         self._enforce_authorized = self._authorize_enforce()
         # G5 — the inline per-actor Beta belief graph + a monotonic sequence for its observations, and
         # a lock (the server is threaded, so belief updates must be serialised). ``actor_last_class``
@@ -229,14 +240,17 @@ class GatewaySettings:
                 and self._enforce_authorized
                 and not self._killswitch_tripped())
 
-    def saas_decision(self, host: str):
+    def saas_decision(self):
         """AE-3 per-request re-authorization. None when this is not a SaaS gateway; otherwise the AE-2
-        ``MonitoringDecision`` for (saas_tenant, request host). Total: any failure is a refusal."""
+        ``MonitoringDecision`` for (saas_tenant, the gateway's FIXED protected saas_host). Deliberately takes no
+        request input: the Host header is client-controlled and is not what the gateway forwards to, so keying
+        authorization on it would let any client switch inspection off (or borrow another host's grant).
+        Total: any failure is a refusal."""
         if self.saas_tenant is None:
             return None
         try:
             from .monitoring_authority_check import check_monitoring_authority
-            return check_monitoring_authority(self.saas_tenant, host)
+            return check_monitoring_authority(self.saas_tenant, self.saas_host or "")
         except Exception:
             from .monitoring_authority_check import MonitoringDecision
             return MonitoringDecision(ok=False, mode=None, reason="monitoring-authority check unavailable")
@@ -691,7 +705,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             return
         # AEGIS-SaaS AE-3: re-authorize THIS request against the tenant's monitoring authority. No valid
         # authority => AEGIS neither inspects nor acts: a plain pass-through (no verdict, no belief, no block).
-        decision = settings.saas_decision(self.headers.get("Host", ""))
+        decision = settings.saas_decision()
         if decision is not None and not decision.ok:
             passthrough = self._forward(method, body)
             if passthrough is None:
@@ -779,7 +793,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1", port: int = 8080,
                   slug: str = "aegis-gateway",
                   on_verdict: Callable[[Verdict], None] | None = None,
-                  saas_tenant: str | None = None) -> ThreadingHTTPServer:
+                  saas_tenant: str | None = None, saas_host: str | None = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -788,5 +802,5 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
     kill-switch and the audit trail."""
     httpd = ThreadingHTTPServer((host, port), AegisGatewayHandler)
     httpd.settings = GatewaySettings(upstream, config, slug=slug, on_verdict=on_verdict,  # type: ignore[attr-defined]
-                                     saas_tenant=saas_tenant)
+                                     saas_tenant=saas_tenant, saas_host=saas_host)
     return httpd

@@ -81,17 +81,22 @@ def _grant(d: Path, *, mode="block", host=HOST, org=TENANT, nb=0.0, na=4.0e9):
     return p
 
 
-def _gw(upstream_port, *, mode="enforce", tenant=TENANT, sink=None):
+def _gw(upstream_port, *, mode="enforce", tenant=TENANT, sink=None, saas_host=HOST):
     cfg = AegisConfig(deployment_secret="k", mode=mode)
     gw = serve_gateway(f"http://127.0.0.1:{upstream_port}", config=cfg, host="127.0.0.1", port=0,
-                       on_verdict=(sink.append if sink is not None else None), saas_tenant=tenant)
+                       on_verdict=(sink.append if sink is not None else None), saas_tenant=tenant,
+                       saas_host=(saas_host if tenant else None))
     threading.Thread(target=gw.serve_forever, daemon=True).start()
     return gw, gw.server_address[1]
 
 
 def _req(port, path, host=HOST):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    c.request("GET", path, headers={"Host": host})
+    if host is None:                                         # send NO Host header at all
+        c.putrequest("GET", path, skip_host=True)
+        c.endheaders()
+    else:
+        c.request("GET", path, headers={"Host": host})
     r = c.getresponse()
     out = (r.status, dict(r.getheaders()), r.read())
     c.close()
@@ -100,7 +105,7 @@ def _req(port, path, host=HOST):
 
 def _run(upstream_port, path=ATTACK, **kw):
     sink: list[Verdict] = []
-    gw, port = _gw(upstream_port, sink=sink, **{k: v for k, v in kw.items() if k in ("mode", "tenant")})
+    gw, port = _gw(upstream_port, sink=sink, **{k: v for k, v in kw.items() if k in ("mode", "tenant", "saas_host")})
     try:
         return _req(port, path, host=kw.get("host", HOST)), sink, gw
     finally:
@@ -194,11 +199,32 @@ def test_no_valid_authority_is_uninspected_pass_through(upstream, pub, monkeypat
     assert sink == [], "no authority => AEGIS must not inspect or record this tenant's traffic"
 
 
-def test_request_for_another_host_header_is_pass_through(upstream, pub, monkeypatch):
+@pytest.mark.parametrize("spoof", ["unrelated.example", "x.invalid", "", None, "APME.cm:1", "other.cm"])
+def test_client_host_header_cannot_switch_off_inspection_or_blocking(upstream, pub, monkeypatch, spoof):
+    """Red-pen HIGH (AE-3): authorization was keyed on the client Host header while the request is always
+    forwarded to the fixed upstream, so a spoofed/missing Host bypassed AEGIS. Authorization is now bound to the
+    gateway's fixed saas_host: whatever Host the client sends, the attack is still blocked."""
     _grant(pub, mode="block")
     monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
-    (status, _, _), sink, _ = _run(upstream, host="unrelated.example")
+    (status, hdr, _), sink, _ = _run(upstream, host=spoof)
+    assert status == 403 and hdr.get("X-Aegis-Block") == "path_traversal_attempt", (spoof, status)
+
+
+def test_grant_for_another_host_never_authorizes_this_gateway(upstream, pub, monkeypatch):
+    """The other half of the HIGH: a tenant's BLOCK grant for host A must not drive monitoring/blocking of a
+    gateway deployed for host B, even when the client sends `Host: A`."""
+    _grant(pub, mode="block", host="a.example")
+    monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
+    (status, _, _), sink, _ = _run(upstream, saas_host="b.example", host="a.example")
     assert status == 200 and sink == []
+
+
+def test_tenant_gateway_requires_a_valid_protected_host():
+    cfg = AegisConfig(deployment_secret="k", mode="enforce")
+    for bad in (None, "", "../x", "[::1]"):
+        with pytest.raises(ValueError, match="saas_host"):
+            G.GatewaySettings("http://127.0.0.1:1", cfg, saas_tenant=TENANT, saas_host=bad)
+    assert G.GatewaySettings("http://127.0.0.1:1", cfg, saas_tenant=TENANT, saas_host="APME.cm.").saas_host == HOST
 
 
 def test_per_request_reauthorization_revocation_takes_effect_immediately(upstream, pub, monkeypatch):
@@ -229,9 +255,9 @@ def _settings(**kw):
 
 def test_effective_enforce_matrix(monkeypatch):
     legacy = _settings()
-    assert legacy.saas_decision("apme.cm") is None
+    assert legacy.saas_decision() is None
     assert legacy.effective_enforce(None) == legacy.enforce
-    s = _settings(saas_tenant=TENANT)
+    s = _settings(saas_tenant=TENANT, saas_host=HOST)
     blk = MonitoringDecision(ok=True, mode="block", reason="authorized")
     obs = MonitoringDecision(ok=True, mode="observe", reason="authorized")
     bad = MonitoringDecision(ok=False, mode=None, reason="x")
@@ -250,5 +276,60 @@ def test_saas_decision_is_total_when_the_check_itself_fails(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("x")
     monkeypatch.setattr(M, "check_monitoring_authority", boom)
-    d = _settings(saas_tenant=TENANT).saas_decision("apme.cm")
+    d = _settings(saas_tenant=TENANT, saas_host=HOST).saas_decision()
     assert d is not None and d.ok is False
+
+
+# ---- red-pen MED (AE-3): the RESPONSE-side gate --------------------------------------------------------------
+class _Reflecting(http.server.BaseHTTPRequestHandler):
+    """Reflects q unencoded — the gateway can only PROVE the XSS from the app's own response."""
+    def log_message(self, *_a):
+        return
+
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("q", [""])[0]
+        body = f"<html><body>results for {q}</body></html>".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture()
+def reflecting():
+    srv = socketserver.TCPServer(("127.0.0.1", 0), _Reflecting)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv.server_address[1]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+XSS = "/s?q=" + urllib.parse.quote("<script>alert(1)</script>")
+
+
+def test_response_side_block_only_with_every_term(reflecting, pub, monkeypatch):
+    _grant(pub, mode="block")
+    monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
+    (status, hdr, _), sink, _ = _run(reflecting, path=XSS)
+    assert status == 403 and hdr.get("X-Aegis-Block") == "xss"
+    assert any(v.decision == "confirmed" and v.attack_class == "xss" for v in sink)
+
+
+@pytest.mark.parametrize("variant", ["observe_grant", "flag_off", "no_grant"])
+def test_response_side_never_blocks_without_the_full_gate(reflecting, pub, monkeypatch, variant):
+    if variant == "observe_grant":
+        _grant(pub, mode="observe")
+        monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
+    elif variant == "flag_off":
+        _grant(pub, mode="block")
+    else:
+        monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
+    (status, _, body), sink, _ = _run(reflecting, path=XSS)
+    assert status == 200 and b"results for" in body, (variant, status)
+    assert all(v.action != "block" for v in sink)
+    if variant == "no_grant":
+        assert sink == []
