@@ -285,6 +285,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay(_READS[path])
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
+        if path == "/api/customer/monitoring/events" and _monitoring_on():
+            return self._customer_read_relay("monitor_events")
         # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
         # Both are served ONLY when customer_oidc_enabled() — otherwise the routes are absent (404), so the
         # edge is byte-identical to a build without customer OIDC (mirrors the operator route-gating).

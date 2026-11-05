@@ -1023,6 +1023,13 @@ class Provisioner:
                     for g in reg.grants(requester_org_id)]
         return {"org_id": requester_org_id, "grants": rows}
 
+    def monitor_events(self, requester: str, requester_org_id: str, *, ip: str = "", limit: int = 200) -> dict:
+        """The SESSION org's drained AEGIS monitoring events (gateway-reported; org-scoped read)."""
+        from ..inbound.monitoring_spool import monitoring_events
+        with self._lock:
+            self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
+        return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
     # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
     def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:
         """Shared gate for a customer-plane READ: ``admit_customer(permission)`` for the SESSION org (NO
