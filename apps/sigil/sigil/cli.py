@@ -1194,6 +1194,26 @@ def cmd_monitoring_secret(a) -> None:
     print(f"  report secret for ({a.org}, {a.host}) -> {path}")
 
 
+def _reconcile_once(store) -> list:
+    """One monitoring-billing sweep: retire (revoke + unpublish) every grant whose org's monitoring plan no longer
+    pays for it at now (lapsed / canceled / past_due / tier / slots). Keyless — the safe direction only."""
+    import time as _time
+
+    from .governor.monitoring_subscription import reconcile_monitoring
+    retired = reconcile_monitoring(store, now=_time.time())
+    for oid, host in retired:
+        print(f"  retired monitoring grant {host} (org {oid}): monitoring plan no longer covers it")
+    return retired
+
+
+def cmd_monitoring_reconcile(a) -> None:
+    """Sweep: apply the monitoring plan to every org's grants (catches a period lapse with no webhook).
+    Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key."""
+    _monitoring_flag_or_exit("monitoring-reconcile")
+    r = _reconcile_once(SpineStore())
+    print(f"  reconciled: {len(r)} grant(s) retired")
+
+
 def cmd_monitoring_drain(a) -> None:
     """Drain / watch the AEGIS-SaaS monitoring-report spool (AE-4b/AE-6), mirroring settle-drain: each sealed
     report must verify under its (org, host) report secret, be fresh, and re-bind to an ACTIVE monitoring
@@ -1219,6 +1239,7 @@ def cmd_monitoring_drain(a) -> None:
         print(f"  watching {a.spool}/incoming -> monitoring events; Ctrl-C to stop")
         try:
             while True:
+                _reconcile_once(store)               # billing standing bounds monitoring continuously
                 _once()
                 _time.sleep(a.interval)
         except KeyboardInterrupt:
@@ -2401,6 +2422,10 @@ def main(argv=None) -> None:
                      help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
     pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pmd.set_defaults(fn=cmd_monitoring_drain)
+    pmr = sub.add_parser("monitoring-reconcile",
+                         help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
+                              "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")
+    pmr.set_defaults(fn=cmd_monitoring_reconcile)
     pms = sub.add_parser("monitoring-secret",
                          help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret "
                               "(prints the 0600 file path, never the secret; default-OFF)")

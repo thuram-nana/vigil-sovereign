@@ -219,15 +219,21 @@ class MonitoringAuthorityRegistry:
         never revives an old grant). DEFAULT-DENY otherwise (other org, other host, revoked, expired, not yet
         valid, ownership lapsed or replaced)."""
         g = self.grant_for(org_id, host)
-        if g is None or not g.covers(now) or not g.proof_sha256:
+        if g is None or not g.covers(now):
             return None
+        return g if self.owned_at(org_id, host, now=now) else None
+
+    def owned_at(self, org_id: str, host: str, *, now: float) -> bool:
+        """The ownership half of ``active_at`` (window NOT applied): an active grant record exists AND the exact
+        (org, host) holds a CURRENT ownership proof that is the SAME proof the grant was minted against."""
+        g = self.grant_for(org_id, host)
+        if g is None or not g.proof_sha256:
+            return False
         own = self._ownership()
         if not own.has_current_proof(org_id, host, now=now):
-            return None
+            return False
         p = own.proof(org_id, host)
-        if p is None or p.token_sha256 != g.proof_sha256:
-            return None
-        return g
+        return p is not None and p.token_sha256 == g.proof_sha256
 
     def grants(self, org_id: str) -> list[MonitoringGrant]:
         """Every active grant record of one org (window not applied), in host order."""

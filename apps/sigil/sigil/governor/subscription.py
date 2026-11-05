@@ -123,7 +123,13 @@ class Subscription:
 
 
 class SubscriptionRegistry:
-    """Owner-signed per-tenant subscription state on the spine. Construction mirrors OrgRegistry/WalletRegistry."""
+    """Owner-signed per-tenant subscription state on the spine. Construction mirrors OrgRegistry/WalletRegistry.
+
+    ``SIGNAL`` / ``_SNAP`` name the record line: the credit-plan line is ``governor.subscription``; a subclass
+    (``monitoring_subscription.MonitoringSubscriptionRegistry``) folds a SEPARATE line under its own signal and
+    snapshot sub-state, so the two never overwrite each other (the signal is inside the signed core)."""
+    SIGNAL = SUBSCRIPTION_SIGNAL
+    _SNAP = "subscription"
 
     def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
         self.store = store
@@ -145,7 +151,7 @@ class SubscriptionRegistry:
         ps, pe = float(period_start), float(period_end)
         if pe <= ps:
             raise ValueError("period_end must be strictly after period_start")
-        core = {"signal": SUBSCRIPTION_SIGNAL, "org_id": oid, "plan_id": pid, "period_start": ps,
+        core = {"signal": self.SIGNAL, "org_id": oid, "plan_id": pid, "period_start": ps,
                 "period_end": pe, "allotment": al, "status": STATUS_ACTIVE, "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
@@ -173,7 +179,7 @@ class SubscriptionRegistry:
 
     def _append_down(self, org_id: str, status: str, *, issued_at: float = 0.0) -> int:
         oid = org_tenant_id(org_id)
-        core = {"signal": SUBSCRIPTION_SIGNAL, "org_id": oid, "plan_id": "", "period_start": 0.0,
+        core = {"signal": self.SIGNAL, "org_id": oid, "plan_id": "", "period_start": 0.0,
                 "period_end": 0.0, "allotment": 0, "status": status, "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto", "reason": f"subscription {oid} -> {status} (governed latch)"}
@@ -195,13 +201,13 @@ class SubscriptionRegistry:
             row: dict[Any, list] = {}
             since = -1
         else:
-            status = dict(snap.subscription_state_map())
-            issued = dict(snap.subscription_issued_map())
-            row = {r[0]: [r[1], r[2], r[3], r[4]] for r in snap.subscription_row}  # oid -> [plan,ps,pe,allot]
+            status = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state")}
+            issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued")}
+            row = {r[0]: [r[1], r[2], r[3], r[4]] for r in getattr(snap, f"{self._SNAP}_row")}  # oid -> [plan,ps,pe,allot]
             since = snap.base_seq - 1
         for rec in self.store.iter_records(since_seq=since):
             p = rec.payload
-            if not isinstance(p, dict) or p.get("signal") != SUBSCRIPTION_SIGNAL:
+            if not isinstance(p, dict) or p.get("signal") != self.SIGNAL:
                 continue
             oid = p.get("org_id")
             if not isinstance(oid, str) or not oid:

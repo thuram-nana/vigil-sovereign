@@ -48,7 +48,7 @@ def _prov(store):
 def setup() -> dict:
     from sigil.governor.asset_ownership import METHOD_DNS_TXT, AssetOwnershipRegistry
     from sigil.governor.identity import owner_keypair
-    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.governor.monitoring_subscription import MonitoringSubscriptionRegistry
     s = _store()
     _, orgs = _prov(s)
     reg = AssetOwnershipRegistry(s)
@@ -56,8 +56,8 @@ def setup() -> dict:
         orgs.create_org(org, org, owner=user, issued_at=float(next(_iss)) / 1000)
         orgs.grant_membership(org, user, "org_admin", issued_at=float(next(_iss)) / 1000)
         # AE-5: monitor_authorize requires an active monitoring plan; respond tier so block grants are allowed.
-        SubscriptionRegistry(s).subscribe(org, "aegis_respond_1h", 0, period_start=0.0, period_end=1e12,
-                                          issued_at=float(next(_iss)) / 1000)
+        MonitoringSubscriptionRegistry(s).subscribe(org, "aegis_respond_1h", 0, period_start=0.0, period_end=1e12,
+                                                    issued_at=float(next(_iss)) / 1000)
         ch = reg.issue_challenge(org, host, issued_at=time.time())
         reg.verify_and_record(org, host, method=METHOD_DNS_TXT, observed=[ch.marker], now=time.time(),
                               ttl_seconds=1e9)

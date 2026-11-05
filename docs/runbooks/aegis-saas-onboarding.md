@@ -64,6 +64,17 @@ Each report must verify under its (org, host) secret, be fresh, and match an ACT
 moved to `<spool>/rejected/` with a `.reason` sidecar. Accepted reports become tenant monitoring events, visible
 to that tenant only at `GET /api/customer/monitoring/events`.
 
+Billing bounds monitoring continuously. AEGIS plans bill on their own monitoring-subscription line and never
+touch the credit plan. Every grant expires at the end of the plan period. Cancel or past_due retires every
+grant for the org. A plan change retires block grants when the new plan has no respond tier, and retires grants
+beyond the slot count (the earliest-issued grants are kept). A renewal re-mints the surviving grants for the
+new period. The `watch` loop above also runs the reconcile sweep, which catches a lapse when no webhook arrives.
+To run the sweep by hand:
+
+```
+VIGIL_CUSTOMER_MONITORING_ENABLED=1 sigil monitoring-reconcile
+```
+
 ## 5. Verify
 
 - Send a benign request through the gateway: it is forwarded.

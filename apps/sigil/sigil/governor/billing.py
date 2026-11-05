@@ -702,6 +702,13 @@ class Entitlement:
     period_s: float = 0.0          # subscription period length in seconds
 
 
+def _is_monitoring_entitlement(ent: "Entitlement") -> bool:
+    """True iff the catalog entitlement is an AEGIS monitoring plan (the CATALOG decides — lazy import: catalog
+    imports this module)."""
+    from .catalog import monitoring_plan
+    return ent.kind == EVENT_SUBSCRIPTION_ACTIVE and bool(ent.plan_id) and monitoring_plan(ent.plan_id) is not None
+
+
 class BillingSigner:
     """Converts a provider-VERIFIED billing event into exactly one owner-signed sovereign mint — the
     EVIDENCE→FACT boundary. Composes the sovereign registries (wallet, subscription, plan-credit ledger) and an
@@ -709,8 +716,15 @@ class BillingSigner:
     event and never lets an on-the-wire amount decide money (only the catalog does)."""
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
-                 expected: "Optional[Mapping[str, Any]]" = None, invoices=None):
+                 expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
+                 on_monitoring_change=None):
         self.provider = provider
+        # AEGIS: a catalog MONITORING plan mints onto its OWN line (governor.monitoring_subscription), never the
+        # credit-plan `subscriptions` record (which drives the plan-credit refill). None => monitoring plans mint
+        # nothing (fail-closed). `on_monitoring_change(org_id, now)` is the sovereign provisioner hook that
+        # enforces the new plan on existing grants and re-mints renewals (owner key, republish).
+        self.monitoring_subscriptions = monitoring_subscriptions
+        self.on_monitoring_change = on_monitoring_change
         self.wallet = wallet
         self.subscriptions = subscriptions
         self.plan = plan
@@ -740,13 +754,17 @@ class BillingSigner:
         its own verified-event source can reuse the deterministic mapping; external callers use `ingest`, which
         is the only path that enforces signature verification."""
         oid = event.org_id                            # already validated in verify_and_parse (_parse_org_id)
+        ent = self.catalog.get(event.price_id)
+        monitoring = ent is not None and _is_monitoring_entitlement(ent)
+        line = self.monitoring_subscriptions if monitoring else self.subscriptions
+        if event.kind in (EVENT_SUBSCRIPTION_CANCELED, EVENT_PAYMENT_FAILED) and line is None:
+            return None
         if event.kind == EVENT_SUBSCRIPTION_CANCELED:
-            return self.subscriptions.cancel(oid)     # safe direction, honored on sight, replay-safe
+            return line.cancel(oid)                   # safe direction, honored on sight, replay-safe
         if event.kind == EVENT_PAYMENT_FAILED:
             # Webhook-driven dunning (H4): carry the provider event's `created` as the down-latch freshness key so
             # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
-            return self.subscriptions.mark_past_due(oid, issued_at=event.created)
-        ent = self.catalog.get(event.price_id)
+            return line.mark_past_due(oid, issued_at=event.created)
         if ent is None:
             return None                               # unknown price -> no entitlement -> mint nothing
         # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
@@ -780,6 +798,9 @@ class BillingSigner:
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
             return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
+                and ent.plan_id and ent.period_s > 0.0 and monitoring:
+            return self._apply_monitoring(oid, event, ent)
+        if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0:
             period_end = event.created + float(ent.period_s)
             # subscribe is LWW by issued_at; using the event's OWN created time makes a replay stale (<= the
@@ -802,6 +823,24 @@ class BillingSigner:
                                      period_start=event.created, period_end=period_end)
             return seq
         return None
+
+    def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> Optional[int]:
+        """A paid AEGIS monitoring period: mint the SEPARATE monitoring line (no credit refill; the credit-plan
+        subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /
+        replayed period is inert), then hand the change to the provisioner hook."""
+        if self.monitoring_subscriptions is None:
+            return None
+        period_end = event.created + float(ent.period_s)
+        seq = self.monitoring_subscriptions.subscribe(oid, ent.plan_id, 0, period_start=event.created,
+                                                      period_end=period_end, issued_at=event.created)
+        s = self.monitoring_subscriptions.subscription(oid)
+        if s is None or (s.plan_id, s.period_start, s.period_end) != (ent.plan_id, float(event.created), period_end):
+            return None
+        self._record_invoice(oid, event, "subscription", credits=0, period_start=event.created,
+                             period_end=period_end)
+        if self.on_monitoring_change is not None:
+            self.on_monitoring_change(oid, event.created)
+        return seq
 
     def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
                         period_start: float = 0.0, period_end: float = 0.0) -> None:

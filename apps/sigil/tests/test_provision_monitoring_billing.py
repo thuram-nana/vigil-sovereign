@@ -14,7 +14,11 @@ def _rig(plan=None, **kw):
     for h in ("a1.cm", "a2.cm"):
         _prove(s, "org_a", h)
     _prove(s, "org_b", "b1.cm")
-    if plan:
+    if plan == "pro":                                        # a CREDIT plan rides the credit line
+        from sigil.governor.subscription import SubscriptionRegistry
+        SubscriptionRegistry(s).subscribe("org_a", "pro", 6000, period_start=0.0, period_end=1e12,
+                                          issued_at=float(next(_iss)))
+    elif plan:
         _subscribe(s, "org_a", plan, **kw)
     return p, s
 
@@ -64,8 +68,8 @@ def test_lapsed_or_canceled_plan_refused():
     p, _ = _rig("aegis_observe_5h", period_end=1.0)           # period already over at now>=1000
     _denied(lambda: p.monitor_authorize("alice", "org_a", "a1.cm"))
     p, s = _rig("aegis_observe_5h")
-    from sigil.governor.subscription import SubscriptionRegistry
-    SubscriptionRegistry(s).cancel("org_a")
+    from sigil.governor.monitoring_subscription import MonitoringSubscriptionRegistry
+    MonitoringSubscriptionRegistry(s).cancel("org_a")
     _denied(lambda: p.monitor_authorize("alice", "org_a", "a1.cm"))
 
 

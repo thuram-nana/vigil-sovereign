@@ -209,6 +209,12 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, AEGIS fold) the SAME floor for the SEPARATE governor.monitoring_subscription line.
+    stranded_msubs = stranded_active_monitoring_subscriptions(store, archived, K)
+    if stranded_msubs:
+        raise PruneUnsafe(f"K={K} would strand active monitoring subscription(s) {stranded_msubs}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed; "
+                          f"lower K or resolve")
     # (c, Slice E2a customer credentials) the SAME floor for governor.customer_credential: an active passkey/
     # TOTP/OIDC-link whose only owner-signed grant sits below K must be carried into the seed, or the prune
     # drops it AND resets the per-(username, cred_key) high-water (re-opening credential replay-resurrection).
@@ -712,7 +718,16 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
     return sorted(str(o) for o in stranded)
 
 
-def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+def stranded_active_monitoring_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS monitoring subscription) — the SAME tripwire as ``stranded_active_subscriptions`` for the
+    SEPARATE ``governor.monitoring_subscription`` line (seed sub-state ``monitoring_subscription_*``, schema v7)."""
+    from ..governor.monitoring_subscription import MONITORING_SUBSCRIPTION_SIGNAL
+    return stranded_active_subscriptions(store, archived, K, _signal=MONITORING_SUBSCRIPTION_SIGNAL,
+                                         _seed_field="monitoring_subscription_state")
+
+
+def stranded_active_subscriptions(store, archived: list[Segment], K: int, *, _signal: Optional[str] = None,
+                                  _seed_field: str = "subscription_state") -> list[str]:
     """§7(c, SaaS subscription) — the tenants (`governor/subscription.py`) whose subscription is `active` with
     its only owner-signed grant in the pruned prefix [0..K) yet NOT carried into the snapshot seed: a prune
     would silently drop the plan (and reset the per-org high-water, re-opening replay of a lapsed plan). EMPTY
@@ -720,6 +735,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     mirroring `stranded_active_accounts`; verified under the owner key valid at each seq; seed round-tripped
     through `model_dump`/`model_validate`. Read-only."""
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL, _SUB_CORE, STATUS_ACTIVE, _DOWN_STATES)
+    signal = SUBSCRIPTION_SIGNAL if _signal is None else _signal
     from ..governor import key_history as _kh
     from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
@@ -732,7 +748,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     issued: dict[Any, float] = {}
     for r in sorted(below, key=lambda r: r.seq):
         p = r.payload
-        if not isinstance(p, dict) or p.get("signal") != SUBSCRIPTION_SIGNAL:
+        if not isinstance(p, dict) or p.get("signal") != signal:
             continue
         oid = p.get("org_id")
         if not isinstance(oid, str) or not oid:
@@ -747,7 +763,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     active = {o for o, v in status.items() if v == STATUS_ACTIVE}
     seed = SnapshotState.model_validate(
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
-    seed_state = seed.subscription_state_map()
+    seed_state = {r[0]: r[1] for r in getattr(seed, _seed_field)}
     carried = {o for o in active if seed_state.get(o) == STATUS_ACTIVE}
     return sorted(str(o) for o in (active - carried))
 

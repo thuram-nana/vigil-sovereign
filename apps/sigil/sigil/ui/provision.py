@@ -939,24 +939,27 @@ class Provisioner:
             self._audit(action, requester=requester, org_id=org_id, target=host, outcome="denied")
             raise ProvisionDenied("requester may not manage monitoring for this org")
 
-    def _monitor_plan_admit(self, reg, org_id: str, host: str, mode: str, now: float) -> None:
+    def _monitor_plan_admit(self, reg, org_id: str, host: str, mode: str, now: float) -> float:
         """AE-5 billing gate (server-side; the CATALOG decides money): the session org needs an ACTIVE, in-period
-        monitoring subscription with a free host slot (re-authorizing an already-granted host reuses its slot),
-        and mode=block needs a plan tier that includes respond. Raises ValueError (refused + audited)."""
+        MONITORING subscription (its own line, never the credit plan) with a free host slot (re-authorizing an
+        already-granted host reuses its slot; a slot is held only by a grant that is ``active_at`` — window +
+        current matching ownership proof), and mode=block needs a plan tier that includes respond. Returns the
+        plan's ``period_end`` (the grant is clamped to it). Raises ValueError (refused + audited)."""
         from ..governor.asset_ownership import _check_host
         from ..governor.catalog import monitoring_plan
         from ..governor.monitoring_authority import MODE_BLOCK
-        from ..governor.subscription import SubscriptionRegistry
-        sub = SubscriptionRegistry(self.store).active_subscription(org_id, now=now)
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
         plan = monitoring_plan(sub.plan_id) if sub is not None else None
-        if plan is None:
+        if sub is None or plan is None:
             raise ValueError("an active monitoring plan is required")
         if mode == MODE_BLOCK and not plan.respond:
             raise ValueError("block mode requires a monitoring plan that includes respond")
         h = _check_host(host)
-        used = {g.host for g in reg.grants(org_id) if g.covers(now)} - {h}
+        used = {g.host for g in reg.grants(org_id) if reg.active_at(org_id, g.host, now=now) is not None} - {h}
         if len(used) >= plan.host_slots:
             raise ValueError("no free protected-host slot on the monitoring plan")
+        return float(sub.period_end)
 
     def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
                           window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
@@ -986,9 +989,9 @@ class Provisioner:
             try:
                 m = _check_mode(mode)
                 reg = MonitoringAuthorityRegistry(self.store)
-                self._monitor_plan_admit(reg, requester_org_id, host, m, t)
-                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=t + window, now=t,
-                              issued_at=self._next_issued())
+                period_end = self._monitor_plan_admit(reg, requester_org_id, host, m, t)
+                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=min(t + window, period_end),
+                              now=t, issued_at=self._next_issued())
             except ValueError as e:
                 self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=host,
                             outcome="refused", reason=str(e))
@@ -1006,6 +1009,49 @@ class Provisioner:
                         outcome=f"granted_{g.mode}", critical=True)
         return {"org_id": g.org_id, "host": g.host, "mode": g.mode, "not_before": g.not_before,
                 "not_after": g.not_after, "published": path.name, "authority": signed.model_dump(mode="json")}
+
+    def monitor_plan_changed(self, org_id: str, *, now: "Optional[float]" = None) -> dict:
+        """The monitoring subscription for ``org_id`` changed (new plan / renewal): enforce the CURRENT plan on
+        the org's existing grants. Retire (revoke + unpublish) what the plan no longer pays for, then RE-MINT —
+        owner key, provisioner path, republished — each surviving grant minted in a PRIOR period, with the new
+        window (clamped to the plan's period_end and the ownership proof), so monitoring continues across
+        periods. Owner/billing-driven (no tenant session); flag-gated like every monitoring path."""
+        from .. import config
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry, plan_enforcement
+        if not config.customer_monitoring_enabled():
+            raise ProvisionDenied("customer monitoring is not enabled on this deployment")
+        t = self._now() if now is None else float(now)
+        retired: list[str] = []
+        renewed: list[str] = []
+        with self._lock:
+            reg = MonitoringAuthorityRegistry(self.store)
+            retire, renew, sub = plan_enforcement(
+                self.store, org_id, now=t, subscriptions=MonitoringSubscriptionRegistry(self.store, owner_key=None),
+                authority=reg)
+            for h in retire:
+                reg.retire(org_id, h)
+                retired.append(h)
+            for old in renew:
+                try:
+                    g = reg.grant(org_id, old.host, mode=old.mode, not_before=t,
+                                  not_after=min(t + float(config.MONITORING_WINDOW_SECONDS), float(sub.period_end)),
+                                  now=t, issued_at=self._next_issued())
+                    signed = _sign_monitoring(reg.owner_key, g)
+                    _publish_monitoring(config.monitoring_publish_dir(), g.org_id, g.host,
+                                        signed.model_dump_json().encode("utf-8"))
+                except Exception:  # noqa: BLE001 — fail-closed: a grant that cannot be renewed is retired
+                    reg.retire(org_id, old.host)
+                    retired.append(old.host)
+                    continue
+                renewed.append(g.host)
+            for h in retired:
+                self._audit("monitor_plan_enforce", requester="owner", org_id=org_id, target=h,
+                            outcome="retired", critical=True)
+            for h in renewed:
+                self._audit("monitor_plan_enforce", requester="owner", org_id=org_id, target=h,
+                            outcome="renewed", critical=True)
+        return {"org_id": org_id, "retired": retired, "renewed": renewed}
 
     def monitor_revoke(self, requester: str, requester_org_id: str, host: str, *, ip: str = "",
                        now: "Optional[float]" = None) -> dict:

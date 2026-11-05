@@ -168,17 +168,26 @@ def monitoring_plan(plan_id: str) -> "MonitoringPlan | None":
     return None
 
 
+def _offered() -> tuple[CatalogEntry, ...]:
+    """The entries ON SALE on this deployment: AEGIS monitoring plans only while VIGIL_CUSTOMER_MONITORING_ENABLED
+    is on (default OFF => the catalog is exactly the pre-AEGIS one: not priced, not listed, not mintable)."""
+    from .. import config
+    if config.customer_monitoring_enabled():
+        return _CATALOG
+    return tuple(e for e in _CATALOG if not e.monitor_hosts)
+
+
 def entitlements() -> dict[str, Entitlement]:
     """The `{price_id: Entitlement}` mapping the BillingSigner consumes — the owner catalog that decides money."""
-    return {e.price_id: e.entitlement() for e in _CATALOG}
+    return {e.price_id: e.entitlement() for e in _offered()}
 
 
 def expected_amounts() -> dict[str, tuple[int, str]]:
     """`{price_id: (amount_minor, currency)}` — the EXPECTED fiat price per offering, for the Slice-F
     checkout-reconciliation amount cross-check (a verified amount below this is refused)."""
-    return {e.price_id: (e.amount_minor, e.currency) for e in _CATALOG}
+    return {e.price_id: (e.amount_minor, e.currency) for e in _offered()}
 
 
 def plans() -> list[dict]:
     """The PUBLIC pricing projection for the pricing page / list-plans endpoint, in catalog order."""
-    return [e.public() for e in _CATALOG]
+    return [e.public() for e in _offered()]

@@ -91,9 +91,9 @@ def _rig():
 
 
 def _subscribe(store, org, plan_id, *, period_end=1e12):
-    from sigil.governor.subscription import SubscriptionRegistry
-    SubscriptionRegistry(store).subscribe(org, plan_id, 0, period_start=0.0, period_end=period_end,
-                                          issued_at=float(next(_iss)))
+    from sigil.governor.monitoring_subscription import MonitoringSubscriptionRegistry
+    MonitoringSubscriptionRegistry(store).subscribe(org, plan_id, 0, period_start=0.0, period_end=period_end,
+                                                    issued_at=float(next(_iss)))
 
 
 # --- positive path + artifact ------------------------------------------------------------------------
