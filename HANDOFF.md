@@ -120,6 +120,28 @@ Stood up `vigil up --with-saas` with `VIGIL_BILLING_WEBHOOK_SPOOL=/tmp/billing-s
 
 Scratch driver: `/tmp/stage3_drive.py` (not committed — local evidence only).
 
+### Milestone 5 — #25 gates: ruff + mypy-ratchet + make gate (CI-faithful) ✅
+
+Ran in a throwaway venv built to **CI's exact lint env** (`engine/crucible/framework/v2/requirements.lock.txt`
++ `vigil_core --no-deps` + `infra/supply-chain/ci-tooling.lock.txt`; mypy 2.3.1 = CI pin):
+- `make gate` (`framework.v2 benchmark --gate --no-incumbents`): **PASS** — precision 1.000, recall 1.000,
+  f1 1.000, 0 FP / 0 FN (11/11).
+- `ruff check sigil`: **All checks passed**.
+- `tools/governance/mypy_ratchet.sh`: **OK** — 15 not-yet-clean modules at ceiling 15; every other module
+  type-clean and blocking.
+- NOTE: running the ratchet under the **full sovereign ML venv** falsely reports `voice/components.py` as STALE
+  (its imports resolve there but not in CI's lighter lint env). Do NOT act on that — removing it would RED CI.
+  Always run ruff/ratchet in the CI-faithful lint env. (I changed only docs, so main's ratchet is unaffected.)
+
+### #25 status rollup (what is verified here, green)
+- Automated backbone: 2308/2320 (customer-e2e composed journeys + k45 money-loop settlement).
+- Loopback engagement: FACT → offline re-verify → tamper-rejected → sound-negative.
+- Live sandbox money-loop over real HTTP: front-door 401/202 + inert spool (no secret), drain re-verify →
+  catalog-decides-money mint → exactly-once → org-scoped.
+- Gates: ruff + mypy-ratchet + make gate all green (CI-faithful).
+- STILL OPEN for #25: Opus multi-lens adversarial red-pen (after Nov 6 05:00 UTC); a drive against
+  Flutterwave's REAL sandbox `/verify` API (needs owner sandbox keys — not stored).
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
