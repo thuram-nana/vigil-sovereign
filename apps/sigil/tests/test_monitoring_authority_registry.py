@@ -9,6 +9,7 @@ Invariants pinned here:
     high-water survives (no replay resurrection), and the prune tripwire refuses a seed that drops it.
 """
 import itertools
+import os
 import tempfile
 
 import pytest
@@ -37,7 +38,7 @@ def _t() -> float:
 
 
 def _store():
-    return SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    return SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
 
 
 def _ma(store, key=OWNER):

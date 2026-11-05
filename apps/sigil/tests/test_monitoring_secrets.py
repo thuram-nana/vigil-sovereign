@@ -106,7 +106,7 @@ def test_resolver_drives_drainer_per_pair(sdir, tmp_path):
     M.provision_report_secret("org_a", "app.example.com", sdir)
     M.provision_report_secret("org_b", "app.example.com", sdir)
     sa = M.resolve_report_secret("org_a", "app.example.com", sdir)
-    store = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    store = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     spool = tmp_path / "spool"
     w = MonitoringSpoolWatcher(store, spool_dir=spool, secret_for=M.resolver(sdir),
                                authority=_Auth({("org_a", "app.example.com"), ("org_b", "app.example.com")}))
@@ -123,7 +123,7 @@ def _isolate_cli_spine_gate(monkeypatch):
     # spine for these tests, because the shared default spine may be left in a legacy layout by other tests in a
     # full run (cross-test pollution unrelated to these verbs; the gate's own behaviour is in test_spine_upgrade).
     import sigil.spine.upgrade as _up
-    fresh = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    fresh = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     monkeypatch.setattr(_up, "SpineStore", lambda: fresh)
 
 
@@ -149,7 +149,7 @@ def test_cli_provision_then_drain(monkeypatch, tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir)])
 
-    store = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    store = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     monkeypatch.setattr(cli, "SpineStore", lambda: store)
     import sigil.governor.monitoring_authority as MA
     monkeypatch.setattr(MA, "MonitoringAuthorityRegistry",

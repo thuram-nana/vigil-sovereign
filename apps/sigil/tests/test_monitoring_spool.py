@@ -30,7 +30,7 @@ _n = itertools.count(1)
 
 
 def _store():
-    return SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    return SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
 
 
 def _grant(store, org, host):

@@ -160,7 +160,7 @@ def test_monitoring_line_reads_from_the_snapshot_seed():
                          monitoring_subscription_state=[["org_a", "active"]],
                          monitoring_subscription_issued=[["org_a", 5.0]],
                          monitoring_subscription_row=[["org_a", "aegis_observe_1h", 0.0, 1e12, 0]])
-    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    s = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     import sigil.governor.subscription as sub_mod
     orig = sub_mod.SnapshotState.load
     try:
@@ -286,7 +286,7 @@ def _isolate_cli(monkeypatch, store):
     import sigil.spine.upgrade as _up
     from sigil import cli
     from sigil.spine.store import SpineStore
-    fresh = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    fresh = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     monkeypatch.setattr(_up, "SpineStore", lambda: fresh)
     monkeypatch.setattr(cli, "SpineStore", lambda: store)
     return cli

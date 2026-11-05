@@ -43,7 +43,7 @@ def _prov():
     from sigil.ui.login_ratelimit import LoginRateLimiter
     from sigil.ui.provision import Provisioner
     ensure_owner_keypair()
-    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    s = SpineStore(os.path.join(tempfile.mkdtemp(), "spine.jsonl"))
     orgs = OrgRegistry(s)
     p = Provisioner(s, customers=CustomerRegistry(s), orgs=orgs, wallet=WalletRegistry(s),
                     email_tokens=EmailTokenLedger(tempfile.mkdtemp(), ttl_s=1e4),
