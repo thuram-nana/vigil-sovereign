@@ -209,6 +209,24 @@ GENUINE remaining #4 build items (narrowed): **W5 oracle** (absent), **one offbo
 **ops sweeps/runbooks + make-gate determinism + egress/kill-switch decision**. Each = its own slice + PR; heavy
 red-pen deferred to post-Nov-6.
 
+### Milestone 8 — #4 W5 SECURITY_GROUP_EXPOSURE: verified COMPLETE (no build) ✅
+
+The handoff's "NOT FOUND" is STALE. Security-group exposure is covered, sound, and guarded:
+- **Oracle backing:** the `CLOUD_POSTURE` oracle (`verify/cloud_posture.py`, `cloud_posture_oracle`) confirms an
+  SG ingress literally open to `0.0.0.0/0` in the target's OWN IaC artifact or a VIGIL-owned live capture.
+  Two registered branches in `docs/capability-matrix/evidence-branches.json`:
+  `iac.cloud_posture.achieved_state` + `cloud_live.cloud_posture.achieved_state`. No new OracleKind
+  (`_ALL_ORACLES` stays 15).
+- **Not an overclaim:** ambiguous/partial exports stay INCONCLUSIVE (the branch prose already hedges;
+  `fact_capable` discipline applies).
+- **Prose↔oracle conformance guard EXISTS and PASSES:** `scanner/tests/test_claim_discipline.py`
+  (`test_the_capability_matrix_does_not_lag_the_branch_registry`) + `aegis/tests/test_gate_invariants.py`
+  (binds the branch registry to `BUG_CLASS_ORACLES`, incl. `CLOUD_POSTURE`). Ran both: **45 passed**.
+
+GENUINE remaining #4 build items now: **one offboarding cascade** (partial today) + ops sweeps/runbooks +
+make-gate determinism + egress/kill-switch decision. (W5, cross-tenant gate, _ALL_ORACLES frozen, W-track LEAD,
+E0 — all verified present.)
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
