@@ -533,6 +533,7 @@ jobs:
               integration/tests/test_engage_runner.py \
               integration/tests/test_ci_runner.py \
               integration/tests/test_findings_crossing.py \
+              integration/tests/test_aegis_saas_acceptance.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \

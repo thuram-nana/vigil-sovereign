@@ -1226,6 +1226,95 @@ def cmd_billing_drain(a) -> None:
               f"{r['deduped']} deduped")
 
 
+def _monitoring_flag_or_exit(verb: str) -> None:
+    from . import config
+    if not config.customer_monitoring_enabled():
+        print(f"{verb}: AEGIS-SaaS monitoring is OFF (set VIGIL_CUSTOMER_MONITORING_ENABLED=1)", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_monitoring_secret(a) -> None:
+    """Provision (or rotate) the per-(org, host) AEGIS-SaaS monitoring REPORT secret (AE-6), and optionally export
+    it (0600, atomic) to an operator-chosen file — e.g. the tenant gateway's --monitoring-secret-file mount.
+    Output is FIXED text only: neither the secret nor its on-disk location is ever printed, and errors name only
+    the exception type. Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED."""
+    from . import config
+    from .governor.monitoring_secrets import export_report_secret, provision_report_secret
+    _monitoring_flag_or_exit("monitoring-secret")
+    base = a.secrets_dir or config.monitoring_secrets_dir()
+    if not a.export_only:
+        try:
+            provision_report_secret(a.org, a.host, base, rotate=a.rotate)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: provisioning refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret provisioned for the requested tenant/host")
+    if a.export_to:
+        try:
+            export_report_secret(a.org, a.host, base, a.export_to, overwrite=a.overwrite)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: export refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret exported (0600) to the requested destination")
+    elif a.export_only:
+        print("monitoring-secret: --export-only requires --export-to", file=sys.stderr)
+        sys.exit(2)
+
+
+def _reconcile_once(store) -> list:
+    """One monitoring-billing sweep: retire (revoke + unpublish) every grant whose org's monitoring plan no longer
+    pays for it at now (lapsed / canceled / past_due / tier / slots). Keyless — the safe direction only."""
+    import time as _time
+
+    from .governor.monitoring_subscription import reconcile_monitoring
+    retired = reconcile_monitoring(store, now=_time.time())
+    for oid, host in retired:
+        print(f"  retired monitoring grant {host} (org {oid}): monitoring plan no longer covers it")
+    return retired
+
+
+def cmd_monitoring_reconcile(a) -> None:
+    """Sweep: apply the monitoring plan to every org's grants (catches a period lapse with no webhook).
+    Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key."""
+    _monitoring_flag_or_exit("monitoring-reconcile")
+    r = _reconcile_once(SpineStore())
+    print(f"  reconciled: {len(r)} grant(s) retired")
+
+
+def cmd_monitoring_drain(a) -> None:
+    """Drain / watch the AEGIS-SaaS monitoring-report spool (AE-4b/AE-6), mirroring settle-drain: each sealed
+    report must verify under its (org, host) report secret, be fresh, and re-bind to an ACTIVE monitoring
+    authority, else it is quarantined. No network ingest endpoint. Default-OFF behind
+    VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key (the registry is read verify-only)."""
+    import time as _time
+
+    from . import config
+    from .governor.monitoring_authority import MonitoringAuthorityRegistry
+    from .governor.monitoring_secrets import resolver
+    from .inbound.monitoring_spool import MonitoringSpoolWatcher
+    _monitoring_flag_or_exit("monitoring-drain")
+    store = SpineStore()
+    watcher = MonitoringSpoolWatcher(store, spool_dir=a.spool,
+                                     secret_for=resolver(a.secrets_dir or config.monitoring_secrets_dir()),
+                                     authority=MonitoringAuthorityRegistry(store, owner_key=None))
+
+    def _once() -> None:
+        r = watcher.drain()
+        print(f"  drained: {r['recorded']} recorded, {r['rejected']} rejected, {r['deduped']} deduped")
+
+    if getattr(a, "monitoring_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming -> monitoring events; Ctrl-C to stop")
+        try:
+            while True:
+                _reconcile_once(store)               # billing standing bounds monitoring continuously
+                _once()
+                _time.sleep(a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        _once()
+
+
 def cmd_knowledge(a) -> None:
     """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
     owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
@@ -2399,6 +2488,34 @@ def main(argv=None) -> None:
     pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.set_defaults(fn=cmd_billing_drain)
+    pmd = sub.add_parser("monitoring-drain",
+                         help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "
+                              "(per-(org,host) MAC + freshness + active authority; fail-closed; default-OFF)")
+    pmd.add_argument("monitoring_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pmd.add_argument("--spool", required=True, help="the monitoring spool directory (its incoming/ is drained)")
+    pmd.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pmd.set_defaults(fn=cmd_monitoring_drain)
+    pmr = sub.add_parser("monitoring-reconcile",
+                         help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
+                              "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")
+    pmr.set_defaults(fn=cmd_monitoring_reconcile)
+    pms = sub.add_parser("monitoring-secret",
+                         help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret and "
+                              "optionally export it 0600 to a chosen file (prints neither the secret nor its "
+                              "location; default-OFF)")
+    pms.add_argument("--org", required=True, help="tenant org_id")
+    pms.add_argument("--host", required=True, help="the protected host (bare DNS name)")
+    pms.add_argument("--rotate", action="store_true", help="replace an existing secret")
+    pms.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pms.add_argument("--export-to", default="",
+                     help="copy the secret (0600, atomic) to this file, e.g. the tenant gateway's secret mount")
+    pms.add_argument("--export-only", action="store_true",
+                     help="export an already-provisioned secret without provisioning/rotating")
+    pms.add_argument("--overwrite", action="store_true", help="allow --export-to to replace an existing file")
+    pms.set_defaults(fn=cmd_monitoring_secret)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])

@@ -283,6 +283,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
                   "/api/customer/assets": "assets_overview"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("monitor_list")
+        if path == "/api/customer/monitoring/events" and _monitoring_on():
+            return self._customer_read_relay("monitor_events")
         # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
         # Both are served ONLY when customer_oidc_enabled() — otherwise the routes are absent (404), so the
         # edge is byte-identical to a build without customer OIDC (mirrors the operator route-gating).
@@ -503,6 +507,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
+        if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
+            return self._monitoring(action, body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -573,6 +579,25 @@ class CustomerHandler(BaseHTTPRequestHandler):
         else:
             payload["lease"] = body.get("lease")
             c, r = self._provision("launch_cancel", requester, payload)
+        return self._json(r, c)
+
+    def _monitoring(self, action: str, body: dict):
+        """AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. REQUESTER + ORG from the SERVER-side session, never
+        the body (a body org_id is ignored); host / mode / window_s are the customer's request (the window is
+        server-capped). The sovereign provisioner admits, steps up, mints + publishes."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": body.get("host", ""),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        if action == "monitoring/authorize":
+            payload["mode"] = body.get("mode", "observe")
+            if body.get("window_s") is not None:
+                payload["window_s"] = body.get("window_s")
+            c, r = self._provision("monitor_authorize", requester, payload)
+        else:
+            c, r = self._provision("monitor_revoke", requester, payload)
         return self._json(r, c)
 
     def _mfa(self, action: str, body: dict):
@@ -658,6 +683,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
             "cose_alg": body.get("cose_alg"), "uv": bool(body.get("uv")),
             "client_data_json": body.get("client_data_json", ""), "challenge": ch, "ip": self._ip()})
         return self._json(r, c)
+
+
+def _monitoring_on() -> bool:
+    from .. import config as _config
+    return _config.customer_monitoring_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,
