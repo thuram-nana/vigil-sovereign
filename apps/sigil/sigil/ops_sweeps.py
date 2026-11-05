@@ -32,16 +32,47 @@ assert_no_offense()
 _MAX_ENVELOPE = 256 * 1024
 
 
-def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False) -> dict:
-    """Report (and with ``apply`` full-refund via ``settle_launch``) every abandoned published lease."""
+def _pending_completions(spool: Path) -> tuple[set, bool]:
+    """``(slug, nonce)`` of every completion still waiting in (or quarantined by) the completion spool — i.e.
+    not yet drained into ``settle_launch``. Signatures are NOT checked: any claim of a finished run blocks a
+    refund (the drain decides the charge). Returns ``(pairs, unreadable)``; ``unreadable`` is True when some
+    waiting file could not be parsed, so its (slug, nonce) is unknown (fail-closed: no refunds at all)."""
+    pairs: set = set()
+    unreadable = False
+    for sub in ("incoming", "working", "rejected"):
+        d = spool / sub
+        if not d.is_dir():
+            continue
+        for fp in sorted(d.glob("*.json*")):
+            if fp.name.endswith(".reason"):
+                continue
+            try:
+                if fp.is_symlink() or not fp.is_file() or fp.stat().st_size > _MAX_ENVELOPE:
+                    raise ValueError("not a bounded regular file")
+                doc = json.loads(fp.read_text(encoding="utf-8"))["document"]
+                pairs.add((str(doc["engagement_slug"]), str(doc["nonce"])))
+            except (OSError, ValueError, KeyError, TypeError):
+                unreadable = True
+    return pairs, unreadable
+
+
+def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
+                                 completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
+    """Report (and with ``apply`` full-refund via ``settle_launch``) every abandoned published lease. A lease
+    with a completion still pending/quarantined in ``completion_spool`` is reported ``completion_pending`` and
+    never refunded (its run finished; the drain must charge it). ``apply`` REQUIRES ``completion_spool``."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
 
     if ttl_s < 0:
         raise ValueError("ttl_s must be non-negative")
+    if apply and completion_spool is None:
+        raise ValueError("apply requires completion_spool — a refund could erase a pending charge (fail-closed)")
     kp = gate.owner_key
     if kp is None:
         raise ValueError("no owner key — the sweep cannot verify leases (fail-closed)")
+    pending, spool_unreadable = (_pending_completions(Path(completion_spool)) if completion_spool is not None
+                                 else (set(), False))
     root = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
@@ -58,6 +89,12 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             continue                                       # already closed out (tombstone pending) — not abandoned
         if doc.not_after.timestamp() + ttl_s > now:
             continue                                       # still live / inside the grace TTL
+        if (doc.engagement_slug, str(doc.nonce)) in pending:
+            rows.append({**row, "status": "completion_pending"})
+            continue
+        if spool_unreadable:
+            rows.append({**row, "status": "completion_unknown"})
+            continue
         if not apply:
             rows.append({**row, "status": "abandoned"})
             continue

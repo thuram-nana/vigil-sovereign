@@ -72,31 +72,31 @@ def test_report_only_by_default_moves_nothing():
 
 def test_within_ttl_is_not_abandoned():
     s, g, _ = _reserve()
-    assert ops_sweeps.sweep_abandoned_reservations(g, now=NOW + HOUR + 10, ttl_s=50, apply=True)["items"] == []
+    assert ops_sweeps.sweep_abandoned_reservations(g, now=NOW + HOUR + 10, ttl_s=50, apply=True, completion_spool=_spool())["items"] == []
     assert _avail(s) == 70
 
 
 def test_apply_full_refund_exactly_once_and_idempotent_rerun():
     s, g, r = _reserve()
-    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=_spool())
     assert out["items"][0]["status"] == "refunded" and out["items"][0]["refunded"] == 30
     assert _avail(s) == 100
     base = os.environ["VIGIL_BASE_DIR"]
     assert is_lease_settled(base, r["slug"], r["nonce"]) and read_credit_lease(base, r["slug"]) is None
-    again = ops_sweeps.sweep_abandoned_reservations(g, now=LATE + 10, ttl_s=50, apply=True)
+    again = ops_sweeps.sweep_abandoned_reservations(g, now=LATE + 10, ttl_s=50, apply=True, completion_spool=_spool())
     assert again["items"] == []
     assert _avail(s) == 100
 
 
 def test_settle_path_marker_blocks_double_refund_even_if_bundle_reappears():
     s, g, r = _reserve()
-    ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)
+    ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=_spool())
     # a stale copy of the bundle is resurrected on the seam: the settled marker keeps it from being swept again
     from vigil_core import SignedCreditLaunchLease
     signed = SignedCreditLaunchLease.model_validate(r["lease"])
     from vigil_core import TrustRoot
     write_credit_lease(os.environ["VIGIL_BASE_DIR"], r["slug"], signed, TrustRoot.model_validate(r["trust_root"]))
-    assert ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)["items"] == []
+    assert ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=_spool())["items"] == []
     # and even a direct re-settle through the existing path is a no-op
     assert g.settle_launch(signed_lease=r["lease"], consumed_units=0, now=LATE)["action"] == "launch_already_settled"
     assert _avail(s) == 100
@@ -105,7 +105,7 @@ def test_settle_path_marker_blocks_double_refund_even_if_bundle_reappears():
 def test_already_settled_lease_is_skipped():
     s, g, r = _reserve()
     assert g.settle_launch(signed_lease=r["lease"], consumed_units=30, now=NOW + 1)["ok"]
-    assert ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)["items"] == []
+    assert ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=_spool())["items"] == []
     assert _avail(s) == 70                                   # completed charge stays charged
 
 
@@ -122,7 +122,7 @@ def test_foreign_signed_lease_is_unverified_never_refunded():
     root = TrustRoot(threshold=1, authorizers=[AuthorizerKey(key_id="owner", name="owner",
                                                              public_key_b64=evil.public_key_b64)])
     write_credit_lease(os.environ["VIGIL_BASE_DIR"], slug2, signed, root)
-    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=_spool())
     st = {i["slug"]: i["status"] for i in out["items"]}
     assert st[slug2] == "unverified" and st[r["slug"]] == "refunded"
     assert _avail(s) == 100                                  # only the genuine 30 came back, never 999
@@ -170,3 +170,54 @@ def test_cli_apply_is_default_off():
 def test_cli_tx_refs_refuses_apply():
     p = _cli("ops-sweep", "tx-refs", "--apply", "--checkouts", "x", "--spool", "y")
     assert p.returncode == 2 and "report-only" in p.stderr
+
+
+def _spool():
+    return tempfile.mkdtemp()
+
+
+def _pending(spool, slug, nonce, sub="incoming"):
+    d = Path(spool) / sub
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "c.json").write_text(json.dumps({"schema": "x", "signatures": [], "document": {
+        "engagement_slug": slug, "nonce": nonce, "outcome": "completed"}}))
+
+
+@pytest.mark.parametrize("sub", ["incoming", "working", "rejected"])
+def test_apply_never_refunds_a_lease_with_a_pending_completion(sub):
+    s, g, r = _reserve()
+    sp = _spool()
+    _pending(sp, r["slug"], r["nonce"], sub)
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=sp)
+    assert [i["status"] for i in out["items"]] == ["completion_pending"]
+    assert _avail(s) == 70
+    assert not is_lease_settled(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+
+
+def test_pending_completion_for_other_nonce_does_not_block():
+    s, g, r = _reserve()
+    sp = _spool()
+    _pending(sp, r["slug"], "other-nonce")
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=sp)
+    assert out["items"][0]["status"] == "refunded" and _avail(s) == 100
+
+
+def test_unreadable_pending_completion_blocks_all_refunds():
+    s, g, r = _reserve()
+    sp = _spool()
+    (Path(sp) / "incoming").mkdir()
+    (Path(sp) / "incoming" / "x.json").write_text("garbage")
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=sp)
+    assert out["items"][0]["status"] == "completion_unknown" and _avail(s) == 70
+
+
+def test_apply_without_completion_spool_refused():
+    s, g, _ = _reserve()
+    with pytest.raises(ValueError):
+        ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True)
+    assert _avail(s) == 70
+
+
+def test_cli_apply_requires_completion_spool():
+    p = _cli("ops-sweep", "reservations", "--apply", env_extra={"VIGIL_OPS_SWEEP_APPLY_ENABLED": "1"})
+    assert p.returncode == 2 and "--completion-spool" in p.stderr

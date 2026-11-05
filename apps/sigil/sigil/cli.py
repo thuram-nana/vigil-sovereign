@@ -1187,12 +1187,17 @@ def cmd_ops_sweep(a) -> None:
             print("--apply refused: set VIGIL_OPS_SWEEP_APPLY_ENABLED=1 to allow refunds (default OFF)",
                   file=sys.stderr)
             sys.exit(2)
+        if a.apply and not a.completion_spool:
+            print("--apply requires --completion-spool (a pending completion must be charged, not refunded)",
+                  file=sys.stderr)
+            sys.exit(2)
         from .ui.launch_gate import LaunchGate
         gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or None))
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
-        out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply)
+        out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
+                                                       completion_spool=(a.completion_spool or None))
     else:
         if a.apply:
             print("tx-refs is report-only; --apply is not supported", file=sys.stderr)
@@ -2379,6 +2384,9 @@ def main(argv=None) -> None:
                      help="grace seconds past lease not_after / checkout start before an item is flagged")
     pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")
     pos.add_argument("--base-dir", default="", help="(reservations) the credit-lease seam root")
+    pos.add_argument("--completion-spool", default="",
+                     help="(reservations) the settle-drain completion spool; leases with a pending completion "
+                          "are never refunded (required with --apply)")
     pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
     pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
     pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
