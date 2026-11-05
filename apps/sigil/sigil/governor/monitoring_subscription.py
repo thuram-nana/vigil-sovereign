@@ -82,6 +82,11 @@ def plan_enforcement(store, org_id: str, *, now: float, subscriptions=None, auth
     sub = subs.active_subscription(org_id, now=t)
     plan = monitoring_plan(sub.plan_id) if sub is not None else None
     if sub is None or plan is None:
+        from .. import config
+        cur = subs.subscription(org_id)
+        if cur is not None and cur.status == STATUS_ACTIVE and \
+                t < float(cur.period_end) + float(config.MONITORING_RENEWAL_GRACE_SECONDS):
+            return [], [], None                        # lapsed but in renewal grace: grants already inert; keep
         return [g.host for g in grants], [], None
     retire: list[str] = []
     renew = []

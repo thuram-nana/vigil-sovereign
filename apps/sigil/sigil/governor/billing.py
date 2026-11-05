@@ -248,6 +248,8 @@ def _map_stripe_event(obj: Mapping[str, Any]) -> Optional[BillingEvent]:
         #                                                        customer.subscription.* below
         "invoice.paid": EVENT_SUBSCRIPTION_ACTIVE,            # a paid (renewal) invoice -> active period
         "customer.subscription.deleted": EVENT_SUBSCRIPTION_CANCELED,
+        # AEGIS routing: an invoice object carries no items.data[].price, so the subscription MUST set
+        # metadata.price_id for invoice.payment_failed to route to the monitoring line (else -> credit line).
         "invoice.payment_failed": EVENT_PAYMENT_FAILED,
     }.get(etype)
     if kind is None:
@@ -755,7 +757,12 @@ class BillingSigner:
         is the only path that enforces signature verification."""
         oid = event.org_id                            # already validated in verify_and_parse (_parse_org_id)
         ent = self.catalog.get(event.price_id)
-        monitoring = ent is not None and _is_monitoring_entitlement(ent)
+        # Route by the FULL, flag-independent catalog (never the flag-filtered entitlements): a down event for a
+        # known AEGIS price goes to the monitoring line ONLY, never the credit plan. NOTE: the Stripe reference
+        # adapter (disabled by default) must carry metadata.price_id on payment_failed for this routing to apply;
+        # a down event with an unknown/absent price keeps the pre-AEGIS behaviour (credit line).
+        from .catalog import monitoring_price_ids
+        monitoring = event.price_id in monitoring_price_ids() or (ent is not None and _is_monitoring_entitlement(ent))
         line = self.monitoring_subscriptions if monitoring else self.subscriptions
         if event.kind in (EVENT_SUBSCRIPTION_CANCELED, EVENT_PAYMENT_FAILED) and line is None:
             return None

@@ -203,6 +203,10 @@ LAUNCH_UNITS = _int_env("VIGIL_LAUNCH_UNITS", 10)
 # registry further clamps it to the ownership proof's expiry).
 MONITORING_WINDOW_SECONDS = _int_env("VIGIL_MONITORING_WINDOW_SECONDS", 30 * 24 * 3600)
 
+# AEGIS-SaaS — server-side renewal GRACE after a monitoring period ends with no down event: the sweep keeps the
+# (already inert, clamped-to-period_end) grants this long so a late renewal can re-mint them; then it retires.
+MONITORING_RENEWAL_GRACE_SECONDS = _int_env("VIGIL_MONITORING_RENEWAL_GRACE_SECONDS", 72 * 3600)
+
 
 def customer_monitoring_enabled() -> bool:
     """True iff the customer monitoring-authority routes are ON (`VIGIL_CUSTOMER_MONITORING_ENABLED`

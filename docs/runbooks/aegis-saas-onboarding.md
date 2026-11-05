@@ -87,3 +87,12 @@ VIGIL_CUSTOMER_MONITORING_ENABLED=1 sigil monitoring-reconcile
    returns to pass-through on the next request, and queued reports are rejected at drain.
 2. Stop the instance (`systemctl disable --now aegis-saas-gateway@<instance>` or `docker compose ... down`).
 3. Delete the gateway's secret file and, on the sovereign host, the matching file in the secrets dir.
+
+### Down-event routing and renewal grace (AE-5 fold 2)
+- Cancel / payment_failed events are routed by the FULL catalog (flag-independent): a known AEGIS price only ever
+  touches the monitoring line, never the credit plan. The Stripe reference adapter (disabled by default) needs
+  `metadata.price_id` on the subscription so `invoice.payment_failed` carries the AEGIS price; without it the event
+  falls back to the pre-AEGIS (credit-line) behaviour.
+- When a monitoring period ends with no down event, grants (clamped to `period_end`, so already inert at the
+  gateway) are kept for `VIGIL_MONITORING_RENEWAL_GRACE_SECONDS` (default 72h). A renewal within grace re-mints
+  them via `monitor_plan_changed`; after grace the sweep retires them. Cancel / past_due cascade immediately.

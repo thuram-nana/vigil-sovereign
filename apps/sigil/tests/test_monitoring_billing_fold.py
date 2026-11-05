@@ -275,7 +275,10 @@ def test_reconcile_sweep_retires_on_lapse_without_a_webhook():
     _msub(s, "org_a", "aegis_observe_5h", pe=pe)
     _auth(p, "a1.cm")
     assert reconcile_monitoring(s, now=pe - 1) == []
-    assert reconcile_monitoring(s, now=pe + 1) == [("org_a", "a1.cm")]
+    from sigil import config
+    grace = float(config.MONITORING_RENEWAL_GRACE_SECONDS)
+    assert reconcile_monitoring(s, now=pe + 1) == []                          # in renewal grace: kept (inert)
+    assert reconcile_monitoring(s, now=pe + grace + 1) == [("org_a", "a1.cm")]
     assert _reg(s).grants("org_a") == [] and not _published("org_a", "a1.cm")
 
 
@@ -350,3 +353,99 @@ def test_ownership_lapsed_grant_frees_its_slot():
     assert _reg(s).active_at("org_a", "a1.cm", now=float(next(_iss))) is None
     assert _auth(p, "a2.cm")["host"] == "a2.cm"
 
+
+
+# --- fold 2 / A: down-event routing by the FULL catalog --------------------------------------------------------
+def _real_signer(s):
+    from sigil.governor import catalog as cat
+    from sigil.governor.billing import BillingSigner, MockBillingProvider
+    from sigil.governor.metering import PlanCreditLedger
+    from sigil.governor.monitoring_subscription import MonitoringSubscriptionRegistry
+    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.governor.wallet import WalletRegistry
+    subs, msubs = SubscriptionRegistry(s), MonitoringSubscriptionRegistry(s)
+    mock = MockBillingProvider("sek")
+    signer = BillingSigner(mock, wallet=WalletRegistry(s), subscriptions=subs, plan=PlanCreditLedger(s),
+                           catalog=cat.entitlements(), expected=cat.expected_amounts(), monitoring_subscriptions=msubs)
+    return signer, mock, subs, msubs
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_aegis_cancel_routes_to_monitoring_only_whatever_the_flag(monkeypatch, flag):
+    from sigil.governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED
+    p, s = _rig()
+    _msub(s, "org_a", "aegis_observe_5h")
+    _auth(p, "a1.cm")
+    if not flag:
+        monkeypatch.delenv("VIGIL_CUSTOMER_MONITORING_ENABLED")
+    signer, mock, subs, msubs = _real_signer(s)
+    assert signer.ingest(*_event(mock, "c1", EVENT_SUBSCRIPTION_ACTIVE, 100.0, "vigil_pro_monthly"), now=100.0)
+    signer.ingest(*_event(mock, "c2", EVENT_SUBSCRIPTION_CANCELED, 200.0, "vigil_aegis_observe_5h_monthly"),
+                  now=200.0)
+    assert subs.subscription("org_a").status == "active"                      # credit plan intact
+    assert msubs.subscription("org_a").status == "canceled"                   # monitoring canceled
+    assert _reg(s).grants("org_a") == []
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_aegis_payment_failed_retires_grants_not_credit_plan(monkeypatch, flag):
+    from sigil.governor.billing import EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE
+    p, s = _rig()
+    _msub(s, "org_a", "aegis_observe_5h")
+    _auth(p, "a1.cm")
+    if not flag:
+        monkeypatch.delenv("VIGIL_CUSTOMER_MONITORING_ENABLED")
+    signer, mock, subs, msubs = _real_signer(s)
+    assert signer.ingest(*_event(mock, "f1", EVENT_SUBSCRIPTION_ACTIVE, 100.0, "vigil_pro_monthly"), now=100.0)
+    signer.ingest(*_event(mock, "f2", EVENT_PAYMENT_FAILED, 1e15, "vigil_aegis_observe_5h_monthly"), now=1e15)
+    assert subs.subscription("org_a").status == "active"
+    assert msubs.subscription("org_a").status == "past_due"
+    assert _reg(s).grants("org_a") == [] and not _published("org_a", "a1.cm")
+
+
+def test_unknown_price_down_event_keeps_pre_aegis_behaviour():
+    from sigil.governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED
+    p, s = _rig()
+    signer, mock, subs, msubs = _real_signer(s)
+    assert signer.ingest(*_event(mock, "u1", EVENT_SUBSCRIPTION_ACTIVE, 100.0, "vigil_pro_monthly"), now=100.0)
+    signer.ingest(*_event(mock, "u2", EVENT_SUBSCRIPTION_CANCELED, 200.0, "nope"), now=200.0)
+    assert subs.subscription("org_a").status == "canceled"
+
+
+# --- fold 2 / B: renewal grace ---------------------------------------------------------------------------------
+def test_lapse_then_renewal_inside_grace_remints_and_republishes():
+    from sigil import config
+    from sigil.governor.monitoring_authority import monitoring_filename
+    from sigil.governor.monitoring_subscription import reconcile_monitoring
+    from vigil_core.monitoring_authority import SignedMonitoringAuthority
+    p, s = _rig()
+    p1 = float(next(_iss)) + 100.0
+    _msub(s, "org_a", "aegis_observe_1h", pe=p1)
+    _auth(p, "a1.cm")
+    t = p1 + 3600.0                                                           # lapsed, inside grace
+    assert reconcile_monitoring(s, now=t) == []
+    # inert at the gateway during grace: the published artifact's window has ended
+    assert _reg(s).active_at("org_a", "a1.cm", now=t) is None
+    raw = (config.monitoring_publish_dir() / monitoring_filename("org_a", "a1.cm")).read_bytes()
+    assert SignedMonitoringAuthority.model_validate_json(raw).document.not_after.timestamp() <= t
+    p2 = t + 10_000.0
+    _msub(s, "org_a", "aegis_observe_1h", ps=t, pe=p2)
+    r = p.monitor_plan_changed("org_a", now=t + 1)
+    assert r["renewed"] == ["a1.cm"]
+    assert _reg(s).active_at("org_a", "a1.cm", now=t + 2).not_after == p2
+    raw = (config.monitoring_publish_dir() / monitoring_filename("org_a", "a1.cm")).read_bytes()
+    assert int(SignedMonitoringAuthority.model_validate_json(raw).document.not_after.timestamp()) == int(p2)
+
+
+def test_lapse_past_grace_retires():
+    from sigil import config
+    from sigil.governor.monitoring_subscription import reconcile_monitoring
+    p, s = _rig()
+    p1 = float(next(_iss)) + 100.0
+    _msub(s, "org_a", "aegis_observe_1h", pe=p1)
+    _auth(p, "a1.cm")
+    t = p1 + float(config.MONITORING_RENEWAL_GRACE_SECONDS) + 1
+    assert reconcile_monitoring(s, now=t) == [("org_a", "a1.cm")]
+    assert not _published("org_a", "a1.cm")
+    _msub(s, "org_a", "aegis_observe_1h", ps=t, pe=t + 1e4)                   # late renewal: nothing to re-mint
+    assert p.monitor_plan_changed("org_a", now=t + 1)["renewed"] == []

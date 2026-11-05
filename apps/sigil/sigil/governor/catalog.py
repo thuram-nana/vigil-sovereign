@@ -168,6 +168,13 @@ def monitoring_plan(plan_id: str) -> "MonitoringPlan | None":
     return None
 
 
+def monitoring_price_ids() -> frozenset[str]:
+    """EVERY AEGIS monitoring price_id in the FULL catalog, flag-independent — used to ROUTE down events
+    (cancel / payment_failed) to the monitoring line so they can never touch the credit-plan subscription,
+    whatever VIGIL_CUSTOMER_MONITORING_ENABLED says (the flag gates SALE, not routing)."""
+    return frozenset(e.price_id for e in _CATALOG if e.monitor_hosts)
+
+
 def _offered() -> tuple[CatalogEntry, ...]:
     """The entries ON SALE on this deployment: AEGIS monitoring plans only while VIGIL_CUSTOMER_MONITORING_ENABLED
     is on (default OFF => the catalog is exactly the pre-AEGIS one: not priced, not listed, not mintable)."""
