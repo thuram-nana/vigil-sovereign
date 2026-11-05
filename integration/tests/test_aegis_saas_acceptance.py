@@ -99,22 +99,41 @@ def rig(tmp_path, monkeypatch):
     return sov, tmp_path
 
 
-def _hit(upstream_port, spool: Path, *, tenant="org_a", host="apme.cm", secret=SECRET_A, mode="enforce",
-         path=ATTACK):
-    gw = G.serve_gateway(f"http://127.0.0.1:{upstream_port}", config=AegisConfig(deployment_secret="k", mode=mode),
-                         host="127.0.0.1", port=0, saas_tenant=tenant, saas_host=host,
-                         monitoring_spool=str(spool), monitoring_secret=secret)
-    threading.Thread(target=gw.serve_forever, daemon=True).start()
-    try:
-        c = http.client.HTTPConnection("127.0.0.1", gw.server_address[1], timeout=5)
-        c.request("GET", path, headers={"Host": host})
-        r = c.getresponse()
-        out = (r.status, r.getheader("X-Aegis-Block"), r.read())
-        c.close()
-        return out
-    finally:
-        gw.shutdown()
-        gw.server_close()
+class _Gateway:
+    """ONE long-lived tenant gateway (as deployed): authority changes must take effect on the SAME process."""
+
+    def __init__(self, upstream_port, spool: Path, *, tenant="org_a", host="apme.cm", secret=SECRET_A,
+                 mode="enforce"):
+        self.host = host
+        self.gw = G.serve_gateway(f"http://127.0.0.1:{upstream_port}",
+                                  config=AegisConfig(deployment_secret="k", mode=mode), host="127.0.0.1", port=0,
+                                  saas_tenant=tenant, saas_host=host, monitoring_spool=str(spool),
+                                  monitoring_secret=secret)
+        threading.Thread(target=self.gw.serve_forever, daemon=True).start()
+
+    def get(self, path=ATTACK):
+        c = http.client.HTTPConnection("127.0.0.1", self.gw.server_address[1], timeout=5)
+        try:
+            c.request("GET", path, headers={"Host": self.host})
+            r = c.getresponse()
+            return r.status, r.getheader("X-Aegis-Block"), r.read()
+        finally:
+            c.close()
+
+    def close(self):
+        self.gw.shutdown()
+        self.gw.server_close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+
+def _hit(upstream_port, spool: Path, *, path=ATTACK, **kw):
+    with _Gateway(upstream_port, spool, **kw) as gw:
+        return gw.get(path)
 
 
 def _spooled(spool: Path) -> list[Path]:
@@ -171,18 +190,33 @@ def test_block_with_every_flag_blocks_then_revoke_is_pass_through(rig, upstream,
     sov, tmp = rig
     assert sov("authorize", "org_a", "alice", "apme.cm", "block")["ok"]
     monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
-    status, blocked, _ = _hit(upstream, tmp / "s1")
-    assert status == 403 and blocked == "path_traversal_attempt"
-    benign = "/assets?file=" + urllib.parse.quote("../styles/app.css")
-    assert _hit(upstream, tmp / "s1", path=benign)[0] == 200
-    r = sov("revoke", "org_a", "alice", "apme.cm")
-    assert r["revoked"] is True and r["unpublished"]
-    spool = tmp / "s2"
-    status, blocked, _ = _hit(upstream, spool)
-    assert status == 200 and blocked is None and _spooled(spool) == []       # uninspected pass-through
+    spool = tmp / "s1"
+    with _Gateway(upstream, spool) as gw:                                     # ONE long-lived gateway
+        status, blocked, _ = gw.get()
+        assert status == 403 and blocked == "path_traversal_attempt"
+        benign = "/assets?file=" + urllib.parse.quote("../styles/app.css")
+        assert gw.get(benign)[0] == 200
+        r = sov("revoke", "org_a", "alice", "apme.cm")
+        assert r["revoked"] is True and r["unpublished"]
+        before = _spooled(spool)
+        status, blocked, body = gw.get()                                      # SAME gateway, next request
+        assert status == 200 and blocked is None and body == b"UPSTREAM-OK"  # uninspected pass-through
+        assert _spooled(spool) == before                                      # nothing spooled after revoke
     # reports sealed while the grant was live but drained AFTER revoke are dropped (re-bound at receipt).
-    out = sov("drain", str(tmp / "s1"), str(sov.secrets))
+    out = sov("drain", str(spool), str(sov.secrets))
     assert out["drain"]["recorded"] == 0 and out["drain"]["rejected"] >= 1 and out["events"]["org_a"] == []
+
+
+def test_grant_after_gateway_start_takes_effect_on_the_same_gateway(rig, upstream, monkeypatch):
+    sov, tmp = rig
+    monkeypatch.setenv(G.SAAS_ENFORCE_ENV, "1")
+    spool = tmp / "s"
+    with _Gateway(upstream, spool) as gw:
+        assert gw.get()[:2] == (200, None) and _spooled(spool) == []          # no authority yet: pass-through
+        assert sov("authorize", "org_a", "alice", "apme.cm", "block")["ok"]
+        status, blocked, _ = gw.get()                                         # SAME gateway picks up the grant
+        assert status == 403 and blocked == "path_traversal_attempt"
+        assert _spooled(spool)
 
 
 # ---- cross-tenant isolation ----------------------------------------------------------------------------------
