@@ -227,6 +227,28 @@ GENUINE remaining #4 build items now: **one offboarding cascade** (partial today
 make-gate determinism + egress/kill-switch decision. (W5, cross-tenant gate, _ALL_ORACLES frozen, W-track LEAD,
 E0 — all verified present.)
 
+### Milestone 9 — #4 offboarding/decommission cascade BUILT → PR #991 ✅ (red-pen pending)
+
+- Branch `claude/offboarding-cascade-ph9x2k` (fresh off main), commit `f559694`, PR
+  https://github.com/thuram-nana/vigil-sovereign/pull/991 (NOT merged).
+- `governor/decommission.py::decommission_org` composes existing safe-direction latches: revoke_org FIRST
+  (+membership cascade) → subscription cancel → credential+account revoke ONLY if it was the customer's last
+  active org (no cross-tenant collateral). Money history retained-but-unreachable. MonitoringAuthority revoke
+  joins when #42 lands. Not yet wired to a UI/CLI verb (follow-up).
+- Verified: test_decommission 4/4; mutation-verify 4/4 killed; critical-set registered (+test passes);
+  ruff + mypy ratchet green (CI-faithful); related governor suites + docs/tests completeness pass.
+- Env-only failure seen locally: docs/tests/test_security_scan_policy::test_gitleaks_negative_control_real_catch
+  (bootstrap installed an unversioned dev gitleaks; CI pins its own) — unrelated to this slice.
+- UNTESTED here: CI on #991 (in flight at checkpoint). Heavy red-pen deferred to post-Nov-6.
+
+### #42 AEGIS-SaaS — NOT STARTED (owner asked; answered)
+Reuse: aegis engine (`framework/v2/aegis/`) + `vigil_core/monitoring_authority.py`. Build order AE-0 (confirm
+MonitoringAuthority snapshot fold + prune tripwire) → AE-1 sovereign mint (`provision.py monitor_authorize` +
+custui route, OBSERVE default) → AE-2 keyless gateway per-request authority verify (FATAL-2, no key) → AE-3
+enforcement gating (BLOCK authority + fired oracle+cert + AEGIS_RESPOND↔billing; prod flag default-OFF) → AE-4
+verdict crossing to tenant Monitoring surface (same inert spool chain; strict org isolation) → AE-5 catalog
+monitoring plan → AE-6 managed gateway deploy → AE-7 acceptance + flag-hold. NEXT after #991: AE-0.
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
@@ -244,6 +266,10 @@ E0 — all verified present.)
 6. Deploy/ops polish (marketing vhost; NVD/EPSS enrichment; edge wiring).
 
 ## Exact next step
+
+(UPDATED) Drive PR #991 CI to green; then start #42 AE-0 on a fresh branch. Older note below kept for history.
+
+## Exact next step (prior)
 
 `vigil up --with-saas` with `VIGIL_BILLING_WEBHOOK_SPOOL`/`_SECRET` set → POST a signed sandbox webhook to
 `/webhooks/billing` → observe spool→drain→mint→credit→credit-gate→billing≠testing over real HTTP (mock verifier
