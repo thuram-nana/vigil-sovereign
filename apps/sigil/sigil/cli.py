@@ -1171,6 +1171,61 @@ def cmd_settle_drain(a) -> None:
               f"{r['deduped']} deduped")
 
 
+def _billing_transaction_verifier():
+    """The server-side Flutterwave ``/v3/transactions/{id}/verify`` caller the billing drain MUST use. No
+    production verifier is provisioned in this codebase yet (the owner-infra deferral), so this returns None
+    and ``billing-drain`` refuses to run. It is the single seam an owner-provisioned verifier plugs into."""
+    return None
+
+
+def cmd_billing_drain(a) -> None:
+    """Drain / watch the inbound BILLING-webhook spool (SaaS Slice C) through ``BillingSigner.ingest``:
+    ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
+    CATALOG decides the entitlement -> one owner-signed mint. Default-OFF (``VIGIL_BILLING_DRAIN_ENABLED=1``)
+    and fail-closed: the verif-hash secret comes ONLY from ``VIGIL_BILLING_WEBHOOK_SECRET`` (never argv, never
+    printed) and the drain refuses to run without a server-side transaction verifier."""
+    import os
+
+    if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
+        print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
+        sys.exit(2)
+    secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
+    if not secret:
+        print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
+        sys.exit(2)
+    verifier = _billing_transaction_verifier()
+    if not callable(verifier):
+        print("billing-drain: no server-side transaction verifier is configured — refusing (fail-closed; a "
+              "verif-hash alone never grants value)", file=sys.stderr)
+        sys.exit(2)
+
+    from .governor import catalog
+    from .governor.billing import BillingSigner, FlutterwaveBillingProvider
+    from .governor.invoices import InvoiceRegistry
+    from .governor.metering import PlanCreditLedger
+    from .governor.subscription import SubscriptionRegistry
+    from .governor.wallet import WalletRegistry
+    from .inbound.billing_spool import BillingSpoolWatcher
+
+    store = SpineStore()
+    signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier),
+                           wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
+                           plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
+                           expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
+    watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
+    del secret
+    if getattr(a, "billing_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
+
+
 def cmd_knowledge(a) -> None:
     """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
     owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
@@ -2336,6 +2391,14 @@ def main(argv=None) -> None:
                           "(default: $VIGIL_BASE_DIR)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
+    pbd = sub.add_parser("billing-drain",
+                         help="drain/watch the inbound Flutterwave billing-webhook spool → server-side "
+                              "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
+                              "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
+    pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
+    pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pbd.set_defaults(fn=cmd_billing_drain)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
