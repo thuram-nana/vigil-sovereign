@@ -115,11 +115,7 @@ class MonitoringSpoolWatcher:
         return rep
 
     def _record(self, rep: dict) -> int:
-<<<<<<< ours
-        payload: dict = {"signal": EVENT_SIGNAL, "source_class": "gateway_reported"}
-=======
         payload: dict[str, object] = {"signal": EVENT_SIGNAL, "source_class": "gateway_reported"}
->>>>>>> theirs
         for k in _FIELDS:
             payload[k] = rep.get(k)
         return self.store.append(kind="event", source="aegis", actor="AEGIS", payload=payload)
