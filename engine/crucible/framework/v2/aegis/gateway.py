@@ -91,6 +91,16 @@ _FORWARD_TIMEOUT_S = 30.0
 _CLIENT_TIMEOUT_S = 60.0                 # per-connection socket read deadline (slowloris bound)
 
 
+SAAS_ENFORCE_ENV = "VIGIL_AEGIS_SAAS_ENFORCE"
+
+
+def _saas_enforce_flag() -> bool:
+    """AEGIS-SaaS AE-3 production enforcement flag — strict, fail-closed, DEFAULT OFF. Only an explicit
+    affirmative token turns it on; anything else (unset, typo) keeps SaaS enforcement off."""
+    import os
+    return (os.environ.get(SAAS_ENFORCE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class GatewaySettings:
     """Per-gateway runtime state, stored on the server instance (like ``api.server``'s handler
     state). ``on_verdict`` is an optional sink the operator wires for logging/metrics — the gateway
@@ -105,7 +115,8 @@ class GatewaySettings:
         down (availability-first)."""
 
     def __init__(self, upstream: str, config: AegisConfig, *, slug: str = "aegis-gateway",
-                 on_verdict: Callable[[Verdict], None] | None = None) -> None:
+                 on_verdict: Callable[[Verdict], None] | None = None,
+                 saas_tenant: str | None = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"upstream must be an http(s) URL with a host, got {upstream!r}")
@@ -115,6 +126,10 @@ class GatewaySettings:
         self.config = config
         self.slug = slug or "aegis-gateway"
         self.on_verdict = on_verdict
+        # AEGIS-SaaS AE-3: when set, this gateway serves ONE customer tenant and every request is re-authorized
+        # against that tenant's owner-signed monitoring authority (AE-2). None = the legacy self-hosted gateway,
+        # whose behaviour is byte-identical to before.
+        self.saas_tenant = saas_tenant or None
         self._enforce_authorized = self._authorize_enforce()
         # G5 — the inline per-actor Beta belief graph + a monotonic sequence for its observations, and
         # a lock (the server is threaded, so belief updates must be serialised). ``actor_last_class``
@@ -213,6 +228,26 @@ class GatewaySettings:
         return (self.intended_mode() == "enforce"
                 and self._enforce_authorized
                 and not self._killswitch_tripped())
+
+    def saas_decision(self, host: str):
+        """AE-3 per-request re-authorization. None when this is not a SaaS gateway; otherwise the AE-2
+        ``MonitoringDecision`` for (saas_tenant, request host). Total: any failure is a refusal."""
+        if self.saas_tenant is None:
+            return None
+        try:
+            from .monitoring_authority_check import check_monitoring_authority
+            return check_monitoring_authority(self.saas_tenant, host)
+        except Exception:
+            from .monitoring_authority_check import MonitoringDecision
+            return MonitoringDecision(ok=False, mode=None, reason="monitoring-authority check unavailable")
+
+    def effective_enforce(self, decision) -> bool:
+        """The per-request enforce term. Legacy gateway: exactly ``self.enforce``. SaaS gateway: blocking is
+        NECESSARY-NOT-SUFFICIENT on the grant — it additionally needs a VERIFIED BLOCK-mode authority for this
+        request AND the default-OFF production flag. OBSERVE never enforces; a refused authority never enforces."""
+        if decision is None:
+            return self.enforce
+        return bool(decision.ok and decision.mode == "block" and _saas_enforce_flag() and self.enforce)
 
     def enforcement_status(self) -> dict[str, object]:
         """A machine-readable, HONEST snapshot of the enforce gate — the structural guarantee that a
@@ -654,6 +689,18 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if too_large:
             self._send_too_large()   # honest 413 + close; never a truncated/desynced forward
             return
+        # AEGIS-SaaS AE-3: re-authorize THIS request against the tenant's monitoring authority. No valid
+        # authority => AEGIS neither inspects nor acts: a plain pass-through (no verdict, no belief, no block).
+        decision = settings.saas_decision(self.headers.get("Host", ""))
+        if decision is not None and not decision.ok:
+            passthrough = self._forward(method, body)
+            if passthrough is None:
+                self._send_bad_gateway()
+                return
+            self._relay(*passthrough)
+            return
+        enforce = settings.effective_enforce(decision)
+
         # Inspect only a bounded prefix (the whole body is still forwarded intact).
         inspect_body = body[:_MAX_INSPECT_BYTES].decode("utf-8", "replace") if body else None
 
@@ -663,7 +710,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             verdict = inspect_request(
                 method, self.path, self._request_headers(), inspect_body,
                 honeypot_paths=settings.config.honeypot_paths,
-                enforce=settings.enforce,
+                enforce=enforce,
             )
         except Exception:
             verdict = None
@@ -687,7 +734,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         #      escalation). NEVER a hard block on belief alone (prove-don't-guess) — only under enforce
         #      + entitlement, availability-first (a soft, retryable 429). observe mode never acts. This
         #      request's own verdict is recorded once, below, so challenge can graduate to throttle.
-        if settings.enforce:
+        if enforce:
             action = graduated_action(self._current_belief())
             if action is not None:
                 self._note_belief(verdict)   # record this request (single feed) so belief keeps accruing
@@ -708,7 +755,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             rverdict = inspect_response(
                 self.path, self._request_headers(), inspect_body,
                 content.decode("utf-8", "replace") if content else None,
-                enforce=settings.enforce,
+                enforce=enforce,
                 canary=settings.config.canary,
             )
         except Exception:
@@ -731,7 +778,8 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 
 def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1", port: int = 8080,
                   slug: str = "aegis-gateway",
-                  on_verdict: Callable[[Verdict], None] | None = None) -> ThreadingHTTPServer:
+                  on_verdict: Callable[[Verdict], None] | None = None,
+                  saas_tenant: str | None = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -739,5 +787,6 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
     is read-only: it inspects and forwards, never blocking. ``slug`` names the gateway for the
     kill-switch and the audit trail."""
     httpd = ThreadingHTTPServer((host, port), AegisGatewayHandler)
-    httpd.settings = GatewaySettings(upstream, config, slug=slug, on_verdict=on_verdict)  # type: ignore[attr-defined]
+    httpd.settings = GatewaySettings(upstream, config, slug=slug, on_verdict=on_verdict,  # type: ignore[attr-defined]
+                                     saas_tenant=saas_tenant)
     return httpd
