@@ -292,6 +292,10 @@ class OrgRegistry:
         # complete.)
         for _m in self.memberships(oid):
             self._append_revoked_membership(oid, _m.username)
+        # Offboarding also revokes + unpublishes every monitoring authority of the org (safe direction).
+        from .monitoring_authority import MonitoringAuthorityRegistry
+        MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
+                                    trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
         return seq
 
     # -- owner mutations: memberships ---------------------------------------------------------------

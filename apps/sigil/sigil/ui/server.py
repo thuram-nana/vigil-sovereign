@@ -1480,6 +1480,21 @@ class Handler(BaseHTTPRequestHandler):
         if action == "launch_start":
             return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
                                   mfa_at=body.get("mfa_at"))
+        # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
+        # requester is the hop principal, org from the edge SESSION (never a free body field).
+        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
+            from .. import config as _config
+            if not _config.customer_monitoring_enabled():
+                return None
+            if action == "monitor_authorize":
+                return p.monitor_authorize(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                           mode=str(body.get("mode", "observe")), window_s=body.get("window_s"),
+                                           ip=ip, mfa_at=body.get("mfa_at"))
+            if action == "monitor_revoke":
+                return p.monitor_revoke(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+            if action == "monitor_events":
+                return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
+            return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
         # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
         if action == "billing_overview":
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)
