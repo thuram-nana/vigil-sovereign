@@ -45,7 +45,7 @@ SIGNAL = "governor.monitoring_authority"
 MODE_OBSERVE = "observe"
 MODE_BLOCK = "block"
 _MODES = frozenset({MODE_OBSERVE, MODE_BLOCK})
-_CORE = ("signal", "org_id", "host", "mode", "not_before", "not_after", "state", "issued_at")
+_CORE = ("signal", "org_id", "host", "mode", "not_before", "not_after", "proof_sha256", "state", "issued_at")
 _MAX_WINDOW_S = 366.0 * 24.0 * 3600.0       # a single grant spans at most ~1 year (re-grant to extend)
 
 _LOAD_FROM_VAULT = object()
@@ -65,6 +65,7 @@ class MonitoringGrant:
     mode: str            # "observe" | "block"
     not_before: float
     not_after: float     # already clamped to the ownership proof's expires_at at grant time
+    proof_sha256: str    # the ownership proof (token hash) this grant was minted against — a re-proof never revives it
     issued_at: float
 
     def covers(self, now: float) -> bool:
@@ -102,18 +103,19 @@ class MonitoringAuthorityRegistry:
             raise ValueError("the ownership proof expires before the requested window starts")
         at = float(issued_at) if issued_at is not None else t
         core = {"signal": SIGNAL, "org_id": oid, "host": h, "mode": m, "not_before": nb, "not_after": na,
-                "state": "active", "issued_at": at}
+                "proof_sha256": proof.token_sha256, "state": "active", "issued_at": at}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"monitoring authority {m.upper()} for {h} (org {oid}) granted (owner-signed)"}
         self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
-        return MonitoringGrant(org_id=oid, host=h, mode=m, not_before=nb, not_after=na, issued_at=at)
+        return MonitoringGrant(org_id=oid, host=h, mode=m, not_before=nb, not_after=na,
+                               proof_sha256=proof.token_sha256, issued_at=at)
 
     def revoke(self, org_id: str, host: str) -> int:
         """Revoke a monitoring grant — the SAFE direction (honored even unsigned, fixed ``issued_at`` 0.0)."""
         oid, h = _check_org_id(org_id), _check_host(host)
         core = {"signal": SIGNAL, "org_id": oid, "host": h, "mode": "", "not_before": 0.0, "not_after": 0.0,
-                "state": "revoked", "issued_at": 0.0}
+                "proof_sha256": "", "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"monitoring authority for {h} (org {oid}) REVOKED (governed latch)"}
@@ -136,6 +138,7 @@ class MonitoringAuthorityRegistry:
             state = dict(snap.monitoring_authority_state_map())
             issued = dict(snap.monitoring_authority_issued_map())
             rows = {(r[0], r[1]): {"mode": r[2], "not_before": r[3], "not_after": r[4],
+                                   "proof_sha256": (r[5] if len(r) > 5 else ""),
                                    "issued_at": issued.get((r[0], r[1]), 0.0)}
                     for r in snap.monitoring_authority_row}
             since = snap.base_seq - 1
@@ -161,7 +164,8 @@ class MonitoringAuthorityRegistry:
                 issued[key] = at
                 state[key] = "active"
                 rows[key] = {"mode": p.get("mode"), "not_before": p.get("not_before"),
-                             "not_after": p.get("not_after"), "issued_at": at}
+                             "not_after": p.get("not_after"), "proof_sha256": p.get("proof_sha256"),
+                             "issued_at": at}
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
 
     @staticmethod
@@ -169,6 +173,7 @@ class MonitoringAuthorityRegistry:
         return MonitoringGrant(org_id=key[0], host=key[1], mode=str(row.get("mode")),
                                not_before=float(as_issued_at(row.get("not_before"))),
                                not_after=float(as_issued_at(row.get("not_after"))),
+                               proof_sha256=str(row.get("proof_sha256") or ""),
                                issued_at=float(as_issued_at(row.get("issued_at"))))
 
     def grant_for(self, org_id: str, host: str) -> Optional[MonitoringGrant]:
@@ -180,12 +185,17 @@ class MonitoringAuthorityRegistry:
 
     def active_at(self, org_id: str, host: str, *, now: float) -> Optional[MonitoringGrant]:
         """The DECISION read: the grant iff active AND inside its window at ``now`` AND the exact (org, host)
-        still holds a CURRENT ownership proof. DEFAULT-DENY otherwise (other org, other host, revoked,
-        expired, not yet valid, ownership lapsed)."""
+        still holds a CURRENT ownership proof — the SAME proof the grant was minted against (a revoke-then-re-prove
+        never revives an old grant). DEFAULT-DENY otherwise (other org, other host, revoked, expired, not yet
+        valid, ownership lapsed or replaced)."""
         g = self.grant_for(org_id, host)
-        if g is None or not g.covers(now):
+        if g is None or not g.covers(now) or not g.proof_sha256:
             return None
-        if not self._ownership().has_current_proof(org_id, host, now=now):
+        own = self._ownership()
+        if not own.has_current_proof(org_id, host, now=now):
+            return None
+        p = own.proof(org_id, host)
+        if p is None or p.token_sha256 != g.proof_sha256:
             return None
         return g
 

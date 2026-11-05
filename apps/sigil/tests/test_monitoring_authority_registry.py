@@ -245,3 +245,39 @@ def test_check_prune_safe_wires_the_monitoring_tripwire(tmp_path, monkeypatch):
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "ghost@org" in str(e.value)
+
+
+# ---- red-pen fold (AE-0 workflow run) ----------------------------------------------------------------
+def test_grant_after_proof_expired_is_refused():
+    """Confirmed LOW: the grant-time expiry half of the ownership gate (not merely the read-time recheck)."""
+    s = _store()
+    _prove(s, "acme", "apme.cm", now=10.0, ttl=50.0)                          # expires at 60
+    with pytest.raises(ValueError, match="ownership"):
+        _ma(s).grant("acme", "apme.cm", not_before=0.0, not_after=1000.0, now=100.0)
+    assert _ma(s).grant_for("acme", "apme.cm") is None
+
+
+def test_reproving_ownership_does_not_revive_an_old_grant():
+    """Design hardening: a grant is bound to the proof it was minted against (proof_sha256). Revoke the proof,
+    re-prove with a NEW token, and the old in-window grant stays inert until the owner grants afresh."""
+    s = _store()
+    _prove(s, "acme", "apme.cm", now=1.0)
+    old = _ma(s).grant("acme", "apme.cm", mode=MODE_BLOCK, not_before=0.0, not_after=1000.0, now=2.0)
+    AssetOwnershipRegistry(s, owner_key=OWNER, trusted_pubkey=OP).revoke_proof("acme", "apme.cm")
+    _prove(s, "acme", "apme.cm", now=3.0)                                     # fresh challenge ⇒ new token
+    assert _ma(s).active_at("acme", "apme.cm", now=5.0) is None, "re-proof must not revive the old grant"
+    new = _ma(s).grant("acme", "apme.cm", not_before=0.0, not_after=1000.0, now=4.0)
+    assert new.proof_sha256 != old.proof_sha256
+    assert _ma(s).active_at("acme", "apme.cm", now=5.0).mode == MODE_OBSERVE
+
+
+def test_forged_grant_in_a_pruned_prefix_is_not_seeded():
+    """Rejected-but-cheap: the SNAPSHOT fold's own signature check (a forged BLOCK grant below K never seeds)."""
+    s = _store()
+    _prove(s, "acme", "apme.cm", now=1.0)
+    MonitoringAuthorityRegistry(s, owner_key=ATTACKER, trusted_pubkey=OP).grant(
+        "acme", "apme.cm", mode=MODE_BLOCK, not_before=0.0, not_after=100.0, now=2.0)
+    k = s.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
+    snap = build([r for r in s.iter_records() if r.seq < k], trusted_pubkey=OP, base_seq=k, snapshot_seq=k - 1)
+    assert ("acme", "apme.cm") not in snap.monitoring_authority_state_map()
+    assert snap.monitoring_authority_row == []

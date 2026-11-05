@@ -69,8 +69,9 @@ class SnapshotState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = 6   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
-    #                           3->4 Slice H (governor.invoice billing history). Every snapshot this build emits
-    #                           carries the v4 keys; a pre-bump build refuses it cleanly via the refuse-newer gate.
+    #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
+    #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority). Every snapshot this build emits
+    #                           carries the v6 keys; a pre-bump build refuses it cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
     trusted_pubkey: str = ""          # owner pubkey the pubkey-dependent folds were computed under
@@ -164,7 +165,7 @@ class SnapshotState(BaseModel):
     #                                   governor.monitoring_authority LWW per (org_id, host). Keep revoked (v6).
     monitoring_authority_issued: list = []  # [[org_id, host, issued_at], ...] — per-(org,host) active high-water;
     #                                   MUST cross a prune or a captured owner-signed grant becomes replay-resurrectable.
-    monitoring_authority_row: list = []  # [[org_id, host, mode, not_before, not_after], ...] — rebuild an active grant.
+    monitoring_authority_row: list = []  # [[org_id, host, mode, not_before, not_after, proof_sha256], ...] — rebuild a grant.
     customer_credential_state: list = []  # [[username, cred_key, "active"|"revoked"], ...] —
     #                                   governor.customer_credential LWW, keyed PER-(username, cred_key). Keep
     #                                   revoked (Slice E2a schema v5; mirrors ownership_proof).
@@ -534,8 +535,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                  for r in s.ownership_proof_row} if s else {}   # ->[method,sha,verified,expires]
     ma_state: dict[tuple, str] = dict(s.monitoring_authority_state_map()) if s else {}   # (org,host) -> state
     ma_issued: dict[tuple, float] = dict(s.monitoring_authority_issued_map()) if s else {}   # (org,host) -> hw
-    ma_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4]]
-                                 for r in s.monitoring_authority_row} if s else {}   # ->[mode,nb,na]
+    ma_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], (r[5] if len(r) > 5 else "")]
+                                 for r in s.monitoring_authority_row} if s else {}   # ->[mode,nb,na,proof_sha]
     cc_state: dict[tuple, str] = dict(s.customer_credential_state_map()) if s else {}   # (user,cred_key) -> state
     cc_issued: dict[tuple, float] = dict(s.customer_credential_issued_map()) if s else {}   # (user,cred_key) -> hw
     cc_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]
@@ -742,7 +743,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     if at > ma_issued.get(makey, NO_HIGHWATER):
                         ma_issued[makey] = at
                         ma_state[makey] = "active"
-                        ma_row[makey] = [p.get("mode"), p.get("not_before"), p.get("not_after")]
+                        ma_row[makey] = [p.get("mode"), p.get("not_before"), p.get("not_after"),
+                                         p.get("proof_sha256")]
         # --- governor.customer_credential LWW + PER-(username, cred_key) high-water (mirrors the ownership_proof
         #     fold EXACTLY, so an active passkey/TOTP/OIDC-link whose only grant is pruned survives and its
         #     high-water is NOT reset — else a captured owner-signed active credential becomes replay-
@@ -894,7 +896,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         ownership_proof_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in op_row.items()],
         monitoring_authority_state=[[k[0], k[1], v] for k, v in ma_state.items()],
         monitoring_authority_issued=[[k[0], k[1], i] for k, i in ma_issued.items()],
-        monitoring_authority_row=[[k[0], k[1], r[0], r[1], r[2]] for k, r in ma_row.items()],
+        monitoring_authority_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in ma_row.items()],
         customer_credential_state=[[k[0], k[1], v] for k, v in cc_state.items()],
         customer_credential_issued=[[k[0], k[1], i] for k, i in cc_issued.items()],
         customer_credential_row=[[k[0], k[1], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]
