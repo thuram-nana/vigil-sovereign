@@ -142,6 +142,34 @@ Ran in a throwaway venv built to **CI's exact lint env** (`engine/crucible/frame
 - STILL OPEN for #25: Opus multi-lens adversarial red-pen (after Nov 6 05:00 UTC); a drive against
   Flutterwave's REAL sandbox `/verify` API (needs owner sandbox keys — not stored).
 
+### Milestone 6 — A (#3 livefire cron): diagnosis (evidence-backed; definitive pin needs the job log)
+
+The `schedule` event runs FOUR nightly jobs. Reproduced locally (docker up):
+- `livefire-range`: **green** (full container range `verify` — all planted weaknesses fired, all controls silent).
+- `livefire-k8s-rbac`: **green** (throwaway k3s; "All checks held against real cluster evidence"; cert re-verified offline).
+- `livefire-secret-github`: SKIPs cleanly without `VIGIL_LIVEFIRE_GH_PAT` (honest `exit 0`, not a failure).
+- `livefire-full`: provisioning reproduced green — Go tools install (`nuclei@v3.3.7`, `httpx@v1.6.9`,
+  `ffuf@v2.1.0`), the pinned **nikto SHA `d506740…` is reachable** (clone+checkout OK), and the version probe
+  reports **2.6.1 ≥ 2.6** once `libnet-ssleay-perl` + `libxml-writer-perl` are present.
+
+**Root-cause conclusion:** the failures (runs 41620914942 / 41815807225) are **runner-environmental, not a code
+or pin regression** (livefire.yml unchanged since the Oct-7 squash merge #918; only one livefire-touching commit,
+that merge). The single most fragile, workflow-documented point is the **nikto `XML::Writer` perl dependency**:
+without it, `nikto -Version` prints `Required module not found: XML::Writer`, the version `sed` reads empty, and
+`livefire-full` fails the `< 2.6` check. The workflow's own comment records this exact flake ("a runner image
+that ships without XML::Writer"). Reproduced here: missing dep → probe fails; `apt-get install libxml-writer-perl`
+→ probe passes.
+
+**Proposed fix (NOT yet landed — speculative without the job log; safe/additive):** harden the `livefire-full`
+nikto provisioning to self-heal + fail-fast with a clear message — e.g. after the apt install, assert
+`perl -MXML::Writer -e1` and, if absent, `cpan -T XML::Writer` fallback; and have the version probe print the
+raw `nikto -Version` on an empty parse so the next failure names its cause. This is a non-blocking nightly and
+the change weakens nothing.
+
+**To finalize definitively:** need the failing run's job log (which of the 4 jobs + which step). No Actions-log
+tool in this toolset — owner to enable it or paste the red job's step log. I will land the fix (or a different
+one) once the log confirms the exact step.
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
