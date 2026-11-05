@@ -172,3 +172,71 @@ def test_resolver_refuses_fifo_even_with_secret_bytes_waiting(sdir):
         assert M.resolve_report_secret("org_a", "app.example.com", sdir) is None
     finally:
         os.close(w)
+
+
+# ---- export (CodeQL fold: the CLI never prints the secret's location; export to an operator-chosen file) ------
+def test_export_writes_an_atomic_0600_copy(tmp_path):
+    sdir = tmp_path / "s"
+    M.provision_report_secret("org_a", "app.example.com", sdir)
+    dest = tmp_path / "out" / "gw.secret"
+    M.export_report_secret("org_a", "app.example.com", sdir, dest)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    assert dest.read_bytes().strip() == M.resolve_report_secret("org_a", "app.example.com", sdir)
+
+
+def test_export_refuses_unprovisioned_existing_and_symlink_destinations(tmp_path):
+    sdir = tmp_path / "s"
+    with pytest.raises(ValueError):
+        M.export_report_secret("org_a", "app.example.com", sdir, tmp_path / "x")
+    M.provision_report_secret("org_a", "app.example.com", sdir)
+    dest = tmp_path / "gw.secret"
+    M.export_report_secret("org_a", "app.example.com", sdir, dest)
+    with pytest.raises(FileExistsError):
+        M.export_report_secret("org_a", "app.example.com", sdir, dest)
+    M.export_report_secret("org_a", "app.example.com", sdir, dest, overwrite=True)
+    real = tmp_path / "victim"
+    real.write_text("keep")
+    link = tmp_path / "link.secret"
+    os.symlink(real, link)
+    with pytest.raises(ValueError):
+        M.export_report_secret("org_a", "app.example.com", sdir, link, overwrite=True)
+    assert real.read_text() == "keep"
+    with pytest.raises(ValueError):
+        M.export_report_secret("org_a", "app.example.com", sdir, tmp_path, overwrite=True)   # a directory
+
+
+def test_cli_output_never_contains_the_secret_or_its_location(monkeypatch, tmp_path, capsys):
+    _isolate_cli_spine_gate(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
+    sdir = tmp_path / "secrets"
+    dest = tmp_path / "staging" / "gw.secret"
+    cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir),
+              "--export-to", str(dest)])
+    out = capsys.readouterr()
+    text = out.out + out.err
+    sec = M.resolve_report_secret("org_a", "app.example.com", sdir)
+    assert sec.decode() not in text
+    assert M.secret_filename("org_a", "app.example.com") not in text and str(sdir) not in text
+    assert dest.read_bytes().strip() == sec
+    with pytest.raises(SystemExit) as e:                                    # errors name only the exception type
+        cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir)])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "FileExistsError" in err and str(sdir) not in err
+    with pytest.raises(SystemExit) as e:
+        cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir),
+                  "--export-only"])
+    assert e.value.code == 2
+
+
+def test_cli_export_only_reexports_without_rotating(monkeypatch, tmp_path, capsys):
+    _isolate_cli_spine_gate(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
+    sdir = tmp_path / "secrets"
+    M.provision_report_secret("org_a", "app.example.com", sdir)
+    before = M.resolve_report_secret("org_a", "app.example.com", sdir)
+    dest = tmp_path / "gw.secret"
+    cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir),
+              "--export-only", "--export-to", str(dest)])
+    assert M.resolve_report_secret("org_a", "app.example.com", sdir) == before
+    assert dest.read_bytes().strip() == before

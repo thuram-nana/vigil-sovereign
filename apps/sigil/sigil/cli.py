@@ -1179,19 +1179,31 @@ def _monitoring_flag_or_exit(verb: str) -> None:
 
 
 def cmd_monitoring_secret(a) -> None:
-    """Provision (or rotate) the per-(org, host) AEGIS-SaaS monitoring REPORT secret (AE-6). Prints only the
-    secret FILE path (copy it, 0600, to that tenant's managed gateway as --monitoring-secret-file) — never the
-    secret itself. Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED."""
+    """Provision (or rotate) the per-(org, host) AEGIS-SaaS monitoring REPORT secret (AE-6), and optionally export
+    it (0600, atomic) to an operator-chosen file — e.g. the tenant gateway's --monitoring-secret-file mount.
+    Output is FIXED text only: neither the secret nor its on-disk location is ever printed, and errors name only
+    the exception type. Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED."""
     from . import config
-    from .governor.monitoring_secrets import provision_report_secret
+    from .governor.monitoring_secrets import export_report_secret, provision_report_secret
     _monitoring_flag_or_exit("monitoring-secret")
-    try:
-        path = provision_report_secret(a.org, a.host, a.secrets_dir or config.monitoring_secrets_dir(),
-                                       rotate=a.rotate)
-    except (OSError, ValueError) as e:
-        print(f"monitoring-secret: {e}", file=sys.stderr)
+    base = a.secrets_dir or config.monitoring_secrets_dir()
+    if not a.export_only:
+        try:
+            provision_report_secret(a.org, a.host, base, rotate=a.rotate)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: provisioning refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret provisioned for the requested tenant/host")
+    if a.export_to:
+        try:
+            export_report_secret(a.org, a.host, base, a.export_to, overwrite=a.overwrite)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: export refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret exported (0600) to the requested destination")
+    elif a.export_only:
+        print("monitoring-secret: --export-only requires --export-to", file=sys.stderr)
         sys.exit(2)
-    print(f"  report secret for ({a.org}, {a.host}) -> {path}")
 
 
 def _reconcile_once(store) -> list:
@@ -2427,13 +2439,19 @@ def main(argv=None) -> None:
                               "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")
     pmr.set_defaults(fn=cmd_monitoring_reconcile)
     pms = sub.add_parser("monitoring-secret",
-                         help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret "
-                              "(prints the 0600 file path, never the secret; default-OFF)")
+                         help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret and "
+                              "optionally export it 0600 to a chosen file (prints neither the secret nor its "
+                              "location; default-OFF)")
     pms.add_argument("--org", required=True, help="tenant org_id")
     pms.add_argument("--host", required=True, help="the protected host (bare DNS name)")
     pms.add_argument("--rotate", action="store_true", help="replace an existing secret")
     pms.add_argument("--secrets-dir", default="",
                      help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pms.add_argument("--export-to", default="",
+                     help="copy the secret (0600, atomic) to this file, e.g. the tenant gateway's secret mount")
+    pms.add_argument("--export-only", action="store_true",
+                     help="export an already-provisioned secret without provisioning/rotating")
+    pms.add_argument("--overwrite", action="store_true", help="allow --export-to to replace an existing file")
     pms.set_defaults(fn=cmd_monitoring_secret)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")

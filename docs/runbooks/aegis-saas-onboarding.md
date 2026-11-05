@@ -27,12 +27,15 @@ provisioner owner-signs a `SignedMonitoringAuthority` and publishes it (0600, ha
 ## 2. Provision the per-(org, host) report secret (sovereign host)
 
 ```
-VIGIL_CUSTOMER_MONITORING_ENABLED=1 sigil monitoring-secret --org <org_id> --host <host>
+VIGIL_CUSTOMER_MONITORING_ENABLED=1 sigil monitoring-secret --org <org_id> --host <host> \
+    --export-to /path/to/staging/<org_id>-<host>.secret
 ```
 
-Prints the secret FILE path only (0600 in a 0700 dir, hashed name). Copy that file, unchanged, to the gateway
-host as `AEGIS_SAAS_SECRET_FILE`, mode 0600, owned by the gateway user. Transfer over an authenticated channel
-(scp over WireGuard/SSH). `--rotate` replaces it; the deployed gateway's reports stop verifying until the new file
+Provisions the secret (0600 in a 0700 dir, hashed name) and exports a 0600 copy, atomically, to the file you name.
+The command prints fixed confirmation text only: never the secret and never its on-disk location. Use
+`--export-only --export-to ...` to re-export an existing secret, and `--overwrite` to replace an existing export
+file. Move the exported file, unchanged, to the gateway host as `AEGIS_SAAS_SECRET_FILE`, mode 0600, owned by the
+gateway user, over an authenticated channel (scp over WireGuard/SSH), then delete the staging copy. `--rotate` replaces it; the deployed gateway's reports stop verifying until the new file
 is deployed and the gateway restarted.
 
 ## 3. Deploy the gateway

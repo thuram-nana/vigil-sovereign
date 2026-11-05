@@ -81,6 +81,37 @@ def resolve_report_secret(org_id: str, host: str, secrets_dir: "str | os.PathLik
     return secret
 
 
+def export_report_secret(org_id: str, host: str, secrets_dir: "str | os.PathLike", dest: "str | os.PathLike", *,
+                         overwrite: bool = False) -> None:
+    """Copy the (org_id, host) report secret to an operator-chosen ``dest`` (e.g. the tenant gateway's
+    ``--monitoring-secret-file`` mount) atomically as a 0600 file, so nobody has to discover or copy the
+    secret's on-disk location by hand. Fail-closed: refuses an unprovisioned/malformed secret, a ``dest`` that is
+    a symlink or not a regular file, an existing ``dest`` unless ``overwrite``, and never returns or logs the
+    secret. Raises ``ValueError`` / ``OSError`` with secret-free messages."""
+    secret = resolve_report_secret(org_id, host, secrets_dir)
+    if secret is None:
+        raise ValueError("no well-formed report secret is provisioned for this tenant/host")
+    target = Path(dest)
+    try:
+        st = os.lstat(target)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("export destination must be a regular file path (no symlink, device or directory)")
+        if not overwrite:
+            raise FileExistsError("export destination already exists (pass overwrite to replace it)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / (".tmp-" + secrets.token_hex(8))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.write(fd, secret + b"\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, target)
+
+
 def resolver(secrets_dir: "str | os.PathLike"):
     """A ``SecretResolver`` for ``MonitoringSpoolWatcher(secret_for=...)`` bound to ``secrets_dir``."""
     def secret_for(org_id: str, host: str) -> Optional[bytes]:
