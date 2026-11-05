@@ -104,8 +104,8 @@ class MonitoringSpoolWatcher:
         if rep.get("decision") not in _DECISIONS:
             raise MonitoringSpoolError("report decision is not reportable")
         try:
-            ts = float(rep.get("ts"))
-        except (TypeError, ValueError) as exc:
+            ts = float(rep["ts"])
+        except (KeyError, TypeError, ValueError) as exc:
             raise MonitoringSpoolError("report timestamp unreadable") from exc
         now = float(self._now())
         if not (now - self.max_age_s <= ts <= now + self.future_skew_s):
@@ -115,7 +115,7 @@ class MonitoringSpoolWatcher:
         return rep
 
     def _record(self, rep: dict) -> int:
-        payload = {"signal": EVENT_SIGNAL, "source_class": "gateway_reported"}
+        payload: dict[str, object] = {"signal": EVENT_SIGNAL, "source_class": "gateway_reported"}
         for k in _FIELDS:
             payload[k] = rep.get(k)
         return self.store.append(kind="event", source="aegis", actor="AEGIS", payload=payload)
