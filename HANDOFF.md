@@ -170,6 +170,34 @@ the change weakens nothing.
 tool in this toolset — owner to enable it or paste the red job's step log. I will land the fix (or a different
 one) once the log confirms the exact step.
 
+### Milestone 7 — #4 design-critique closeout: grounded status (verify-before-build) ✅ (investigation)
+
+Verified against the actual tree (several handoff notes are STALE — built in #990):
+- **Cross-tenant isolation merge-gate: ALREADY BUILT** — `test_custui.py::test_cross_tenant_isolation_two_customer_orgs`
+  ("governance R3 MERGE-GATE": session-scoped reads, IDOR `?org_id=` ignored, billing/invoices/assessments
+  covered) + `test_customer_e2e.py::test_e2e_cross_tenant_and_cross_plane_isolation` (customer cookie ⊥ operator
+  cockpit `/sovereign/*`, and vice-versa) + per-surface cross-tenant 403s (`test_ui_billing`, `test_ui_assessments`,
+  `test_invoices` IDOR). The design-critique "CONFIRMED MISSING" is stale. (Residual: `monitoring` surface = #42,
+  not built yet; an explicit customer→`do_action` mutation-refusal assertion is implied by cookie=anon-on-operator.)
+- **`_ALL_ORACLES` frozen: CONFIRMED** — guarded at exactly 15 by `test_defensive_capability`, `test_twin_refresh`,
+  `test_witness_quorum::test_all_oracles_stays_exactly_fifteen_no_new_kind`.
+- **W-track LEAD-only soundness: wired** — `verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES` referenced across
+  producer/critic/sensor suites + `oracle_probe_executor`. (TODO: spot-confirm nosqli/ldap/xpath stay LEAD and
+  IAM-over-permission is LEAD-or-discriminator.)
+- **W5 `SECURITY_GROUP_EXPOSURE`: GENUINELY ABSENT** — no code/JSON hits → real work item (ship a sound
+  LEAD-or-oracle + a prose↔oracle conformance test; audit `evidence-branches.json` for an overclaim).
+- **Offboarding cascade: PARTIAL** — `orgs.revoke_org` cascades org + memberships (reactivation guard) and
+  `asset_ownership` revokes on offboarding, but there is **no single cascade** covering
+  account+org+wallet+subscription+invoices+credentials+monitoring → real work item.
+- **E0 per-org billing perms: NOT FOUND by name** (`view_own_billing`/`manage_own_billing`) — RBAC model exists
+  (viewer<analyst<operator<owner, capped below run_engagement/offense_authority) but billing-specific perms are
+  not named → confirm the gating path / add if missing.
+- **Pending:** `make gate` byte-identical (run twice + diff); ops sweeps (abandoned reservations, dangling
+  tx_ref); snapshot down-migration runbook; unified egress posture; kill-switch-default decision.
+
+GENUINE remaining #4 build items: W5 oracle, offboarding single-cascade, E0 billing perms (+ the pending ops/docs).
+Each touches money/auth → gets the per-slice build→mutation-verify→red-pen; heavy red-pen deferred to post-Nov-6.
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
