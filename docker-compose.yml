@@ -15,6 +15,7 @@
 #   observability    otel-collector    — OTLP receiver → stdout, or → a real backend (optional)
 #   strix            strix-sandbox     — BUILD-ONLY: the Kali sandbox image strix runs targets in
 #   aegis            aegis-gateway     — BUILD-ONLY: the AEGIS defensive "provable firewall" sidecar image
+#   aegis-saas       aegis-saas-gateway — MANAGED tenant gateway (AEGIS-SaaS AE-6; default-OFF, env-required)
 #
 # Usage:
 #   docker compose up -d qdrant                       # the default backend
@@ -115,6 +116,47 @@ services:
       # keeps THIS context lean while the image still gets the one dependency it can't start without.
       additional_contexts:
         vigil_core: ./packages/core/vigil_core
+
+  # AEGIS-SaaS (AE-6) MANAGED tenant gateway — one container per (tenant org, protected host). Default-OFF:
+  # only `--profile aegis-saas` starts it, and it refuses to start without the env below. It is KEYLESS:
+  # it mounts the owner trust root + published monitoring authorities READ-ONLY (verify-only) and the
+  # per-(org,host) report secret as a 0600 file (never on argv). Monitoring reports land in the spool the
+  # sovereign drains with `sigil monitoring-drain`. Hard blocking additionally needs a BLOCK grant AND
+  # VIGIL_AEGIS_SAAS_ENFORCE=1 AND --mode enforce AND the AEGIS_RESPOND entitlement (all OFF by default).
+  # See docs/runbooks/aegis-saas-onboarding.md.
+  aegis-saas-gateway:
+    image: vigil/aegis-gateway:local
+    profiles: ["aegis-saas"]
+    command:
+      - "--upstream"
+      - "${AEGIS_SAAS_UPSTREAM:?set AEGIS_SAAS_UPSTREAM}"
+      - "--host"
+      - "0.0.0.0"
+      - "--mode"
+      - "observe"
+      - "--saas-tenant"
+      - "${AEGIS_SAAS_TENANT:?set AEGIS_SAAS_TENANT}"
+      - "--saas-host"
+      - "${AEGIS_SAAS_HOST:?set AEGIS_SAAS_HOST}"
+      - "--monitoring-spool"
+      - "/var/lib/aegis/monitoring-spool"
+      - "--monitoring-secret-file"
+      - "/run/aegis/report.secret"
+    environment:
+      AEGIS_GW_SECRET: "${AEGIS_SAAS_DEPLOYMENT_SECRET:?set AEGIS_SAAS_DEPLOYMENT_SECRET}"
+      VIGIL_MONITORING_PUBLISH_DIR: /var/lib/aegis/monitoring_authority
+      VIGIL_AUTHORITY_ROOT_DIR: /var/lib/aegis/authority-root
+    volumes:
+      - "${AEGIS_SAAS_PUBLISH_DIR:?set AEGIS_SAAS_PUBLISH_DIR}:/var/lib/aegis/monitoring_authority:ro"
+      - "${AEGIS_SAAS_AUTHORITY_ROOT_DIR:?set AEGIS_SAAS_AUTHORITY_ROOT_DIR}:/var/lib/aegis/authority-root:ro"
+      - "${AEGIS_SAAS_SECRET_FILE:?set AEGIS_SAAS_SECRET_FILE}:/run/aegis/report.secret:ro"
+      - "${AEGIS_SAAS_SPOOL_DIR:?set AEGIS_SAAS_SPOOL_DIR}:/var/lib/aegis/monitoring-spool"
+    ports:
+      - "${AEGIS_SAAS_BIND:-127.0.0.1}:${AEGIS_SAAS_PORT:-8080}:8080"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
 
 volumes:
   qdrant-data:

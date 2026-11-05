@@ -216,6 +216,34 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+_MAX_SECRET_FILE_BYTES = 4096
+
+
+def load_monitoring_secret(path: str) -> bytes:
+    """Read the per-(tenant, host) monitoring REPORT secret from a file (AEGIS-SaaS AE-6). The secret is NEVER
+    taken from argv. Fail-closed: the path must be a regular file (no symlink/FIFO), owner-only (no group/other
+    permission bits — 0600 or stricter), bounded, and hold at least 16 bytes once surrounding whitespace is
+    stripped. The stripped file content (as bytes) IS the secret — the sovereign resolver uses the same rule."""
+    import stat as _stat
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise ValueError("monitoring secret file is not a regular file")
+        if st.st_mode & 0o077:
+            raise ValueError("monitoring secret file must be owner-only (chmod 600)")
+        data = os.read(fd, _MAX_SECRET_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > _MAX_SECRET_FILE_BYTES:
+        raise ValueError("monitoring secret file is too large")
+    secret = data.strip()
+    if len(secret) < 16:
+        raise ValueError("monitoring secret must be at least 16 bytes")
+    return secret
+
+
 def _cmd_gateway(args: argparse.Namespace) -> int:
     """Run the inline reverse-proxy "provable firewall" in front of the operator's app. Blocks a
     request ONLY when a deterministic oracle proves it is an attack (re-runnable certificate);
@@ -268,8 +296,26 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     _webhook_sink = (_make_webhook_verdict_sink(verdict_webhook, verdict_sink)
                      if verdict_webhook else None)
     on_verdict = _compose_verdict_sinks(_local_sink, _webhook_sink)
-    httpd = serve_gateway(upstream, config=config, host=host, port=port,
-                          slug=slug, on_verdict=on_verdict)
+    # AEGIS-SaaS AE-6 managed deployment: a tenant-bound gateway (all default-OFF / absent = legacy gateway).
+    saas_tenant = getattr(args, "saas_tenant", None) or None
+    saas_host = getattr(args, "saas_host", None) or None
+    monitoring_spool = getattr(args, "monitoring_spool", None) or None
+    monitoring_secret = None
+    if getattr(args, "monitoring_secret_file", None):
+        try:
+            monitoring_secret = load_monitoring_secret(getattr(args, "monitoring_secret_file", None))
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"aegis gateway: cannot load --monitoring-secret-file: {e}\n")
+            return 2
+    try:
+        saas_kw = {k: v for k, v in (("saas_tenant", saas_tenant), ("saas_host", saas_host),
+                                     ("monitoring_spool", monitoring_spool),
+                                     ("monitoring_secret", monitoring_secret)) if v is not None}
+        httpd = serve_gateway(upstream, config=config, host=host, port=port,
+                              slug=slug, on_verdict=on_verdict, **saas_kw)
+    except ValueError as e:
+        sys.stderr.write(f"aegis gateway: {e}\n")
+        return 2
     status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
     # SELF-REGISTER so the console's Defense screen tracks EVERY gateway — UI-, CLI-, or cron-launched,
     # observe or enforce. The record carries the live snapshot; the console prunes it when the pid dies.
@@ -403,6 +449,17 @@ def main(argv: list[str] | None = None) -> int:
                         "property holds only then; a predictable canary can false-block. Generate one with: "
                         "python3 -c \"import secrets; print('AEGIS-'+secrets.token_urlsafe(18))\". The floor "
                         "rejects only obvious degeneracy (short / whitespace / sequential). Blocks only under --mode enforce.")
+    g.add_argument("--saas-tenant", default=None, metavar="ORG_ID",
+                   help="AEGIS-SaaS: bind this gateway to ONE tenant org; every request is re-authorized "
+                        "against that tenant's owner-signed monitoring authority (no authority => pass-through)")
+    g.add_argument("--saas-host", default=None, metavar="HOST",
+                   help="AEGIS-SaaS: the FIXED protected host the tenant's monitoring authority names "
+                        "(required with --saas-tenant)")
+    g.add_argument("--monitoring-spool", default=None, metavar="DIR",
+                   help="AEGIS-SaaS: spool sealed metadata-only monitoring reports here (requires "
+                        "--monitoring-secret-file and --saas-tenant)")
+    g.add_argument("--monitoring-secret-file", default=None, metavar="PATH",
+                   help="AEGIS-SaaS: 0600 file holding the per-(tenant, host) report secret (never on argv)")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")

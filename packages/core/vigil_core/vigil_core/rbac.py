@@ -49,7 +49,10 @@ _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offen
                       # NO org member can reach these today; a later OWNER-SIGNED org-admin delegation will grant
                       # them WITHIN one org to a tenant-admin. They are DISJOINT from `offense_authority` on
                       # purpose — billing/org authority NEVER implies testing authority (see orgs.admit).
-                      "manage_billing", "manage_members", "manage_org"}
+                      "manage_billing", "manage_members", "manage_org",
+                      # AEGIS-SaaS AE-1 — request owner-signed DEFENSIVE monitoring of the org's own proven
+                      # hosts. Disjoint from run_engagement/offense_authority (observe != offense-test).
+                      "manage_monitoring"}
 
 # A PER-ORG tenant-admin role (Slice E0) — NOT part of the global linear chain
 # (viewer<analyst<operator<owner) and NEVER a grantable global account role; it exists ONLY as an
@@ -61,7 +64,10 @@ _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offen
 # by policy). It is a non-cumulative addition to PERMISSIONS: `org_admin ⊆ owner` (owner stays the ceiling)
 # and the four cumulative roles above are unchanged, so `role_can` (a pure membership test) is unaffected.
 _ORG_ADMIN = frozenset({"read", "view_billing", "view_usage", "view_invoices",
-                        "manage_billing", "manage_members"})
+                        "manage_billing", "manage_members",
+                        # AE-1: a tenant-admin may request DEFENSIVE monitoring of the org's proven hosts
+                        # (never offense — own != offense-test != observe != block).
+                        "manage_monitoring"})
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
     "org_admin": _ORG_ADMIN,

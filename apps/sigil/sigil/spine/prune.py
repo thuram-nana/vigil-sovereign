@@ -185,6 +185,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active ownership proof(s) {stranded_proofs}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
+    # (c, AEGIS-SaaS AE-0) the SAME floor for governor.monitoring_authority: an active owner-signed monitoring
+    # grant whose only record sits below K must be carried into the seed, or the prune drops it AND resets the
+    # per-(org,host) high-water (a captured grant could then resurrect a REVOKED monitoring authority).
+    stranded_ma = stranded_active_monitoring_authorities(store, archived, K)
+    if stranded_ma:
+        raise PruneUnsafe(f"K={K} would strand active monitoring authorit(ies) {stranded_ma}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -201,6 +209,12 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, AEGIS fold) the SAME floor for the SEPARATE governor.monitoring_subscription line.
+    stranded_msubs = stranded_active_monitoring_subscriptions(store, archived, K)
+    if stranded_msubs:
+        raise PruneUnsafe(f"K={K} would strand active monitoring subscription(s) {stranded_msubs}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed; "
+                          f"lower K or resolve")
     # (c, Slice E2a customer credentials) the SAME floor for governor.customer_credential: an active passkey/
     # TOTP/OIDC-link whose only owner-signed grant sits below K must be carried into the seed, or the prune
     # drops it AND resets the per-(username, cred_key) high-water (re-opening credential replay-resurrection).
@@ -456,6 +470,45 @@ def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> 
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
 
+def stranded_active_monitoring_authorities(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS-SaaS AE-0) — ACTIVE monitoring grants (`governor/monitoring_authority.py`) whose only
+    owner-signed record sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed.
+    EMPTY in the happy path. Mirrors `stranded_active_ownership_proofs`. Returns ``host@org_id``. VERIFIED-active
+    only (a forged/unsigned grant never blocks a prune). Read-only."""
+    from ..governor.monitoring_authority import SIGNAL as MA_SIGNAL, _CORE as MA_CORE, _MODES as MA_MODES
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    st: dict[tuple, str] = {}
+    hw: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != MA_SIGNAL:
+            continue
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == "revoked":
+            st[key] = "revoked"
+        elif rst == "active" and p.get("mode") in MA_MODES and verify_signed(p, MA_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > hw.get(key, NO_HIGHWATER):
+                hw[key], st[key] = at, "active"
+    active = {k for k, v in st.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.monitoring_authority_state_map()
+    carried = {(row[0], row[1]) for row in seed.monitoring_authority_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
 def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:
     """§7(c, Slice E2a) — the ACTIVE customer credentials (`governor/customer_credentials.py`) whose only
     owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
@@ -665,7 +718,16 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
     return sorted(str(o) for o in stranded)
 
 
-def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+def stranded_active_monitoring_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS monitoring subscription) — the SAME tripwire as ``stranded_active_subscriptions`` for the
+    SEPARATE ``governor.monitoring_subscription`` line (seed sub-state ``monitoring_subscription_*``, schema v7)."""
+    from ..governor.monitoring_subscription import MONITORING_SUBSCRIPTION_SIGNAL
+    return stranded_active_subscriptions(store, archived, K, _signal=MONITORING_SUBSCRIPTION_SIGNAL,
+                                         _seed_field="monitoring_subscription_state")
+
+
+def stranded_active_subscriptions(store, archived: list[Segment], K: int, *, _signal: Optional[str] = None,
+                                  _seed_field: str = "subscription_state") -> list[str]:
     """§7(c, SaaS subscription) — the tenants (`governor/subscription.py`) whose subscription is `active` with
     its only owner-signed grant in the pruned prefix [0..K) yet NOT carried into the snapshot seed: a prune
     would silently drop the plan (and reset the per-org high-water, re-opening replay of a lapsed plan). EMPTY
@@ -673,6 +735,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     mirroring `stranded_active_accounts`; verified under the owner key valid at each seq; seed round-tripped
     through `model_dump`/`model_validate`. Read-only."""
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL, _SUB_CORE, STATUS_ACTIVE, _DOWN_STATES)
+    signal = SUBSCRIPTION_SIGNAL if _signal is None else _signal
     from ..governor import key_history as _kh
     from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
@@ -685,7 +748,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     issued: dict[Any, float] = {}
     for r in sorted(below, key=lambda r: r.seq):
         p = r.payload
-        if not isinstance(p, dict) or p.get("signal") != SUBSCRIPTION_SIGNAL:
+        if not isinstance(p, dict) or p.get("signal") != signal:
             continue
         oid = p.get("org_id")
         if not isinstance(oid, str) or not oid:
@@ -700,7 +763,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     active = {o for o, v in status.items() if v == STATUS_ACTIVE}
     seed = SnapshotState.model_validate(
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
-    seed_state = seed.subscription_state_map()
+    seed_state = {r[0]: r[1] for r in getattr(seed, _seed_field)}
     carried = {o for o in active if seed_state.get(o) == STATUS_ACTIVE}
     return sorted(str(o) for o in (active - carried))
 
