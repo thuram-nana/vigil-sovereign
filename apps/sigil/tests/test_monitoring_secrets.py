@@ -119,9 +119,12 @@ def test_resolver_drives_drainer_per_pair(sdir, tmp_path):
 
 
 def _isolate_cli_spine_gate(monkeypatch):
-    # the CLI startup migration gate reads the shared default spine, which other tests in a full run may leave
-    # in a legacy layout; it is unrelated to these verbs (covered in test_spine_upgrade), so stub it here.
-    monkeypatch.setattr(cli, "_assert_store_operable_or_exit", lambda cmd: None)
+    # The CLI's REAL startup migration gate still runs — it is NOT stubbed. It is only pointed at a FRESH, empty
+    # spine for these tests, because the shared default spine may be left in a legacy layout by other tests in a
+    # full run (cross-test pollution unrelated to these verbs; the gate's own behaviour is in test_spine_upgrade).
+    import sigil.spine.upgrade as _up
+    fresh = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    monkeypatch.setattr(_up, "SpineStore", lambda: fresh)
 
 
 def test_cli_verbs_are_default_off(monkeypatch, tmp_path, capsys):
