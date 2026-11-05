@@ -118,7 +118,14 @@ def test_resolver_drives_drainer_per_pair(sdir, tmp_path):
     assert S.monitoring_events(store, "org_b") == []
 
 
+def _isolate_cli_spine_gate(monkeypatch):
+    # the CLI startup migration gate reads the shared default spine, which other tests in a full run may leave
+    # in a legacy layout; it is unrelated to these verbs (covered in test_spine_upgrade), so stub it here.
+    monkeypatch.setattr(cli, "_assert_store_operable_or_exit", lambda cmd: None)
+
+
 def test_cli_verbs_are_default_off(monkeypatch, tmp_path, capsys):
+    _isolate_cli_spine_gate(monkeypatch)
     monkeypatch.delenv("VIGIL_CUSTOMER_MONITORING_ENABLED", raising=False)
     for argv in (["monitoring-secret", "--org", "o", "--host", "app.example.com", "--secrets-dir", str(tmp_path)],
                  ["monitoring-drain", "--spool", str(tmp_path / "s"), "--secrets-dir", str(tmp_path)]):
@@ -129,6 +136,7 @@ def test_cli_verbs_are_default_off(monkeypatch, tmp_path, capsys):
 
 
 def test_cli_provision_then_drain(monkeypatch, tmp_path, capsys):
+    _isolate_cli_spine_gate(monkeypatch)
     monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
     sdir = tmp_path / "secrets"
     cli.main(["monitoring-secret", "--org", "org_a", "--host", "app.example.com", "--secrets-dir", str(sdir)])
