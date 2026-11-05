@@ -113,6 +113,58 @@ def _federated_org_id(iss: str, sub: str) -> str:
     return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
 
 
+def _monitoring_filename(org_id: str, host: str) -> str:
+    """A fixed-charset file name for (org, host): a hash, so no host/org string can traverse the directory."""
+    return hashlib.sha256(f"{org_id}\x00{host}".encode("utf-8")).hexdigest() + ".json"
+
+
+def _sign_monitoring(owner_key, grant):
+    """Owner-sign the publishable ``SignedMonitoringAuthority`` for an ACTIVE registry grant. The private key
+    is used only inside ``sign_monitoring_authority`` and never written anywhere."""
+    from datetime import datetime, timezone
+    from vigil_core.monitoring_authority import (MonitoringAuthority, MonitoringMode,
+                                                 sign_monitoring_authority)
+    if owner_key is None:
+        raise ValueError("minting a monitoring authority requires the owner key")
+    doc = MonitoringAuthority(
+        org_id=grant.org_id, host=grant.host, mode=MonitoringMode(grant.mode),
+        not_before=datetime.fromtimestamp(grant.not_before, tz=timezone.utc),
+        not_after=datetime.fromtimestamp(grant.not_after, tz=timezone.utc), issued_by="owner")
+    return sign_monitoring_authority(doc, {"owner": owner_key.private_key_b64})
+
+
+def _publish_monitoring(base, org_id: str, host: str, data: bytes):
+    """Atomically publish signed public bytes: 0700 dir, 0600 temp file in the same dir, fsync, rename."""
+    import os
+    from pathlib import Path
+    d = Path(base)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    final = d / _monitoring_filename(org_id, host)
+    tmp = d / (".tmp-" + secrets.token_hex(8))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return final
+
+
+def _unpublish_monitoring(base, org_id: str, host: str) -> bool:
+    from pathlib import Path
+    p = Path(base) / _monitoring_filename(org_id, host)
+    try:
+        p.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 class Provisioner:
     """The owner-signed signing service. Registries + ledgers are INJECTED (the registries carry the owner
     key; the edge never constructs this). `expose_dev_tokens` is a DEV-ONLY escape hatch that returns the
@@ -890,6 +942,99 @@ class Provisioner:
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
+
+    # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
+    def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
+        """Flag gate (default OFF) then ``admit_customer`` on the SESSION org. Caller holds the lock."""
+        from .. import config
+        if not config.customer_monitoring_enabled():
+            raise ProvisionDenied("customer monitoring is not enabled on this deployment")
+        if not self.orgs.admit_customer(username=requester, org_id=org_id, permission=permission):
+            self._audit(action, requester=requester, org_id=org_id, target=host, outcome="denied")
+            raise ProvisionDenied("requester may not manage monitoring for this org")
+
+    def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
+                          window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Owner-sign + publish a DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag →
+        ``admit_customer(manage_monitoring)`` (org_admin; never run_engagement/offense) → step-up → registry
+        grant (requires a CURRENT ownership proof, clamped to its expiry) → owner-signed
+        ``SignedMonitoringAuthority`` published atomically for the keyless gateway. The window is SERVER-
+        decided (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it. A BLOCK grant turns
+        on NO enforcement by itself (AE-3 gates enforcement per request)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry, _check_mode
+        with self._lock:
+            self._monitor_admit("monitor_authorize", requester, requester_org_id, host, "manage_monitoring")
+            self._require_stepup(mfa_at, now=t)      # AFTER admit (no-op unless enforcement is on)
+            window = float(config.MONITORING_WINDOW_SECONDS)
+            if window_s is not None:
+                if isinstance(window_s, bool):
+                    raise ProvisionError("window_s must be a positive number of seconds")
+                try:
+                    asked = float(window_s)
+                except (TypeError, ValueError):
+                    raise ProvisionError("window_s must be a positive number of seconds") from None
+                if not math.isfinite(asked) or asked <= 0.0:
+                    raise ProvisionError("window_s must be a positive number of seconds")
+                window = min(window, asked)          # the client may only ask for SHORTER
+            try:
+                m = _check_mode(mode)
+                reg = MonitoringAuthorityRegistry(self.store)
+                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=t + window, now=t,
+                              issued_at=self._next_issued())
+            except ValueError as e:
+                self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            try:
+                signed = _sign_monitoring(reg.owner_key, g)
+                path = _publish_monitoring(config.monitoring_publish_dir(), g.org_id, g.host,
+                                           signed.model_dump_json().encode("utf-8"))
+            except Exception as e:  # noqa: BLE001 — fail-closed: never leave an active-but-unpublished grant
+                reg.revoke(g.org_id, g.host)
+                self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=g.host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not publish the monitoring authority: {type(e).__name__}") from e
+            self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=g.host,
+                        outcome=f"granted_{g.mode}", critical=True)
+        return {"org_id": g.org_id, "host": g.host, "mode": g.mode, "not_before": g.not_before,
+                "not_after": g.not_after, "published": path.name, "authority": signed.model_dump(mode="json")}
+
+    def monitor_revoke(self, requester: str, requester_org_id: str, host: str, *, ip: str = "",
+                       now: "Optional[float]" = None) -> dict:
+        """Revoke (the SAFE direction) + unpublish one (session org, host) grant. Idempotent; admit-gated so
+        a tenant can only revoke ITS OWN org's grants. No step-up (revoking only ever reduces authority)."""
+        from .. import config
+        from ..governor.asset_ownership import _check_host
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_revoke", requester, requester_org_id, host, "manage_monitoring")
+            try:
+                h = _check_host(host)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            was_active = reg.grant_for(requester_org_id, h) is not None
+            if was_active:
+                reg.revoke(requester_org_id, h)
+            removed = _unpublish_monitoring(config.monitoring_publish_dir(), requester_org_id, h)
+            self._audit("monitor_revoke", requester=requester, org_id=requester_org_id, target=h,
+                        outcome="revoked" if was_active else "noop", critical=True)
+        return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
+
+    def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                     now: "Optional[float]" = None) -> dict:
+        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership)."""
+        t = self._now() if now is None else float(now)
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_list", requester, requester_org_id, "", "read")
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            rows = [{"host": g.host, "mode": g.mode, "not_before": g.not_before, "not_after": g.not_after,
+                     "active": reg.active_at(requester_org_id, g.host, now=t) is not None}
+                    for g in reg.grants(requester_org_id)]
+        return {"org_id": requester_org_id, "grants": rows}
 
     # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
     def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:

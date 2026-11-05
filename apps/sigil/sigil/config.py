@@ -199,6 +199,26 @@ MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revo
 # decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
 # later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
 LAUNCH_UNITS = _int_env("VIGIL_LAUNCH_UNITS", 10)
+# AEGIS-SaaS AE-1 — the SERVER-DECIDED window of one monitoring grant (a customer may only ask for SHORTER; the
+# registry further clamps it to the ownership proof's expiry).
+MONITORING_WINDOW_SECONDS = _int_env("VIGIL_MONITORING_WINDOW_SECONDS", 30 * 24 * 3600)
+
+
+def customer_monitoring_enabled() -> bool:
+    """True iff the customer monitoring-authority routes are ON (`VIGIL_CUSTOMER_MONITORING_ENABLED`
+    affirmative). OFF by default: the edge routes and provisioner actions are absent (404) exactly as an
+    unknown route, and nothing is minted or published."""
+    return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def monitoring_publish_dir() -> Path:
+    """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
+    verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
+    (`VIGIL_BASE_DIR`, else `.vigil-live`). Only signed public artifacts land here — never private material."""
+    override = (os.environ.get("VIGIL_MONITORING_PUBLISH_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "monitoring_authority"
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
