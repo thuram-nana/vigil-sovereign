@@ -185,6 +185,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active ownership proof(s) {stranded_proofs}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
+    # (c, AEGIS-SaaS AE-0) the SAME floor for governor.monitoring_authority: an active owner-signed monitoring
+    # grant whose only record sits below K must be carried into the seed, or the prune drops it AND resets the
+    # per-(org,host) high-water (a captured grant could then resurrect a REVOKED monitoring authority).
+    stranded_ma = stranded_active_monitoring_authorities(store, archived, K)
+    if stranded_ma:
+        raise PruneUnsafe(f"K={K} would strand active monitoring authorit(ies) {stranded_ma}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -452,6 +460,45 @@ def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> 
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.ownership_proof_state_map()
     carried = {(row[0], row[1]) for row in seed.ownership_proof_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_monitoring_authorities(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS-SaaS AE-0) — ACTIVE monitoring grants (`governor/monitoring_authority.py`) whose only
+    owner-signed record sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed.
+    EMPTY in the happy path. Mirrors `stranded_active_ownership_proofs`. Returns ``host@org_id``. VERIFIED-active
+    only (a forged/unsigned grant never blocks a prune). Read-only."""
+    from ..governor.monitoring_authority import SIGNAL as MA_SIGNAL, _CORE as MA_CORE, _MODES as MA_MODES
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    st: dict[tuple, str] = {}
+    hw: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != MA_SIGNAL:
+            continue
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == "revoked":
+            st[key] = "revoked"
+        elif rst == "active" and p.get("mode") in MA_MODES and verify_signed(p, MA_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > hw.get(key, NO_HIGHWATER):
+                hw[key], st[key] = at, "active"
+    active = {k for k, v in st.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.monitoring_authority_state_map()
+    carried = {(row[0], row[1]) for row in seed.monitoring_authority_row
                if seed_state.get((row[0], row[1])) == "active"}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
