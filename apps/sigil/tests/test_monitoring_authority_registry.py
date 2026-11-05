@@ -112,8 +112,8 @@ def test_ownership_revoke_makes_grant_inert_immediately():
     _prove(s, "acme", "apme.cm", now=1.0)
     _ma(s).grant("acme", "apme.cm", not_before=0.0, not_after=100.0, now=2.0)
     AssetOwnershipRegistry(s, owner_key=OWNER, trusted_pubkey=OP).revoke_proof("acme", "apme.cm")
-    assert _ma(s).grant_for("acme", "apme.cm") is not None                   # record still there...
-    assert _ma(s).active_at("acme", "apme.cm", now=5.0) is None              # ...but no longer authorizes
+    assert ("acme", "apme.cm") not in _ma(s)._fold()                          # cascade-revoked on the spine
+    assert _ma(s).active_at("acme", "apme.cm", now=5.0) is None              # ...and no longer authorizes
 
 
 def test_revoke_and_no_replay_resurrection():

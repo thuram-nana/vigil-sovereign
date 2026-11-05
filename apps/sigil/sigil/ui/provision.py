@@ -113,11 +113,6 @@ def _federated_org_id(iss: str, sub: str) -> str:
     return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
 
 
-def _monitoring_filename(org_id: str, host: str) -> str:
-    """A fixed-charset file name for (org, host): a hash, so no host/org string can traverse the directory."""
-    return hashlib.sha256(f"{org_id}\x00{host}".encode("utf-8")).hexdigest() + ".json"
-
-
 def _sign_monitoring(owner_key, grant):
     """Owner-sign the publishable ``SignedMonitoringAuthority`` for an ACTIVE registry grant. The private key
     is used only inside ``sign_monitoring_authority`` and never written anywhere."""
@@ -140,7 +135,8 @@ def _publish_monitoring(base, org_id: str, host: str, data: bytes):
     d = Path(base)
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(d, 0o700)
-    final = d / _monitoring_filename(org_id, host)
+    from ..governor.monitoring_authority import monitoring_filename
+    final = d / monitoring_filename(org_id, host)
     tmp = d / (".tmp-" + secrets.token_hex(8))
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -153,16 +149,6 @@ def _publish_monitoring(base, org_id: str, host: str, data: bytes):
         tmp.unlink(missing_ok=True)
         raise
     return final
-
-
-def _unpublish_monitoring(base, org_id: str, host: str) -> bool:
-    from pathlib import Path
-    p = Path(base) / _monitoring_filename(org_id, host)
-    try:
-        p.unlink()
-        return True
-    except FileNotFoundError:
-        return False
 
 
 class Provisioner:
@@ -1016,9 +1002,10 @@ class Provisioner:
                 raise ProvisionDenied(str(e)) from None
             reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
             was_active = reg.grant_for(requester_org_id, h) is not None
+            from ..governor.monitoring_authority import unpublish
+            removed = unpublish(requester_org_id, h, config.monitoring_publish_dir())
             if was_active:
                 reg.revoke(requester_org_id, h)
-            removed = _unpublish_monitoring(config.monitoring_publish_dir(), requester_org_id, h)
             self._audit("monitor_revoke", requester=requester, org_id=requester_org_id, target=h,
                         outcome="revoked" if was_active else "noop", critical=True)
         return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}

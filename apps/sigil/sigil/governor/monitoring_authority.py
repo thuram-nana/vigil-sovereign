@@ -58,6 +58,26 @@ def _check_mode(mode: str) -> str:
     return m
 
 
+def monitoring_filename(org_id: str, host: str) -> str:
+    """A fixed-charset file name for (org, host): a hash, so no host/org string can traverse the directory."""
+    import hashlib
+    return hashlib.sha256(f"{org_id}\x00{host}".encode("utf-8")).hexdigest() + ".json"
+
+
+def unpublish(org_id: str, host: str, base=None) -> bool:
+    """Delete the published signed artifact for (org, host) so the keyless gateway stops seeing it. Called by
+    EVERY revoke path (the artifact verifies on signature + window alone, so revoking only the spine record
+    would leave it accepted until ``not_after``). Idempotent."""
+    from pathlib import Path
+    from .. import config
+    p = Path(config.monitoring_publish_dir() if base is None else base) / monitoring_filename(org_id, host)
+    try:
+        p.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 @dataclass(frozen=True)
 class MonitoringGrant:
     org_id: str
@@ -119,7 +139,17 @@ class MonitoringAuthorityRegistry:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"monitoring authority for {h} (org {oid}) REVOKED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        unpublish(oid, h)
+        return seq
+
+    def retire(self, org_id: str, host: str) -> None:
+        """Ownership of (org, host) lapsed: revoke the grant if one is on the spine, and ALWAYS unpublish."""
+        oid, h = _check_org_id(org_id), _check_host(host)
+        if (oid, h) in self._fold():
+            self.revoke(oid, h)
+        else:
+            unpublish(oid, h)
 
     def revoke_org(self, org_id: str) -> list[int]:
         """Revoke every active grant of one org (offboarding / decommission hook)."""

@@ -226,6 +226,50 @@ def test_revoke_unpublishes_and_is_idempotent():
     assert again["revoked"] is False and again["unpublished"] is False
 
 
+
+# --- red-pen fold: every revoke path unpublishes; a failed publish leaves no active grant ------------
+def test_ownership_proof_revoke_unpublishes_artifact():
+    from sigil.governor.asset_ownership import AssetOwnershipRegistry
+    from sigil.governor.monitoring_authority import MonitoringAuthorityRegistry
+    p, s, _ = _rig()
+    r = p.monitor_authorize("alice", "org_a", "apme.cm")
+    rb = p.monitor_authorize("bob", "org_b", "beta.cm")
+    AssetOwnershipRegistry(s).revoke_proof("org_a", "apme.cm")
+    assert not (_pubdir() / r["published"]).exists()
+    assert (_pubdir() / rb["published"]).exists()                      # other tenant untouched
+    assert ("org_a", "apme.cm") not in MonitoringAuthorityRegistry(s, owner_key=None)._fold()
+
+
+def test_org_offboarding_unpublishes_all_org_artifacts():
+    from sigil.governor.monitoring_authority import MonitoringAuthorityRegistry
+    p, s, orgs = _rig()
+    _prove(s, "org_a", "apme2.cm")
+    r1 = p.monitor_authorize("alice", "org_a", "apme.cm")
+    r2 = p.monitor_authorize("alice", "org_a", "apme2.cm", mode="block")
+    rb = p.monitor_authorize("bob", "org_b", "beta.cm")
+    orgs.revoke_org("org_a")
+    assert not (_pubdir() / r1["published"]).exists() and not (_pubdir() / r2["published"]).exists()
+    assert (_pubdir() / rb["published"]).exists()
+    assert MonitoringAuthorityRegistry(s, owner_key=None).grants("org_a") == []
+
+
+def test_publish_failure_revokes_the_grant(monkeypatch):
+    from sigil.governor.monitoring_authority import MonitoringAuthorityRegistry
+    from sigil.ui import provision as pv
+    from sigil.ui.provision import ProvisionError
+    p, s, _ = _rig()
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(pv, "_publish_monitoring", _boom)
+    with pytest.raises(ProvisionError):
+        p.monitor_authorize("alice", "org_a", "apme.cm")
+    reg = MonitoringAuthorityRegistry(s, owner_key=None)
+    assert reg.grant_for("org_a", "apme.cm") is None
+    assert ("org_a", "apme.cm") not in reg._fold()
+    assert [g for g in p.monitor_list("alice", "org_a")["grants"] if g["active"]] == []
+
+
 def test_block_grant_enables_nothing_by_itself():
     from sigil import config
     p, s, _ = _rig()
