@@ -96,6 +96,30 @@ passed:
 - **To finalize:** need the failing run's job log (runs 41620914942 / 41815807225) — no Actions-log tool in
   this toolset. Owner to enable the Actions tool or paste which job+step is red.
 
+### Milestone 4 — B: LIVE sandbox money-loop driven end-to-end over real HTTP ✅
+
+Stood up `vigil up --with-saas` with `VIGIL_BILLING_WEBHOOK_SPOOL=/tmp/billing-spool` +
+`VIGIL_BILLING_WEBHOOK_SECRET=<sandbox verif-hash, local-only, not a real key>`. Origin
+127.0.0.1:8770; `/customer/`→200; `/webhooks/billing`→405 on GET (POST-only).
+
+- **Stage 2 (live HTTP front-door, `uiproxy POST /webhooks/billing`):** forged verif-hash → **401**;
+  missing → **401**; wrong method → **405**; authentic → **202** `{"ok":true,"spooled":true}`. One inert
+  envelope written (`0600` in `0700`), schema `vigil.webhook.billing.v1`, body recoverable; **verif-hash
+  secret absent from the spool** (grep-asserted) — only `body_b64`.
+- **Stage 3 (sovereign drain over the REAL spooled envelope; `BillingSpoolWatcher` + `BillingSigner` +
+  `FlutterwaveBillingProvider` with an injected sandbox re-verifier + owner catalog):**
+  - untrusted webhook → server-side re-verify → owner-signed mint: `minted:1`, orgA credited.
+  - **no on-the-wire amount decides money:** webhook body `amount:49`; the **catalog** minted **500** credits.
+  - **exactly-once:** re-spooled the same tx (fresh wrapper) → wallet stayed **500** (no double-credit).
+  - **org-scoped:** orgB available = 0.
+- **Not exercised (documented):** Flutterwave's real sandbox `/v3/transactions/{id}/verify` API — needs owner
+  sandbox keys (not stored). The injected verifier is the documented deterministic sandbox stand-in.
+- **Finding (ops):** the billing drain has **no bundled CLI/serve entrypoint** (unlike `sigil inbound` /
+  `sigil settle-drain`); it exists as the `BillingSpoolWatcher` API only. Part of the owner-infra deferral —
+  worth an ops ticket so a deployed stack actually drains the billing spool.
+
+Scratch driver: `/tmp/stage3_drive.py` (not committed — local evidence only).
+
 ## Remaining tasks (in order)
 
 1. **#25 hands-on (in progress):** stand up the LIVE stack (`vigil up` / custui over the loopback hop) and
