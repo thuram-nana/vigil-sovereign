@@ -419,7 +419,12 @@ class AssetOwnershipRegistry:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"ownership proof for {h} (org {oid}) REVOKED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        # Cascade: a monitoring authority minted on this proof must not stay published/verifiable.
+        from .monitoring_authority import MonitoringAuthorityRegistry
+        MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
+                                    trusted_pubkey=self.trusted_pubkey).retire(oid, h)
+        return seq
 
     # -- reads (owner-key-succession-aware folds) ---------------------------------------------------
     def _fold(self, signal: str, core_fields):
