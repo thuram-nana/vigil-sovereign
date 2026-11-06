@@ -240,6 +240,22 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand invoice(s) for tenant(s) {stranded_invs}: a below-K billing-history "
                           f"line would not be carried into the snapshot seed (losing the invoice or re-opening "
                           f"invoice replay); lower K or resolve")
+    # (c, PP-1 postpaid) the SAME floor for governor.postpaid: an ENABLED credit line whose only owner-signed
+    # set_account sits below K must be carried into the seed, or the prune drops the line + resets the per-org
+    # high-water (re-opening replay of a disabled line). Fail-closed, like the subscription floor.
+    stranded_pp = stranded_active_postpaid(store, archived, K)
+    if stranded_pp:
+        raise PruneUnsafe(f"K={K} would strand active postpaid account(s) {stranded_pp}: their only owner-signed "
+                          f"set_account sits below K and would not be carried into the snapshot seed (resetting "
+                          f"the per-org anti-replay high-water); lower K or resolve")
+    # (c, PP-1 postpaid arrears) the SAME floor for the ADDITIVE arrears ledger: a prune must carry every below-K
+    # tenant's drawn balance AND the consumed-entry_id set into the seed, or it would LOWER the drawn balance
+    # (letting a tenant draw past their line) AND drop the anti-replay seen-set (re-opening accrual replay).
+    stranded_ppa = stranded_postpaid_arrears(store, archived, K)
+    if stranded_ppa:
+        raise PruneUnsafe(f"K={K} would strand postpaid arrears for tenant(s) {stranded_ppa}: a below-K drawn "
+                          f"balance or consumed entry_id would not be carried into the snapshot seed (lowering "
+                          f"the line's drawn balance or re-opening accrual replay); lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -724,6 +740,106 @@ def stranded_active_monitoring_subscriptions(store, archived: list[Segment], K: 
     from ..governor.monitoring_subscription import MONITORING_SUBSCRIPTION_SIGNAL
     return stranded_active_subscriptions(store, archived, K, _signal=MONITORING_SUBSCRIPTION_SIGNAL,
                                          _seed_field="monitoring_subscription_state")
+
+
+def stranded_active_postpaid(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-1 postpaid account) — the tenants (`governor/postpaid.py`) whose ENABLED postpaid credit line
+    has its only owner-signed `set_account` in the pruned prefix [0..K) yet NOT carried into the snapshot seed:
+    a prune would silently drop the line AND reset the per-org high-water (re-opening replay of a disabled line
+    via a captured `set_account`). EMPTY in the happy path — `SnapshotState.build()` carries each verified-
+    enabled account. Fail-closed tripwire mirroring `stranded_active_subscriptions` for the enabled-bool account
+    line; verified under the owner key valid at each seq; seed round-tripped through `model_dump`/`model_validate`.
+    Read-only."""
+    from ..governor.postpaid import POSTPAID_SIGNAL, _PP_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    enabled: dict[Any, bool] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != POSTPAID_SIGNAL:
+            continue
+        oid = p.get("org_id")
+        if not isinstance(oid, str) or not oid:
+            continue
+        if p.get("enabled") is True:
+            if verify_signed(p, _PP_CORE, resolver.at(r.seq)):
+                at = as_issued_at(p.get("issued_at"))
+                if at > issued.get(oid, NO_HIGHWATER):
+                    issued[oid], enabled[oid] = at, True
+        else:
+            dat = as_issued_at(p.get("issued_at"))        # 0.0 on sight; else fresher-than-open only
+            if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
+                enabled[oid] = False
+    active = {o for o, en in enabled.items() if en}       # enabled lines below K that MUST survive the prune
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = {r[0]: r[1] for r in seed.postpaid_state}
+    carried = {o for o in active if seed_state.get(o) is True}
+    return sorted(str(o) for o in (active - carried))
+
+
+def stranded_postpaid_arrears(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-1 postpaid arrears) — the tenants whose per-org arrears balance
+    (`governor.postpaid_debit`/`postpaid_credit`) or anti-replay seen-set sits in the pruned prefix [0..K) yet
+    would NOT be carried exactly into the snapshot seed: a prune would silently LOWER the drawn balance (letting
+    a tenant draw past their credit line) and/or drop a consumed `entry_id` (re-opening accrual replay — a pruned
+    debit re-appended above K would re-accrue). EMPTY in the happy path. Fail-closed tripwire mirroring
+    `stranded_active_wallets` (per-org debited/credited + seen); verified under the owner key valid at each seq;
+    the seed round-trips through `model_dump`/`model_validate`. Read-only."""
+    from ..governor.postpaid import (POSTPAID_DEBIT_SIGNAL, POSTPAID_CREDIT_SIGNAL, _PP_DEBIT_CORE, _PP_CREDIT_CORE)
+    from ..governor.wallet import _as_credits
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    debited: dict[Any, int] = {}
+    credited: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror PostpaidArrearsLedger._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        amt = _as_credits(p.get("credits"))
+        if sig == POSTPAID_DEBIT_SIGNAL:
+            debited[oid] = debited.get(oid, 0) + amt
+        else:
+            credited[oid] = credited.get(oid, 0) + amt
+    active = set(debited) | set(credited)
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sd, sc = seed.postpaid_arrears_debited_map(), seed.postpaid_arrears_credited_map()
+    ss = seed.postpaid_arrears_seen_set()
+    stranded: set = set()
+    for o in active:
+        if sd.get(o, 0) != debited.get(o, 0) or sc.get(o, 0) != credited.get(o, 0):
+            stranded.add(str(o))          # a drawn-balance the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
+    return sorted(stranded)
 
 
 def stranded_active_subscriptions(store, archived: list[Segment], K: int, *, _signal: Optional[str] = None,
