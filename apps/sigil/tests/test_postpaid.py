@@ -130,10 +130,14 @@ def test_forged_enable_is_inert():
 
 
 def test_set_requires_owner_key():
+    # the constructor coerces owner_key=None -> owner_keypair(), so null it AFTER construction to exercise the
+    # "no owner signing key" guard deterministically (a keyless/unprovisioned process), independent of SIGIL_HOME.
     s = _store()
     import pytest
+    r = PostpaidRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    r.owner_key = None
     with pytest.raises(ValueError):
-        PostpaidRegistry(s, owner_key=None, trusted_pubkey=OP).set_account("acme", 500, 30, issued_at=1.0)
+        r.set_account("acme", 500, 30, issued_at=1.0)
 
 
 def test_limit_and_terms_validated_fail_closed():
@@ -219,8 +223,10 @@ def test_tenant_isolation():
 def test_accrue_requires_owner_key_and_validates_credits():
     s = _store()
     import pytest
+    a0 = PostpaidArrearsLedger(s, owner_key=OWNER, trusted_pubkey=OP)
+    a0.owner_key = None            # null AFTER construction (constructor coerces None -> owner_keypair())
     with pytest.raises(ValueError):
-        PostpaidArrearsLedger(s, owner_key=None, trusted_pubkey=OP).accrue("acme", 10, entry_id="x", issued_at=1.0)
+        a0.accrue("acme", 10, entry_id="x", issued_at=1.0)
     with pytest.raises(ValueError):
         _arr(s).accrue("acme", 0, entry_id="x", issued_at=1.0)       # credits clamped > 0 at binding
     with pytest.raises(ValueError):
