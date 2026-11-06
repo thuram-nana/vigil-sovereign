@@ -49,7 +49,7 @@ assert_no_offense()
 
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed re-entrant txn lock)
 from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-source the gate<->ledger entry-id scheme)
-                                 SETTLE_ENTRY_PREFIX)
+                                 SETTLE_ENTRY_PREFIX, postpaid_is_overdue)
 
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
@@ -61,9 +61,10 @@ class LaunchGate:
     production they default to the owner-key-backed sovereign registries over ``store``."""
 
     def __init__(self, store, *, orgs=None, ownership=None, meter=None, wallet=None,
-                 postpaid=None, arrears=None, owner_key=None, base_dir: Optional[str] = None):
+                 postpaid=None, arrears=None, invoices=None, owner_key=None, base_dir: Optional[str] = None):
         from ..governor.asset_ownership import AssetOwnershipRegistry
         from ..governor.identity import owner_keypair
+        from ..governor.invoices import InvoiceRegistry
         from ..governor.metering import CreditMeter, PlanCreditLedger
         from ..governor.orgs import OrgRegistry
         from ..governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
@@ -80,6 +81,8 @@ class LaunchGate:
         # arrears) instead of burning prepaid credits. Absent/disabled ⇒ the prepaid path below is byte-identical.
         self.postpaid = postpaid if postpaid is not None else PostpaidRegistry(store)
         self.arrears = arrears if arrears is not None else PostpaidArrearsLedger(store)
+        # PP-3 dunning: the gate reads the owner-signed invoice ledger to refuse a launch when the line is OVERDUE.
+        self.invoices = invoices if invoices is not None else InvoiceRegistry(store)
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
 
@@ -205,6 +208,12 @@ class LaunchGate:
                 if acc + u > acct.credit_limit:
                     return (f"over postpaid credit line: drawing {u} on top of {acc} accrued would exceed the "
                             f"{acct.credit_limit}-credit limit (org {oid})")
+                # PP-3 DUNNING: an OVERDUE line (any unpaid arrears invoice past its net-terms due date) refuses
+                # NEW launches — the SAFE access-reducing direction. Reversible: paying the invoice (PP-2b) clears
+                # it and launches resume. An already in-flight launch still settles; only new reserves are refused.
+                if postpaid_is_overdue(self.invoices, self.postpaid, oid, now_ts):
+                    return (f"postpaid line is OVERDUE (unpaid arrears invoice past net terms, org {oid}): settle "
+                            f"the outstanding invoice before launching new assessments")
             elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
             return None

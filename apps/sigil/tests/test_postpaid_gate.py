@@ -242,3 +242,44 @@ def test_postpaid_full_consumption_settle_is_recorded_and_billable():
     assert arr.accrued("org_a") == 100                 # refund 0 -> arrears stays at the consumed 100
     assert arr.in_flight_reserved("org_a") == 0        # the settle MARKER cleared the reserve from in-flight
     assert arr.net_settled_consumed("org_a") == 100    # ...so PP-2 bills the full 100 (NOT 0 — the leak is closed)
+
+
+def test_postpaid_overdue_line_refuses_new_launch_until_paid():
+    # PP-3 DUNNING -> GATE: a tenant with an UNPAID arrears invoice past its net-terms due date is refused NEW
+    # launches (the SAFE access-reducing direction); paying the invoice (PP-2b) clears it and launches resume.
+    # net_terms=0 (due at period_end) keeps all `now` values small -> inside the engagement-authority window
+    # (the overdue net-terms arithmetic itself is unit-tested in test_postpaid_dunning.py with real day offsets).
+    from sigil.governor.identity import owner_keypair
+    from sigil.governor.invoices import InvoiceRegistry
+    from sigil.governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
+                                         pay_postpaid_invoice)
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=0, postpaid=(500, 0))    # net 0 -> due at period_end
+    g = _gate(s)
+    r = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=100, now=2000.0, nonce="n1")
+    assert r["ok"] and _accrued(s, "org_a") == 100
+    g.settle_launch(signed_lease=r["lease"], consumed_units=100, now=3000.0)       # full consumption
+    owner = owner_keypair()
+    reg, arr, inv = (PostpaidRegistry(s, owner_key=owner), PostpaidArrearsLedger(s, owner_key=owner),
+                     InvoiceRegistry(s, owner_key=owner))
+    invoice_postpaid_arrears(reg, arr, inv, "org_a", period_end=3400.0, issued_at=3400.0)   # due = 3400 (net 0)
+    # BEFORE the due date: a new launch is still allowed (the line is current)
+    r2 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=3399.0, nonce="n2")
+    assert r2["ok"], r2
+    # AT/AFTER the due date, UNPAID: a new launch is REFUSED by dunning (NOT a credit-line refusal — accrued << limit)
+    r3 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=3401.0, nonce="n3")
+    assert r3["ok"] is False and "OVERDUE" in r3["error"], r3
+    # pay the arrears invoice (PP-2b) -> overdue clears -> launches resume (reversible)
+    iid = next(i.invoice_id for i in inv.invoices("org_a") if i.kind == "postpaid")
+    assert pay_postpaid_invoice(inv, "org_a", iid, issued_at=3402.0) is not None
+    r4 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=3403.0, nonce="n4")
+    assert r4["ok"], r4
+
+
+def test_prepaid_tenant_never_dunned():
+    # a NON-postpaid (prepaid) tenant has no arrears invoices, so the dunning conjunct (inside the postpaid
+    # branch) is never reached: the prepaid path is byte-identical.
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)      # prepaid, NO postpaid account
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2000.0, nonce="p1")
+    assert r["ok"] and _avail(s, "org_a") == 70     # prepaid launch unaffected by dunning
