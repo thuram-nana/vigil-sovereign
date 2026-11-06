@@ -222,3 +222,23 @@ def test_prepaid_path_byte_identical_when_no_postpaid_record():
     st = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=10, now=3000.0)
     assert st["ok"] and st["net_spend"] == 10 and st["refunded"] == 20
     assert _avail(s, "org_a") == 90                 # 20 of the 30 refunded to the wallet (prepaid bucket path)
+
+
+def test_postpaid_full_consumption_settle_is_recorded_and_billable():
+    # RED-PEN HIGH (PP-2 FOLD): a launch that consumes its ENTIRE reservation settles with refund 0. The gate
+    # must STILL record the settlement (the marker), so `in_flight_reserved` clears the reserve and PP-2 bills the
+    # full consumption. Pre-fix the gate wrote the reversal only `if refund > 0`, so a fully-consumed launch left
+    # NO settle record -> it looked perpetually in-flight -> net_settled_consumed read 0 -> invoiced $0 (a silent
+    # revenue leak). This drives the real gate settle path (not the ledger directly), so a revert to `if refund>0`
+    # reds here.
+    from sigil.governor.postpaid import PostpaidArrearsLedger
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=0, postpaid=(500, 30))
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=100, now=2000.0, nonce="nf")
+    assert r["ok"] and _accrued(s, "org_a") == 100
+    st = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=100, now=3000.0)   # FULL consumption
+    assert st["ok"] and st["net_spend"] == 100 and st["refunded"] == 0, st
+    arr = PostpaidArrearsLedger(s)
+    assert arr.accrued("org_a") == 100                 # refund 0 -> arrears stays at the consumed 100
+    assert arr.in_flight_reserved("org_a") == 0        # the settle MARKER cleared the reserve from in-flight
+    assert arr.net_settled_consumed("org_a") == 100    # ...so PP-2 bills the full 100 (NOT 0 — the leak is closed)

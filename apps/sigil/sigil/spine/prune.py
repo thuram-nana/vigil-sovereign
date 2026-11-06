@@ -256,6 +256,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand postpaid arrears for tenant(s) {stranded_ppa}: a below-K drawn "
                           f"balance or consumed entry_id would not be carried into the snapshot seed (lowering "
                           f"the line's drawn balance or re-opening accrual replay); lower K or resolve")
+    # (c, PP-2 postpaid in-flight) a reserve that is still IN-FLIGHT (settle not yet landed) must not be pruned:
+    # PP-2's `in_flight_reserved` is a LIVE pairing scan, so a pruned unsettled reserve would be billed as
+    # consumed (over-billing a possibly-cancelled launch). Fail-closed, distinct from the aggregate arrears floor.
+    stranded_ppr = stranded_active_postpaid_reserves(store, archived, K)
+    if stranded_ppr:
+        raise PruneUnsafe(f"K={K} would strand an in-flight postpaid reserve for tenant(s) {stranded_ppr}: a "
+                          f"below-K reserve whose settle has not yet landed would be hidden from the PP-2 "
+                          f"in-flight scan, over-billing the (possibly cancelled) launch; lower K or let it settle")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -840,6 +848,66 @@ def stranded_postpaid_arrears(store, archived: list[Segment], K: int) -> list[st
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
+
+
+def stranded_active_postpaid_reserves(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-2 postpaid in-flight) — the tenants with an IN-FLIGHT postpaid RESERVE (a ``reserve-postpaid:``
+    debit whose matching ``settle-postpaid:`` settle record has NOT landed) sitting in the pruned prefix [0..K).
+
+    PP-2 arrears invoicing EXCLUDES in-flight reserves from the billing basis via
+    ``PostpaidArrearsLedger.in_flight_reserved`` — a LIVE pairing scan (the per-reserve amounts it needs are NOT
+    in the aggregate `stranded_postpaid_arrears` seed, which carries only per-org debited/credited totals + the
+    seen-set). Pruning an UNSETTLED reserve would hide it from that live scan, so `net_settled_consumed` would
+    inflate toward `accrued` and OVER-bill the in-flight (and possibly later-cancelled) launch, with no claw-back
+    (the delta model only bills forward) — the red-pen MED. `stranded_postpaid_arrears` does NOT prevent this: it
+    only checks the aggregate balance + seen-set survive, both of which a pruned reserve's debit still satisfies.
+
+    Fail-closed tripwire: block the prune while a below-K reserve is still in-flight (no settle in the archived
+    prefix NOR the live tail [K..]). A SETTLED reserve (settle present anywhere) IS prunable — once settled it
+    leaves the in-flight set and `accrued` (snapshot-seeded) carries its net consumption. Signature-verified so a
+    forged settle cannot unblock the prune. Read-only. EMPTY in the happy path (no in-flight launch straddles the
+    prune horizon; launches normally settle within their lifetime)."""
+    from ..governor.postpaid import (POSTPAID_DEBIT_SIGNAL, POSTPAID_CREDIT_SIGNAL, _PP_DEBIT_CORE,
+                                     _PP_CREDIT_CORE, RESERVE_ENTRY_PREFIX, SETTLE_ENTRY_PREFIX)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+
+    def _pairs(records):
+        for r in records:
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+                continue
+            oid, eid = p.get("org_id"), p.get("entry_id")
+            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+                continue
+            core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                              # fail-closed: a forged settle must not unblock the prune
+            if sig == POSTPAID_DEBIT_SIGNAL and eid.startswith(RESERVE_ENTRY_PREFIX):
+                yield ("reserve", oid, eid[len(RESERVE_ENTRY_PREFIX):])
+            elif sig == POSTPAID_CREDIT_SIGNAL and eid.startswith(SETTLE_ENTRY_PREFIX):
+                yield ("settle", oid, eid[len(SETTLE_ENTRY_PREFIX):])
+
+    reserves: dict[str, str] = {}      # in-flight-candidate suffix -> org_id, for reserves in the PRUNED prefix
+    settled: set = set()               # suffixes with a landed settle, archived OR live
+    for kind, oid, suf in _pairs(sorted(below, key=lambda r: r.seq)):
+        if kind == "reserve":
+            reserves.setdefault(suf, oid)
+        else:
+            settled.add(suf)
+    for kind, _oid, suf in _pairs(store.iter_records(since_seq=K - 1)):   # live tail: a settle here also counts
+        if kind == "settle":
+            settled.add(suf)
+    return sorted({oid for suf, oid in reserves.items() if suf not in settled})
 
 
 def stranded_active_subscriptions(store, archived: list[Segment], K: int, *, _signal: Optional[str] = None,

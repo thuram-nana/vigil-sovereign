@@ -257,3 +257,70 @@ def test_in_flight_reserve_withheld_but_prior_settled_draw_still_billed():
     assert invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=2000.0, issued_at=_issue()) is None
     assert [i.credits for i in _postpaid_invs(inv, "acme")] == [40]
     assert invoiced_postpaid_total(inv, "acme") == 40
+
+
+# ---- HIGH (red-pen FOLD): a FULL-consumption launch (refund==0) is billed, not treated as in-flight forever ---
+def test_full_consumption_settle_is_billed():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 500, 30, issued_at=_issue())
+    # a launch RESERVES 100 then consumes ALL 100 -> the gate's settle refund is 0 -> settle() STILL records it
+    arr.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())
+    arr.settle("acme", 0, entry_id="settle-postpaid:acme:n1", issued_at=_issue())   # full consumption, refund 0
+    assert arr.accrued("acme") == 100                    # refund 0 -> balance unchanged (== consumed)
+    assert arr.in_flight_reserved("acme") == 0           # the settle MARKER cleared it from in-flight
+    assert arr.net_settled_consumed("acme") == 100       # ...so the full consumption is billable (was 0 pre-fix)
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue())
+    invs = _postpaid_invs(inv, "acme")
+    assert len(invs) == 1 and invs[0].credits == 100     # billed the full consumed 100 — the revenue leak is closed
+
+
+def test_settle_marker_zero_refund_is_balance_noop_but_clears_in_flight():
+    s = _store()
+    arr = _arr(s)
+    arr.accrue("acme", 80, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())
+    before = arr.accrued("acme")
+    arr.settle("acme", 0, entry_id="settle-postpaid:acme:n1", issued_at=_issue())
+    assert before == 80 and arr.accrued("acme") == 80    # a 0-refund settle does NOT move the balance
+    assert arr.in_flight_reserved("acme") == 0           # ...but it DOES clear the reserve from in-flight
+    # a positive-refund settle reduces the arrears like a reverse (consumed 30 of 50)
+    arr.accrue("acme", 50, entry_id="reserve-postpaid:acme:n2", issued_at=_issue())
+    arr.settle("acme", 20, entry_id="settle-postpaid:acme:n2", issued_at=_issue())
+    assert arr.accrued("acme") == 110 and arr.in_flight_reserved("acme") == 0
+    # fail-closed: a negative refund is refused at binding
+    import pytest
+    with pytest.raises(ValueError):
+        arr.settle("acme", -1, entry_id="settle-postpaid:acme:n3", issued_at=_issue())
+
+
+# ---- HIGH (red-pen FOLD): a same-month re-run bills its NEW delta — content-addressed id, no month-key drop ----
+def test_late_same_month_delta_is_billed_not_dropped():
+    import datetime as _dt
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 1000, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="r:1", issued_at=_issue())
+    jan = postpaid_invoice_period_end(_dt.datetime(2026, 1, 5, tzinfo=_dt.timezone.utc).timestamp())
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=jan, issued_at=_issue())        # bills 100
+    # MORE settled consumption LATER in the SAME month, then a second run with the SAME month label
+    arr.accrue("acme", 40, entry_id="r:2", issued_at=_issue())
+    jan2 = postpaid_invoice_period_end(_dt.datetime(2026, 1, 25, tzinfo=_dt.timezone.utc).timestamp())
+    assert jan == jan2                                   # same month label — the OLD month key would collide + DROP
+    seq = invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=jan2, issued_at=_issue())
+    assert seq is not None                               # the new 40 IS billed (content id advances), not dropped
+    invs = _postpaid_invs(inv, "acme")                   # two invoices share the Jan period LABEL (order-indifferent)
+    assert len(invs) == 2 and sorted(i.credits for i in invs) == [40, 100]
+    assert invoiced_postpaid_total(inv, "acme") == 140
+
+
+def test_invoice_id_is_content_addressed_on_billing_high_water():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 1000, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="r:1", issued_at=_issue())
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue())
+    arr.accrue("acme", 40, entry_id="r:2", issued_at=_issue())
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=2000.0, issued_at=_issue())
+    # the id is the billing high-water this invoice advances FROM (0, then 100): distinct per delta (no leak),
+    # identical for concurrent racers on the same high-water (first-mint-wins dedup -> no double-bill)
+    assert [i.invoice_id for i in _postpaid_invs(inv, "acme")] == ["postpaid:acme:0", "postpaid:acme:100"]

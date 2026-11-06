@@ -326,3 +326,64 @@ def test_check_prune_safe_reraises_nonempty_postpaid_floor_wiring_only(tmp_path,
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "strand" in str(e.value).lower() and "ghost-tenant" in str(e.value)
+
+
+# ---- (f) PP-2 in-flight reserve prune tripwire (red-pen MED) ------------------------------------------
+def _reserve_store(tmp_path, *, settled: bool):
+    """A segmented store with a postpaid RESERVE in the sealed [0..5) prefix. When `settled`, a matching settle
+    credit lands in the LIVE tail, so the reserve is no longer in-flight (and is therefore prunable)."""
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    r = PostpaidRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    a = PostpaidArrearsLedger(s, owner_key=OWNER, trusted_pubkey=OP)
+    r.set_account("acme", 500, 30, issued_at=1.0)                                              # seq 0
+    a.accrue("acme", 100, engagement_id="acme", entry_id="reserve-postpaid:acme:n1", issued_at=2.0)  # seq 1 reserve
+    for _ in range(3):
+        s.append(kind="event", source="t", actor="u", payload={"i": "pad"})                   # seq 2..4
+    s.rotate()                                                                                 # seal [0..5)
+    # second segment [5..10): when `settled`, a matching settle lands here (seq >= K=5, so LIVE vs the pruned
+    # prefix) — the reserve is then no longer in-flight; otherwise this slot is a pad and the reserve stays open.
+    if settled:
+        a.settle("acme", 40, entry_id="settle-postpaid:acme:n1", issued_at=3.0)                # seq 5 (live)
+    else:
+        s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})                  # seq 5 (pad)
+    for _ in range(4):
+        s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})                  # seq 6..9
+    s.rotate()                                                                                 # seal [5..10)
+    for _ in range(3):
+        s.append(kind="event", source="t", actor="u", payload={"i": "tail"})                  # seq 10..12 (active)
+    return s
+
+
+def test_prune_refuses_to_strand_an_in_flight_postpaid_reserve(tmp_path, monkeypatch):
+    # RED-PEN MED (FOLD): an UNSETTLED reserve in the pruned prefix would be hidden from in_flight_reserved's live
+    # scan -> net_settled inflates toward accrued -> the (possibly cancelled) in-flight launch is over-billed. The
+    # tripwire fail-closed REFUSES the prune. (The aggregate arrears floor PERMITS it — it carries only balances.)
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _reserve_store(tmp_path, settled=False)
+    archived = _archived_below(s, 5)
+    assert prune.stranded_postpaid_arrears(s, archived, 5) == []          # the aggregate floor does NOT catch it
+    assert prune.stranded_active_postpaid_reserves(s, archived, 5) == ["acme"]
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    msg = str(e.value).lower()
+    assert "in-flight" in msg and "acme" in msg
+
+
+def test_prune_allows_a_settled_postpaid_reserve(tmp_path, monkeypatch):
+    # a reserve whose settle has landed (in the live tail) is NOT in-flight -> prunable (accrued is snapshot-seeded
+    # and in_flight_reserved stays 0 even with the reserve pruned).
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _reserve_store(tmp_path, settled=True)
+    archived = _archived_below(s, 5)
+    assert prune.stranded_active_postpaid_reserves(s, archived, 5) == []
+    assert prune.check_prune_safe(s, 5) == archived                       # the whole safety check passes
+
+
+def test_check_prune_safe_reraises_nonempty_reserve_floor_wiring_only(tmp_path, monkeypatch):
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _pp_segmented_store(tmp_path)
+    monkeypatch.setattr(prune, "stranded_active_postpaid_reserves", lambda store, archived, K: ["ghost-tenant"])
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    assert "in-flight" in str(e.value).lower() and "ghost-tenant" in str(e.value)

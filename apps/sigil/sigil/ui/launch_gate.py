@@ -322,8 +322,11 @@ class LaunchGate:
                 except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no reversal yet)
                     return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
                             f"{type(e).__name__}"}
-                if refund > 0:
-                    self.arrears.reverse(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
+                # ALWAYS record the settlement — even a FULL-consumption settle whose refund is 0. The record's
+                # presence clears the reserve from the arrears IN-FLIGHT set (`in_flight_reserved`), so PP-2 bills
+                # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
+                # prior `if refund > 0` left a fully-consumed launch with no settle record -> invoiced $0.)
+                self.arrears.settle(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
             return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                     "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
