@@ -133,7 +133,7 @@ def test_monitoring_line_crosses_a_hard_prune_and_tripwire_detects_a_stranding_s
         below.extend(prune.read_segment_records(s._layout.seg_path(seg)))
     seed = SnapshotState.model_validate(build(below, trusted_pubkey=owner_pubkey(), base_seq=5,
                                               snapshot_seq=-1).model_dump())
-    assert seed.schema_version == 7
+    assert seed.schema_version == 8
     assert dict(seed.monitoring_subscription_state)["org_a"] == "active"
     assert seed.subscription_state == []                                      # never folded into the credit line
     real_build = prune.build

@@ -59,11 +59,12 @@ class LaunchGate:
     production they default to the owner-key-backed sovereign registries over ``store``."""
 
     def __init__(self, store, *, orgs=None, ownership=None, meter=None, wallet=None,
-                 owner_key=None, base_dir: Optional[str] = None):
+                 postpaid=None, arrears=None, owner_key=None, base_dir: Optional[str] = None):
         from ..governor.asset_ownership import AssetOwnershipRegistry
         from ..governor.identity import owner_keypair
         from ..governor.metering import CreditMeter, PlanCreditLedger
         from ..governor.orgs import OrgRegistry
+        from ..governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
         from ..governor.subscription import SubscriptionRegistry
         from ..governor.wallet import WalletRegistry
         self.store = store
@@ -73,6 +74,10 @@ class LaunchGate:
         self.wallet = wallet if wallet is not None else WalletRegistry(store)
         self.meter = meter if meter is not None else CreditMeter(
             self.wallet, PlanCreditLedger(store), SubscriptionRegistry(store))
+        # PP-1 enterprise postpaid: a tenant with an owner-signed ENABLED credit line draws against it (accruing
+        # arrears) instead of burning prepaid credits. Absent/disabled ⇒ the prepaid path below is byte-identical.
+        self.postpaid = postpaid if postpaid is not None else PostpaidRegistry(store)
+        self.arrears = arrears if arrears is not None else PostpaidArrearsLedger(store)
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
 
@@ -190,7 +195,15 @@ class LaunchGate:
             if not self._authority_ok(h, slug, t):
                 return (f"no current owner-signed engagement authority for {h} (org {oid}) — the owner must "
                         f"authorize this target (offense_authority stays at the owner key)")
-            if self.meter.available(oid, now_ts) < u:
+            acct = self.postpaid.account(oid)
+            if acct is not None and acct.is_enabled():
+                # POSTPAID (PP-1): the credit conjunct is the owner-signed credit LINE, not the prepaid balance —
+                # admit the launch iff the drawn arrears plus this reservation stay within the signed limit.
+                acc = self.arrears.accrued(oid)
+                if acc + u > acct.credit_limit:
+                    return (f"over postpaid credit line: drawing {u} on top of {acc} accrued would exceed the "
+                            f"{acct.credit_limit}-credit limit (org {oid})")
+            elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
             return None
 
@@ -201,12 +214,24 @@ class LaunchGate:
             re = _gated()                                # TOCTOU: re-check every conjunct inside the lock
             if re is not None:
                 return {"ok": False, "error": re}
-            before = self.meter.available(oid, now_ts)
-            self._spend(oid, u, slug, non, now_ts)       # plan-first then wallet (idempotent per slug/nonce)
-            if before - self.meter.available(oid, now_ts) < u:
-                # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
-                # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
-                return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            acct = self.postpaid.account(oid)
+            if acct is not None and acct.is_enabled():
+                # POSTPAID (PP-1): ACCRUE `u` against the credit line. The accrual-delta invariant mirrors the
+                # prepaid availability-delta — a reused nonce's idempotent accrue no-ops ⇒ no delta ⇒ refuse and
+                # mint NOTHING, so a reservation is ALWAYS backed by a real, incremental draw. No prepaid bucket
+                # is touched, so a postpaid tenant never consumes wallet/plan credits.
+                before_acc = self.arrears.accrued(oid)
+                self.arrears.accrue(oid, u, engagement_id=slug,
+                                    entry_id=f"reserve-postpaid:{slug}:{non}", issued_at=now_ts)
+                if self.arrears.accrued(oid) - before_acc < u:
+                    return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            else:
+                before = self.meter.available(oid, now_ts)
+                self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent per slug/nonce)
+                if before - self.meter.available(oid, now_ts) < u:
+                    # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
+                    # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
+                    return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
                 not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts)
@@ -271,6 +296,34 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        # POSTPAID (PP-1) settle. Detect a postpaid reservation by its PRUNE-DURABLE arrears debit marker —
+        # `arrears.was_accrued(reserve-postpaid:{slug}:{nonce})`, which reads the SnapshotState-seeded seen-set,
+        # NOT a live scan of the individual debit record (a hard prune can drop that record while carrying only
+        # the per-org balance + seen-set into the seed — the red-pen HIGH: a live scan read False post-prune and
+        # mis-routed the settle to the prepaid wallet, minting credits + leaving the arrears un-reversed). It is
+        # also NOT the account's CURRENT enabled state (the owner may disable the line between reserve and
+        # settle). A postpaid reservation touched no plan/wallet bucket, so REVERSE the unconsumed draw
+        # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
+        # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared settlement marker +
+        # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
+        if self.arrears.was_accrued(oid, f"reserve-postpaid:{s}:{non}"):
+            with self._lock:
+                try:
+                    from vigil_integration.live.credit_lease_broker import (
+                        is_lease_settled, record_lease_settlement, tombstone_credit_lease,
+                    )
+                    if is_lease_settled(self._seam_base(), s, non):
+                        return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
+                                "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
+                    record_lease_settlement(self._seam_base(), s, non)
+                    tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
+                except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no reversal yet)
+                    return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
+                            f"{type(e).__name__}"}
+                if refund > 0:
+                    self.arrears.reverse(oid, refund, entry_id=f"settle-postpaid:{s}:{non}", issued_at=now_ts)
+            return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
+                    "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every

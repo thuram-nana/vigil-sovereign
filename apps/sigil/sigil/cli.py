@@ -1265,6 +1265,52 @@ def cmd_billing_drain(a) -> None:
               f"{r['deduped']} deduped")
 
 
+def cmd_postpaid(a) -> None:
+    """Owner control of the enterprise POSTPAID credit line (PP-1): set | disable | status.
+
+    `set <org> <credit_limit> <net_terms_days>` opens (or raises) a tenant's owner-signed credit line
+    (enabled); `disable <org>` closes it (the safe direction — honored on sight); `status [<org>]` reports the
+    arrears roster (limit, terms, and the currently-drawn balance). An OWNER action — paying never grants a
+    line, and the launch gate admits a postpaid tenant's run against the line (accruing arrears) instead of
+    requiring prepaid credits."""
+    import time
+    from .governor.identity import owner_keypair
+    from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
+    store = SpineStore()
+    owner = owner_keypair()
+    reg = PostpaidRegistry(store, owner_key=owner)
+    arr = PostpaidArrearsLedger(store, owner_key=owner)
+    cmd = a.postpaid_cmd
+    if cmd == "set":
+        if a.org is None or a.limit is None or a.net_terms is None:
+            print("postpaid set: <org> <credit_limit> <net_terms_days> are required", file=sys.stderr)
+            sys.exit(2)
+        try:
+            reg.set_account(a.org, int(a.limit), int(a.net_terms), issued_at=time.time())
+        except (ValueError, TypeError) as e:
+            print(f"postpaid set: refused ({type(e).__name__}: {e})", file=sys.stderr)
+            sys.exit(2)
+        acct = reg.account(a.org)
+        print(f"  postpaid ENABLED for {acct.org_id}: limit {acct.credit_limit} credits, "
+              f"net {acct.net_terms_days}d")
+    elif cmd == "disable":
+        if a.org is None:
+            print("postpaid disable: <org> is required", file=sys.stderr)
+            sys.exit(2)
+        reg.disable(a.org)
+        print(f"  postpaid DISABLED for {a.org} (the line is closed; a fresh `set` re-opens it)")
+    else:  # status
+        rows = [reg.account(a.org)] if a.org else reg.accounts()
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            print(f"  {a.org}: not postpaid" if a.org else "  no postpaid accounts")
+            return
+        for acct in rows:
+            state = "enabled" if acct.is_enabled() else "disabled"
+            print(f"  {acct.org_id}: {state}, limit {acct.credit_limit}, net {acct.net_terms_days}d, "
+                  f"drawn {arr.accrued(acct.org_id)}")
+
+
 def _monitoring_flag_or_exit(verb: str) -> None:
     from . import config
     if not config.customer_monitoring_enabled():
@@ -2543,6 +2589,14 @@ def main(argv=None) -> None:
     pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.set_defaults(fn=cmd_billing_drain)
+    ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line (PP-1): set|disable|status — the "
+                                          "owner-signed account mode an enterprise tenant draws against in "
+                                          "arrears (paying never grants a line)")
+    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status"])
+    ppp.add_argument("org", nargs="?", default=None, help="tenant org_id (== tenant_id)")
+    ppp.add_argument("limit", nargs="?", default=None, help="(set) credit_limit, in credits (non-negative int)")
+    ppp.add_argument("net_terms", nargs="?", default=None, help="(set) net terms, in days [0, 366]")
+    ppp.set_defaults(fn=cmd_postpaid)
     pmd = sub.add_parser("monitoring-drain",
                          help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "
                               "(per-(org,host) MAC + freshness + active authority; fail-closed; default-OFF)")
