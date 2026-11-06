@@ -1175,7 +1175,9 @@ def cmd_ops_sweep(a) -> None:
     """Read-only-by-default operator sweeps. ``reservations``: abandoned (unsettled past not_after + TTL) credit
     reservations -> report; ``--apply`` full-refunds them via the existing owner-keyed ``settle_launch`` path
     (exactly-once per (slug, nonce)) and additionally requires VIGIL_OPS_SWEEP_APPLY_ENABLED=1 (default OFF).
-    ``tx-refs``: dangling Flutterwave checkouts (no webhook drained) -> report only."""
+    ``reconcile`` (PP-4): per enterprise-postpaid org, report invoiced-vs-paid against real (net-settled)
+    consumption, flagging uninvoiced-consumption / outstanding / overdue -> report only (retire abandoned
+    reserves via ``reservations --apply``). ``tx-refs``: dangling Flutterwave checkouts (no webhook drained) -> report only."""
     import os
     import time as _time
 
@@ -1198,6 +1200,24 @@ def cmd_ops_sweep(a) -> None:
             sys.exit(2)
         out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
                                                        completion_spool=(a.completion_spool or None))
+    elif a.sweep_cmd == "reconcile":
+        # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
+        # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed
+        # `reservations --apply` path (settle_launch auto-detects a postpaid lease), so reconcile
+        # mints/settles nothing and takes no --apply of its own.
+        if a.apply:
+            print("reconcile is report-only; to retire abandoned reserves use `ops-sweep reservations --apply`",
+                  file=sys.stderr)
+            sys.exit(2)
+        from .governor.identity import owner_keypair
+        from .governor.invoices import InvoiceRegistry
+        from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
+        store = SpineStore()
+        owner = owner_keypair()
+        reg = PostpaidRegistry(store, owner_key=owner)
+        arr = PostpaidArrearsLedger(store, owner_key=owner)
+        inv = InvoiceRegistry(store, owner_key=owner)
+        out = ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=now)
     else:
         if a.apply:
             print("tx-refs is report-only; --apply is not supported", file=sys.stderr)
@@ -2603,9 +2623,10 @@ def main(argv=None) -> None:
     psd.set_defaults(fn=cmd_settle_drain)
     pos = sub.add_parser("ops-sweep",
                          help="read-only operator sweeps: abandoned credit reservations (--apply full-refunds "
-                              "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / dangling Flutterwave "
+                              "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / postpaid reconcile "
+                              "(invoiced-vs-paid vs real consumption; report only) / dangling Flutterwave "
                               "tx_refs (report only)")
-    pos.add_argument("sweep_cmd", choices=["reservations", "tx-refs"])
+    pos.add_argument("sweep_cmd", choices=["reservations", "reconcile", "tx-refs"])
     pos.add_argument("--ttl", type=float, default=86400.0,
                      help="grace seconds past lease not_after / checkout start before an item is flagged")
     pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")

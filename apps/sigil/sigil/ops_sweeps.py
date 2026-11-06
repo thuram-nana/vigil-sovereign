@@ -117,6 +117,63 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     return {"applied": bool(apply), "items": rows}
 
 
+def sweep_postpaid_reconciliation(postpaid: Any, arrears: Any, invoices: Any, *, now: float,
+                                  orgs: "Optional[Iterable[str]]" = None) -> dict:
+    """REPORT-ONLY reconciliation of each enabled postpaid org: invoiced-vs-paid vs real consumption.
+
+    Per org, composes the owner-signed postpaid scalars into one row and flags any discrepancy an
+    operator should chase:
+      * ``uninvoiced_consumption`` — net settled consumption exceeds what has been invoiced
+        (``billable_uninvoiced = net_settled_consumed - invoiced > 0``). Reads ``net_settled_consumed``
+        (accrued MINUS still-in-flight reserves), NEVER raw ``accrued``, so an in-flight reserve (a
+        launch that has not settled) is never mis-reported as un-billed revenue an operator would
+        wrongly chase.
+      * ``outstanding`` — an invoiced balance remains unpaid (``invoiced - paid > 0``, PP-2b).
+      * ``overdue`` — an unpaid invoice is past its net-terms due date at ``now`` (PP-3 dunning read).
+    A row with none of these is ``reconciled``. This is a PURE READ: it only folds owner-signed
+    records, writes nothing, mints nothing, settles nothing. The abandoned-reservation RETIRE half of
+    PP-4 rides the EXISTING ``sweep_abandoned_reservations`` (owner-keyed, lease-verified, exactly-once
+    per ``(slug, nonce)``) under the same ``--apply`` triple-gate — so PP-4 adds no new money-moving code.
+    """
+    from .governor.postpaid import (
+        invoiced_postpaid_total,
+        paid_postpaid_total,
+        postpaid_outstanding,
+        postpaid_overdue_amount,
+    )
+
+    want = None if orgs is None else {str(o) for o in orgs}
+    rows: list[dict] = []
+    for acct in postpaid.accounts():
+        oid = acct.org_id
+        if want is not None and oid not in want:
+            continue
+        if not acct.is_enabled():
+            continue
+        drawn = int(arrears.accrued(oid))
+        billable = int(arrears.net_settled_consumed(oid))     # accrued - in_flight: the billing basis
+        in_flight = int(arrears.in_flight_reserved(oid))
+        invoiced = int(invoiced_postpaid_total(invoices, oid))
+        paid = int(paid_postpaid_total(invoices, oid))
+        outstanding = int(postpaid_outstanding(invoices, oid))
+        overdue = int(postpaid_overdue_amount(invoices, postpaid, oid, now))
+        billable_uninvoiced = max(0, billable - invoiced)
+        flags: list[str] = []
+        if billable_uninvoiced > 0:
+            flags.append("uninvoiced_consumption")
+        if outstanding > 0:
+            flags.append("outstanding")
+        if overdue > 0:
+            flags.append("overdue")
+        rows.append({
+            "org_id": oid, "drawn": drawn, "billable": billable, "in_flight": in_flight,
+            "invoiced": invoiced, "paid": paid, "outstanding": outstanding, "overdue": overdue,
+            "billable_uninvoiced": billable_uninvoiced,
+            "status": flags if flags else ["reconciled"],
+        })
+    return {"applied": False, "items": rows}
+
+
 def _iter_spool_bodies(d: Path) -> Iterable[dict]:
     """Yield every decodable webhook body (JSON object) in a billing-spool subdir. Never follows symlinks,
     never raises on a hostile/malformed file (it is simply skipped)."""
