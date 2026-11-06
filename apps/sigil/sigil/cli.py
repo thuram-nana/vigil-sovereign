@@ -1275,7 +1275,8 @@ def cmd_postpaid(a) -> None:
     requiring prepaid credits."""
     import time
     from .governor.identity import owner_keypair
-    from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears
+    from .governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
+                                    postpaid_invoice_period_end)
     store = SpineStore()
     owner = owner_keypair()
     reg = PostpaidRegistry(store, owner_key=owner)
@@ -1303,7 +1304,10 @@ def cmd_postpaid(a) -> None:
         from .governor.invoices import InvoiceRegistry
         inv = InvoiceRegistry(store, owner_key=owner)
         now = time.time() if a.now is None else float(a.now)
-        pe = now if a.period_end is None else float(a.period_end)
+        # HIGH (red-pen): default the period key to the STABLE UTC-month boundary, never raw wall-clock — so two
+        # billing runs in one month share the invoice_id and the owner-signed invoice fold dedups them to ONE
+        # (a wall-clock `pe` gave each run a distinct id -> a double-bill). An explicit --period-end still wins.
+        pe = postpaid_invoice_period_end(now) if a.period_end is None else float(a.period_end)
         targets = [a.org] if a.org else [x.org_id for x in reg.accounts() if x.is_enabled()]
         minted = [oid for oid in targets
                   if invoice_postpaid_arrears(reg, arr, inv, oid, period_end=pe, issued_at=now) is not None]

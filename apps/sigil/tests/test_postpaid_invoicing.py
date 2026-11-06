@@ -18,7 +18,7 @@ import tempfile
 from sigil.governor import catalog
 from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
-                                     invoiced_postpaid_total)
+                                     invoiced_postpaid_total, postpaid_invoice_period_end)
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
 
@@ -160,3 +160,100 @@ def test_tenant_isolation():
     invoice_postpaid_arrears(reg, arr, inv, "org_b", period_end=1000.0, issued_at=_issue())
     assert invoiced_postpaid_total(inv, "org_a") == 100 and invoiced_postpaid_total(inv, "org_b") == 20
     assert _postpaid_invs(inv, "org_a")[0].credits == 100 and _postpaid_invs(inv, "org_b")[0].credits == 20
+
+
+# ---- HIGH (red-pen): a stable per-month period key, so two runs in one period never double-bill -----------
+def test_period_end_is_stable_within_utc_month():
+    import datetime as _dt
+    jan2 = _dt.datetime(2026, 1, 2, 3, 4, tzinfo=_dt.timezone.utc).timestamp()
+    jan29 = _dt.datetime(2026, 1, 29, 23, 0, tzinfo=_dt.timezone.utc).timestamp()
+    feb1 = _dt.datetime(2026, 2, 1, 0, 0, tzinfo=_dt.timezone.utc).timestamp()
+    # distinct wall-clocks in ONE UTC month collapse to one key (the HIGH fix); the next month is a new key
+    assert postpaid_invoice_period_end(jan2) == postpaid_invoice_period_end(jan29)
+    assert postpaid_invoice_period_end(jan2) != postpaid_invoice_period_end(feb1)
+    # the key IS the UTC calendar-month start
+    assert postpaid_invoice_period_end(jan29) == _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc).timestamp()
+    # fail-closed: a garbage clock clamps to a still-STABLE 0.0 (never a wall-clock value that reopens the bug)
+    assert postpaid_invoice_period_end(float("nan")) == 0.0
+    assert postpaid_invoice_period_end(float("inf")) == 0.0
+    assert postpaid_invoice_period_end(-1.0) == 0.0
+    assert postpaid_invoice_period_end(True) == 0.0            # bool is not a clock
+
+
+def test_two_same_month_runs_mint_one_invoice():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 500, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="r:1", issued_at=_issue())
+    import datetime as _dt
+    pe_a = postpaid_invoice_period_end(_dt.datetime(2026, 3, 10, tzinfo=_dt.timezone.utc).timestamp())
+    pe_b = postpaid_invoice_period_end(_dt.datetime(2026, 3, 20, tzinfo=_dt.timezone.utc).timestamp())
+    assert pe_a == pe_b                                        # same month -> same invoice_id
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=pe_a, issued_at=_issue())
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=pe_b, issued_at=_issue())
+    # the two runs mint ONE invoice, not two (the owner-signed fold dedups the shared invoice_id)
+    assert len(_postpaid_invs(inv, "acme")) == 1
+    assert invoiced_postpaid_total(inv, "acme") == 100
+
+
+# ---- MED (red-pen): bill NET SETTLED consumption — an in-flight reserve is never over-billed ---------------
+def test_in_flight_reserve_is_not_billed():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 500, 30, issued_at=_issue())
+    # a launch RESERVES 100 against the line (reserved, not yet settled) — the gate's reserve entry-id scheme
+    arr.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())
+    assert arr.accrued("acme") == 100                 # the credit-line cap DOES count the full reserve
+    assert arr.in_flight_reserved("acme") == 100
+    assert arr.net_settled_consumed("acme") == 0      # ...but nothing is billable while in-flight
+    # a billing run that fires mid-flight mints NOTHING (the MED over-bill is closed)
+    assert invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue()) is None
+    assert _postpaid_invs(inv, "acme") == []
+
+
+def test_settled_consumption_billed_at_net_not_reserved():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 500, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())        # reserve 100
+    # the launch settles having consumed 40 -> the gate reverses reserved-consumed = 60 under the settle id
+    arr.reverse("acme", 60, entry_id="settle-postpaid:acme:n1", issued_at=_issue())
+    assert arr.accrued("acme") == 40
+    assert arr.in_flight_reserved("acme") == 0         # the settle landed -> no longer in-flight
+    assert arr.net_settled_consumed("acme") == 40
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue())
+    invs = _postpaid_invs(inv, "acme")
+    assert len(invs) == 1 and invs[0].credits == 40    # billed the NET consumed, never the 100 reserved
+
+
+def test_cancelled_in_flight_draw_is_never_billed():
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 500, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())        # reserve 100
+    # a mid-period run fires while the draw is in-flight -> bills nothing
+    assert invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue()) is None
+    # the launch is CANCELLED: consumed 0 -> the gate reverses the FULL 100 under the settle id
+    arr.reverse("acme", 100, entry_id="settle-postpaid:acme:n1", issued_at=_issue())
+    assert arr.accrued("acme") == 0 and arr.net_settled_consumed("acme") == 0
+    # a LATER run (a new period) still bills nothing — a cancelled draw never bills, so no claw-back is needed
+    assert invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=2000.0, issued_at=_issue()) is None
+    assert _postpaid_invs(inv, "acme") == []
+
+
+def test_in_flight_reserve_withheld_but_prior_settled_draw_still_billed():
+    """A settled draw (billable) and a fresh in-flight reserve coexist: only the settled net is billed, and the
+    in-flight reserve is withheld until it too settles — the delta model never re-bills or over-bills."""
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("acme", 1000, 30, issued_at=_issue())
+    arr.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=_issue())        # reserve 100
+    arr.reverse("acme", 60, entry_id="settle-postpaid:acme:n1", issued_at=_issue())         # settle: consumed 40
+    invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=1000.0, issued_at=_issue())  # bills 40
+    arr.accrue("acme", 50, entry_id="reserve-postpaid:acme:n2", issued_at=_issue())         # a NEW in-flight 50
+    assert arr.accrued("acme") == 90 and arr.in_flight_reserved("acme") == 50
+    assert arr.net_settled_consumed("acme") == 40      # only the settled 40 is billable
+    # a run now adds nothing (40 already invoiced; the 50 reserve is in-flight)
+    assert invoice_postpaid_arrears(reg, arr, inv, "acme", period_end=2000.0, issued_at=_issue()) is None
+    assert [i.credits for i in _postpaid_invs(inv, "acme")] == [40]
+    assert invoiced_postpaid_total(inv, "acme") == 40
