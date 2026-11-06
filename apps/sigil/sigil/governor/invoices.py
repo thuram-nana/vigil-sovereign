@@ -52,10 +52,12 @@ from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — m
 INVOICE_SIGNAL = "governor.invoice"
 
 # The kinds of billing-history line. `subscription` = a subscription period was charged; `topup` = a one-off
-# paid credit purchase. Extendable later (refund, adjustment) WITHOUT a schema change — a fold ignores an
-# unknown kind's row only if a reader opts to, but by default every well-formed signed row is retained as
-# history (the kind is descriptive, not a gate).
-INVOICE_KINDS = frozenset({"subscription", "topup", "postpaid"})
+# paid credit purchase; `postpaid` = an enterprise arrears invoice (PP-2); `payment` = a RECEIPT against a
+# postpaid arrears invoice (PP-2b) — money IN, reducing the tenant's OUTSTANDING balance, NOT a charge and NOT a
+# change to the consumption basis the arrears invoicing bills from. Extendable later (refund, adjustment) WITHOUT
+# a schema change — a fold ignores an unknown kind's row only if a reader opts to, but by default every
+# well-formed signed row is retained as history (the kind is descriptive, not a gate).
+INVOICE_KINDS = frozenset({"subscription", "topup", "postpaid", "payment"})
 
 # The owner-signed authenticated CORE. `invoice_id` is inside it so a captured record cannot be re-stamped with
 # a fresh idempotency key to forge a duplicate line. `amount_minor`/`currency`/`price_id`/`credits`/`period_*`

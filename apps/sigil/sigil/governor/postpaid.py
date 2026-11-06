@@ -544,3 +544,61 @@ def invoice_postpaid_arrears(postpaid: "PostpaidRegistry", arrears: "PostpaidArr
                            price_id="postpaid_arrears", amount_minor=amount, currency=currency,
                            credits=delta, period_start=0.0, period_end=float(period_end),
                            issued_at=float(issued_at))
+
+
+# ---- PP-2b: invoice PAYMENT -> outstanding-balance tracking (receipts, DISTINCT from the consumption basis) ---
+# A payment is money IN against a minted arrears invoice. It reduces what the tenant OWES (`postpaid_outstanding`)
+# but it is NOT a change to consumption: it must NOT lower `accrued` / `net_settled_consumed` (the billing basis)
+# NOR `invoiced_postpaid_total` (the billing high-water), or the delta model would under-bill future consumption.
+# So a payment lives ONLY in the billing-history ledger as a `kind="payment"` receipt (owner-signed, idempotent,
+# prune-durable like any invoice), never as an arrears-ledger credit. PP-3 dunning tests `postpaid_outstanding`.
+_POSTPAID_PAYMENT_PRICE_ID = "postpaid_payment"
+
+
+def paid_postpaid_total(invoices: Any, org_id: str) -> int:
+    """Σ credits of the POSTPAID-invoice PAYMENTS (receipts) recorded for `org_id` — what the tenant has PAID
+    against its arrears invoices. Reads `kind == "payment"` lines tagged `price_id == "postpaid_payment"` (so a
+    future top-up/subscription payment can never be miscounted here). Org-scoped; fail-closed to 0 on empty."""
+    if not isinstance(org_id, str) or not org_id:
+        return 0
+    return sum(int(inv.credits) for inv in invoices.invoices(org_id)
+               if inv.kind == "payment" and inv.price_id == _POSTPAID_PAYMENT_PRICE_ID)
+
+
+def postpaid_outstanding(invoices: Any, org_id: str) -> int:
+    """What the tenant currently OWES on its postpaid arrears = Σ invoiced − Σ paid, clamped >= 0. This is the
+    scalar PP-3 dunning will test (billed-but-unpaid drives access reduction). DISTINCT from `accrued` (the
+    credit-line draw) and `net_settled_consumed` (the un-invoiced billing basis): outstanding is the
+    billed-but-unpaid balance. Fail-closed to 0 on an empty id."""
+    if not isinstance(org_id, str) or not org_id:
+        return 0
+    return max(0, invoiced_postpaid_total(invoices, org_id) - paid_postpaid_total(invoices, org_id))
+
+
+def pay_postpaid_invoice(invoices: Any, org_id: str, invoice_id: str, *, issued_at: float) -> Optional[int]:
+    """Record a PAYMENT settling ONE owner-signed POSTPAID arrears invoice in full, reducing the tenant's
+    OUTSTANDING balance. Returns the receipt record's seq, or None when there is nothing to pay (no such postpaid
+    invoice for this org, or it is already paid).
+
+    MONEY DOCTRINE: the paid amount/credits come from the NAMED owner-signed invoice itself (catalog-derived at
+    its mint), NEVER a wire value — the caller names WHICH invoice is paid, not how much. Idempotent per
+    `pay:{invoice_id}` (paying the same invoice twice folds once — the invoice ledger is first-mint-wins, so even
+    a concurrent double-pay credits once). The receipt is itself owner-signed (via `invoices.record`), so a forged
+    payment cannot deflate a victim's outstanding. The arrears ledger (accrued / net_settled_consumed) is
+    UNTOUCHED, so future arrears invoicing still bills real consumption. The real payment-provider path (a verified
+    webhook whose amount is cross-checked against this invoice's catalog amount) is a prod-gated follow-up; this is
+    the mock-first owner/operator receipt."""
+    if not (isinstance(org_id, str) and org_id and isinstance(invoice_id, str) and invoice_id):
+        return None                                   # fail-closed on an empty org / id (never raise into a caller)
+    oid = org_tenant_id(org_id)
+    invs = invoices.invoices(oid)                     # one org-scoped fold
+    target = next((inv for inv in invs if inv.invoice_id == invoice_id and inv.kind == "postpaid"), None)
+    if target is None:
+        return None                                   # no such postpaid invoice for this tenant (fail-closed)
+    pay_id = f"pay:{target.invoice_id}"
+    if any(inv.invoice_id == pay_id for inv in invs):
+        return None                                   # already paid (idempotent receipt already folded)
+    return invoices.record(oid, invoice_id=pay_id, kind="payment", price_id=_POSTPAID_PAYMENT_PRICE_ID,
+                           amount_minor=int(target.amount_minor), currency=target.currency,
+                           credits=int(target.credits), period_start=0.0, period_end=float(target.period_end),
+                           issued_at=float(issued_at))

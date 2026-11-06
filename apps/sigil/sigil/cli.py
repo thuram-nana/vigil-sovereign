@@ -1276,7 +1276,8 @@ def cmd_postpaid(a) -> None:
     import time
     from .governor.identity import owner_keypair
     from .governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
-                                    postpaid_invoice_period_end)
+                                    paid_postpaid_total, pay_postpaid_invoice, postpaid_invoice_period_end,
+                                    postpaid_outstanding)
     store = SpineStore()
     owner = owner_keypair()
     reg = PostpaidRegistry(store, owner_key=owner)
@@ -1313,7 +1314,27 @@ def cmd_postpaid(a) -> None:
                   if invoice_postpaid_arrears(reg, arr, inv, oid, period_end=pe, issued_at=now) is not None]
         suffix = f": {', '.join(minted)}" if minted else ""
         print(f"  {len(minted)} postpaid arrears invoice(s) minted (of {len(targets)} account(s)){suffix}")
+    elif cmd == "pay":
+        # PP-2b (mock-first): record a receipt that settles ONE named postpaid invoice in full, reducing the
+        # tenant's OUTSTANDING balance. The amount comes from the owner-signed invoice itself (money doctrine),
+        # so the operator names WHICH invoice (the 2nd positional), never how much. The real payment-provider
+        # webhook path is a prod-gated follow-up.
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
+        inv_id = a.limit                              # the 2nd positional doubles as <invoice_id> for `pay`
+        if a.org is None or not inv_id:
+            print("postpaid pay: <org> <invoice_id> are required", file=sys.stderr)
+            sys.exit(2)
+        seq = pay_postpaid_invoice(inv, a.org, inv_id, issued_at=time.time())
+        if seq is None:
+            print(f"  nothing paid: no open postpaid invoice {inv_id!r} for {a.org} (unknown, non-postpaid, "
+                  f"or already paid)")
+        else:
+            print(f"  payment recorded for {a.org} invoice {inv_id} (seq {seq}); "
+                  f"outstanding now {postpaid_outstanding(inv, a.org)}")
     else:  # status
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
         rows = [reg.account(a.org)] if a.org else reg.accounts()
         rows = [r for r in rows if r is not None]
         if not rows:
@@ -1322,7 +1343,8 @@ def cmd_postpaid(a) -> None:
         for acct in rows:
             state = "enabled" if acct.is_enabled() else "disabled"
             print(f"  {acct.org_id}: {state}, limit {acct.credit_limit}, net {acct.net_terms_days}d, "
-                  f"drawn {arr.accrued(acct.org_id)}")
+                  f"drawn {arr.accrued(acct.org_id)}, outstanding {postpaid_outstanding(inv, acct.org_id)} "
+                  f"(paid {paid_postpaid_total(inv, acct.org_id)})")
 
 
 def _monitoring_flag_or_exit(verb: str) -> None:
@@ -2603,13 +2625,14 @@ def main(argv=None) -> None:
     pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.set_defaults(fn=cmd_billing_drain)
-    ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line (PP-1): set|disable|status — the "
+    ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "
                                           "owner-signed account mode an enterprise tenant draws against in "
                                           "arrears (paying never grants a line)")
-    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status", "invoice"])
+    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status", "invoice", "pay"])
     ppp.add_argument("org", nargs="?", default=None,
                      help="tenant org_id (== tenant_id); omit for `invoice` to sweep ALL enabled postpaid accounts")
-    ppp.add_argument("limit", nargs="?", default=None, help="(set) credit_limit, in credits (non-negative int)")
+    ppp.add_argument("limit", nargs="?", default=None,
+                     help="(set) credit_limit, in credits (non-negative int); (pay) the <invoice_id> to settle")
     ppp.add_argument("net_terms", nargs="?", default=None, help="(set) net terms, in days [0, 366]")
     ppp.add_argument("--period-end", dest="period_end", type=float, default=None,
                      help="(invoice) the arrears billing-period end (POSIX); default = now")
