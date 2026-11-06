@@ -1,7 +1,8 @@
 # Hosting & Persistence runbook
 
 How VIGIL stores its data, what a host must provide, and the exact gates between a running
-install and charging real customers. Companion to `REMOTE-HOSTING.md` (the reverse-proxy /
+install and charging real customers. The *why* behind each gate; for the turnkey, ordered command
+sequence see `GO-LIVE-quickstart.md`. Companion to `REMOTE-HOSTING.md` (the reverse-proxy /
 never-public-bind topology), `snapshot-down-migration.md`, and `egress-posture.md`.
 
 > **The one rule:** the cloud provides *durable storage + compute + backing services + the TLS
