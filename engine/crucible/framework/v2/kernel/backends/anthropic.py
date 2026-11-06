@@ -46,6 +46,7 @@ from ..llm import (
     make_call_trace,
     parse_json_response,
     sampling_create_kwargs,
+    system_param,
 )
 
 
@@ -175,18 +176,14 @@ class AnthropicBackend(LLMBackend):
             try:
                 create_kwargs = dict(
                     model=self.model,
-                    # EC-1a: pass `system` as a cache-control content BLOCK (not a bare string)
-                    # so Anthropic prompt caching attaches one ephemeral breakpoint at the end of
-                    # the stable system span. The prompt is already prefix-stable — all volatile
-                    # per-step content rides the USER turn — so no reorder is needed; cached input
-                    # reads bill at ~10% across a scan's many same-system calls. Caching degrades
-                    # silently (no separate cache entry, no error) when the prefix is under the
-                    # model's minimum. The untrusted-data fence stays in the user turn (uncached).
-                    system=[{
-                        "type": "text",
-                        "text": sys_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }],
+                    # EC-1a: system_param attaches one ephemeral cache_control breakpoint at the end
+                    # of the stable system span so Anthropic prompt caching applies (the prompt is
+                    # already prefix-stable — all volatile per-step content rides the USER turn, so
+                    # no reorder, and the untrusted-data fence stays uncached). It returns the plain
+                    # pre-caching string instead — no vendor-side retention requested — when this is
+                    # the ZDR backend (self.zdr), an --ephemeral session is active, or the operator
+                    # opted out, so caching never overrides the zero-retention sovereignty posture.
+                    system=system_param(sys_prompt, zdr=getattr(self, "zdr", False)),
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                 )

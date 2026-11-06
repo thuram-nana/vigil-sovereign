@@ -51,6 +51,7 @@ from ..llm import (
     make_call_trace,
     parse_json_response,
     sampling_create_kwargs,
+    system_param,
 )
 
 
@@ -178,13 +179,11 @@ class BedrockBackend(LLMBackend):
                 # interface as the standard Anthropic client.
                 rsp = client.messages.create(  # type: ignore[attr-defined]
                     model=self.model,
-                    # EC-1a: system as a cache-control content block (see anthropic.py). Bedrock
-                    # supports Anthropic prompt caching; the cache is isolated per organization.
-                    system=[{
-                        "type": "text",
-                        "text": sys_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }],
+                    # EC-1a: system_param applies the prompt-cache breakpoint (see anthropic.py +
+                    # llm.system_param); Bedrock supports Anthropic prompt caching (isolated per
+                    # organization). Caching is skipped (plain string) under an active --ephemeral
+                    # session or the operator opt-out, so the zero-retention posture is preserved.
+                    system=system_param(sys_prompt, zdr=getattr(self, "zdr", False)),
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a

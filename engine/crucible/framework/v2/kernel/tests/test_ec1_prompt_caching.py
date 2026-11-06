@@ -18,6 +18,7 @@ Mutation-verify targets (each neuter reds a named test):
   * tokens_in = raw input only (un-fold)                -> test_usage_folds_cache_tokens_into_tokens_in
   * _tb_record ignores the folded tokens_in             -> test_budget_charges_the_folded_total
   * hardcode the trace cache fields to 0                -> test_usage_folds_cache_tokens_into_tokens_in
+  * drop the zdr/ephemeral gate in llm.system_param     -> test_zdr_backend_sends_plain_system_no_cache_control
 """
 
 from __future__ import annotations
@@ -243,6 +244,77 @@ def test_cache_block_survives_a_parse_retry() -> None:
     assert len(captured) == 2                                   # one retry
     assert captured[0]["system"][0]["text"] == captured[1]["system"][0]["text"]   # prefix stable
     assert captured[0]["messages"] != captured[1]["messages"]  # user got the retry hint
+
+
+# ----------------------------------------- sovereignty: caching must defer to ZDR / --ephemeral / opt-out
+
+
+def test_zdr_backend_sends_plain_system_no_cache_control() -> None:
+    """A zero-data-retention backend must NEVER instruct the vendor to retain the prompt prefix:
+    system_param returns the plain pre-caching STRING (no cache_control block) when zdr=True.
+    MUTATION TARGET: drop the `zdr` term from system_param -> this test reds."""
+    captured: list = []
+    be = _bare_anthropic()
+    be.zdr = True
+    be._client_obj = lambda: _stub_client(captured, _usage(cache_creation=0, cache_read=0))
+    be.complete(_prompt())
+    system = captured[0]["system"]
+    assert isinstance(system, str)                       # plain string == pre-EC-1a wire shape
+    assert "STABLE-DOCTRINE" in system
+    assert "cache_control" not in str(captured[0])       # nowhere on the wire
+
+
+def test_opt_out_env_sends_plain_system_no_cache_control(monkeypatch) -> None:
+    """The operator opt-out (CRUCIBLE_PROMPT_CACHE_DISABLED) disables the breakpoint entirely — an
+    escape hatch for a model/region that rejects cache_control."""
+    monkeypatch.setenv("CRUCIBLE_PROMPT_CACHE_DISABLED", "1")
+    captured: list = []
+    _run(_bare_anthropic(), _prompt(), captured, _usage(cache_creation=0, cache_read=0))
+    assert isinstance(captured[0]["system"], str)
+    assert "cache_control" not in str(captured[0])
+
+
+def test_active_ephemeral_session_forces_caching_off(monkeypatch) -> None:
+    """An active --ephemeral session ('leaves nothing behind / never route reasoning through a
+    data-retaining vendor') forces caching off; the positive control proves it caches otherwise."""
+    monkeypatch.setattr("framework.v2.common.ephemeral.is_active", lambda: True)
+    cap: list = []
+    _run(_bare_anthropic(), _prompt(), cap, _usage(cache_creation=0, cache_read=0))
+    assert isinstance(cap[0]["system"], str)             # ephemeral -> plain string, no retention
+    assert "cache_control" not in str(cap[0])
+    # POSITIVE CONTROL: no ephemeral session -> the identical call caches
+    monkeypatch.setattr("framework.v2.common.ephemeral.is_active", lambda: False)
+    cap2: list = []
+    _run(_bare_anthropic(), _prompt(), cap2, _usage(cache_creation=0, cache_read=0))
+    assert isinstance(cap2[0]["system"], list)
+    assert cap2[0]["system"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_real_nested_schema_prefix_is_byte_stable_and_is_what_gets_cached() -> None:
+    """The cached span is _build_system(prompt) = system + output-contract +
+    json.dumps(schema.model_json_schema(), indent=2). Exercise it over a REAL nested schema (not the
+    trivial _Tiny) and assert byte-identical across calls (schema-serialization determinism), and
+    that system_param caches exactly that text. Deeper cross-hash-seed + binding.build_system_prompt
+    coverage is a follow-up; the red-pen verified determinism empirically across seeds."""
+    class _Leaf(BaseModel):
+        kind: str
+        score: float
+
+    class _Nested(BaseModel):
+        items: list[_Leaf]
+        label: str
+        flags: dict[str, bool]
+
+    be = _bare_anthropic()
+    doc = "OBSIDIAN senior operator doctrine. " * 60      # a realistic stable doctrine prefix
+    mk = lambda u: Prompt(system=doc, user=u, schema=_Nested, schema_name="Nested",
+                          cognitive_doc="metacognition.md", cognitive_sections=["s1"])
+    built1 = be._build_system(mk("u1"))
+    built2 = be._build_system(mk("u2-different"))
+    assert built1 == built2                              # real nested schema tail is deterministic
+    block = llm.system_param(built1, zdr=False)
+    assert isinstance(block, list) and block[-1]["text"] == built1
+    assert block[-1]["cache_control"] == {"type": "ephemeral"}
 
 
 # --------------------------------------------------------------- opt-in live assertion
