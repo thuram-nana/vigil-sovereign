@@ -36,13 +36,17 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     """``(slug, nonce)`` of every completion still waiting in (or quarantined by) the completion spool — i.e.
     not yet drained into ``settle_launch``. Signatures are NOT checked: any claim of a finished run blocks a
     refund (the drain decides the charge). Returns ``(pairs, unreadable)``; ``unreadable`` is True when some
-    waiting file could not be parsed, so its (slug, nonce) is unknown (fail-closed: no refunds at all)."""
+    waiting file could not be parsed, so its (slug, nonce) is unknown — OR when the spool has NONE of the
+    expected subdirs (absent / uninitialized / mis-pointed), which must never read as "no pending" (both
+    fail-closed: no refunds at all)."""
     pairs: set = set()
     unreadable = False
+    saw_subdir = False
     for sub in ("incoming", "working", "rejected"):
         d = spool / sub
         if not d.is_dir():
             continue
+        saw_subdir = True
         for fp in sorted(d.glob("*.json*")):
             if fp.name.endswith(".reason"):
                 continue
@@ -53,6 +57,11 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
                 pairs.add((str(doc["engagement_slug"]), str(doc["nonce"])))
             except (OSError, ValueError, KeyError, TypeError):
                 unreadable = True
+    if not saw_subdir:
+        # An absent / empty / mis-pointed completion spool has NONE of the drain's subdirs. It must NOT read
+        # as "no pending completions" and green-light a refund: a completed-but-undrained run's completion
+        # lives in the REAL spool, so an unusable view is completion-UNKNOWN (fail-closed — refuse refunds).
+        return pairs, True
     return pairs, unreadable
 
 

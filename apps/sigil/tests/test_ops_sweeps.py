@@ -173,7 +173,12 @@ def test_cli_tx_refs_refuses_apply():
 
 
 def _spool():
-    return tempfile.mkdtemp()
+    # a REAL (initialized) completion spool: has the drain's incoming/ subdir but no pending completion, so an
+    # abandoned (never-run) lease is legitimately refundable. A bare mkdtemp with no subdirs is a mis-pointed
+    # spool and is (correctly) refused — see test_apply_refuses_mispointed_completion_spool.
+    sp = tempfile.mkdtemp()
+    (Path(sp) / "incoming").mkdir()
+    return sp
 
 
 def _pending(spool, slug, nonce, sub="incoming"):
@@ -205,10 +210,24 @@ def test_pending_completion_for_other_nonce_does_not_block():
 def test_unreadable_pending_completion_blocks_all_refunds():
     s, g, r = _reserve()
     sp = _spool()
-    (Path(sp) / "incoming").mkdir()
+    (Path(sp) / "incoming").mkdir(exist_ok=True)
     (Path(sp) / "incoming" / "x.json").write_text("garbage")
     out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=sp)
     assert out["items"][0]["status"] == "completion_unknown" and _avail(s) == 70
+
+
+def test_apply_refuses_mispointed_completion_spool():
+    """A mis-pointed / uninitialized --completion-spool (exists but has none of incoming/working/rejected, or
+    does not exist at all) must NOT read as 'no pending completions' and green-light a refund of a run whose
+    completion is sitting in the REAL spool: it is completion-UNKNOWN -> refuse (fail-closed)."""
+    s, g, r = _reserve()
+    bare = tempfile.mkdtemp()                                 # exists, but no drain subdirs = not a real spool
+    out = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=bare)
+    assert out["items"][0]["status"] == "completion_unknown" and _avail(s) == 70
+    assert not is_lease_settled(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    missing = os.path.join(tempfile.mkdtemp(), "nope")        # a path that does not exist at all
+    out2 = ops_sweeps.sweep_abandoned_reservations(g, now=LATE, ttl_s=50, apply=True, completion_spool=missing)
+    assert out2["items"][0]["status"] == "completion_unknown" and _avail(s) == 70
 
 
 def test_apply_without_completion_spool_refused():
