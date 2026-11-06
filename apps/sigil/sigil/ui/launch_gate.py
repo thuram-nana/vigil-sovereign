@@ -48,6 +48,8 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed re-entrant txn lock)
+from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-source the gate<->ledger entry-id scheme)
+                                 SETTLE_ENTRY_PREFIX)
 
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
@@ -222,7 +224,7 @@ class LaunchGate:
                 # is touched, so a postpaid tenant never consumes wallet/plan credits.
                 before_acc = self.arrears.accrued(oid)
                 self.arrears.accrue(oid, u, engagement_id=slug,
-                                    entry_id=f"reserve-postpaid:{slug}:{non}", issued_at=now_ts)
+                                    entry_id=f"{RESERVE_ENTRY_PREFIX}{slug}:{non}", issued_at=now_ts)
                 if self.arrears.accrued(oid) - before_acc < u:
                     return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
             else:
@@ -306,7 +308,7 @@ class LaunchGate:
         # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
         # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared settlement marker +
         # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
-        if self.arrears.was_accrued(oid, f"reserve-postpaid:{s}:{non}"):
+        if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
             with self._lock:
                 try:
                     from vigil_integration.live.credit_lease_broker import (
@@ -320,8 +322,11 @@ class LaunchGate:
                 except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no reversal yet)
                     return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
                             f"{type(e).__name__}"}
-                if refund > 0:
-                    self.arrears.reverse(oid, refund, entry_id=f"settle-postpaid:{s}:{non}", issued_at=now_ts)
+                # ALWAYS record the settlement — even a FULL-consumption settle whose refund is 0. The record's
+                # presence clears the reserve from the arrears IN-FLIGHT set (`in_flight_reserved`), so PP-2 bills
+                # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
+                # prior `if refund > 0` left a fully-consumed launch with no settle record -> invoiced $0.)
+                self.arrears.settle(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
             return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                     "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits

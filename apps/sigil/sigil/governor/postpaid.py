@@ -25,11 +25,13 @@ ACCOUNT-MODE MODEL (``PostpaidRegistry``) — the SAME asymmetric-auth idiom as 
     FRESHER than the last honored open (mirrors subscription dunning).
 
 ARREARS MODEL (``PostpaidArrearsLedger``) — ADDITIVE, never LWW:
-  * `accrue` (a launch draws against the line) appends `governor.postpaid_debit`; `reverse` (settle/cancel
-    refunds the unconsumed part, or PP-2 records a paid invoice) appends `governor.postpaid_credit`. Both are
-    owner/gate-signed + verified so a forged record cannot inflate OR deflate a victim's arrears; idempotent per
-    `entry_id` (a replayed reserve/settle no-ops). The gate's accrual-delta invariant (accrued MUST rise by the
-    reserved units, else refuse) makes a reused nonce fail-closed, mirroring the prepaid availability-delta.
+  * `accrue` (a launch draws against the line) appends `governor.postpaid_debit`; `settle` (a launch settles —
+    ALWAYS written, the refund 0..reserved) and `reverse` (PP-2 records a paid invoice) append
+    `governor.postpaid_credit`. Both are owner/gate-signed + verified so a forged record cannot inflate OR deflate
+    a victim's arrears; idempotent per `entry_id` (a replayed reserve/settle no-ops). The gate's accrual-delta
+    invariant (accrued MUST rise by the reserved units, else refuse) makes a reused nonce fail-closed, mirroring
+    the prepaid availability-delta. A settle is ALWAYS recorded (even a full-consumption refund of 0) so the
+    in-flight set clears and PP-2 bills the real consumption.
 
 PP-1 is the account mode + the accrual ledger + the launch-gate integration. The periodic owner-signed ARREARS
 INVOICE (which issues a `postpaid_credit` on payment, resetting the drawn balance) is PP-2; the DUNNING↔gate
@@ -58,6 +60,14 @@ from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — m
 POSTPAID_SIGNAL = "governor.postpaid"
 POSTPAID_DEBIT_SIGNAL = "governor.postpaid_debit"      # a launch drawn against the line (arrears grows)
 POSTPAID_CREDIT_SIGNAL = "governor.postpaid_credit"    # a settle/cancel reversal or a paid invoice (arrears shrinks)
+
+# The launch gate's entry_id scheme for a postpaid DRAW and its SETTLE reversal — SHARED by the gate (which
+# writes them, ui/launch_gate.py) and the arrears ledger's in-flight pairing (which reads them), so the two can
+# never drift. A postpaid_debit under RESERVE_ENTRY_PREFIX whose matching SETTLE_ENTRY_PREFIX credit has NOT yet
+# landed is an IN-FLIGHT launch (reserved, not settled) — excluded from the PP-2 arrears INVOICING basis so a
+# reserved-but-unconsumed (or later-cancelled) draw is never over-billed.
+RESERVE_ENTRY_PREFIX = "reserve-postpaid:"
+SETTLE_ENTRY_PREFIX = "settle-postpaid:"
 
 # Sane bounds. A credit line is a non-negative credit count; net terms are whole days within a year
 # (0 = due on issue; typical 15 / 30 / 60). Both live inside the signed core, so neither can be rewritten
@@ -103,6 +113,18 @@ def _as_nonneg_int(v: object) -> int:
             return 0
         return n if n > 0 else 0
     return 0
+
+
+def _check_refund(refund: int) -> int:
+    """Validate a SETTLE refund amount at binding. Unlike `_check_credits` (which requires > 0), a settle refund
+    may be 0: a FULL-consumption launch returns nothing to the line, yet its settle must still be RECORDED (the
+    marker that clears the reserve from the in-flight set, so the launch is billed for its real consumption).
+    Must be a non-negative whole number."""
+    if isinstance(refund, bool) or not isinstance(refund, int):
+        raise ValueError("refund must be a non-negative integer")
+    if refund < 0:
+        raise ValueError("refund must be a non-negative integer (>= 0)")
+    return refund
 
 
 @dataclass(frozen=True)
@@ -288,6 +310,30 @@ class PostpaidArrearsLedger:
                    "tier": "A0", "decision": "auto", "reason": f"postpaid reverse {c} <- {oid}"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def settle(self, org_id: str, refund: int, *, entry_id: Optional[str] = None, issued_at: float) -> int:
+        """Record a launch SETTLEMENT against the arrears — written on EVERY settle, including a full-consumption
+        settle whose `refund` (= reserved - consumed, from the owner-signed lease) is 0. The `refund` is the
+        unconsumed draw returned to the line and reduces `accrued` by exactly that much; the RECORD'S PRESENCE
+        (a ``governor.postpaid_credit`` under the settle entry_id) is the marker that clears the reserve from the
+        IN-FLIGHT set (`in_flight_reserved`), so a reserve is billed for its real consumption once it settles.
+
+        SECURITY (red-pen HIGH): the gate previously wrote the reversal ONLY when `refund > 0`, so a launch that
+        consumed its ENTIRE reservation (refund 0) left no settle record — `in_flight_reserved` treated it as
+        perpetually in-flight and `net_settled_consumed` read 0, so PP-2 invoiced $0 for real, fully-consumed
+        consumption (a silent revenue leak). This method is the fix: the gate calls it UNCONDITIONALLY, and a
+        0-refund settle is a balance no-op (`_as_credits(0) == 0`) but a load-bearing in-flight-clearing marker.
+        Owner/gate-signed + verified (a forged record is inert); idempotent per `entry_id`."""
+        if self.owner_key is None:
+            raise ValueError("postpaid settle requires the owner signing key")
+        oid = org_tenant_id(org_id)
+        r = _check_refund(refund)
+        eid = _check_entry_id(entry_id)
+        core = {"signal": POSTPAID_CREDIT_SIGNAL, "org_id": oid, "entry_id": eid, "credits": r,
+                "issued_at": float(issued_at)}
+        payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
+                   "tier": "A0", "decision": "auto", "reason": f"postpaid settle (refund {r}) <- {oid}"}
+        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
     def was_accrued(self, org_id: str, entry_id: str) -> bool:
         """True iff an owner-signed postpaid DEBIT under (org_id, entry_id) has EVER been folded — the
         PRUNE-DURABLE discriminator the launch settle path uses to tell a POSTPAID reservation from a prepaid
@@ -359,3 +405,142 @@ class PostpaidArrearsLedger:
             return 0
         debited, credited, _ = self._fold()
         return max(0, debited.get(org_id, 0) - credited.get(org_id, 0))
+
+    def in_flight_reserved(self, org_id: str) -> int:
+        """Σ reserved credits of this tenant's IN-FLIGHT launch draws — owner-signed postpaid DEBITs under
+        ``RESERVE_ENTRY_PREFIX`` whose matching ``SETTLE_ENTRY_PREFIX`` credit has NOT yet landed (reserved,
+        not yet settled or cancelled). The PP-2 invoicing basis holds these OUT (`net_settled_consumed` below),
+        so a reserved-but-unconsumed — or later-cancelled — launch is never billed; once it settles, only its
+        NET consumption (`reserved - refund`) remains in `accrued` and becomes billable. Pairing is by the
+        entry_id SUFFIX (`{slug}:{nonce}`) shared by the gate's reserve/settle pair, so the two can never drift.
+        A DEBIT under some other entry_id (a finalised direct accrual) is NOT a reservation and never counted
+        here. Signature-verified fail-closed: a forged reserve can only ever SUPPRESS a tenant's own billing,
+        so an unsigned/forged/wrong-epoch record is ignored (never allowed to deflate the basis). Fail-closed
+        to 0 on an empty id.
+
+        PRUNE SAFETY (red-pen MED, CLOSED): this is a LIVE pairing scan, not snapshot-seeded, because the
+        per-reserve amounts + pairing it needs are NOT carried in the arrears seed (which keeps only the per-org
+        aggregate debited/credited totals + the seen-set — `stranded_postpaid_arrears` guards only those). So a
+        hard prune that archived an UNSETTLED reserve debit would hide it from this scan and let
+        `net_settled_consumed` inflate toward `accrued`, over-billing the (possibly later-cancelled) in-flight
+        launch. The ``stranded_active_postpaid_reserves`` prune tripwire (spine/prune.py, wired into
+        `check_prune_safe`) CLOSES this: it fail-closed REFUSES any prune that would archive a reserve whose
+        settle has not landed, so an in-flight reserve is always present for this live scan. A settled reserve is
+        prunable (it has left the in-flight set and `accrued` is seeded). A snapshot-seeded per-reserve in-flight
+        sub-state — which would let such a prune proceed instead of blocking it — is a PP-2b operational nicety,
+        not a correctness gap."""
+        if not isinstance(org_id, str) or not org_id:
+            return 0
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        reserves: dict[str, int] = {}      # in-flight suffix -> reserved credits (first-mint-wins, idempotent)
+        settled: set[str] = set()          # suffixes whose settle credit has landed
+        seen: set = set()
+        for r in self.store.iter_records():
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+                continue
+            if p.get("org_id") != org_id:
+                continue
+            eid = p.get("entry_id")
+            if not (isinstance(eid, str) and eid):
+                continue
+            core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                                  # fail-closed: never let a forged record move the basis
+            key = (sig, org_id, eid)
+            if key in seen:
+                continue                                  # idempotent (mirror `_fold`): first occurrence wins
+            seen.add(key)
+            if sig == POSTPAID_DEBIT_SIGNAL and eid.startswith(RESERVE_ENTRY_PREFIX):
+                reserves[eid[len(RESERVE_ENTRY_PREFIX):]] = _as_credits(p.get("credits"))
+            elif sig == POSTPAID_CREDIT_SIGNAL and eid.startswith(SETTLE_ENTRY_PREFIX):
+                settled.add(eid[len(SETTLE_ENTRY_PREFIX):])
+        return sum(amt for suf, amt in reserves.items() if suf not in settled)
+
+    def net_settled_consumed(self, org_id: str) -> int:
+        """The tenant's BILLABLE consumption = `accrued` − `in_flight_reserved` — the PP-2 invoicing basis. A
+        launch that has reserved but not yet settled contributes its full reserve to `accrued` (the credit-line
+        cap must count it) but is held OUT of billing until it settles, when only its net consumed amount remains
+        in `accrued`. A finalised DIRECT accrual (no reserve/settle pairing) carries no in-flight reservation and
+        is billable at once. Clamped >= 0; fail-closed to 0 on an empty id."""
+        if not isinstance(org_id, str) or not org_id:
+            return 0
+        return max(0, self.accrued(org_id) - self.in_flight_reserved(org_id))
+
+
+# ---- PP-2: arrears invoicing (reuses the owner-signed invoice ledger; no new spine record) ---------------
+def postpaid_invoice_period_end(now: float) -> float:
+    """The human-readable `period_end` LABEL for an arrears billing run at wall-clock `now` (POSIX seconds): the
+    START of `now`'s UTC calendar month, as a POSIX timestamp. The CLI stamps it on the invoice so a monthly run
+    labels its invoice with the month it covers. It is NO LONGER the idempotency key — concurrency-safety and
+    exactly-once are the invoice_id's job, and that is content-addressed on the billing high-water
+    (`invoice_postpaid_arrears`), which both dedups concurrent runs AND lets a later same-month run bill its new
+    delta. Keeping the label a stable month boundary (not raw `time.time()`) keeps repeated monthly invoices
+    cleanly labelled. Fail-closed: a non-finite / non-positive / unconvertible `now` clamps to 0.0."""
+    import math
+    from datetime import datetime, timezone
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return 0.0
+    try:
+        f = float(now)
+        if not math.isfinite(f) or f <= 0.0:
+            return 0.0
+        dt = datetime.fromtimestamp(f, tz=timezone.utc)
+        return datetime(dt.year, dt.month, 1, tzinfo=timezone.utc).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+
+def invoiced_postpaid_total(invoices: Any, org_id: str) -> int:
+    """Σ credits of the POSTPAID arrears invoices already minted for `org_id` — the billed high-water. The
+    arrears minter bills only the UN-invoiced delta against this, so re-running it never double-bills. Reads
+    the owner-signed invoice ledger, org-scoped. Fail-closed to 0 on an empty id."""
+    if not isinstance(org_id, str) or not org_id:
+        return 0
+    return sum(int(inv.credits) for inv in invoices.invoices(org_id) if inv.kind == "postpaid")
+
+
+def invoice_postpaid_arrears(postpaid: "PostpaidRegistry", arrears: "PostpaidArrearsLedger", invoices: Any,
+                             org_id: str, *, period_end: float, issued_at: float) -> Optional[int]:
+    """Mint ONE owner-signed POSTPAID arrears invoice for a tenant's UN-INVOICED drawn credits, or None when
+    there is nothing new to bill (not postpaid, or no new draws). The billed amount comes from the owner CATALOG
+    (`catalog.postpaid_invoice_amount_minor`), NEVER a wire value. Idempotent + concurrency-safe via a
+    CONTENT-ADDRESSED invoice_id keyed on the per-org billing high-water (see below), so a billing run is safe to
+    repeat OR race — `period_end` is only the invoice's period label.
+
+    DELTA MODEL — bills `drawn - already_invoiced`, so re-running (or a mid-period re-run) never double-bills and
+    each period captures only the new draws. The invoicing basis is `arrears.net_settled_consumed(org)` =
+    `accrued - in_flight_reserved`, NOT the raw `accrued`: a launch that has RESERVED against the line but not
+    yet SETTLED contributes its full reserve to `accrued` (the credit-line cap must count it) but is held OUT of
+    billing until it settles — at which point only its NET consumed amount (`reserved - refund`) remains in
+    `accrued` and becomes billable. This is the red-pen MED fix: billing raw `accrued` over-billed an in-flight
+    reservation, and a LATER cancel (which lowers `accrued` below the already-invoiced total) could not claw the
+    over-bill back (the delta model only ever bills forward). Holding in-flight reserves out means a launch is
+    billed once, at net consumed, only after it settles — and a cancelled draw is never billed. PP-2b (invoice
+    PAYMENT -> arrears reversal) MUST keep this basis as net consumption EXCLUDING payments (a payment settles the
+    debt; it does not un-consume), so it will add a payment mechanism DISTINCT from this ledger's settle-refund
+    credits rather than lowering the value this reads. The gate's credit-line cap (`accrued <= credit_limit`) is
+    unchanged by invoicing."""
+    if not postpaid.is_postpaid(org_id):
+        return None
+    oid = org_tenant_id(org_id)
+    invoiced_before = invoiced_postpaid_total(invoices, oid)   # the billing HIGH-WATER before this mint
+    drawn = arrears.net_settled_consumed(oid)         # PP-2: settled consumption only (in-flight reserves held out)
+    delta = drawn - invoiced_before
+    if delta <= 0:
+        return None                                   # nothing new drawn since the last invoice
+    from .catalog import postpaid_invoice_amount_minor
+    amount, currency = postpaid_invoice_amount_minor(delta)
+    # CONTENT-ADDRESSED idempotency key (red-pen HIGH): the invoice_id is the per-org billing HIGH-WATER this
+    # invoice advances FROM (`invoiced_before`), NOT the wall-clock period. Two runs RACING on the same high-water
+    # compute the SAME id, so the owner-signed invoice fold (first-mint-wins) dedups them -> no double-bill, and it
+    # is deterministic ACROSS PROCESSES with no lock (the process-wide spine lock does not serialise a read-modify-
+    # write across processes). A later run billing a NEW delta advances to a HIGHER high-water -> a DISTINCT id ->
+    # it mints, so a same-month re-run's new consumption is never dropped (the month-key under-bill/leak is closed).
+    # `period_end` is now purely the invoice's period LABEL, not the idempotency key.
+    return invoices.record(oid, invoice_id=f"postpaid:{oid}:{invoiced_before}", kind="postpaid",
+                           price_id="postpaid_arrears", amount_minor=amount, currency=currency,
+                           credits=delta, period_start=0.0, period_end=float(period_end),
+                           issued_at=float(issued_at))

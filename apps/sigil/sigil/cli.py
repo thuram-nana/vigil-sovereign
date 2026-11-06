@@ -1275,7 +1275,8 @@ def cmd_postpaid(a) -> None:
     requiring prepaid credits."""
     import time
     from .governor.identity import owner_keypair
-    from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
+    from .governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
+                                    postpaid_invoice_period_end)
     store = SpineStore()
     owner = owner_keypair()
     reg = PostpaidRegistry(store, owner_key=owner)
@@ -1299,6 +1300,19 @@ def cmd_postpaid(a) -> None:
             sys.exit(2)
         reg.disable(a.org)
         print(f"  postpaid DISABLED for {a.org} (the line is closed; a fresh `set` re-opens it)")
+    elif cmd == "invoice":
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
+        now = time.time() if a.now is None else float(a.now)
+        # HIGH (red-pen): default the period key to the STABLE UTC-month boundary, never raw wall-clock — so two
+        # billing runs in one month share the invoice_id and the owner-signed invoice fold dedups them to ONE
+        # (a wall-clock `pe` gave each run a distinct id -> a double-bill). An explicit --period-end still wins.
+        pe = postpaid_invoice_period_end(now) if a.period_end is None else float(a.period_end)
+        targets = [a.org] if a.org else [x.org_id for x in reg.accounts() if x.is_enabled()]
+        minted = [oid for oid in targets
+                  if invoice_postpaid_arrears(reg, arr, inv, oid, period_end=pe, issued_at=now) is not None]
+        suffix = f": {', '.join(minted)}" if minted else ""
+        print(f"  {len(minted)} postpaid arrears invoice(s) minted (of {len(targets)} account(s)){suffix}")
     else:  # status
         rows = [reg.account(a.org)] if a.org else reg.accounts()
         rows = [r for r in rows if r is not None]
@@ -2592,10 +2606,15 @@ def main(argv=None) -> None:
     ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line (PP-1): set|disable|status — the "
                                           "owner-signed account mode an enterprise tenant draws against in "
                                           "arrears (paying never grants a line)")
-    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status"])
-    ppp.add_argument("org", nargs="?", default=None, help="tenant org_id (== tenant_id)")
+    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status", "invoice"])
+    ppp.add_argument("org", nargs="?", default=None,
+                     help="tenant org_id (== tenant_id); omit for `invoice` to sweep ALL enabled postpaid accounts")
     ppp.add_argument("limit", nargs="?", default=None, help="(set) credit_limit, in credits (non-negative int)")
     ppp.add_argument("net_terms", nargs="?", default=None, help="(set) net terms, in days [0, 366]")
+    ppp.add_argument("--period-end", dest="period_end", type=float, default=None,
+                     help="(invoice) the arrears billing-period end (POSIX); default = now")
+    ppp.add_argument("--now", type=float, default=None,
+                     help="(invoice) issued_at override (POSIX); default = now")
     ppp.set_defaults(fn=cmd_postpaid)
     pmd = sub.add_parser("monitoring-drain",
                          help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "

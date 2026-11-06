@@ -55,7 +55,7 @@ INVOICE_SIGNAL = "governor.invoice"
 # paid credit purchase. Extendable later (refund, adjustment) WITHOUT a schema change — a fold ignores an
 # unknown kind's row only if a reader opts to, but by default every well-formed signed row is retained as
 # history (the kind is descriptive, not a gate).
-INVOICE_KINDS = frozenset({"subscription", "topup"})
+INVOICE_KINDS = frozenset({"subscription", "topup", "postpaid"})
 
 # The owner-signed authenticated CORE. `invoice_id` is inside it so a captured record cannot be re-stamped with
 # a fresh idempotency key to forge a duplicate line. `amount_minor`/`currency`/`price_id`/`credits`/`period_*`
