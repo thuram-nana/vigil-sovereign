@@ -88,8 +88,17 @@ def migration_needed(store: SpineStore) -> tuple[bool, str]:
 def assert_operable(store: SpineStore | None = None) -> None:
     """Fail-closed startup gate. Raise ``MigrationRequired`` (naming the fix command) if the store needs
     migration; return quietly otherwise. Call this at CLI startup for any command that operates on the
-    spine, EXEMPTING the recovery commands that fix it (``upgrade``/``spine``/``doctor``/``restore``/…)."""
-    store = store or SpineStore()
+    spine, EXEMPTING the recovery commands that fix it (``upgrade``/``spine``/``doctor``/``restore``/…).
+
+    With no store given, open the one at the CURRENTLY configured spine path (``config.SPINE_PATH``, read
+    live — not the value bound into ``SpineStore.__init__``'s default at import), so a process that
+    (re)points ``SIGIL_HOME``/``SPINE_PATH`` (a relocated spine; every test that isolates its own home)
+    is gated against the store it ACTUALLY operates on, never a stale import-time default. In production
+    ``config.SPINE_PATH`` is set once at import and never mutated, so this is byte-for-byte the old
+    behaviour there."""
+    if store is None:
+        from .. import config
+        store = SpineStore(config.SPINE_PATH)
     needed, reason = migration_needed(store)
     if needed:
         raise MigrationRequired(reason)

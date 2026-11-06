@@ -30,6 +30,13 @@ _SCHEMA = "vigil.webhook.billing.v1"
 def home(monkeypatch):
     d = tempfile.mkdtemp()
     monkeypatch.setenv("SIGIL_HOME", d)
+    # `cli.main()` runs a store-operability gate (assert_operable) BEFORE the command, against the store at
+    # config.SPINE_PATH. Point it at THIS test's fresh home so the gate is not tripped by the shared,
+    # order-polluted process home — another test earlier in the suite may have left a legacy single-file
+    # spine at the import-time default, which would refuse `billing-drain` with exit 3 before it can reach
+    # its own fail-closed refusals (exit 2). Mirrors the repo's config-retarget isolation convention.
+    from sigil import config
+    monkeypatch.setattr(config, "SPINE_PATH", Path(d) / "spine" / "spine.jsonl")
     monkeypatch.delenv("VIGIL_BILLING_DRAIN_ENABLED", raising=False)
     monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SECRET", raising=False)
     ensure_owner_keypair()
