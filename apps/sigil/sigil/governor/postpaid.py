@@ -553,6 +553,7 @@ def invoice_postpaid_arrears(postpaid: "PostpaidRegistry", arrears: "PostpaidArr
 # So a payment lives ONLY in the billing-history ledger as a `kind="payment"` receipt (owner-signed, idempotent,
 # prune-durable like any invoice), never as an arrears-ledger credit. PP-3 dunning tests `postpaid_outstanding`.
 _POSTPAID_PAYMENT_PRICE_ID = "postpaid_payment"
+_POSTPAID_PAYMENT_ID_PREFIX = "pay:"    # a receipt's invoice_id is this + the paid invoice's id (single-sourced)
 
 
 def paid_postpaid_total(invoices: Any, org_id: str) -> int:
@@ -595,10 +596,53 @@ def pay_postpaid_invoice(invoices: Any, org_id: str, invoice_id: str, *, issued_
     target = next((inv for inv in invs if inv.invoice_id == invoice_id and inv.kind == "postpaid"), None)
     if target is None:
         return None                                   # no such postpaid invoice for this tenant (fail-closed)
-    pay_id = f"pay:{target.invoice_id}"
+    pay_id = f"{_POSTPAID_PAYMENT_ID_PREFIX}{target.invoice_id}"
     if any(inv.invoice_id == pay_id for inv in invs):
         return None                                   # already paid (idempotent receipt already folded)
     return invoices.record(oid, invoice_id=pay_id, kind="payment", price_id=_POSTPAID_PAYMENT_PRICE_ID,
                            amount_minor=int(target.amount_minor), currency=target.currency,
                            credits=int(target.credits), period_start=0.0, period_end=float(target.period_end),
                            issued_at=float(issued_at))
+
+
+# ---- PP-3: dunning -> credit-gate interaction (an OVERDUE line refuses NEW launches, the SAFE direction) ------
+# An arrears invoice is OVERDUE when it is UNPAID and its due date has passed. The due date is the invoice's
+# period_end plus the tenant's current owner-signed net_terms_days. A tenant with any overdue invoice is refused
+# NEW launches by the launch gate (reserve-time only — an already in-flight launch still settles); paying the
+# invoice (PP-2b) clears the overdue state and launches resume (reversible). Reading-only + fail-closed, so a
+# replay (a re-appended invoice/payment folds once, content-addressed) can neither advance a period nor evade
+# dunning. DISTINCT from the credit-line cap (accrued <= credit_limit, enforced at reserve by PP-1).
+def postpaid_overdue_amount(invoices: Any, postpaid: "PostpaidRegistry", org_id: str, now: float) -> int:
+    """Σ credits of the tenant's UNPAID postpaid invoices whose due date (period_end + net_terms_days) has passed
+    at `now`. `net_terms_days` comes from the CURRENT owner-signed account. An invoice is PAID iff a
+    `pay:{invoice_id}` receipt exists (PP-2b). Fail-closed to 0 on an empty id, an unknown/not-postpaid account,
+    or a non-finite `now` (never spuriously overdue -> never wrongly refuses)."""
+    if not isinstance(org_id, str) or not org_id:
+        return 0
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return 0
+    import math
+    if not math.isfinite(float(now)):
+        return 0
+    acct = postpaid.account(org_id)
+    if acct is None:
+        return 0                                       # never postpaid -> no arrears invoices -> not overdue
+    net_secs = max(0, int(acct.net_terms_days)) * 86400
+    rows = invoices.invoices(org_id)
+    paid: set = {inv.invoice_id[len(_POSTPAID_PAYMENT_ID_PREFIX):] for inv in rows
+                 if inv.kind == "payment" and inv.price_id == _POSTPAID_PAYMENT_PRICE_ID
+                 and inv.invoice_id.startswith(_POSTPAID_PAYMENT_ID_PREFIX)}
+    overdue = 0
+    for inv in rows:
+        if inv.kind != "postpaid" or inv.invoice_id in paid:
+            continue                                   # not an arrears invoice, or already settled
+        if float(now) >= float(inv.period_end) + net_secs:
+            overdue += int(inv.credits)                # unpaid AND past the net-terms due date
+    return overdue
+
+
+def postpaid_is_overdue(invoices: Any, postpaid: "PostpaidRegistry", org_id: str, now: float) -> bool:
+    """True iff the tenant has ANY unpaid postpaid invoice past its net-terms due date at `now` — the dunning
+    predicate the launch gate consults to refuse NEW launches (reversible on payment). Fail-closed (False) on a
+    bad id / account / clock, so dunning never wrongly blocks a tenant in good standing."""
+    return postpaid_overdue_amount(invoices, postpaid, org_id, now) > 0
