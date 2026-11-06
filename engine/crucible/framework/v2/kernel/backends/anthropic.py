@@ -175,7 +175,18 @@ class AnthropicBackend(LLMBackend):
             try:
                 create_kwargs = dict(
                     model=self.model,
-                    system=sys_prompt,
+                    # EC-1a: pass `system` as a cache-control content BLOCK (not a bare string)
+                    # so Anthropic prompt caching attaches one ephemeral breakpoint at the end of
+                    # the stable system span. The prompt is already prefix-stable — all volatile
+                    # per-step content rides the USER turn — so no reorder is needed; cached input
+                    # reads bill at ~10% across a scan's many same-system calls. Caching degrades
+                    # silently (no separate cache entry, no error) when the prefix is under the
+                    # model's minimum. The untrusted-data fence stays in the user turn (uncached).
+                    system=[{
+                        "type": "text",
+                        "text": sys_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                 )
@@ -246,8 +257,17 @@ class AnthropicBackend(LLMBackend):
                     continue
                 raise
 
-            tokens_in = getattr(rsp.usage, "input_tokens", 0) if hasattr(rsp, "usage") else 0
-            tokens_out = getattr(rsp.usage, "output_tokens", 0) if hasattr(rsp, "usage") else 0
+            usage = getattr(rsp, "usage", None)
+            raw_input = getattr(usage, "input_tokens", 0) or 0
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            # EC-1a: fold cached input back into tokens_in so the per-tool budget ledger counts the
+            # SAME total input volume it did before caching. With caching ON, usage.input_tokens is
+            # only the UNCACHED remainder (cached bytes move to cache_{creation,read}_input_tokens),
+            # so without this fold the budget silently under-charges and throttles late. Mirrors
+            # claude_code.py; keeps the "metering never changes a call" invariant intact.
+            tokens_in = raw_input + cache_creation + cache_read
+            tokens_out = getattr(usage, "output_tokens", 0) or 0
 
             trace = make_call_trace(
                 backend=self.name,
@@ -256,6 +276,8 @@ class AnthropicBackend(LLMBackend):
                 cognitive_sections=prompt.cognitive_sections,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
                 latency_ms=latency,
             )
             _log.info(
@@ -263,6 +285,7 @@ class AnthropicBackend(LLMBackend):
                 schema=prompt.schema_name,
                 model=self.model,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                cache_creation=cache_creation, cache_read=cache_read,
                 latency_ms=int(latency),
             )
             return LLMResult(parsed=parsed, trace=trace, raw_response=raw)

@@ -325,5 +325,10 @@ class CallTrace(BaseModel):
     )
     tokens_in: int = 0
     tokens_out: int = 0
+    # EC-1a prompt-caching provenance. Default 0 => backward compatible with every existing
+    # caller and every persisted trace. tokens_in already folds these in (so the budget ledger
+    # is unchanged); these two fields record HOW the input broke down for the margin dashboard.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     latency_ms: float = 0.0
     timestamp: str = ""

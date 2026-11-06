@@ -178,7 +178,13 @@ class VertexBackend(LLMBackend):
             try:
                 rsp = client.messages.create(  # type: ignore[attr-defined]
                     model=self.model,
-                    system=sys_prompt,
+                    # EC-1a: system as a cache-control content block (see anthropic.py). Vertex /
+                    # Google Cloud supports Anthropic prompt caching; the cache is per organization.
+                    system=[{
+                        "type": "text",
+                        "text": sys_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a
@@ -212,8 +218,13 @@ class VertexBackend(LLMBackend):
                     continue
                 raise
 
-            tokens_in = getattr(rsp.usage, "input_tokens", 0) if hasattr(rsp, "usage") else 0
-            tokens_out = getattr(rsp.usage, "output_tokens", 0) if hasattr(rsp, "usage") else 0
+            usage = getattr(rsp, "usage", None)
+            raw_input = getattr(usage, "input_tokens", 0) or 0
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            # EC-1a: fold cached input into tokens_in so the budget ledger is unchanged (see anthropic.py).
+            tokens_in = raw_input + cache_creation + cache_read
+            tokens_out = getattr(usage, "output_tokens", 0) or 0
 
             trace = make_call_trace(
                 backend=self.name,
@@ -222,6 +233,8 @@ class VertexBackend(LLMBackend):
                 cognitive_sections=prompt.cognitive_sections,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
                 latency_ms=latency,
             )
             _log.info(
@@ -229,6 +242,7 @@ class VertexBackend(LLMBackend):
                 schema=prompt.schema_name,
                 model=self.model, region=self.region, project=self.project,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                cache_creation=cache_creation, cache_read=cache_read,
                 latency_ms=int(latency),
             )
             return LLMResult(parsed=parsed, trace=trace, raw_response=raw)

@@ -495,6 +495,7 @@ def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
 def make_call_trace(
     backend: str, *, is_dryrun: bool, cognitive_doc: str,
     cognitive_sections: list[str], tokens_in: int = 0, tokens_out: int = 0,
+    cache_creation_input_tokens: int = 0, cache_read_input_tokens: int = 0,
     latency_ms: float = 0.0,
 ) -> CallTrace:
     return CallTrace(
@@ -504,6 +505,8 @@ def make_call_trace(
         cognitive_sections=cognitive_sections,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         latency_ms=latency_ms,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
