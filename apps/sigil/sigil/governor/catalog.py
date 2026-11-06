@@ -151,6 +151,17 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
 _validate(_CATALOG)
 
 
+# Enterprise POSTPAID arrears pricing (PP-2). The owner catalog is the money anchor: an arrears invoice bills
+# `drawn_credits * this per-credit rate`, NEVER a wire value. PLACEHOLDER (1 minor unit/credit in USD, ~the 1k
+# top-up rate) — the owner sets the real net-terms rate before production, exactly like every other price here.
+_POSTPAID_PER_CREDIT_MINOR = 1
+_POSTPAID_CURRENCY = "USD"
+if (isinstance(_POSTPAID_PER_CREDIT_MINOR, bool) or not isinstance(_POSTPAID_PER_CREDIT_MINOR, int)
+        or _POSTPAID_PER_CREDIT_MINOR < 0 or len(_POSTPAID_CURRENCY) != 3 or not _POSTPAID_CURRENCY.isalpha()
+        or not _POSTPAID_CURRENCY.isupper()):
+    raise ValueError("postpaid arrears price must be a non-negative int (minor units) + an ISO-4217 currency")
+
+
 _plan_seen: set[str] = set()
 for _e in _CATALOG:
     if _e.monitor_hosts:
@@ -198,3 +209,17 @@ def expected_amounts() -> dict[str, tuple[int, str]]:
 def plans() -> list[dict]:
     """The PUBLIC pricing projection for the pricing page / list-plans endpoint, in catalog order."""
     return [e.public() for e in _offered()]
+
+
+def postpaid_per_credit_minor() -> int:
+    """The owner-catalog price per drawn credit (minor units) a POSTPAID arrears invoice bills (PP-2).
+    Placeholder until the owner sets the real net-terms rate (same convention as the catalog prices)."""
+    return _POSTPAID_PER_CREDIT_MINOR
+
+
+def postpaid_invoice_amount_minor(credits: int) -> "tuple[int, str]":
+    """`(amount_minor, currency)` a postpaid arrears invoice bills for `credits` drawn — `credits` times the
+    catalog per-credit rate, clamped non-negative. The money anchor for PP-2 (the amount is derived from the
+    owner catalog, NEVER a wire value); a forged/negative credits value folds to a 0 amount."""
+    c = credits if (isinstance(credits, int) and not isinstance(credits, bool) and credits > 0) else 0
+    return c * _POSTPAID_PER_CREDIT_MINOR, _POSTPAID_CURRENCY

@@ -359,3 +359,42 @@ class PostpaidArrearsLedger:
             return 0
         debited, credited, _ = self._fold()
         return max(0, debited.get(org_id, 0) - credited.get(org_id, 0))
+
+
+# ---- PP-2: arrears invoicing (reuses the owner-signed invoice ledger; no new spine record) ---------------
+def invoiced_postpaid_total(invoices: Any, org_id: str) -> int:
+    """Σ credits of the POSTPAID arrears invoices already minted for `org_id` — the billed high-water. The
+    arrears minter bills only the UN-invoiced delta against this, so re-running it never double-bills. Reads
+    the owner-signed invoice ledger, org-scoped. Fail-closed to 0 on an empty id."""
+    if not isinstance(org_id, str) or not org_id:
+        return 0
+    return sum(int(inv.credits) for inv in invoices.invoices(org_id) if inv.kind == "postpaid")
+
+
+def invoice_postpaid_arrears(postpaid: "PostpaidRegistry", arrears: "PostpaidArrearsLedger", invoices: Any,
+                             org_id: str, *, period_end: float, issued_at: float) -> Optional[int]:
+    """Mint ONE owner-signed POSTPAID arrears invoice for a tenant's UN-INVOICED drawn credits, or None when
+    there is nothing new to bill (not postpaid, or no new draws). The billed amount comes from the owner CATALOG
+    (`catalog.postpaid_invoice_amount_minor`), NEVER a wire value. Idempotent per `(org, period_end)` via the
+    invoice_id, so a billing run is safe to repeat.
+
+    DELTA MODEL — bills `drawn - already_invoiced`, so re-running (or a mid-period re-run) never double-bills and
+    each period captures only the new draws. In PP-1/PP-2 the arrears ledger carries ONLY draws and settle
+    refunds (no payments yet), so `arrears.accrued(org)` IS the net drawn consumption — the correct invoicing
+    basis. PP-2b (invoice PAYMENT -> arrears reversal) MUST keep this basis as net consumption EXCLUDING payments
+    (a payment settles the debt; it does not un-consume), so it will add a payment mechanism DISTINCT from this
+    ledger's settle-refund credits rather than lowering the value this reads. The gate's credit-line cap
+    (`accrued <= credit_limit`) is unchanged by invoicing."""
+    if not postpaid.is_postpaid(org_id):
+        return None
+    oid = org_tenant_id(org_id)
+    drawn = arrears.accrued(oid)                      # PP-2: == net drawn consumption (no payments yet)
+    delta = drawn - invoiced_postpaid_total(invoices, oid)
+    if delta <= 0:
+        return None                                   # nothing new drawn since the last invoice
+    from .catalog import postpaid_invoice_amount_minor
+    amount, currency = postpaid_invoice_amount_minor(delta)
+    return invoices.record(oid, invoice_id=f"postpaid:{oid}:{repr(float(period_end))}", kind="postpaid",
+                           price_id="postpaid_arrears", amount_minor=amount, currency=currency,
+                           credits=delta, period_start=0.0, period_end=float(period_end),
+                           issued_at=float(issued_at))
