@@ -296,14 +296,17 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
-        # POSTPAID (PP-1) settle. Detect a postpaid reservation by its OWNER-SIGNED arrears debit record
-        # (`reserve-postpaid:{slug}:{nonce}`), NOT by the account's CURRENT enabled state — the owner may have
-        # disabled the line between reserve and settle, and a postpaid reservation must still be reversed against
-        # the arrears, never mis-refunded to the prepaid wallet. A postpaid reservation touched no plan/wallet
-        # bucket, so REVERSE the unconsumed draw (refund = reserved - consumed) from the drawn balance; net
-        # arrears change == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared
-        # settlement marker + the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
-        if self.arrears.debited_entry(oid, f"reserve-postpaid:{s}:{non}") is not None:
+        # POSTPAID (PP-1) settle. Detect a postpaid reservation by its PRUNE-DURABLE arrears debit marker —
+        # `arrears.was_accrued(reserve-postpaid:{slug}:{nonce})`, which reads the SnapshotState-seeded seen-set,
+        # NOT a live scan of the individual debit record (a hard prune can drop that record while carrying only
+        # the per-org balance + seen-set into the seed — the red-pen HIGH: a live scan read False post-prune and
+        # mis-routed the settle to the prepaid wallet, minting credits + leaving the arrears un-reversed). It is
+        # also NOT the account's CURRENT enabled state (the owner may disable the line between reserve and
+        # settle). A postpaid reservation touched no plan/wallet bucket, so REVERSE the unconsumed draw
+        # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
+        # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared settlement marker +
+        # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
+        if self.arrears.was_accrued(oid, f"reserve-postpaid:{s}:{non}"):
             with self._lock:
                 try:
                     from vigil_integration.live.credit_lease_broker import (

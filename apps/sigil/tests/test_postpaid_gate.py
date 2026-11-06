@@ -159,6 +159,49 @@ def test_postpaid_settle_reverses_even_if_line_disabled_midflight():
     assert _accrued(s, "org_a") == 20          # still reversed against arrears (detected via the debit record)
 
 
+def test_settle_reverses_a_postpaid_draw_after_a_hard_prune_of_the_debit_record(monkeypatch):
+    # RED-PEN HIGH (end-to-end): a hard prune drops the reserve-postpaid debit record; the snapshot seed carries
+    # only the per-org balance + seen-set. settle must STILL detect the postpaid reservation (via the
+    # prune-durable was_accrued discriminator) and reverse the arrears — never mint prepaid wallet credits from
+    # the draw. Pre-fix (live-scan discriminator) this minted reserved-consumed wallet credits + left arrears full.
+    from sigil.governor.identity import owner_pubkey
+    from sigil.governor.postpaid import PostpaidArrearsLedger
+    from sigil.spine.snapshot import SnapshotState, build
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=0, postpaid=(500, 30))
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=100, now=2000.0, nonce="np")
+    assert r["ok"] and _accrued(s, "org_a") == 100
+    recs = list(s.iter_records())
+    k = recs[-1].seq + 1                                      # a boundary PAST every record (incl. the debit)
+    snap = build(recs, trusted_pubkey=owner_pubkey(), base_seq=k, snapshot_seq=k - 1)
+
+    class _Pruned:
+        def __init__(self, inner, K):
+            self._i, self._K = inner, K
+
+        def iter_records(self, *, since_seq=-1):
+            for rr in self._i.iter_records(since_seq=since_seq):
+                if rr.seq >= self._K:
+                    yield rr
+
+        def get(self, seq):
+            return self._i.get(seq)
+
+        def append(self, **kw):
+            return self._i.append(**kw)
+
+        @property
+        def path(self):
+            return getattr(self._i, "path", "")
+
+    pruned = _Pruned(s, k)                                    # hides every <k record, incl. the reserve debit
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, ss: snap))
+    st = _gate(pruned).settle_launch(signed_lease=r["lease"], consumed_units=30, now=3000.0, expect_org_id="org_a")
+    assert st["ok"] and st["net_spend"] == 30 and st["refunded_wallet"] == 0, st
+    assert PostpaidArrearsLedger(pruned).accrued("org_a") == 30   # arrears reversed to consumed, via the seed
+    assert _avail(s, "org_a") == 0                                # NO prepaid wallet credits minted from the draw
+
+
 def test_disabled_postpaid_account_falls_back_to_prepaid():
     # an org whose line is DISABLED is not postpaid: the gate takes the prepaid path and refuses with no credits.
     s = _store()

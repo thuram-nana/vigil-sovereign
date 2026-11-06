@@ -189,13 +189,17 @@ def test_reverse_idempotent_per_entry_id():
     assert a.accrued("acme") == 70
 
 
-def test_debited_entry_returns_signed_amount_or_none():
+def test_was_accrued_detects_a_postpaid_draw():
     s = _store()
     a = _arr(s)
-    a.accrue("acme", 100, entry_id="r:1", issued_at=1.0)
-    assert a.debited_entry("acme", "r:1") == 100
-    assert a.debited_entry("acme", "nope") is None
-    assert a.debited_entry("", "r:1") is None
+    a.accrue("acme", 100, entry_id="reserve-postpaid:slug:n1", issued_at=1.0)
+    assert a.was_accrued("acme", "reserve-postpaid:slug:n1") is True
+    assert a.was_accrued("acme", "nope") is False
+    assert a.was_accrued("ghost", "reserve-postpaid:slug:n1") is False
+    assert a.was_accrued("", "x") is False
+    # a reversal's entry_id is a CREDIT, not a debit -> was_accrued discriminates (returns False for it)
+    a.reverse("acme", 10, entry_id="settle-postpaid:slug:n1", issued_at=2.0)
+    assert a.was_accrued("acme", "settle-postpaid:slug:n1") is False
 
 
 def test_forged_arrears_records_are_inert():
@@ -209,7 +213,7 @@ def test_forged_arrears_records_are_inert():
              "issued_at": 3.0}
     s.append(kind="event", source="governor", actor="WARDEN", payload={**signed_payload(dcore, ATTACKER)})
     s.append(kind="event", source="governor", actor="WARDEN", payload={**signed_payload(ccore, ATTACKER)})
-    assert a.accrued("acme") == 100 and a.debited_entry("acme", "forge-d") is None
+    assert a.accrued("acme") == 100 and a.was_accrued("acme", "forge-d") is False
 
 
 def test_tenant_isolation():

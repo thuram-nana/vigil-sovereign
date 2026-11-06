@@ -147,6 +147,30 @@ def test_arrears_balance_and_seen_survive_a_hard_prune(monkeypatch):
         "dropping the seen-set ⇒ the replayed debit double-counts (isolates the seen-set carry)"
 
 
+# ---- (c2) RED-PEN HIGH regression: the settle discriminator (was_accrued) is PRUNE-DURABLE -------------
+def test_was_accrued_is_prune_durable(monkeypatch):
+    # A hard prune can drop the individual reserve-postpaid debit record while the seed carries only the per-org
+    # balance + seen-set. settle detects a postpaid reservation via was_accrued, which MUST read the SEEDED
+    # seen-set (not a live scan) — else it reads False post-prune and settle mis-refunds the draw into the
+    # prepaid wallet (the confirmed HIGH). The neutered control (seen stripped) reproduces that False.
+    store = _store()
+    a = _arr(store)
+    eid = "reserve-postpaid:cust_x:n1"
+    a.accrue("acme", 100, entry_id=eid, issued_at=1.0)        # seq 0 (the only spine record for the reservation)
+    k = _marker(store)                                        # seq 1
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OP, base_seq=k, snapshot_seq=k - 1)
+    assert (POSTPAID_DEBIT_SIGNAL, "acme", eid) in snap.postpaid_arrears_seen_set()
+    pruned = PrunedView(store, k)                             # the debit record (seq 0) is now physically hidden
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    assert PostpaidArrearsLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).was_accrued("acme", eid) is True, \
+        "the postpaid-settle discriminator must survive the prune via the seeded seen-set"
+    snap_no_seen = snap.model_copy(update={"postpaid_arrears_seen": []})
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap_no_seen))
+    assert PostpaidArrearsLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).was_accrued("acme", eid) is False, \
+        "isolates the seen-set carry: without it the discriminator reads False and settle would mis-refund"
+
+
 # ---- (d) build() == scan over a mixed population ------------------------------------------------------
 def test_postpaid_build_equals_scan_mixed():
     store = _store()
@@ -262,9 +286,10 @@ def test_floor_detects_a_seed_that_omits_postpaid_arrears(tmp_path, monkeypatch)
 
     def incomplete_build(records, **kw):
         seed = real_build(records, **kw)
+        # drop ONLY the drawn balance (keep the seen-set) -> ISOLATES the balance-compare clause (the exact
+        # "tenant draws past the line" corruption: a lowered drawn balance the seed fails to carry).
         return seed.model_copy(update={
             "postpaid_arrears_debited": [r for r in seed.postpaid_arrears_debited if r[0] != "acme"],
-            "postpaid_arrears_seen": [r for r in seed.postpaid_arrears_seen if r[1] != "acme"],
         })
 
     monkeypatch.setattr(prune, "build", incomplete_build)
@@ -272,6 +297,26 @@ def test_floor_detects_a_seed_that_omits_postpaid_arrears(tmp_path, monkeypatch)
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "strand" in str(e.value).lower() and "acme" in str(e.value)
+
+
+def test_floor_detects_a_seed_that_drops_only_the_arrears_seen_key(tmp_path, monkeypatch):
+    # isolates the SEEN-set clause of stranded_postpaid_arrears (anti-replay durability): a seed that keeps the
+    # balance but DROPS the consumed entry_id must still be flagged (a pruned debit re-appended above K would
+    # re-accrue). Complements the balance-clause isolation above.
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _pp_segmented_store(tmp_path)
+    real_build = prune.build
+
+    def incomplete_build(records, **kw):
+        seed = real_build(records, **kw)
+        return seed.model_copy(update={
+            "postpaid_arrears_seen": [r for r in seed.postpaid_arrears_seen if r[1] != "acme"],
+        })
+
+    monkeypatch.setattr(prune, "build", incomplete_build)
+    assert prune.stranded_postpaid_arrears(s, _archived_below(s, 5), 5) == ["acme"]
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(s, 5)
 
 
 def test_check_prune_safe_reraises_nonempty_postpaid_floor_wiring_only(tmp_path, monkeypatch):

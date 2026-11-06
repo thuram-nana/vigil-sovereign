@@ -288,25 +288,23 @@ class PostpaidArrearsLedger:
                    "tier": "A0", "decision": "auto", "reason": f"postpaid reverse {c} <- {oid}"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
-    def debited_entry(self, org_id: str, entry_id: str) -> Optional[int]:
-        """The `credits` of the owner-signed postpaid DEBIT recorded under (org_id, entry_id), or None. The
-        launch settle path uses this to detect that a reservation was a POSTPAID draw (and how much it accrued)
-        — robust to the account being disabled between reserve and settle — so a postpaid reservation is always
-        reversed against the arrears, never mis-refunded to the prepaid wallet. Verified under the owner key
-        valid at the seq; fail-closed to None. A live scan is sound here: a reservation settles well within its
-        lease window, so its debit record is never pruned."""
+    def was_accrued(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed postpaid DEBIT under (org_id, entry_id) has EVER been folded — the
+        PRUNE-DURABLE discriminator the launch settle path uses to tell a POSTPAID reservation from a prepaid
+        one (so a postpaid reservation is reversed against the arrears, never mis-refunded to the prepaid
+        wallet). It reads the SnapshotState-SEEDED seen-set (via `_fold`), so it stays True after a hard prune
+        that drops the individual debit record — the prune carries the per-org balance AND the seen-set into
+        the seed (spine/prune.py `stranded_postpaid_arrears`), exactly as `accrued()` stays correct.
+
+        SECURITY (red-pen HIGH): a non-seeded LIVE scan here read False after such a prune and mis-routed the
+        settle to the prepaid bucket — MINTING `reserved - consumed` wallet credits that were never debited AND
+        leaving the arrears un-reversed (net arrears change == reserved, not consumed; a cancel converted a
+        deferred debt into immediately-spendable credits). The settle refund AMOUNT comes from the owner-signed
+        lease, so only this durable EXISTENCE check is needed here. Fail-closed (False) on an empty id."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
-            return None
-        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        for r in self.store.iter_records():
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != POSTPAID_DEBIT_SIGNAL:
-                continue
-            if p.get("org_id") != org_id or p.get("entry_id") != entry_id:
-                continue
-            if verify_signed(p, _PP_DEBIT_CORE, resolver.at(r.seq)):
-                return _as_credits(p.get("credits"))
-        return None
+            return False
+        _debited, _credited, seen = self._fold()
+        return (POSTPAID_DEBIT_SIGNAL, org_id, entry_id) in seen
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
