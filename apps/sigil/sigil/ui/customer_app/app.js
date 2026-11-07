@@ -384,7 +384,7 @@
   // (private window / blocked): prefs default ON, nothing is remembered, the bell still polls + chimes.
   var NTF_POLL_MS = 45000;
   var ntf = { items: [], count: 0, open: false, openUnread: null, started: false, loaded: false,
-              timer: null, knownUnread: {} };
+              timer: null, knownUnread: {}, gen: 0 };
   var _chime = null;
 
   function lsGet(k, dflt) { try { var v = localStorage.getItem(k); return v == null ? dflt : v; } catch (e) { return dflt; } }
@@ -428,6 +428,7 @@
   function stopNtf() { if (ntf.timer) { clearInterval(ntf.timer); ntf.timer = null; } }
   function resetNtf() {   // on logout / account switch — never carry one account's notifications into another
     stopNtf();
+    ntf.gen++;            // invalidate any in-flight poll so its late result cannot repopulate ntf.items
     ntf.items = []; ntf.count = 0; ntf.open = false; ntf.openUnread = null;
     ntf.started = false; ntf.loaded = false; ntf.knownUnread = {};
   }
@@ -440,12 +441,17 @@
   async function pollNtf() {
     if (!authed() || !ntfEnabled()) { return; }
     ntf.started = true;                           // gate the one auto-poll from syncNtf (the timer drives the rest)
+    var gen = ntf.gen;                            // capture; a logout/disable/401 bumps ntf.gen to invalidate this
     var data;
     try { data = await VUI.getJSON(API + "/notifications"); }
     catch (e) {
       if (e && e.status === 401) { resetNtf(); await refreshWho(); }   // session died — boot flow unmounts
       return;                                     // transient error: keep last state, retry next tick (no toast spam)
     }
+    // The /notifications read fans out to three upstream relays, so this await is routinely 100s of ms. Drop a
+    // STALE response: if the account was signed out/switched or alerts disabled while it was in flight, this
+    // result must NOT repopulate ntf.items (cross-account bleed on a shared browser) or chime after a disable.
+    if (gen !== ntf.gen || !authed() || !ntfEnabled()) { return; }
     var items = (data && data.notifications) || [];
     var seen = seenSet(), fresh = [];
     items.forEach(function (n) {
@@ -494,7 +500,8 @@
     var prefs = h("div.cust-ntf-prefs", {}, [
       toggleRow("Enabled", enabled, function (on) {
         setNtfEnabled(on);
-        if (on) { ntf.started = false; startNtf(); pollNtf(); } else { stopNtf(); }
+        // disable also bumps the generation so a poll already in flight cannot chime/toast after alerts are off
+        if (on) { ntf.started = false; startNtf(); pollNtf(); } else { ntf.gen++; stopNtf(); }
         renderBell();
       }),
       toggleRow("Sound", ntfSound(), function (on) { setNtfSound(on); }, !enabled),
