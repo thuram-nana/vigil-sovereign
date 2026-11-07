@@ -812,15 +812,25 @@ class Provisioner:
                 "meta_tag": ch.meta_tag, "marker": ch.marker}
 
     def launch_reserve(self, requester: str, requester_org_id: str, host: str, *,
-                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+                       product_id: str = "", ip: str = "", mfa_at: float = 0.0,
+                       now: "Optional[float]" = None) -> dict:
         """Reserve credits + mint a launch lease for ONE offense launch against (org, host). Delegates to the
         LaunchGate, which composes admit_customer(run_engagement) + a current ownership proof + a verifying
         owner-signed EngagementAuthority + a sufficient credit balance, then reserves + mints under the spine
-        lock. requester/org are the SERVER-authenticated session principal (never body fields); the credit
-        `units` are SERVER-decided (``config.LAUNCH_UNITS``), never customer-supplied (money doctrine). Returns
-        the signed lease for the edge to relay; the offense launch verifies it before any traffic."""
+        lock. requester/org are the SERVER-authenticated session principal (never body fields).
+
+        The credit ``units`` are SERVER-decided and never a customer-supplied amount (money doctrine). EC-7b:
+        a customer MAY pick a tiered launch PRODUCT (``product_id`` — e.g. the Quick/Deep scan); the units it
+        reserves come from the OWNER CATALOG (``catalog.launch_product``), exactly as ``price_id`` maps to
+        credits — the customer names a product, never a number. An unknown / not-offered ``product_id`` is
+        REFUSED fail-closed (never a silent fallback to a different tier). No ``product_id`` ⇒ the default
+        per-launch units (``config.LAUNCH_UNITS``), byte-identical to pre-EC-7b. The run tier is then DERIVED
+        at engage time from these signed units (vigil_core.run_tier), so the product choice flows through the
+        already-signed ``units_reserved`` — no new signed field. Returns the signed lease for the edge to
+        relay; the offense launch verifies it before any traffic."""
         t = self._now() if now is None else float(now)
         from .. import config
+        from ..governor import catalog
         from .launch_gate import LaunchGate
         # E3c red-pen fold: gate step-up AFTER authority, never before (non-negotiable #5 — a non-member is
         # refused by admit, NOT told to step up) and consistent with launch_cancel/launch_start. launch_reserve
@@ -834,16 +844,30 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not launch assessments for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: AFTER admit (no-op unless enforcement is on)
+        # EC-7b: resolve the reserved units from the chosen PRODUCT via the owner catalog (AFTER authz).
+        # Fail-closed on an unknown / not-offered product; empty product_id keeps the default units.
+        units = int(config.LAUNCH_UNITS)
+        pid = str(product_id or "").strip()
+        if pid:
+            product = catalog.launch_product(pid)    # None when unknown, not offered, or EC-7 flag off
+            if product is None:
+                self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied(f"unknown or unavailable launch product: {pid!r}")
+            units = int(product.units)
         r = LaunchGate(self.store).reserve_launch(
-            requester=requester, org_id=requester_org_id, host=host, units=config.LAUNCH_UNITS, now=t)
+            requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
         if not r.get("ok"):
             self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
                         target=host, outcome="denied")
             raise ProvisionDenied(str(r.get("error") or "launch reservation refused"))
         self._audit("launch_reserve", requester=requester, org_id=requester_org_id, target=host,
                     outcome="reserved", critical=True)
-        return {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
-                                  "lease", "trust_root") if k in r}
+        out = {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
+                                 "lease", "trust_root") if k in r}
+        if pid:
+            out["product_id"] = pid                  # echo the resolved product for the edge/UI
+        return out
 
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
