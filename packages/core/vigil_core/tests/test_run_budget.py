@@ -225,9 +225,10 @@ def test_concurrent_copy_context_workers_charge_the_one_shared_slot(monkeypatch)
     """copy_context binds the SAME _RunBudget into every pool worker (exactly as the self-consistency sweep
     does), so many workers charging CONCURRENTLY all aggregate onto the ONE run accumulator — the total is
     EXACT, none escapes to a fresh (unarmed) context. This is the propagation-at-scale contract behind the
-    hard cap. (``charge`` takes a lock around the read-modify-write so this stays exact even under a future
-    free-threaded CPython; the GIL already serialises a slot ``+= n`` today, so the count is exact either way
-    — the lock is correctness-by-construction for the money accumulator, not a GIL-race patch.)"""
+    hard cap. (``charge`` LOCKS the read-modify-write, so the count is correct BY CONSTRUCTION. ``spent += n``
+    is a non-atomic RMW in principle; CPython's current eval loop happens not to preempt a slot ``+= n`` mid-op,
+    so the total is already exact here under the GIL — but that is an implementation detail, not atomicity, and
+    it does NOT hold under free-threaded CPython, so the lock is the real guard, not an optional optimisation.)"""
     _on(monkeypatch)
     rb.arm(10**9)                                  # high ceiling: this pins aggregation, not the stop
     n_threads, per_thread = 8, 5000                # 40000 single-token charges across 8 copy_context workers

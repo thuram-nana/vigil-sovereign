@@ -147,8 +147,11 @@ def run_consistent(
         # _RunBudget object) — is then VISIBLE inside every sample, so each sample's LLM spend is CHARGED to
         # the run and its fail-closed STOP fires, instead of silently escaping in a fresh (unarmed) child
         # context. All copies share the one _RunBudget reference, so concurrent charges aggregate under its
-        # lock. ``map`` preserves submission order → byte-stable modal representative; the serial/dry-run
-        # branch above (every deterministic replay / ``make gate`` run) is untouched.
+        # lock. (copy_context is a WHOLE-context snapshot, so other run-scoped ContextVars — e.g. the
+        # engagement-scope logging slug — are also re-homed onto the samples; that only re-attributes their
+        # audit-log lines to the engagement, never a correctness / determinism / money change.) ``map``
+        # preserves submission order → byte-stable modal representative; the serial/dry-run branch above
+        # (every deterministic replay / ``make gate`` run) is untouched.
         sample_ctxs = [copy_context() for _ in range(n)]
         with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
             outs = list(ex.map(lambda ctx: ctx.run(_guarded, run_fn, rate_limiter), sample_ctxs))

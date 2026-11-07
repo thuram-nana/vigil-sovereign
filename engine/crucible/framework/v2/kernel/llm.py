@@ -607,7 +607,9 @@ def _backend_complete_raw(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
 def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult":
     """Complete ``prompt`` on an EXPLICITLY-provided backend (``binding.run(backend=...)`` — a pinned run or a
     test), routed through the ONE egress chokepoint — classify -> redact -> provenance -> audit — exactly like
-    the auto-selected failover path, so there is no second un-redacted, un-audited egress. The explicit backend
+    the auto-selected failover path, so there is no second un-redacted, un-audited, or (EC-3) un-CAPPED egress —
+    the run-budget stop/charge (``_rb_check`` before, ``_rb_charge`` after) run here too, so an armed run that
+    pins an explicit backend is held to the hard ceiling on THIS egress exactly as on the failover path. The explicit backend
     is the caller's choice, so there is NO failover and NO sovereignty pre-assert (the backend was already
     constructed, which asserts the policy); the gateway still masks every credential shape it recognises in the
     prompt, records the unified audit entry, and runs the call inside the egress context so a bypass fails
@@ -618,8 +620,10 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     _hit = _l2_lookup(prompt, backend)
     if _hit is not None:
         return _hit
+    _rb_check()                                          # EC-3: FAIL-CLOSED run-budget stop BEFORE the egress
     if _gw is None:
         _r = _backend_complete_raw(backend, prompt)
+        _rb_charge(getattr(_r, "trace", None))           # EC-3: charge actual tokens (the explicit-backend egress)
         _l2_store(prompt, _r, backend)
         return _r
 
@@ -635,6 +639,7 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     res = _gw.egress(payload, case=case)
     if res.refused:
         raise BackendUnavailable(res.refusal_reason)
+    _rb_charge(getattr(res.output, "trace", None))       # EC-3: charge actual tokens (the explicit-backend egress)
     _l2_store(prompt, res.output, backend)
     return res.output
 

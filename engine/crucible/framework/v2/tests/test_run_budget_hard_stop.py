@@ -8,6 +8,7 @@ read from the VERIFIED lease. Everything here is offline/hermetic (no key, no ne
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * make _rb_check a no-op / stop raising when over      -> test_kernel_charges_then_stops_before_egress
+  * drop _rb_check/_rb_charge on the EXPLICIT-backend egress -> test_kernel_explicit_backend_charges_then_stops_before_egress
   * make _rb_ act even when the run is UNARMED           -> test_kernel_unarmed_is_byte_identical_noop
   * charge dry-run tokens (drop the is_dryrun skip)      -> test_kernel_dry_run_charges_zero
   * engage re-raises RunBudgetExceeded instead of partial -> test_run_engagement_budget_stop_returns_a_partial_that_can_settle
@@ -89,6 +90,28 @@ def test_kernel_charges_then_stops_before_egress(monkeypatch):
 
     with pytest.raises(RunBudgetExceeded):                  # call 2: spent 100 >= 100 → STOP before egress
         llm.complete_with_failover(prompt=SimpleNamespace())
+    assert state["calls"] == 1                              # NO provider round-trip on the stopping call
+    assert rb.was_exceeded() is True
+
+
+def test_kernel_explicit_backend_charges_then_stops_before_egress(monkeypatch):
+    """Red-pen fold (LOW): complete_with_backend — the EXPLICIT-backend egress reached by binding.run(backend=…)
+    when a caller pins a live backend (e.g. a reason_step ctx['backend']) — carries the SAME EC-3 hooks as
+    complete_with_failover, so an armed run is held to the hard ceiling on THIS egress too, not just the
+    auto-selected path. Before the fold the explicit-backend path had neither _rb_check nor _rb_charge, so an
+    armed run that pinned a backend silently bypassed the cap (serial AND the copy_context-propagated parallel
+    sweep).  MUTATION-VERIFY: dropping either hook in complete_with_backend reds this (no stop / spent stays 0)."""
+    _on(monkeypatch)
+    b, state = _fake_backend(tokens_in=100, tokens_out=0)   # each real call spends exactly 100
+    _wire(monkeypatch, b)
+    rb.arm(100)                                             # ceiling == one call's spend
+
+    llm.complete_with_backend(b, prompt=SimpleNamespace())  # call 1: spent 0 < 100 → egress + charge → 100
+    assert state["calls"] == 1
+    assert rb.spent() == 100
+
+    with pytest.raises(RunBudgetExceeded):                  # call 2: spent 100 >= 100 → STOP before egress
+        llm.complete_with_backend(b, prompt=SimpleNamespace())
     assert state["calls"] == 1                              # NO provider round-trip on the stopping call
     assert rb.was_exceeded() is True
 
