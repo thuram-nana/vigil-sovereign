@@ -49,6 +49,9 @@ _ORG_ID_PREFIX = "org_"
 # run_engagement) and `owner` — a customer can never hand a teammate any offense‑adjacent or global
 # authority (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
+# The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
+# so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
+_NOTIF_MAX = 100
 
 
 class ProvisionError(Exception):
@@ -1162,6 +1165,106 @@ class Provisioner:
         from ..governor import asset_ownership as _own
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
+
+    def customer_notifications(self, requester: str, requester_org_id: str, *, ip: str = "",
+                               now: "Optional[float]" = None) -> dict:
+        """The SESSION org's actionable notifications, aggregated ACROSS only the surfaces the requester is
+        entitled to read and ranked most-severe-first — the read behind the customer notification centre.
+
+        Three sources, each behind its OWN permission (no global leg), skip-on-deny so a role sees exactly
+        what it may read and nothing else (a billing-only admin never sees assessment findings, and vice
+        versa; a non-member / revoked member gets an empty list, never another tenant's data):
+          * oracle-confirmed assessment FINDINGS       (view_assessments)
+          * BILLING standing — dunning / lapsed / exhausted, derived from owner-signed spine STATES only
+            (past_due & canceled are signed subscription statuses; zero credits is the natural floor — NO
+            invented threshold decides a notification)                              (view_billing)
+          * confirmed/lead AEGIS MONITORING alerts, only when monitoring is enabled AND permitted (reuses
+            ``monitor_events``' own flag+admit gate; its fail-closed refusal simply contributes nothing).
+
+        Each item is ``{id, kind, severity, title, body, ts}`` with a STABLE id (``finding:<ref>`` /
+        ``billing:<state>`` / ``monitor:<report_id>``) the edge/UI uses for read-tracking — no timestamp is
+        invented for a finding (its cert carries none). ``org_id`` is the hop-bound session principal, NEVER
+        a body field, so org A can never read org B. A read takes no lock, mints nothing, holds no owner key."""
+        t = self._now() if now is None else float(now)
+        # Display-severity -> rank (most-severe first). Findings carry their cert severity verbatim; billing
+        # and monitoring assign from the vocabulary below. Unknown severities rank as "medium" (actionable),
+        # never silently last.
+        _rank = {"critical": 0, "high": 1, "medium": 2, "moderate": 2, "low": 3, "info": 4, "informational": 4}
+        items: list[dict] = []
+
+        # 1) Assessment findings — each confirmed FACT is a notification. admit_customer returns bool (no raise),
+        #    so a denied source is simply skipped. Tenant-scoped inside the projector by the org's own slug set.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            from . import assessments as _assess
+            found = _assess.assessment_findings(self.store, requester_org_id, now=t)
+            for f in found.get("findings", []):
+                ref = str(f.get("finding_ref") or "").strip()
+                if not ref:
+                    continue
+                sev = str(f.get("severity") or "medium").strip().lower() or "medium"
+                items.append({"id": "finding:" + ref, "kind": "finding", "severity": sev,
+                              "title": str(f.get("title") or ref),
+                              "body": str(f.get("summary") or ""), "ts": None})
+
+        # 2) Billing standing — dunning / lapsed / exhausted, from owner-signed STATES only (no money number
+        #    decides a notification). past_due (dunning) is the sharpest; a canceled subscription and an
+        #    exhausted (zero) credit balance each raise their own one-shot, stable-id notice.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_billing"):
+            from . import billing as _billing
+            ov = _billing.billing_overview(self.store, requester_org_id, now=t)
+            sub = ov.get("subscription") or {}
+            status = str(sub.get("status") or "")
+            if status == "past_due":
+                items.append({"id": "billing:past_due", "kind": "billing", "severity": "high",
+                              "title": "Payment past due",
+                              "body": "Your subscription payment is past due. Settle it to keep your plan active.",
+                              "ts": None})
+            elif status == "canceled":
+                items.append({"id": "billing:canceled", "kind": "billing", "severity": "medium",
+                              "title": "Subscription canceled",
+                              "body": "Your subscription is canceled. Resubscribe to restore plan credits.",
+                              "ts": None})
+            credits = ov.get("credits") or {}
+            try:
+                avail = int(credits.get("available") or 0)
+            except (TypeError, ValueError):
+                avail = 0
+            if avail <= 0:
+                items.append({"id": "billing:no_credits", "kind": "billing", "severity": "medium",
+                              "title": "Out of assessment credits",
+                              "body": "You have no assessment credits available. Top up to launch new assessments.",
+                              "ts": None})
+
+        # 3) Monitoring alerts — AEGIS-SaaS. monitor_events self-gates on the default-OFF flag AND
+        #    admit_customer, raising ProvisionDenied when off or not permitted; we treat that as "no source"
+        #    (byte-identical to a build without monitoring). A confirmed attack is high; a lead is low.
+        try:
+            mon = self.monitor_events(requester, requester_org_id, ip=ip)
+        except ProvisionDenied:
+            mon = None
+        if mon:
+            for ev in mon.get("events", []):
+                rid = str(ev.get("report_id") or "").strip()
+                if not rid:
+                    continue
+                decision = str(ev.get("decision") or "").strip().lower()
+                host = str(ev.get("host") or "")
+                klass = str(ev.get("attack_class") or "activity")
+                confirmed = decision == "confirmed"
+                title = ("Confirmed " + klass if confirmed else "Lead: " + klass) + (" on " + host if host else "")
+                body = "AEGIS " + (decision or "event")
+                action = str(ev.get("action") or "")
+                if action:
+                    body += " — action " + action
+                items.append({"id": "monitor:" + rid, "kind": "monitoring",
+                              "severity": "high" if confirmed else "low", "title": title, "body": body,
+                              "ts": ev.get("ts")})
+
+        # Stable, severity-ranked order; a stable sort keeps within-source order (findings + monitoring are
+        # already newest-first). Cap the returned list; ``count`` is the TRUE pre-cap total for the UI badge.
+        total = len(items)
+        items.sort(key=lambda n: _rank.get(str(n.get("severity") or "").lower(), 2))
+        return {"org_id": requester_org_id, "notifications": items[:_NOTIF_MAX], "count": total}
 
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:

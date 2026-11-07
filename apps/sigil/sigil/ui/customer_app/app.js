@@ -373,6 +373,195 @@
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
   }
 
+  // ---- notification centre --------------------------------------------------------------------
+  // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
+  // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
+  // each behind its own permission, scoped to THIS session org — this UI never sends an org id).
+  //
+  // enable/disable + sound are per-viewer prefs in localStorage; read-state is a per-viewer set of
+  // seen ids (namespaced by username so a shared browser never bleeds one account's read-state into
+  // another). EVERY storage access is wrapped — the feature works fully with storage unavailable
+  // (private window / blocked): prefs default ON, nothing is remembered, the bell still polls + chimes.
+  var NTF_POLL_MS = 45000;
+  var ntf = { items: [], count: 0, open: false, openUnread: null, started: false, loaded: false,
+              timer: null, knownUnread: {}, gen: 0 };
+  var _chime = null;
+
+  function lsGet(k, dflt) { try { var v = localStorage.getItem(k); return v == null ? dflt : v; } catch (e) { return dflt; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage off: prefs hold for this load only */ } }
+  function ntfEnabled() { return lsGet("vigil.ntf.enabled", "1") !== "0"; }
+  function ntfSound() { return lsGet("vigil.ntf.sound", "1") !== "0"; }
+  function setNtfEnabled(on) { lsSet("vigil.ntf.enabled", on ? "1" : "0"); }
+  function setNtfSound(on) { lsSet("vigil.ntf.sound", on ? "1" : "0"); }
+  function seenKey() { var w = state.get().who || {}; return "vigil.ntf.seen." + (w.username || "anon"); }
+  function seenIds() { try { var a = JSON.parse(lsGet(seenKey(), "[]")); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function seenSet() { var s = {}; seenIds().forEach(function (id) { s[id] = 1; }); return s; }
+  function markSeen(ids) {
+    var cur = seenIds(), have = {};
+    cur.forEach(function (x) { have[x] = 1; });
+    (ids || []).forEach(function (id) { if (id && !have[id]) { cur.push(id); have[id] = 1; } });
+    if (cur.length > 300) { cur = cur.slice(cur.length - 300); }   // cap — read-state is a convenience, not a ledger
+    lsSet(seenKey(), JSON.stringify(cur));
+  }
+
+  function sevBucket(sev) {
+    var s = String(sev || "").toLowerCase();
+    if (s === "critical" || s === "high") return "high";
+    if (s === "low" || s === "info" || s === "informational") return "low";
+    return "med";
+  }
+  function sevLabel(sev) { var s = String(sev || "medium").toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  function unreadCount() { var seen = seenSet(), n = 0; ntf.items.forEach(function (it) { if (it && it.id && !seen[it.id]) n++; }); return n; }
+
+  function playChime() {
+    if (!ntfSound()) return;
+    try {
+      if (!_chime) { _chime = new Audio("vigil-notify.wav"); _chime.preload = "auto"; }
+      _chime.currentTime = 0;
+      var p = _chime.play();                     // may reject under the browser autoplay policy until a gesture
+      if (p && typeof p.catch === "function") { p.catch(function () {}); }   // the toast still shows — silent
+    } catch (e) { /* no audio support: the visible toast + badge still fire */ }
+  }
+
+  function startNtf() { if (!ntf.timer) { ntf.timer = setInterval(function () { pollNtf(); }, NTF_POLL_MS); } }
+  function stopNtf() { if (ntf.timer) { clearInterval(ntf.timer); ntf.timer = null; } }
+  function resetNtf() {   // on logout / account switch — never carry one account's notifications into another
+    stopNtf();
+    ntf.gen++;            // invalidate any in-flight poll so its late result cannot repopulate ntf.items
+    ntf.items = []; ntf.count = 0; ntf.open = false; ntf.openUnread = null;
+    ntf.started = false; ntf.loaded = false; ntf.knownUnread = {};
+  }
+  // Mount/unmount with the session: start polling once signed in + enabled; stop when signed out or disabled.
+  function syncNtf() {
+    if (authed() && ntfEnabled()) { startNtf(); if (!ntf.started) { pollNtf(); } }
+    else { stopNtf(); }
+  }
+
+  async function pollNtf() {
+    if (!authed() || !ntfEnabled()) { return; }
+    ntf.started = true;                           // gate the one auto-poll from syncNtf (the timer drives the rest)
+    var gen = ntf.gen;                            // capture; a logout/disable/401 bumps ntf.gen to invalidate this
+    var data;
+    try { data = await VUI.getJSON(API + "/notifications"); }
+    catch (e) {
+      if (e && e.status === 401) { resetNtf(); await refreshWho(); }   // session died — boot flow unmounts
+      return;                                     // transient error: keep last state, retry next tick (no toast spam)
+    }
+    // The /notifications read fans out to three upstream relays, so this await is routinely 100s of ms. Drop a
+    // STALE response: if the account was signed out/switched or alerts disabled while it was in flight, this
+    // result must NOT repopulate ntf.items (cross-account bleed on a shared browser) or chime after a disable.
+    if (gen !== ntf.gen || !authed() || !ntfEnabled()) { return; }
+    var items = (data && data.notifications) || [];
+    var seen = seenSet(), fresh = [];
+    items.forEach(function (n) {
+      if (!n || !n.id) { return; }
+      if (seen[n.id] || ntf.knownUnread[n.id]) { return; }   // already read, or already alerted this session
+      fresh.push(n); ntf.knownUnread[n.id] = 1;
+    });
+    ntf.items = items;
+    ntf.count = (data && typeof data.count === "number") ? data.count : items.length;
+    if (ntf.loaded && fresh.length) {             // never chime on the first (silent) load after sign-in
+      playChime();
+      var top = fresh[0];                         // server returns most-severe-first
+      VUI.toast(fresh.length > 1 ? (fresh.length + " new notifications") : ("New: " + (top.title || "notification")));
+    }
+    ntf.loaded = true;
+    renderBell();
+  }
+
+  function toggleNtf() {
+    var wasOpen = ntf.open;
+    ntf.open = !wasOpen;
+    if (ntf.open) {
+      if (ntfEnabled()) {                         // opening = reading: snapshot what's unread NOW (for the
+        var seen = seenSet(); ntf.openUnread = {};             // highlight), then clear the badge
+        ntf.items.forEach(function (n) { if (n && n.id && !seen[n.id]) ntf.openUnread[n.id] = 1; });
+        markSeen(ntf.items.map(function (n) { return n && n.id; }));
+      }
+    } else { ntf.openUnread = null; }
+    renderBell();
+  }
+  function markAllRead() { markSeen(ntf.items.map(function (n) { return n && n.id; })); ntf.openUnread = {}; renderBell(); }
+
+  function toggleRow(label, on, onChange, disabled) {
+    var cb = h("input", { type: "checkbox" });
+    cb.checked = !!on; if (disabled) { cb.disabled = true; }
+    cb.addEventListener("change", function () { onChange(cb.checked); });
+    return h("label.cust-ntf-toggle" + (disabled ? ".disabled" : ""), {}, [cb, h("span", { text: label })]);
+  }
+
+  function ntfPanel() {
+    var enabled = ntfEnabled();
+    var head = h("div.cust-ntf-head", {}, [
+      h("strong", { text: "Notifications" }), h("span.spacer"),
+      (enabled && ntf.items.length) ? h("button.cust-ntf-link", { type: "button", text: "Mark all read", onClick: markAllRead }) : null,
+    ]);
+    var prefs = h("div.cust-ntf-prefs", {}, [
+      toggleRow("Enabled", enabled, function (on) {
+        setNtfEnabled(on);
+        // disable also bumps the generation so a poll already in flight cannot chime/toast after alerts are off
+        if (on) { ntf.started = false; startNtf(); pollNtf(); } else { ntf.gen++; stopNtf(); }
+        renderBell();
+      }),
+      toggleRow("Sound", ntfSound(), function (on) { setNtfSound(on); }, !enabled),
+    ]);
+    var body;
+    if (!enabled) {
+      body = h("div.cust-ntf-empty", { text: "Notifications are off. Turn them on to be alerted about findings, "
+        + "billing and monitoring for this workspace." });
+    } else if (!ntf.items.length) {
+      body = h("div.cust-ntf-empty", { text: "You're all caught up." });
+    } else {
+      body = h("div.cust-ntf-list", {}, ntf.items.map(function (n) {
+        var unread = ntf.openUnread ? !!ntf.openUnread[n.id] : false;
+        return h("div.cust-ntf-item" + (unread ? ".unread" : ""), {}, [
+          h("span.cust-ntf-sev.sev-" + sevBucket(n.severity), { text: sevLabel(n.severity) }),
+          h("div.cust-ntf-txt", {}, [
+            h("div.cust-ntf-title", { text: n.title || "Notification" }),
+            n.body ? h("div.cust-ntf-body", { text: n.body }) : null,
+            n.kind ? h("div.cust-ntf-kind", { text: String(n.kind) }) : null,
+          ]),
+        ]);
+      }));
+    }
+    return h("div.cust-ntf-panel", { role: "dialog", "aria-label": "Notifications" }, [head, prefs, body]);
+  }
+
+  function ntfWidget() {
+    if (!authed()) { return null; }
+    var enabled = ntfEnabled();
+    var unread = enabled ? unreadCount() : 0;
+    var bell = h("button.cust-bell" + (enabled ? "" : ".off"), {
+      type: "button", title: enabled ? "Notifications" : "Notifications are off",
+      "aria-label": "Notifications" + (unread > 0 ? " (" + unread + " unread)" : ""),
+      "aria-expanded": ntf.open ? "true" : "false", onClick: toggleNtf,
+    }, [
+      VUI.icon("bell"),
+      (unread > 0) ? h("span.cust-bell-badge", { text: unread > 99 ? "99+" : String(unread) }) : null,
+    ]);
+    return h("div.cust-ntf" + (ntf.open ? ".open" : ""), { id: "cust-ntf" }, [bell, ntf.open ? ntfPanel() : null]);
+  }
+
+  // Keep --cust-topbar-h in sync with the real (possibly wrapped) topbar height, so the fixed panel always
+  // drops just below the topbar at any viewport width. Cheap; called on render, on open, and on resize.
+  function setTopbarVar() {
+    try {
+      var tb = VUI.$(".cust-topbar");
+      document.documentElement.style.setProperty("--cust-topbar-h", (tb && tb.offsetHeight ? tb.offsetHeight : 64) + "px");
+    } catch (e) { /* no DOM / detached: the CSS fallback (72px) still positions the panel */ }
+  }
+
+  // In-place refresh of ONLY the bell subtree (a poll must not re-render the whole page). shell() places
+  // #cust-ntf; if it is not mounted (logged out), this is a no-op and the next full render handles it.
+  function renderBell() {
+    setTopbarVar();
+    var host = VUI.$("#cust-ntf");
+    if (!host || !host.parentNode) { return; }
+    var w = ntfWidget();
+    if (w) { host.parentNode.replaceChild(w, host); } else { host.remove(); }
+  }
+
   // ---- shell --------------------------------------------------------------------------------------
   function navLink(label, hash) {
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
@@ -395,6 +584,7 @@
         h("span.brand", { text: "VIGIL" }),
         h("nav", {}, links),
         h("span.spacer"),
+        authed() ? ntfWidget() : null,
         right,
       ]),
       h("div#cust-main", {}, inner),
@@ -404,6 +594,7 @@
   async function doLogout() {
     var posted = true;
     try { await VUI.postJSON(API + "/logout", {}); } catch (e) { posted = false; }
+    resetNtf();                                  // drop this account's notifications before reflecting the session
     await refreshWho();                          // reflect the ACTUAL server session — never assume it severed
     if (authed()) {
       // the logout POST did not take (network error / gate refusal / revoke error) and the cookie is STILL
@@ -441,10 +632,14 @@
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
     var view = ROUTES[key] || ROUTES["#/"];
+    ntf.open = false;              // a route change closes any open panel (the shell is rebuilt below)
     VUI.mount(root, view());
+    setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it
+    syncNtf();                     // start/stop the notification poll to match the live session + pref
   }
 
   window.addEventListener("hashchange", render);
+  window.addEventListener("resize", setTopbarVar);   // keep the fixed notification panel pinned below the topbar
   state.sub(render);
 
   // ---- boot ---------------------------------------------------------------------------------------

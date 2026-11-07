@@ -49,3 +49,60 @@
 .cust-badge-pending  { color: var(--warn, #d9b34a); border-color: var(--warn, #d9b34a); }
 .cust-badge-expired  { color: var(--danger, #e2776c); border-color: var(--danger, #e2776c); }
 .cust-register { margin-top: 24px; }
+
+/* ---- notification centre (bell + unread badge + dropdown panel) ---- */
+/* The bell stays inline in the topbar, but the PANEL is anchored to the topbar (the positioned ancestor),
+   not the bell — the bell can wrap to any position, while the topbar's right edge is always the shell edge,
+   so the dropdown opens top-right and drops below the whole (possibly wrapped) topbar, never off-screen. */
+.cust-ntf { display: inline-flex; }
+.cust-bell {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; padding: 0; border: 1px solid transparent; border-radius: 10px;
+  background: none; color: inherit; cursor: pointer; opacity: 0.78;
+}
+.cust-bell:hover { opacity: 1; background: var(--bg-3, #1b212c); }
+.cust-bell.off { opacity: 0.5; }
+.cust-bell[aria-expanded="true"] { opacity: 1; background: var(--bg-3, #1b212c); border-color: var(--border, #212734); }
+.cust-bell-badge {
+  position: absolute; top: 2px; right: 2px; min-width: 16px; height: 16px; box-sizing: border-box;
+  padding: 0 4px; border-radius: 999px; background: var(--st-blocked, #e06a5e); color: #fff;
+  font-size: 10px; line-height: 16px; font-weight: 700; text-align: center;
+  border: 2px solid var(--bg-0, #0a0c10);
+}
+/* The panel is a VIEWPORT-anchored fixed drawer at the top-right — robust to however the topbar wraps (the
+   bell can land anywhere, and the shell may be narrower than the window). Its top follows the real topbar
+   height via --cust-topbar-h (app.js keeps it fresh on render + resize), so it always drops just below the
+   topbar and never off-screen; width clamps to the viewport with a gutter at every size. */
+.cust-ntf-panel {
+  position: fixed; top: calc(var(--cust-topbar-h, 72px) + 10px); right: 16px; left: auto; z-index: 50;
+  width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - var(--cust-topbar-h, 72px) - 36px);
+  overflow-y: auto; background: var(--bg-1, #0f1219); border: 1px solid var(--border, #212734);
+  border-radius: 14px; box-shadow: var(--shadow-2, 0 12px 40px rgba(0,0,0,.5));
+}
+.cust-ntf-head {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border, #212734);
+}
+.cust-ntf-head .spacer { flex: 1 1 auto; }
+.cust-ntf-link { background: none; border: 0; cursor: pointer; color: var(--st-running, #5b9bd5); font: inherit; font-size: 0.82rem; padding: 2px 4px; }
+.cust-ntf-link:hover { text-decoration: underline; }
+.cust-ntf-prefs { display: flex; gap: 18px; padding: 8px 14px; border-bottom: 1px solid var(--border, #212734); }
+.cust-ntf-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; opacity: 0.85; cursor: pointer; }
+.cust-ntf-toggle.disabled { opacity: 0.45; cursor: default; }
+.cust-ntf-empty { padding: 28px 16px; text-align: center; opacity: 0.7; font-size: 0.88rem; }
+.cust-ntf-list { display: block; }
+.cust-ntf-item { display: flex; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border, #212734); }
+.cust-ntf-item:last-child { border-bottom: 0; }
+.cust-ntf-item.unread { background: color-mix(in srgb, var(--st-running, #5b9bd5) 10%, transparent); }
+.cust-ntf-sev {
+  flex: 0 0 auto; align-self: flex-start; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+.cust-ntf-sev.sev-high { color: var(--sev-high, #e8894c); }
+.cust-ntf-sev.sev-med  { color: var(--sev-medium, #e8b64c); }
+.cust-ntf-sev.sev-low  { color: var(--sev-low, #5b9bd5); }
+.cust-ntf-txt { flex: 1 1 auto; min-width: 0; }
+.cust-ntf-title { font-weight: 600; font-size: 0.9rem; word-break: break-word; }
+.cust-ntf-body { font-size: 0.82rem; opacity: 0.78; margin-top: 2px; word-break: break-word; }
+.cust-ntf-kind { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.5; margin-top: 4px; }
