@@ -4,8 +4,8 @@
 # Creates, each LEAST-PRIVILEGE and idempotently (checks before it creates):
 #   1. a KMS CMK (alias/<project>-owner-kek) that envelope-encrypts VIGIL's KEK   -> VIGIL_KMS_KEY_ID
 #   2. an S3 backup bucket (versioned, default SSE-KMS, public access blocked)    -> VIGIL_PUSH_DEST
-#   3. an IAM role + instance profile the EC2 host assumes (NO static keys): KMS Encrypt/Decrypt on that CMK
-#      + S3 Get/Put on that bucket, and nothing else
+#   3. an IAM role + instance profile the EC2 host assumes (NO static keys): KMS Encrypt/Decrypt/GenerateDataKey
+#      on that CMK + S3 Get/Put on that bucket, and nothing else
 #   4. a security group: 443 + 80 ONLY from Cloudflare's current ranges, 22 ONLY from your admin IP
 #   5. an Elastic IP (the stable public IPv4 you point the DNS A record at)
 #
@@ -68,13 +68,13 @@ aws iam get-role --role-name "$ROLE" >/dev/null 2>&1 || aws iam create-role --ro
   --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
 aws iam put-role-policy --role-name "$ROLE" --policy-name "${PROJECT}-host-policy" --policy-document "$(jq -cn \
   --arg key "$KEY_ARN" --arg bkt "arn:aws:s3:::${BUCKET}" '{Version:"2012-10-17",Statement:[
-    {Sid:"OwnerKekEnvelope",Effect:"Allow",Action:["kms:Encrypt","kms:Decrypt","kms:DescribeKey"],Resource:$key},
+    {Sid:"OwnerKekEnvelope",Effect:"Allow",Action:["kms:Encrypt","kms:Decrypt","kms:GenerateDataKey","kms:DescribeKey"],Resource:$key},
     {Sid:"BackupObjects",Effect:"Allow",Action:["s3:PutObject","s3:GetObject"],Resource:($bkt+"/*")},
     {Sid:"BackupList",Effect:"Allow",Action:["s3:ListBucket"],Resource:$bkt}]}')"
 aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1 \
   || aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
 aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" 2>/dev/null || true
-echo "  = IAM role/instance-profile ${ROLE} ready (KMS Encrypt/Decrypt on the CMK + S3 Get/Put on the bucket only)"
+echo "  = IAM role/instance-profile ${ROLE} ready (KMS Encrypt/Decrypt/GenerateDataKey on the CMK + S3 Get/Put on the bucket only)"
 
 # 4) Security group — 443/80 from Cloudflare only, 22 from the admin IP -------------------------------------
 VPC="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)"
@@ -92,13 +92,28 @@ aws ec2 authorize-security-group-ingress --group-id "$SGID" --protocol tcp --por
   && echo "  + SSH 22 from ${ADMIN_SSH_CIDR}" || echo "  = SSH rule already present"
 V4="$(curl -fsS https://www.cloudflare.com/ips-v4)"
 V6="$(curl -fsS https://www.cloudflare.com/ips-v6)"
-cf_perm() { jq -cn --argjson port "$1" --arg v4 "$V4" --arg v6 "$V6" \
-  '{IpProtocol:"tcp",FromPort:$port,ToPort:$port,
-    IpRanges:($v4|split("\n")|map(select(length>0)|{CidrIp:.,Description:"Cloudflare"})),
-    Ipv6Ranges:($v6|split("\n")|map(select(length>0)|{CidrIpv6:.,Description:"Cloudflare"}))}'; }
+# Add ONE Cloudflare CIDR to a port, idempotently. We authorize PER-CIDR, not as one all-in-one blob: a
+# single multi-CIDR authorize fails ATOMICALLY the moment any one CIDR already exists
+# (InvalidPermission.Duplicate), which would silently drop every genuinely-new range in the same call —
+# making the documented "re-run provision.sh to pick up changed Cloudflare ranges" a no-op. Here only a real
+# Duplicate is treated as already-present; any OTHER error is surfaced and aborts the run (fail-loud).
+cf_add() {   # $1=port  $2=cidr  $3=v4|v6
+  local key="IpRanges" ckey="CidrIp" out perm
+  [ "$3" = "v6" ] && { key="Ipv6Ranges"; ckey="CidrIpv6"; }
+  perm="$(jq -cn --argjson p "$1" --arg c "$2" --arg key "$key" --arg ckey "$ckey" \
+    '{IpProtocol:"tcp",FromPort:$p,ToPort:$p} + {($key):[{($ckey):$c,Description:"Cloudflare"}]}')"
+  if out="$(aws ec2 authorize-security-group-ingress --group-id "$SGID" --ip-permissions "$perm" 2>&1)"; then
+    return 0
+  fi
+  printf '%s' "$out" | grep -q "InvalidPermission.Duplicate" && return 0   # already present — fine
+  echo "  ! failed to authorize Cloudflare ${3} ${2} on port ${1}: ${out}" >&2
+  exit 1
+}
 for port in 443 80; do
-  aws ec2 authorize-security-group-ingress --group-id "$SGID" --ip-permissions "$(cf_perm "$port")" 2>/dev/null \
-    && echo "  + ${port} from the current Cloudflare ranges" || echo "  = ${port} Cloudflare ranges already present"
+  n=0
+  while IFS= read -r c; do [ -n "$c" ] || continue; if cf_add "$port" "$c" v4; then n=$((n + 1)); fi; done <<<"$V4"
+  while IFS= read -r c; do [ -n "$c" ] || continue; if cf_add "$port" "$c" v6; then n=$((n + 1)); fi; done <<<"$V6"
+  echo "  = ${port}: ensured ${n} Cloudflare CIDR(s) present (new ranges land on re-run; duplicates skipped)"
 done
 
 # 5) Elastic IP ---------------------------------------------------------------------------------------------

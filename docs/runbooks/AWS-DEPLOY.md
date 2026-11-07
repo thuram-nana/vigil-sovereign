@@ -42,8 +42,9 @@ It creates, each least-privilege:
 2. **S3 bucket** `vigil-backups-<acct>` — versioned, default SSE-KMS (under the same CMK), public access
    fully blocked. The off-host backup push writes the already-encrypted parts here. → `VIGIL_PUSH_DEST`.
 3. **IAM role + instance profile** `vigil-host` — the EC2 host assumes it (NO static keys on disk). Policy:
-   `kms:Encrypt`/`Decrypt`/`DescribeKey` on **that CMK only**, `s3:PutObject`/`GetObject` on **that bucket
-   only**, `s3:ListBucket` on the bucket. Nothing else.
+   `kms:Encrypt`/`Decrypt`/`GenerateDataKey`/`DescribeKey` on **that CMK only** (S3 SSE-KMS uploads call
+   `GenerateDataKey` under the host's own identity — without it every backup PUT is denied),
+   `s3:PutObject`/`GetObject` on **that bucket only**, `s3:ListBucket` on the bucket. Nothing else.
 4. **Security group** `vigil-edge` — inbound **443 + 80 only from Cloudflare's current IP ranges** (fetched
    live from `cloudflare.com/ips`), **22 only from `ADMIN_SSH_CIDR`**. So the origin is unreachable except
    through Cloudflare (and your admin IP for SSH). Everything else is denied.
@@ -98,8 +99,13 @@ systemctl --user start vigil-backup-push.service        # run once now; check jo
 Then **test a restore from S3** (a backup you have not restored is not a backup):
 ```bash
 aws s3 cp --recursive s3://vigil-backups-<acct>/vigil/<latest-timestamp>/ ./restore-check/
-sigil restore ./restore-check --expect-governance-pubkey <your governance pubkey, out of band> && sigil verify
+# `vigil restore` (the two-plane CLI) restores into FRESH dirs and RE-VERIFIES both planes; a non-zero exit = FAIL.
+# (--sigil-home exercises the sovereign leg that holds the KMS-wrapped KEK / owner key.)
+vigil restore ./restore-check --base-dir ./restore-base --crucible-root ./restore-crucible \
+      --sigil-home ./restore-sigil-home --expect-governance-pubkey <your governance pubkey, out of band>
 ```
+(Use `vigil restore`, not `sigil restore` — restore already re-verifies the RESTORED dirs; a trailing
+`sigil verify` would check the live host instead. For an explicit re-check add `vigil verify --base-dir ./restore-base`.)
 
 ### 2c. nginx for the public origin
 
@@ -123,18 +129,38 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    |---|---|---|---|
    | A | `vigilguard.net` (`@`) | **your Elastic IP** | Proxied |
    | CNAME | `www` | `vigilguard.net` | Proxied |
-   | A | `app` | your Elastic IP | Proxied (or DNS-only if you front custui yourself) |
-   | A | `console` | your Elastic IP | **DNS-only, or omit** — keep the operator plane off the public edge |
-4. **Cloudflare → SSL/TLS:** mode **Full (Strict)** (Cloudflare verifies the origin cert from §2c). Enable
-   **Authenticated Origin Pulls** and install Cloudflare's client cert check at the origin so the origin only
-   accepts connections carrying Cloudflare's certificate — defense-in-depth with the SG lock.
+   | A | `app` | your Elastic IP | Proxied |
+   | A | `console` | — | **OMIT — no public record** |
+
+   Keep every public-serving record **Proxied** so DNS only ever resolves to Cloudflare, consistent with the
+   Cloudflare-only SG lock. Do **not** create a `console` record on public DNS: a `DNS-only` (grey-cloud)
+   record IS a public A record — it publishes the operator cockpit's IP to the internet and (per the SG
+   caveat in §3.4) is then reachable by any Cloudflare tenant, contradicting the §topology rule "never a
+   public A record". Reach the console over **VPN / SSH local-forward / split-horizon (internal-only) DNS**.
+   Likewise do not switch `app` to DNS-only unless you deliberately widen the SG to serve 443 publicly — that
+   removes the Cloudflare-only origin lock for that plane.
+4. **Cloudflare → SSL/TLS:** mode **Full (Strict)** (Cloudflare verifies the origin cert from §2c). Then lock
+   the origin to THIS zone. The SG admits **all** Cloudflare ranges and Cloudflare's **default**
+   Authenticated-Origin-Pulls CA is **shared across every Cloudflare tenant** — so neither is a per-tenant
+   lock: another tenant pointing their own zone at your Elastic IP would pass both and bypass your WAF /
+   rate-limits / cache rules. Enforce ONE of:
+   - **(a) per-hostname AOP with your OWN uploaded origin-pull certificate** (unique to this zone;
+     Cloudflare → SSL/TLS → Origin Server → Authenticated Origin Pulls), enforced at the origin by
+     uncommenting the `ssl_client_certificate` + `ssl_verify_client on` block in `vigil-public.nginx.conf`
+     so the origin rejects any connection not bearing THIS zone's client cert; or
+   - **(b) a Cloudflare Tunnel** (`cloudflared`) — then there is no public 443 at all and the SG needs no
+     inbound 443/80.
+
+   Cloudflare's *shared* AOP cert alone is **not** a sufficient origin lock.
 5. **Cloudflare → caching / rules:** the public plane is static + read-only JSON, so a cache rule on
    `vigilguard.net/*` is safe and desirable; **do not** cache `app.vigilguard.net` (authenticated, cookies) —
    add a bypass rule. Turn on the WAF managed ruleset.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare
-range is refused by the security group.
+range is refused by the security group. And once you enforce per-zone AOP (§3.4a): a request that reaches the
+origin from a Cloudflare range **without your zone's origin-pull client cert is refused** (HTTP 400/496) —
+so the only accepted path is through *your* Cloudflare zone, not merely "some Cloudflare tenant".
 
 ## 4. Go-live gates (unchanged — do not skip)
 
