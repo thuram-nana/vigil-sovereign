@@ -114,6 +114,19 @@ class TenantCost:
     in_flight_tokens: int     # Σ reserved envelope of reserves whose settle has not landed (the pending pool draw)
 
 
+@dataclass(frozen=True)
+class GlobalCostPosition:
+    """The GLOBAL (cross-tenant) cost position — the scalar the EC-5 pool meter draws against. `used` =
+    committed + in_flight (Σ settled ACTUAL tokens + Σ in-flight reserved envelope, across ALL tenants)."""
+    committed_tokens: int    # Σ settled ACTUAL tokens, ALL tenants
+    in_flight_tokens: int    # Σ reserved envelope of reserved-but-unsettled launches, ALL tenants
+
+    @property
+    def used_tokens(self) -> int:
+        """The total GLOBAL pool draw: committed real cost + the pending (in-flight) reserved envelope."""
+        return self.committed_tokens + self.in_flight_tokens
+
+
 class CostEnvelopeLedger:
     """Owner-signed per-tenant token-cost envelope ledger on the spine. Construction mirrors ``WalletRegistry``:
     the owner signing key + trusted pubkey default to the persisted owner identity; tests inject explicit keys."""
@@ -301,3 +314,59 @@ class CostEnvelopeLedger:
         return [TenantCost(org_id=str(o), committed_tokens=settled.get(o, 0),
                            reserved_tokens=reserved.get(o, 0), in_flight_tokens=self._in_flight(str(o)))
                 for o in orgs]
+
+    def global_position(self) -> GlobalCostPosition:
+        """The GLOBAL (cross-tenant) cost position in ONE O(spine) pass — the read EC-5's pool meter draws
+        against. Returns ``GlobalCostPosition(committed, in_flight)`` where committed = Σ settled ACTUAL tokens
+        and in_flight = Σ reserved envelope of reserved-but-unsettled launches, summed across ALL tenants.
+
+        This is an EQUIVALENCE-ORACLE match for ``sum over tenant_costs() of (committed + in_flight)`` but in a
+        SINGLE spine scan — folding the settled total and the global reserve/settle suffix-pairing together —
+        rather than ``tenant_costs()``'s O(orgs × spine) per-org ``_in_flight`` loop. Every discipline of the
+        per-tenant fold is preserved verbatim: fail-closed ``verify_signed`` under the succession-aware resolver
+        at each record's seq (a forged / replayed / wrong-epoch record never moves the pool), the SnapshotState
+        hard-prune seed (committed seeded from the folded settled map; the consumed-entry_id ``seen`` set seeded
+        so a pre-prune replay cannot resurrect as a PHANTOM in-flight draw), and the ``{org_id}:{suffix}`` pairing
+        (the suffix after the prefix, keyed per org so cross-tenant suffix collisions never pair). The in-flight
+        reserve AMOUNTS come from the LIVE window only — ``stranded_active_cost_reserves`` fail-closed refuses a
+        prune that would archive an unsettled reserve, exactly as ``_in_flight`` relies on."""
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        reserves: dict[tuple[str, str], int] = {}   # (org_id, suffix) -> reserved tokens of an in-flight reserve
+        settled_suffixes: set[tuple[str, str]] = set()   # (org_id, suffix) whose settle record has landed
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            # Anchor mismatch (rotated/empty key) ⇒ bypass the snapshot and genesis-scan, mirroring _fold/_in_flight.
+            committed = 0
+            seen: set = set()
+            since = -1
+        else:
+            committed = sum(snap.cost_settled_map().values())   # seed Σ settled from the folded prefix (== _fold)
+            seen = set(snap.cost_seen_set())                    # seed consumed entry_ids (prune-durable, no phantoms)
+            since = snap.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+                continue
+            oid = p.get("org_id")
+            eid = p.get("entry_id")
+            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+                continue
+            core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                                        # fail-closed: unsigned/forged/wrong-epoch is inert
+            key = (sig, oid, eid)
+            if key in seen:
+                continue                                        # idempotent + prune-durable (seeded from snapshot)
+            seen.add(key)
+            amount = _as_tokens(p.get("tokens"))
+            if sig == COST_SETTLE_SIGNAL:
+                committed += amount                             # Σ settled ACTUAL (global committed cost)
+                if eid.startswith(SETTLE_COST_PREFIX):
+                    settled_suffixes.add((oid, eid[len(SETTLE_COST_PREFIX):]))
+            elif eid.startswith(RESERVE_COST_PREFIX):
+                reserves[(oid, eid[len(RESERVE_COST_PREFIX):])] = amount
+        in_flight = sum(amt for k, amt in reserves.items() if k not in settled_suffixes)
+        return GlobalCostPosition(committed_tokens=committed, in_flight_tokens=in_flight)
