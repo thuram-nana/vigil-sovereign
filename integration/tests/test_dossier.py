@@ -64,6 +64,11 @@ def _log_with_secret(run_dir: Path) -> None:
     (run_dir / ".crucible-v2.log").write_text(
         json.dumps({"event": "req", "authorization": "Bearer SECRET-TOKEN-XYZ", "tokens_in": 42}) + "\n" +
         json.dumps({"event": "resp", "cookie": "session=DEADBEEF-SECRET"}) + "\n" +
+        # a credential carried as a VALUE under a NON-secret key — a realistic structlog capture that
+        # key-name masking alone misses (the engagement log must get the SAME value-level redaction the
+        # terminal transcript gets, or these ship in the clear in the governance-signed dossier).
+        json.dumps({"event": "fetch", "target": "http://admin:VALUESECRET-PW@victim.example/x",
+                    "note": "sent Authorization: Bearer VALUESECRET-BEARER-abc123"}) + "\n" +
         "this line is not json\n", encoding="utf-8")
 
 
@@ -274,9 +279,14 @@ def test_the_shipped_engagement_log_is_scrubbed(tmp_path):
         assert "logs/engagement-log.jsonl" in _entries(zf)
         log = zf.read("logs/engagement-log.jsonl").decode("utf-8")
         whole = b"".join(zf.read(n) for n in _entries(zf)).decode("utf-8", errors="replace")
-    # the secret VALUES are masked everywhere in the archive
+    # the key-masked secret VALUES are masked everywhere in the archive
     assert "SECRET-TOKEN-XYZ" not in whole and "DEADBEEF-SECRET" not in whole
     assert "<redacted-X2>" in log
+    # VALUE-level secrets under NON-secret keys (a URL-userinfo password, a pasted Bearer token) are ALSO
+    # masked — key-name masking alone would ship these in the clear (the engagement log now gets the same
+    # value-level redaction the terminal transcript gets).
+    assert "VALUESECRET-PW" not in whole, "URL-userinfo password leaked in the signed dossier"
+    assert "VALUESECRET-BEARER-abc123" not in whole, "pasted Bearer token leaked in the signed dossier"
     # non-secret telemetry that merely CONTAINS a secret word is preserved (no over-masking)
     assert "tokens_in" in log and "42" in log
     # the non-JSON line is dropped, never shipped in the clear
@@ -459,3 +469,73 @@ def test_no_terminal_history_no_transcript_entry(tmp_path):
     assert res["ok"]
     with zipfile.ZipFile(out) as zf:
         assert "logs/terminal-transcript.jsonl" not in _entries(zf)   # absent when no transcript is supplied
+
+
+# --------------------------------------------------------------------------------------------------
+# "verify it yourself" — the shipped outer-envelope recipe catches every tamper vector, and a run with
+# N>1 proven facts is counted + carried (the single-fact path was the only one pinned before)
+# --------------------------------------------------------------------------------------------------
+
+
+def test_manifest_check_recipe_catches_alter_delete_and_inject(tmp_path):
+    """The dossier ships a self-contained verify-it-yourself recipe (_MANIFEST_CHECK) — a recipient's only
+    automated check of the OUTER envelope. It must catch all three tamper vectors and never crash: an
+    ALTERED listed file, a MISSING listed file, and an INJECTED file the signed manifest does not list."""
+    import shutil
+
+    from framework.v2.report.case_file import _MANIFEST_CHECK
+    body = _MANIFEST_CHECK.split("<<'PYTHON'\n", 1)[1].rsplit("\nPYTHON", 1)[0]
+    run = tmp_path / "run"; run.mkdir()
+    _mint_a_fact(run); _findings_json(run)
+    out = tmp_path / "dossier.zip"
+    assert build_dossier(run_dir=str(run), out_zip=str(out), engagement_slug="acme", base_dir=str(run))["ok"]
+
+    def _recipe(d: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-c", body], cwd=str(d), capture_output=True, text=True, timeout=60)
+
+    clean = tmp_path / "clean"; clean.mkdir()
+    with zipfile.ZipFile(out) as zf:
+        zf.extractall(clean)
+    r = _recipe(clean)
+    assert "OK -" in r.stdout and "FAIL" not in r.stdout, r.stdout      # a pristine extraction passes
+
+    alt = tmp_path / "alt"; shutil.copytree(clean, alt)
+    (alt / "index.html").write_text("TAMPERED", encoding="utf-8")
+    assert "FAIL" in _recipe(alt).stdout                                # an altered listed file is caught
+
+    miss = tmp_path / "miss"; shutil.copytree(clean, miss)
+    (miss / "index.html").unlink()
+    rm = _recipe(miss)
+    assert rm.returncode == 0 and "MISSING" in rm.stdout and "FAIL" in rm.stdout   # caught, never a crash
+
+    inj = tmp_path / "inj"; shutil.copytree(clean, inj)
+    (inj / "reports" / "EVIL.md").write_text("injected", encoding="utf-8")
+    assert "UNLISTED" in _recipe(inj).stdout                            # an injected unlisted file is caught
+
+
+def test_multiple_facts_are_counted_and_each_carried(tmp_path):
+    """N>1 proven FACTs: build_dossier reports the real count, the index banner states it, and EVERY fact's
+    certificate rides the offline-verifiable proof bundle (only facts==0/1 was pinned before)."""
+    run = tmp_path / "run"; run.mkdir()
+    mint = build_report_mint(run_dir=run, signers=SIGNERS, engagement_slug="acme",
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
+    for i, param in enumerate(("id", "name"), start=1):
+        rep = {
+            "id": f"errsqli-00{i}", "bug_class": "error_based_sqli", "surface": f"GET /items?{param}=",
+            "poc_script_code": "print('benign')",
+            CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
+                                         "response_bytes_ref": "resp", "request_bytes_ref": "req",
+                                         "bug_class": "error_based_sqli", "observed_scheme": "http"}],
+                          "blobs": {"resp": _SQL_ERROR,
+                                    "req": f"GET /items?{param}=1%27 HTTP/1.1\r\nHost: t\r\n\r\n".encode()}},
+        }
+        res = mint(rep)
+        assert res is not None and res.is_fact
+    out = tmp_path / "dossier.zip"
+    res = build_dossier(run_dir=str(run), out_zip=str(out), engagement_slug="acme", base_dir=str(run))
+    assert res["ok"] and res["facts"] == 2, res
+    with zipfile.ZipFile(out) as zf:
+        idx = zf.read("index.html").decode("utf-8")
+        bundle = json.loads(zf.read("proof-bundle/evidence-bundle.json"))
+    assert "2 oracle-confirmed FACT" in idx, "the index banner must state the real (N>1) fact count"
+    assert len(bundle["certificates"]) == 2, "every proven fact's certificate must ride the proof bundle"

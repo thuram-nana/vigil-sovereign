@@ -1072,14 +1072,28 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
 
 
 _MANIFEST_CHECK = """python3 - <<'PYTHON'
+# Run this in a CLEAN extraction of the dossier (only its own files present). It checks BOTH directions:
+# every listed file is present and unaltered, AND no file was INJECTED that the signed manifest does not
+# list — so a flipped byte, a deleted entry, and an added unlisted file are all caught (never a crash).
 import hashlib, json, pathlib
 manifest = json.load(open("MANIFEST.json"))
-bad = []
-for entry in manifest["entries"]:
-    data = pathlib.Path(entry["path"]).read_bytes()
-    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
-        bad.append(entry["path"])
-print("ALTERED FILES:", bad) if bad else print("OK -", len(manifest["entries"]), "files all match")
+listed = {e["path"]: e["sha256"] for e in manifest["entries"]}
+altered, missing = [], []
+for path, want in listed.items():
+    p = pathlib.Path(path)
+    if not p.is_file():
+        missing.append(path)
+    elif hashlib.sha256(p.read_bytes()).hexdigest() != want:
+        altered.append(path)
+# file -> manifest: every archive file EXCEPT the signed envelope itself must be listed in the manifest.
+envelope = {"MANIFEST.json", "MANIFEST.sig.json", "TRUST-ROOT-FINGERPRINT.txt"}
+present = {p.as_posix() for p in pathlib.Path(".").rglob("*") if p.is_file()}
+unlisted = sorted(present - set(listed) - envelope)
+if altered:  print("ALTERED FILES:", altered)
+if missing:  print("MISSING FILES (listed but absent):", missing)
+if unlisted: print("UNLISTED FILES (present but NOT in the signed manifest):", unlisted)
+print("OK -", len(listed), "files all match and the archive has no unlisted files") \\
+    if not (altered or missing or unlisted) else print("RESULT: FAIL")
 PYTHON"""
 
 _SIGNATURE_CHECK = """python3 - <<'PYTHON'

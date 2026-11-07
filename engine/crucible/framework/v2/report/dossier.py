@@ -268,7 +268,12 @@ def _scrub_log(run_dir: Path) -> tuple[Optional[str], int]:
             if not isinstance(obj, dict):
                 dropped += 1
                 continue
-            scrubbed = _scrub(None, "", obj)  # the live logger's secret masker, reused verbatim
+            # Key-NAME masking (the live logger's masker) THEN value-level redaction — the same
+            # two-pass the terminal transcript gets (_scrub_jsonl_file). Key-masking alone misses a
+            # secret carried as a VALUE under a non-secret key (a `target` URL with userinfo
+            # credentials, a pasted `Authorization: Bearer …` in a free-text field) — a realistic
+            # structlog capture that would otherwise ship UNMASKED in the governance-signed dossier.
+            scrubbed = _deep_redact_values(_scrub(None, "", obj))
             out_lines.append(json.dumps(scrubbed, sort_keys=True, default=str))
     if not out_lines and dropped == 0:
         return (None, 0)
