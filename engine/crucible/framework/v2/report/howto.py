@@ -136,7 +136,13 @@ def _param_from_title(title: str | None) -> str | None:
     free-text "… at <word>" idiom, a trailing path, or a multi-word phrase yields nothing — a finding
     that never recorded a parameter is never given a fabricated one. Callers gate this on a proven FACT."""
     m = _TITLE_PARAM_RE.search((title or "").strip())
-    return m.group(1) if m else None
+    if not m:
+        return None
+    tok = m.group(1)
+    # The engine renders the shorthand as f"{bug_class} confirmed at {param}", so a finding with a FALSY
+    # param yields the literal "None" — that is the ABSENCE of a recorded parameter, not a parameter named
+    # "None". Reject it (and its casings) rather than show a fabricated input in the signed dossier.
+    return None if tok.lower() == "none" else tok
 
 
 def _surface_phrase(method: str | None, location: str | None) -> str:

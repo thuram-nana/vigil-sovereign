@@ -227,6 +227,8 @@ def test_title_param_recovery_is_conservative() -> None:
     assert _param_from_title("boolean_sqli observed at q") is None               # different verb, not "confirmed"
     assert _param_from_title("mitigated the risk at runtime") is None            # English idiom, not the marker
     assert _param_from_title("Missing Content-Security-Policy") is None          # passive, no shorthand
+    assert _param_from_title("boolean_sqli confirmed at None") is None           # engine f-string of a falsy param
+    assert _param_from_title("xss confirmed at NONE") is None                    # same, any casing
     assert _param_from_title("") is None and _param_from_title(None) is None
 
 
