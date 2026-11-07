@@ -22,9 +22,11 @@ write, so the on-disk store is bounded to the TTL window instead of growing with
 
 FAIL-SAFE: every store/lookup is wrapped so a broken/locked/corrupt cache can only ever degrade to a MISS or a
 no-op — it never raises into, or changes the result of, a completion. SECRETS AT REST: the store holds the
-``system``/``user`` prompt + the raw response (which the gateway redactor masks on a best-effort basis), so
-the DB is owner-only 0600 under the tenant shard, and L2 is DISABLED for a ZDR / ``--ephemeral`` session
-(checked at the ``kernel.llm`` wire-in) so a zero-retention run leaves nothing on disk.
+raw response (the gateway redactor masks it on a best-effort basis) keyed by a ``sha256`` of the
+``system``/``user`` prompt + selection — the prompt TEXT itself is never stored (only its hash), so prompts are
+not recoverable from the DB. The DB is owner-only 0600 under the tenant shard, and L2 is DISABLED for a ZDR /
+``--ephemeral`` session (checked at the ``kernel.llm`` wire-in) so a zero-retention run leaves nothing on disk.
+This store is registered in the data-ground-truth ledger (``docs/data-ground-truth/data-stores.json``).
 """
 from __future__ import annotations
 
