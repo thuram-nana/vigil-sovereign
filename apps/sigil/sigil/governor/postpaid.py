@@ -418,24 +418,28 @@ class PostpaidArrearsLedger:
         so an unsigned/forged/wrong-epoch record is ignored (never allowed to deflate the basis). Fail-closed
         to 0 on an empty id.
 
-        PRUNE SAFETY (red-pen MED, CLOSED): this is a LIVE pairing scan, not snapshot-seeded, because the
-        per-reserve amounts + pairing it needs are NOT carried in the arrears seed (which keeps only the per-org
-        aggregate debited/credited totals + the seen-set — `stranded_postpaid_arrears` guards only those). So a
-        hard prune that archived an UNSETTLED reserve debit would hide it from this scan and let
-        `net_settled_consumed` inflate toward `accrued`, over-billing the (possibly later-cancelled) in-flight
-        launch. The ``stranded_active_postpaid_reserves`` prune tripwire (spine/prune.py, wired into
-        `check_prune_safe`) CLOSES this: it fail-closed REFUSES any prune that would archive a reserve whose
-        settle has not landed, so an in-flight reserve is always present for this live scan. A settled reserve is
-        prunable (it has left the in-flight set and `accrued` is seeded). A snapshot-seeded per-reserve in-flight
-        sub-state — which would let such a prune proceed instead of blocking it — is a PP-2b operational nicety,
-        not a correctness gap."""
+        PRUNE SAFETY: the per-reserve AMOUNTS come from the LIVE window only — ``stranded_active_postpaid_reserves``
+        (spine/prune.py, wired into ``check_prune_safe``) fail-closed REFUSES any prune that would archive an
+        UNSETTLED reserve, so the live window always holds every genuinely in-flight reserve + its paired settle.
+        But the consumed-entry_id SEEN-SET is SNAPSHOT-SEEDED exactly as :meth:`_fold`, so a replay whose entry_id
+        was consumed BEFORE a hard prune is ignored here too. WITHOUT that seed a FULLY-SETTLED reserve (reserve
+        debit + settle credit both below the prune boundary, hence prunable) whose reserve debit was then replayed
+        above the boundary would be counted as in-flight (its pruned settle can no longer pair it live), inflating
+        ``in_flight_reserved`` and so UNDER-counting ``net_settled_consumed = accrued - in_flight`` — an UNDER-BILL
+        (a revenue leak). Seeding the seen-set closes that (symmetric with cost_ledger._in_flight / was_accrued)."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}      # in-flight suffix -> reserved credits (first-mint-wins, idempotent)
         settled: set[str] = set()          # suffixes whose settle credit has landed
-        seen: set = set()
-        for r in self.store.iter_records():
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            seen: set = set()              # anchor mismatch (rotated/empty key) => genesis scan, mirror _fold
+            since = -1
+        else:
+            seen = set(snap.postpaid_arrears_seen_set())   # seed consumed entry_ids so a pre-prune replay is ignored
+            since = snap.base_seq - 1                       # live window only (tripwire keeps every real in-flight here)
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if not isinstance(p, dict):
                 continue
