@@ -122,6 +122,67 @@ def _advance_floor(base: Any, safe_slug: str, seq: int) -> "tuple[bool, str]":
     return True, "ok"
 
 
+def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
+                           base: Any, t: float) -> "tuple[bool, str, Any]":
+    """Owner-pinned VERIFY + BIND of the seam lease for ``slug`` — everything :func:`verify_customer_launch_lease`
+    does EXCEPT the single-use consume. Returns ``(ok, reason, doc)``: on success ``(True, "ok", <lease doc>)``
+    (so a caller can read ``doc.units_reserved``), else ``(False, <reason>, None)``. Fail-CLOSED; never raises.
+    This is the ONE owner-pinned verify+bind shared by the arm (``verify_customer_launch_lease``) and the keyless
+    ceiling read (:func:`read_verified_launch_units`), so they agree by construction — the ceiling a run arms is
+    read from the SAME verified lease the arm consumes, never from an unverified seam/wire value."""
+    safe = _safe_slug(slug)
+    if not safe:
+        return False, "unsafe engagement slug", None
+    try:
+        from .authority.store import load_authority_root
+        owner_root = load_authority_root()        # OUR pinned owner key — NOT the seam-carried trust_root
+    except Exception as e:  # noqa: BLE001 — a malformed/absent root is fail-closed
+        return False, f"owner authority trust root unreadable (fail-closed): {type(e).__name__}", None
+    if owner_root is None:
+        return False, "no owner authority trust root to verify the lease against (fail-closed)", None
+    try:
+        from vigil_core import verify_credit_launch_lease
+        from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
+    except Exception as e:  # noqa: BLE001
+        return False, f"lease seam/verify unavailable (fail-closed): {type(e).__name__}", None
+    bundle = read_credit_lease(base, safe)
+    if bundle is None:
+        return False, "no credit-launch lease on the seam for this engagement", None
+    try:
+        ok, reason = verify_credit_launch_lease(bundle.signed_lease, owner_root)
+    except Exception as e:  # noqa: BLE001
+        return False, f"lease verify raised (fail-closed): {type(e).__name__}", None
+    if not ok:
+        return False, f"lease does not verify under the owner key: {reason}", None
+    doc = bundle.signed_lease.document
+    if doc.engagement_slug != safe:
+        return False, f"lease engagement_slug {doc.engagement_slug!r} != engagement {safe!r}", None
+    if doc.scope_host != host:
+        return False, f"lease scope_host {doc.scope_host!r} != target host {host!r}", None
+    if not tenant or doc.org_id != tenant:
+        return False, f"lease org_id {doc.org_id!r} != this process tenant {tenant!r}", None
+    try:
+        nb, na = doc.not_before.timestamp(), doc.not_after.timestamp()
+    except Exception as e:  # noqa: BLE001
+        return False, f"lease window unreadable (fail-closed): {type(e).__name__}", None
+    if not (nb <= t < na):
+        return False, "lease is outside its validity window", None
+    # K4-1 / K5: a lease whose (slug, nonce) was SETTLED/CANCELED is no longer a runnable launch capability —
+    # refuse on BOTH the arm (consume=True) and the enqueue pre-check (consume=False). Belt-and-braces beyond
+    # the seam tombstone (which already removes the bundle so read_credit_lease returns None in the common
+    # case); this catches a stale/re-published copy.
+    try:
+        if is_lease_settled(base, safe, doc.nonce):
+            return False, "lease has been settled/canceled (no longer a runnable launch capability)", None
+    except Exception as e:  # noqa: BLE001 — FAIL-CLOSED (K4-1 red-pen): if settlement status is UNREADABLE we
+        # REFUSE rather than fall through to consume. is_lease_settled is total today (absent/malformed ⇒ False,
+        # never raises), so this pins a latent fail-OPEN coupling in the arming precondition — it is not a
+        # behaviour change on any currently-reachable input, and the arm must never proceed when its
+        # anti-replay/revocation state cannot be trusted.
+        return False, f"credit-lease settlement status unreadable (fail-closed): {type(e).__name__}", None
+    return True, "ok", doc
+
+
 def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
                                  base_dir: Any = None, now: Optional[float] = None,
                                  consume: bool = True) -> "tuple[bool, str]":
@@ -132,59 +193,35 @@ def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
     ``consume=False`` so it does not burn the single use."""
     base = base_dir if base_dir is not None else _base_dir()
     t = time.time() if now is None else float(now)
-    safe = _safe_slug(slug)
-    if not safe:
-        return False, "unsafe engagement slug"
-    try:
-        from .authority.store import load_authority_root
-        owner_root = load_authority_root()        # OUR pinned owner key — NOT the seam-carried trust_root
-    except Exception as e:  # noqa: BLE001 — a malformed/absent root is fail-closed
-        return False, f"owner authority trust root unreadable (fail-closed): {type(e).__name__}"
-    if owner_root is None:
-        return False, "no owner authority trust root to verify the lease against (fail-closed)"
-    try:
-        from vigil_core import verify_credit_launch_lease
-        from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
-    except Exception as e:  # noqa: BLE001
-        return False, f"lease seam/verify unavailable (fail-closed): {type(e).__name__}"
-    bundle = read_credit_lease(base, safe)
-    if bundle is None:
-        return False, "no credit-launch lease on the seam for this engagement"
-    try:
-        ok, reason = verify_credit_launch_lease(bundle.signed_lease, owner_root)
-    except Exception as e:  # noqa: BLE001
-        return False, f"lease verify raised (fail-closed): {type(e).__name__}"
+    ok, reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t)
     if not ok:
-        return False, f"lease does not verify under the owner key: {reason}"
-    doc = bundle.signed_lease.document
-    if doc.engagement_slug != safe:
-        return False, f"lease engagement_slug {doc.engagement_slug!r} != engagement {safe!r}"
-    if doc.scope_host != host:
-        return False, f"lease scope_host {doc.scope_host!r} != target host {host!r}"
-    if not tenant or doc.org_id != tenant:
-        return False, f"lease org_id {doc.org_id!r} != this process tenant {tenant!r}"
-    try:
-        nb, na = doc.not_before.timestamp(), doc.not_after.timestamp()
-    except Exception as e:  # noqa: BLE001
-        return False, f"lease window unreadable (fail-closed): {type(e).__name__}"
-    if not (nb <= t < na):
-        return False, "lease is outside its validity window"
-    # K4-1 / K5: a lease whose (slug, nonce) was SETTLED/CANCELED is no longer a runnable launch capability —
-    # refuse on BOTH the arm (consume=True) and the enqueue pre-check (consume=False). Belt-and-braces beyond
-    # the seam tombstone (which already removes the bundle so read_credit_lease returns None in the common
-    # case); this catches a stale/re-published copy.
-    try:
-        if is_lease_settled(base, safe, doc.nonce):
-            return False, "lease has been settled/canceled (no longer a runnable launch capability)"
-    except Exception as e:  # noqa: BLE001 — FAIL-CLOSED (K4-1 red-pen): if settlement status is UNREADABLE we
-        # REFUSE rather than fall through to consume. is_lease_settled is total today (absent/malformed ⇒ False,
-        # never raises), so this pins a latent fail-OPEN coupling in the arming precondition — it is not a
-        # behaviour change on any currently-reachable input, and the arm must never proceed when its
-        # anti-replay/revocation state cannot be trusted.
-        return False, f"credit-lease settlement status unreadable (fail-closed): {type(e).__name__}"
+        return False, reason
     if consume:
         # ms resolution REDUCES (does not eliminate) same-second re-lease collisions on the integer floor;
         # same-ms re-leases and backward clock steps still collide — see the KNOWN LIMITATION in the module
         # docstring (fail-closed; the sound fix keys single-use on the nonce, tracked for the K-hardening pass).
-        return _advance_floor(base, safe, int(float(doc.issued_at) * 1000))
+        return _advance_floor(base, _safe_slug(slug), int(float(doc.issued_at) * 1000))
     return True, "ok"
+
+
+def read_verified_launch_units(slug: str, host: str, tenant: Optional[str], *,
+                               base_dir: Any = None, now: Optional[float] = None) -> Optional[int]:
+    """EC-3 — the OWNER-SIGNED, keyless per-run ceiling input: the ``units_reserved`` from the VERIFIED +
+    BOUND credit-launch lease for ``slug`` (the SAME owner-pinned verify+bind the arm uses), or ``None`` when
+    there is no lease that verifies/binds. Verify-ONLY — it does NOT consume the single-use floor (the engine
+    arm's ``verify_customer_launch_lease(consume=True)`` remains the one authoritative consume), so reading the
+    ceiling never burns the launch. Fail-CLOSED: any missing / forged / wrong-host / wrong-tenant / expired /
+    settled lease ⇒ ``None`` (no ceiling derivable ⇒ the run is left unarmed by the caller). Never raises.
+
+    The engine multiplies this by :data:`vigil_core.ENVELOPE_TOKENS_PER_CREDIT` to get the token ceiling, so
+    the hard run budget enforces the SAME reserved envelope the sovereign plane minted — one shared constant,
+    no money number in the engine, no drift test."""
+    base = base_dir if base_dir is not None else _base_dir()
+    t = time.time() if now is None else float(now)
+    ok, _reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t)
+    if not ok or doc is None:
+        return None
+    try:
+        return int(doc.units_reserved)
+    except (TypeError, ValueError):   # a doc that validated already has units_reserved>=1; defence-in-depth
+        return None
