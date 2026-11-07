@@ -12279,9 +12279,11 @@
         V.card("Tenant billing", null, h("div#billing-detail", null,
           h("div.empty", null, "Select a tenant to see its credits, subscription and invoices.")), false),
       ]),
+      h("div#billing-margin", { style: { marginTop: "16px" } }, h("div", { style: { display: "none" } })),
     ]);
     loadBillingPlans();
     loadBillingOrgs();
+    loadBillingMargin();
     if (BADMIN.org) loadBillingDetail(BADMIN.org, BADMIN.orgName);
   }
 
@@ -12328,6 +12330,59 @@
     }).catch(function (e) {
       var host = V.$("#billing-orgs"); if (!host) return;
       V.mount(host, offlineEmpty(e, "The tenant directory is owner-only (manage_org)."));
+    });
+  }
+
+  // EC-6 operator margin reconciliation (owner-tier, flag-gated). /api/billing/margin 404s when
+  // VIGIL_MARGIN_DASHBOARD_ENABLED is off and 403s for a non-owner, so the section stays HIDDEN unless an owner
+  // on a flag-on deployment gets rows — the billing screen is byte-identical otherwise. A null cost/margin
+  // renders "not configured" (never a fabricated 0); a 'mixed'-currency tenant shows a withheld (—) margin,
+  // never a cross-currency number.
+  function loadBillingMargin() {
+    V.getJSON(SOV("/api/billing/margin")).then(function (d) {
+      var host = V.$("#billing-margin"); if (!host) return;
+      if (!d || !Array.isArray(d.tenants)) { V.mount(host, h("div", { style: { display: "none" } })); return; }
+      var cur = d.currency || "USD";
+      function m(v, c) { return (v === null || v === undefined) ? h("span.dim", null, "not configured") : _jMoney(v, c || cur); }
+      function pct(v) { return (v === null || v === undefined) ? h("span.dim", null, "—") : (String(v) + "%"); }
+      var t = d.totals || {};
+      var note = d.rate_configured
+        ? ("cost rate " + d.cost_rate_micro_minor_per_token + " micro-minor/token"
+          + (d.margin_multiplier_k ? (" · target k=" + d.margin_multiplier_k) : ""))
+        : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
+      var rows = d.tenants.map(function (x) {
+        return h("tr", null, [
+          h("td", null, x.name || x.org_id),
+          h("td.mono", null, String(x.committed_tokens)),
+          h("td.mono", null, String(x.in_flight_tokens)),
+          h("td", null, m(x.billed_revenue_minor, x.currency)),
+          h("td", null, m(x.cost_minor, x.currency)),
+          h("td", null, m(x.margin_minor, x.currency)),
+          h("td", null, pct(x.margin_pct)),
+        ]);
+      });
+      V.mount(host, V.card("Margin · billing↔cost reconciliation", d.rate_configured ? "OWNER" : "NOT CONFIGURED", [
+        h("div.hint", null, note),
+        h("div.scroll-x", null, h("table.tbl", null, [
+          h("thead", null, h("tr", null, [h("th", null, "tenant"), h("th", null, "tokens"), h("th", null, "in flight"),
+            h("th", null, "billed"), h("th", null, "cost"), h("th", null, "margin"), h("th", null, "margin %")])),
+          h("tbody", null, rows.length ? rows
+            : [h("tr", null, h("td", { colspan: "7" }, h("div.empty", null, "no tenant activity")))]),
+          h("tfoot", null, h("tr", null, [
+            h("td", null, h("b", null, "TOTAL (" + String(t.tenant_count || 0) + ")")),
+            h("td.mono", null, String(t.committed_tokens || 0)),
+            h("td.mono", null, String(t.in_flight_tokens || 0)),
+            h("td", null, m(t.billed_revenue_minor)),
+            h("td", null, m(t.cost_minor)),
+            h("td", null, m(t.margin_minor)),
+            h("td", null, pct(t.margin_pct)),
+          ])),
+        ])),
+      ], true));
+    }).catch(function () {
+      // 404 (flag off) / 403 (non-owner) / sovereign offline → keep the margin section HIDDEN (byte-identical).
+      var host = V.$("#billing-margin"); if (!host) return;
+      V.mount(host, h("div", { style: { display: "none" } }));
     });
   }
 
