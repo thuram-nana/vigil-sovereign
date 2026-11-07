@@ -36,6 +36,7 @@ assert_no_offense()
 
 from .billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, Entitlement  # noqa: E402
 from .subscription import _check_plan_id  # noqa: E402  (mirror the mint-path plan_id validator — fail-closed at import, red-pen D/C2)
+from vigil_core import run_tier  # noqa: E402  (EC-7: the PURE run-tier leaf — units band + tier→profile/routing; both planes import it)
 
 _PERIOD_MONTH_S = 30 * 24 * 3600.0          # a monthly subscription period, in seconds
 _AEGIS_OBSERVE_PER_HOST = 4900             # PLACEHOLDER per-protected-host monthly price (minor units)
@@ -172,6 +173,82 @@ for _e in _CATALOG:
         _plan_seen.add(_e.plan_id)
 
 
+# ==================================================================================================
+# EC-7 — tiered Quick/Deep LAUNCH PRODUCTS (default-OFF; byte-identical to the pre-EC-7 catalog when off).
+# A launch product is NOT a payment offering (not in _CATALOG): it names what a LAUNCH runs — "quick" (a
+# surface roster, cheaper models, small budget) or "deep" (the full roster, capable models, large budget). The
+# run tier is RE-DERIVED at engage time from the launch's signed units_reserved (vigil_core.run_tier), so EC-7
+# adds no new signed field and no snapshot bump; the catalog just validates each product's declared tier
+# matches its units band. Offered only when config.tiered_products_enabled().
+# ==================================================================================================
+@dataclass(frozen=True)
+class LaunchProduct:
+    """One EC-7 tiered launch product. `units` is the credits this launch reserves (the existing signed
+    units_reserved); `run_tier` (RUN_TIERS) is the declared tier, which MUST equal the band-derived tier for
+    those units (validated fail-closed when EC-7 is offered — see `_validate_launch_product_band`) so the
+    product definition and the runtime derivation never diverge."""
+    product_id: str
+    display_name: str
+    run_tier: str
+    units: int
+
+    def public(self) -> dict:
+        """The PUBLIC projection — what a customer sees for a launch product."""
+        return {"product_id": self.product_id, "name": self.display_name, "run_tier": self.run_tier,
+                "units": self.units, "profile": run_tier.engage_profile_for(self.run_tier)}
+
+
+# PLACEHOLDER units / names — the owner sets the real unit sizes (what a Quick vs Deep run costs the customer)
+# and tunes the units band (vigil_core.run_tier.quick_max_units) to sit BETWEEN them; the validator below fails
+# the deploy loudly if the declared tier and the band ever disagree.
+_LAUNCH_PRODUCTS: tuple[LaunchProduct, ...] = (
+    LaunchProduct("vigil_launch_quick", "Quick scan", "quick", units=3),
+    LaunchProduct("vigil_launch_deep", "Deep scan", "deep", units=20),
+)
+
+
+def _validate_launch_product_structure(products: tuple[LaunchProduct, ...]) -> None:
+    """ENV-INDEPENDENT structural validation — runs at import UNCONDITIONALLY and reads NO env var, so it is
+    byte-identical regardless of VIGIL_TIERED_PRODUCTS / VIGIL_QUICK_MAX_UNITS: a malformed product (empty /
+    duplicate id, unknown run_tier, non-positive or bool units) raises, so a bad DEFINITION fails the deploy
+    loudly whether or not EC-7 is offered."""
+    seen: set[str] = set()
+    for p in products:
+        if not p.product_id or p.product_id in seen:
+            raise ValueError(f"launch product_id must be non-empty and unique: {p.product_id!r}")
+        seen.add(p.product_id)
+        if p.run_tier not in run_tier.RUN_TIERS:
+            raise ValueError(f"launch product {p.product_id!r}: run_tier must be one of "
+                             f"{tuple(run_tier.RUN_TIERS)}, got {p.run_tier!r}")
+        if isinstance(p.units, bool) or not isinstance(p.units, int) or p.units < 1:
+            raise ValueError(f"launch product {p.product_id!r}: units must be an int >= 1, got {p.units!r}")
+
+
+def _validate_launch_product_band(products: tuple[LaunchProduct, ...]) -> None:
+    """BAND-consistency validation — reads the owner-tunable band (VIGIL_QUICK_MAX_UNITS, via run_tier): each
+    product's DECLARED tier MUST equal its units' band-derived tier (never ship a Quick product that silently
+    runs Deep, or vice versa). Run ONLY when EC-7 is OFFERED (gated below + in launch_products), so a band
+    misconfiguration fails closed-and-LOUD when the products are live, but reading VIGIL_QUICK_MAX_UNITS has
+    ZERO effect on the catalog import / money plane when VIGIL_TIERED_PRODUCTS is unset — the EC-7 default-OFF
+    byte-identical invariant (an operator pre-tuning the band while EC-7 is off never crashes plans())."""
+    for p in products:
+        derived = run_tier.run_tier_for_units(p.units)
+        if derived != p.run_tier:
+            raise ValueError(f"launch product {p.product_id!r}: units {p.units} fall in the {derived!r} band "
+                             f"but the product declares run_tier {p.run_tier!r} (band mismatch — tune the units "
+                             f"or VIGIL_QUICK_MAX_UNITS)")
+
+
+# Structural validation ALWAYS (env-independent ⇒ byte-identical). The band check runs at import ONLY when
+# EC-7 is ON — gated on the SHARED run_tier flag reader (NOT sigil.config, which catalog cannot import at
+# module scope), so a started-with-EC-7-on deploy still fails FAST on a bad band, while an EC-7-off import
+# never reads VIGIL_QUICK_MAX_UNITS. launch_products() re-checks the band so OFFERED products are always
+# band-coherent even if the flag is flipped on after import.
+_validate_launch_product_structure(_LAUNCH_PRODUCTS)
+if run_tier.tiered_products_enabled():
+    _validate_launch_product_band(_LAUNCH_PRODUCTS)
+
+
 def monitoring_plan(plan_id: str) -> "MonitoringPlan | None":
     """The catalog's monitoring entitlement for a subscription plan_id (None if it is not a monitoring plan).
     The CATALOG decides what a plan buys — never a client field."""
@@ -211,6 +288,29 @@ def expected_amounts() -> dict[str, tuple[int, str]]:
 def plans() -> list[dict]:
     """The PUBLIC pricing projection for the pricing page / list-plans endpoint, in catalog order."""
     return [e.public() for e in _offered()]
+
+
+def launch_products() -> tuple[LaunchProduct, ...]:
+    """The EC-7 tiered Quick/Deep launch products ON OFFER — `()` unless config.tiered_products_enabled()
+    (default OFF ⇒ byte-identical to pre-EC-7: no tiered product is listed, and plans() / expected_amounts() /
+    entitlements() are unchanged). When offered, the band consistency is re-checked so an OFFERED product is
+    always coherent with the live band (fail-closed-loud on a misconfiguration). NOTE: these products are
+    DEFINED and LISTED here; wiring a customer's product choice into the credit RESERVATION (so a Deep launch
+    reserves its units) is a follow-on — until then a launch reserves the default units (base 'quick' tier)."""
+    from .. import config
+    if not config.tiered_products_enabled():
+        return ()
+    _validate_launch_product_band(_LAUNCH_PRODUCTS)   # offered ⇒ always band-coherent (catches a post-import flag flip)
+    return _LAUNCH_PRODUCTS
+
+
+def launch_product(product_id: str) -> "LaunchProduct | None":
+    """The offered launch product for `product_id`, or None (unknown / not offered / flag off). The CATALOG
+    decides what a product runs — never a client field."""
+    for p in launch_products():
+        if p.product_id == product_id:
+            return p
+    return None
 
 
 def postpaid_per_credit_minor() -> int:
