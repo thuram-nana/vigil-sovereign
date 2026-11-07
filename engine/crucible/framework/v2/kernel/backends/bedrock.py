@@ -51,6 +51,7 @@ from ..llm import (
     make_call_trace,
     parse_json_response,
     sampling_create_kwargs,
+    system_param,
 )
 
 
@@ -178,7 +179,11 @@ class BedrockBackend(LLMBackend):
                 # interface as the standard Anthropic client.
                 rsp = client.messages.create(  # type: ignore[attr-defined]
                     model=self.model,
-                    system=sys_prompt,
+                    # EC-1a: system_param applies the prompt-cache breakpoint (see anthropic.py +
+                    # llm.system_param); Bedrock supports Anthropic prompt caching (isolated per
+                    # organization). Caching is skipped (plain string) under an active --ephemeral
+                    # session or the operator opt-out, so the zero-retention posture is preserved.
+                    system=system_param(sys_prompt, zdr=getattr(self, "zdr", False)),
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a
@@ -212,8 +217,13 @@ class BedrockBackend(LLMBackend):
                     continue
                 raise
 
-            tokens_in = getattr(rsp.usage, "input_tokens", 0) if hasattr(rsp, "usage") else 0
-            tokens_out = getattr(rsp.usage, "output_tokens", 0) if hasattr(rsp, "usage") else 0
+            usage = getattr(rsp, "usage", None)
+            raw_input = getattr(usage, "input_tokens", 0) or 0
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            # EC-1a: fold cached input into tokens_in so the budget ledger is unchanged (see anthropic.py).
+            tokens_in = raw_input + cache_creation + cache_read
+            tokens_out = getattr(usage, "output_tokens", 0) or 0
 
             trace = make_call_trace(
                 backend=self.name,
@@ -222,6 +232,8 @@ class BedrockBackend(LLMBackend):
                 cognitive_sections=prompt.cognitive_sections,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
                 latency_ms=latency,
             )
             _log.info(
@@ -229,6 +241,7 @@ class BedrockBackend(LLMBackend):
                 schema=prompt.schema_name,
                 model=self.model, region=self.region,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                cache_creation=cache_creation, cache_read=cache_read,
                 latency_ms=int(latency),
             )
             return LLMResult(parsed=parsed, trace=trace, raw_response=raw)

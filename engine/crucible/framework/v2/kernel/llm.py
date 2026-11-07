@@ -170,6 +170,37 @@ def sampling_create_kwargs(model: str, temperature: float, effort: str | None) -
     return {"output_config": {"effort": eff}} if eff else {}
 
 
+# EC-1a prompt caching — the `system` param for a first-party anthropic-SDK messages.create.
+# Caching is a COST optimization and must NEVER override the zero-data-retention sovereignty
+# posture, so the ephemeral cache_control breakpoint is attached ONLY when caching is allowed;
+# otherwise the plain pre-caching string is sent, so no vendor-side prompt retention is requested.
+def prompt_cache_disabled() -> bool:
+    """Operator opt-out (CRUCIBLE_PROMPT_CACHE_DISABLED) — an escape hatch for a model/region that
+    rejects cache_control. Default OFF (caching ON)."""
+    return os.environ.get("CRUCIBLE_PROMPT_CACHE_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ephemeral_session_active() -> bool:
+    """True while a --ephemeral / ZDR session is active (common.ephemeral). Lazy + guarded so a
+    status query can never break a completion, and so importing llm never pulls in common.ephemeral."""
+    try:
+        from ..common import ephemeral
+        return bool(ephemeral.is_active())
+    except Exception:                                      # noqa: BLE001 — metering/posture query, never a gate
+        return False
+
+
+def system_param(sys_prompt: str, *, zdr: bool = False) -> "str | list[dict]":
+    """Return a cache_control content block (one ephemeral breakpoint at the end of the stable
+    system span) to enable Anthropic prompt caching — UNLESS caching must be off: a ZDR backend, an
+    active --ephemeral session (common.ephemeral: 'leaves nothing behind / never route reasoning
+    through a data-retaining vendor'), or the operator opt-out. In those cases the plain string is
+    returned — the exact pre-EC-1a wire shape — so the vendor is never asked to retain the prefix."""
+    if zdr or prompt_cache_disabled() or _ephemeral_session_active():
+        return sys_prompt
+    return [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]
+
+
 class LLMBackend(abc.ABC):
     """All backends implement this. Subclasses set `name`."""
 
@@ -495,6 +526,7 @@ def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
 def make_call_trace(
     backend: str, *, is_dryrun: bool, cognitive_doc: str,
     cognitive_sections: list[str], tokens_in: int = 0, tokens_out: int = 0,
+    cache_creation_input_tokens: int = 0, cache_read_input_tokens: int = 0,
     latency_ms: float = 0.0,
 ) -> CallTrace:
     return CallTrace(
@@ -504,6 +536,8 @@ def make_call_trace(
         cognitive_sections=cognitive_sections,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         latency_ms=latency_ms,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
