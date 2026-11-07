@@ -15,6 +15,8 @@ Mutation-verify targets (each neuter reds a named test):
   * skip the re-parse-against-live-schema guard                -> test_unparseable_cached_value_is_a_miss
   * a cache HIT still calls the provider (wiring)              -> test_wiring_hit_skips_the_provider
   * cache a non-deterministic call (wiring)                    -> test_wiring_nondeterministic_is_never_cached
+  * drop the store's answering-backend provenance guard        -> test_wiring_failover_result_is_not_cached
+  * drop the store's expired-row eviction                      -> test_store_evicts_expired_rows
 """
 from __future__ import annotations
 
@@ -59,9 +61,12 @@ def _p(system="SYS", user="USR", **kw) -> Prompt:
     return Prompt(**d)
 
 
-def _res(x: int, raw: str | None = None) -> LLMResult:
+def _res(x: int, raw: str | None = None, backend: str = "fake") -> LLMResult:
+    # ``backend`` is the ANSWERING backend recorded in the trace: the L2 store provenance guard caches a result
+    # only when its trace.backend matches the backend the key is built from, so a backend double must record its
+    # own name here (not a fixed sentinel) or its fresh completions would be (correctly) refused by that guard.
     return LLMResult(parsed=S(x=x),
-                     trace=make_call_trace("fake", is_dryrun=False, cognitive_doc="doc",
+                     trace=make_call_trace(backend, is_dryrun=False, cognitive_doc="doc",
                                            cognitive_sections=[], tokens_in=7, tokens_out=2),
                      raw_response=raw if raw is not None else ('{"x": %d}' % x))
 
@@ -180,6 +185,30 @@ def test_ttl_expiry_is_a_miss(monkeypatch):
     assert _lookup(p) is None                             # expired -> miss (recompute refreshes identically)
 
 
+def test_store_evicts_expired_rows(monkeypatch):
+    # Growth bound: an expired row already reads as a MISS, but store() also DELETES expired rows on each fresh
+    # write so the on-disk store cannot grow without bound. Seed a stale row directly, then a fresh store must
+    # reap it while keeping the fresh row.
+    monkeypatch.setenv("CRUCIBLE_L2_TTL_S", "100")
+    clock = [1000.0]
+    monkeypatch.setattr(rc.time, "time", lambda: clock[0])
+    conn = rc._connect()
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO l2 (key, raw_response, schema_name, backend, model, tokens_in, tokens_out, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("stale-key", '{"x": 1}', "S", "fake", _OLD, 0, 0, 800.0),   # age 200 > TTL 100 at clock 1000
+    )
+    conn.commit()
+    conn.close()
+    _store(_p(user="FRESH"), 9)                            # a fresh store() triggers eviction (threshold 900)
+    conn = rc._connect()
+    keys = {r[0] for r in conn.execute("SELECT key FROM l2").fetchall()}
+    conn.close()
+    assert "stale-key" not in keys                         # the expired row was reaped
+    assert len(keys) == 1                                  # only the fresh row remains (bounded to the TTL window)
+
+
 def test_unparseable_cached_value_is_a_miss():
     # a stored raw that no longer parses against the LIVE prompt.schema is a MISS, never a wrong answer.
     p = _p()
@@ -225,7 +254,9 @@ class _CountingBackend(LLMBackend):
 
     def complete(self, prompt):
         self.calls += 1
-        return _res(self.calls)                           # a DIFFERENT value each call: a hit serves the first
+        # record THIS backend as the answerer (trace.backend == self.name) so the store's provenance guard
+        # accepts it — a real backend builds its trace the same way (make_call_trace(backend=self.name)).
+        return _res(self.calls, backend=self.name)        # a DIFFERENT value each call: a hit serves the first
 
 
 @pytest.fixture
@@ -298,3 +329,25 @@ def test_wiring_failover_hit_survives_budget_clamp(_no_gateway, monkeypatch):
     llm.complete_with_failover(_p(max_tokens=100))
     r2 = llm.complete_with_failover(_p(max_tokens=100))
     assert be.calls == 1 and r2.trace.cached is True    # HIT despite the clamp (keyed on the original max_tokens)
+
+
+def test_wiring_failover_result_is_not_cached(_no_gateway, monkeypatch):
+    # complete_with_failover builds the L2 key from the PRIMARY (get_backend()), but on a transient overload it
+    # may fail over IN-TIER to a SECONDARY backend. Caching that answer under the primary's key would
+    # mis-provenance the store — and a current-gen secondary is NOT determinism-guaranteed — so a failover
+    # result is NEVER cached. Simulate it by having the routed call report a different answering backend than
+    # the primary the key is keyed on; the second identical call must therefore re-route (not HIT).
+    primary = _CountingBackend(model=_OLD)
+    primary.name = "primary"                              # the backend the key is built from
+    monkeypatch.setattr(llm, "get_backend", lambda *a, **k: primary)
+    routed = [0]
+
+    def _failover_egress(prompt):
+        routed[0] += 1
+        return _res(routed[0], backend="secondary-overload-failover")   # a DIFFERENT backend answered
+
+    monkeypatch.setattr(llm, "_route_urk_egress", _failover_egress)
+    llm.complete_with_failover(_p())
+    llm.complete_with_failover(_p())                      # identical deterministic prompt
+    assert routed[0] == 2                                 # the second call was NOT served from cache (no store)
+    assert rc.stats()["stores"] == 0                      # the failover result was never persisted

@@ -17,6 +17,8 @@ even an unsharded single-tenant default never serves org A's answer to org B or 
 
 DETERMINISM (framework doctrine): :func:`l2_key` is a PURE function — no wallclock, no RNG. ``created_at`` is
 stored for TTL hygiene ONLY and is never in the key, so a TTL-expired entry recomputes to the identical value.
+GROWTH BOUND: an expired row already reads as a MISS, and :func:`store` also DELETES expired rows on each fresh
+write, so the on-disk store is bounded to the TTL window instead of growing without bound.
 
 FAIL-SAFE: every store/lookup is wrapped so a broken/locked/corrupt cache can only ever degrade to a MISS or a
 no-op — it never raises into, or changes the result of, a completion. SECRETS AT REST: the store holds the
@@ -222,6 +224,15 @@ def store(prompt: Any, result: Any, *, backend: str, model: str, tier: str,
         )
         conn.commit()
         _STATS["stores"] += 1
+        # EVICTION (growth bound): a TTL-expired row already reads as a MISS (lookup re-checks the TTL), but it
+        # is never otherwise deleted, so without this the store file would grow without bound. Reclaim the dead
+        # rows on each fresh store, AFTER the value's own commit so an eviction hiccup never loses the write.
+        # Best-effort (its own try/except): the table is bounded by the TTL window, so the scan stays cheap.
+        try:
+            conn.execute("DELETE FROM l2 WHERE created_at < ?", (time.time() - _ttl_s(),))
+            conn.commit()
+        except Exception:                                 # noqa: BLE001 — eviction never breaks a store
+            pass
     except Exception:                                     # noqa: BLE001
         pass
     finally:

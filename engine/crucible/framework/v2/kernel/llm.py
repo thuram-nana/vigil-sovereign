@@ -370,7 +370,14 @@ def _l2_lookup(prompt: "Prompt", backend: "LLMBackend"):
 
 
 def _l2_store(prompt: "Prompt", result: "LLMResult", backend: "LLMBackend") -> None:
-    """Persist a fresh (MISS-path) deterministic completion. Never caches a dry-run or already-cached result."""
+    """Persist a fresh (MISS-path) deterministic completion. Never caches a dry-run or already-cached result,
+    and never caches a result a DIFFERENT backend produced than the one the key is built from. The L2 key is
+    built from the PRIMARY (``get_backend()``), but ``complete_with_failover`` may fail over IN-TIER to a
+    secondary backend on a transient overload; caching that answer under the primary's key would MIS-PROVENANCE
+    the store — a later lookup keyed on the primary would serve a value a different model actually produced, and
+    a current-gen secondary (NOT determinism-guaranteed) could be cached under the older-model key. So the store
+    is gated on the ANSWERING backend (``result.trace.backend``) matching ``backend.name``: a failover is a rare
+    overload event, and skipping its store costs at most one re-call — never a cross-model or stale HIT."""
     try:
         from . import response_cache as _rc
         model = str(getattr(backend, "model", "") or "")
@@ -380,6 +387,8 @@ def _l2_store(prompt: "Prompt", result: "LLMResult", backend: "LLMBackend") -> N
         tr = getattr(result, "trace", None)
         if tr is not None and (getattr(tr, "cached", False) or getattr(tr, "is_dryrun", False)):
             return
+        if str(getattr(tr, "backend", "") or "") != str(getattr(backend, "name", "") or ""):
+            return                                       # a failover/secondary backend answered: never cache it
         org, slug = _rc.resolve_scope()
         _rc.store(prompt, result, backend=str(getattr(backend, "name", "") or ""), model=model,
                   tier=_l2_tier(), org_id=org, slug=slug)
