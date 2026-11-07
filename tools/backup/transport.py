@@ -405,4 +405,16 @@ def get_transport(spec: str) -> Transport:
         return factory(spec[len(scheme) + len("://"):])
     if spec.startswith("local:"):
         return LocalDirectoryTransport(spec[len("local:"):])
+    # Guard the silent local-directory fallthrough: a single-colon near-miss of a remote scheme — e.g.
+    # ``s3:bucket/prefix``, one slash short of the documented ``s3://bucket/prefix`` (a mistake that
+    # rsync's own accepted ``rsync:host:path`` form primes) — must NOT resolve to a LocalDirectoryTransport.
+    # That would write the "off-host" copy to the engine's OWN disk AND pass the W7-4 off-host verify (a
+    # false green: the only second copy then sits on the dying host, discovered at disaster-recovery time).
+    near = re.match(r"^([a-z][a-z0-9+.\-]*):", spec)        # a <scheme>: prefix that was not <scheme>://
+    if near and near.group(1) in _REGISTRY:
+        scheme = near.group(1)
+        raise TransportError(
+            f"{scheme} destination must be {scheme}://… (got single-colon {spec!r}, which is NOT a remote "
+            f"destination); did you mean '{scheme}://{spec[len(scheme) + 1:]}'? "
+            f"(use 'local:{spec}' if you really mean a local directory named that)")
     return LocalDirectoryTransport(spec)                    # a bare path is the local-directory backend

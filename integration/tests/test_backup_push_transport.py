@@ -316,6 +316,19 @@ def test_get_transport_resolves_s3():
         S3Transport("")
 
 
+def test_get_transport_rejects_single_colon_s3_nearmiss(tmp_path):
+    """Red-pen fold: a one-slash-short `s3:bucket/prefix` must NOT silently become a LocalDirectoryTransport
+    (an on-host copy that passes the off-host verify — a false green). It fails closed with a did-you-mean."""
+    with pytest.raises(TransportError, match="did you mean 's3://"):
+        get_transport("s3:my-bucket/vigil")
+    with pytest.raises(TransportError, match="did you mean 's3://"):
+        get_transport("s3:")
+    # the explicit local: escape hatch still works for a (bizarre) directory literally named like a scheme
+    assert isinstance(get_transport("local:s3:weird-dir"), LocalDirectoryTransport)
+    # a genuine bare local path whose first segment is not a registered scheme is unaffected
+    assert isinstance(get_transport(str(tmp_path)), LocalDirectoryTransport)
+
+
 def test_s3_transport_push_and_verify_roundtrip(tmp_path):
     bucket = tmp_path / "s3"
     log: list = []
