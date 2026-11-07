@@ -387,3 +387,34 @@ def test_check_prune_safe_reraises_nonempty_reserve_floor_wiring_only(tmp_path, 
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "in-flight" in str(e.value).lower() and "ghost-tenant" in str(e.value)
+
+
+# ---- (g) in_flight_reserved is prune-durable against a replayed settled reserve (EC-4 red-pen cross-finding) ----
+def test_in_flight_reserved_is_prune_durable_against_a_replayed_settled_reserve(monkeypatch):
+    # A FULLY SETTLED postpaid reserve (reserve debit + settle credit both below K) is prunable — the in-flight
+    # tripwire allows it (the reserve is settled). If its reserve DEBIT is then replayed above K, in_flight_reserved
+    # MUST still read 0: the settle was pruned (cannot pair live), so only the SNAPSHOT-SEEDED seen-set stops the
+    # replay from resurrecting as a phantom in-flight draw — which would UNDER-count net_settled_consumed = accrued
+    # - in_flight (an UNDER-BILL / revenue leak). The neutered control (seen stripped) reproduces the phantom. This
+    # is the pattern-level finding the EC-4 cost-ledger red-pen surfaced in postpaid's mirror of _in_flight.
+    store = _store()
+    a = _arr(store)
+    a.accrue("acme", 100, entry_id="reserve-postpaid:acme:n1", issued_at=1.0)  # seq 0 reserve (debit)
+    a.settle("acme", 40, entry_id="settle-postpaid:acme:n1", issued_at=2.0)    # seq 1 settle (credit) -> fully settled
+    captured_reserve = store.get(0).payload
+    k = _marker(store)                                                         # seq 2
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OP, base_seq=k, snapshot_seq=k - 1)
+    assert (POSTPAID_DEBIT_SIGNAL, "acme", "reserve-postpaid:acme:n1") in snap.postpaid_arrears_seen_set()
+
+    store.append(kind="event", source="governor", actor="WARDEN", payload=captured_reserve)  # seq 3: replay (live)
+    pruned = PrunedView(store, k)                                             # reserve+settle (seq 0,1) now hidden
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    assert PostpaidArrearsLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).in_flight_reserved("acme") == 0, \
+        "a replayed already-settled+pruned reserve must NOT resurrect as a phantom in-flight draw (seeded seen-set)"
+
+    snap_no_seen = snap.model_copy(update={"postpaid_arrears_seen": []})
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap_no_seen))
+    assert PostpaidArrearsLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).in_flight_reserved("acme") == 100, \
+        "isolates the seed carry: without it the replayed reserve resurrects as 100 phantom in-flight credits"
