@@ -215,6 +215,17 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def margin_dashboard_enabled() -> bool:
+    """True iff the EC-6 operator MARGIN dashboard route is ON (`VIGIL_MARGIN_DASHBOARD_ENABLED` affirmative).
+    OFF by default (mirrors `customer_monitoring_enabled`): with it off the owner-tier `/api/billing/margin`
+    read is absent (404 exactly as an unknown route) — the SERVER surface is byte-identical to a build without
+    EC-6. (The cockpit static assets ship unconditionally; the panel stays hidden and the client probes the
+    route once on load, then latches OFF on the 404/403 so it never re-polls — the panel reveals only for an
+    owner with the flag on.) The read is still owner-gated AND fail-closed on an unset cost rate even when on —
+    this flag only decides whether the route exists at all (a pure READ projection; nothing is ever minted)."""
+    return (os.environ.get("VIGIL_MARGIN_DASHBOARD_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
