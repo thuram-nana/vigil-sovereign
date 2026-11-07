@@ -325,13 +325,92 @@ def reset_cache() -> None:
     _cached_backend = None
 
 
+# EC-1b — L2 deterministic response cache seam. A deterministic completion (single-shot, temperature 0, older
+# model) is served from the per-tenant local store instead of re-calling the provider, at zero tokens. The
+# cache sits OUTSIDE the egress chokepoint, so a HIT reaches no provider — and therefore skips NO security
+# gate: a MISS runs the full gated path (throttle -> redact -> authorize -> route -> audit) unchanged, and only
+# then stores. Fail-safe (any error -> the normal path) and OFF (byte-identical) for a non-deterministic /
+# dry-run / ZDR-ephemeral call or when the cache kill-switch is set.
+def _l2_backend_for_failover(prompt: "Prompt"):
+    """The auto-selected backend to key the L2 cache on — resolved ONLY when the prompt is plausibly
+    cacheable (cheap pre-gate: cache enabled, not ephemeral, samples==1, temperature==0.0), so a
+    non-deterministic call never resolves a backend or opens the cache for L2's sake. None => skip L2."""
+    try:
+        from . import response_cache as _rc
+        if (_ephemeral_session_active() or _rc.l2_disabled()
+                or int(getattr(prompt, "samples", 1)) != 1
+                or float(getattr(prompt, "temperature", 0.2)) != 0.0):
+            return None
+        return get_backend()
+    except Exception:                                    # noqa: BLE001 — never let L2 break a completion
+        return None
+
+
+def _l2_tier() -> str:
+    try:
+        return str(getattr(sovereignty.current().tier, "value", "") or "")
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _l2_lookup(prompt: "Prompt", backend: "LLMBackend"):
+    """A rebuilt LLMResult on a cache HIT, else None. Runs the FULL determinism gate (incl. the
+    model-family check now that the backend is known) + ZDR/dry-run/kill-switch exclusions."""
+    try:
+        from . import response_cache as _rc
+        model = str(getattr(backend, "model", "") or "")
+        if (bool(getattr(backend, "is_dryrun", False)) or _ephemeral_session_active()
+                or _rc.l2_disabled() or not _rc.is_deterministic(prompt, model)):
+            return None
+        org, slug = _rc.resolve_scope()
+        return _rc.lookup(prompt, backend=str(getattr(backend, "name", "") or ""), model=model,
+                          tier=_l2_tier(), org_id=org, slug=slug)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _l2_store(prompt: "Prompt", result: "LLMResult", backend: "LLMBackend") -> None:
+    """Persist a fresh (MISS-path) deterministic completion. Never caches a dry-run or already-cached result,
+    and never caches a result a DIFFERENT backend produced than the one the key is built from. The L2 key is
+    built from the PRIMARY (``get_backend()``), but ``complete_with_failover`` may fail over IN-TIER to a
+    secondary backend on a transient overload; caching that answer under the primary's key would MIS-PROVENANCE
+    the store — a later lookup keyed on the primary would serve a value a different model actually produced, and
+    a current-gen secondary (NOT determinism-guaranteed) could be cached under the older-model key. So the store
+    is gated on the ANSWERING backend (``result.trace.backend``) matching ``backend.name``: a failover is a rare
+    overload event, and skipping its store costs at most one re-call — never a cross-model or stale HIT."""
+    try:
+        from . import response_cache as _rc
+        model = str(getattr(backend, "model", "") or "")
+        if (bool(getattr(backend, "is_dryrun", False)) or _ephemeral_session_active()
+                or _rc.l2_disabled() or not _rc.is_deterministic(prompt, model)):
+            return
+        tr = getattr(result, "trace", None)
+        if tr is not None and (getattr(tr, "cached", False) or getattr(tr, "is_dryrun", False)):
+            return
+        if str(getattr(tr, "backend", "") or "") != str(getattr(backend, "name", "") or ""):
+            return                                       # a failover/secondary backend answered: never cache it
+        org, slug = _rc.resolve_scope()
+        _rc.store(prompt, result, backend=str(getattr(backend, "name", "") or ""), model=model,
+                  tier=_l2_tier(), org_id=org, slug=slug)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def complete_with_failover(prompt: "Prompt") -> "LLMResult":
     """Complete ``prompt`` with failover (see ``_complete_with_failover_raw`` for the failover contract),
     wrapped in the per-tool TOKEN BUDGET: consult the current tool's budget and apply WARN + THROTTLE
     (a bounded delay, NEVER a block) before the call, clamp the per-call output ceiling, and charge the
     ACTUAL tokens the call spent afterwards. The tool is read from ``token_budget.current_tool()`` (a
     subsystem sets it with ``using_tool(...)``; the default is ``engine``). Metering never changes what
-    the call does — it can only slow it and record it."""
+    the call does — it can only slow it and record it.
+
+    EC-1b: a deterministic prompt is first looked up in the L2 response cache; a HIT returns with no
+    provider call and no budget charge (0 tokens). A MISS runs the gated path below unchanged, then stores."""
+    _b = _l2_backend_for_failover(prompt)
+    if _b is not None:
+        _hit = _l2_lookup(prompt, _b)
+        if _hit is not None:
+            return _hit                                  # served from cache: no throttle, no egress, no charge
     tool = _tb_tool()
     _tb_throttle(tool)                                   # warn + throttle (bounded), never blocks
     _mx = getattr(prompt, "max_tokens", None)            # defensive: a minimal prompt double may lack it
@@ -342,6 +421,19 @@ def complete_with_failover(prompt: "Prompt") -> "LLMResult":
             pass
     result = _route_urk_egress(prompt)                   # M4.1: through the single egress chokepoint
     _tb_record(tool, getattr(result, "trace", None))     # None trace records nothing (spent == 0)
+    if _b is not None:
+        # Store under the ORIGINAL (pre-clamp) max_tokens. The budget clamp mutated prompt.max_tokens for the
+        # provider call, but the L2 LOOKUP above keyed on the original, so the store must too — otherwise L2
+        # would never hit under budget pressure (a silent cost-saving defeat). A HIT is free (0 tokens), so the
+        # clamp (back-pressure) is a miss-path-only concern; the cache maps the caller's deterministic REQUEST
+        # to its response. Leaving max_tokens at the original also undoes the clamp's in-place mutation of the
+        # caller's prompt (cleaner; a reused prompt then re-keys on the original too).
+        if _mx is not None:
+            try:
+                prompt.max_tokens = _mx
+            except (AttributeError, TypeError):
+                pass
+        _l2_store(prompt, result, _b)                    # cache the fresh deterministic result (fail-safe)
     return result
 
 
@@ -445,9 +537,17 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     is the caller's choice, so there is NO failover and NO sovereignty pre-assert (the backend was already
     constructed, which asserts the policy); the gateway still masks every credential shape it recognises in the
     prompt, records the unified audit entry, and runs the call inside the egress context so a bypass fails
-    closed. When the shared core is absent the call still completes via the raw round-trip."""
+    closed. When the shared core is absent the call still completes via the raw round-trip.
+
+    EC-1b: a deterministic prompt on this explicit backend is first looked up in the L2 response cache; a
+    HIT returns with no provider round-trip; a MISS runs the gated path below unchanged, then stores."""
+    _hit = _l2_lookup(prompt, backend)
+    if _hit is not None:
+        return _hit
     if _gw is None:
-        return _backend_complete_raw(backend, prompt)
+        _r = _backend_complete_raw(backend, prompt)
+        _l2_store(prompt, _r, backend)
+        return _r
 
     def _invoke(redacted: dict) -> "LLMResult":
         return _backend_complete_raw(backend, _apply_redaction_to_prompt(prompt, redacted))
@@ -461,6 +561,7 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     res = _gw.egress(payload, case=case)
     if res.refused:
         raise BackendUnavailable(res.refusal_reason)
+    _l2_store(prompt, res.output, backend)
     return res.output
 
 
@@ -527,7 +628,7 @@ def make_call_trace(
     backend: str, *, is_dryrun: bool, cognitive_doc: str,
     cognitive_sections: list[str], tokens_in: int = 0, tokens_out: int = 0,
     cache_creation_input_tokens: int = 0, cache_read_input_tokens: int = 0,
-    latency_ms: float = 0.0,
+    cached: bool = False, latency_ms: float = 0.0,
 ) -> CallTrace:
     return CallTrace(
         backend=backend,
@@ -538,6 +639,7 @@ def make_call_trace(
         tokens_out=tokens_out,
         cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
+        cached=cached,
         latency_ms=latency_ms,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )

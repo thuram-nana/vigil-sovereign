@@ -60,7 +60,7 @@ def test_discovered_sinks_are_exactly_the_expected_set() -> None:
     assert g.discover_sinks() == {
         "evidence", ".blackboard", ".evidence-keys", ".entitlement", ".authority", ".authority-root",
         ".memory", ".dryrun", ".improve", ".intake-authorizations.txt",
-        ".crucible-v2.log", ".planner-state.json",
+        ".crucible-v2.log", ".planner-state.json", ".cache",
     }
 
 
