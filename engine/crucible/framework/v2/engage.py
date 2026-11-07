@@ -59,6 +59,18 @@ from .scanner.campaign import ScanReport, WebScanCampaign
 from .scanner.orchestrator import AttackPath, AutonomousCampaign, ChainedConclusion
 from .worldmodel.graph import WorldModel
 
+# EC-3 — the RUN-SCOPED HARD token budget (shared leaf in vigil_core). Guarded like the kernel's import so
+# the engage path still runs if the shared core is ever absent (then _run_budget is None ⇒ never armed ⇒
+# RunBudgetExceeded is never raised ⇒ the except-clause below is inert ⇒ byte-identical). DEFAULT-OFF.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import run_budget as _run_budget
+    from vigil_core import RunBudgetExceeded as _RunBudgetExceeded
+except Exception:                                          # noqa: BLE001
+    _run_budget = None
+
+    class _RunBudgetExceeded(Exception):  # inert sentinel: nothing raises it when the core is absent
+        pass
+
 if TYPE_CHECKING:  # intel types are only referenced in annotations on the default path
     from .intel.predict import AssetHypothesis
     from .intel.resolve import Entity
@@ -124,6 +136,12 @@ class EngagementResult:
     # report (graded as leads). Fusion NEVER changes report.active_findings or any oracle verdict.
     fused_leads: int = 0
     fused_facts: int = 0
+    # EC-3 — set when a RUN-SCOPED HARD token-budget stop (RunBudgetExceeded) ended this run early. None on
+    # every normal run (byte-identical). A non-None reason marks a PARTIAL result: the findings-so-far are
+    # RETAINED and the run still returns normally (NOT a crash / NOT a raise), so the downstream
+    # engage_worker emits a COMPLETED signal → completion_spool.settle_launch settles the reservation
+    # consumed-so-far — the launch is neither stranded (lost reservation) nor double-charged.
+    stopped_reason: str | None = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -452,6 +470,55 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool 
         raise EngagementRefused(
             f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
             f"The lease is reserved + started on the sovereign plane and re-verified here keyless before traffic.")
+
+
+def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int | None":
+    """EC-3 — arm THIS run's HARD per-run token ceiling at preflight. Returns the armed ceiling, or None.
+
+    DEFAULT-OFF: when ``VIGIL_RUN_HARD_BUDGET_ENABLED`` is unset this is a no-op — ``run_budget.arm`` refuses
+    to arm, no lease is read, the run is left UNARMED, and the engine (and ``make gate``) is byte-identical.
+    When ON, the ceiling is ``units_reserved × ENVELOPE_TOKENS_PER_CREDIT`` read from the VERIFIED owner-signed
+    credit-launch lease via the SAME owner-pinned verify+bind the K2 arm uses (read NON-consuming here, so the
+    ceiling read never burns the single-use lease) — identical BY CONSTRUCTION to the sovereign reserved
+    envelope (one shared constant; no money number in the engine). A lease-less local run may instead cap via
+    the operator ``VIGIL_RUN_TOKEN_CEILING`` (integer tokens); with neither a verified lease nor that override
+    the run stays UNARMED (so a flag-ON greenfield/operator run — and ``make gate`` — is still byte-identical).
+
+    Best-effort — NEVER raises into the run: a budget that cannot be armed must not sink an otherwise-authorized
+    engagement (the hard stop is a COST guard, not a safety gate; soundness is the oracles' job). It also
+    ``reset()``s first so a ceiling can never leak in from a prior run that reused this thread/context."""
+    if _run_budget is None:
+        return None
+    try:
+        _run_budget.reset()                       # start clean — no stale ceiling from a reused thread/context
+        if not _run_budget.enabled():
+            return None
+        ceiling: "int | None" = None
+        try:
+            from urllib.parse import urlsplit
+
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+
+            from .common.tenant import tenant_id
+            from .launch_lease import customer_engagement_requires_lease, read_verified_launch_units
+            if customer_engagement_requires_lease(slug):
+                host = urlsplit(seed_url).hostname or ""
+                units = read_verified_launch_units(slug, host, tenant_id())
+                if units is not None and int(units) >= 1:
+                    ceiling = int(units) * int(ENVELOPE_TOKENS_PER_CREDIT)
+        except Exception:  # noqa: BLE001 — a lease/ceiling read failure leaves the run unarmed, never sinks it
+            ceiling = None
+        if ceiling is None:
+            raw = os.environ.get("VIGIL_RUN_TOKEN_CEILING", "").strip()   # operator lease-less local cap
+            if raw:
+                try:
+                    v = int(raw)
+                    ceiling = v if v >= 1 else None
+                except ValueError:
+                    ceiling = None
+        return _run_budget.arm(ceiling)
+    except Exception:  # noqa: BLE001 — arming is best-effort; never raise into the engagement
+        return None
 
 
 def _engage_oob_authority(slug: str) -> dict:
@@ -1234,6 +1301,15 @@ def run_engagement(
         raise
     ledger.complete(P_PREFLIGHT)
 
+    # EC-3 — arm the RUN-SCOPED HARD token budget for this run (DEFAULT-OFF; a no-op that reads no lease and
+    # leaves the run UNARMED when VIGIL_RUN_HARD_BUDGET_ENABLED is unset, so the path below is byte-identical).
+    # When armed, the kernel chokepoint raises RunBudgetExceeded once cumulative reasoning tokens reach the
+    # owner-signed reserved envelope; it surfaces as a PARTIAL EngagementResult (stopped_reason) below, never
+    # a crash. ``_rb_stopped`` captures a stop the SCAN propagates; a stop a best-effort phase swallowed is
+    # caught via the run_budget latch at the end.
+    _arm_run_budget(slug, seed_url, resume=resume)
+    _rb_stopped: "Exception | None" = None
+
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
     for label, relay in (("advertise", oob_advertise_base_url), ("relay", oob_relay_url)):
@@ -1497,9 +1573,20 @@ def run_engagement(
             target=seed_url, tenant=fleet_tenant, work_kind=fleet_work_kind,
         ):
             ledger.start(P_SCAN)
-            report = _do_scan()
-            ledger.complete(P_SCAN)
-            ledger.persist_report(report)
+            try:
+                report = _do_scan()
+            except _RunBudgetExceeded as _rbx:
+                # EC-3 FAIL-CLOSED run-budget stop mid-scan: a CLEAN terminal stop, NOT a crash. Mark the
+                # phase failed, keep the findings-so-far (an empty report when the scan produced none before
+                # the ceiling — the scanner returns its report only on completion), and fall through to
+                # return a PARTIAL EngagementResult (stopped_reason set below). Returning normally (not
+                # re-raising) is the MONEY SEAM: the worker emits COMPLETED → settle, never FAILED/refund.
+                ledger.fail(P_SCAN)
+                _rb_stopped = _rbx
+                report = ScanReport(target=seed_url)
+            else:
+                ledger.complete(P_SCAN)
+                ledger.persist_report(report)
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.
@@ -1634,6 +1721,22 @@ def run_engagement(
     # the oracle verdict.
     if spine is not None:
         _verify_live_spine_at_close(spine, slug, sink)
+
+    # EC-3 — surface a RUN-SCOPED HARD token-budget stop as a PARTIAL result. The stop reaches here one of
+    # two ways: the SCAN propagated RunBudgetExceeded (``_rb_stopped``), or a best-effort phase — whose
+    # PhaseLedger.run_phase wrapper swallows every exception — caught it, in which case the run_budget LATCH
+    # (``was_exceeded``) is what tells us the ceiling fired. Either way, record a legible stopped_reason + a
+    # NON-fatal spine refusal (the run is complete-with-partial, not refused), then DISARM so the ceiling
+    # never leaks to the next run on this thread. The run still RETURNS normally, so engage_worker emits a
+    # COMPLETED signal and completion_spool settles the reservation consumed-so-far.
+    _rb_exceeded = _rb_stopped is not None or (_run_budget is not None and _run_budget.was_exceeded())
+    if _rb_exceeded and result.stopped_reason is None:
+        reason = str(_rb_stopped) if _rb_stopped is not None else "run token budget exceeded (ceiling reached)"
+        result.stopped_reason = reason
+        if sink is not None:
+            sink.refusal("run-budget", seed_url, reason=reason, fatal=False)
+    if _run_budget is not None:
+        _run_budget.reset()
     return result
 
 

@@ -47,6 +47,8 @@ from .credit_lease import (
     CreditLaunchLease, SignedCreditLaunchLease, credit_lease_signing_bytes,
     sign_credit_launch_lease, verify_credit_launch_lease,
 )
+from . import run_budget
+from .run_budget import RunBudgetExceeded
 from .authority import (
     EngagementAuthority, SignedAuthority, TargetEnvironment, authority_signing_bytes,
     sign_engagement_authority, verify_engagement_authority,
@@ -115,6 +117,7 @@ __all__ = [
     "ENVELOPE_TOKENS_PER_CREDIT",
     "CreditLaunchLease", "SignedCreditLaunchLease", "credit_lease_signing_bytes",
     "sign_credit_launch_lease", "verify_credit_launch_lease",
+    "run_budget", "RunBudgetExceeded",
     "BUILD_INTEGRITY_STATES", "BUILD_MANIFEST_DOMAIN", "BUILD_MANIFEST_SCHEMA", "BuildArtifact",
     "BuildIntegrityResult", "BuildIntegrityState", "BuildManifestError", "BUILD_MANIFEST_FILENAME",
     "SignedBuildManifest", "BUILD_TRUST_ROOT_FILENAME", "build_manifest_from_specs",
