@@ -13,9 +13,9 @@
 # the customer app (custui on :8734). The public site holds NO key and sets NO cookie, so there is nothing
 # here to protect with a Host allowlist; keeping it on its own hostname is simply the correct layout:
 #
-#     vigil.example.com         → THIS file         → pubui   127.0.0.1:8735  (public: everyone can see)
-#     console.vigil.example.com → vigil.Caddyfile    → vigil up 127.0.0.1:8770 (operator cockpit; keep private)
-#     app.vigil.example.com     → the customer edge   → custui  127.0.0.1:8734 (tenant app; its own vhost — J2)
+#     vigilguard.net         → THIS file         → pubui   127.0.0.1:8735  (public: everyone can see)
+#     console.vigilguard.net → vigil.Caddyfile    → vigil up 127.0.0.1:8770 (operator cockpit; keep private)
+#     app.vigilguard.net     → the customer edge   → custui  127.0.0.1:8734 (tenant app; its own vhost — J2)
 #
 # Start it first (optionally populate the CVE catalog with `sigil cve ingest` — the one standing outbound
 # path, never at page-request time), then point DNS A/AAAA for your public host at THIS machine:
@@ -25,17 +25,17 @@
 # Cache-Control on every response; this edge only adds HSTS. There are no Server-Sent Events on this plane
 # (static + read-only JSON, GET/HEAD only), so no flush_interval override is needed.
 
-vigil.example.com, www.vigil.example.com {
+vigilguard.net, www.vigilguard.net {
 	encode zstd gzip
 
 	# Canonicalize www → apex so the marketing site has one public URL.
-	@www host www.vigil.example.com
-	redir @www https://vigil.example.com{uri} permanent
+	@www host www.vigilguard.net
+	redir @www https://vigilguard.net{uri} permanent
 
 	reverse_proxy 127.0.0.1:8735
 
 	# Belt-and-braces: only serve the two hosts this site is for.
-	@badhost not host vigil.example.com www.vigil.example.com
+	@badhost not host vigilguard.net www.vigilguard.net
 	respond @badhost 421
 
 	header {
