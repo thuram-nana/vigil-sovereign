@@ -98,6 +98,22 @@ def _regress(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def _ab(args: argparse.Namespace) -> int:
+    # LAZY import — `eval.ab` imports `engage` (heavy + offense-plane). Importing it only inside this handler
+    # keeps it off the make-gate/benchmark import path (FATAL-2 import hygiene). This is an OPERATOR verb:
+    # live keys, stochastic — never a CI gate.
+    from . import ab as ab_mod
+
+    result = ab_mod.run_ab_benchmark(repeats=args.repeats)
+    print(ab_mod.render_ab(result))
+    if args.json:
+        Path(args.json).expanduser().write_text(
+            result.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        print(f"\nwrote {args.json}")
+    # Exit 1 when the cheaper arm regressed detection vs the capable arm — a usable operator go/no-go.
+    return 0 if result.passed else 1
+
+
 def _show(args: argparse.Namespace) -> int:
     run = load_run(args.run)
     for ts in run.per_target:
@@ -139,6 +155,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("show", help="print a run summary")
     p.add_argument("--run", required=True)
     p.set_defaults(fn=_show)
+
+    p = sub.add_parser(
+        "ab",
+        help="A/B no-regression eval (OPERATOR, live keys): arm A capable (routing off) vs arm B cheaper "
+             "(routing on) against the loopback benchmark app; gate B against snapshot(A); report token/$ delta",
+    )
+    p.add_argument("--repeats", type=int, default=3,
+                   help="Repeats per arm (default 3). Aggregated conservatively (A best-case, B worst-case).")
+    p.add_argument("--json", default="",
+                   help="Also write the structured ABResult to this JSON path.")
+    p.set_defaults(fn=_ab)
 
     return parser
 
