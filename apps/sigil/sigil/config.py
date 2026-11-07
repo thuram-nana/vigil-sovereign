@@ -280,9 +280,12 @@ def global_pool_bands() -> dict:
     """The owner-set band fractions (fraction used/budget at which each posture engages) + the DEGRADE shrink
     factor for the graduated pool kill-switch. SAFE PLACEHOLDER defaults (NOT real money numbers), each
     env-overridable; the owner ratifies before go-live. Monotone by construction
-    (0 < throttle ≤ degrade ≤ refuse ≤ hard_stop, 0 < degrade_factor ≤ 1); a non-monotone / out-of-range
+    (0 < throttle ≤ degrade ≤ refuse ≤ hard_stop ≤ 1, 0 < degrade_factor ≤ 1); a non-monotone / out-of-range
     override reverts to the safe defaults wholesale (FAIL-SAFE — a bad band must never INVERT the graduation,
-    e.g. a refuse threshold below throttle, which could admit MORE draw at a HIGHER fraction)."""
+    e.g. a refuse threshold below throttle, which could admit MORE draw at a HIGHER fraction; and a threshold
+    ABOVE 1.0 — a percent-vs-fraction typo like refuse=150 — must never be accepted, or the armed kill-switch
+    is silently DISARMED because the used-fraction can never reach it. Since the thresholds are monotone,
+    bounding hard_stop ≤ 1.0 bounds them all)."""
     bands = {
         "throttle_at": _float_env("VIGIL_GLOBAL_POOL_THROTTLE_AT", 0.75),
         "degrade_at": _float_env("VIGIL_GLOBAL_POOL_DEGRADE_AT", 0.85),
@@ -292,7 +295,8 @@ def global_pool_bands() -> dict:
     }
     t, d, r, h, f = (bands["throttle_at"], bands["degrade_at"], bands["refuse_at"],
                      bands["hard_stop_at"], bands["degrade_factor"])
-    if not (0.0 < t <= d <= r <= h and 0.0 < f <= 1.0):
+    # upper bound h <= 1.0 (fail-safe against a percent-vs-fraction typo silently disarming the kill-switch).
+    if not (0.0 < t <= d <= r <= h <= 1.0 and 0.0 < f <= 1.0):
         return {"throttle_at": 0.75, "degrade_at": 0.85, "refuse_at": 0.95, "hard_stop_at": 1.0,
                 "degrade_factor": 0.5}
     return bands

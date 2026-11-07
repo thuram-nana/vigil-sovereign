@@ -176,6 +176,21 @@ def test_bands_from_config_non_monotone_override_reverts_to_safe_defaults(monkey
     assert (b.throttle_at, b.degrade_at, b.refuse_at, b.hard_stop_at) == (0.75, 0.85, 0.95, 1.0)
 
 
+@pytest.mark.parametrize("env,val", [
+    ("VIGIL_GLOBAL_POOL_REFUSE_AT", "1.5"),      # a percent-vs-fraction typo (150%) — monotone but out-of-domain
+    ("VIGIL_GLOBAL_POOL_HARD_STOP_AT", "2.0"),   # hard_stop above 1.0 — the used-fraction can never reach it
+    ("VIGIL_GLOBAL_POOL_THROTTLE_AT", "80"),     # 80 (meant 0.80): would keep the whole band > 1.0
+])
+def test_bands_above_one_revert_to_safe_defaults_so_the_kill_switch_cannot_be_silently_disarmed(monkeypatch, env, val):
+    # A threshold ABOVE 1.0 (a percent-vs-fraction typo) is monotone-but-out-of-domain: the used-fraction (used/budget)
+    # can never reach it, so an ARMED pool would NEVER refuse — the kill-switch is silently disarmed. The band
+    # validation's h <= 1.0 upper bound must reject it wholesale, reverting to the safe (armable) defaults.
+    monkeypatch.setenv(env, val)
+    b = PoolBands.from_config()
+    assert (b.throttle_at, b.degrade_at, b.refuse_at, b.hard_stop_at) == (0.75, 0.85, 0.95, 1.0)
+    assert b.degrade_factor == 0.5
+
+
 # ======================================================================================================
 # 5) global_position() — SINGLE-PASS correctness + the sum-of-tenant_costs equivalence oracle
 # ======================================================================================================
