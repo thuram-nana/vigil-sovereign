@@ -226,6 +226,15 @@ def margin_dashboard_enabled() -> bool:
     return (os.environ.get("VIGIL_MARGIN_DASHBOARD_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def tiered_products_enabled() -> bool:
+    """True iff the EC-7 tiered Quick/Deep LAUNCH PRODUCTS are offered (`VIGIL_TIERED_PRODUCTS` affirmative).
+    OFF by default: `catalog.launch_products()` returns `()` and the existing pricing surface (plans() /
+    expected_amounts() / entitlements()) is byte-identical to pre-EC-7 — a launch product is a NEW offering,
+    not a change to any existing one. A launch's run tier is DERIVED from its signed units_reserved either way
+    (no new signed field); this flag only decides whether the Quick/Deep products are listed and sellable."""
+    return (os.environ.get("VIGIL_TIERED_PRODUCTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir

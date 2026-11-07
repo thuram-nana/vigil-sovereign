@@ -122,3 +122,64 @@ def test_catalog_drives_a_subscription_mint():
     assert signer.ingest(body, "flw-hash", now=100.0) is not None
     assert subs.subscription("acme").plan_id == "pro"
     assert meter.available("acme", now=200.0) == 6000        # the Pro monthly allotment from the catalog
+
+
+# ==================================================================================================
+# EC-7 — tiered Quick/Deep LAUNCH PRODUCTS (default-OFF; byte-identical catalog surface when off).
+# ==================================================================================================
+
+def test_launch_products_default_off_is_byte_identical(monkeypatch):
+    monkeypatch.delenv("VIGIL_TIERED_PRODUCTS", raising=False)
+    assert cat.launch_products() == ()                       # nothing offered
+    assert cat.launch_product("vigil_launch_quick") is None
+    # the EC-7 flag must not perturb the payment/pricing surface at all
+    plans_off = cat.plans()
+    amts_off = cat.expected_amounts()
+    ents_off = cat.entitlements()
+    monkeypatch.setenv("VIGIL_TIERED_PRODUCTS", "1")
+    assert cat.plans() == plans_off
+    assert cat.expected_amounts() == amts_off
+    assert cat.entitlements() == ents_off                    # launch products are NOT payment offerings
+
+
+def test_launch_products_offered_when_flag_on(monkeypatch):
+    monkeypatch.setenv("VIGIL_TIERED_PRODUCTS", "1")
+    prods = cat.launch_products()
+    assert {p.product_id for p in prods} == {"vigil_launch_quick", "vigil_launch_deep"}
+    quick = cat.launch_product("vigil_launch_quick")
+    deep = cat.launch_product("vigil_launch_deep")
+    assert quick.run_tier == "quick" and quick.public()["profile"] == "surface"
+    assert deep.run_tier == "deep" and deep.public()["profile"] == "full"
+    assert cat.launch_product("nope") is None                # unknown ⇒ None (catalog decides, never a client field)
+    assert deep.units > quick.units                          # deep reserves more credits than quick
+
+
+def test_launch_product_declared_tier_matches_the_units_band():
+    # the load-bearing EC-7 consistency: each product's DECLARED tier equals the band-derived tier for its
+    # units — so the catalog definition and the runtime (run_tier) derivation can never diverge.
+    from vigil_core import run_tier
+    for p in cat._LAUNCH_PRODUCTS:
+        assert run_tier.run_tier_for_units(p.units) == p.run_tier, p.product_id
+
+
+def test_launch_products_validate_fail_closed():
+    LP = cat.LaunchProduct
+    # a well-formed set validates
+    cat._validate_launch_products((LP("a", "A", "quick", units=3), LP("b", "B", "deep", units=20)))
+    # duplicate / empty product_id
+    with pytest.raises(ValueError):
+        cat._validate_launch_products((LP("a", "A", "quick", 3), LP("a", "A2", "deep", 20)))
+    with pytest.raises(ValueError):
+        cat._validate_launch_products((LP("", "A", "quick", 3),))
+    # unknown run_tier
+    with pytest.raises(ValueError):
+        cat._validate_launch_products((LP("a", "A", "medium", 3),))
+    # units must be a positive int (bool is rejected — a classic int-subclass footgun)
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError):
+            cat._validate_launch_products((LP("a", "A", "quick", bad),))
+    # BAND MISMATCH: units 20 fall in the "deep" band but the product declares "quick" ⇒ fail-closed
+    with pytest.raises(ValueError):
+        cat._validate_launch_products((LP("a", "A", "quick", units=20),))
+    with pytest.raises(ValueError):
+        cat._validate_launch_products((LP("a", "A", "deep", units=3),))

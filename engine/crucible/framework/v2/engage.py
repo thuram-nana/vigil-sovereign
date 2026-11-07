@@ -218,6 +218,21 @@ def _profile_deferred_packs(profile: str) -> list[str]:
     return list(_PROFILE_DEFERRED.get((profile or "surface").lower(), ()))
 
 
+def profile_kwargs(profile: str) -> "dict[str, bool]":
+    """The ``run_engagement`` ``enable_*`` kwargs a ``--profile`` turns ON, as a plain dict — the
+    NON-argparse sibling of :func:`resolve_profile`, for callers (EC-7's keyless engage worker) that drive
+    ``run_engagement`` DIRECTLY rather than through the CLI ``Namespace``. It reads the SAME ``_PROFILE_FLAGS``
+    + ``_PROFILE_FLAG_KWARG`` the CLI ``--profile`` path uses, so the two roster sources can never diverge
+    (a conformance test pins that every key here is a real ``run_engagement`` kwarg). ``surface`` ⇒ ``{}`` —
+    the default roster, byte-identical. Only flags that map 1:1 to a real ``enable_*`` kwarg are returned;
+    a plan-named pack with no flag yet is DEFERRED (see ``_PROFILE_DEFERRED``), never fabricated. PURE: no
+    oracle, no gate change, mints nothing — it only names which EXISTING opt-in passes a roster turns on."""
+    name = (profile or "surface").lower()
+    return {_PROFILE_FLAG_KWARG[dest]: True
+            for dest in _PROFILE_FLAGS.get(name, ())
+            if dest in _PROFILE_FLAG_KWARG}
+
+
 def _record_engagement_profile(run_dir: "str | None", profile: str, flags: dict, deferred: list) -> None:
     """Record the resolved profile + the exact ``enable_*`` roster + the deferred plan-named packs to
     ``<run_dir>/_engagement_profile.json`` so the roster is auditable. Run-dir-gated + best-effort: no run

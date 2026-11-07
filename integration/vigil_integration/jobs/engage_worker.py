@@ -25,10 +25,11 @@ module scope, NO ``sigil`` import, NO execution at import (two-env boundary).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from .model import SecurityJob
 
@@ -84,6 +85,47 @@ def _default_run_engagement(*, slug: str, seed_url: str, **kw: Any) -> Any:
     return run_engagement(slug, seed_url, **kw)
 
 
+def _default_run_tier_enabled() -> bool:
+    """The default EC-7 gate: the SHARED ``vigil_core`` reader of ``VIGIL_TIERED_PRODUCTS`` (NO ``sigil``
+    import — FATAL-2; the sovereign ``config.tiered_products_enabled`` mirrors the same leaf). Lazy: vigil_core
+    is imported at call time, never at module scope. OFF ⇒ the worker derives/applies no run tier."""
+    from vigil_core import run_tier
+    return run_tier.tiered_products_enabled()
+
+
+def _default_read_units(slug: str, host: str, tenant: Optional[str], *, base_dir: Any, now: Any) -> Optional[int]:
+    """Read the launch's OWNER-SIGNED ``units_reserved`` via the SAME verified+bound lease EC-3 reads for its
+    ceiling (authoritative, verify-ONLY — never consumes the single-use floor, never trusts ``job.extra``).
+    Lazy (two-env): ``framework`` is imported only here. Fail-closed: any missing / forged / wrong-host /
+    wrong-tenant / expired / settled lease ⇒ ``None`` (the caller then classifies the SMALLER 'quick' tier)."""
+    from framework.v2.launch_lease import read_verified_launch_units
+    return read_verified_launch_units(slug, host, tenant, base_dir=base_dir, now=now)
+
+
+@contextlib.contextmanager
+def _model_routing_scope(enabled: Optional[bool]) -> "Iterator[None]":
+    """Scope the EC-2a model-routing lever (``CRUCIBLE_MODEL_ROUTING``) to the EC-7 run tier for the duration
+    of ONE run, restoring the prior value EXACTLY on exit (including unset). ``enabled is None`` ⇒ a NO-OP
+    (byte-identical: EC-7 off, so the deployment's own routing setting stands untouched). ``True`` turns the
+    cheaper per-binding tiers ON for a 'quick' run; ``False`` forces every binding to its capable model for a
+    'deep' run (fail-toward-capable). Scoping the WHOLE ``run_engagement`` call is correct even though the run
+    spawns parallel self-consistency samples — the worker runs one job at a time (``JobRunner.run_one``), so
+    ``os.environ`` is stable for the run and every in-process sample reads the same value."""
+    if enabled is None:
+        yield
+        return
+    key = "CRUCIBLE_MODEL_ROUTING"
+    prev = os.environ.get(key)
+    os.environ[key] = "1" if enabled else "0"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
+
+
 def _launch_governance_signers(base_dir: Any) -> "list[tuple[str, str]]":
     """Load the STABLE offense-governance signer for this ``base_dir`` as ``[(key_id, priv_b64)]`` — the same
     key the sovereign launch step (``ui.launch_governance``) owner-DELEGATED at launch, so the crossing + the
@@ -125,6 +167,8 @@ def make_engage_worker(
     run: "Optional[Callable[..., Any]]" = None,
     profile_kwargs: "Optional[dict[str, Any]]" = None,
     prod_execution_enabled: "Optional[Callable[[], bool]]" = None,
+    run_tier_enabled: "Optional[Callable[[], bool]]" = None,
+    read_units: "Optional[Callable[..., Optional[int]]]" = None,
     now: Any = None,
     finding_spool_dir: Any = None,
     completion_spool_dir: Any = None,
@@ -139,8 +183,18 @@ def make_engage_worker(
     failure RAISES (``JobRunner`` turns a worker error into a ``failed`` outcome + ``release_delivery``, so
     the work is re-driveable, never a silent false-clean).
 
-    ``run`` / ``prod_execution_enabled`` / ``trust_root`` are injectable for tests (a mock engine + a mock
-    flag + an explicit owner root) so the full wiring is exercised deterministically without a live scan."""
+    EC-7 (tiered Quick/Deep products): when ``run_tier_enabled()`` is True the worker DERIVES the run tier
+    from the launch's OWNER-SIGNED ``units_reserved`` (``read_units`` — the SAME verified+bound lease EC-3
+    reads, authoritative, never the tamperable ``job.extra``) and overlays the tier's engagement roster
+    (``engage.profile_kwargs`` — a 'deep' launch runs the full browser/SSO/GraphQL/access-control roster, a
+    'quick' launch the lean default) + sets the EC-2a model-routing lever for the run (quick ⇒ cheaper tiers
+    on; deep ⇒ capable models). OFF by default ⇒ byte-identical: no derivation, run_engagement's own default
+    roster, ``CRUCIBLE_MODEL_ROUTING`` untouched. A bad/absent/unverifiable lease fails SAFE to the smaller
+    'quick' tier (never silently escalates a run to the fuller, more expensive 'deep').
+
+    ``run`` / ``prod_execution_enabled`` / ``run_tier_enabled`` / ``read_units`` / ``trust_root`` are
+    injectable for tests (a mock engine + mock flags + a stub units reader + an explicit owner root) so the
+    full wiring is exercised deterministically without a live scan."""
     def _worker(job: SecurityJob) -> Any:
         from framework.v2.authority.store import load_authority_root, load_verified_authority
         from vigil_core.authority import TargetEnvironment
@@ -179,6 +233,24 @@ def make_engage_worker(
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
         kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
+        # EC-7 — tiered Quick/Deep run profile (default-OFF ⇒ byte-identical). When the owner has enabled
+        # tiered products, DERIVE the run tier from the launch's OWNER-SIGNED units_reserved (the SAME
+        # verified+bound lease EC-3 reads for its token ceiling — authoritative, never the tamperable
+        # job.extra), then OVERLAY the tier's engagement roster (additively — the profile system only ever
+        # UNIONS flags on) and HOLD the EC-2a routing lever for the run. A bad / absent / unverifiable lease ⇒
+        # units=None ⇒ "quick" (fail-SAFE: the smaller-impact, cheaper tier — never a silent escalation to the
+        # fuller, costlier "deep").
+        tier_enabled = run_tier_enabled if run_tier_enabled is not None else _default_run_tier_enabled
+        read_u = read_units if read_units is not None else _default_read_units
+        routing_override: Optional[bool] = None
+        if tier_enabled():
+            from framework.v2.engage import profile_kwargs as _engage_profile_kwargs
+            from vigil_core import run_tier
+            units = read_u(job.slug, host, (job.tenant_id or None), base_dir=base_dir, now=now)
+            tier = run_tier.run_tier_for_units(units)              # None/bad ⇒ "quick" (fail-safe)
+            kwargs["profile"] = run_tier.engage_profile_for(tier)  # surface|full — the roster NAME (manifest-recorded)
+            kwargs.update(_engage_profile_kwargs(kwargs["profile"]))   # the enable_* passes that roster turns ON
+            routing_override = run_tier.routing_enabled_for(tier)  # quick ⇒ cheaper tiers on; deep ⇒ capable models
         # K4-5d(B): the completion SEAM. Load the owner-delegated offense-governance signers BEFORE the arm
         # (fail-closed — a run that could never settle must not consume the lease), then:
         #   run succeeds → cross the confirmed FACTs (best-effort) + emit a COMPLETED settle signal (REQUIRED —
@@ -191,7 +263,8 @@ def make_engage_worker(
         do_settle = bool(emit_completion and nonce)
         sgnrs = (signers if signers is not None else _launch_governance_signers(base_dir)) if do_settle else None
         try:
-            result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
+            with _model_routing_scope(routing_override):          # EC-7: scope CRUCIBLE_MODEL_ROUTING to the tier (no-op when off)
+                result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
         except Exception:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
             # Emit a refunding FAILED completion ONLY on the TERMINAL attempt. A transient failure (attempt <
             # _MAX_ARM_ATTEMPTS) re-drives WITHOUT a premature refund, so it can never spool a FAILED that RACES
