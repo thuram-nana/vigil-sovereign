@@ -49,6 +49,7 @@ from ..llm import (
     Prompt,
     make_call_trace,
     parse_json_response,
+    resolve_effective_model,
     sampling_create_kwargs,
     system_param,
 )
@@ -170,6 +171,9 @@ class VertexBackend(LLMBackend):
 
     def complete(self, prompt: Prompt) -> LLMResult:
         client = self._client_obj()
+        # EC-2a: the model this call uses (routing-resolved per-call LOCAL; == self.model when
+        # routing is off). Never mutate self.model — parallel self-consistency samples share it.
+        effective_model = resolve_effective_model(prompt, self)
         sys_prompt = self._build_system(prompt)
         user_msg = prompt.user
 
@@ -178,7 +182,7 @@ class VertexBackend(LLMBackend):
             t0 = time.perf_counter()
             try:
                 rsp = client.messages.create(  # type: ignore[attr-defined]
-                    model=self.model,
+                    model=effective_model,
                     # EC-1a: system_param applies the prompt-cache breakpoint (see anthropic.py +
                     # llm.system_param); Vertex / Google Cloud supports Anthropic prompt caching (per
                     # organization). Caching is skipped (plain string) under an active --ephemeral
@@ -188,7 +192,7 @@ class VertexBackend(LLMBackend):
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a
                     # current model on Vertex previously 400'd on the unconditional temperature.
-                    **sampling_create_kwargs(self.model, prompt.temperature, prompt.effort),
+                    **sampling_create_kwargs(effective_model, prompt.temperature, prompt.effort),
                 )
             except Exception as e:
                 raise BackendError(f"Vertex API error: {e}") from e
@@ -228,6 +232,7 @@ class VertexBackend(LLMBackend):
             trace = make_call_trace(
                 backend=self.name,
                 is_dryrun=False,
+                model=effective_model,
                 cognitive_doc=prompt.cognitive_doc,
                 cognitive_sections=prompt.cognitive_sections,
                 tokens_in=tokens_in,
@@ -239,7 +244,7 @@ class VertexBackend(LLMBackend):
             _log.info(
                 "kernel.vertex.complete",
                 schema=prompt.schema_name,
-                model=self.model, region=self.region, project=self.project,
+                model=effective_model, region=self.region, project=self.project,
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 cache_creation=cache_creation, cache_read=cache_read,
                 latency_ms=int(latency),

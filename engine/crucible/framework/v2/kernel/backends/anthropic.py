@@ -45,6 +45,7 @@ from ..llm import (
     is_current_model,
     make_call_trace,
     parse_json_response,
+    resolve_effective_model,
     sampling_create_kwargs,
     system_param,
 )
@@ -166,16 +167,19 @@ class AnthropicBackend(LLMBackend):
         return self._client
 
     def _create_with_backoff(self, client: object, sys_prompt: str, user_msg: str,
-                             prompt: Prompt) -> object:
+                             prompt: Prompt, model: str | None = None) -> object:
         """Issue one Messages API call, retrying transient failures (429/overload/5xx/
         connection) with backoff + jitter, honouring Retry-After. Raises BackendOverloaded when
         the transient failure persists (so dispatch fails over) or BackendError for a permanent
-        failure (e.g. a 400/401 — failing over would not help)."""
+        failure (e.g. a 400/401 — failing over would not help). ``model`` is the EC-2a effective
+        model for this call (routing-resolved; == self.model when routing is off); when omitted it
+        falls back to self.model — the pre-EC-2a behaviour for a direct caller."""
+        model = model if model is not None else self.model
         last: Exception | None = None
         for api_attempt in range(1, _MAX_API_ATTEMPTS + 1):
             try:
                 create_kwargs = dict(
-                    model=self.model,
+                    model=model,
                     # EC-1a: system_param attaches one ephemeral cache_control breakpoint at the end
                     # of the stable system span so Anthropic prompt caching applies (the prompt is
                     # already prefix-stable — all volatile per-step content rides the USER turn, so
@@ -220,6 +224,11 @@ class AnthropicBackend(LLMBackend):
     def complete(self, prompt: Prompt) -> LLMResult:
         client = self._client_obj()
 
+        # EC-2a: the model this call uses. A per-call LOCAL (never a mutation of self.model — the
+        # self-consistency sweep runs parallel samples on this one instance), resolved via the one
+        # routing source of truth. == self.model when routing is off / the tier is unmapped.
+        effective_model = resolve_effective_model(prompt, self)
+
         sys_prompt = self._build_system(prompt)
         user_msg = prompt.user
 
@@ -228,7 +237,7 @@ class AnthropicBackend(LLMBackend):
             t0 = time.perf_counter()
             # transient failures (429/overload/5xx/connection) are retried with backoff inside
             # here; a persistent transient raises BackendOverloaded for the dispatch failover (X4).
-            rsp = self._create_with_backoff(client, sys_prompt, user_msg, prompt)
+            rsp = self._create_with_backoff(client, sys_prompt, user_msg, prompt, effective_model)
             latency = (time.perf_counter() - t0) * 1000.0
 
             text_parts = [
@@ -269,6 +278,7 @@ class AnthropicBackend(LLMBackend):
             trace = make_call_trace(
                 backend=self.name,
                 is_dryrun=False,
+                model=effective_model,
                 cognitive_doc=prompt.cognitive_doc,
                 cognitive_sections=prompt.cognitive_sections,
                 tokens_in=tokens_in,
@@ -280,7 +290,7 @@ class AnthropicBackend(LLMBackend):
             _log.info(
                 "kernel.anthropic.complete",
                 schema=prompt.schema_name,
-                model=self.model,
+                model=effective_model,
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 cache_creation=cache_creation, cache_read=cache_read,
                 latency_ms=int(latency),

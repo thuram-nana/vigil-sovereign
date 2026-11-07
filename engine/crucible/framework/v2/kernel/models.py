@@ -319,6 +319,12 @@ class CallTrace(BaseModel):
 
     backend: str
     is_dryrun: bool
+    # EC-2a model-tier routing provenance: the concrete model this call actually used. Default ""
+    # => backward compatible with every persisted trace and every caller that does not set it (the
+    # dry-run stub, older backends). Records which model each reasoning step ran on so routing is
+    # observable and the margin dashboard (EC-6) can attribute cost per model. Provenance only — the
+    # provider/model is NEVER a trust anchor.
+    model: str = ""
     cognitive_doc: str = Field(description="v1 source-of-truth doc cited.")
     cognitive_sections: list[str] = Field(
         default_factory=list, description="Anchors of doc sections used."
