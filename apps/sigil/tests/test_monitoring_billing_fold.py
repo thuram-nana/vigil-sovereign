@@ -123,7 +123,7 @@ def _segmented(tmp_path):
 def test_monitoring_line_crosses_a_hard_prune_and_tripwire_detects_a_stranding_seed(tmp_path, monkeypatch):
     from sigil.spine import prune
     from sigil.spine.manifest import read_manifest
-    from sigil.spine.snapshot import SnapshotState, build
+    from sigil.spine.snapshot import SnapshotState, _MAX_SNAPSHOT_SCHEMA, build
     from sigil.governor.identity import owner_pubkey
     s = _segmented(tmp_path)
     archived = prune.check_prune_safe(s, 5)
@@ -133,7 +133,7 @@ def test_monitoring_line_crosses_a_hard_prune_and_tripwire_detects_a_stranding_s
         below.extend(prune.read_segment_records(s._layout.seg_path(seg)))
     seed = SnapshotState.model_validate(build(below, trusted_pubkey=owner_pubkey(), base_seq=5,
                                               snapshot_seq=-1).model_dump())
-    assert seed.schema_version == 8
+    assert seed.schema_version == _MAX_SNAPSHOT_SCHEMA   # the seed carries THIS build's current schema (EC-4: v9)
     assert dict(seed.monitoring_subscription_state)["org_a"] == "active"
     assert seed.subscription_state == []                                      # never folded into the credit line
     real_build = prune.build

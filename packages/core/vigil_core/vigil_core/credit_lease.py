@@ -18,7 +18,9 @@ never persisted or returned. Mirrors ``authority.py`` exactly (same canonical fo
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,6 +33,27 @@ from .spine_domains import DOMAIN_TAGS
 # so a credit-lease signature can never be replayed as (or satisfied by) any other kind. Sourced from the ONE
 # registry (the plan's "define the domain tag once in vigil_core"); never change without a schema bump.
 _LEASE_DOMAIN = DOMAIN_TAGS["credit-launch-lease"]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return v if v >= 1 else default
+
+
+# EC-4 — the credit->token envelope conversion `E`: how many Anthropic tokens one VIGIL credit's HARD-CAPPED
+# cost envelope buys. Defined ONCE here, beside CreditLaunchLease.units_reserved (the credits the envelope is
+# derived from), so BOTH planes agree BY CONSTRUCTION — the sovereign plane computes envelope = units * E when
+# it reserves; the keyless engine reads the same E for its hard run-budget — with NO cross-plane import (the
+# credit-lease seam-contract precedent). After reserve, the SIGNED reserved envelope is the source of truth
+# (settle clamps to it), so a later E change can never retro-resize a minted reservation.
+#
+# PLACEHOLDER default — this is an OWNER money-doctrine number. Ratify it (and the per-model-tier $ cost rate in
+# the catalog) before any production go-live; operator-overridable via VIGIL_ENVELOPE_TOKENS_PER_CREDIT for
+# staging. The cost ledger it feeds is default-OFF (not wired into the live launch-gate money path yet).
+ENVELOPE_TOKENS_PER_CREDIT: Final[int] = _env_int("VIGIL_ENVELOPE_TOKENS_PER_CREDIT", 100_000)
 
 
 class CreditLaunchLease(BaseModel):

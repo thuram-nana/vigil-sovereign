@@ -43,6 +43,7 @@ from .highwater import (
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
 from .credit_lease import (
+    ENVELOPE_TOKENS_PER_CREDIT,
     CreditLaunchLease, SignedCreditLaunchLease, credit_lease_signing_bytes,
     sign_credit_launch_lease, verify_credit_launch_lease,
 )
@@ -111,6 +112,7 @@ __all__ = [
     "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",
     "AccountCredential", "sign_target_credentials", "target_credentials_signing_bytes",
     "verify_target_credentials",
+    "ENVELOPE_TOKENS_PER_CREDIT",
     "CreditLaunchLease", "SignedCreditLaunchLease", "credit_lease_signing_bytes",
     "sign_credit_launch_lease", "verify_credit_launch_lease",
     "BUILD_INTEGRITY_STATES", "BUILD_MANIFEST_DOMAIN", "BUILD_MANIFEST_SCHEMA", "BuildArtifact",

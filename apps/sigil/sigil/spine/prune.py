@@ -264,6 +264,23 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand an in-flight postpaid reserve for tenant(s) {stranded_ppr}: a "
                           f"below-K reserve whose settle has not yet landed would be hidden from the PP-2 "
                           f"in-flight scan, over-billing the (possibly cancelled) launch; lower K or let it settle")
+    # (c, EC-4 cost ledger) the SAME floor for the ADDITIVE token-cost ledger: a prune must carry every below-K
+    # tenant's reserved/settled totals AND the consumed-entry_id set into the seed, or it would LOWER a tenant's
+    # committed real cost (corrupting the per-tenant margin record) AND drop the anti-replay seen-set (re-opening
+    # reserve/settle replay). Fail-closed, mirroring the postpaid arrears floor.
+    stranded_cl = stranded_cost_ledger(store, archived, K)
+    if stranded_cl:
+        raise PruneUnsafe(f"K={K} would strand cost-ledger totals for tenant(s) {stranded_cl}: a below-K reserved "
+                          f"or settled token total or consumed entry_id would not be carried into the snapshot "
+                          f"seed (zeroing attributed cost or re-opening reserve/settle replay); lower K or resolve")
+    # (c, EC-4 in-flight cost envelope) a cost reserve still IN-FLIGHT (settle not yet landed) must not be pruned:
+    # `in_flight_envelope` is a LIVE pairing scan, so a pruned unsettled reserve would vanish from the pending pool
+    # draw (EC-5 pool meter under-counts, over-admitting past the cap). Fail-closed, distinct from the aggregate floor.
+    stranded_clr = stranded_active_cost_reserves(store, archived, K)
+    if stranded_clr:
+        raise PruneUnsafe(f"K={K} would strand an in-flight cost reserve for tenant(s) {stranded_clr}: a below-K "
+                          f"reserve whose settle has not yet landed would be hidden from the in-flight envelope "
+                          f"scan, under-counting the pending pool draw; lower K or let it settle")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -896,6 +913,124 @@ def stranded_active_postpaid_reserves(store, archived: list[Segment], K: int) ->
                 yield ("reserve", oid, eid[len(RESERVE_ENTRY_PREFIX):])
             elif sig == POSTPAID_CREDIT_SIGNAL and eid.startswith(SETTLE_ENTRY_PREFIX):
                 yield ("settle", oid, eid[len(SETTLE_ENTRY_PREFIX):])
+
+    reserves: dict[str, str] = {}      # in-flight-candidate suffix -> org_id, for reserves in the PRUNED prefix
+    settled: set = set()               # suffixes with a landed settle, archived OR live
+    for kind, oid, suf in _pairs(sorted(below, key=lambda r: r.seq)):
+        if kind == "reserve":
+            reserves.setdefault(suf, oid)
+        else:
+            settled.add(suf)
+    for kind, _oid, suf in _pairs(store.iter_records(since_seq=K - 1)):   # live tail: a settle here also counts
+        if kind == "settle":
+            settled.add(suf)
+    return sorted({oid for suf, oid in reserves.items() if suf not in settled})
+
+
+def stranded_cost_ledger(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, EC-4 cost ledger) — the tenants whose per-org token-cost totals
+    (`governor.cost_reserve`/`governor.cost_settle`) or anti-replay seen-set sits in the pruned prefix [0..K) yet
+    would NOT be carried exactly into the snapshot seed: a prune would silently LOWER a tenant's committed real
+    cost (zeroing attributed Anthropic spend, corrupting the per-tenant margin record) and/or drop a consumed
+    `entry_id` (re-opening reserve/settle replay — a pruned record re-appended above K would double-count). EMPTY
+    in the happy path. Fail-closed tripwire mirroring `stranded_postpaid_arrears` (per-org reserved/settled + seen);
+    verified under the owner key valid at each seq; the seed round-trips through `model_dump`/`model_validate`.
+    Read-only."""
+    from ..governor.cost_ledger import (COST_RESERVE_SIGNAL, COST_SETTLE_SIGNAL, _RESERVE_CORE, _SETTLE_CORE,
+                                        _as_tokens)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    reserved: dict[Any, int] = {}
+    settled: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror CostEnvelopeLedger._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        amt = _as_tokens(p.get("tokens"))
+        if sig == COST_RESERVE_SIGNAL:
+            reserved[oid] = reserved.get(oid, 0) + amt
+        else:
+            settled[oid] = settled.get(oid, 0) + amt
+    active = set(reserved) | set(settled)
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sr, sst = seed.cost_reserved_map(), seed.cost_settled_map()
+    ss = seed.cost_seen_set()
+    stranded: set = set()
+    for o in active:
+        if sr.get(o, 0) != reserved.get(o, 0) or sst.get(o, 0) != settled.get(o, 0):
+            stranded.add(str(o))          # a committed-cost / reserved total the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))              # a consumed entry_id the seed drops (reserve/settle anti-replay durability)
+    return sorted(stranded)
+
+
+def stranded_active_cost_reserves(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, EC-4 in-flight cost envelope) — the tenants with an IN-FLIGHT cost RESERVE (a ``reserve-cost:``
+    `governor.cost_reserve` whose matching ``settle-cost:`` `governor.cost_settle` has NOT landed) sitting in the
+    pruned prefix [0..K).
+
+    `CostEnvelopeLedger.in_flight_envelope` is a LIVE pairing scan (the per-reserve amounts it needs are NOT in
+    the aggregate `stranded_cost_ledger` seed, which carries only per-org reserved/settled totals + the seen-set).
+    Pruning an UNSETTLED reserve would hide it from that live scan, so the pending pool draw (held OUT of committed
+    cost) would silently vanish — the global pool meter (EC-5) would under-count the in-flight envelope and could
+    over-admit launches past the pool cap. `stranded_cost_ledger` does NOT prevent this: it only checks the
+    aggregate reserved/settled totals + seen-set survive, all of which a pruned reserve's record still satisfies.
+
+    Fail-closed tripwire: block the prune while a below-K reserve is still in-flight (no settle in the archived
+    prefix NOR the live tail [K..]). A SETTLED reserve (settle present anywhere) IS prunable — once settled it
+    leaves the in-flight set and `committed_cost` (snapshot-seeded) carries its settled cost. Signature-verified so
+    a forged settle cannot unblock the prune. Read-only. EMPTY in the happy path (no in-flight launch straddles the
+    prune horizon; launches normally settle within their lifetime)."""
+    from ..governor.cost_ledger import (COST_RESERVE_SIGNAL, COST_SETTLE_SIGNAL, _RESERVE_CORE, _SETTLE_CORE,
+                                        RESERVE_COST_PREFIX, SETTLE_COST_PREFIX)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+
+    def _pairs(records):
+        for r in records:
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+                continue
+            oid, eid = p.get("org_id"), p.get("entry_id")
+            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+                continue
+            core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                              # fail-closed: a forged settle must not unblock the prune
+            if sig == COST_RESERVE_SIGNAL and eid.startswith(RESERVE_COST_PREFIX):
+                yield ("reserve", oid, eid[len(RESERVE_COST_PREFIX):])
+            elif sig == COST_SETTLE_SIGNAL and eid.startswith(SETTLE_COST_PREFIX):
+                yield ("settle", oid, eid[len(SETTLE_COST_PREFIX):])
 
     reserves: dict[str, str] = {}      # in-flight-candidate suffix -> org_id, for reserves in the PRUNED prefix
     settled: set = set()               # suffixes with a landed settle, archived OR live
