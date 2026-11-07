@@ -27,7 +27,7 @@ single :meth:`Transport.remote_sha256` readback each backend must provide. (Sign
 the separate W7-6/#464 step; it hardens verification against an attacker who rewrites the copy AND its
 recorded hashes together — this gate already catches corruption/truncation/tamper relative to what was sent.)
 
-Two REAL backends ship (neither is a stub):
+Three REAL backends ship (none is a stub):
   * ``local`` — the local-directory backend (a bare path, or ``local:<path>``): copy the parts into
     ``<root>/<subdir>/`` on the local filesystem. Used against a MOUNTED remote FS (NFS / sshfs), a removable
     disk, and in tests to simulate a remote host. Verification re-reads the landed bytes.
@@ -37,19 +37,27 @@ Two REAL backends ship (neither is a stub):
     DESTINATION-side in the strongest sense over ssh: it runs ``sha256sum`` ON the remote host, so the remote
     hashes its OWN stored bytes; for a daemon / local target it reads the landed copy back (via ``rsync``) and
     hashes the bytes it actually receives.
+  * ``s3`` — a REAL remote transport to AWS S3 over the ``aws`` CLI (``s3://bucket[/prefix]``), for the
+    cloud/EC2 hosting profile. Push copies each encrypted part with ``aws s3 cp`` (optionally SSE-KMS — a
+    second layer over the files' own encryption); DESTINATION-side verify downloads the landed object back
+    and hashes the bytes it receives, failing closed on a truncated/corrupted/tampered copy. No boto3 (the
+    instance role / profile supplies credentials); the ``aws`` call is an injectable runner so it unit-tests
+    without the CLI. A ``restore`` reads the pushed copy back the same way: ``aws s3 cp s3://… ./bk && sigil
+    restore ./bk`` (or a mounted-S3 path), authenticated with ``--expect-governance-pubkey`` out of band.
 
-The factory + registry are structured so further backends (scp / object-store / S3) slot in behind the SAME
+The factory + registry are structured so a further backend (``scp``) slots in behind the SAME
 ``Transport.push`` + ``Transport.remote_sha256`` contract without touching callers.
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 # A ``scheme://`` prefix (e.g. ``rsync://``, ``s3://``) marks a remote backend spec; a bare path or ``local:``
 # is the shipped local-directory backend.
@@ -262,10 +270,107 @@ class RsyncTransport(Transport):
             return _sha256_path(local)
 
 
-# The pluggable registry: scheme -> backend factory taking the destination string. rsync is routed
-# explicitly in get_transport (its spec must reach rsync verbatim); add scp/object-store here.
+# argv (fully-resolved, no shell) + timeout -> CompletedProcess(returncode, stdout, stderr). Injected in
+# tests (a fake that simulates `aws s3 cp` against a local "bucket" dir — the `aws` CLI is not on the test
+# runner); the default shells to the real CLI. Mirrors the kek_backends `aws` runner seam.
+AwsRunner = Callable[[list], "subprocess.CompletedProcess[str]"]
+
+
+def _default_aws_runner(argv: list, timeout: float) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)  # noqa: S603 — resolved argv, no shell
+
+
+class S3Transport(Transport):
+    """A REAL remote transport to AWS S3 over the ``aws`` CLI (not a stub). ``dest`` is the destination ROOT
+    ``s3://bucket[/prefix]``; push copies each already-encrypted part to
+    ``s3://bucket/prefix/<remote_subdir>/<name>`` with ``aws s3 cp`` (optionally server-side-encrypted —
+    SSE-KMS when a key is configured, a second layer over the files' own passphrase encryption). Destination
+    verification is genuinely destination-side: :meth:`remote_sha256` downloads the LANDED object back and
+    hashes the bytes it actually receives, so a truncated / corrupted / tampered S3 copy is detected and the
+    push fails closed (W7-4). No boto3 — the instance role / configured profile supplies credentials; the
+    ``aws`` invocation is an injectable argv-runner so it is unit-tested without the CLI.
+
+    SSE + region come from the constructor, else the environment:
+    ``VIGIL_BACKUP_S3_SSE`` (e.g. ``aws:kms`` / ``AES256``), ``VIGIL_BACKUP_S3_SSE_KMS_KEY_ID`` (implies
+    SSE-KMS), and ``VIGIL_AWS_REGION`` (falling back to the standard ``AWS_REGION`` / ``AWS_DEFAULT_REGION``).
+    No secret ever reaches argv — only file paths, the ``s3://`` URI, and the PUBLIC key id/region."""
+
+    scheme = "s3"
+
+    def __init__(self, dest: str, *, aws_bin: str = "aws", sse: "str | None" = None,
+                 sse_kms_key_id: "str | None" = None, region: "str | None" = None, timeout: float = 600.0,
+                 runner: "AwsRunner | None" = None):
+        d = str(dest).strip().rstrip("/")
+        if not d:
+            raise TransportError("empty s3 destination (expected s3://bucket[/prefix])")
+        self.dest = d if d.startswith("s3://") else "s3://" + d
+        self.sse_kms_key_id = (sse_kms_key_id if sse_kms_key_id is not None
+                               else os.environ.get("VIGIL_BACKUP_S3_SSE_KMS_KEY_ID", "")).strip()
+        self.sse = (sse if sse is not None else os.environ.get("VIGIL_BACKUP_S3_SSE", "")).strip()
+        if self.sse_kms_key_id and not self.sse:
+            self.sse = "aws:kms"                              # a KMS key id implies SSE-KMS
+        self.region = (region if region is not None else (os.environ.get("VIGIL_AWS_REGION")
+                       or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "")).strip()
+        self.aws_bin = aws_bin
+        self.timeout = timeout
+        self._runner = runner or _default_aws_runner
+
+    def _run(self, argv: list) -> "subprocess.CompletedProcess[str]":
+        try:
+            return self._runner(argv, self.timeout)
+        except FileNotFoundError as e:
+            raise TransportError(f"{argv[0]!r} not found — install + configure the AWS CLI (the instance "
+                                 f"role / profile must allow s3:PutObject + s3:GetObject): {e}") from e
+        except subprocess.TimeoutExpired as e:
+            raise TransportError(f"{self.aws_bin!r} timed out after {self.timeout}s") from e
+
+    def _cp(self, src: str, dst: str, *, upload: bool) -> "subprocess.CompletedProcess[str]":
+        argv = [self.aws_bin]
+        if self.region:
+            argv += ["--region", self.region]
+        argv += ["s3", "cp", "--only-show-errors"]
+        if upload and self.sse:                              # SSE applies to the upload only
+            argv += ["--sse", self.sse]
+            if self.sse == "aws:kms" and self.sse_kms_key_id:
+                argv += ["--sse-kms-key-id", self.sse_kms_key_id]
+        argv += [src, dst]                                   # src/dst are an absolute path + an s3:// URI —
+        return self._run(argv)                               # never a '-'-leading value (and _safe_name-guarded)
+
+    def push(self, files: Iterable[Path], remote_subdir: str) -> dict:
+        _safe_subdir(remote_subdir)
+        paths = [Path(f) for f in files]
+        for f in paths:
+            if not f.is_file():
+                raise TransportError(f"push source {f} is not a file")
+        copied: list[str] = []
+        for f in paths:
+            _safe_name(f.name)
+            dst = f"{self.dest}/{remote_subdir}/{f.name}"
+            proc = self._cp(str(f), dst, upload=True)
+            if proc.returncode != 0:
+                raise TransportError(f"aws s3 cp {f.name} → {dst} failed (exit {proc.returncode}): "
+                                     f"{(proc.stderr or '').strip()}")
+            copied.append(f.name)
+        return {"backend": self.scheme, "target": f"{self.dest}/{remote_subdir}/", "files": copied}
+
+    def remote_sha256(self, remote_subdir: str, name: str) -> str:
+        _safe_subdir(remote_subdir)
+        _safe_name(name)
+        src = f"{self.dest}/{remote_subdir}/{name}"
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / name
+            proc = self._cp(src, str(local), upload=False)   # download the LANDED object + hash what we receive
+            if proc.returncode != 0 or not local.is_file():
+                raise TransportError(f"cannot read destination copy {src} (exit {proc.returncode}): "
+                                     f"{(proc.stderr or '').strip()}")
+            return _sha256_path(local)
+
+
+# The pluggable registry: scheme -> backend factory taking the destination string (scheme stripped). rsync is
+# routed explicitly in get_transport (its spec must reach rsync verbatim); s3 reconstructs its s3:// URI.
 _REGISTRY: dict[str, "callable[[str], Transport]"] = {   # type: ignore[valid-type]
     "local": lambda dest: LocalDirectoryTransport(dest),
+    "s3": lambda dest: S3Transport("s3://" + dest),
 }
 
 
@@ -292,11 +397,11 @@ def get_transport(spec: str) -> Transport:
         factory = _REGISTRY.get(scheme)
         if factory is None:
             raise TransportError(
-                f"transport backend {scheme!r} is not built yet — the local-directory and rsync backends "
-                f"ship. Implement Transport.push + Transport.remote_sha256 and register {scheme!r} in "
-                f"tools/backup/transport._REGISTRY, or push over rsync (rsync://… or "
-                f"rsync:[user@]host:path) or to a local path / mounted remote filesystem "
-                f"(a bare path or local:<path>).")
+                f"transport backend {scheme!r} is not built yet — the local-directory, rsync and s3 "
+                f"backends ship. Implement Transport.push + Transport.remote_sha256 and register "
+                f"{scheme!r} in tools/backup/transport._REGISTRY, or push over s3 (s3://bucket/prefix), "
+                f"rsync (rsync://… or rsync:[user@]host:path), or to a local path / mounted remote "
+                f"filesystem (a bare path or local:<path>).")
         return factory(spec[len(scheme) + len("://"):])
     if spec.startswith("local:"):
         return LocalDirectoryTransport(spec[len("local:"):])

@@ -45,6 +45,7 @@ from tools.backup import transport as _transport_mod  # noqa: E402
 from tools.backup.transport import (  # noqa: E402
     LocalDirectoryTransport,
     RsyncTransport,
+    S3Transport,
     TransportError,
     get_transport,
 )
@@ -81,10 +82,9 @@ def test_local_directory_transport_copies_files(tmp_path):
 def test_get_transport_factory_resolves_local_and_errors_on_unbuilt(tmp_path):
     assert isinstance(get_transport(str(tmp_path)), LocalDirectoryTransport)
     assert isinstance(get_transport("local:" + str(tmp_path)), LocalDirectoryTransport)
-    # scp/s3 are still honest residuals — a clear error, never a silent no-op.
-    for remote in ("scp://host/path", "s3://bucket/key"):
-        with pytest.raises(TransportError, match="not built yet"):
-            get_transport(remote)
+    # s3 now SHIPS (tested below); scp is the remaining honest residual — a clear error, never a silent no-op.
+    with pytest.raises(TransportError, match="not built yet"):
+        get_transport("scp://host/path")
     with pytest.raises(TransportError, match="empty"):
         get_transport("")
 
@@ -278,6 +278,117 @@ def test_rsync_over_ssh_remote_sha256_and_negative_control(tmp_path):
     (landed_dir / "offense.vglbk").write_bytes(payload + b"x")
     with pytest.raises(TransportError, match="destination integrity verification FAILED"):
         t.verify("20260101-000000", {"offense.vglbk": _sha256(payload)})
+
+
+# --- W7-4: a REAL transport round-trips to S3 (the aws CLI, simulated by an injectable runner) ----------
+
+def _fake_aws(bucket_root: Path, *, log=None, fail=False):
+    """Simulate ``aws s3 cp SRC DST`` against a local 'bucket' dir (the `aws` CLI is not on the test runner):
+    map ``s3://bucket/key`` -> ``<bucket_root>/bucket/key`` and copy local<->bucket. Records argv into ``log``
+    so the SSE/region flag construction + the no-secret-on-argv invariant can be asserted."""
+    import types as _t
+
+    def run(argv, timeout):
+        if log is not None:
+            log.append(list(argv))
+        if fail:
+            return _t.SimpleNamespace(returncode=1, stdout="", stderr="AccessDenied")
+        src, dst = argv[-2], argv[-1]
+        local_of = lambda uri: bucket_root / uri[len("s3://"):]  # noqa: E731
+        if dst.startswith("s3://"):                               # upload
+            tgt = local_of(dst)
+            tgt.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, tgt)
+        else:                                                     # download
+            s = local_of(src)
+            if not s.is_file():
+                return _t.SimpleNamespace(returncode=1, stdout="", stderr="NoSuchKey")
+            shutil.copy2(s, dst)
+        return _t.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return run
+
+
+def test_get_transport_resolves_s3():
+    t = get_transport("s3://my-bucket/vigil-backups")
+    assert isinstance(t, S3Transport) and t.dest == "s3://my-bucket/vigil-backups"
+    with pytest.raises(TransportError, match="empty s3 destination"):
+        S3Transport("")
+
+
+def test_s3_transport_push_and_verify_roundtrip(tmp_path):
+    bucket = tmp_path / "s3"
+    log: list = []
+    t = S3Transport("s3://bkt/vigil", runner=_fake_aws(bucket, log=log),
+                    sse_kms_key_id="alias/vigil-backup", region="eu-west-1")
+    src = tmp_path / "src"
+    src.mkdir()
+    a = src / "offense.vglbk"
+    a.write_bytes(os.urandom(4096))
+    m = src / "MANIFEST.json"
+    m.write_text(json.dumps({"schema": 1}))
+    res = t.push([a, m], "20260101-000000")
+    assert res["backend"] == "s3" and set(res["files"]) == {"offense.vglbk", "MANIFEST.json"}
+    landed = bucket / "bkt/vigil/20260101-000000/offense.vglbk"
+    assert landed.is_file() and landed.read_bytes() == a.read_bytes()        # a real, byte-identical copy
+    up = [c for c in log if c[-1].startswith("s3://")][0]                    # the UPLOAD argv
+    assert "--region" in up and "eu-west-1" in up
+    assert "--sse" in up and "aws:kms" in up and "alias/vigil-backup" in up  # SSE-KMS applied on upload
+    expected = {"offense.vglbk": _sha256(a.read_bytes()), "MANIFEST.json": _sha256(m.read_bytes())}
+    verified = t.verify("20260101-000000", expected)                        # destination-side readback matches
+    assert set(verified["verified"]) == {"offense.vglbk", "MANIFEST.json"}
+
+
+def test_s3_verify_catches_a_tampered_destination_copy(tmp_path):
+    # NEGATIVE CONTROL: a same-length byte flip at the destination must fail closed.
+    bucket = tmp_path / "s3"
+    t = S3Transport("s3://bkt/vigil", runner=_fake_aws(bucket))
+    a = tmp_path / "offense.vglbk"
+    a.write_bytes(os.urandom(2048))
+    t.push([a], "20260101-000000")
+    expected = {"offense.vglbk": _sha256(a.read_bytes())}
+    assert t.verify("20260101-000000", expected)                            # intact first
+    landed = bucket / "bkt/vigil/20260101-000000/offense.vglbk"
+    bad = bytearray(landed.read_bytes())
+    bad[7] ^= 0x01
+    landed.write_bytes(bytes(bad))
+    with pytest.raises(TransportError, match="destination integrity verification FAILED"):
+        t.verify("20260101-000000", expected)
+
+
+def test_s3_verify_catches_a_missing_destination_copy(tmp_path):
+    bucket = tmp_path / "s3"
+    t = S3Transport("s3://bkt/vigil", runner=_fake_aws(bucket))
+    a = tmp_path / "offense.vglbk"
+    a.write_bytes(b"ciphertext")
+    t.push([a], "20260101-000000")
+    (bucket / "bkt/vigil/20260101-000000/offense.vglbk").unlink()
+    with pytest.raises(TransportError, match="unreadable|FAILED"):
+        t.verify("20260101-000000", {"offense.vglbk": _sha256(b"ciphertext")})
+
+
+def test_s3_push_fails_closed_on_aws_error(tmp_path):
+    # NEGATIVE CONTROL: a non-zero `aws` exit (no creds / denied) fails the push closed, never silent.
+    bucket = tmp_path / "s3"
+    t = S3Transport("s3://bkt/vigil", runner=_fake_aws(bucket, fail=True))
+    a = tmp_path / "offense.vglbk"
+    a.write_bytes(b"x")
+    with pytest.raises(TransportError, match="aws s3 cp"):
+        t.push([a], "20260101-000000")
+
+
+def test_s3_no_file_content_on_argv(tmp_path):
+    # the transport moves CIPHERTEXT only, and the file CONTENT (and any secret) never reaches argv — only
+    # the file PATH, the s3:// URI, and the PUBLIC key id / region.
+    bucket = tmp_path / "s3"
+    log: list = []
+    t = S3Transport("s3://bkt/vigil", runner=_fake_aws(bucket, log=log),
+                    sse_kms_key_id="alias/k", region="r")
+    a = tmp_path / "offense.vglbk"
+    a.write_bytes(b"super-secret-ciphertext-bytes")
+    t.push([a], "20260101-000000")
+    flat = " ".join(" ".join(str(x) for x in c) for c in log)
+    assert "super-secret-ciphertext-bytes" not in flat
 
 
 # --- W7-4: end-to-end CLI fail-closed — the "fails WITHOUT this change" guard ---------------------------
