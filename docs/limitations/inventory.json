@@ -684,9 +684,9 @@
     },
     {
       "file": "tools/backup/transport.py",
-      "snippet": "neither is a stub",
+      "snippet": "none is a stub",
       "kind": "non-debt",
-      "note": "Explicitly asserts both backup backends are REAL (the opposite of a stub)."
+      "note": "Explicitly asserts all THREE backup backends (local/rsync/s3) are REAL (the opposite of a stub)."
     },
     {
       "file": "tools/ha/require_networkpolicy.py",
