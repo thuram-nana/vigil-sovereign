@@ -162,9 +162,15 @@ class FindingReceiver:
             )
         # Anchor 2: appended into the owner-signed hash-chain. append() is fsync-durable and returns
         # the assigned seq; the record is now covered by the owner-signed spine head.
+        # IDEMPOTENT (finding FDX-4): dedup on the finding's CONTENT identity — the store keys dedup on
+        # kind/source/actor/payload (excluding seq/ts), and the payload is a deterministic function of the
+        # signed finding cert, so ingesting the SAME finding twice (a crash-reclaim re-ingest where the append
+        # had already landed before the crash, or a re-cross from the durable blackboard) returns the EXISTING
+        # seq instead of double-appending. Two DIFFERENT findings carry different payloads and never falsely
+        # dedup. This is the receiver-side idempotency layer the crash-recovery reclaim relies on.
         return self.store.append(
             kind=FINDING_KIND, source=FINDING_SOURCE, actor=FINDING_ACTOR,
-            payload=vf.to_spine_payload(),
+            payload=vf.to_spine_payload(), dedup=True,
         )
 
     def ingest_detection(self, envelope: "str | bytes") -> int:
@@ -198,9 +204,11 @@ class FindingReceiver:
                 f"detection {vd.oracle!r}: engagement_slug {vd.engagement_slug!r} is outside the "
                 f"owner-delegated scope {self._scope!r} — refusing (cross-engagement detection)"
             )
+        # IDEMPOTENT (finding FDX-4), symmetric with ingest(): dedup on the detection FACT's content identity
+        # so a crash-reclaim re-ingest or a re-cross returns the existing seq instead of double-appending.
         return self.store.append(
             kind=DETECTION_KIND, source=FINDING_SOURCE, actor=DETECTION_ACTOR,
-            payload=vd.to_spine_payload(),
+            payload=vd.to_spine_payload(), dedup=True,
         )
 
 

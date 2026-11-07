@@ -19,6 +19,7 @@ import pytest
 
 from sigil.governor.identity import delegate_offense_governance, delegate_offense_spine
 from sigil.inbound import SpoolWatcher
+from sigil.inbound.finding_receiver import FindingReceiver
 from sigil.spine.store import SpineStore
 from vigil_core import AuthorizerKey, evidence_signing_bytes, generate_keypair, sign
 from vigil_integration.detection.certificate import build_certificate, sign_certificate
@@ -249,6 +250,87 @@ def test_archive_failure_does_not_double_ingest(env):
     finally:
         os.chmod(w.processed, 0o700)
     assert len(_kinds(store, "finding")) == 1
+
+
+# --- crash-recovery durability (FDX-1 reclaim + FDX-4 idempotent append + FDX-6 watch survival) ---------
+
+def test_reclaim_working_recovers_a_crash_stranded_finding(env):
+    # FDX-1: a mid-drain crash can leave a file in working/ (claimed out of incoming/ but never archived).
+    # drain() scans only incoming/, so without a reclaim that file — and its confirmed FACT — is LOST.
+    # The reclaim sweep at the top of drain() moves it back to incoming/ and it is ingested.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    w.working.mkdir(parents=True, exist_ok=True)
+    (w.working / "stranded.json").write_text(_finding(ref="sqli-stranded"), encoding="utf-8")
+    r = w.drain()
+    assert r["ingested"] == 1
+    assert "sqli-stranded" in {rec.payload["finding_ref"] for rec in _kinds(store, "finding")}
+    assert list(w.working.glob("*.json")) == []          # reclaimed + archived, nothing left stranded
+
+
+def test_reclaim_after_ingest_does_not_double_append(env):
+    # FDX-1 + FDX-4 together (the load-bearing interaction). Simulate a crash AFTER the spine append but
+    # BEFORE the processed/ archive: the finding is already on the spine, an identical copy sits in working/,
+    # and NO processed marker exists. The reclaim re-ingests it, but the receiver's content dedup (dedup=True)
+    # returns the existing seq instead of appending a SECOND identical finding. Without the dedup layer the
+    # reclaim would double-ingest — which is exactly why FDX-1 and FDX-4 must co-land.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    spool_envelope(spool, _finding(ref="sqli-dup"))
+    w.drain()
+    assert len(_kinds(store, "finding")) == 1
+    for m in list(w.processed.glob("*.json")):
+        m.unlink()                                       # the archive "never happened" (crash window)
+    (w.working / "replay.json").write_text(_finding(ref="sqli-dup"), encoding="utf-8")
+    w.drain()                                            # reclaim → re-ingest → dedup on content identity
+    assert len(_kinds(store, "finding")) == 1            # STILL exactly one record — no double-append
+
+
+def test_receiver_ingest_is_idempotent_on_content(env):
+    # FDX-4 at the receiver: two ingests of the SAME finding append exactly one spine record; the second
+    # returns the first's seq (content-dedup), never a second identical finding.
+    store, spool = env
+    recv = FindingReceiver.from_delegation(store, owner_pubkey=OWNER.public_key_b64,
+                                           delegation=_gov_deleg(), now=NOW, scope="acme")
+    envelope = _finding(ref="idem-1")
+    s1 = recv.ingest(envelope)
+    s2 = recv.ingest(envelope)
+    assert s1 == s2 and len(_kinds(store, "finding")) == 1
+
+
+def test_detection_reclaim_after_ingest_does_not_double_append(env):
+    # FDX-4 symmetry for the detection path (ingest_detection also uses dedup=True).
+    store, spool = env
+    w = _watcher(store, spool, scope="*", spine=_spine_deleg())
+    spool_envelope(spool, _detection())
+    w.drain()
+    assert len(_kinds(store, "detection")) == 1
+    for m in list(w.processed.glob("*.json")):
+        m.unlink()
+    (w.working / "det-replay.json").write_text(_detection(), encoding="utf-8")
+    w.drain()
+    assert len(_kinds(store, "detection")) == 1
+
+
+def test_watch_loop_survives_a_drain_error(env):
+    # FDX-6: an unexpected error from one drain() round must NOT kill the watch loop (which would silently
+    # stop the results-delivery daemon and strand every subsequent finding). The loop reports and continues.
+    import threading
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    stop = threading.Event()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient spine/IO fault")
+        stop.set()                                       # second round ends the loop
+        return {"ingested": 0, "rejected": 0, "deduped": 0, "seqs": []}
+
+    w.drain = flaky                                      # type: ignore[assignment]
+    w.watch(interval=0.0, stop=stop)                     # must return, not raise
+    assert calls["n"] >= 2                               # the loop continued past the first-round error
 
 
 def test_fifo_and_symlink_in_incoming_are_rejected_without_hanging(env):

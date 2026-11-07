@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -129,17 +130,42 @@ class SpoolWatcher:
         except UnicodeDecodeError as exc:          # a non-UTF-8 blob is hostile input, not a crash
             raise OSError(f"not valid UTF-8: {exc}") from exc
 
+    def _reclaim_working(self) -> None:
+        """Crash recovery: move any file stranded in ``working/`` — a claim (``os.replace`` into working/)
+        that was interrupted before the file was archived to ``processed/`` or quarantined to ``rejected/``,
+        i.e. a mid-drain crash — back to ``incoming/`` so it is reprocessed. Without this, ``drain()`` (which
+        scans ONLY ``incoming/``) would never look at a stranded file again and the confirmed FACT it carries
+        would be SILENTLY LOST. A re-process is safe because the finding append is idempotent on the finding's
+        content identity (``FindingReceiver.ingest`` passes ``dedup=True``) — so reclaiming a file whose ingest
+        had already appended before the crash deduplicates instead of double-appending. Mirrors the money
+        drains' ``completion_spool``/``billing_spool`` crash-recovery sweep."""
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return
+        for f in stale:
+            try:
+                os.replace(f, self.incoming / f.name)
+            except OSError:
+                self._safe_unlink(f)
+
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {ingested, rejected, deduped, seqs}.
 
-        For each file: CLAIM it out of ``incoming/`` (atomic rename into ``working/``) BEFORE anything else,
-        so a failed archive or a re-run can never re-read it from ``incoming/`` and double-append. Read it as
-        a bounded regular UTF-8 file, then compute the dedup identity from the READ BYTES (not the producer-
-        chosen filename — so a mismatched name cannot suppress a different finding). If that identical
-        envelope was already ingested (``processed/<sha256>`` exists), the claimed copy is a re-spool and is
-        archived WITHOUT re-appending (idempotent). Otherwise ingest and archive to ``processed/<sha256>``
-        (the dedup marker). ANY failure → ``rejected/``, nothing appended. Never raises on one bad file;
-        never blocks on a hostile one."""
+        Begins with a crash-recovery sweep of ``working/`` (``_reclaim_working``): a file a mid-drain crash
+        left stranded there — claimed out of ``incoming/`` but not yet archived/quarantined — is moved back
+        to ``incoming/`` so its FACT is never lost. For each file: CLAIM it out of ``incoming/`` (atomic
+        rename into ``working/``) BEFORE anything else, so a failed archive or a re-run can never re-read it
+        from ``incoming/`` and double-append. Read it as a bounded regular UTF-8 file, then compute the dedup
+        identity from the READ BYTES (not the producer-chosen filename — so a mismatched name cannot suppress
+        a different finding). If that identical envelope was already ingested (``processed/<sha256>`` exists),
+        the claimed copy is a re-spool and is archived WITHOUT re-appending (idempotent). Otherwise ingest and
+        archive to ``processed/<sha256>`` (the dedup marker). The append is ALSO idempotent on the finding's
+        content identity (``FindingReceiver`` uses ``dedup=True``), so a reclaimed file whose ingest had
+        already appended before a crash (no ``processed/`` marker yet) deduplicates rather than double-ingests.
+        ANY failure → ``rejected/``, nothing appended. Never raises on one bad file; never blocks on a hostile
+        one."""
+        self._reclaim_working()
         ingested, rejected, deduped, seqs = 0, 0, 0, []
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
@@ -195,9 +221,18 @@ class SpoolWatcher:
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
         """Drain in a loop until ``stop`` (a threading.Event) is set. Each round is a fresh ``drain()``
-        (delegations are re-verified against the current clock, so an expired delegation stops admitting)."""
+        (delegations are re-verified against the current clock, so an expired delegation stops admitting).
+
+        A single bad drain NEVER kills the daemon: ``drain()`` already quarantines per-file failures, but an
+        unexpected error OUTSIDE the per-file loop (e.g. a transient spine/IO fault) is caught here, reported
+        to stderr, and the loop continues — so the results-delivery drain survives a blip rather than silently
+        dying and stranding every subsequent finding in ``incoming/`` (mirrors the money drains' watch loop)."""
         while True:
-            self.drain()
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                sys.stderr.write("vigil finding-drain: WARNING drain error (continuing): "
+                                 f"{type(exc).__name__}: {exc}\n")
             if stop is not None and getattr(stop, "wait", None) is not None:
                 if stop.wait(interval):
                     return
