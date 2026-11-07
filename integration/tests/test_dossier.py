@@ -64,11 +64,15 @@ def _log_with_secret(run_dir: Path) -> None:
     (run_dir / ".crucible-v2.log").write_text(
         json.dumps({"event": "req", "authorization": "Bearer SECRET-TOKEN-XYZ", "tokens_in": 42}) + "\n" +
         json.dumps({"event": "resp", "cookie": "session=DEADBEEF-SECRET"}) + "\n" +
-        # a credential carried as a VALUE under a NON-secret key — a realistic structlog capture that
-        # key-name masking alone misses (the engagement log must get the SAME value-level redaction the
-        # terminal transcript gets, or these ship in the clear in the governance-signed dossier).
+        # credentials carried as VALUES under NON-secret keys — a realistic structlog capture that key-name
+        # masking alone misses (the engagement log must get the SAME value-level redaction the terminal
+        # transcript gets, or these ship in the clear in the governance-signed dossier). Covers URL userinfo,
+        # a pasted Bearer, a Basic-auth header (whose base64 payload a naive 'mask to first space' leaks), and
+        # a Cookie / Set-Cookie value (a header family a key-name masker never sees in free text).
         json.dumps({"event": "fetch", "target": "http://admin:VALUESECRET-PW@victim.example/x",
-                    "note": "sent Authorization: Bearer VALUESECRET-BEARER-abc123"}) + "\n" +
+                    "note": "sent Authorization: Bearer VALUESECRET-BEARER-abc123",
+                    "req": "Authorization: Basic VALUESECRET-BASIC-dXNlcg==",
+                    "resp_hdr": "Set-Cookie: sid=VALUESECRET-COOKIE; HttpOnly"}) + "\n" +
         "this line is not json\n", encoding="utf-8")
 
 
@@ -287,6 +291,8 @@ def test_the_shipped_engagement_log_is_scrubbed(tmp_path):
     # value-level redaction the terminal transcript gets).
     assert "VALUESECRET-PW" not in whole, "URL-userinfo password leaked in the signed dossier"
     assert "VALUESECRET-BEARER-abc123" not in whole, "pasted Bearer token leaked in the signed dossier"
+    assert "VALUESECRET-BASIC" not in whole, "Authorization: Basic payload leaked (value masked only to first space)"
+    assert "VALUESECRET-COOKIE" not in whole, "Set-Cookie value leaked (header family a key-name masker never sees)"
     # non-secret telemetry that merely CONTAINS a secret word is preserved (no over-masking)
     assert "tokens_in" in log and "42" in log
     # the non-JSON line is dropped, never shipped in the clear
@@ -497,20 +503,40 @@ def test_manifest_check_recipe_catches_alter_delete_and_inject(tmp_path):
     with zipfile.ZipFile(out) as zf:
         zf.extractall(clean)
     r = _recipe(clean)
-    assert "OK -" in r.stdout and "FAIL" not in r.stdout, r.stdout      # a pristine extraction passes
+    assert r.returncode == 0 and "OK -" in r.stdout and "FAIL" not in r.stdout, r.stdout   # pristine passes, exit 0
 
     alt = tmp_path / "alt"; shutil.copytree(clean, alt)
     (alt / "index.html").write_text("TAMPERED", encoding="utf-8")
-    assert "FAIL" in _recipe(alt).stdout                                # an altered listed file is caught
+    ra = _recipe(alt)
+    assert ra.returncode == 1 and "FAIL" in ra.stdout                   # altered listed file: caught, exit 1
 
     miss = tmp_path / "miss"; shutil.copytree(clean, miss)
     (miss / "index.html").unlink()
     rm = _recipe(miss)
-    assert rm.returncode == 0 and "MISSING" in rm.stdout and "FAIL" in rm.stdout   # caught, never a crash
+    # caught + a clean FAIL exit (1), never a crash (an unguarded read would traceback to exit 2 + stderr)
+    assert rm.returncode == 1 and "MISSING" in rm.stdout and not rm.stderr.strip()
 
     inj = tmp_path / "inj"; shutil.copytree(clean, inj)
     (inj / "reports" / "EVIL.md").write_text("injected", encoding="utf-8")
-    assert "UNLISTED" in _recipe(inj).stdout                            # an injected unlisted file is caught
+    ri = _recipe(inj)
+    assert ri.returncode == 1 and "UNLISTED" in ri.stdout              # an injected unlisted file is caught
+
+    # a recipient's benign OS/extraction noise must NOT be reported as tampering (false-positive guard)
+    noise = tmp_path / "noise"; shutil.copytree(clean, noise)
+    (noise / ".DS_Store").write_text("macos", encoding="utf-8")
+    (noise / "__MACOSX").mkdir(); (noise / "__MACOSX" / "x").write_text("sidecar", encoding="utf-8")
+    (noise / "dossier.zip").write_bytes(b"the downloaded archive itself")
+    rn = _recipe(noise)
+    assert rn.returncode == 0 and "OK -" in rn.stdout, rn.stdout        # noise ignored, still passes clean
+
+    # a file injected via a SYMLINKED directory must be caught — the signed dossier contains no symlinks,
+    # so any symlink is a tamper signal (it would otherwise evade both the hash check and the file->manifest
+    # diff, since rglob need not descend a directory symlink).
+    sym = tmp_path / "sym"; shutil.copytree(clean, sym)
+    evil = tmp_path / "evil-outside"; evil.mkdir(); (evil / "payload.md").write_text("injected via symlink")
+    (sym / "evidence-extra").symlink_to(evil, target_is_directory=True)
+    rs = _recipe(sym)
+    assert rs.returncode == 1 and "SYMLINK" in rs.stdout.upper()        # the symlink is flagged as tamper
 
 
 def test_multiple_facts_are_counted_and_each_carried(tmp_path):

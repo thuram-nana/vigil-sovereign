@@ -1075,7 +1075,8 @@ _MANIFEST_CHECK = """python3 - <<'PYTHON'
 # Run this in a CLEAN extraction of the dossier (only its own files present). It checks BOTH directions:
 # every listed file is present and unaltered, AND no file was INJECTED that the signed manifest does not
 # list — so a flipped byte, a deleted entry, and an added unlisted file are all caught (never a crash).
-import hashlib, json, pathlib
+# EXIT CODE: 1 on any failure, 0 only when the archive is intact — so a pipeline can gate on it ($?).
+import hashlib, json, pathlib, sys
 manifest = json.load(open("MANIFEST.json"))
 listed = {e["path"]: e["sha256"] for e in manifest["entries"]}
 altered, missing = [], []
@@ -1085,15 +1086,27 @@ for path, want in listed.items():
         missing.append(path)
     elif hashlib.sha256(p.read_bytes()).hexdigest() != want:
         altered.append(path)
-# file -> manifest: every archive file EXCEPT the signed envelope itself must be listed in the manifest.
+# file -> manifest: every archive file EXCEPT the signed envelope itself must be listed. Benign OS/extraction
+# noise (.DS_Store, Thumbs.db, a __MACOSX/ sidecar, the downloaded .zip itself) is NOT a signed-content entry
+# and must not be reported as tampering — a false "UNLISTED" on a recipient's Mac/Windows would cry wolf.
 envelope = {"MANIFEST.json", "MANIFEST.sig.json", "TRUST-ROOT-FINGERPRINT.txt"}
-present = {p.as_posix() for p in pathlib.Path(".").rglob("*") if p.is_file()}
-unlisted = sorted(present - set(listed) - envelope)
+def _noise(path):
+    parts = path.split("/")
+    return parts[-1] in {".DS_Store", "Thumbs.db"} or "__MACOSX" in parts or path.endswith(".zip")
+present = {p.as_posix() for p in pathlib.Path(".").rglob("*") if p.is_file() and not p.is_symlink()}
+unlisted = sorted(x for x in (present - set(listed) - envelope) if not _noise(x))
+# The signed dossier contains NO symlinks (the compiler writes only regular files), so ANY symlink in the
+# extraction is a tamper signal — a file injected via a symlinked directory would otherwise evade both the
+# hash check (it is not a listed path) and the file->manifest diff (rglob need not descend a dir symlink).
+symlinks = sorted(p.as_posix() for p in pathlib.Path(".").rglob("*") if p.is_symlink())
 if altered:  print("ALTERED FILES:", altered)
 if missing:  print("MISSING FILES (listed but absent):", missing)
 if unlisted: print("UNLISTED FILES (present but NOT in the signed manifest):", unlisted)
-print("OK -", len(listed), "files all match and the archive has no unlisted files") \\
-    if not (altered or missing or unlisted) else print("RESULT: FAIL")
+if symlinks: print("SYMLINKS (a signed dossier contains none):", symlinks)
+if altered or missing or unlisted or symlinks:
+    print("RESULT: FAIL")
+    sys.exit(1)
+print("OK -", len(listed), "files all match and the archive has no unlisted files")
 PYTHON"""
 
 _SIGNATURE_CHECK = """python3 - <<'PYTHON'

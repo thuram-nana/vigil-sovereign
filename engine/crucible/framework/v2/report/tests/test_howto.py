@@ -214,17 +214,38 @@ def test_fact_howto_renders_from_title_shorthand_when_surface_lacks_a_param() ->
 
 
 def test_title_param_recovery_is_conservative() -> None:
-    # The fallback recovers a parameter ONLY from the engine's trailing "at <single-token>" shorthand,
-    # never from a mid-sentence "at", a trailing path, a multi-word phrase, or a passive title — a
-    # finding that recorded no parameter is never given a fabricated one.
+    # The fallback recovers a parameter ONLY from the engine's exact oracle marker "confirmed at <token>"
+    # at the end of the title — never from a mid-sentence "at", a bare trailing "at <x>" English idiom, a
+    # trailing path, a multi-word phrase, a different verb, or a passive title. A finding that recorded no
+    # parameter is never given a fabricated one (red-pen BLOCK: howto title-param fabrication).
     from framework.v2.report.howto import _param_from_title
     assert _param_from_title("boolean_sqli confirmed at q") == "q"
     assert _param_from_title("xss confirmed at user_id") == "user_id"
     assert _param_from_title("Blind SQL injection in product search") is None   # make_fact's own title
-    assert _param_from_title("SQL injection at the login endpoint") is None      # multi-word phrase
-    assert _param_from_title("Open redirect at /login") is None                  # trailing path
+    assert _param_from_title("SQL injection at the login endpoint") is None      # bare "at", not the marker
+    assert _param_from_title("Open redirect at /login") is None                  # trailing path, no marker
+    assert _param_from_title("boolean_sqli observed at q") is None               # different verb, not "confirmed"
+    assert _param_from_title("mitigated the risk at runtime") is None            # English idiom, not the marker
     assert _param_from_title("Missing Content-Security-Policy") is None          # passive, no shorthand
     assert _param_from_title("") is None and _param_from_title(None) is None
+
+
+def test_title_param_fallback_only_applies_to_proven_facts() -> None:
+    # The title fallback is gated on g.is_fact, so a LEAD (or a demoted finding that kept its
+    # "<class> confirmed at <param>" title) is NEVER given a recovered parameter — only a PROVEN finding,
+    # whose title truly IS the engine's oracle shorthand, gets one. (red-pen BLOCK: not scoped to facts.)
+    lead = make_lead()
+    lead.surface = "http://127.0.0.1:18080/"             # bare URL — parse_surface yields no parameter
+    lead.title = "boolean_sqli confirmed at q"           # a shorthand-shaped title on a LEAD
+    gl = grade_finding(lead)
+    assert not gl.is_fact
+    assert build_howto(gl).parameter is None             # the lead is NOT given the recovered parameter
+
+    fact = make_fact()
+    fact.surface = "http://127.0.0.1:18080/"
+    fact.title = "boolean_sqli confirmed at q"
+    gf = grade_finding(fact)
+    assert gf.is_fact and build_howto(gf).parameter == "q"   # the PROVEN finding is
 
 
 def test_title_param_fallback_does_not_change_a_parsed_surface() -> None:
