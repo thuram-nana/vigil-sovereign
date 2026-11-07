@@ -49,6 +49,16 @@ try:                                                       # pragma: no cover - 
 except Exception:                                          # noqa: BLE001
     _token_budget = None
 
+# EC-3 — RUN-SCOPED HARD BUDGET (fail-CLOSED stop), the sibling of the advisory per-tool _tb_ metering
+# above. vigil_core.run_budget is the same shared leaf both planes import; guard the import exactly like
+# token_budget so the kernel still completes a call if the shared core is ever absent. DEFAULT-OFF: when the
+# run budget is not armed (flag off / no lease) every _rb_ helper is a no-op and complete_with_failover is
+# byte-identical. Distinct from _tb_ (warn+throttle, never blocks): the hard stop RAISES, terminally.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import run_budget as _run_budget
+except Exception:                                          # noqa: BLE001
+    _run_budget = None
+
 # M4.1 — the ONE egress chokepoint both LLM paths route through. vigil_core is the shared leaf both the
 # offense framework and the sovereign planes import, so composing the egress discipline (classify ->
 # redact -> authorize -> route -> provenance -> output-verify -> audit) there crosses no FATAL-2 boundary.
@@ -95,6 +105,33 @@ def _tb_record(tool: str, trace: "CallTrace") -> None:
         spent = int(getattr(trace, "tokens_in", 0) or 0) + int(getattr(trace, "tokens_out", 0) or 0)
         if spent > 0:
             _token_budget.record(tool, spent)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _rb_check() -> None:
+    """FAIL-CLOSED run-budget stop: if this run's cumulative reasoning tokens have reached the armed per-run
+    ceiling, raise :class:`RunBudgetExceeded` BEFORE the egress so the overshooting call never leaves the
+    engine. A no-op when the run budget is unarmed (flag off / no lease) or the shared core is absent, so
+    the default path is byte-identical. UNLIKE _tb_throttle (bounded sleep, never blocks), this RAISES — a
+    TERMINAL stop that propagates out of the kernel; it is deliberately NOT swallowed here and must NOT be
+    retried as a transient."""
+    if _run_budget is None:
+        return
+    _run_budget.check_or_raise()                           # raises RunBudgetExceeded iff armed AND over
+
+
+def _rb_charge(trace: "CallTrace | None") -> None:
+    """Charge the ACTUAL tokens a real (non-dry-run) call spent to this run's HARD accumulator — the
+    sibling of _tb_record for the per-run ceiling. Dry-run charges 0 (mirrors _tb_record), so fixture /
+    ``make gate`` runs never accumulate and determinism is untouched. A no-op when unarmed or the core is
+    absent. Never raises (recording spend must not break a completion; the STOP is _rb_check's job)."""
+    if _run_budget is None or trace is None or getattr(trace, "is_dryrun", False):
+        return
+    try:
+        spent = int(getattr(trace, "tokens_in", 0) or 0) + int(getattr(trace, "tokens_out", 0) or 0)
+        if spent > 0:
+            _run_budget.charge(spent)
     except Exception:                                      # noqa: BLE001
         pass
 
@@ -454,8 +491,10 @@ def complete_with_failover(prompt: "Prompt") -> "LLMResult":
             prompt.max_tokens = _tb_clamp(tool, _mx)
         except (AttributeError, TypeError):
             pass
+    _rb_check()                                          # EC-3: FAIL-CLOSED run-budget stop BEFORE the egress
     result = _route_urk_egress(prompt)                   # M4.1: through the single egress chokepoint
     _tb_record(tool, getattr(result, "trace", None))     # None trace records nothing (spent == 0)
+    _rb_charge(getattr(result, "trace", None))           # EC-3: charge actual tokens to the run accumulator
     if _b is not None:
         # Store under the ORIGINAL (pre-clamp) max_tokens. The budget clamp mutated prompt.max_tokens for the
         # provider call, but the L2 LOOKUP above keyed on the original, so the store must too — otherwise L2

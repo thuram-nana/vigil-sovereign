@@ -24,6 +24,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -139,9 +140,18 @@ def run_consistent(
     if workers <= 1 or n <= 1:
         outs: list[tuple[Any, Any]] = [_guarded(run_fn, rate_limiter) for _ in range(n)]
     else:
+        # Snapshot THIS (the caller's) context once per sample — on this thread, BEFORE dispatch — so each
+        # pool worker runs inside a COPY of it. copy_context() captures the CALLER's ContextVars; calling it
+        # inside the worker would capture the worker's fresh/empty context and defeat the purpose. A
+        # context-local the run owns — notably the EC-3 run-budget accumulator/ceiling (a shared, lock-guarded
+        # _RunBudget object) — is then VISIBLE inside every sample, so each sample's LLM spend is CHARGED to
+        # the run and its fail-closed STOP fires, instead of silently escaping in a fresh (unarmed) child
+        # context. All copies share the one _RunBudget reference, so concurrent charges aggregate under its
+        # lock. ``map`` preserves submission order → byte-stable modal representative; the serial/dry-run
+        # branch above (every deterministic replay / ``make gate`` run) is untouched.
+        sample_ctxs = [copy_context() for _ in range(n)]
         with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
-            # map preserves input (submission) order → byte-stable modal representative.
-            outs = list(ex.map(lambda _i: _guarded(run_fn, rate_limiter), range(n)))
+            outs = list(ex.map(lambda ctx: ctx.run(_guarded, run_fn, rate_limiter), sample_ctxs))
     keys = [_canon(key_fn(p)) for p, _ in outs]
     counts = Counter(keys)
     modal_key, modal_n = counts.most_common(1)[0]
