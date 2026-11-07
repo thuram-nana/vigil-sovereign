@@ -180,6 +180,26 @@ def test_entry_id_validation():
             L.reserve("acme", 10, entry_id=bad, issued_at=1.0)
 
 
+def test_reserve_settle_enforce_the_entry_id_prefix():
+    # RED-PEN LOW cluster: the prefix-AGNOSTIC fold (reserved_total/committed/was_reserved sum every record) and
+    # the prefix-GATED in-flight pairing (keys on the {slug}:{nonce} suffix after the prefix) must agree on what a
+    # reservation is — so a reserve MUST be under reserve-cost: and a settle under settle-cost:, enforced at bind.
+    s = _store()
+    L = _led(s)
+    with pytest.raises(ValueError):
+        L.reserve("acme", 10, entry_id="acme:n1", issued_at=1.0)                  # no reserve-cost: prefix
+    with pytest.raises(ValueError):
+        L.reserve("acme", 10, entry_id="settle-cost:acme:n1", issued_at=1.0)      # wrong prefix on a reserve
+    with pytest.raises(ValueError):
+        L.settle("acme", 10, entry_id="acme:n1", issued_at=1.0)                   # no settle-cost: prefix
+    with pytest.raises(ValueError):
+        L.settle("acme", 10, entry_id="reserve-cost:acme:n1", issued_at=1.0)      # wrong prefix on a settle
+    # the correct prefixes are accepted and pair across the fold + in-flight readers consistently
+    L.reserve("acme", 10, entry_id="reserve-cost:acme:n1", issued_at=1.0)
+    L.settle("acme", 10, entry_id="settle-cost:acme:n1", issued_at=2.0)
+    assert L.committed_cost("acme") == 10 and L.in_flight_envelope("acme") == 0
+
+
 def test_in_flight_pairs_by_suffix_not_raw_entry_id():
     # the in-flight scan pairs a reserve to its settle by the {slug}:{nonce} SUFFIX after the prefix — a settle for
     # a DIFFERENT suffix must not clear an unrelated reserve.

@@ -90,13 +90,18 @@ def _check_tokens(tokens: int, *, allow_zero: bool) -> int:
     return tokens
 
 
-def _check_entry_id(entry_id: str) -> str:
+def _check_entry_id(entry_id: str, *, prefix: str = "") -> str:
     """The idempotency key for one ledger entry (reserve-cost:/settle-cost: + {slug}:{nonce} from the gate).
     Bounded + non-control so it round-trips the signed core and the snapshot rows verbatim. NOT auto-generated:
-    the suffix pairing is load-bearing, so the caller always supplies it."""
+    the suffix pairing is load-bearing, so the caller always supplies it. `prefix` (when given) is ENFORCED at
+    bind so the prefix-AGNOSTIC fold (reserved_total/committed/was_reserved sum EVERY owner-signed record) and
+    the prefix-GATED in-flight pairing (which keys on the {slug}:{nonce} SUFFIX after the prefix) can never
+    disagree on what a reservation is — a reserve MUST be under RESERVE_COST_PREFIX, a settle under SETTLE_COST_PREFIX."""
     e = str(entry_id or "").strip()
     if not e or len(e) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in e):
         raise ValueError("entry_id must be a non-empty, non-control string of <= 128 chars")
+    if prefix and not e.startswith(prefix):
+        raise ValueError(f"entry_id must start with {prefix!r} (reserve/settle prefixes are load-bearing)")
     return e
 
 
@@ -128,7 +133,7 @@ class CostEnvelopeLedger:
             raise ValueError("cost reserve requires the owner signing key")
         oid = org_tenant_id(org_id)
         t = _check_tokens(tokens, allow_zero=False)
-        eid = _check_entry_id(entry_id)
+        eid = _check_entry_id(entry_id, prefix=RESERVE_COST_PREFIX)
         core = {"signal": COST_RESERVE_SIGNAL, "org_id": oid, "entry_id": eid, "tokens": t,
                 "engagement_id": str(engagement_id or ""), "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
@@ -149,7 +154,7 @@ class CostEnvelopeLedger:
             cap = _as_tokens(reserved_cap)
             if t > cap:
                 t = cap                                       # clamp actual to the reserved envelope (fail-closed)
-        eid = _check_entry_id(entry_id)
+        eid = _check_entry_id(entry_id, prefix=SETTLE_COST_PREFIX)
         core = {"signal": COST_SETTLE_SIGNAL, "org_id": oid, "entry_id": eid, "tokens": t,
                 "engagement_id": str(engagement_id or ""), "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
@@ -209,15 +214,24 @@ class CostEnvelopeLedger:
     def _in_flight(self, org_id: str) -> int:
         """Σ reserved-envelope tokens of this tenant's IN-FLIGHT launches — owner-signed cost_reserves under
         ``RESERVE_COST_PREFIX`` whose matching ``SETTLE_COST_PREFIX`` record has NOT yet landed (reserved, not
-        settled). A LIVE pairing scan by the ``{slug}:{nonce}`` entry_id SUFFIX (mirrors postpaid in_flight), NOT
-        snapshot-seeded — the per-reserve amounts it needs are not carried in the seed (which keeps only per-org
-        aggregates + the seen-set); ``stranded_active_cost_reserves`` fail-closed refuses a prune that would
-        archive an unsettled reserve, so it is always present for this scan. Fail-closed verify + idempotent."""
+        settled). A pairing scan by the ``{slug}:{nonce}`` entry_id SUFFIX (mirrors postpaid in_flight). The
+        per-reserve AMOUNTS come from the LIVE window only — ``stranded_active_cost_reserves`` fail-closed refuses
+        a prune that would archive an UNSETTLED reserve, so the live window always holds every genuinely in-flight
+        reserve + its paired settle. But the consumed-entry_id SEEN-SET is SNAPSHOT-SEEDED exactly as
+        :meth:`_fold`, so a replay whose entry_id was consumed BEFORE a hard prune (e.g. a re-appended
+        already-settled reserve whose paired settle was itself pruned, so it cannot pair live) is ignored here
+        too — WITHOUT the seed it would resurrect as a PHANTOM in-flight pool draw. Fail-closed verify + idempotent."""
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}     # in-flight suffix -> reserved tokens (first-mint-wins, idempotent)
         settled: set[str] = set()         # suffixes whose settle record has landed
-        seen: set = set()
-        for r in self.store.iter_records():
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            seen: set = set()             # anchor mismatch (rotated/empty key) => genesis scan, mirror _fold
+            since = -1
+        else:
+            seen = set(snap.cost_seen_set())   # seed the consumed-entry_id set so a pre-prune replay is ignored
+            since = snap.base_seq - 1          # scan the LIVE window only (tripwire keeps every real in-flight here)
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if not isinstance(p, dict):
                 continue
@@ -234,7 +248,7 @@ class CostEnvelopeLedger:
                 continue                                      # fail-closed: never let a forged record move it
             key = (sig, org_id, eid)
             if key in seen:
-                continue                                      # idempotent (mirror _fold): first occurrence wins
+                continue                                      # idempotent + prune-durable (seeded from snapshot)
             seen.add(key)
             if sig == COST_RESERVE_SIGNAL and eid.startswith(RESERVE_COST_PREFIX):
                 reserves[eid[len(RESERVE_COST_PREFIX):]] = _as_tokens(p.get("tokens"))

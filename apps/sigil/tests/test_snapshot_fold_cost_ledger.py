@@ -121,6 +121,36 @@ def test_was_reserved_is_prune_durable(monkeypatch):
         "isolates the seen-set carry: without it the discriminator reads False"
 
 
+# ---- (c3) RED-PEN MED: in_flight_envelope is prune-durable against a replayed settled reserve ---------
+def test_in_flight_is_prune_durable_against_a_replayed_settled_reserve(monkeypatch):
+    # A FULLY SETTLED launch (reserve+settle both below K) is prunable — stranded_active_cost_reserves allows it
+    # because the reserve is settled. If its reserve record is then replayed above K, in_flight_envelope MUST still
+    # read 0: the settle was pruned (cannot pair live), so only the seeded seen-set stops the replay from
+    # resurrecting as a PHANTOM pending pool draw. _in_flight seeds its seen-set from the snapshot exactly as
+    # _fold; the neutered control (seen stripped) reproduces the phantom (the confirmed red-pen MED).
+    store = _store()
+    L = _led(store)
+    L.reserve("acme", 1000, entry_id="reserve-cost:acme:n1", issued_at=1.0)   # seq 0
+    L.settle("acme", 300, entry_id="settle-cost:acme:n1", issued_at=2.0)      # seq 1 (fully settled)
+    captured_reserve = store.get(0).payload
+    k = _marker(store)                                                        # seq 2
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OP, base_seq=k, snapshot_seq=k - 1)
+    assert (COST_RESERVE_SIGNAL, "acme", "reserve-cost:acme:n1") in snap.cost_seen_set()
+
+    store.append(kind="event", source="governor", actor="WARDEN", payload=captured_reserve)  # seq 3: replay (live)
+    pruned = PrunedView(store, k)                                             # reserve+settle (seq 0,1) now hidden
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    assert CostEnvelopeLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).in_flight_envelope("acme") == 0, \
+        "a replayed already-settled+pruned reserve must NOT resurrect as a phantom in-flight draw (seeded seen-set)"
+
+    snap_no_seen = snap.model_copy(update={"cost_seen": []})
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap_no_seen))
+    assert CostEnvelopeLedger(pruned, owner_key=OWNER, trusted_pubkey=OP).in_flight_envelope("acme") == 1000, \
+        "isolates the seed carry: without it the replayed reserve resurrects as 1000 phantom in-flight tokens"
+
+
 # ---- (d) build() == scan over a mixed population -----------------------------------------------------
 def test_cost_build_equals_scan_mixed():
     store = _store()
