@@ -1214,6 +1214,12 @@ def cmd_ops_sweep(a) -> None:
         from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
         store = SpineStore()
         owner = owner_keypair()
+        if owner is None:
+            # Fail-closed like the `reservations` branch: without the owner key the signed folds verify
+            # nothing and the sweep would print an empty "all-clear" over a spine it cannot read — a
+            # false reconciled signal for an audit tool. Refuse instead.
+            print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+            sys.exit(2)
         reg = PostpaidRegistry(store, owner_key=owner)
         arr = PostpaidArrearsLedger(store, owner_key=owner)
         inv = InvoiceRegistry(store, owner_key=owner)

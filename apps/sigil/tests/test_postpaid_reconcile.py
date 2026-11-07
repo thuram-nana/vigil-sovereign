@@ -158,20 +158,47 @@ def test_reconcile_is_report_only_appends_nothing():
     assert len(list(s.iter_records())) == n_before           # pure read — appended nothing
 
 
-def test_reconcile_covers_only_enabled_orgs_and_honours_the_orgs_filter():
+def test_reconcile_covers_accounts_drops_only_closed_zero_lines_and_honours_the_orgs_filter():
     s = _store()
     reg, arr, inv = _reg(s), _arr(s), _inv(s)
     reg.set_account("acme", 1000, 30, issued_at=_issue())
     reg.set_account("globex", 1000, 30, issued_at=_issue())
+    reg.set_account("initech", 1000, 30, issued_at=_issue())   # will be disabled with ZERO balance
     arr.accrue("acme", 10, entry_id="r:acme:1", issued_at=_issue())
     arr.accrue("globex", 20, entry_id="r:globex:1", issued_at=_issue())
     both = ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=1000.0)
-    assert {r["org_id"] for r in both["items"]} == {"acme", "globex"}
-    reg.disable("globex", issued_at=_issue())                # a closed line drops out
-    only = ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=1000.0)
-    assert {r["org_id"] for r in only["items"]} == {"acme"}
+    assert {r["org_id"] for r in both["items"]} == {"acme", "globex", "initech"}
+    # a DISABLED line that still OWES stays visible (its debt is real); a disabled ZERO-balance line drops
+    reg.disable("globex", issued_at=_issue())                  # globex still has 20 uninvoiced consumption
+    reg.disable("initech", issued_at=_issue())                 # initech never drew anything -> fully closed
+    after = {r["org_id"]: r for r in
+             ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=1000.0)["items"]}
+    assert set(after) == {"acme", "globex"}                    # initech (closed, zero) dropped; globex KEPT
+    assert after["globex"]["enabled"] is False
+    assert "closed_with_balance" in after["globex"]["status"]
+    assert "uninvoiced_consumption" in after["globex"]["status"]
+    assert after["acme"]["enabled"] is True
+    # orgs filter still scopes
     filtered = ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=1000.0, orgs=["acme"])
     assert {r["org_id"] for r in filtered["items"]} == {"acme"}
+
+
+def test_reconcile_surfaces_a_disabled_line_that_still_owes():
+    """RED-PEN MED (w3xmqrepj): `postpaid disable` closes a delinquent account but does NOT erase its
+    arrears — it writes only the account-mode record, never the arrears/invoice ledgers. The audit sweep
+    MUST still surface a closed line that owes (outstanding/overdue), else the highest-risk receivable
+    goes invisible. MUTATION TARGET: restore a blanket `if not enabled: continue` skip -> this test reds."""
+    s = _store()
+    reg, arr, inv = _reg(s), _arr(s), _inv(s)
+    reg.set_account("globex", 1000, 0, issued_at=_issue())     # net_terms 0 -> due at period_end
+    _bill(reg, arr, inv, "globex", 100, period_end=1000.0)     # billed, unpaid
+    reg.disable("globex", issued_at=_issue())                  # operator closes the delinquent account
+    row = _row(reg, arr, inv, "globex", now=1001.0)            # past due
+    assert row is not None                                     # NOT hidden by the close
+    assert row["enabled"] is False
+    assert row["outstanding"] == 100 and row["overdue"] == 100
+    assert "outstanding" in row["status"] and "overdue" in row["status"]
+    assert "closed_with_balance" in row["status"]
 
 
 def test_reconcile_rows_are_strictly_org_scoped():
@@ -212,3 +239,12 @@ def test_cli_reconcile_refuses_apply_and_points_to_reservations():
     p = _cli("ops-sweep", "reconcile", "--apply")
     assert p.returncode == 2
     assert "report-only" in p.stderr and "reservations --apply" in p.stderr
+
+
+def test_cli_reconcile_without_owner_identity_fails_closed():
+    """RED-PEN LOW (w3xmqrepj): on a box with no owner identity the reconcile branch must refuse (like
+    `reservations`), not print an empty all-clear over a spine it cannot verify. The _iso fixture gives a
+    fresh, keyless SIGIL_HOME."""
+    p = _cli("ops-sweep", "reconcile")
+    assert p.returncode == 2
+    assert "no owner identity" in p.stderr
