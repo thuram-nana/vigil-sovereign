@@ -1,0 +1,93 @@
+"""AWS-1 — the KEK custody backend selection (sigil.config.kek_backend) wired into owner_vault().
+
+Proves: the default is the byte-identical TPM backend; VIGIL_KEK_BACKEND=kms selects the AWS-KMS backend
+(fail-closed if the key id is unset); the region falls back to the standard AWS_* vars; an unknown backend
+value fails SAFE to tpm (a typo can never silently disable sealing or pick a surprise backend).
+"""
+from __future__ import annotations
+
+import pytest
+
+from sigil import config
+from sigil.platform import vault as _vault
+
+
+@pytest.fixture(autouse=True)
+def _reset_owner_vault():
+    _vault.reset_owner_vault_for_test()      # drop the process-wide cache before AND after each test
+    yield
+    _vault.reset_owner_vault_for_test()
+
+
+def test_config_kek_backend_defaults_tpm_and_reads_env(monkeypatch):
+    monkeypatch.delenv("VIGIL_KEK_BACKEND", raising=False)
+    assert config.kek_backend() == "tpm"
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "kms")
+    assert config.kek_backend() == "kms"
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "KMS")          # case-insensitive
+    assert config.kek_backend() == "kms"
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "nonsense")     # unknown -> fail-safe to tpm
+    assert config.kek_backend() == "tpm"
+
+
+def test_config_region_falls_back_to_standard_aws_vars(monkeypatch):
+    for v in ("VIGIL_AWS_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(v, raising=False)
+    assert config.aws_region() == ""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-2")
+    assert config.aws_region() == "us-east-2"
+    monkeypatch.setenv("VIGIL_AWS_REGION", "eu-west-1")     # the explicit VIGIL var wins
+    assert config.aws_region() == "eu-west-1"
+
+
+def test_owner_vault_default_backend_is_tpm(monkeypatch):
+    monkeypatch.delenv("VIGIL_KEK_BACKEND", raising=False)
+    from vigil_core.kek_backends import TpmKekBackend
+    assert isinstance(_vault.owner_vault()._backend, TpmKekBackend)
+
+
+def test_owner_vault_selects_kms_when_configured(monkeypatch):
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "kms")
+    monkeypatch.setenv("VIGIL_KMS_KEY_ID", "alias/vigil-owner")
+    monkeypatch.setenv("VIGIL_AWS_REGION", "eu-west-1")
+    from vigil_core.kek_backends import KmsKekBackend
+    b = _vault.owner_vault()._backend
+    assert isinstance(b, KmsKekBackend)
+    assert "alias/vigil-owner" in b.label() and "eu-west-1" in b.label()
+
+
+def test_owner_vault_kms_without_key_fails_closed(monkeypatch):
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "kms")
+    monkeypatch.delenv("VIGIL_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("VIGIL_AWS_REGION", "eu-west-1")
+    from vigil_core.kek import KekError
+    with pytest.raises(KekError):               # a KMS backend with no key never silently degrades
+        _vault.owner_vault()
+
+
+def test_secretstore_set_fails_closed_when_kms_selected_but_unconfigured(monkeypatch, tmp_path):
+    """Red-pen fold (AWS-1, secrets.py): a sealing backend EXPLICITLY selected but misconfigured
+    (VIGIL_KEK_BACKEND=kms with no VIGIL_KMS_KEY_ID) must NOT silently write an opted-in secret as 0600
+    plaintext — SecretStore.set() fails closed. Without the guard, _sealed_available() swallows the
+    construction KekError and set() plants plaintext in sigil.env (the gap this fold closes)."""
+    from sigil.platform import secrets as secmod
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "kms")
+    monkeypatch.delenv("VIGIL_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("VIGIL_AWS_REGION", "eu-west-1")
+    monkeypatch.setattr(secmod, "SIGIL_HOME", tmp_path)          # never touch the real home even if it leaked
+    s = secmod.SecretStore()
+    s._kr = None                                                # no OS keyring → would reach the envfile tier
+    with pytest.raises(RuntimeError):
+        s.set("ANTHROPIC_API_KEY", "sk-ant-MUSTNOTLAND")
+    assert not (tmp_path / "sigil.env").exists()                # fail-closed BEFORE any plaintext write
+
+
+def test_secretstore_guard_is_noop_on_tpm_default(monkeypatch):
+    """Control: the guard only fires for an explicitly-selected-but-broken backend. Under the default TPM
+    backend owner_vault() builds a Vault (it does NOT raise), so _assert_sealing_not_broken() is a no-op and
+    the designed non-bricking envfile degrade for an unprovisioned vault is preserved byte-identically."""
+    from sigil.platform import secrets as secmod
+    monkeypatch.delenv("VIGIL_KEK_BACKEND", raising=False)
+    s = secmod.SecretStore()
+    s._kr = None
+    s._assert_sealing_not_broken()   # must NOT raise on the default backend

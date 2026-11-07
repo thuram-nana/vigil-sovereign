@@ -25,10 +25,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from .kek import (
-    _SEAL_PRIV, _SEAL_PUB, KekError, TpmRunner, _default_tpm_runner, is_provisioned, load_kek,
-    load_kek_from, provision_kek, reseal_kek,
-)
+from .kek import _SEAL_PRIV, _SEAL_PUB, KekError, TpmRunner, _default_tpm_runner
+from .kek_backends import KekBackend, TpmKekBackend
 from .rotation import RotationError, rewrap_or_seal, verify_opens_to
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
 
@@ -55,9 +53,15 @@ class Vault:
     """Seals/opens secret files under a TPM-sealed KEK. ``vault_dir`` holds the sealed-KEK blobs;
     ``runner`` is the injectable tpm2 seam (a fake in tests, the real subprocess in production)."""
 
-    def __init__(self, vault_dir, runner: TpmRunner = _default_tpm_runner) -> None:
+    def __init__(self, vault_dir, runner: TpmRunner = _default_tpm_runner, *,
+                 backend: "Optional[KekBackend]" = None) -> None:
         self._dir = Path(vault_dir)
-        self._runner = runner
+        # KEK custody is pluggable (audit G1 cloud extension). The DEFAULT is TPM-sealing — byte-identical
+        # to the pre-backend behaviour; `runner` remains the tpm2 argv-runner for it. A cloud deployment
+        # injects a KmsKekBackend (owner_vault() selects it from config) so the KEK is KMS-wrapped at rest
+        # instead. The rest of the Vault — AEAD sealing of secrets under the UNWRAPPED KEK, rotation,
+        # .prev/.rot crash-window handling — is custody-agnostic and unchanged.
+        self._backend: KekBackend = backend if backend is not None else TpmKekBackend(runner)
         self._kek_cache: Optional[bytes] = None
         # The PREVIOUS KEK — populated ONLY while a rotation's `.prev` blobs exist on disk (a rotation is in
         # progress, or an interrupted one has not been reconciled). It lets a read during the crash window —
@@ -71,18 +75,19 @@ class Vault:
 
     def enabled(self) -> bool:
         """True iff a sealed KEK has been provisioned here (i.e. sealing is ON)."""
-        return is_provisioned(self._dir)
+        return self._backend.is_provisioned(self._dir)
 
     def provision(self) -> None:
-        """One-time: generate + TPM-seal a fresh KEK for this machine. Raises :class:`KekError` if the
-        TPM is unavailable (fail-closed — never provisions a fake/plaintext KEK). Existing plaintext key
-        files are migrated lazily (on their next read), non-destructively."""
-        provision_kek(self._dir, runner=self._runner)
+        """One-time: generate + wrap a fresh KEK for this machine under the configured custody backend
+        (TPM-seal by default, or KMS-encrypt). Raises :class:`KekError` if the backend is unavailable
+        (fail-closed — never provisions a fake/plaintext KEK). Existing plaintext key files are migrated
+        lazily (on their next read), non-destructively."""
+        self._backend.provision(self._dir)
         with self._lock:
             self._kek_cache = None  # force a fresh unseal next use
 
     def status(self) -> str:
-        return ("sealed (TPM-sealed KEK)" if self.enabled()
+        return (f"sealed ({self._backend.label()})" if self.enabled()
                 else "UNSEALED — trust-root keys/secrets are PLAINTEXT at rest; run `sigil vault provision`")
 
     # --- read / write / migrate -------------------------------------------------------------------
@@ -91,9 +96,9 @@ class Vault:
         with self._lock:
             if self._kek_cache is None:
                 try:
-                    self._kek_cache = load_kek(self._dir, runner=self._runner)
+                    self._kek_cache = self._backend.load(self._dir)
                 except KekError as e:
-                    raise VaultLocked(f"cannot unseal the KEK from the TPM: {e}") from e
+                    raise VaultLocked(f"cannot unseal the KEK ({self._backend.label()}): {e}") from e
             return self._kek_cache
 
     def _prev_kek(self) -> Optional[bytes]:
@@ -108,8 +113,8 @@ class Vault:
                 return None
             if self._prev_kek_cache is None:
                 try:
-                    self._prev_kek_cache = load_kek_from(self._dir, _SEAL_PUB + ".prev", _SEAL_PRIV + ".prev",
-                                                         runner=self._runner)
+                    self._prev_kek_cache = self._backend.load_from(self._dir, _SEAL_PUB + ".prev",
+                                                                   _SEAL_PRIV + ".prev")
                 except KekError:
                     return None
             return self._prev_kek_cache
@@ -320,9 +325,9 @@ class Vault:
                 staged_files = [p.with_name(p.name + ".rot") for (p, _c, _b, _e) in plan]
                 # 2) seal the fresh KEK to STAGED TPM blobs and prove it unseals back (the TPM leg; a fake
                 #    keyring stub in tests, the real tpm2 seal on a provisioned host).
-                reseal_kek(self._dir, fresh, runner=self._runner, pub_name=pub_rot, priv_name=priv_rot)
-                if load_kek_from(self._dir, pub_rot, priv_rot, runner=self._runner) != fresh:
-                    raise RotationError("the freshly-sealed KEK did not unseal back to itself (TPM seal leg failed)")
+                self._backend.reseal(self._dir, fresh, pub_name=pub_rot, priv_name=priv_rot)
+                if self._backend.load_from(self._dir, pub_rot, priv_rot) != fresh:
+                    raise RotationError("the freshly-sealed KEK did not unseal back to itself (seal leg failed)")
                 # 3) stage every re-wrapped file and re-verify it opens under the new KEK from disk.
                 for (p, ctx, new_blob, expected), staged in zip(plan, staged_files):
                     _atomic_write_bytes(staged, new_blob)

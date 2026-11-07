@@ -2010,20 +2010,28 @@ def cmd_vault(a) -> None:
 
     from vigil_core.kek import KekError
 
+    from . import config
     from .platform.vault import owner_vault
     v = owner_vault()
+    backend = config.kek_backend()
     if getattr(a, "vault_cmd", "status") == "provision":
         if v.enabled():
-            print("vault already provisioned (a TPM-sealed KEK is present) — nothing to do.")
+            print(f"vault already provisioned ({v.status()}) — nothing to do.")
             return
         try:
             v.provision()
         except KekError as e:
-            print(f"!! could not provision the TPM-sealed KEK: {e}")
-            print("   one-time setup on this machine:")
-            print("     sudo apt install tpm2-tools && sudo usermod -aG tss $USER   (then log out/in)")
+            print(f"!! could not provision the KEK (backend={backend}): {e}")
+            if backend == "kms":
+                print("   AWS-KMS backend one-time setup:")
+                print("     - export VIGIL_KMS_KEY_ID=<CMK id/arn/alias> and VIGIL_AWS_REGION=<region>")
+                print("     - the host's `aws` CLI must reach KMS with an instance role / credentials")
+                print("       granting kms:Encrypt + kms:Decrypt on that key (docs/runbooks/AWS-DEPLOY.md)")
+            else:
+                print("   TPM backend one-time setup on this machine:")
+                print("     sudo apt install tpm2-tools && sudo usermod -aG tss $USER   (then log out/in)")
             _sys.exit(1)
-        print("vault provisioned — a fresh KEK is now TPM-sealed to this machine.")
+        print(f"vault provisioned — {v.status()}.")
         print("Trust-root keys + secrets seal at rest transparently on their next read/write.")
     else:
         print(f"vault: {v.status()}")

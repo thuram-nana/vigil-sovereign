@@ -215,6 +215,33 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def kek_backend() -> str:
+    """Which custody backend wraps the at-rest KEK (the key that seals the owner key + secrets):
+
+      * ``"tpm"`` (DEFAULT) — TPM-sealed to this machine (byte-identical to the pre-cloud behaviour).
+      * ``"kms"`` — AWS-KMS envelope-encrypted (cloud): `sigil vault provision` wraps a fresh KEK with the
+        instance role's ``kms:Encrypt`` under `VIGIL_KMS_KEY_ID`; boot unwraps it with ``kms:Decrypt``.
+
+    Any unknown value falls back to ``"tpm"`` — a typo can never silently disable sealing or pick a
+    surprise backend. The owner Ed25519 key still signs in-process; KMS only guards the KEK at rest."""
+    v = (os.environ.get("VIGIL_KEK_BACKEND") or "tpm").strip().lower()
+    return v if v in ("tpm", "kms") else "tpm"
+
+
+def kms_key_id() -> str:
+    """The AWS KMS CMK id/arn/alias that wraps the KEK when `kek_backend()` is ``"kms"`` (VIGIL_KMS_KEY_ID).
+    Empty unless the cloud backend is configured; the KMS backend fails CLOSED if it is empty."""
+    return (os.environ.get("VIGIL_KMS_KEY_ID") or "").strip()
+
+
+def aws_region() -> str:
+    """The AWS region for the KMS CMK (VIGIL_AWS_REGION, falling back to the standard AWS_REGION /
+    AWS_DEFAULT_REGION the `aws` CLI already reads). Empty unless configured; the KMS backend fails
+    closed if it is empty."""
+    return (os.environ.get("VIGIL_AWS_REGION") or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+
+
 def margin_dashboard_enabled() -> bool:
     """True iff the EC-6 operator MARGIN dashboard route is ON (`VIGIL_MARGIN_DASHBOARD_ENABLED` affirmative).
     OFF by default (mirrors `customer_monitoring_enabled`): with it off the owner-tier `/api/billing/margin`
