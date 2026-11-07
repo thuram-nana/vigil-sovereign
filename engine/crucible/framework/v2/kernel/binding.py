@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import docs
+from . import routing
 from .llm import LLMBackend, Prompt, complete_with_backend, complete_with_failover
 from .models import CallTrace
 
@@ -278,6 +279,7 @@ def run(
     temperature: float = 0.2,
     max_tokens: int = 4096,
     effort: str | None = None,
+    model_tier: str = "",
 ) -> tuple[BaseModel, CallTrace]:
     """Render the prompt, dispatch to the active backend, return (parsed, trace).
 
@@ -285,7 +287,18 @@ def run(
     (evidence, response bodies, context). When present it is isolated in a
     nonce-fenced UNTRUSTED-DATA block rather than mixed into the trusted
     input; `nonce` is required in that case.
+
+    `model_tier` (EC-2a) is the difficulty tier this call declares for model-tier routing. When
+    left empty it is assigned CENTRALLY from the binding's identity (``cognitive_doc_stem``) via
+    kernel.routing — so the finding-critical bindings (critique/hypothesize/decide) get the capable
+    "deep" tier and the mechanical ones get "standard", with no per-binding wiring. A backend only
+    acts on it when the operator has enabled routing AND mapped that tier to a cheaper model;
+    otherwise every call stays on the backend's configured model (byte-identical).
     """
+    # EC-2a: an explicit tier wins; otherwise assign the binding's default tier from its identity.
+    # tier_for_binding falls back to the CAPABLE default for an unknown stem, so a new binding is
+    # never silently routed cheap.
+    tier = model_tier or routing.tier_for_binding(cognitive_doc_stem)
     doc = docs.cognitive(cognitive_doc_stem)
     system = build_system_prompt(doc, section_anchors, task_directive)
     user = build_user_prompt(
@@ -312,6 +325,7 @@ def run(
         # None => the backend resolves the operator default (CRUCIBLE_EFFORT) at send time; an explicit
         # value (e.g. from the chatbot's effort control) overrides it. Older models ignore effort entirely.
         effort=effort,
+        model_tier=tier,
     )
     # An explicitly-passed backend is the caller's choice (tests / a pinned run), but it is STILL a model
     # egress, so it routes through the ONE gateway chokepoint (``complete_with_backend`` — classify -> redact

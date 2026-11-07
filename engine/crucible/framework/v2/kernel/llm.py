@@ -35,7 +35,7 @@ from ..common import logging as v2log
 from ..common.errors import (
     BackendError, BackendOverloaded, BackendUnavailable, SovereigntyViolation,
 )
-from . import sovereignty
+from . import routing, sovereignty
 from .models import CallTrace
 
 
@@ -116,6 +116,12 @@ class Prompt:
     # operator default (CRUCIBLE_EFFORT) or the model's own default decide; an explicit value overrides.
     # Resolved + applied per-backend via sampling_create_kwargs (older models ignore it and take temperature).
     effort: str | None = None
+    # EC-2a model-tier routing. A cognitive binding declares its DIFFICULTY tier here ("deep" for the
+    # finding-critical bindings, "standard" for the mechanical ones — binding.run assigns it from the
+    # binding identity). A backend resolves it to a concrete model via resolve_effective_model (below):
+    # default-OFF and fail-toward-capable, so "" — or routing disabled, or an unmapped tier — always
+    # yields the backend's own configured model (byte-identical to pre-EC-2a).
+    model_tier: str = ""
     # Self-consistency policy (anti-hallucination P5), for NO-ORACLE bindings only. samples>1
     # declares that the call site wants N-sample agreement clustering (see kernel.consistency);
     # agreement_gate is the modal-share threshold below which the site should ABSTAIN. Defaults
@@ -170,6 +176,29 @@ def sampling_create_kwargs(model: str, temperature: float, effort: str | None) -
     return {"output_config": {"effort": eff}} if eff else {}
 
 
+def resolve_effective_model(prompt: "Prompt", backend: "LLMBackend") -> str:
+    """EC-2a — the ONE source of truth for the model a single call actually uses: the backend's own
+    configured ``model`` unless model-tier routing is enabled AND the prompt's ``model_tier`` is a
+    recognised tier the operator has explicitly mapped to a cheaper model (see kernel.routing). A
+    backend's ``complete`` and the L2 cache seam BOTH resolve through here so the cache keys on — and
+    the determinism gate sees — the exact model the provider was (or would be) asked for. Fail-safe:
+    a backend with no ``model`` attribute, or any routing error, yields the backend's model (or ""),
+    never raises. When routing is off or the tier is "" this returns ``backend.model`` byte-identically.
+
+    A backend that does NOT honor routing (``honors_routing`` False — every backend outside the
+    Anthropic-SDK family) ignores ``model_tier`` in its own ``complete()`` and always calls its
+    configured model, so this returns that model for it unconditionally. That keeps the L2 cache key
+    and the determinism gate true to the model the provider was actually asked for (no cross-model
+    mis-provenance from a routed key labelling a model the backend never invoked)."""
+    default_model = str(getattr(backend, "model", "") or "")
+    if not bool(getattr(backend, "honors_routing", False)):
+        return default_model
+    try:
+        return routing.resolve_model(str(getattr(prompt, "model_tier", "") or ""), default_model)
+    except Exception:                                      # noqa: BLE001 — routing is advisory, never a gate
+        return default_model
+
+
 # EC-1a prompt caching — the `system` param for a first-party anthropic-SDK messages.create.
 # Caching is a COST optimization and must NEVER override the zero-data-retention sovereignty
 # posture, so the ephemeral cache_control breakpoint is attached ONLY when caching is allowed;
@@ -205,6 +234,12 @@ class LLMBackend(abc.ABC):
     """All backends implement this. Subclasses set `name`."""
 
     name: str = "abstract"
+    # EC-2a: True only on a backend whose complete() actually resolves the routed effective model
+    # (the Anthropic-SDK family: anthropic/bedrock/vertex). A backend that leaves this False ignores
+    # model_tier and always uses its own configured model, so resolve_effective_model returns that
+    # model for it — keeping the L2 cache key + determinism gate true to the model actually invoked,
+    # and making routing's documented "Anthropic-family-only" scope hold in code, not just prose.
+    honors_routing: bool = False
 
     @abc.abstractmethod
     def is_available(self) -> tuple[bool, str]:
@@ -358,7 +393,7 @@ def _l2_lookup(prompt: "Prompt", backend: "LLMBackend"):
     model-family check now that the backend is known) + ZDR/dry-run/kill-switch exclusions."""
     try:
         from . import response_cache as _rc
-        model = str(getattr(backend, "model", "") or "")
+        model = resolve_effective_model(prompt, backend)   # EC-2a: key on the model the call actually uses
         if (bool(getattr(backend, "is_dryrun", False)) or _ephemeral_session_active()
                 or _rc.l2_disabled() or not _rc.is_deterministic(prompt, model)):
             return None
@@ -380,7 +415,7 @@ def _l2_store(prompt: "Prompt", result: "LLMResult", backend: "LLMBackend") -> N
     overload event, and skipping its store costs at most one re-call — never a cross-model or stale HIT."""
     try:
         from . import response_cache as _rc
-        model = str(getattr(backend, "model", "") or "")
+        model = resolve_effective_model(prompt, backend)   # EC-2a: key on the model the call actually uses
         if (bool(getattr(backend, "is_dryrun", False)) or _ephemeral_session_active()
                 or _rc.l2_disabled() or not _rc.is_deterministic(prompt, model)):
             return
@@ -628,11 +663,12 @@ def make_call_trace(
     backend: str, *, is_dryrun: bool, cognitive_doc: str,
     cognitive_sections: list[str], tokens_in: int = 0, tokens_out: int = 0,
     cache_creation_input_tokens: int = 0, cache_read_input_tokens: int = 0,
-    cached: bool = False, latency_ms: float = 0.0,
+    cached: bool = False, latency_ms: float = 0.0, model: str = "",
 ) -> CallTrace:
     return CallTrace(
         backend=backend,
         is_dryrun=is_dryrun,
+        model=model,
         cognitive_doc=cognitive_doc,
         cognitive_sections=cognitive_sections,
         tokens_in=tokens_in,
