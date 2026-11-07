@@ -752,6 +752,12 @@
       "kind": "debt",
       "limit_id": "LIMIT-evidence-empty-engagement-slug",
       "note": "The customer assessment API (Slice K) surfaces FINDINGS only; a detection FACT is withheld because its certificate carries no signed engagement_slug (it cannot be per-engagement-confined — symmetric with finding_receiver.ingest_detection), the same unsigned/empty engagement_slug root the evidence single_engagement limit tracks. Detections return once the detection cert declares a signed slug."
+    },
+    {
+      "file": "packages/core/vigil_core/vigil_core/credit_lease.py",
+      "snippet": "not wired into the live launch-gate money path yet",
+      "kind": "non-debt",
+      "note": "Deliberate design decision, not debt (EC-4 per-tenant token-cost envelope ledger): the cost ledger ships as a DEFAULT-OFF primitive BY DESIGN, per the money doctrine that money-doctrine numbers — here ENVELOPE_TOKENS_PER_CREDIT, the credit->token conversion E — stay behind default-OFF placeholders until explicit owner ratification, so no unratified money number can drive production spend. The primitive itself is complete, owner-signed, mutation-verified and prune-durable (governor/cost_ledger.py + the v9 snapshot fold + the two spine/prune.py tripwires); it is simply not yet consulted by the live gate. Wiring it into the live launch-gate money path (reserve on reserve_launch, settle from the ACTUAL recorded tokens on settle_launch) + the EC-5 global pool meter + the keyless engine's actual-token delivery is the planned EC-4b increment, not unfinished/deferred debt."
     }
   ]
 }
