@@ -117,6 +117,76 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     return {"applied": bool(apply), "items": rows}
 
 
+def sweep_postpaid_reconciliation(postpaid: Any, arrears: Any, invoices: Any, *, now: float,
+                                  orgs: "Optional[Iterable[str]]" = None) -> dict:
+    """REPORT-ONLY reconciliation of each postpaid org: invoiced-vs-paid vs real consumption.
+
+    Per org, composes the owner-signed postpaid scalars into one row and flags any discrepancy an
+    operator should chase:
+      * ``uninvoiced_consumption`` — net settled consumption exceeds what has been invoiced
+        (``billable_uninvoiced = net_settled_consumed - invoiced > 0``). Reads ``net_settled_consumed``
+        (accrued MINUS still-in-flight reserves), NEVER raw ``accrued``, so an in-flight reserve (a
+        launch that has not settled) is never mis-reported as un-billed revenue an operator would
+        wrongly chase.
+      * ``outstanding`` — an invoiced balance remains unpaid (``invoiced - paid > 0``, PP-2b).
+      * ``overdue`` — an unpaid invoice is past its net-terms due date at ``now`` (PP-3 dunning read).
+      * ``closed_with_balance`` — a DISABLED (closed) line that still carries owed arrears. Disabling a
+        line does NOT erase its debt (``postpaid disable`` writes only the account-mode record), so a
+        closed line that still owes stays visible (the highest-risk discrepancy — a churned/delinquent
+        tenant); only a closed line with no balance of any kind is dropped. Each row carries ``enabled``.
+    A row with none of these is ``reconciled``. This is a PURE READ: it only folds owner-signed
+    records, writes nothing, mints nothing, settles nothing. The abandoned-reservation RETIRE half of
+    PP-4 rides the EXISTING ``sweep_abandoned_reservations`` (owner-keyed, lease-verified, exactly-once
+    per ``(slug, nonce)``) under the same ``--apply`` triple-gate — so PP-4 adds no new money-moving code.
+    """
+    from .governor.postpaid import (
+        invoiced_postpaid_total,
+        paid_postpaid_total,
+        postpaid_outstanding,
+        postpaid_overdue_amount,
+    )
+
+    want = None if orgs is None else {str(o) for o in orgs}
+    rows: list[dict] = []
+    for acct in postpaid.accounts():
+        oid = acct.org_id
+        if want is not None and oid not in want:
+            continue
+        enabled = acct.is_enabled()
+        drawn = int(arrears.accrued(oid))
+        billable = int(arrears.net_settled_consumed(oid))     # accrued - in_flight: the billing basis
+        in_flight = int(arrears.in_flight_reserved(oid))
+        invoiced = int(invoiced_postpaid_total(invoices, oid))
+        paid = int(paid_postpaid_total(invoices, oid))
+        outstanding = int(postpaid_outstanding(invoices, oid))
+        overdue = int(postpaid_overdue_amount(invoices, postpaid, oid, now))
+        billable_uninvoiced = max(0, billable - invoiced)
+        # A DISABLED (closed) line still carries real, OWED arrears: `postpaid disable` writes only the
+        # account-mode record, never the arrears/invoice ledgers, so the debt stays owed and the sibling
+        # `postpaid status` / overdue reads still account for it. The audit sweep MUST surface a closed
+        # line that still owes (the highest-risk discrepancy); it drops a disabled line ONLY when it is
+        # fully settled (no balance of any kind). An enabled line always appears.
+        has_balance = any((drawn, billable, in_flight, invoiced, paid, outstanding, overdue))
+        if not enabled and not has_balance:
+            continue
+        flags: list[str] = []
+        if billable_uninvoiced > 0:
+            flags.append("uninvoiced_consumption")
+        if outstanding > 0:
+            flags.append("outstanding")
+        if overdue > 0:
+            flags.append("overdue")
+        if not enabled and has_balance:
+            flags.append("closed_with_balance")              # a disabled line that still owes
+        rows.append({
+            "org_id": oid, "enabled": enabled, "drawn": drawn, "billable": billable,
+            "in_flight": in_flight, "invoiced": invoiced, "paid": paid, "outstanding": outstanding,
+            "overdue": overdue, "billable_uninvoiced": billable_uninvoiced,
+            "status": flags if flags else ["reconciled"],
+        })
+    return {"applied": False, "items": rows}
+
+
 def _iter_spool_bodies(d: Path) -> Iterable[dict]:
     """Yield every decodable webhook body (JSON object) in a billing-spool subdir. Never follows symlinks,
     never raises on a hostile/malformed file (it is simply skipped)."""
