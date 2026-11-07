@@ -29,6 +29,54 @@ async function refresh() {
   const l = s.ingest_lag || {};
   $("#lag").innerHTML = `<b>head</b><span>${l.head_seq}</span><b>since checkpoint</b><span>${l.records_since_checkpoint}</span>`;
   renderCaps(s.capabilities || {});
+  loadMargin();
+}
+
+// EC-6 operator margin panel. minor-units -> display money; a null cost/margin is "not configured" (never a
+// fabricated 0). The /api/billing/margin route is owner-tier + flag-gated: it 404s (flag off) or 403s
+// (non-owner). On that first negative the panel LATCHES OFF (marginOff=true) and never polls again, so an
+// off-flag / non-owner cockpit issues exactly ONE probe at load, then is byte-identical in steady state (the
+// server route itself is byte-identical — 404 — when off). A transient network/parse error does NOT latch.
+let marginOff = false;   // latched true after a deterministic 404/403: stop re-polling /api/billing/margin
+function money(v, cur) {
+  if (v === null || v === undefined) return '<span class="nc">not configured</span>';
+  const sym = cur === "USD" ? "$" : "";
+  const s = (Math.abs(v) / 100).toFixed(2);
+  const tail = cur && cur !== "USD" ? " " + esc(cur) : "";
+  return `${v < 0 ? "-" : ""}${sym}${s}${tail}`;
+}
+async function loadMargin() {
+  if (marginOff) return;                 // latched off (flag off / non-owner): no further polling
+  const panel = $("#margin-panel");
+  let m = null;
+  try {
+    const r = await fetch("/api/billing/margin", H);
+    if (r.status === 404 || r.status === 403) { marginOff = true; panel.style.display = "none"; return; }
+    if (r.ok) m = await r.json();
+  } catch (_) { /* transient network/parse error -> try again next cycle (do NOT latch) */ }
+  if (!m || !Array.isArray(m.tenants)) { panel.style.display = "none"; return; }  // unavailable -> hidden
+  const cur = m.currency || "USD";
+  $("#margin-note").textContent = m.rate_configured
+    ? `cost rate ${m.cost_rate_micro_minor_per_token} micro-minor/token${m.margin_multiplier_k ? ` · target k=${m.margin_multiplier_k}` : ""}`
+    : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
+  const t = m.totals || {};
+  $("#margin-totals").innerHTML =
+    `<b>tenants</b><span>${t.tenant_count || 0}</span>` +
+    `<b>committed tokens</b><span>${t.committed_tokens || 0}</span>` +
+    `<b>cost in flight (tok)</b><span>${t.in_flight_tokens || 0}</span>` +
+    `<b>billed revenue</b><span>${money(t.billed_revenue_minor, cur)}</span>` +
+    `<b>collected</b><span>${money(t.collected_minor, cur)}</span>` +
+    `<b>cost</b><span>${money(t.cost_minor, cur)}</span>` +
+    `<b>margin</b><span>${money(t.margin_minor, cur)}</span>`;
+  const head = `<tr><th>tenant</th><th>tokens</th><th>in flight</th><th>billed</th><th>cost</th><th>margin</th><th>margin %</th></tr>`;
+  const body = m.tenants.map((x) => `<tr><td>${esc(x.name || x.org_id)}</td>
+    <td>${x.committed_tokens}</td><td>${x.in_flight_tokens}</td>
+    <td>${money(x.billed_revenue_minor, x.currency || cur)}</td>
+    <td>${money(x.cost_minor, x.currency || cur)}</td>
+    <td>${money(x.margin_minor, x.currency || cur)}</td>
+    <td>${x.margin_pct === null || x.margin_pct === undefined ? '<span class="nc">—</span>' : esc(x.margin_pct) + "%"}</td></tr>`).join("");
+  $("#margin-table").innerHTML = head + (body || '<tr><td colspan="7" class="nc">no tenant activity</td></tr>');
+  panel.style.display = "block";
 }
 const kv = (o) => Object.entries(o || {}).map(([a, n]) => `<b>${esc(a)}</b><span>${n}</span>`).join("");
 

@@ -71,3 +71,12 @@ button:hover{background:var(--raise)}
 .cap-row button{margin-left:auto}
 .cap-row.both{border-top:1px solid var(--line);padding-top:8px}
 .cap-row.both button{margin-left:0}
+/* EC-6 operator margin panel — ships with the cockpit but hidden by default; revealed only when the owner-tier
+   /api/billing/margin read returns rows (flag off -> 404 / a non-owner -> 403 keeps it hidden and the client
+   latches off after one probe, so the SERVER route is byte-identical to a build without EC-6). */
+#margin-panel{display:none}
+.mtbl{width:100%;border-collapse:collapse;font:12px var(--mono);margin-top:10px}
+.mtbl th,.mtbl td{text-align:right;padding:3px 8px;border-bottom:1px solid var(--line)}
+.mtbl th:first-child,.mtbl td:first-child{text-align:left}
+.mtbl th{color:var(--dim);font-weight:400;letter-spacing:.04em}
+.mtbl .nc{color:var(--dim);font-style:italic}

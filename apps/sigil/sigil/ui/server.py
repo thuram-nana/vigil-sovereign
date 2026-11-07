@@ -44,7 +44,7 @@ from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
 
 from ..bridge.daemon import bind_ok
-from ..config import SPINE_PATH, oidc_enabled
+from ..config import SPINE_PATH, margin_dashboard_enabled, oidc_enabled
 from ..reuse import verify_one
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
@@ -505,6 +505,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "owner only")
             from . import billing as _billing
             return self._json({"orgs": _billing.org_list(self.server.store())})
+        if path == "/api/billing/margin" and margin_dashboard_enabled():
+            # EC-6 — the OPERATOR margin reconciliation (billed revenue vs EC-4 actual token cost -> margin per
+            # tenant + per period). OWNER-tier (`manage_billing`) — this is the operator's OWN cross-tenant
+            # cost/margin view, NOT a customer surface. The gate checks the caller's GLOBAL ACCOUNT role
+            # (`principal.role` from AccountsRegistry: viewer/analyst/operator/owner), where `manage_billing` is
+            # OWNER-ONLY — it does NOT consult a per-org membership role via admit(). (The per-org `org_admin`
+            # role DOES carry `manage_billing` in the RBAC table, but that is never a global `principal.role` on
+            # this operator route, and a customer has no global account role at all -> role_can is False.)
+            # Mirrors the `/api/billing/orgs` owner-only gate. A pure READ projection — mints nothing, surfaces
+            # no secret, and marks cost/margin 'not configured' (never fabricates a number) until the owner
+            # ratifies the catalog cost rate. Behind VIGIL_MARGIN_DASHBOARD_ENABLED (default OFF ⇒ this path
+            # falls through to the 404 exactly as an unknown route).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_billing"):
+                return self._deny(403, "owner only")
+            from . import margin as _margin
+            return self._json(_margin.margin_overview(self.server.store()))
         if path == "/api/billing/plans":
             # The owner-controlled PRICE->ENTITLEMENT catalog, projected for display (the pricing list). Any
             # authenticated principal may read it (viewer+); it is global, carries NO tenant data and NO secret
