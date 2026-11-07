@@ -572,6 +572,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
                                       "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
         if action == "launch/reserve":
             payload["host"] = body.get("host", "")              # session org, never body-supplied
+            payload["product_id"] = body.get("product_id", "")  # EC-7b: tier product choice (catalog id, not an amount)
             c, r = self._provision("launch_reserve", requester, payload)
         elif action == "launch/start":
             payload["lease"] = body.get("lease")                # publish the signed lease -> run (K3)
