@@ -56,6 +56,16 @@ _HTTP_METHODS = frozenset(
 # the brace form, group 2 the colon form.
 _TEMPLATE_RE = re.compile(r"\{([^{}/]+)\}|:([A-Za-z_][A-Za-z0-9_]*)")
 
+# The engine records an oracle-CONFIRMED finding's title in its own shorthand — "<bug_class> confirmed
+# at <param>" (scanner/report.py:229-230; case_file.py:107 documents it). The affected input name is the
+# token after the LITERAL marker "confirmed at", at the end of the title. A scan's oracle-confirmed FACT
+# often carries only the seed URL in its `surface` (the vulnerable parameter lives in this title), so
+# recovering the param lets the richest "how to verify" block render for the PROVEN findings, where it
+# matters most. ANCHORED to the exact engine marker (not a bare trailing "at <x>") + applied only to a
+# proven FACT (see build_howto): a free-text English "… at <word>" idiom, a lead, a path, or a multi-word
+# phrase never yields a parameter, so the block can never show a fabricated input the finding never recorded.
+_TITLE_PARAM_RE = re.compile(r"\bconfirmed at\s+([A-Za-z0-9_.\-\[\]]+)\s*$")
+
 # Keys inside a retained oracle_context that betray a reproduce-from-raw PoC capture (the
 # evidence.poc byte-refs). A plain differential/boolean context carries none of these, so a
 # normal finding never triggers the PoC-replay pointer.
@@ -116,6 +126,23 @@ def parse_surface(surface: str | None) -> tuple[str | None, str | None, str | No
                     break
 
     return (method, url or None, param)
+
+
+def _param_from_title(title: str | None) -> str | None:
+    """Recover the affected input name from the engine's oracle-confirmed title shorthand —
+    "<bug_class> confirmed at <param>" (scanner/report.py:229-230; case_file.py:107). Returns the token
+    after the LITERAL "confirmed at" marker at the END of the title, else ``None``. Deterministic and
+    conservative: it fires ONLY on that exact engine marker (never a bare trailing "at <x>"), so a
+    free-text "… at <word>" idiom, a trailing path, or a multi-word phrase yields nothing — a finding
+    that never recorded a parameter is never given a fabricated one. Callers gate this on a proven FACT."""
+    m = _TITLE_PARAM_RE.search((title or "").strip())
+    if not m:
+        return None
+    tok = m.group(1)
+    # The engine renders the shorthand as f"{bug_class} confirmed at {param}", so a finding with a FALSY
+    # param yields the literal "None" — that is the ABSENCE of a recorded parameter, not a parameter named
+    # "None". Reject it (and its casings) rather than show a fabricated input in the signed dossier.
+    return None if tok.lower() == "none" else tok
 
 
 def _surface_phrase(method: str | None, location: str | None) -> str:
@@ -194,6 +221,14 @@ def build_howto(g: GradedFinding) -> HowTo:
     """Build the how-to block for one graded finding. Pure + deterministic."""
     f = g.finding
     method, location, param = parse_surface(f.surface)
+    if param is None and g.is_fact:
+        # A scan's oracle-confirmed FACT often records only the seed URL in `surface`, with the
+        # vulnerable parameter in the engine's title shorthand ("<class> confirmed at <param>"). Recover
+        # it so the richest "how to verify, test & patch" block renders for the PROVEN finding — where
+        # "how do I test this myself" matters most. Gated on g.is_fact (and the literal "confirmed at"
+        # marker in _param_from_title) so a LEAD, a demoted finding, or a free-text title can never be
+        # given a fabricated parameter it never recorded.
+        param = _param_from_title(getattr(f, "title", "") or "")
     grounding = "fact" if g.is_fact else ("demoted" if g.grade == GRADE_DEMOTED else "lead")
 
     certificate = f"sha256:{g.certificate_digest}" if (g.is_fact and g.certificate_digest) else None
