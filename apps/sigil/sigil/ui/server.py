@@ -1487,9 +1487,11 @@ class Handler(BaseHTTPRequestHandler):
             return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
                                    str(body.get("method", "")), ip=ip, mfa_at=body.get("mfa_at"))
         # Slice G — offense-launch credit reservation. requester is the hop principal; org from the edge
-        # session; host (reserve) / lease (cancel) from the body. units are server-decided (config.LAUNCH_UNITS).
+        # session; host (reserve) / lease (cancel) from the body. units are server-decided: EC-7b maps the
+        # optional product_id (a catalog identifier, NOT an amount) to the owner catalog's units, else default.
         if action == "launch_reserve":
-            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip,
+            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                    product_id=str(body.get("product_id", "")), ip=ip,
                                     mfa_at=body.get("mfa_at"))
         if action == "launch_cancel":
             return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
