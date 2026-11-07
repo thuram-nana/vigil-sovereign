@@ -330,5 +330,9 @@ class CallTrace(BaseModel):
     # is unchanged); these two fields record HOW the input broke down for the margin dashboard.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # EC-1b L2 response cache: True when this result was served from the deterministic local response
+    # cache (no provider call). Default False => backward compatible. Honest provenance — a cached
+    # reasoning step is visibly cached in its persisted trace; tokens_in/out are 0 on a cache hit.
+    cached: bool = False
     latency_ms: float = 0.0
     timestamp: str = ""
