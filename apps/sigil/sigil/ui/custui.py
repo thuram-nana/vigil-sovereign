@@ -67,6 +67,7 @@ _APP_CTYPES = {
     ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
     ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
+    ".wav": "audio/wav",   # the notification chime (same-origin media; strict CSP's default-src 'self' covers it)
 }
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
@@ -280,7 +281,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
                   "/api/customer/assessments": "assessment_summary",
                   "/api/customer/assessments/findings": "assessment_findings",
-                  "/api/customer/assets": "assets_overview"}
+                  "/api/customer/assets": "assets_overview",
+                  "/api/customer/notifications": "notifications"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)

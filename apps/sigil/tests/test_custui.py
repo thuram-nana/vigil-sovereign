@@ -994,3 +994,31 @@ def test_stepup_off_by_default_sensitive_op_unchanged(tmp_path, monkeypatch):
         assert c == 200 and r["role"] == "analyst", (c, r)         # no step-up needed when the flag is off
     finally:
         sov.shutdown(); edge.shutdown()
+
+
+def test_notifications_route_requires_a_session(tmp_path, monkeypatch):
+    # the notification centre read is session-gated at the edge: no customer cookie -> 401, never an anon leak.
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        assert _get(_opener(), ep, "/api/customer/notifications")[0] == 401
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_notifications_end_to_end_shape_scoped_to_session_org(tmp_path, monkeypatch):
+    # a signed-in customer reaches notifications over the edge->hop->dispatch->provisioner path and gets a
+    # well-formed, session-org-scoped payload (NOT 404/500). A fresh trial org_admin (credits present, no
+    # subscription, no view_assessments) has nothing to nag about -> an empty-but-valid centre.
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "n@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        org = conf["org_id"]
+        code, body = _get(op, ep, "/api/customer/notifications")
+        assert code == 200, (code, body)
+        assert body["org_id"] == org                               # scoped to the SERVER-side session org
+        assert isinstance(body["notifications"], list) and body["count"] == 0
+    finally:
+        sov.shutdown(); edge.shutdown()
