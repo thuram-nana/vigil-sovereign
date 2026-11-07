@@ -63,3 +63,31 @@ def test_owner_vault_kms_without_key_fails_closed(monkeypatch):
     from vigil_core.kek import KekError
     with pytest.raises(KekError):               # a KMS backend with no key never silently degrades
         _vault.owner_vault()
+
+
+def test_secretstore_set_fails_closed_when_kms_selected_but_unconfigured(monkeypatch, tmp_path):
+    """Red-pen fold (AWS-1, secrets.py): a sealing backend EXPLICITLY selected but misconfigured
+    (VIGIL_KEK_BACKEND=kms with no VIGIL_KMS_KEY_ID) must NOT silently write an opted-in secret as 0600
+    plaintext — SecretStore.set() fails closed. Without the guard, _sealed_available() swallows the
+    construction KekError and set() plants plaintext in sigil.env (the gap this fold closes)."""
+    from sigil.platform import secrets as secmod
+    monkeypatch.setenv("VIGIL_KEK_BACKEND", "kms")
+    monkeypatch.delenv("VIGIL_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("VIGIL_AWS_REGION", "eu-west-1")
+    monkeypatch.setattr(secmod, "SIGIL_HOME", tmp_path)          # never touch the real home even if it leaked
+    s = secmod.SecretStore()
+    s._kr = None                                                # no OS keyring → would reach the envfile tier
+    with pytest.raises(RuntimeError):
+        s.set("ANTHROPIC_API_KEY", "sk-ant-MUSTNOTLAND")
+    assert not (tmp_path / "sigil.env").exists()                # fail-closed BEFORE any plaintext write
+
+
+def test_secretstore_guard_is_noop_on_tpm_default(monkeypatch):
+    """Control: the guard only fires for an explicitly-selected-but-broken backend. Under the default TPM
+    backend owner_vault() builds a Vault (it does NOT raise), so _assert_sealing_not_broken() is a no-op and
+    the designed non-bricking envfile degrade for an unprovisioned vault is preserved byte-identically."""
+    from sigil.platform import secrets as secmod
+    monkeypatch.delenv("VIGIL_KEK_BACKEND", raising=False)
+    s = secmod.SecretStore()
+    s._kr = None
+    s._assert_sealing_not_broken()   # must NOT raise on the default backend

@@ -174,7 +174,14 @@ class KmsKekBackend:
             os.chmod(d, 0o700)
         except OSError:
             pass
-        if self.is_provisioned(d):
+        # Overwrite-guard mirrors the TPM recipe's OR-semantics (kek.provision_kek): refuse when EITHER
+        # blob exists. The wrapped KEK is the ciphertext in the priv file; the pub file is only the
+        # non-secret marker. If pub is lost but priv survives (a selective backup/restore, a dropped sync,
+        # a manual `rm kek.tpm.pub`), is_provisioned()'s AND would read False and let reseal() overwrite the
+        # one surviving copy of the KEK — permanently orphaning the owner key sealed under it. The OR here
+        # keeps that state RECOVERABLE (restore the tiny marker) instead of destroying the trust root.
+        # (is_provisioned()'s AND stays correct for the separate "is sealing fully on" question.)
+        if (d / _SEAL_PUB).exists() or (d / _SEAL_PRIV).exists():
             raise KekError("a wrapped KEK already exists here — refusing to overwrite the trust root")
         self.reseal(d, new_kek(), pub_name=_SEAL_PUB, priv_name=_SEAL_PRIV)
 

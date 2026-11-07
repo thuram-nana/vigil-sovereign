@@ -137,6 +137,29 @@ def test_reprovision_refuses_to_overwrite(tmp_path):
         b.provision(tmp_path)
 
 
+def test_reprovision_refuses_when_only_priv_survives(tmp_path):
+    """The wrapped KEK is the ciphertext in the priv file. If the non-secret pub marker is lost but priv
+    survives, re-provision must STILL refuse (OR-guard, mirroring the TPM recipe) — otherwise it would
+    overwrite the one surviving copy of the KEK and permanently orphan the owner key sealed under it."""
+    shared = make_fake_kms()
+    b = KmsKekBackend(key_id=KEY_A, region=REGION, runner=shared)
+    b.provision(tmp_path)
+    before = (tmp_path / "kek.tpm.priv").read_bytes()
+    (tmp_path / "kek.tpm.pub").unlink()                           # lose ONLY the marker (priv survives)
+    assert b.is_provisioned(tmp_path) is False                   # AND-based "fully on" now reads False ...
+    with pytest.raises(KekError):                                # ... but provision must still refuse
+        b.provision(tmp_path)
+    assert (tmp_path / "kek.tpm.priv").read_bytes() == before    # the surviving KEK ciphertext is intact
+
+
+def test_reprovision_refuses_when_only_pub_survives(tmp_path):
+    b = _kms()
+    b.provision(tmp_path)
+    (tmp_path / "kek.tpm.priv").unlink()                          # lose only the ciphertext
+    with pytest.raises(KekError):
+        b.provision(tmp_path)
+
+
 def test_unreachable_kms_fails_closed_no_plaintext(tmp_path):
     dead = KmsKekBackend(key_id=KEY_A, region=REGION, runner=make_fake_kms(unavailable=True))
     with pytest.raises(KekError):
