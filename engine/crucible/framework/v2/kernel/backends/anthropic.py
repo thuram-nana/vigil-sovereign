@@ -121,6 +121,7 @@ class AnthropicBackend(LLMBackend):
     in a structured-log marker; the API call shape is identical."""
 
     name = "anthropic"
+    honors_routing = True      # EC-2a: complete() resolves the routed effective model
 
     def __init__(self, *, zdr: bool | None = None) -> None:
         try:
@@ -192,8 +193,10 @@ class AnthropicBackend(LLMBackend):
                     max_tokens=prompt.max_tokens,
                 )
                 # temperature for older models; output_config.effort for current ones — never both, never
-                # budget_tokens. One shared helper keeps anthropic/bedrock/vertex identical.
-                create_kwargs.update(sampling_create_kwargs(self.model, prompt.temperature, prompt.effort))
+                # budget_tokens. EC-2a: computed from the EFFECTIVE routed `model` (NOT self.model), so a
+                # cross-generation route carries the sampling family of the model actually invoked — matching
+                # bedrock.py / vertex.py (the shared helper keeps all three identical).
+                create_kwargs.update(sampling_create_kwargs(model, prompt.temperature, prompt.effort))
                 return client.messages.create(**create_kwargs)  # type: ignore[attr-defined]
             except Exception as e:  # noqa: BLE001 — classify below; never leak a raw SDK error
                 last = e

@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from framework.v2.kernel import binding, llm, routing
 from framework.v2.kernel import response_cache as rc
+from framework.v2.kernel.backends import anthropic as _anthropic
 from framework.v2.kernel.llm import LLMBackend, LLMResult, Prompt, make_call_trace
 from framework.v2.kernel.models import CritiqueResult
 
@@ -61,12 +62,15 @@ def _p(**kw) -> Prompt:
 
 class _FakeBackend:
     """A backend double: a fixed configured model + a name, is_dryrun False. (resolve_effective_model
-    only reads .model; the L2 seam also reads .name/.is_dryrun.)"""
+    reads .model + .honors_routing; the L2 seam also reads .name/.is_dryrun.) honors_routing defaults
+    True so the routing-ON assertions exercise the routed path; a test sets it False to exercise a
+    non-wired backend (ollama/self_hosted/mistral/azure/claude_code)."""
 
-    def __init__(self, model: str, name: str = "fake") -> None:
+    def __init__(self, model: str, name: str = "fake", honors_routing: bool = True) -> None:
         self.model = model
         self.name = name
         self.is_dryrun = False
+        self.honors_routing = honors_routing
 
 
 # ---- routing policy: default-OFF --------------------------------------------------------------------
@@ -185,6 +189,63 @@ def test_effective_model_is_fail_safe(monkeypatch):
         raise RuntimeError("boom")
     monkeypatch.setattr(routing, "resolve_model", _boom)
     assert llm.resolve_effective_model(_p(model_tier="standard"), _FakeBackend(_CURRENT)) == _CURRENT
+
+
+def test_non_honoring_backend_keys_on_its_own_model(monkeypatch):
+    # Red-pen fold: resolve_effective_model is the ONE source of truth only because a backend that does
+    # NOT honor routing (honors_routing False — every backend outside the Anthropic-SDK family) always
+    # resolves to its OWN configured model, even with routing on + the tier mapped. So the L2 cache key
+    # and the determinism gate never label a routed model the backend never actually invoked.
+    monkeypatch.setenv(routing._ENABLE_ENV, "1")
+    monkeypatch.setenv(f"{routing._TIER_ENV_PREFIX}STANDARD", _OLD)
+    nonwired = _FakeBackend(_CURRENT, honors_routing=False)
+    assert llm.resolve_effective_model(_p(model_tier="standard"), nonwired) == _CURRENT   # NOT _OLD
+    wired = _FakeBackend(_CURRENT, honors_routing=True)
+    assert llm.resolve_effective_model(_p(model_tier="standard"), wired) == _OLD           # honors -> routed
+
+
+# ---- the Anthropic backend applies the sampling regime of the EFFECTIVE model (CONFIRMED red-pen MED) --
+class _CaptureClient:
+    """Captures the kwargs of the single messages.create call; returns an opaque stub (the raw round-trip
+    value _create_with_backoff returns unparsed)."""
+
+    def __init__(self) -> None:
+        self.kw: dict | None = None
+
+    @property
+    def messages(self):
+        return self
+
+    def create(self, **kw):
+        self.kw = dict(kw)
+        return "stub"
+
+
+def _bare_anthropic(model: str):
+    be = _anthropic.AnthropicBackend.__new__(_anthropic.AnthropicBackend)   # bypass __init__ (no SDK/key)
+    be.model = model
+    return be
+
+
+def test_anthropic_sampling_regime_follows_effective_model(monkeypatch):
+    # The bug 4 red-pen lenses confirmed: _create_with_backoff sent the request to the routed `model` but
+    # computed sampling_create_kwargs(self.model) — so a cross-generation route sent the wrong family.
+    # It must compute the regime from the EFFECTIVE model (matching bedrock/vertex).
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    prompt = _p(temperature=0.2, effort=None)
+
+    # self.model CURRENT, routed to an OLDER model -> OLDER family: temperature present, no output_config.
+    cli = _CaptureClient()
+    _bare_anthropic(_CURRENT)._create_with_backoff(cli, "s", "u", prompt, _OLD)
+    assert cli.kw["model"] == _OLD
+    assert cli.kw.get("temperature") == 0.2          # from the EFFECTIVE (older) model, NOT self.model
+    assert "output_config" not in cli.kw
+
+    # self.model OLDER, routed to a CURRENT model -> CURRENT family: NO temperature (effort unset -> omitted).
+    cli2 = _CaptureClient()
+    _bare_anthropic(_OLD)._create_with_backoff(cli2, "s", "u", prompt, _CURRENT)
+    assert cli2.kw["model"] == _CURRENT
+    assert "temperature" not in cli2.kw              # current family rejects temperature; regime from EFFECTIVE
 
 
 # ---- the L2 cache seam keys on the EFFECTIVE model ---------------------------------------------------

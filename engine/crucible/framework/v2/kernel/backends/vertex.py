@@ -84,6 +84,7 @@ def _region_allowlist() -> tuple[str, ...]:
 
 class VertexBackend(LLMBackend):
     name = "vertex"
+    honors_routing = True      # EC-2a: complete() resolves the routed effective model
 
     def __init__(self) -> None:
         try:

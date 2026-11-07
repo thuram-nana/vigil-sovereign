@@ -183,8 +183,16 @@ def resolve_effective_model(prompt: "Prompt", backend: "LLMBackend") -> str:
     backend's ``complete`` and the L2 cache seam BOTH resolve through here so the cache keys on — and
     the determinism gate sees — the exact model the provider was (or would be) asked for. Fail-safe:
     a backend with no ``model`` attribute, or any routing error, yields the backend's model (or ""),
-    never raises. When routing is off or the tier is "" this returns ``backend.model`` byte-identically."""
+    never raises. When routing is off or the tier is "" this returns ``backend.model`` byte-identically.
+
+    A backend that does NOT honor routing (``honors_routing`` False — every backend outside the
+    Anthropic-SDK family) ignores ``model_tier`` in its own ``complete()`` and always calls its
+    configured model, so this returns that model for it unconditionally. That keeps the L2 cache key
+    and the determinism gate true to the model the provider was actually asked for (no cross-model
+    mis-provenance from a routed key labelling a model the backend never invoked)."""
     default_model = str(getattr(backend, "model", "") or "")
+    if not bool(getattr(backend, "honors_routing", False)):
+        return default_model
     try:
         return routing.resolve_model(str(getattr(prompt, "model_tier", "") or ""), default_model)
     except Exception:                                      # noqa: BLE001 — routing is advisory, never a gate
@@ -226,6 +234,12 @@ class LLMBackend(abc.ABC):
     """All backends implement this. Subclasses set `name`."""
 
     name: str = "abstract"
+    # EC-2a: True only on a backend whose complete() actually resolves the routed effective model
+    # (the Anthropic-SDK family: anthropic/bedrock/vertex). A backend that leaves this False ignores
+    # model_tier and always uses its own configured model, so resolve_effective_model returns that
+    # model for it — keeping the L2 cache key + determinism gate true to the model actually invoked,
+    # and making routing's documented "Anthropic-family-only" scope hold in code, not just prose.
+    honors_routing: bool = False
 
     @abc.abstractmethod
     def is_available(self) -> tuple[bool, str]:

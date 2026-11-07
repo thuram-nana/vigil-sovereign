@@ -85,6 +85,7 @@ def _region_allowlist() -> tuple[str, ...]:
 
 class BedrockBackend(LLMBackend):
     name = "bedrock"
+    honors_routing = True      # EC-2a: complete() resolves the routed effective model
 
     def __init__(self) -> None:
         try:
