@@ -78,8 +78,8 @@ def run_tier_for_units(units: int) -> str:
         u = int(units)
     except (TypeError, ValueError):
         return "quick"
-    if u <= 0:
-        return "quick"
+    # quick_max_units() is always >= 1, so a non-positive u is <= it ⇒ "quick" — the fail-SAFE direction falls
+    # out of the band compare itself (no separate <=0 guard needed; a non-int already returned "quick" above).
     return "quick" if u <= quick_max_units() else "deep"
 
 

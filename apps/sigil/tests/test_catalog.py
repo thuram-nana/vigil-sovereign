@@ -162,24 +162,65 @@ def test_launch_product_declared_tier_matches_the_units_band():
         assert run_tier.run_tier_for_units(p.units) == p.run_tier, p.product_id
 
 
-def test_launch_products_validate_fail_closed():
+def test_launch_product_structure_validate_fail_closed():
+    # ENV-INDEPENDENT structural validation (runs at import unconditionally; reads no env var).
     LP = cat.LaunchProduct
-    # a well-formed set validates
-    cat._validate_launch_products((LP("a", "A", "quick", units=3), LP("b", "B", "deep", units=20)))
-    # duplicate / empty product_id
-    with pytest.raises(ValueError):
-        cat._validate_launch_products((LP("a", "A", "quick", 3), LP("a", "A2", "deep", 20)))
-    with pytest.raises(ValueError):
-        cat._validate_launch_products((LP("", "A", "quick", 3),))
-    # unknown run_tier
-    with pytest.raises(ValueError):
-        cat._validate_launch_products((LP("a", "A", "medium", 3),))
-    # units must be a positive int (bool is rejected — a classic int-subclass footgun)
-    for bad in (0, -1, True):
+    cat._validate_launch_product_structure((LP("a", "A", "quick", units=3), LP("b", "B", "deep", units=20)))
+    with pytest.raises(ValueError):                                   # duplicate product_id
+        cat._validate_launch_product_structure((LP("a", "A", "quick", 3), LP("a", "A2", "deep", 20)))
+    with pytest.raises(ValueError):                                   # empty product_id
+        cat._validate_launch_product_structure((LP("", "A", "quick", 3),))
+    with pytest.raises(ValueError):                                   # unknown run_tier
+        cat._validate_launch_product_structure((LP("a", "A", "medium", 3),))
+    for bad in (0, -1, True):                                         # units must be a positive int (bool rejected)
         with pytest.raises(ValueError):
-            cat._validate_launch_products((LP("a", "A", "quick", bad),))
-    # BAND MISMATCH: units 20 fall in the "deep" band but the product declares "quick" ⇒ fail-closed
-    with pytest.raises(ValueError):
-        cat._validate_launch_products((LP("a", "A", "quick", units=20),))
-    with pytest.raises(ValueError):
-        cat._validate_launch_products((LP("a", "A", "deep", units=3),))
+            cat._validate_launch_product_structure((LP("a", "A", "quick", bad),))
+
+
+def test_launch_product_band_validate_fail_closed():
+    # BAND-consistency validation (reads VIGIL_QUICK_MAX_UNITS): declared tier must equal the band-derived tier.
+    LP = cat.LaunchProduct
+    cat._validate_launch_product_band((LP("a", "A", "quick", units=3), LP("b", "B", "deep", units=20)))
+    with pytest.raises(ValueError):                                   # units 20 ⇒ "deep" band but declares "quick"
+        cat._validate_launch_product_band((LP("a", "A", "quick", units=20),))
+    with pytest.raises(ValueError):                                   # units 3 ⇒ "quick" band but declares "deep"
+        cat._validate_launch_product_band((LP("a", "A", "deep", units=3),))
+
+
+def test_catalog_import_byte_identical_off_with_a_misconfigured_band():
+    # The EC-7 red-pen MED regression: with EC-7 OFF (VIGIL_TIERED_PRODUCTS unset) but the owner-tunable band
+    # VIGIL_QUICK_MAX_UNITS mis-set OUTSIDE the shipped [3,19] (e.g. pre-staging or a leftover test value), the
+    # catalog import must STILL succeed and plans() must be byte-identical — the band check must NOT run at
+    # import when EC-7 is off. A fresh subprocess proves the import path (mutation: making the band check
+    # unconditional at import reds this). Pre-fix this crashed `import sigil.governor.catalog` → took down plans().
+    import os, subprocess, sys, textwrap
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3]                        # …/apps/sigil/tests/ -> repo root
+    prog = textwrap.dedent("""
+        import os
+        os.environ.pop("VIGIL_TIERED_PRODUCTS", None)     # EC-7 OFF
+        os.environ["VIGIL_QUICK_MAX_UNITS"] = "25"        # band mis-set (>= deep units) while off
+        from sigil.governor import catalog
+        assert catalog.launch_products() == (), "off => no products offered"
+        print("PLANS", len(catalog.plans()))              # must not crash
+    """)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(root / "apps/sigil"), str(root / "packages/core/vigil_core")])
+    env.pop("VIGIL_TIERED_PRODUCTS", None)
+    r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f"catalog import crashed when EC-7 off + bad band:\n{r.stderr}"
+    assert "PLANS 5" in r.stdout, r.stdout
+
+
+def test_tiered_products_flag_cross_plane_agreement():
+    # The import-time band gate uses run_tier.tiered_products_enabled(); launch_products() uses
+    # config.tiered_products_enabled(). They MUST agree on every value (one env var, two readers) or the
+    # catalog could validate-at-import but not offer, or vice versa. Pin their equality.
+    from vigil_core import run_tier
+    from sigil import config as _config
+    import os as _os
+    for v in ("", "1", "true", "TRUE", "yes", "on", "enabled", "0", "no", "off", " on ", "y", "2"):
+        _os.environ["VIGIL_TIERED_PRODUCTS"] = v
+        assert run_tier.tiered_products_enabled() == _config.tiered_products_enabled(), repr(v)
+    _os.environ.pop("VIGIL_TIERED_PRODUCTS", None)
+    assert run_tier.tiered_products_enabled() == _config.tiered_products_enabled()   # unset agrees too

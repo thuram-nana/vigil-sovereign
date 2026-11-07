@@ -231,7 +231,9 @@ def tiered_products_enabled() -> bool:
     OFF by default: `catalog.launch_products()` returns `()` and the existing pricing surface (plans() /
     expected_amounts() / entitlements()) is byte-identical to pre-EC-7 — a launch product is a NEW offering,
     not a change to any existing one. A launch's run tier is DERIVED from its signed units_reserved either way
-    (no new signed field); this flag only decides whether the Quick/Deep products are listed and sellable."""
+    (no new signed field); this flag decides whether the Quick/Deep products are LISTED/OFFERED (the run tier
+    is applied by the engage worker when on). Wiring a customer's product choice into the credit reservation
+    is a follow-on — until then a launch reserves the default units (the base 'quick' tier)."""
     return (os.environ.get("VIGIL_TIERED_PRODUCTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 

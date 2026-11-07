@@ -185,8 +185,8 @@ for _e in _CATALOG:
 class LaunchProduct:
     """One EC-7 tiered launch product. `units` is the credits this launch reserves (the existing signed
     units_reserved); `run_tier` (RUN_TIERS) is the declared tier, which MUST equal the band-derived tier for
-    those units (validated fail-closed at import) so the product definition and the runtime derivation never
-    diverge."""
+    those units (validated fail-closed when EC-7 is offered — see `_validate_launch_product_band`) so the
+    product definition and the runtime derivation never diverge."""
     product_id: str
     display_name: str
     run_tier: str
@@ -207,9 +207,11 @@ _LAUNCH_PRODUCTS: tuple[LaunchProduct, ...] = (
 )
 
 
-def _validate_launch_products(products: tuple[LaunchProduct, ...]) -> None:
-    """Fail-closed at import: a malformed / tier-mismatched launch product raises, so a bad deploy fails loudly
-    (never ships a Quick product that silently runs Deep, or vice versa)."""
+def _validate_launch_product_structure(products: tuple[LaunchProduct, ...]) -> None:
+    """ENV-INDEPENDENT structural validation — runs at import UNCONDITIONALLY and reads NO env var, so it is
+    byte-identical regardless of VIGIL_TIERED_PRODUCTS / VIGIL_QUICK_MAX_UNITS: a malformed product (empty /
+    duplicate id, unknown run_tier, non-positive or bool units) raises, so a bad DEFINITION fails the deploy
+    loudly whether or not EC-7 is offered."""
     seen: set[str] = set()
     for p in products:
         if not p.product_id or p.product_id in seen:
@@ -220,6 +222,16 @@ def _validate_launch_products(products: tuple[LaunchProduct, ...]) -> None:
                              f"{tuple(run_tier.RUN_TIERS)}, got {p.run_tier!r}")
         if isinstance(p.units, bool) or not isinstance(p.units, int) or p.units < 1:
             raise ValueError(f"launch product {p.product_id!r}: units must be an int >= 1, got {p.units!r}")
+
+
+def _validate_launch_product_band(products: tuple[LaunchProduct, ...]) -> None:
+    """BAND-consistency validation — reads the owner-tunable band (VIGIL_QUICK_MAX_UNITS, via run_tier): each
+    product's DECLARED tier MUST equal its units' band-derived tier (never ship a Quick product that silently
+    runs Deep, or vice versa). Run ONLY when EC-7 is OFFERED (gated below + in launch_products), so a band
+    misconfiguration fails closed-and-LOUD when the products are live, but reading VIGIL_QUICK_MAX_UNITS has
+    ZERO effect on the catalog import / money plane when VIGIL_TIERED_PRODUCTS is unset — the EC-7 default-OFF
+    byte-identical invariant (an operator pre-tuning the band while EC-7 is off never crashes plans())."""
+    for p in products:
         derived = run_tier.run_tier_for_units(p.units)
         if derived != p.run_tier:
             raise ValueError(f"launch product {p.product_id!r}: units {p.units} fall in the {derived!r} band "
@@ -227,7 +239,14 @@ def _validate_launch_products(products: tuple[LaunchProduct, ...]) -> None:
                              f"or VIGIL_QUICK_MAX_UNITS)")
 
 
-_validate_launch_products(_LAUNCH_PRODUCTS)
+# Structural validation ALWAYS (env-independent ⇒ byte-identical). The band check runs at import ONLY when
+# EC-7 is ON — gated on the SHARED run_tier flag reader (NOT sigil.config, which catalog cannot import at
+# module scope), so a started-with-EC-7-on deploy still fails FAST on a bad band, while an EC-7-off import
+# never reads VIGIL_QUICK_MAX_UNITS. launch_products() re-checks the band so OFFERED products are always
+# band-coherent even if the flag is flipped on after import.
+_validate_launch_product_structure(_LAUNCH_PRODUCTS)
+if run_tier.tiered_products_enabled():
+    _validate_launch_product_band(_LAUNCH_PRODUCTS)
 
 
 def monitoring_plan(plan_id: str) -> "MonitoringPlan | None":
@@ -273,11 +292,16 @@ def plans() -> list[dict]:
 
 def launch_products() -> tuple[LaunchProduct, ...]:
     """The EC-7 tiered Quick/Deep launch products ON OFFER — `()` unless config.tiered_products_enabled()
-    (default OFF ⇒ byte-identical to pre-EC-7: no tiered product is listed or sellable, and plans() /
-    expected_amounts() / entitlements() are unchanged). The definitions + their fail-closed validation always
-    exist at import; this gate only decides whether they are OFFERED."""
+    (default OFF ⇒ byte-identical to pre-EC-7: no tiered product is listed, and plans() / expected_amounts() /
+    entitlements() are unchanged). When offered, the band consistency is re-checked so an OFFERED product is
+    always coherent with the live band (fail-closed-loud on a misconfiguration). NOTE: these products are
+    DEFINED and LISTED here; wiring a customer's product choice into the credit RESERVATION (so a Deep launch
+    reserves its units) is a follow-on — until then a launch reserves the default units (base 'quick' tier)."""
     from .. import config
-    return _LAUNCH_PRODUCTS if config.tiered_products_enabled() else ()
+    if not config.tiered_products_enabled():
+        return ()
+    _validate_launch_product_band(_LAUNCH_PRODUCTS)   # offered ⇒ always band-coherent (catches a post-import flag flip)
+    return _LAUNCH_PRODUCTS
 
 
 def launch_product(product_id: str) -> "LaunchProduct | None":

@@ -8,7 +8,7 @@ the owner-tunable boundary, and the default-OFF flag — all offline, stdlib-onl
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * flip the band compare ``u <= quick_max_units()`` to ``<``        -> test_band_boundary_is_inclusive
-  * drop the ``u <= 0`` fail-safe guard (non-positive ⇒ "deep")      -> test_nonpositive_and_malformed_units_are_quick
+  * flip the except fallback ``return "quick"`` to ``"deep"``        -> test_nonpositive_and_malformed_units_are_quick
   * change the ``engage_profile_for`` default off "surface"          -> test_unknown_tier_profile_is_surface
   * change the ``routing_enabled_for`` default off False             -> test_unknown_tier_routing_is_off_fail_toward_capable
   * drop the ``v >= 1`` fallback in quick_max_units                  -> test_quick_max_units_bad_env_falls_back
