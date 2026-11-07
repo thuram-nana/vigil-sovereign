@@ -245,6 +245,74 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _float_env(name: str, default: float) -> float:
+    """A fail-safe float env read: a missing / empty / non-numeric value falls back to `default` (never
+    raises). Used for the owner-set EC-5 pool band fractions, which must deploy with safe defaults."""
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+# --- EC-5 global cost POOL + graduated kill-switch (SHIPPED OFF BY DEFAULT) ------------
+# A GLOBAL (cross-tenant) cost-pool METER over the EC-4 cost ledger + a graduated kill-switch. The pool
+# BUDGET is an OWNER capacity number in TOKENS (never a $ amount, never on the wire); unset/0 ⇒ UNBOUNDED ⇒
+# the meter short-circuits to NORMAL without folding the ledger, so a sovereign install is BYTE-IDENTICAL.
+# The per-token $ rate and the credit→token envelope E stay single-sourced in vigil_core
+# (ENVELOPE_TOKENS_PER_CREDIT), referenced not re-defined here. Mirrors the customer_monitoring_enabled /
+# catalog placeholder doctrine: a reviewed-code default-off operator number, owner-ratified before go-live.
+def global_pool_tokens():
+    """The GLOBAL cross-tenant cost-pool capacity in TOKENS (`VIGIL_GLOBAL_POOL_TOKENS`). Unset / 0 /
+    non-numeric ⇒ None = UNBOUNDED (default-off): the pool meter short-circuits to NORMAL and admits the full
+    request WITHOUT folding the cost ledger, so reserve_launch is byte-identical to pre-EC-5. An OWNER capacity
+    number — the owner arms the pool by setting it to >= 1 (plus optional band-fraction overrides)."""
+    raw = (os.environ.get("VIGIL_GLOBAL_POOL_TOKENS") or "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 1 else None
+
+
+def global_pool_bands() -> dict:
+    """The owner-set band fractions (fraction used/budget at which each posture engages) + the DEGRADE shrink
+    factor for the graduated pool kill-switch. SAFE PLACEHOLDER defaults (NOT real money numbers), each
+    env-overridable; the owner ratifies before go-live. Monotone by construction
+    (0 < throttle ≤ degrade ≤ refuse ≤ hard_stop ≤ 1, 0 < degrade_factor ≤ 1); a non-monotone / out-of-range
+    override reverts to the safe defaults wholesale (FAIL-SAFE — a bad band must never INVERT the graduation,
+    e.g. a refuse threshold below throttle, which could admit MORE draw at a HIGHER fraction; and a threshold
+    ABOVE 1.0 — a percent-vs-fraction typo like refuse=150 — must never be accepted, or the armed kill-switch
+    is silently DISARMED because the used-fraction can never reach it. Since the thresholds are monotone,
+    bounding hard_stop ≤ 1.0 bounds them all)."""
+    bands = {
+        "throttle_at": _float_env("VIGIL_GLOBAL_POOL_THROTTLE_AT", 0.75),
+        "degrade_at": _float_env("VIGIL_GLOBAL_POOL_DEGRADE_AT", 0.85),
+        "refuse_at": _float_env("VIGIL_GLOBAL_POOL_REFUSE_AT", 0.95),
+        "hard_stop_at": _float_env("VIGIL_GLOBAL_POOL_HARD_STOP_AT", 1.0),
+        "degrade_factor": _float_env("VIGIL_GLOBAL_POOL_DEGRADE_FACTOR", 0.5),
+    }
+    t, d, r, h, f = (bands["throttle_at"], bands["degrade_at"], bands["refuse_at"],
+                     bands["hard_stop_at"], bands["degrade_factor"])
+    # upper bound h <= 1.0 (fail-safe against a percent-vs-fraction typo silently disarming the kill-switch).
+    if not (0.0 < t <= d <= r <= h <= 1.0 and 0.0 < f <= 1.0):
+        return {"throttle_at": 0.75, "degrade_at": 0.85, "refuse_at": 0.95, "hard_stop_at": 1.0,
+                "degrade_factor": 0.5}
+    return bands
+
+
+def cost_ledger_write_enabled() -> bool:
+    """True iff the launch gate writes the EC-4 cost reserve/settle pair (the EC-5 live-path wiring). OFF by
+    default (`VIGIL_COST_LEDGER_WRITE` unset / non-affirmative) UNLESS the global cost pool is ARMED — an armed
+    pool MUST meter its own draw, so arming it implies the writes. When OFF the gate appends NO cost record and
+    reserve_launch / settle_launch are byte-identical to pre-EC-5. Single-sourced here (the shared seam EC-6
+    reuses rather than re-adding the reserve_launch cost write)."""
+    if (os.environ.get("VIGIL_COST_LEDGER_WRITE") or "").strip().lower() in _OIDC_AFFIRMATIVE:
+        return True
+    return global_pool_tokens() is not None
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail

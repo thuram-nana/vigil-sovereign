@@ -61,8 +61,11 @@ class LaunchGate:
     production they default to the owner-key-backed sovereign registries over ``store``."""
 
     def __init__(self, store, *, orgs=None, ownership=None, meter=None, wallet=None,
-                 postpaid=None, arrears=None, invoices=None, owner_key=None, base_dir: Optional[str] = None):
+                 postpaid=None, arrears=None, invoices=None, owner_key=None, base_dir: Optional[str] = None,
+                 cost_ledger=None, pool=None):
         from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.cost_ledger import CostEnvelopeLedger
+        from ..governor.cost_pool import GlobalCostPool
         from ..governor.identity import owner_keypair
         from ..governor.invoices import InvoiceRegistry
         from ..governor.metering import CreditMeter, PlanCreditLedger
@@ -83,6 +86,16 @@ class LaunchGate:
         self.arrears = arrears if arrears is not None else PostpaidArrearsLedger(store)
         # PP-3 dunning: the gate reads the owner-signed invoice ledger to refuse a launch when the line is OVERDUE.
         self.invoices = invoices if invoices is not None else InvoiceRegistry(store)
+        # EC-5: the owner-signed cost ledger the gate WRITES the reserve/settle cost pair into (the EC-4
+        # gate-writes-the-pair wiring, gated default-OFF behind config.cost_ledger_write_enabled), and the
+        # GLOBAL cost-pool meter it reads as one more fail-closed conjunct. The pool reads the SAME ledger, so
+        # the pair it meters is the pair the gate writes (single-sourced). DEFAULT-OFF: an unbounded pool
+        # (config.global_pool_tokens() None) never folds and the write flag is off ⇒ byte-identical to pre-EC-5.
+        self._cost_ledger = cost_ledger if cost_ledger is not None else CostEnvelopeLedger(
+            store, owner_key=self.owner_key)
+        from .. import config
+        self._pool = pool if pool is not None else GlobalCostPool(
+            self._cost_ledger, budget_tokens=config.global_pool_tokens())
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
 
@@ -150,6 +163,48 @@ class LaunchGate:
             self.wallet.debit(oid, from_wallet, engagement_id=slug,
                               entry_id=f"reserve-wallet:{slug}:{nonce}", issued_at=now_ts)
 
+    def _write_cost_reserve(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> None:
+        """EC-5: owner-sign the cost-ledger RESERVE for this launch — the token envelope ``units * E`` it may
+        spend — gated DEFAULT-OFF behind ``config.cost_ledger_write_enabled()`` (off ⇒ NO record appended,
+        byte-identical). Idempotent per ``(slug, nonce)`` via the shared ``reserve-cost:`` prefix contract.
+        FAIL-SAFE: the cost ledger is ADVISORY metering, NEVER a gate on the real launch beyond the explicit
+        pool-REFUSE conjunct — a cost-write error is swallowed (logged) so it can never break a real launch."""
+        from .. import config
+        if not config.cost_ledger_write_enabled():
+            return
+        try:
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+            from ..governor.cost_ledger import RESERVE_COST_PREFIX
+            self._cost_ledger.reserve(oid, units * ENVELOPE_TOKENS_PER_CREDIT,
+                                      entry_id=f"{RESERVE_COST_PREFIX}{slug}:{nonce}", engagement_id=slug,
+                                      issued_at=now_ts)
+        except Exception:  # noqa: BLE001 — advisory metering: a cost-write failure never breaks the launch
+            import logging
+            logging.getLogger(__name__).warning("EC-5 cost-reserve write failed (advisory; launch unaffected)",
+                                                 exc_info=True)
+
+    def _write_cost_settle(self, oid: str, slug: str, nonce: str, consumed: int, reserved: int,
+                           now_ts: float) -> None:
+        """EC-5: owner-sign the cost-ledger SETTLE for this launch — the ACTUAL tokens consumed (the
+        conservative credit-envelope PROXY ``consumed * E`` until the keyless actual-token delivery lands),
+        CLAMPED to the reserved envelope ``reserved * E`` so a forged over-report can never over-settle. All
+        arguments come from the VERIFIED lease (never a wire value). Gated DEFAULT-OFF + idempotent per
+        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve)."""
+        from .. import config
+        if not config.cost_ledger_write_enabled():
+            return
+        try:
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+            from ..governor.cost_ledger import SETTLE_COST_PREFIX
+            self._cost_ledger.settle(oid, consumed * ENVELOPE_TOKENS_PER_CREDIT,
+                                     entry_id=f"{SETTLE_COST_PREFIX}{slug}:{nonce}",
+                                     reserved_cap=reserved * ENVELOPE_TOKENS_PER_CREDIT, engagement_id=slug,
+                                     issued_at=now_ts)
+        except Exception:  # noqa: BLE001 — advisory metering: a cost-write failure never breaks the settle
+            import logging
+            logging.getLogger(__name__).warning("EC-5 cost-settle write failed (advisory; settle unaffected)",
+                                                 exc_info=True)
+
     def reserve_launch(self, *, requester: str, org_id: str, host: str, units: int, now: Any,
                        duration_hours: Any = _DEFAULT_LEASE_HOURS, nonce: Optional[str] = None) -> dict:
         """Authorize + reserve + mint for ONE launch. Returns ``{ok: True, lease, ...}`` with the signed lease
@@ -216,6 +271,14 @@ class LaunchGate:
                             f"the outstanding invoice before launching new assessments")
             elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
+            # EC-5 GLOBAL COST POOL conjunct (AFTER the per-tenant credit conjunct): when the pool is ARMED and
+            # over capacity (REFUSE_NEW / HARD_STOP, or unmeasurable ⇒ fail-closed REFUSE_NEW) refuse this NEW
+            # launch — the safe, reversible access-reducing direction (an in-flight launch still settles and
+            # frees the pool, so the pool auto-relaxes with no owner-signed un-latch). UNBOUNDED (default) ⇒
+            # gate_refusal() short-circuits to None WITHOUT folding ⇒ byte-identical no-op.
+            pool_refusal = self._pool.gate_refusal()
+            if pool_refusal is not None:
+                return pool_refusal
             return None
 
         pre = _gated()                                   # cheap pre-check outside the lock (fast refusal)
@@ -243,6 +306,10 @@ class LaunchGate:
                     # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
                     # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
                     return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            # EC-5: after the real (incremental) reserve succeeds, write the cost-ledger RESERVE for the pool
+            # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
+            # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
+            self._write_cost_reserve(oid, u, slug, non, now_ts)
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
                 not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts)
@@ -336,6 +403,9 @@ class LaunchGate:
                 # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
                 # prior `if refund > 0` left a fully-consumed launch with no settle record -> invoiced $0.)
                 self.arrears.settle(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
+                # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
+                # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
+                self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
             return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                     "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
@@ -395,6 +465,9 @@ class LaunchGate:
             if wallet_refund > 0:
                 self.wallet.grant(oid, wallet_refund, "refund", source_ref=s,
                                   entry_id=f"settle-wallet:{s}:{non}", issued_at=now_ts)
+            # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
+            # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
+            self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
         return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                 "refunded": refund, "refunded_plan": plan_refund, "refunded_wallet": wallet_refund,
                 "net_spend": consumed}
