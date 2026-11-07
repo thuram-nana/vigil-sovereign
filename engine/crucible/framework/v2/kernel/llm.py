@@ -59,6 +59,17 @@ try:                                                       # pragma: no cover - 
 except Exception:                                          # noqa: BLE001
     _run_budget = None
 
+# EC-2b — PER-RUN COST TAP (per-model token attribution), the measurement sibling of the EC-3 hard budget
+# above. This is the engine-plane ``kernel.cost_tap`` (a stdlib-only kernel module, NOT a vigil_core leaf —
+# only the engine-plane A/B harness reads it). Guarded exactly like ``_run_budget`` so the kernel still
+# completes a call if it is ever absent. DEFAULT-OFF: when ``CRUCIBLE_COST_TAP`` is unset (or no cost-tap
+# scope is entered) ``record`` is a no-op and ``complete_with_failover`` is byte-identical; it also skips
+# dry-run traces, so ``make gate`` never accumulates.
+try:                                                       # pragma: no cover - import guard
+    from . import cost_tap as _cost_tap
+except Exception:                                          # noqa: BLE001
+    _cost_tap = None
+
 # M4.1 — the ONE egress chokepoint both LLM paths route through. vigil_core is the shared leaf both the
 # offense framework and the sovereign planes import, so composing the egress discipline (classify ->
 # redact -> authorize -> route -> provenance -> output-verify -> audit) there crosses no FATAL-2 boundary.
@@ -132,6 +143,20 @@ def _rb_charge(trace: "CallTrace | None") -> None:
         spent = int(getattr(trace, "tokens_in", 0) or 0) + int(getattr(trace, "tokens_out", 0) or 0)
         if spent > 0:
             _run_budget.charge(spent)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _ct_record(trace: "CallTrace | None") -> None:
+    """Attribute the ACTUAL tokens a real (non-dry-run) call spent to the per-run, per-model COST TAP
+    (EC-2b) — the measurement sibling of _rb_charge. cost_tap.record itself no-ops on a dry-run / None trace
+    and when the tap is unarmed (CRUCIBLE_COST_TAP unset or no cost-tap scope entered), so fixture /
+    ``make gate`` runs never accumulate and the default path is byte-identical. A no-op when the module is
+    absent. Never raises (recording cost must not break a completion)."""
+    if _cost_tap is None:
+        return
+    try:
+        _cost_tap.record(trace)
     except Exception:                                      # noqa: BLE001
         pass
 
@@ -495,6 +520,7 @@ def complete_with_failover(prompt: "Prompt") -> "LLMResult":
     result = _route_urk_egress(prompt)                   # M4.1: through the single egress chokepoint
     _tb_record(tool, getattr(result, "trace", None))     # None trace records nothing (spent == 0)
     _rb_charge(getattr(result, "trace", None))           # EC-3: charge actual tokens to the run accumulator
+    _ct_record(getattr(result, "trace", None))           # EC-2b: attribute actual tokens by model (default-OFF)
     if _b is not None:
         # Store under the ORIGINAL (pre-clamp) max_tokens. The budget clamp mutated prompt.max_tokens for the
         # provider call, but the L2 LOOKUP above keyed on the original, so the store must too — otherwise L2
@@ -561,6 +587,9 @@ def _urk_provenance(result: "LLMResult") -> dict:
         return {}
     return {
         "answered_backend": getattr(tr, "backend", ""),
+        # EC-2b/EC-6: the concrete model this call answered on (routing provenance). Additive + back-compatible
+        # ("" when a backend/trace does not record it); the margin dashboard + telemetry attribute cost per model.
+        "model": getattr(tr, "model", ""),
         "tokens_in": int(getattr(tr, "tokens_in", 0) or 0),
         "tokens_out": int(getattr(tr, "tokens_out", 0) or 0),
         "is_dryrun": bool(getattr(tr, "is_dryrun", False)),
@@ -624,6 +653,7 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     if _gw is None:
         _r = _backend_complete_raw(backend, prompt)
         _rb_charge(getattr(_r, "trace", None))           # EC-3: charge actual tokens (the explicit-backend egress)
+        _ct_record(getattr(_r, "trace", None))           # EC-2b: attribute actual tokens by model (default-OFF)
         _l2_store(prompt, _r, backend)
         return _r
 
@@ -640,6 +670,7 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     if res.refused:
         raise BackendUnavailable(res.refusal_reason)
     _rb_charge(getattr(res.output, "trace", None))       # EC-3: charge actual tokens (the explicit-backend egress)
+    _ct_record(getattr(res.output, "trace", None))       # EC-2b: attribute actual tokens by model (default-OFF)
     _l2_store(prompt, res.output, backend)
     return res.output
 
