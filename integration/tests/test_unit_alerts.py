@@ -128,26 +128,61 @@ def test_unit_heartbeat_reads_service_result_from_env(tmp_path, monkeypatch):
 
 
 # ── the monitor: negative control + fail-closed ─────────────────────────────────────────────────────────
-def test_clean_fleet_raises_no_alarm(tmp_path):
+def _always_on() -> list:
+    """The units watched fail-closed on EVERY host (optional=False). Opted-out OPTIONAL drains are not here."""
+    return [s for s in ua.registry() if not s.optional]
+
+
+def test_clean_fleet_raises_no_alarm(tmp_path, monkeypatch):
     """NEGATIVE CONTROL that the gate is not a no-op: a fresh, successful heartbeat for every unit fires
-    ZERO alarms."""
+    ZERO alarms. With the optional drains OPTED OUT, only the always-on units are counted healthy."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
     _write_all_healthy(tmp_path, now=T0)
     sink = _RecordingSink()
     summary = ua.run_alert_monitor(tmp_path, now=T0 + 60, sink=sink)
     assert summary["alarms"] == 0
-    assert summary["healthy"] == len(ua.registry())
+    assert summary["healthy"] == len(_always_on())   # the opted-out optional drains are not watched
     assert sink.alarms == []
 
 
-def test_absent_heartbeat_is_a_staleness_alarm_fail_closed(tmp_path):
-    """FAIL-CLOSED: an empty state dir (no unit has ever run) alarms for EVERY unit, never silent-healthy."""
+def test_absent_heartbeat_is_a_staleness_alarm_fail_closed(tmp_path, monkeypatch):
+    """FAIL-CLOSED: an empty state dir (no unit has ever run) alarms for EVERY ALWAYS-ON unit, never
+    silent-healthy. An opted-out OPTIONAL drain is not watched (no false ABSENT alarm for a drain the host
+    does not run) — proven separately by test_optional_drain_is_fail_closed_watched_once_enabled."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
     sink = _RecordingSink()
     summary = ua.run_alert_monitor(tmp_path, now=T0, sink=sink)
-    assert summary["alarms"] == len(ua.registry())
-    assert summary["stale"] == len(ua.registry())  # ABSENT counts under the staleness dead-man
+    always_on = {s.unit for s in _always_on()}
+    assert summary["alarms"] == len(always_on)
+    assert summary["stale"] == len(always_on)  # ABSENT counts under the staleness dead-man
     assert all(a.kind == "unit-heartbeat-stale" for a in sink.alarms)
     states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert set(states.keys()) == always_on             # EVERY always-on unit watched; opted-out drains absent
     assert set(states.values()) == {ua.ABSENT}
+
+
+def test_optional_drain_not_watched_when_disabled(tmp_path, monkeypatch):
+    """The enablement gate: with its flag UNSET, an optional SaaS drain is NOT in the default watched set, so
+    an empty state dir raises NO alarm for it — a host that never enabled the pipeline is not false-alarmed."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    watched = {s["unit"] for s in summary["statuses"]}
+    assert "vigil-finding-drain.service" not in watched
+    assert "vigil-settle-drain.service" not in watched
+
+
+def test_optional_drain_is_fail_closed_watched_once_enabled(tmp_path, monkeypatch):
+    """Once its flag is set, an optional drain IS watched fail-closed exactly like an always-on unit: an
+    absent heartbeat is an ABSENT staleness alarm. So an ENABLED drain that stops firing is caught."""
+    monkeypatch.setenv("VIGIL_FINDING_DRAIN_ENABLED", "1")
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert states.get("vigil-finding-drain.service") == ua.ABSENT   # enabled ⇒ fail-closed watched
+    assert "vigil-settle-drain.service" not in states               # still opted out
 
 
 def test_failing_one_unit_produces_exactly_one_alert(tmp_path):

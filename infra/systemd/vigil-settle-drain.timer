@@ -1,0 +1,23 @@
+# VIGIL SaaS settle-on-completion drain timer — fires the oneshot on a cadence.
+# =====================================================================
+# Makes revenue recognition RUN unattended: fires vigil-settle-drain.service every ~60s, so a completed run
+# is charged and a canceled/failed run is refunded within a cadence, and a fresh heartbeat is written.
+# A late settle is money owed either way (a stranded refund or an un-recognized charge), so the dead-man
+# matters: `vigil alerts` alarms if this timer stops firing — but ONLY when VIGIL_SETTLE_DRAIN_ENABLED is set.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-settle-drain.timer
+
+[Unit]
+Description=Cadence trigger for the VIGIL SaaS settle-on-completion drain
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+Persistent=true
+RandomizedDelaySec=15
+Unit=vigil-settle-drain.service
+
+[Install]
+WantedBy=timers.target

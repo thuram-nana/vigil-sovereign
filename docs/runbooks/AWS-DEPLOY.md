@@ -114,6 +114,36 @@ real-IP block). Give the origin a cert for the Cloudflare→origin hop — eithe
 (`certbot certonly -d vigilguard.net -d www.vigilguard.net`) or a **Cloudflare Origin CA** cert (longer
 lived, only trusted by Cloudflare). `nginx -t && systemctl reload nginx`.
 
+### 2d. Supervised SaaS background runtime (the drains)
+
+The customer-SaaS pipeline runs as owner-tied **background drains** that must run continuously + recover
+unattended. They ship as **opt-in systemd user timer-oneshots** (each fires its drain on a tight cadence,
+writes a heartbeat, and is watched by the `vigil alerts` staleness dead-man). They are **not** enabled by
+bootstrap — each needs a per-deployment **owner-signed delegation**, so you enable them only after
+provisioning that. Enable the two load-bearing "nothing-lost" drains first:
+
+```bash
+# findings crossing (offense→sovereign confirmed FACTs → the tenant's spine) + settle-on-completion
+# (completed⇒charge, canceled/failed⇒refund, owner-keyed + idempotent)
+for d in finding-drain settle-drain; do
+  cp infra/systemd/vigil-$d.{service,timer} ~/.config/systemd/user/
+  cp infra/systemd/vigil-$d.env.example     ~/.config/vigil/$d.env
+  $EDITOR ~/.config/vigil/$d.env     # set the spool, the owner-signed delegation path, the scope, ENABLE=1
+done
+# Tell the staleness dead-man to watch them (so an ENABLED drain that stops firing is alarmed; an
+# un-enabled host raises no false alarm):
+printf 'VIGIL_FINDING_DRAIN_ENABLED=1\nVIGIL_SETTLE_DRAIN_ENABLED=1\n' >> ~/.config/vigil/alerts.env
+systemctl --user daemon-reload
+systemctl --user enable --now vigil-finding-drain.timer vigil-settle-drain.timer vigil-alerts.timer
+systemctl --user list-timers 'vigil-*'                  # confirm next run
+vigil alerts --once --require-push                       # a fresh drain heartbeat ⇒ no alarm
+```
+
+A drain crash loses nothing (slice 1: the finding drain reclaims its own in-flight work + de-duplicates;
+settle is idempotent per `(slug,nonce)`), and the dead-man alarms if a timer stops firing — so the pipeline
+both runs and recovers without a human. (The remaining drains — `billing-drain`, `monitoring-drain`,
+`ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` — follow the same pattern.)
+
 ## 3. Point Namecheap at Cloudflare, Cloudflare at the Elastic IP
 
 Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS from Namecheap to Cloudflare

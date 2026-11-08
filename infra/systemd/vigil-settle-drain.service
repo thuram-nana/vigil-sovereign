@@ -1,0 +1,55 @@
+# VIGIL SaaS — settle-on-completion drain (systemd USER service, oneshot)
+# =====================================================================
+# Readiness slice 2. Runs ONE pass of `sigil settle-drain drain`: claims every owner-delegation-signed
+# engagement-completion signal the offense worker emitted, verifies it, and calls the OWNER-KEYED,
+# idempotent `settle_launch` — a COMPLETED run consumes its reserved credits, a CANCELED/FAILED run is
+# fully REFUNDED. The paired timer fires this on a cadence, so a finished (or failed) customer assessment
+# finalizes its billing WITHOUT a human, and a crash/retry can never double-charge (settle is idempotent
+# per (slug,nonce)).
+#
+# SOVEREIGN-plane (`sigil`, %h/.sigil venv): it holds the owner key (only the sovereign plane may mint a
+# refund grant) and imports no offense engine. Fail-closed: a forged/unsigned/replayed completion is
+# quarantined and settles nothing.
+#
+# OPT-IN: shipped but NOT enabled by bootstrap — it needs a per-deployment owner-signed OFFENSE_GOVERNANCE
+# delegation scoped to the cust_ engagement slug. Enable only after provisioning it + filling
+# ~/.config/vigil/settle-drain.env. The dead-man watches this unit ONLY when VIGIL_SETTLE_DRAIN_ENABLED is set.
+#
+# INSTALL (paired with the timer):
+#   cp infra/systemd/vigil-settle-drain.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-settle-drain.env.example     ~/.config/vigil/settle-drain.env
+#   $EDITOR ~/.config/vigil/settle-drain.env
+#   systemctl --user daemon-reload && systemctl --user enable --now vigil-settle-drain.timer
+#   # add VIGIL_SETTLE_DRAIN_ENABLED=1 to the vigil-alerts monitor's env so the dead-man watches it.
+
+[Unit]
+Description=VIGIL SaaS settle-on-completion drain (one pass: completed⇒charge, canceled/failed⇒refund; owner-keyed)
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/vigil/settle-drain.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil settle-drain drain --spool ${VIGIL_SETTLE_SPOOL} --delegation ${VIGIL_SETTLE_DELEGATION} --scope ${VIGIL_SETTLE_SCOPE} --base-dir ${VIGIL_SETTLE_BASE_DIR}
+
+# --- heartbeat + staleness alarm (W8-1) ------------------------------------
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
+# --- hardening -------------------------------------------------------------
+# Reads the settle spool, READS the published credit lease + WRITES the settlement/tombstone under the
+# credit-lease seam root (VIGIL_SETTLE_BASE_DIR) and the spine under ~/.sigil. Network is not locked down
+# (a KMS-sealed owner KEK needs an outbound aws kms call to mint the owner-signed settle).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# IMPORTANT: if VIGIL_SETTLE_BASE_DIR (the credit-lease seam) is outside ~/.sigil, ADD it to ReadWritePaths
+# above, or the owner-signed settle/tombstone write will be denied by ProtectSystem=strict.

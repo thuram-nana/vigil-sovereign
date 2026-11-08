@@ -91,6 +91,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _truthy(raw: "str | None") -> bool:
+    """A conservative truthiness for an enable flag: only an explicit affirmative turns a unit ON. Anything
+    else (unset, empty, '0', 'false', garbage) leaves an OPTIONAL unit OFF — so an optional unit is watched
+    fail-closed ONLY on a deliberate opt-in, never by accident."""
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ── the unit registry ───────────────────────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class UnitSpec:
@@ -102,6 +109,15 @@ class UnitSpec:
     cadence_s: int            # nominal seconds between fires (from the timer's OnCalendar/OnUnitActiveSec)
     randomized_delay_s: int   # the timer's RandomizedDelaySec smear
     description: str
+    # ── conditionally-enabled units (SaaS drains) ──────────────────────────────────────────────────────
+    # An ALWAYS-ON unit (backup/integrity/posture/…) leaves ``optional=False`` and is watched fail-closed
+    # unconditionally. An OPTIONAL unit (a SaaS drain that needs per-deployment owner-signed delegations and
+    # is only run when that pipeline is turned on) is watched fail-closed ONLY when its ``enable_env`` flag is
+    # truthy in the monitor's environment — so it never false-ABSENT-alarms on a host that does not run it,
+    # yet is alarmed the moment it is enabled and then stops firing. This is strictly ADDITIVE: it can only
+    # REMOVE an opted-out optional unit from the watched set; it never un-watches an always-on unit.
+    optional: bool = False
+    enable_env: str = ""      # the env var whose truthiness enables an optional unit; "" ⇒ never (if optional)
 
     @property
     def _env_key(self) -> str:
@@ -111,6 +127,14 @@ class UnitSpec:
     def staleness_bound_s(self) -> int:
         derived = int(self.cadence_s * _STALENESS_CADENCE_FACTOR) + self.randomized_delay_s
         return _env_int(self._env_key, derived)
+
+    def watched_by_default(self, env: "Optional[dict[str, str]]" = None) -> bool:
+        """Whether a default monitor cycle (``watched=None``) includes this unit. Always-on units always; an
+        optional unit only when its enable flag is set. An explicit ``watched=[…]`` list bypasses this."""
+        if not self.optional:
+            return True
+        src = os.environ if env is None else env
+        return bool(self.enable_env) and _truthy(src.get(self.enable_env))
 
 
 # Curated to match the committed timer files under infra/systemd/. The cadence values are the OnCalendar /
@@ -135,6 +159,14 @@ HA_UNITS: tuple[UnitSpec, ...] = (
              "standing twin — re-project the signed spine into a stored advisory worldmodel snapshot (every 6h)"),
     UnitSpec("vigil-checkpoint.service", "vigil-checkpoint.timer", 15 * 60, 60,
              "scheduled off-box witnessed-checkpoint emitter — anti-rollback anchor (every 15m)"),
+    # ── SaaS pipeline drains (OPTIONAL: watched fail-closed only when their enable flag is set, so a host
+    # that does not run the customer-SaaS pipeline gets no false ABSENT alarm; see UnitSpec.optional) ──
+    UnitSpec("vigil-finding-drain.service", "vigil-finding-drain.timer", 60, 15,
+             "SaaS: drain the offense→sovereign finding/detection spool onto the owner-signed spine (60s; opt-in)",
+             optional=True, enable_env="VIGIL_FINDING_DRAIN_ENABLED"),
+    UnitSpec("vigil-settle-drain.service", "vigil-settle-drain.timer", 60, 15,
+             "SaaS: drain the engagement-completion settle spool → settle_launch (charge/refund) (60s; opt-in)",
+             optional=True, enable_env="VIGIL_SETTLE_DRAIN_ENABLED"),
 )
 
 _BY_NAME = {u.unit: u for u in HA_UNITS}
@@ -268,7 +300,10 @@ def collect_statuses(state_dir: str | os.PathLike, *, watched: Optional[list[str
 
 def _watched_specs(watched: Optional[list[str]]) -> list[UnitSpec]:
     if watched is None:
-        return list(HA_UNITS)
+        # Default cycle: every ALWAYS-ON unit, plus each OPTIONAL unit whose enable flag is set. An opted-out
+        # optional drain is omitted (so a host that does not run the SaaS pipeline gets no false ABSENT alarm);
+        # every always-on unit stays watched fail-closed. An explicit watched=[…] list overrides this gating.
+        return [s for s in HA_UNITS if s.watched_by_default()]
     out: list[UnitSpec] = []
     for name in watched:
         spec = _spec_for(name)

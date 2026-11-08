@@ -1,0 +1,31 @@
+# VIGIL SaaS findings-crossing drain timer — fires the oneshot on a tight cadence.
+# =====================================================================
+# THIS is what makes the findings pipeline RUN unattended: it fires vigil-finding-drain.service every ~60s,
+# so a confirmed FACT the offense side spooled crosses to the owner-signed spine (and the tenant's assessment
+# surface) within a cadence, and a fresh heartbeat is written each run.
+#
+# DEAD-MAN: `vigil alerts` alarms if this timer stops firing (the heartbeat goes stale) — but ONLY when
+# VIGIL_FINDING_DRAIN_ENABLED is set in the monitor's env, so a host that does not run the SaaS pipeline is
+# not falsely alarmed for a drain it never enabled. Keep the cadence well under the staleness bound.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-finding-drain.timer
+#   systemctl --user list-timers 'vigil-*'
+
+[Unit]
+Description=Cadence trigger for the VIGIL SaaS findings-crossing drain
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Timer]
+# First fire 60s after boot, then every 60s while active. A oneshot drain that finds an empty spool exits
+# immediately, so a tight cadence is cheap; tighten/loosen to your latency need (keep under the dead-man bound).
+OnBootSec=60
+OnUnitActiveSec=60
+# Run once on the next wake if the machine was asleep at the scheduled time.
+Persistent=true
+# Smear the start so many hosts do not fire simultaneously.
+RandomizedDelaySec=15
+Unit=vigil-finding-drain.service
+
+[Install]
+WantedBy=timers.target
