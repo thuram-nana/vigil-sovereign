@@ -306,6 +306,11 @@
     return h("div", {}, [
       h("hr"),
       h("p", { text: "Publish ONE of these for " + (r.host || "") + ", then verify:" }),
+      h("label.cust-authz", { style: "display:flex;gap:.5rem;align-items:flex-start;margin:.5rem 0" }, [
+        h("input", { type: "checkbox", id: "cust-authz-confirm" }),
+        h("span.cust-muted", { text: "I confirm I am authorized to test this asset. Controlling a domain is not "
+          + "the same as being allowed to test it — only check this if you have authorization." }),
+      ]),
       VUI.card("DNS TXT record", "dns-txt", [kv("Name", r.dns_name), kv("Value", r.dns_value),
         h("div.row", {}, [h("button.btn", { type: "button", text: "Verify via DNS",
           onClick: function () { doVerify(r.host, "dns-txt"); } })])]),
@@ -319,8 +324,14 @@
     ]);
   }
   async function doVerify(host, method) {
+    var box = document.getElementById("cust-authz-confirm");
+    if (!box || !box.checked) {                        // one inline step: confirm authorization, then verify
+      flowCard("#asset-verify", h("p.cust-muted", { text: "Please confirm you are authorized to test this "
+        + "asset (the checkbox above) before verifying." }));
+      return;
+    }
     try {
-      var r = await VUI.postJSON(API + "/target/verify", { host: host, method: method });
+      var r = await VUI.postJSON(API + "/target/verify", { host: host, method: method, authorized: true });
       VUI.toast("Ownership verified for " + (r.host || host));
       if (here() === "#/assets") render();           // refresh the status list -> the host now shows "Verified"
     } catch (e) { flowCard("#asset-verify", flowMsg(e, "Verification did not pass — publish the token and retry.")); }

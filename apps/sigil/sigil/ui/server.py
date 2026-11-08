@@ -1485,7 +1485,8 @@ class Handler(BaseHTTPRequestHandler):
             return p.target_challenge(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
         if action == "target_verify":
             return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
-                                   str(body.get("method", "")), ip=ip, mfa_at=body.get("mfa_at"))
+                                   str(body.get("method", "")), authorized=bool(body.get("authorized")),
+                                   ip=ip, mfa_at=body.get("mfa_at"))
         # Slice G — offense-launch credit reservation. requester is the hop principal; org from the edge
         # session; host (reserve) / lease (cancel) from the body. units are server-decided: EC-7b maps the
         # optional product_id (a catalog identifier, NOT an amount) to the owner catalog's units, else default.

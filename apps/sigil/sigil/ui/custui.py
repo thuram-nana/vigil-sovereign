@@ -553,6 +553,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("target_challenge", requester, payload)
         else:
             payload["method"] = body.get("method", "")
+            # The customer's inline "I am authorized to test this asset" affirmation. Unlike requester/org (which
+            # are session-bound, never body), this is the customer's OWN statement, so it legitimately rides the
+            # body; the provisioner requires it fail-closed before it will mint the target authority.
+            payload["authorized"] = bool(body.get("authorized"))
             c, r = self._provision("target_verify", requester, payload)
         return self._json(r, c)
 
