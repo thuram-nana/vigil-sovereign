@@ -84,6 +84,17 @@ class EngagementRefused(RuntimeError):
     a relay host not on the charter allowlist."""
 
 
+class EngagementPaused(RuntimeError):
+    """pause/resume PR-3 — a RUNNING customer engagement was cooperatively halted because its owner-signed
+    credit-launch lease is PAUSED (a REVERSIBLE operator halt), raised at a clean point after the traffic phase.
+
+    DELIBERATELY NOT a subclass of :class:`EngagementRefused`: a refusal is a TERMINAL 'could not start', whereas
+    a pause is a transient, RE-DRIVEABLE halt. The customer-launch worker catches THIS type specifically to
+    re-drive (resume) the launch WITHOUT emitting the refunding/terminal FAILED settle and WITHOUT consuming a
+    crash-attempt — see ``vigil_integration.jobs.engage_worker``. Default-OFF: never raised until pause/resume
+    is enabled (nothing records a pause), so the engine is byte-identical."""
+
+
 @dataclass
 class EngagementResult:
     """The full outcome of an engagement: the oracle-confirmed scan report AND the
@@ -485,6 +496,47 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool 
         raise EngagementRefused(
             f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
             f"The lease is reserved + started on the sovereign plane and re-verified here keyless before traffic.")
+
+
+def _engage_pause_base() -> str:
+    """pause/resume PR-3 — the cross-plane seam base the pause substrate + the lease verify SHARE (matches
+    ``launch_lease._base_dir()``), so the in-flight halt looks a pause up under the SAME base the lease was
+    published to."""
+    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+
+
+def _engage_lease_nonce(slug: str, seed_url: str) -> "str | None":
+    """pause/resume PR-3 — THIS customer launch's OWNER-SIGNED lease nonce (verify-only, NON-consuming, and
+    readable even while paused), used to BIND the in-flight cooperative-halt check to this exact lease. Returns
+    None for a greenfield / operator run (no lease required) or when no lease verifies. Fail-closed + quiet: any
+    error ⇒ None ⇒ the run carries NO halt binding and is byte-identical to pre-pause/resume behaviour."""
+    try:
+        from .launch_lease import customer_engagement_requires_lease, read_verified_launch_nonce
+        if not customer_engagement_requires_lease(slug):
+            return None
+        from urllib.parse import urlsplit
+
+        from .common.tenant import tenant_id
+        host = urlsplit(seed_url).hostname or ""
+        return read_verified_launch_nonce(slug, host, tenant_id(), base_dir=_engage_pause_base())
+    except Exception:  # noqa: BLE001 — a nonce-read failure leaves the run UNHALTED (byte-identical), never sinks it
+        return None
+
+
+def _lease_is_paused(base: str, slug: str, nonce: "str | None") -> bool:
+    """pause/resume PR-3 — TOTAL, FAIL-CLOSED-toward-HALT pause predicate for a customer launch. No nonce ⇒
+    False (greenfield / operator runs are never pause-gated). ``is_lease_paused`` is itself total + fail-closed
+    (an unsafe slug or an existing-but-unreadable/corrupt marker already returns True/halt and NEVER raises), so
+    the only thing this backstops is an import failure of the seam module — which it treats as HALT (the run
+    re-drives, money-safe) rather than silently continuing to send traffic on an unknown pause state. FATAL-2:
+    the ``vigil_integration.live`` import stays LAZY inside the function, exactly as the lease verify does."""
+    if not nonce:
+        return False
+    try:
+        from vigil_integration.live.credit_lease_pause import is_lease_paused
+        return bool(is_lease_paused(base, slug, nonce))
+    except Exception:  # noqa: BLE001 — FAIL-CLOSED toward HALT (re-drive), never continue on an unknown pause state
+        return True
 
 
 def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int | None":
@@ -1325,6 +1377,16 @@ def run_engagement(
     _arm_run_budget(slug, seed_url, resume=resume)
     _rb_stopped: "Exception | None" = None
 
+    # pause/resume PR-3 — bind THIS run's cooperative in-flight halt to its OWNER-SIGNED lease nonce. Read ONCE
+    # here (verify-only, non-consuming, readable even while paused); for a greenfield / operator run (no lease)
+    # the nonce is None ⇒ no halt_check wired, no post-scan pause raise ⇒ the engine (and ``make gate``) is
+    # BYTE-IDENTICAL. For a customer run, the lease was NOT paused at the enqueue gate (PR-2 refuses a paused
+    # lease there) so the nonce reads cleanly; a pause arriving LATER (mid-run) is what the halt_check + the
+    # post-scan raise below catch.
+    _pause_base = _engage_pause_base()
+    _pause_nonce = _engage_lease_nonce(slug, seed_url)
+    _pause_halt_check = (lambda: _lease_is_paused(_pause_base, slug, _pause_nonce)) if _pause_nonce else None
+
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
     for label, relay in (("advertise", oob_advertise_base_url), ("relay", oob_relay_url)):
@@ -1463,6 +1525,10 @@ def run_engagement(
             # (byte-identical). Without this the "6th gate" was never installed on any real
             # caller and the README's egress claim was false for target traffic.
             egress_allowlist=build_engagement_allowlist(slug=slug),
+            # pause/resume PR-3 — the cooperative in-flight halt: stop sending target traffic at the next gated
+            # action if THIS customer launch's lease is paused mid-run. None for greenfield/operator runs and
+            # for customer runs until pause/resume is enabled ⇒ byte-identical.
+            halt_check=_pause_halt_check,
         )
         # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
         # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
@@ -1602,6 +1668,18 @@ def run_engagement(
             else:
                 ledger.complete(P_SCAN)
                 ledger.persist_report(report)
+
+    # pause/resume PR-3 — the AUTHORITATIVE in-flight halt. The traffic phase is done; if THIS customer launch's
+    # lease is now paused, RAISE here (a clean body point, OUTSIDE the PhaseLedger swallow-wrappers) so the
+    # customer-launch worker RE-DRIVES the launch rather than settling a half-done run. The executor's halt_check
+    # already stopped further traffic at the next action; this is what turns that cooperative stop into a
+    # re-driveable outcome. Raised BEFORE the best-effort reasoning phases so a paused run wastes no further work.
+    # DEFAULT-OFF: no nonce / no pause marker ⇒ _lease_is_paused is False ⇒ never raised ⇒ byte-identical.
+    if _lease_is_paused(_pause_base, slug, _pause_nonce):
+        raise EngagementPaused(
+            f"customer launch {slug!r} cooperatively halted — its credit-launch lease is paused (a reversible "
+            f"operator halt). Re-driveable: resume (clear the pause) re-arms the SAME lease without re-burning "
+            f"its single-use floor.")
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.

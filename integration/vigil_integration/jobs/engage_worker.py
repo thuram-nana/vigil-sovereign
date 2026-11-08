@@ -70,6 +70,78 @@ def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> int:
     except OSError:
         return 1                                       # fail-safe: fresh, NON-terminal arm (never auto-resume)
 
+
+#: pause/resume PR-3 — the suffix of the durable per-(slug,nonce) "the floor was burned; the next arm must
+#: RESUME" marker, written when an in-flight PAUSE rolls back its attempt slot (so the rollback does not reset
+#: the resume decision to a floor-RE-burning fresh arm). Lives beside the numbered attempt markers.
+_RESUME_MARK_SUFFIX = "resume"
+
+
+def _attempt_key(slug: str, nonce: str) -> str:
+    """The shared ``.engage-attempts`` key for ``(slug, nonce)`` — the SAME hash :func:`_mark_attempt` uses, so
+    the rollback and resume-required markers address the same slot family."""
+    return hashlib.sha256((str(slug) + "\x00" + str(nonce)).encode("utf-8")).hexdigest()
+
+
+def _release_attempt(base_dir: Any, slug: str, nonce: str, attempt: int) -> None:
+    """pause/resume PR-3 — roll back THIS attempt's numbered marker so an in-flight PAUSE never consumes
+    crash-attempt budget (``_MAX_ARM_ATTEMPTS``). ``_mark_attempt`` always hands out the LOWEST free slot, so the
+    slot just taken is the current maximum; deleting exactly it keeps the slots contiguous and a genuine CRASH
+    still advances toward the terminal attempt. Best-effort: a failed unlink leaves the slot (the pause then
+    counts as one crash attempt — fail-SAFE toward eventual termination, NEVER toward a never-terminating launch
+    or a lost refund). No nonce / bad attempt ⇒ no-op."""
+    if not nonce or attempt < 1:
+        return
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    with contextlib.suppress(OSError):
+        (Path(base) / _ATTEMPTS_DIRNAME / f"{_attempt_key(slug, nonce)}.{attempt}.json").unlink()
+
+
+def _record_resume_required(base_dir: Any, slug: str, nonce: str) -> None:
+    """pause/resume PR-3 — durably record that THIS (slug,nonce)'s single-use floor WAS burned and the next arm
+    MUST resume (verify + re-bind, NOT re-consume), so an in-flight pause whose attempt slot was rolled back
+    re-drives WITHOUT a replay refusal. Idempotent ``O_CREAT``; keyed per (slug,nonce) so a genuine re-lease
+    (new nonce) is unaffected. Best-effort: a failed write degrades to a one-cycle replay refusal that self-heals
+    on the next re-drive (``attempt > 1`` then holds) — money-safe (never a double-charge)."""
+    if not nonce:
+        return
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    with contextlib.suppress(OSError):
+        d = Path(base) / _ATTEMPTS_DIRNAME
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(d / f"{_attempt_key(slug, nonce)}.{_RESUME_MARK_SUFFIX}.json", os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+
+
+def _resume_required(base_dir: Any, slug: str, nonce: str) -> bool:
+    """pause/resume PR-3 — True iff a prior in-flight pause POSITIVELY recorded that THIS (slug,nonce)'s floor
+    was burned (so the arm must RESUME, not re-consume). FAIL-CLOSED toward FRESH: any read error ⇒ False. This
+    direction is the money-safe one — a false False causes at worst a one-cycle replay refusal that self-heals
+    (``attempt > 1`` on the next re-drive), whereas a false True would make a FRESH arm SKIP the single-use
+    consume and leave the floor un-burned (a replayable lease). No nonce ⇒ False."""
+    if not nonce:
+        return False
+    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    try:
+        return (Path(base) / _ATTEMPTS_DIRNAME / f"{_attempt_key(slug, nonce)}.{_RESUME_MARK_SUFFIX}.json").is_file()
+    except OSError:
+        return False
+
+
+def _is_engagement_paused(exc: BaseException) -> bool:
+    """pause/resume PR-3 — True iff ``exc`` is the engine's re-driveable in-flight pause halt
+    (``framework.v2.engage.EngagementPaused``). Lazy + guarded (FATAL-2: no ``framework`` at module scope). By
+    the time a run has raised, the runner has already imported ``framework.v2.engage``, so this is a cheap
+    ``sys.modules`` lookup. SAFE DEFAULT = False: if the type cannot be resolved the exception is treated as a
+    NORMAL failure (the transient/terminal FAILED path), never silently converted into a held, infinitely
+    re-driven launch — the money-dangerous direction is a false POSITIVE, which ``isinstance`` cannot produce."""
+    try:
+        from framework.v2.engage import EngagementPaused
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ treat as a normal failure (safe default)
+        return False
+    return isinstance(exc, EngagementPaused)
+
+
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
 #: (``add_customer_target``), so the engine's destructive-confirm gate already refuses destructive tools; the
 #: run therefore stays read-only/non-destructive without a special flag. Left empty = run_engagement's
@@ -228,7 +300,12 @@ def make_engage_worker(
         # marker only governs whether THIS (slug,nonce) re-burns its own floor. No nonce ⇒ fresh arm (safe).
         nonce = str((job.extra or {}).get("nonce") or "")
         attempt = _mark_attempt(base_dir, job.slug, nonce) if nonce else 1
-        resume = attempt > 1                                       # a re-drive resumes (K4-5a), never re-burns the floor
+        # a re-drive resumes (K4-5a), never re-burns the floor. pause/resume PR-3: an in-flight PAUSE rolls its
+        # attempt slot back (so pauses never consume crash-attempt budget), so ``attempt`` alone can read 1 on a
+        # post-pause re-drive even though the floor WAS burned on the original arm — the resume-required marker
+        # makes RESUME hold regardless, so the re-drive re-validates/re-binds WITHOUT re-burning the floor into a
+        # replay refusal.
+        resume = (attempt > 1) or _resume_required(base_dir, job.slug, nonce)
         terminal = attempt >= _MAX_ARM_ATTEMPTS                    # the LAST attempt: its failure is a real abandonment
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
@@ -265,7 +342,20 @@ def make_engage_worker(
         try:
             with _model_routing_scope(routing_override):          # EC-7: scope CRUCIBLE_MODEL_ROUTING to the tier (no-op when off)
                 result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
-        except Exception:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
+        except Exception as _run_exc:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
+            # pause/resume PR-3 — a COOPERATIVE in-flight PAUSE halt is NOT a failure; it is a re-driveable
+            # transient. Classify it by TYPE (not by message) BEFORE the FAILED-settle path so a paused launch:
+            #   * NEVER emits the terminal refunding FAILED settle (the lease is HELD for resume, not refunded or
+            #     tombstoned — no premature refund, and the launch poller keeps re-driving), and
+            #   * rolls its attempt slot back + records resume-required, so repeat pause/resume can NEVER exhaust
+            #     ``_MAX_ARM_ATTEMPTS`` into a spurious terminal abandonment, and the eventual resume re-drive
+            #     re-validates/re-binds WITHOUT re-burning the single-use floor into a replay refusal.
+            # Then re-raise unchanged, so JobRunner still marks the job failed + release_delivery → re-enqueue.
+            if _is_engagement_paused(_run_exc):
+                if nonce:
+                    _release_attempt(base_dir, job.slug, nonce, attempt)
+                    _record_resume_required(base_dir, job.slug, nonce)
+                raise
             # Emit a refunding FAILED completion ONLY on the TERMINAL attempt. A transient failure (attempt <
             # _MAX_ARM_ATTEMPTS) re-drives WITHOUT a premature refund, so it can never spool a FAILED that RACES
             # the eventual COMPLETED into a free run (the K4-5 red-pen HIGH). The terminal FAILED settles +
