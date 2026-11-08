@@ -1,110 +1,122 @@
-# VIGIL — End-to-End Handover (read this first)
+# VIGIL — HANDOFF (concrete, end-to-end) — 2026-11-08
 
-Repo: thuram-nana/vigil-sovereign. Default branch: main. No credentials in this file.
-Rule: verify live repo state with GitHub tools before trusting anything here.
+> Supersedes the prior HANDOFF-SESSION.md. Written for a **fresh agent (or human) to take over cleanly**.
+> Session of record: `session_01KWuLkRRktuxFkoybzaDd9s`. `main` is at **`f882dfdb`** (all green).
+> **BLOCKER right now:** the account hit its **weekly usage limit (resets 2026-11-13 05:00 UTC)** — spawning sub-agents / Workflows FAILS until then. **Direct tools (Bash, Read/Write, git, GitHub PR tools) still work.** So a human, or an agent after the reset, picks this up.
 
-## 0. Owner rules (non-negotiable)
-- Merge, approve, dismiss alerts, or run against production ONLY with explicit owner approval.
-- Standing approvals: merge PR #996 when ALL checks green; merge #993/#994/#995 only if ALL checks green.
-- Never weaken a guard or disable a test to get green. Never force-push. No model names in commits/PRs/code.
-- Every change: build -> tests -> mutation-verify (break guard, test fails, restore) -> review -> fold -> PR.
-- Invariants: two-plane boundary (sovereign imports no framework), owner key only in sovereign provisioner,
-  owner catalog decides money, billing != testing, tenant isolation, default-OFF and fail-closed.
+---
 
-## 1. Open pull requests
+## 0. OPERATING DISCIPLINE (read first — this is "how")
 
-### PR #996 — AEGIS-SaaS AE-0..AE-7 (branch claude/aegis-saas-ph9x2k)
-- State: OPEN. Approved to merge once every check is green.
-- Last known: all blocking checks green except P5, which was re-running.
-- P5 fix pushed (c9b2138): acceptance test child process now has integration/ on PYTHONPATH.
-- Later commit d313c4a (handoff note) restarted CI.
-- CodeQL (advisory default setup) still red. Local CodeQL 2.27.4 and 2.26.3 (default + security-extended,
-  tests in/out, threat model local, actions): 0 new alerts, 0 on changed lines. 11 real alerts already fixed.
-  To finish: get the text of the CodeQL check details (or code-scanning read access) and fix what it lists.
-- Note: one commit in branch history contains merge conflict markers (fixed in the next commit). Prefer
-  squash merge so main history stays clean.
+**Repo / planes.** Two-plane monorepo at `/home/user/vigil-sovereign`:
+- **Sovereign plane** — `apps/sigil` + `packages/core/vigil_core`, framework-free, owner Ed25519 trust root; the **Provisioner** (`apps/sigil/sigil/ui/provision.py`, reached only over the loopback hop) is the ONLY owner-key holder.
+- **Offense plane** — `engine/crucible` (CRUCIBLE), keyless, only *verifies* owner signatures.
+- **FATAL-2 boundary:** `assert_no_offense()` at import; `uiproxy.py` stays stdlib-only; framework imports in sovereign code stay lazy. `integration/tests/test_two_env_boundary.py::_PROBE` enforces it — register every new `live`/edge module there.
 
-### PR #993 — billing-drain CLI (branch claude/billing-drain-ph9x2k)
-- State: OPEN, NOT merged. Its run failed "SIGIL governor gates (P7)" (run predates #992 merge).
-- To do: reproduce P7 locally (PYTHONPATH=apps/sigil:integration pytest apps/sigil/tests), fix at source,
-  update branch from main, re-run, merge only if all green.
+**Per-slice discipline (NON-NEGOTIABLE, applied to every PR this session):**
+`build → mutation-verify (break each guard → its named test REDS → restore → green) → heaviest adversarial red-pen (Workflow: disjoint lenses → perspective-diverse 3-skeptic verify, survives iff ≥2 confirm) → fold CONFIRMED findings (each fix mutation-verified) → PR → merge only on CI green + mergeable clean`. One slice per PR, each **default-OFF + fail-closed**, off fresh `origin/main`.
+**A red-pen "confirmed" is a CLAIM to verify against ground truth yourself, not an order** — this session caught a real HIGH in C1b *and* refuted its over-claims; it folded a real fail-closed hole in pause PR-1 and *documented* (not folded) a non-reachable RMW race.
 
-### PR #994 — ops sweeps (branch claude/ops-sweeps-ph9x2k)
-- State: OPEN. Review found + fixed: --apply could refund a lease whose completion was still pending.
-- To do: confirm all checks green after main moved; merge only if green. May conflict with #993 in cli.py.
+**Test legs** (always `SIGIL_HOME=$(mktemp -d)`, venv `/home/user/vigil-sovereign/.venv-sovereign/bin/python`):
+- Sovereign: `PYTHONPATH="apps/sigil:packages/core/vigil_core"`
+- Integration superset: `PYTHONPATH="apps/sigil:integration:engine/crucible:gateway:packages/core/vigil_core:."`
+- Gates: `ruff check <files>`; `bash tools/governance/mypy_ratchet.sh` (ceiling 15 — new modules must be type-clean and NOT appear in the error list).
 
-### PR #995 — ops runbooks (branch claude/ops-docs-ph9x2k)
-- State: OPEN. Was all green. To do: update from main, confirm green, merge.
+**Worktree pattern** (branches are often held by agent worktrees; use detached worktrees):
+```
+WT=/tmp/claude-0/.../scratchpad/wt-<slice>; git -C /home/user/vigil-sovereign fetch origin main
+git -C /home/user/vigil-sovereign worktree add --detach "$WT" origin/main
+# edit/commit on detached HEAD, then:
+git push origin HEAD:refs/heads/claude/<branch>     # fully-qualified refname is required from a detached HEAD
+git worktree remove --force "$WT"                    # after merge
+```
+Open PRs with `mcp__github__create_pull_request` (base `main`). **Do NOT `git push origin main`** (PR-only).
 
-### PR #991 — offboarding cascade (branch claude/offboarding-cascade-ph9x2k)
-- State: OPEN, CI was green. NOT pre-approved; ask owner before merging.
+**NEVER-CROSS (owner's standing constraints):**
+1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION` (customer prod execution stays flag-held).
+2. Do **not** inject/commit any real Flutterwave secret (`VIGIL_FLW_SECRET_KEY` is read from env at call time; tests use dummies).
+3. Do **not** ratify money-doctrine numbers (margins, $/token, catalog prices) — owner-set.
+4. Do **not** dismiss security alerts (an A14/supply-chain red is handled, not ignored; the CDN-504 transient is confirmed-transient by a clean re-run, never waved through).
+Everything new ships **default-OFF + fail-closed**, byte-identical when off.
 
-### Merged this session
-- PR #992 livefire nikto hardening -> main (squash 74d5c86).
+**Attribution (binding) — every commit & PR:**
+- Commit message ends with:
+  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+  `Claude-Session: https://claude.ai/code/session_01KWuLkRRktuxFkoybzaDd9s`
+- PR body ends with: `🤖 Generated with [Claude Code](https://claude.com/claude-code)` + blank line + `https://claude.ai/code/session_01KWuLkRRktuxFkoybzaDd9s`
+- **No model identifier anywhere else** in a pushed artifact (code/comments/PR title).
 
-### Dependabot PRs
-- 8 open (#959,#960,#962,#963,#964,#988,#989 and others). Not triaged. Some are security bumps
-  (pydantic 2.14.2). Lock regeneration rules in section 5.
+**Merge authorization (owner, standing):** "on every PR once all checks are fully green and tested you can merge." GitHub ops via `mcp__github__*`. Squash-merge (repo convention).
 
-## 2. What AEGIS-SaaS contains (on PR #996, not yet on main)
-- AE-0 governor/monitoring_authority.py: owner-signed per-(org,host) grants; snapshot schema bump; prune tripwire.
-- AE-1 ui/provision.py monitor_authorize/revoke/list; rbac perm manage_monitoring; custui routes.
-  Flag VIGIL_CUSTOMER_MONITORING_ENABLED (default OFF).
-- AE-2 aegis/monitoring_authority_check.py: keyless verify against pinned owner root.
-- AE-3 aegis/gateway.py: tenant gateway needs saas_host; flag VIGIL_AEGIS_SAAS_ENFORCE (default OFF).
-- AE-4 aegis/monitoring_report.py + inbound/monitoring_spool.py: sealed metadata-only reports, drainer,
-  tenant events route.
-- AE-5 governor/monitoring_subscription.py + catalog/billing changes: separate subscription line, period clamp,
-  cancel/past-due cascade, plan enforcement, 72h renewal grace, reconcile sweep.
-- AE-6 gateway CLI flags, docker-compose profile aegis-saas, infra/systemd unit, governor/monitoring_secrets.py,
-  CLI verbs monitoring-secret (--export-to), monitoring-drain, monitoring-reconcile.
-- AE-7 integration/tests/test_aegis_saas_acceptance.py (8 tests) + docs/runbooks/aegis-saas-flag-hold.md.
-- Runbooks: docs/runbooks/aegis-saas-onboarding.md, aegis-saas-flag-hold.md.
+---
 
-## 3. Work left to complete (in order)
-1. PR #996 to all-green, then squash-merge.
-2. PR #993 P7 failure -> fix -> merge if green. Then #994, #995 if green.
-3. Real prices, no placeholders (owner request). File: apps/sigil/sigil/governor/catalog.py is marked
-   PLACEHOLDER (AEGIS per-host 49/99 USD and whole list). Do: set final prices in code, remove placeholder
-   wording; move provider plan ids into owner config mapping catalog price_id -> Flutterwave plan id; refuse
-   to start in production if an offered subscription is unmapped. Owner must create real Flutterwave plans.
-   Then grep the repo for other placeholder markers (PLACEHOLDER, TODO, FIXME, XXX) in shipped code and resolve.
-4. After #996 and #991 are both on main: add a test that decommission_org also revokes and unpublishes
-   that org's monitoring grants (hook exists via orgs.revoke_org).
-5. #14 Enterprise postpaid invoicing on the existing billing spine:
-   PP-1 owner-signed postpaid account mode (credit limit, net terms; usage accrues a balance).
-   PP-2 periodic owner-signed arrears invoices (extend governor/invoices.py; org-scoped reads).
-   PP-3 overdue/over-limit -> reduce access via the credit gate; reversible; replay cannot advance a period.
-   PP-4 reconciliation, acceptance test, review. Build on top of AEGIS billing code.
-6. #7 polish: customer Monitoring UI screens in custui SPA (APIs exist); marketing-domain reverse-proxy vhost
-   (follow apps/sigil/deploy/reverse-proxy/vigil.nginx.conf); NVD/EPSS enrichment for CVE catalog.
-7. #4 leftover: kill-switch default decision (owner decides).
-8. #3 livefire cron: fix merged in #992; confirm the next nightly run is green.
-9. Dependabot triage.
+## 1. CURRENT STATE — merged to `main` (`f882dfdb`)
 
-## 4. Owner decisions pending
-- Real AEGIS prices and the full price list; create Flutterwave plans and supply their ids.
-- Flag flips per docs/runbooks/aegis-saas-flag-hold.md (all default OFF).
-- Merge PR #991. Kill-switch default.
+Recent merges (newest first): `f882dfdb` pause/resume **PR-2 #1034** · `6567fff2` pause/resume **PR-1 #1033** · `93ee42cc` **C1b #1032** (group-commit coalescing) · `2be9bbd5` **JOBQ-75 #1031** (durable job queue in backup) · `a3cb1b03` NTF-3 #1030 · … (#1024–#1029 production-readiness).
 
-## 5. Environment and how to resume
-- Python 3.13 (python3.13); venvs .venv-sovereign and .venv-offense (bootstrap.sh --yes builds them).
-- Sovereign tests: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:integration .venv-sovereign/bin/python -m pytest apps/sigil/tests -q
-- Engine tests: PYTHONPATH=engine/crucible:packages/core/vigil_core .venv-offense/bin/python -m pytest <path> -q
-- CI-faithful lint: venv from engine/crucible/framework/v2/requirements.lock.txt + vigil_core + infra/supply-chain/ci-tooling.lock.txt;
-  then (cd apps/sigil && ruff check sigil) and bash tools/governance/mypy_ratchet.sh. Do not run the ratchet
-  in the full sovereign venv (false STALE).
-- Known env-only failures: test_golden_vectors_match, test_live_server_registers_eight_tools,
-  test_gitleaks_negative_control_real_catch.
-- Any change under vendor/strix/ needs uv==0.11.29 lock regen in a temp copy and
-  python3 tools/vendoring/regen_strix_series.py.
-- Trivy DB: use --db-repository public.ecr.aws/aquasecurity/trivy-db:2.
-- CodeQL can be run locally (bundle from github/codeql-action releases) to find PR alerts.
-- Tool limits seen: no Actions-log or code-scanning API tools; long chat messages about security specifics get
-  truncated, so keep chat short and put detail in files.
+**This session shipped 5 PRs, each red-penned + mutation-verified:**
+- **#1031 JOBQ-75** — the paid SecurityJob queue now defaults under `base_dir` so backup captures it (host loss no longer strands in-flight paid jobs); 41-agent red-pen 0 survivors; folded 2 LOWs (restore owner-only perms + fingerprint-survival test).
+- **#1032 C1b** — 1M-scale concurrent-append coalescing on the signed spine (default-OFF). Red-pen caught a **real HIGH** (locked-vault seal share-fate → content appends routed DIRECT) + a serialization-mismatch poison-isolation bug (pre-flight now `canonical_json`) + an attribution false-green test; all folded + mutation-verified.
+- **#1033 pause/resume PR-1** — `integration/vigil_integration/live/credit_lease_pause.py`: a reversible, nonce-scoped, **fail-CLOSED** pause marker (sibling of the settlement marker). Red-pen caught a real fail-closed hole (`is_file()` outside the try raises on EACCES on the keyless plane) → folded; RMW-race documented as the caller-serialization contract.
+- **#1034 pause/resume PR-2** — adds `is_lease_paused` to the ONE shared verify chokepoint `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease`, refusing a paused lease on both consume paths **without burning the single-use floor** (resume re-arms the same lease). **INERT/default-OFF** (nothing calls `record_lease_pause` yet). ⚠️ Its red-pen **verify phase did not run** (weekly limit) — I verified the 2 surfaced HIGHs myself: **not reachable** at PR-2 (no pause-marker writer), but they are **HARD PR-4 constraints** (see §2).
 
-## 6. Verified results this session
-- Full SIGIL suite green except the 3 known env-only tests.
-- AEGIS engine suite 0 failures; AEGIS acceptance 8/8; ruff + mypy ratchet green.
-- Loopback engagement harness: positive, offline re-verify, tamper rejected, sound negative.
-- make gate PASS (precision/recall/f1 1.000).
+---
+
+## 2. IMMEDIATE NEXT — finish pause/resume (PR-3 → PR-4 → PR-5)
+
+Lifecycle chokepoints (grounded): reserve → `provision.launch_reserve` → `LaunchGate.reserve_launch` (mints owner-signed `CreditLaunchLease`); start → `provision.launch_start` → `LaunchGate.publish_lease` → seam `credit_lease_broker.write_credit_lease`; drain → `launch_drain.LaunchSeamDrain` → `jobs/launch_trigger.LaunchTrigger` (`verify_customer_launch_lease(consume=False)`) enqueues a `SecurityJob` keyed on `launch_delivery_id(slug,nonce)`; run → `jobs/runner.JobRunner.run_one` → `jobs/authorize.build_customer_launch_gate` (consume=False) → `jobs/engage_worker` → `engage.run_engagement` → `engage._engage_launch_lease_precondition` (`verify_customer_launch_lease(consume = not resume)` — the ONE authoritative floor-burn); settle → `inbound/completion_spool.CompletionSpoolWatcher.drain` → `LaunchGate.settle_launch` (refund `reserved−consumed` + settlement marker + tombstone). Worker crash-resume already exists (`engage_worker._mark_attempt`, `resume=attempt>1`, `_MAX_ARM_ATTEMPTS=3`) and re-validates WITHOUT re-burning the floor — REUSE it.
+
+**PR-3 — in-flight cooperative halt** (branch `claude/pauseresume-pr3-inflight-halt`):
+- Add an `is_lease_paused(slug,nonce)` cooperative-halt check at `engage.py`'s existing `KillSwitch(slug).is_tripped()` scan-loop checkpoint (~`engage.py:1441`). On pause → raise a **re-driveable, NON-terminal** error (NOT a kill-switch trip, NOT a terminal FAILED settle).
+- In `engage_worker.py` (~265-280) classify the pause-halt like a transient failure → `failed` + `release_delivery` → re-enqueue. It must **NOT** emit the terminal FAILED settle (no premature refund) and **NOT** consume an arm-attempt toward `_MAX_ARM_ATTEMPTS` (so repeat pause/resume can't force a spurious terminal abandonment — likely needs the attempt marker to distinguish "paused" from "crashed").
+- Tests: `engine/crucible/framework/v2/tests/test_engage_pause_halt.py` + `integration/tests/test_engage_worker_pause_redrive.py`. Red-pen lenses: no-refund-on-pause, no-floor-reburn-on-resume, attempt-not-consumed, re-drive exactly-once.
+
+**PR-4 — customer pause/resume actions + UI + flag** (branch `claude/pauseresume-pr4-actions`):
+- `LaunchGate.pause_launch`/`resume_launch` (mirror `publish_lease`/`settle_launch`): verify the owner-signed lease, `expect_org_id` tenant-bind, then `record_lease_pause`/`clear_lease_pause` **under `spine_lock`** (this is the caller-serialization the PR-1 RMW note requires).
+- `provision.launch_pause`/`launch_resume` (mirror `launch_cancel`/`launch_start`: `admit_customer(run_engagement)` + `_require_stepup` + audit). `custui.py` routes `/api/customer/launch/pause|resume`. `config.customer_pause_resume_enabled()` default-OFF (copy `customer_monitoring_enabled()`).
+- **⚠️ HARD CONSTRAINT (the two unverified PR-2 red-pen HIGHs — DO NOT LOSE THIS):** pausing an **already-enqueued** launch must NOT strand the paid lease. Either (a) pause *before* enqueue, and/or (b) ensure the gate-refusal for an already-enqueued job **RELEASES the delivery for re-drive on resume** rather than terminally failing it and keeping the one-shot `delivery_id` marker (which would make the job un-re-admittable). Add an explicit test: enqueue → pause → (job refused) → resume → job RE-ADMITS and runs; the lease is never stranded, never double-charged. This is money-critical — red-pen it hard.
+- Decision to confirm with owner: pause/resume as a **customer** action (default; reuses `run_engagement` + step-up) vs **owner-only** (`manage_launch`). Default taken = customer.
+
+**PR-5 — doctor/observability reconciliation** (branch `claude/pauseresume-pr5-doctor`):
+- `integration/vigil_integration/doctor.py` money/drain posture (~`doctor.py:1133,1373`) must treat a paused `(slug,nonce)` as an expected held-reservation, NOT a stuck-lease/unsettled-drain alarm (a genuinely stuck lease must still alarm — pause is a *positively-recorded* state, not an alarm suppressor). Optional advisory paused projection via `completion_spool._record_outcome` (no amount). `integration/tests/test_doctor_paused_launch.py`.
+- `doctor.py` is the **highest-contention file** across Wave-3 — serialize edits (see §3).
+
+---
+
+## 3. REMAINING PROGRAM (full forward plan, de-conflicted)
+
+### Front A — production hardening (mostly done)
+- **Pause/resume** PR-3/4/5 (above).
+- **Network recovery + deploy maturity (#73, "Item B")** — scope reconstructed from real code (the label taxonomy is program-internal; files are real). There is NO central retry helper; the house pattern is *degrade/fail-safe, never fail-open* — add bounded reconnect ONLY where a transient drop should auto-recover.
+  - NET-2: `integration/vigil_integration/live/net_recovery.py` (bounded backoff, injectable clock) adopted by `otel_export.py` reachability + the drain `watch()` loops; default-OFF, never widens the egress floor.
+  - NET-4: degraded-mode surfacing + a `doctor.py` network-recovery posture line (advisory, never gates a launch).
+  - DEP-2: readiness-gated bring-up (`infra/systemd/vigil-bringup.service` gated on `vigil doctor`+readyz; `sovereign_deploy/acceptance.py`) — gating ≠ enabling prod execution.
+  - DEP-3: upgrade/rollback + down-migration **drill** automation (mirror `vigil-backup-drill.timer`; exercises `spine/upgrade.py`).
+- **#70 backups-everywhere tail** — the job queue is now covered (#1031); remaining is G2/G3/G4 coverage of the rest + the **evidence-DEK KMS escrow** whose *live* path is **owner-blocked** (needs a real AWS KMS key).
+- **#69 money production-gate / alerting** — tracker shows in-progress but MONEY-4 merged and NTF alerting shipped; **re-ground before counting it** — likely mostly done. Verify, then close or finish the tail.
+
+### Front C — 1,000,000 users (the long pole)
+- Group-commit (C1a + C1b) **DONE**.
+- **Tenant sharding — DESIGN NOT COMPLETE.** The design Workflow (`wf_395eee7a-e41`) ran 8 architecture-grounding agents + 2 of 3 candidate designs, then the **weekly limit** killed the 6 critics + the synthesis. **Resume it after the limit resets:**
+  `Workflow({scriptPath:'/root/.claude/.../workflows/scripts/design-tenant-sharding-wf_395eee7a-e41.js', resumeFromRunId:'wf_395eee7a-e41'})` (cached agents replay free; only the failed critics+synthesis re-run). Journal (10 results) at `…/subagents/workflows/wf_395eee7a-e41/journal.jsonl`.
+  The 3 candidate angles: (A) self-contained cells/shard-per-node; (B) global routing + an owner-signed shard-assignment record; (C) minimal-diff consistent-hash pre-sharding (reuse the per-org/per-slug dirs + the `CRUCIBLE_TENANT` worker hint, shard the worker fleet + job queue + tenant dirs first). The 6 invariants every design must preserve are in the script's `INVARIANTS` const (signed spine never forks, isolation only stronger, FATAL-2, money exactly-once + EC-5 pool, default-OFF/fail-closed, online reversible migration). **Report the synthesized design + slice plan to the owner before building** (core-touching).
+
+### Front B — fully hostable / pay round-trip + go-live (round-trip built, flag-held)
+- Customer-app **checkout UI** + `…/billing/return` page; **`sigil serve-customer` CLI** + marketing-domain reverse-proxy vhost (follow `apps/sigil/deploy/reverse-proxy/vigil.nginx.conf`); **NTF enablement tail** (enable `vigil-alerts.timer` + `--test-delivery`); optional **CVE catalog NVD/EPSS enrichment** (operator-run, rate-limited; KEV already gives a browsable catalog).
+
+### Owner-only (held — NOT the agent's to do)
+Provision the real **Flutterwave secret**; flip **`VIGIL_CUSTOMER_PROD_EXECUTION`**; **ratify money numbers**; **DNS/TLS cutover** for `vigilguard.net`; the **AWS KMS key** for evidence-DEK + KEK.
+
+### Housekeeping
+7 open **Dependabot** PRs (incl. a MAJOR `huggingface-hub` 1→2 and a `python 3.13→3.15` base-image bump) — riskier, left untriaged; triage individually, don't bulk-merge. Merged-PR branches (`claude/pauseresume-pr1/pr2`, `claude/jobq75-…`, etc.) can be deleted. Reference design detail: the Wave-3 grounding agent's full file-anchored plan is in this session's transcript.
+
+---
+
+## 4. KEY ANCHORS (quick map)
+- Signed spine: `apps/sigil/sigil/spine/store.py` (`append`/`append_many`/`_write_record_locked`, `spine_lock`), `vigil_core/canonical.py` + `chain.py`.
+- Money seam: `integration/vigil_integration/live/credit_lease_broker.py` (leases/settlements/**pauses**), `governor/{wallet,metering}.py`, EC-4 cost ledger, EC-5 pool.
+- Launch verify chokepoint: `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease` (now contains the pause re-check).
+- Jobs: `integration/vigil_integration/jobs/{queue,runner,authorize,launch_trigger,engage_worker}.py`.
+- Isolation: `admit_customer`, `_derive_tenant_id`/`_TENANT_RE`, owner-signed `OrgRegistry`.
+- Router: `integration/vigil_integration/uiproxy.py` (keyless, stdlib-only).
+- Doctor/durability: `doctor.py`, `spine/{snapshot,prune,upgrade}.py`, `integration/vigil_integration/backup.py`.
