@@ -37,7 +37,8 @@ assert_no_offense()
 
 # The Flutterwave v3 API host the egress is pinned to (the allowlist in ``config`` enforces it before any socket
 # opens). Overridable ONLY for a sandbox via ``VIGIL_FLW_API_BASE``, which must STILL be https on an allowlisted
-# host — a steered base cannot turn this into an SSRF proxy (the ``_guard`` re-checks the final URL every call).
+# host — a steered base cannot turn this into an SSRF proxy: ``_guard`` pins the INITIAL url to https + the host
+# allowlist, and ``_NoRedirect`` (below) blocks a 3xx from escaping that pin with the Bearer secret attached.
 _DEFAULT_API_BASE = "https://api.flutterwave.com"
 _SECRET_ENV = "VIGIL_FLW_SECRET_KEY"
 
@@ -46,6 +47,30 @@ _SECRET_ENV = "VIGIL_FLW_SECRET_KEY"
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _DEFAULT_TIMEOUT_S = 15.0
 _MAX_TXID_LEN = 32
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a 3xx. The default opener would auto-follow a redirect WITH the ``Authorization: Bearer
+    <VIGIL_FLW_SECRET_KEY>`` header attached (urllib copies every request header but Content-Type/Length onto
+    the redirect target) — relaying the LIVE payment-provider secret to whatever host a compromised / MITM'd
+    ``api.flutterwave.com`` names, including an off-allowlist, plaintext-http one that the one-shot ``_guard``
+    (which sees only the INITIAL url, before the socket) never re-checks. Returning None stops the follow; the
+    3xx then surfaces as a non-2xx ``HTTPError`` ⇒ a fail-closed ``FlutterwaveEgressError``. The sibling
+    egresses install the SAME guard for this exact exfiltration path (``platform/secret_probes.py``,
+    ``agents/bastion.py``)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# The one outbound call goes through this redirect-BLOCKING opener, so a 3xx can never exfiltrate the Bearer
+# secret to a redirect target past the egress pin. ``_do_open`` is the single open point — and the test seam.
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _do_open(req, timeout):
+    """The single outbound open point (a redirect-blocking opener); also the test seam the egress tests patch."""
+    return _OPENER.open(req, timeout=timeout)   # noqa: S310 — https + host pinned by _guard; redirects blocked
 
 
 class FlutterwaveEgressError(RuntimeError):
@@ -95,7 +120,7 @@ def _request_json(method: str, url: str, *, secret: str, json_body: "Optional[Ma
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — scheme + host guarded above
+        with _do_open(req, timeout) as r:  # redirect-blocking opener — a 3xx fails closed, never relays the secret
             raw = r.read(_MAX_RESPONSE_BYTES + 1)
     except FlutterwaveEgressError:
         raise

@@ -199,7 +199,7 @@ def test_request_json_puts_secret_in_bearer_header_not_url(monkeypatch):
         captured["ctype"] = req.get_header("Content-type")
         return _FakeResp(json.dumps({"status": "success", "data": {"ok": True}}).encode("utf-8"))
 
-    monkeypatch.setattr(fe.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(fe, "_do_open", fake_urlopen)
     out = fe._request_json("POST", "https://api.flutterwave.com/v3/payments", secret=_DUMMY,
                            json_body={"tx_ref": "vigil:acme:n"})
     assert out == {"status": "success", "data": {"ok": True}}
@@ -210,10 +210,79 @@ def test_request_json_puts_secret_in_bearer_header_not_url(monkeypatch):
 
 def test_request_json_refuses_oversize_response(monkeypatch):
     monkeypatch.setattr(fe, "_MAX_RESPONSE_BYTES", 8)
-    monkeypatch.setattr(fe.urllib.request, "urlopen",
+    monkeypatch.setattr(fe, "_do_open",
                         lambda req, timeout=None: _FakeResp(b"x" * 64))
     with pytest.raises(fe.FlutterwaveEgressError):
         fe._request_json("GET", "https://api.flutterwave.com/v3/x", secret=_DUMMY)
+
+
+# ---- secret-exfil defense: a hostile 3xx is NOT followed WITH the Bearer secret (the red-pen HIGH) --
+def test_request_json_does_not_follow_a_redirect_with_the_bearer_secret(monkeypatch):
+    """A compromised / MITM'd provider that answers the pinned call with a 302 to an off-allowlist host must
+    NOT make the egress follow it WITH ``Authorization: Bearer <secret>`` attached — that would exfiltrate the
+    LIVE payment key past the egress pin (``_guard`` only ever sees the INITIAL url). The redirect-blocking
+    opener turns the 3xx into a fail-closed error and the redirect TARGET is never contacted. Exercises the
+    REAL ``_request_json`` transport over two loopback servers."""
+    import http.server
+    import threading
+
+    hits = {"origin_auth": None, "target_contacted": False, "target_auth": None}
+
+    class _Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                          # the off-allowlist redirect target
+            hits["target_contacted"] = True
+            hits["target_auth"] = self.headers.get("Authorization")
+            self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"success","data":{}}')
+
+        def log_message(self, *a):                                 # keep the test output clean
+            pass
+
+    tgt = http.server.HTTPServer(("127.0.0.1", 0), _Target)
+    tport = tgt.server_address[1]
+
+    class _Origin(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                          # the pinned host: 302 -> the target (cross-host http)
+            hits["origin_auth"] = self.headers.get("Authorization")
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{tport}/v3/transactions/9911/verify")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    org = http.server.HTTPServer(("127.0.0.1", 0), _Origin)
+    oport = org.server_address[1]
+    threading.Thread(target=tgt.serve_forever, daemon=True).start()
+    threading.Thread(target=org.serve_forever, daemon=True).start()
+
+    # Bypass ONLY _guard (its https+allowlist check is covered separately) so the request reaches the opener,
+    # where we observe REDIRECT handling. The secret rides the REAL Bearer header, exactly as in production.
+    monkeypatch.setattr(fe, "_guard", lambda url: None)
+    canary = "FLWSECK-live-REDPEN-canary-DO-NOT-FORWARD"
+    try:
+        with pytest.raises(fe.FlutterwaveEgressError):            # the 302 is a fail-closed non-2xx, never a follow
+            fe._request_json("GET", f"http://127.0.0.1:{oport}/v3/transactions/9911/verify", secret=canary)
+        assert hits["origin_auth"] == f"Bearer {canary}"          # the secret WAS on the initial call (test is real)
+        assert hits["target_contacted"] is False                  # ...but the redirect target was NEVER reached
+        assert hits["target_auth"] is None                        # ...so the live key was never relayed onward
+    finally:
+        org.shutdown(); tgt.shutdown()
+
+
+def test_request_json_raises_fail_closed_on_a_transient_transport_failure(monkeypatch):
+    """The money-safety contract (so the inbound drain QUARANTINES + retries rather than minting on a lost
+    call): a transient transport failure RAISES a FlutterwaveEgressError whose message carries NO secret.
+    Exercises the REAL ``_request_json`` transport — a connection refused to a closed loopback port."""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()                                                     # the port is now closed ⇒ connection refused
+    monkeypatch.setattr(fe, "_guard", lambda url: None)
+    with pytest.raises(fe.FlutterwaveEgressError) as ei:
+        fe._request_json("GET", f"http://127.0.0.1:{dead}/v3/x", secret=_DUMMY)
+    assert _DUMMY not in str(ei.value)                            # (c) the secret never rides a failure message
 
 
 # ---- (c) end-to-end: the outbound secret never leaks through the real billing drain ------------------
