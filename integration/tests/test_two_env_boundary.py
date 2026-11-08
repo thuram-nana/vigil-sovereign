@@ -78,6 +78,9 @@ assert "strix" not in _m, "authorization_broker must not import strix at module 
 import vigil_integration.live.credit_lease_broker  # Slice K: the credit-launch-lease seam (both planes)
 assert "framework" not in _m, "credit_lease_broker must not import framework at module scope"
 assert "strix" not in _m, "credit_lease_broker must not import strix at module scope"
+import vigil_integration.live.credit_lease_pause  # pause/resume PR-1: the reversible pause-marker seam (both planes)
+assert "framework" not in _m, "credit_lease_pause must not import framework at module scope"
+assert "strix" not in _m, "credit_lease_pause must not import strix at module scope"
 import vigil_integration.live.cloud_live_posture  # Wave #4 Track B: the live cloud-capture FACT minter
 assert "framework" not in _m, "cloud_live_posture must not import framework at module scope"
 assert "strix" not in _m, "cloud_live_posture must not import strix at module scope"
