@@ -100,6 +100,15 @@ Lifecycle chokepoints (grounded): reserve → `provision.launch_reserve` → `La
 - **Tenant sharding — DESIGN NOT COMPLETE.** The design Workflow (`wf_395eee7a-e41`) ran 8 architecture-grounding agents + 2 of 3 candidate designs, then the **weekly limit** killed the 6 critics + the synthesis. **Resume it after the limit resets:**
   `Workflow({scriptPath:'/root/.claude/.../workflows/scripts/design-tenant-sharding-wf_395eee7a-e41.js', resumeFromRunId:'wf_395eee7a-e41'})` (cached agents replay free; only the failed critics+synthesis re-run). Journal (10 results) at `…/subagents/workflows/wf_395eee7a-e41/journal.jsonl`.
   The 3 candidate angles: (A) self-contained cells/shard-per-node; (B) global routing + an owner-signed shard-assignment record; (C) minimal-diff consistent-hash pre-sharding (reuse the per-org/per-slug dirs + the `CRUCIBLE_TENANT` worker hint, shard the worker fleet + job queue + tenant dirs first). The 6 invariants every design must preserve are in the script's `INVARIANTS` const (signed spine never forks, isolation only stronger, FATAL-2, money exactly-once + EC-5 pool, default-OFF/fail-closed, online reversible migration). **Report the synthesized design + slice plan to the owner before building** (core-touching).
+- **Build dimensions the design must slice (knowable NOW, pre-design — so the work is not a black box):** the exact slice list comes from the resumed design, but every candidate must cover these, and they are the unit of PR-by-PR delivery:
+  1. **Shard key + assignment** — a deterministic `org_id → shard_id` map. In design B/C an **owner-signed `ShardAssignment` spine record** (mirror `MonitoringAuthority`/lease records: new domain tag in `vigil_core/spine_domains.py`, sign in the Provisioner, verify keyless at the routing edge). Default-OFF: one shard = today's single-node behavior, byte-identical.
+  2. **Routing layer** — `uiproxy.py` + the custui/provision edges resolve a request's org to its shard and forward there (keyless, stdlib-only; verify the signed assignment against the pinned owner root). A wrong/missing assignment fails **closed**.
+  3. **Worker-fleet sharding** — the `jobs/{queue,runner,launch_trigger,engage_worker}` fleet already carries the `CRUCIBLE_TENANT` hint + `authorize_job._reconcile_tenant` cross-tenant refusal; extend so each worker process owns a shard's queue + tenant dirs only, and an org-A job in an org-B shard still refuses (the isolation invariant must get *stronger*, never weaker, under sharding).
+  4. **Per-shard signed spine** — each shard keeps its OWN hash-chained spine (the global spine must never fork: §INVARIANT-1). The owner trust root is shared/pinned; shard spines are independent chains, never merged.
+  5. **Money at scale** — the **EC-5 global pool meter + graduated kill-switch is cross-shard**: it must aggregate reservations/spend across shards (a per-shard local meter would let the global cap be breached N×). Reserve/settle stays exactly-once per `(slug,nonce)` within a shard; the pool read is global. This is the sharpest money hazard — red-pen it hardest.
+  6. **Online reversible migration** (§INVARIANT-6) — move a tenant's dirs + open leases + credential rows between shards with **no spine fork, no isolation drop, no double-charge, no lost in-flight paid job**, reversible mid-flight. Likely a drain-pause-copy-verify-cutover-resume cycle reusing the pause/resume substrate (another reason pause/resume PR-3/4/5 lands first).
+  7. **Global tenant registry / coordinator** — a lookup from org → shard that the routing layer and `vigil doctor` consult; owner-signed source of truth; fail-closed.
+- **Scale-acceptance gate (the explicit "1M is done" bar — build this as the closing slice, mirror K4-6's flag-hold):** a load harness driving **N tenants × M concurrent engagements** to owner-set target numbers (throughput, p99 latency, spine-append contention), proving under load: (a) no signed-spine fork across shards; (b) cross-tenant isolation holds **during a live shard migration**; (c) the EC-5 global cap is never breached cross-shard; (d) no in-flight paid job is stranded by a migration or a node loss; (e) exactly-once survives the fleet. Production multi-shard stays **flag-held** until this is green (owner flips it, like `VIGIL_CUSTOMER_PROD_EXECUTION`). Owner sets the target numbers (money/capacity doctrine — not the agent's to invent).
 
 ### Front B — fully hostable / pay round-trip + go-live (round-trip built, flag-held)
 - Customer-app **checkout UI** + `…/billing/return` page; **`sigil serve-customer` CLI** + marketing-domain reverse-proxy vhost (follow `apps/sigil/deploy/reverse-proxy/vigil.nginx.conf`); **NTF enablement tail** (enable `vigil-alerts.timer` + `--test-delivery`); optional **CVE catalog NVD/EPSS enrichment** (operator-run, rate-limited; KEV already gives a browsable catalog).
@@ -112,7 +121,22 @@ Provision the real **Flutterwave secret**; flip **`VIGIL_CUSTOMER_PROD_EXECUTION
 
 ---
 
-## 4. KEY ANCHORS (quick map)
+## 4. DEFINITION OF 100% — the closing gates (what "done" means)
+
+The system is NOT 100% until every line below is true. Items marked **[agent]** are the next agent's to build/verify; **[owner]** are deliberate owner acts the agent must never do.
+
+1. **[agent]** Pause/resume PR-3 → PR-4 → PR-5 merged (the only in-flight production-hardening chain). §2.
+2. **[agent]** Front A tail closed: #73 (network recovery + deploy maturity) and #70 (backups-everywhere + evidence-DEK **live path owner-blocked on a real KMS key**) merged; #69 (money-gate/alerting) re-grounded and closed or finished. §3.
+3. **[agent]** Front B surface closed: checkout UI + billing-return page, `sigil serve-customer` CLI, marketing-domain vhost, NTF enablement tail. §3.
+4. **[agent]** **1M scaling** — tenant-sharding design resumed + synthesized + owner-approved, then built slice-by-slice across the 7 build dimensions (§3 Front C), then the **scale-acceptance gate green** (N tenants × M concurrent; no spine fork; isolation-under-migration; EC-5 global cap cross-shard; no stranded paid job; exactly-once). This is the largest remaining body of work and the real distance to "1,000,000 users."
+5. **[agent]** A final **personal hands-on end-to-end + at-scale verification** (the #25 analog, now including load): drive signup → pay → authorize → run → oracle-confirmed FACT → settle, AND the scale harness, adversarially. Report honestly WITH EVIDENCE; do not trust per-slice red-pens alone.
+6. **[owner]** The held flips, none of which the agent performs: provision the real **Flutterwave secret**; flip **`VIGIL_CUSTOMER_PROD_EXECUTION`**; flip the **multi-shard production flag** (after gate 4); **ratify the money numbers** (margins, $/token, catalog prices, and the scale target numbers); **DNS/TLS cutover** for `vigilguard.net`; the **AWS KMS key** for evidence-DEK + KEK.
+
+Honest status line: the **customer-SaaS product, money loop, offense breadth, production-hardening, and AWS/deploy substrate are built and merged**; the **distance to 100% is dominated by item 4 (tenant sharding → scale-acceptance)**, which is designed-but-not-built, plus the finite Front A/B tails (items 1–3) and the owner-only flips (item 6). Everything built ships default-OFF + fail-closed, so `main` is always in a safe, shippable-at-single-node state.
+
+---
+
+## 5. KEY ANCHORS (quick map)
 - Signed spine: `apps/sigil/sigil/spine/store.py` (`append`/`append_many`/`_write_record_locked`, `spine_lock`), `vigil_core/canonical.py` + `chain.py`.
 - Money seam: `integration/vigil_integration/live/credit_lease_broker.py` (leases/settlements/**pauses**), `governor/{wallet,metering}.py`, EC-4 cost ledger, EC-5 pool.
 - Launch verify chokepoint: `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease` (now contains the pause re-check).
