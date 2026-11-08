@@ -279,14 +279,32 @@ def make_engage_worker(
                     pass
             raise
         if do_settle:
-            try:                                                   # cross FACTs — best-effort (never blocks settle)
-                from .findings_crossing import cross_confirmed_findings, findings_from_report
-                found = findings_from_report(getattr(result, "report", None))
-                if found:
-                    cross_confirmed_findings(found, engagement_slug=job.slug, signers=sgnrs,
-                                             spool_dir=_finding_spool(base_dir, finding_spool_dir, job.slug))
-            except Exception:  # noqa: BLE001 — crossing is best-effort; a crossing error must not block the settle
-                pass
+            # FDX-2: a COMPLETED run's settle DEPENDS on its confirmed FACTs being durably crossed to the
+            # sovereign finding spool FIRST — the COMPLETED signal's very existence must prove the FACTs
+            # crossed, so a paid run can never settle with its FACTs lost. CAUTION: cross_confirmed_findings
+            # is TOTAL — it COUNTS a per-finding durability/sign/serialize failure (e.g. an unwritable finding
+            # spool) and RETURNS a CrossingResult WITHOUT raising (findings_crossing.py). So merely CALLING it
+            # is not a gate; we must INSPECT the result and raise on `errors`, else a swallowed spool-write
+            # failure falls through to the COMPLETED emit — the exact FACT-loss-while-charging hole this slice
+            # closes. On a raise, JobRunner marks the job failed + release_delivery, so the launch RE-DRIVES
+            # (resume re-reaches completion and the crossing retries; the finding spool's content-addressed
+            # dedup + the receiver's two-anchor ingest make the retry idempotent, so an already-crossed FACT
+            # lands exactly once). Money-safe: a crossing that keeps erroring HOLDS the reservation (never
+            # charges) rather than recognising revenue on a run whose FACTs were lost; a FACT that does not
+            # re-fire legitimately degrades to a LEAD (counted in `leads`, NOT crossed, NOT an error) and does
+            # not block. The terminal FAILED path (above) still refunds a genuine run failure.
+            from .findings_crossing import cross_confirmed_findings, findings_from_report
+            found = findings_from_report(getattr(result, "report", None))
+            if found:
+                crossing = cross_confirmed_findings(
+                    found, engagement_slug=job.slug, signers=sgnrs,
+                    spool_dir=_finding_spool(base_dir, finding_spool_dir, job.slug))
+                if crossing.errors:
+                    raise RuntimeError(
+                        f"findings crossing incomplete for {job.slug}: {crossing.errors} of {len(found)} "
+                        f"confirmed FACT(s) failed to cross durably (crossed={crossing.crossed}, "
+                        f"leads={crossing.leads}) — refusing to emit the COMPLETED settle signal so the launch "
+                        f"re-drives rather than settle with its FACTs lost")
             from .completion_signal import emit_completion_signal
             emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="completed",
                                    signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir, job.slug))
