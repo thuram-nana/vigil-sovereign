@@ -114,6 +114,43 @@ real-IP block). Give the origin a cert for the Cloudflare→origin hop — eithe
 (`certbot certonly -d vigilguard.net -d www.vigilguard.net`) or a **Cloudflare Origin CA** cert (longer
 lived, only trusted by Cloudflare). `nginx -t && systemctl reload nginx`.
 
+### 2d. Supervised SaaS background runtime (the drains)
+
+The customer-SaaS pipeline runs as owner-tied **background drains** that must run continuously + recover
+unattended. They ship as **opt-in systemd user timer-oneshots** (each fires its drain on a tight cadence,
+writes a heartbeat, and is watched by the `vigil alerts` staleness dead-man). They are **not** enabled by
+bootstrap — each needs a per-deployment **owner-signed delegation**, so you enable them only after
+provisioning that. Enable the two load-bearing "nothing-lost" drains first:
+
+```bash
+# findings crossing (offense→sovereign confirmed FACTs → the tenant's spine) + settle-on-completion
+# (completed⇒charge, canceled/failed⇒refund, owner-keyed + idempotent)
+for d in finding-drain settle-drain; do
+  cp infra/systemd/vigil-$d.{service,timer} ~/.config/systemd/user/
+  cp infra/systemd/vigil-$d.env.example     ~/.config/vigil/$d.env
+  # Set ONLY the owner-signed delegation path, as an ABSOLUTE path. The spool, scope and (for settle) the
+  # credit-lease base-dir ship as working %h-expanded defaults in the .service — override them in the env
+  # file ONLY with an absolute path. Do NOT put the ENABLE flag here (it is read by the monitor, below).
+  # A %h or relative path in an env file does NOT expand and the drain refuses it (fails loud), so keep paths absolute.
+  $EDITOR ~/.config/vigil/$d.env
+done
+# Arm the staleness dead-man by setting the watch flags in the MONITOR's env (this is the one place they are
+# read — they are inert in the drains' own env files):
+printf 'VIGIL_FINDING_DRAIN_ENABLED=1\nVIGIL_SETTLE_DRAIN_ENABLED=1\n' >> ~/.config/vigil/alerts.env
+systemctl --user daemon-reload
+systemctl --user enable --now vigil-finding-drain.timer vigil-settle-drain.timer vigil-alerts.timer
+systemctl --user list-timers 'vigil-*'                  # confirm next run
+vigil alerts --once --require-push                       # a fresh drain heartbeat ⇒ no alarm
+# NOTE: `vigil alerts` proves LIVENESS (the drain ran), not DELIVERY. Confirm the pipeline end-to-end by
+# driving a real completion/finding through and checking it crosses (the tenant surface updates / the lease
+# settles) — a drain pointed at the wrong directory would run "healthy" yet move nothing.
+```
+
+A drain crash loses nothing (slice 1: the finding drain reclaims its own in-flight work + de-duplicates;
+settle is idempotent per `(slug,nonce)`), and the dead-man alarms if a timer stops firing — so the pipeline
+both runs and recovers without a human. (The remaining drains — `billing-drain`, `monitoring-drain`,
+`ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` — follow the same pattern.)
+
 ## 3. Point Namecheap at Cloudflare, Cloudflare at the Elastic IP
 
 Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS from Namecheap to Cloudflare

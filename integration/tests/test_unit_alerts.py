@@ -95,6 +95,53 @@ def test_registered_units_and_timers_actually_exist_on_disk():
         assert (_SYSTEMD / u.timer).exists(), f"{u.timer} registered but no timer file"
 
 
+# The security-critical fail-closed guarantee is that the ALWAYS-ON set (watched unconditionally) and the
+# OPTIONAL set (watched only when early-armed or run-proven) are each pinned BY NAME here — independently of the
+# `optional` flag the code reads. Without this pin the fail-closed tests derive their expectation from the same
+# flag, so a regression flipping an always-on unit (e.g. the spine-integrity verifier) to optional would pass CI
+# while that unit goes silently unwatched. Changing either set is therefore a DELIBERATE edit to this pin.
+_PINNED_OPTIONAL = {"vigil-finding-drain.service", "vigil-settle-drain.service"}
+_PINNED_ALWAYS_ON = {
+    "vigil-backup.service", "vigil-backup-push.service", "vigil-backup-drill.service",
+    "vigil-ha-mirror.service", "vigil-integrity.service", "vigil-posture.service",
+    "vigil-reprove.service", "vigil-twin.service", "vigil-checkpoint.service",
+}
+
+
+def test_optional_set_is_exactly_the_two_saas_drains():
+    assert {s.unit for s in ua.registry() if s.optional} == _PINNED_OPTIONAL
+
+
+def test_always_on_set_is_pinned_by_name_not_by_flag():
+    """Flip an always-on unit to optional and THIS fails — independently of any flag-derived count."""
+    assert {s.unit for s in ua.registry() if not s.optional} == _PINNED_ALWAYS_ON
+    # the two partitions exactly cover the registry (no unit in neither / both)
+    assert _PINNED_ALWAYS_ON | _PINNED_OPTIONAL == {s.unit for s in ua.registry()}
+    assert not (_PINNED_ALWAYS_ON & _PINNED_OPTIONAL)
+
+
+def test_registry_rejects_an_optional_unit_with_empty_enable_env():
+    """Import-time invariant: an optional unit with no enable_env (unwatchable before its first heartbeat, with
+    no knob to early-arm it) is refused — so a flip-to-optional cannot silently darken a fail-closed guard."""
+    bad = ua.UnitSpec("vigil-integrity.service", "vigil-integrity.timer", 900, 60, "x",
+                      optional=True, enable_env="")
+    with pytest.raises(AssertionError):
+        ua._validate_registry((bad,))
+    ua._validate_registry(ua.registry())   # the shipped registry satisfies it
+
+
+def test_every_always_on_unit_absent_alarms_with_all_enable_flags_cleared(tmp_path, monkeypatch):
+    """Flag-INDEPENDENT fail-closed proof: with EVERY drain enable flag cleared and an empty state dir, the
+    monitor alarms ABSENT for each PINNED always-on unit (by name), while the opted-out drains stay unwatched."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    for unit in _PINNED_ALWAYS_ON:
+        assert states.get(unit) == ua.ABSENT, f"{unit} is not ABSENT-alarmed fail-closed"
+    assert _PINNED_OPTIONAL.isdisjoint(states)   # opted-out drains not watched
+
+
 # ── heartbeat write/read roundtrip ──────────────────────────────────────────────────────────────────────
 def test_heartbeat_write_is_atomic_roundtrip(tmp_path):
     ua.write_unit_heartbeat(tmp_path, "vigil-backup.service", now=T0, ok=True, result="success")
@@ -128,26 +175,94 @@ def test_unit_heartbeat_reads_service_result_from_env(tmp_path, monkeypatch):
 
 
 # ── the monitor: negative control + fail-closed ─────────────────────────────────────────────────────────
-def test_clean_fleet_raises_no_alarm(tmp_path):
+def _always_on() -> list:
+    """The units watched fail-closed on EVERY host (optional=False). Opted-out OPTIONAL drains are not here."""
+    return [s for s in ua.registry() if not s.optional]
+
+
+def test_clean_fleet_raises_no_alarm(tmp_path, monkeypatch):
     """NEGATIVE CONTROL that the gate is not a no-op: a fresh, successful heartbeat for every unit fires
-    ZERO alarms."""
-    _write_all_healthy(tmp_path, now=T0)
+    ZERO alarms. The optional drains have fresh heartbeats here (they have run on this host), so they are
+    watched healthy too — heartbeat presence arms the dead-man even with the monitor flags unset."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    _write_all_healthy(tmp_path, now=T0)   # writes a beat for EVERY unit, drains included
     sink = _RecordingSink()
     summary = ua.run_alert_monitor(tmp_path, now=T0 + 60, sink=sink)
     assert summary["alarms"] == 0
-    assert summary["healthy"] == len(ua.registry())
+    assert summary["healthy"] == len(ua.registry())  # drains with a fresh beat are watched (run-state coupling)
     assert sink.alarms == []
 
 
-def test_absent_heartbeat_is_a_staleness_alarm_fail_closed(tmp_path):
-    """FAIL-CLOSED: an empty state dir (no unit has ever run) alarms for EVERY unit, never silent-healthy."""
+def test_absent_heartbeat_is_a_staleness_alarm_fail_closed(tmp_path, monkeypatch):
+    """FAIL-CLOSED: an empty state dir (no unit has ever run) alarms for EVERY ALWAYS-ON unit, never
+    silent-healthy. An opted-out OPTIONAL drain is not watched (no false ABSENT alarm for a drain the host
+    does not run) — proven separately by test_optional_drain_is_fail_closed_watched_once_enabled."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
     sink = _RecordingSink()
     summary = ua.run_alert_monitor(tmp_path, now=T0, sink=sink)
-    assert summary["alarms"] == len(ua.registry())
-    assert summary["stale"] == len(ua.registry())  # ABSENT counts under the staleness dead-man
+    always_on = {s.unit for s in _always_on()}
+    assert summary["alarms"] == len(always_on)
+    assert summary["stale"] == len(always_on)  # ABSENT counts under the staleness dead-man
     assert all(a.kind == "unit-heartbeat-stale" for a in sink.alarms)
     states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert set(states.keys()) == always_on             # EVERY always-on unit watched; opted-out drains absent
     assert set(states.values()) == {ua.ABSENT}
+
+
+def test_optional_drain_not_watched_when_disabled(tmp_path, monkeypatch):
+    """The enablement gate: with its flag UNSET, an optional SaaS drain is NOT in the default watched set, so
+    an empty state dir raises NO alarm for it — a host that never enabled the pipeline is not false-alarmed."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    watched = {s["unit"] for s in summary["statuses"]}
+    assert "vigil-finding-drain.service" not in watched
+    assert "vigil-settle-drain.service" not in watched
+
+
+def test_optional_drain_is_fail_closed_watched_once_enabled(tmp_path, monkeypatch):
+    """Once its flag is set, an optional drain IS watched fail-closed exactly like an always-on unit: an
+    absent heartbeat is an ABSENT staleness alarm. So an ENABLED drain that stops firing is caught."""
+    monkeypatch.setenv("VIGIL_FINDING_DRAIN_ENABLED", "1")
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert states.get("vigil-finding-drain.service") == ua.ABSENT   # enabled ⇒ fail-closed watched
+    assert "vigil-settle-drain.service" not in states               # still opted out
+
+
+def test_optional_drain_with_a_heartbeat_is_watched_even_with_the_flag_unset(tmp_path, monkeypatch):
+    """RUN-STATE COUPLING: a drain that has RUN (a heartbeat on disk) is watched even though the monitor's
+    enable flag was never set — so a fresh beat counts the drain HEALTHY, and (crucially) a later stall will
+    be caught. Without this, an enabled-but-monitor-unflagged drain was invisible to the dead-man."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    ua.write_unit_heartbeat(tmp_path, "vigil-settle-drain.service", now=T0, ok=True, result="success")
+    summary = ua.run_alert_monitor(tmp_path, now=T0 + 60, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert states.get("vigil-settle-drain.service") == ua.HEALTHY     # heartbeat present ⇒ watched (flag unset)
+    assert "vigil-finding-drain.service" not in states                # no beat, no flag ⇒ still opted out
+
+
+def test_enabled_money_drain_that_stops_is_caught_even_with_the_monitor_flag_unset(tmp_path, monkeypatch):
+    """THE CLOSED HOLE (money safety): the settle drain fired (wrote a heartbeat) but its monitor enable flag
+    was never set; it then STOPS and its beat goes stale. The dead-man MUST still raise exactly one staleness
+    alarm — a stuck settle drain is money owed either way. Before the run-state coupling this was SILENT."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    _write_all_healthy(tmp_path, now=T0)   # every other unit fresh-healthy, so the stale settle drain is isolated
+    spec = ua._spec_for("vigil-settle-drain.service")
+    old = T0 - spec.staleness_bound_s() - 1
+    ua.write_unit_heartbeat(tmp_path, "vigil-settle-drain.service", now=old, ok=True, result="success")
+    sink = _RecordingSink()
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=sink)
+    assert summary["alarms"] == 1
+    assert len(sink.alarms) == 1
+    a = sink.alarms[0]
+    assert a.kind == "unit-heartbeat-stale"
+    assert "vigil-settle-drain.service" in a.detail
 
 
 def test_failing_one_unit_produces_exactly_one_alert(tmp_path):
@@ -386,5 +501,8 @@ def test_loop_uses_injected_clock_and_cadence(tmp_path):
 # ── FATAL-2 boundary ────────────────────────────────────────────────────────────────────────────────────
 def test_module_never_imports_sigil_or_framework():
     src = (_REPO / "integration" / "vigil_integration" / "unit_alerts.py").read_text(encoding="utf-8")
-    assert not re.search(r"^\s*(import|from)\s+sigil", src, re.M), "FATAL-2: unit_alerts must not import sigil"
-    assert not re.search(r"^\s*(import|from)\s+framework", src, re.M), "FATAL-2: must not import framework"
+    # The two planes the sovereign-side monitor must never pull in: the sovereign app (sigil) and the whole
+    # offense engine (framework / strix / crucible). The guard matches any of them so a future refactor that
+    # routes through an offense module at import scope reds here, not silently at runtime.
+    assert not re.search(r"^\s*(import|from)\s+(sigil|framework|strix|crucible)\b", src, re.M), \
+        "FATAL-2: unit_alerts must import no sigil / framework / strix / crucible module at module scope"
