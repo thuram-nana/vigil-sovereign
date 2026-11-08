@@ -1176,7 +1176,7 @@ class Provisioner:
         """The SESSION org's actionable notifications, aggregated ACROSS only the surfaces the requester is
         entitled to read and ranked most-severe-first — the read behind the customer notification centre.
 
-        Three sources, each behind its OWN permission (no global leg), skip-on-deny so a role sees exactly
+        Four sources, each behind its OWN permission (no global leg), skip-on-deny so a role sees exactly
         what it may read and nothing else (a billing-only admin never sees assessment findings, and vice
         versa; a non-member / revoked member gets an empty list, never another tenant's data):
           * oracle-confirmed assessment FINDINGS       (view_assessments)
@@ -1185,11 +1185,15 @@ class Provisioner:
             invented threshold decides a notification)                              (view_billing)
           * confirmed/lead AEGIS MONITORING alerts, only when monitoring is enabled AND permitted (reuses
             ``monitor_events``' own flag+admit gate; its fail-closed refusal simply contributes nothing).
+          * assessment OUTCOMES (NTF-3) — a verified completion/cancellation/failure settled a run, so a
+            COMPLETED run with ZERO findings and a FAILED run (credits refunded) are no longer silent. Written
+            by the settle drain, tenant-scoped inside the projector; carries NO amount  (view_assessments)
 
         Each item is ``{id, kind, severity, title, body, ts}`` with a STABLE id (``finding:<ref>`` /
-        ``billing:<state>`` / ``monitor:<report_id>``) the edge/UI uses for read-tracking — no timestamp is
-        invented for a finding (its cert carries none). ``org_id`` is the hop-bound session principal, NEVER
-        a body field, so org A can never read org B. A read takes no lock, mints nothing, holds no owner key."""
+        ``billing:<state>`` / ``monitor:<report_id>`` / ``outcome:<slug>:<nonce>``) the edge/UI uses for
+        read-tracking — no timestamp is invented for a finding (its cert carries none). ``org_id`` is the
+        hop-bound session principal, NEVER a body field, so org A can never read org B. A read takes no lock,
+        mints nothing, holds no owner key."""
         t = self._now() if now is None else float(now)
         # Display-severity -> rank (most-severe first). Findings carry their cert severity verbatim; billing
         # and monitoring assign from the vocabulary below. Unknown severities rank as "medium" (actionable),
@@ -1264,6 +1268,34 @@ class Provisioner:
                 items.append({"id": "monitor:" + rid, "kind": "monitoring",
                               "severity": "high" if confirmed else "low", "title": title, "body": body,
                               "ts": ev.get("ts")})
+
+        # 4) Assessment OUTCOMES (NTF-3) — the settle drain projects every verified completion/cancellation/
+        #    failure to a tenant-scoped ``assessment_outcome`` record, so a COMPLETED run with ZERO findings and
+        #    a FAILED run (credits refunded) are no longer silent. Same axis as findings (view_assessments),
+        #    skip-on-deny; tenant-scoped INSIDE the projector by the org's own server-derived slug set (the IDOR
+        #    class — another tenant's outcome is structurally unreachable). Advisory: the record carries NO
+        #    amount, so no money figure decides a notification. failed → high / canceled → medium (needs
+        #    attention); completed → info (done). Stable id ``outcome:<slug>:<nonce>`` for read-tracking.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            from . import assessments as _assess
+            outs = _assess.assessment_outcomes(self.store, requester_org_id, now=t)
+            for o in outs.get("outcomes", []):
+                slug = str(o.get("engagement_slug") or "").strip()
+                nonce = str(o.get("nonce") or "").strip()
+                if not slug or not nonce:
+                    continue
+                outcome = str(o.get("outcome") or "").strip().lower()
+                if outcome == "failed":
+                    sev, head, body = ("high", "Assessment failed",
+                                       "An assessment run failed. Reserved credits were refunded.")
+                elif outcome == "canceled":
+                    sev, head, body = ("medium", "Assessment canceled",
+                                       "An assessment run was canceled. Reserved credits were refunded.")
+                else:  # completed (the only remaining signed outcome; flat-per-run consumed, no refund)
+                    sev, head, body = ("info", "Assessment completed",
+                                       "An assessment run completed. View any findings in your assessments.")
+                items.append({"id": "outcome:" + slug + ":" + nonce, "kind": "assessment",
+                              "severity": sev, "title": head, "body": body, "ts": o.get("ts")})
 
         # Stable, severity-ranked order; a stable sort keeps within-source order (findings + monitoring are
         # already newest-first). Cap the returned list; ``count`` is the TRUE pre-cap total for the UI badge.
