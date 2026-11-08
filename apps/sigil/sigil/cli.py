@@ -1163,6 +1163,13 @@ def cmd_inbound(a) -> None:
     else:
         r = watcher.drain()
         print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} inbound finding/detection envelope(s) quarantined in {watcher.rejected} — an "
+                  f"oracle-confirmed result may be lost to its tenant. Investigate + clear the quarantine; this "
+                  f"unit stays FAILED (the dead-man alarms) until rejected/ is empty.", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_settle_drain(a) -> None:
@@ -1211,6 +1218,14 @@ def cmd_settle_drain(a) -> None:
         r = watcher.drain()
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} engagement-completion settle(s) quarantined in {watcher.rejected} — a completed "
+                  f"customer run may be UNSETTLED (never charged, or never refunded). Investigate + clear the "
+                  f"quarantine; this unit stays FAILED (the dead-man alarms) until rejected/ is empty.",
+                  file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_ops_sweep(a) -> None:
@@ -1331,6 +1346,13 @@ def cmd_billing_drain(a) -> None:
         r = watcher.drain()
         print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} billing webhook(s) quarantined in {watcher.rejected} — a paid charge may be "
+                  f"UN-MINTED (the customer paid, no credit granted). Investigate + clear the quarantine; this "
+                  f"unit stays FAILED (the dead-man alarms) until rejected/ is empty.", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_postpaid(a) -> None:
