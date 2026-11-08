@@ -37,6 +37,13 @@ _FINDING_KIND = "finding"
 _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity", "title", "summary",
                 "how_to_verify", "report_claims", "oracle_context_digest", "artifact_manifest")
 
+# NTF-3: the settle-drain's tenant-scoped assessment-outcome projection (``sigil.inbound.completion_spool``).
+_OUTCOME_KIND = "assessment_outcome"
+# The stable, inert fields a customer may read for one settled assessment outcome. An allowlist (never a raw
+# payload dump) so the API shape is fixed and a future internal field can never leak. NO amount is ever here —
+# the outcome record is advisory (money-doctrine clean); it carries no price/charge/refund figure.
+_OUTCOME_FIELDS = ("engagement_slug", "outcome", "nonce", "ts")
+
 
 def valid_org(org_id: object) -> Optional[str]:
     """Validate + normalise a client-supplied org_id to a tenant id, FAIL-CLOSED (None on anything invalid),
@@ -89,6 +96,42 @@ def assessment_findings(store, org_id: str, *, now: float, limit: int = 200) -> 
     rows.sort(key=lambda t: t[0], reverse=True)     # newest-first by spine seq
     n = max(1, min(int(limit), 1000))
     return {"org_id": org_id, "findings": [j for _s, j in rows[:n]], "count": len(rows)}
+
+
+def _outcome_json(payload: dict) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for f in _OUTCOME_FIELDS:
+        v = payload.get(f)
+        if v is not None:
+            out[f] = v
+    return out
+
+
+def assessment_outcomes(store, org_id: str, *, now: float, limit: int = 200) -> dict[str, Any]:
+    """The settled assessment OUTCOMES (completed / canceled / failed) for ONE org's authorized assessments,
+    newest-first. PURE read; tenant-scoped by the org's server-derived slug set EXACTLY as
+    :func:`assessment_findings` is (the IDOR class — an outcome for another tenant is structurally never
+    returned, because ``_customer_slug`` is a one-way hash of ``org_id\\x00host`` and the slug set is derived
+    SERVER-SIDE from THIS org's own current ownership proofs, never a client value). Mirrors the findings
+    projector: scan ``kind=="assessment_outcome"``, keep ONLY records whose ``engagement_slug`` is in the org's
+    own slug set, allowlist-projected (never a raw payload dump). Assumes the caller was already authorized for
+    ``org_id`` by the route/aggregator. ``count`` is the true total so a client can page without ever seeing
+    another tenant's outcomes."""
+    slug_set = _org_slug_set(store, org_id, now=now)
+    rows: list[tuple[int, dict]] = []
+    if slug_set:                                    # no proven hosts -> no slugs -> no outcomes (fail-closed)
+        for r in store.iter_records():
+            if getattr(r, "kind", None) != _OUTCOME_KIND:
+                continue
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            if p.get("engagement_slug") not in slug_set:
+                continue
+            rows.append((int(getattr(r, "seq", 0)), _outcome_json(p)))
+    rows.sort(key=lambda t: t[0], reverse=True)     # newest-first by spine seq
+    n = max(1, min(int(limit), 1000))
+    return {"org_id": org_id, "outcomes": [j for _s, j in rows[:n]], "count": len(rows)}
 
 
 def assessment_summary(store, org_id: str, *, now: float) -> dict[str, Any]:

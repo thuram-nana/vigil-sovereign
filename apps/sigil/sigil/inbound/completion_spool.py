@@ -163,7 +163,39 @@ class CompletionSpoolWatcher:
             now=self._now(), expect_org_id=lease_doc.org_id)
         if not result.get("ok"):
             raise CompletionSpoolError(f"settle_launch refused: {result.get('error')}")
+        # NTF-3: project the just-settled outcome to a tenant-visible notification record. ONLY on a FRESH
+        # settle (``action == "launch_settled"``, NEVER ``launch_already_settled``) — an idempotent re-drive
+        # of an already-settled (slug, nonce) appends NO second record. STRICTLY SEPARATE from the settle
+        # decision above: the append is best-effort and fail-safe (``_record_outcome`` swallows every error),
+        # so it can NEITHER fail NOR double the settle (which has already committed), mirroring how FDX-2 keeps
+        # findings-crossing out of the settle signal. The record carries NO amount — it is ADVISORY (money-
+        # doctrine clean) and NEVER alters the charge/refund. org_id/slug/host come from the VERIFIED owner-
+        # signed lease, never the signal body.
+        if result.get("action") == "launch_settled":
+            self._record_outcome(lease_doc, doc)
         return result
+
+    def _record_outcome(self, lease_doc: Any, completion: Any) -> None:
+        """Best-effort tenant-scoped ``assessment_outcome`` projection for the customer notification centre
+        (NTF-3). The ``org_id`` / ``engagement_slug`` are taken from the VERIFIED owner-signed lease (never the
+        signal body); the terminal ``outcome`` from the governance-verified completion. Carries NO amount —
+        advisory only, never a money figure. FAIL-SAFE: any store/append error is swallowed (logged), so this
+        projection can NEVER fail or double the settle, which has already committed. The record's stable
+        ``(slug, nonce)`` identity lets the notification centre de-dup an at-least-once double-append."""
+        try:
+            self.store.append(
+                kind="assessment_outcome", source="sigil", actor="settle-drain",
+                payload={
+                    "engagement_slug": str(lease_doc.engagement_slug),
+                    "org_id": str(lease_doc.org_id),
+                    "outcome": str(completion.outcome.value),
+                    "nonce": str(lease_doc.nonce),
+                    "ts": float(self._now()),
+                })
+        except Exception:  # noqa: BLE001 — advisory projection: an append failure never breaks/doubles the settle
+            import logging
+            logging.getLogger(__name__).warning(
+                "NTF-3 assessment-outcome record append failed (advisory; settle unaffected)", exc_info=True)
 
     @staticmethod
     def _consumed(outcome: str, reserved: int) -> int:
