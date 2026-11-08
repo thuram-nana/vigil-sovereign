@@ -131,7 +131,13 @@ def test_backup_captures_live_job_queue_and_skips_done_audit_trail(tmp_path):
     assert summary["secrets"] == 3                       # the three re-wrapped identity keys
 
     new_base = tmp_path / "restored-base"
-    res = restore_offense_backup(dest, str(new_base), PW)
+    # Simulate a permissive multi-user host (umask 0022 → fresh files 0644 / dirs 0755) so the owner-only
+    # restore posture (L1-2) is exercised DETERMINISTICALLY regardless of the CI host's ambient umask.
+    _old_umask = os.umask(0o022)
+    try:
+        res = restore_offense_backup(dest, str(new_base), PW)
+    finally:
+        os.umask(_old_umask)
     assert res["verified"] is True
 
     new_qroot = Path(_default_queue_root(str(new_base)))
@@ -141,6 +147,18 @@ def test_backup_captures_live_job_queue_and_skips_done_audit_trail(tmp_path):
     restored_done = new_qroot / "done"
     assert not restored_done.exists() or not list(restored_done.glob("*.json")), \
         "jobs/done/ (the completed-job audit trail) must NOT be captured by the backup"
+
+    # [JOBQ-75 fold / L1-2] the restore preserves the live OWNER-ONLY posture (no group/other access) rather
+    # than landing paid-job queue state at the process umask (0755/0644) on a multi-user DR host. Checked on the
+    # restored tree BEFORE building q2 (SecurityJobQueue re-chmods only delivery/fingerprint/leases, never
+    # queue/running), so these bits reflect the RESTORE. Revert the restore-side chmod in backup.py and these RED.
+    assert (new_qroot.stat().st_mode & 0o077) == 0, "restored jobs/ root must deny group/other (owner-only)"
+    for _sub in ("queue", "running"):
+        _d = new_qroot / _sub
+        if _d.is_dir():
+            assert (_d.stat().st_mode & 0o077) == 0, f"restored jobs/{_sub}/ dir must deny group/other"
+            for _f in _d.glob("*.json"):
+                assert (_f.stat().st_mode & 0o077) == 0, f"restored jobs/{_sub}/ file must be owner-only"
 
     # Build a fresh queue on the RESTORED tree. The functional assertions below (pending_count, requeue_stale,
     # duplicate_delivery) are what prove the LIVE queue was captured — a queue that was NOT backed up restores
@@ -154,6 +172,15 @@ def test_backup_captures_live_job_queue_and_skips_done_audit_trail(tmp_path):
     redup = q2.enqueue(_job(delivery_id="dA", commit="aaaa"))
     assert redup.enqueued is False and redup.reason == "duplicate_delivery", \
         "the permanent delivery_id idempotency marker must survive backup→restore"
+
+    # (e) [JOBQ-75 fold / F4] the fingerprint/ WORK-dedup seen-set survived INDEPENDENTLY of delivery/: job A is
+    # still in flight (pending → never completed → its fingerprint marker was never cleared), so re-enqueuing
+    # A's work under a FRESH delivery_id coalesces as duplicate_fingerprint. enqueue checks delivery FIRST, so a
+    # new delivery_id (dA2) is required to reach the fingerprint leg — proving fingerprint/ survived, not just
+    # delivery/. Make the backup ALSO skip jobs/fingerprint/ and this REDS (marker absent → re-enqueue succeeds).
+    refp = q2.enqueue(_job(delivery_id="dA2", commit="aaaa"))
+    assert refp.enqueued is False and refp.reason == "duplicate_fingerprint", \
+        "the fingerprint work-dedup marker must survive backup→restore independently of delivery/"
 
     # (b) the STRANDED running job (B, dead claimer) re-drives via requeue_stale().
     assert q2.requeue_stale() >= 1, "a crashed-worker job in running/ must be reclaimed after restore"

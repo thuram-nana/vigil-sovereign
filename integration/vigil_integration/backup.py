@@ -1115,6 +1115,25 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
             if _is_sensitive_rel(rel):
                 os.chmod(target, 0o600)
 
+        # [JOBQ-75 fold / L1-2] The live SecurityJob queue is deliberately OWNER-ONLY (the scheduler mkdirs
+        # queue/running/done 0700 + writes job files 0600; SecurityJobQueue chmods delivery/fingerprint/leases
+        # 0700 + markers 0600). The write loop above lands non-sensitive files at the process umask (0644 files
+        # / 0755 dirs), which would expose paid-job metadata (tenant_id, delivery_id, cust_ slug) to other local
+        # UIDs on a multi-user DR host. Re-assert owner-only on the restored DEFAULT queue subtree (keyed to the
+        # <base>/jobs default, as the done/-skip is). Best-effort: a chmod failure never aborts a verified
+        # restore (the content — the nothing-lost guarantee — is already written + re-verified).
+        staged_jobs = staged_base / _QUEUE_SUBDIR
+        if staged_jobs.is_dir():
+            for _qp in staged_jobs.rglob("*"):
+                try:
+                    os.chmod(_qp, 0o700 if _qp.is_dir() else 0o600)
+                except OSError:
+                    pass
+            try:
+                os.chmod(staged_jobs, 0o700)
+            except OSError:
+                pass
+
         # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
         # plaintext-0600) — each with its own AEAD purpose context. The vault dir is built inside the staged
         # tree and swapped in with it.
