@@ -27,6 +27,7 @@ import ipaddress
 import json
 import secrets
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -82,6 +83,58 @@ def _is_loopback(addr: str) -> bool:
         return ipaddress.ip_address(addr).is_loopback
     except ValueError:
         return False
+
+
+def _listening(host: str, port: int) -> bool:
+    """True if something is LISTENING on (host, port) right now. A short-timeout connect, nothing sent:
+    this REPORTS liveness, it never provisions or mutates anything on the provisioner."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.35):
+            return True
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def _provision_addr(provision_base: str) -> "tuple[str, int] | None":
+    """The (host, port) of the provisioner the edge federates to, parsed from its base URL. Returns None
+    when the base is unset/unparseable (→ the edge cannot be ready). Never surfaced to the caller — only a
+    boolean readiness verdict is — so no address ever leaves on the probe body."""
+    try:
+        u = urlparse(provision_base or "")
+    except ValueError:
+        return None
+    host = u.hostname
+    if not host:
+        return None
+    port = u.port or (443 if u.scheme == "https" else 80)
+    return host, int(port)
+
+
+# `/readyz` is UNAUTHENTICATED, so an untrusted caller could hammer it. The check does a live TCP connect to
+# the provisioner backend; without a bound, a probe flood would AMPLIFY into a matching flood of provisioner
+# connects. Debounce it: a result is cached for a short TTL and shared across the ThreadingHTTPServer's
+# request threads, so no matter the incoming /readyz rate the edge opens at most ~1 provisioner connect per
+# TTL per address. The window is tiny, so readiness still reflects reality for an orchestrator's probe.
+# (Mirrors `uiproxy._sovereign_ready_debounced`.)
+_READYZ_TTL = 1.0
+_readyz_lock = threading.Lock()
+_readyz_cache: dict = {}
+
+
+def _provisioner_ready_debounced(host: str, port: int) -> bool:
+    """`_listening(host, port)` behind a short-TTL, thread-safe cache, so an unauthenticated /readyz flood
+    cannot amplify into a flood of provisioner connects. Returns the cached result within the TTL, else does
+    one live connect and caches it."""
+    key = (host, int(port))
+    now = time.monotonic()
+    with _readyz_lock:
+        hit = _readyz_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    ok = _listening(host, port)          # the single live connect, done OUTSIDE the lock
+    with _readyz_lock:
+        _readyz_cache[key] = (now + _READYZ_TTL, ok)
+    return ok
 
 
 class CustomerServer(ThreadingHTTPServer):
@@ -262,11 +315,30 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if sid:
             self._set_cookie(sid)
 
+    # --- health / readiness (probe surface) --------------------------------------------------------
+    def _readyz(self):
+        """Readiness — a LIVE, DEBOUNCED port probe of the edge's one real dependency: the sovereign
+        provisioner. Returns 503 when it is not listening (the edge can still serve its static shell, but
+        no customer read/action can complete), so an LB drains this edge instead of serving 502s. The body
+        is a boolean + the check name ONLY — never the provisioner address, so the unauthenticated probe
+        leaks nothing. Side-effect-free: it opens one TCP connection and sends no bytes."""
+        addr = _provision_addr(self.server.provision_base)
+        ok = bool(addr) and _provisioner_ready_debounced(*addr)
+        self._json({"ok": ok, "checks": [{"name": "provisioner", "ok": ok}]}, 200 if ok else 503)
+
     # --- routing -----------------------------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
+        # Probe surface (UNAUTHENTICATED, no cookie, no secret) — placed FIRST, ahead of the session/relay
+        # plane, so a k8s/LB liveness+readiness probe (which can present no customer cookie) is answered
+        # without touching any privileged state. `/healthz` is pure liveness (the process answers);
+        # `/readyz` checks the edge's REAL dependency — the sovereign provisioner it federates every
+        # customer read/action to — and returns 503 when it is unreachable, so an orchestrator drains an
+        # edge whose provisioner is down rather than serving 502s from it.
         if path == "/healthz":
             return self._json({"ok": True})
+        if path == "/readyz":
+            return self._readyz()
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:
