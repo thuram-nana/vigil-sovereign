@@ -1055,10 +1055,26 @@ class SpineStore:
         but before its ack — a caller needing exactly-once relies on content-addressed dedup / processed
         markers (the drains already do). The chain is NEVER corrupted: unacked durable records are valid chain
         records and the next write continues from the true tip (the torn-tail truncation only removes a
-        partially-written final line, never a committed one)."""
+        partially-written final line, never a committed one).
+
+        ATOMIC-OR-NOTHING on the IN-PROCESS error path (distinct from a crash): if a spec fails WHILE the
+        batch is being written — a missing required field (rejected up front, before any lock/byte) or a
+        payload only ``json.dumps`` discovers is non-serializable (caught mid-write) — the partial prefix
+        already written is rolled back to the pre-batch chain tip before the error propagates. So a caller
+        that catches the error and retries can never silently DUPLICATE the already-written records
+        (``append_many`` has no content dedup). This mirrors ``append()``, which writes its one record
+        all-or-nothing."""
         if not specs:
             return []
-        for s in specs:
+        for i, s in enumerate(specs):
+            # Reject a malformed spec BEFORE any lock/byte: a spec missing a required field would otherwise
+            # raise a KeyError PARTWAY THROUGH the write loop below, after earlier records were already
+            # written — a durable partial prefix on the signed chain. Fail closed here with a clear message.
+            missing = [k for k in ("kind", "source", "actor", "payload") if k not in s]
+            if missing:
+                raise SpineError(
+                    f"append_many spec[{i}] is missing required field(s) {missing} — each spec needs "
+                    f"kind/source/actor/payload; refusing to write a partial batch")
             self._validate_kind_schema(s.get("kind"), s.get("schema_version", SCHEMA_VERSION))
         with spine_lock(self.path):
             with self._crossproc_lock():
@@ -1075,16 +1091,29 @@ class SpineStore:
                                      "append_many (%s)", pre_size - clean_end, active)
                     pred = last if last is not None else self._seam_tip_for_active()
                     off = clean_end
-                    for s in specs:
-                        entry, n = self._write_record_locked(
-                            f, pred, kind=s["kind"], source=s["source"], actor=s["actor"],
-                            payload=s["payload"], parent_id=s.get("parent_id"),
-                            supersedes_id=s.get("supersedes_id"), ts=s.get("ts"),
-                            schema_version=s.get("schema_version", SCHEMA_VERSION))
-                        entries.append(entry)
-                        placed.append((off, n))
-                        off += n
-                        pred = entry
+                    try:
+                        for s in specs:
+                            entry, n = self._write_record_locked(
+                                f, pred, kind=s["kind"], source=s["source"], actor=s["actor"],
+                                payload=s["payload"], parent_id=s.get("parent_id"),
+                                supersedes_id=s.get("supersedes_id"), ts=s.get("ts"),
+                                schema_version=s.get("schema_version", SCHEMA_VERSION))
+                            entries.append(entry)
+                            placed.append((off, n))
+                            off += n
+                            pred = entry
+                    except BaseException:
+                        # ATOMIC-OR-NOTHING (signed ledger): a spec that fails mid-batch — e.g. a payload only
+                        # json.dumps finds non-serializable, or any seal/write error — leaves records 0..i-1
+                        # already written to the open file. Roll them back to the pre-batch tip so the batch is
+                        # all-or-nothing like append(): flush pushes any buffered bytes to the OS, then truncate
+                        # to clean_end drops the whole partial prefix. append_many has NO dedup, so a leftover
+                        # prefix would be silently DUPLICATED by a caller that retries after catching the error.
+                        # No in-memory index/seq/last state was published yet (that happens only after the fsync
+                        # below), so truncating the bytes fully restores the chain tip.
+                        f.flush()
+                        f.truncate(clean_end)
+                        raise
                     f.flush()
                     os.fsync(f.fileno())                   # ONE durability barrier for the whole batch
                     _maybe_crash("append_after_fsync")     # crash-fuzz: batch durable, not yet acked/sealed

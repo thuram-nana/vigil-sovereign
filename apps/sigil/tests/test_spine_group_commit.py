@@ -96,3 +96,39 @@ def test_append_many_uses_one_fsync_for_the_whole_batch(monkeypatch):
     for i in range(4):
         t.append(kind=_KIND, source="gc", actor="test", payload={"i": i})
     assert calls["n"] == 4, f"4 single appends must fsync 4 times, got {calls['n']}"
+
+
+def test_append_many_is_atomic_on_a_nonserializable_payload_midbatch():
+    # A spec whose payload only json.dumps finds non-serializable raises MID-BATCH (after earlier records of
+    # the batch were already written). append_many must be ATOMIC-OR-NOTHING like append(): the partial
+    # prefix is rolled back to the pre-batch tip, the chain is unchanged, and — because append_many has no
+    # dedup — a later retry cannot silently DUPLICATE the already-written records.
+    import pytest
+    s = _store()
+    s.append_many([_spec(0), _spec(1)])                  # a committed batch first: seqs [0, 1]
+    bad = [_spec(2), _spec(3),
+           {"kind": _KIND, "source": "gc", "actor": "test", "payload": {"bad": object()}},  # spec[2] unserializable
+           _spec(5)]
+    with pytest.raises(Exception):                       # noqa: B017 — the ROLLBACK (asserted next) is the point
+        s.append_many(bad)
+    # NOTHING from the failed batch landed: the chain is still exactly [0, 1] and verifies (no partial prefix).
+    # WITHOUT the rollback this reads [0, 1, 2, 3] (spec 2 + spec 3 were written before spec[2]-payload raised).
+    assert [r.seq for r in s.iter_records()] == [0, 1]
+    assert s.verify()[0]
+    # a caller that retries a now-clean batch writes EXACTLY the new records — no duplicate of a leftover prefix
+    seqs = s.append_many([_spec(2), _spec(3)])
+    assert seqs == [2, 3]
+    assert [r.seq for r in s.iter_records()] == [0, 1, 2, 3]
+    assert s.verify()[0]
+
+
+def test_append_many_rejects_a_missing_required_field_before_writing():
+    # A spec missing a required field is rejected UP FRONT (before any lock/byte) with a clear SpineError —
+    # not a cryptic KeyError partway through the write loop. Nothing from the bad batch lands.
+    import pytest
+    s = _store()
+    s.append_many([_spec(0)])                            # seq 0 committed
+    with pytest.raises(store_mod.SpineError, match="missing required field"):
+        s.append_many([_spec(1), {"kind": _KIND, "source": "gc", "actor": "test"}])  # spec[1] has no payload
+    assert [r.seq for r in s.iter_records()] == [0]      # still just seq 0 — the batch was refused whole
+    assert s.verify()[0]
