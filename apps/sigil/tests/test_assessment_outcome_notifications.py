@@ -180,6 +180,30 @@ def test_canceled_outcome_is_medium():
     assert n and n["severity"] == "medium" and n["title"] == "Assessment canceled"
 
 
+# -- MONEY-WORDING: the failed/canceled body is billing-model-neutral (no false "refund" claim) -------
+def test_outcome_body_is_billing_model_neutral_no_false_refund_claim():
+    # Red-pen L4-01 fold: a POSTPAID/invoice tenant holds no prepaid credit wallet — a failed run reverses the
+    # arrears draw (the run is simply not invoiced), so no credit refund occurs. The failed/canceled bodies
+    # must NOT assert "credits were refunded" (false for that billing model); they say "you were not charged",
+    # which is true for both prepaid (full refund) and postpaid (draw reversed / not invoiced).
+    store = _store()
+    owner = ensure_owner_keypair()
+    p = _prov(store, owner)
+    it = iter(range(1, 10_000))
+    _member(p.orgs, "acme", "alice", "operator", it)
+    slug = _prove(store, "acme", "acme.example", it)
+    WalletRegistry(store, owner_key=owner).grant("acme", 100, "trial", issued_at=float(next(it)))
+    _outcome(store, slug, "f1", outcome="failed")
+    _outcome(store, slug, "x1", outcome="canceled")
+    out = p.customer_notifications("alice", "acme", now=NOW)
+    for nid in ("outcome:" + slug + ":f1", "outcome:" + slug + ":x1"):
+        n = _by_id(out, nid)
+        assert n is not None, nid
+        low = n["body"].lower()
+        assert "not charged" in low            # billing-model-neutral: true for prepaid AND postpaid
+        assert "refund" not in low             # never promise a credit refund a postpaid tenant never got
+
+
 # -- PER-SOURCE RBAC: a billing-only admin never sees assessment outcomes ----------------------------
 def test_without_view_assessments_no_outcome_source():
     store = _store()

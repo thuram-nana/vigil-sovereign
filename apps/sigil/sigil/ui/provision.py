@@ -1185,9 +1185,10 @@ class Provisioner:
             invented threshold decides a notification)                              (view_billing)
           * confirmed/lead AEGIS MONITORING alerts, only when monitoring is enabled AND permitted (reuses
             ``monitor_events``' own flag+admit gate; its fail-closed refusal simply contributes nothing).
-          * assessment OUTCOMES (NTF-3) — a verified completion/cancellation/failure settled a run, so a
-            COMPLETED run with ZERO findings and a FAILED run (credits refunded) are no longer silent. Written
-            by the settle drain, tenant-scoped inside the projector; carries NO amount  (view_assessments)
+          * assessment OUTCOMES (NTF-3) — a verified completion/cancellation/failure SETTLED a run, so a
+            COMPLETED run with ZERO findings and a FAILED/CANCELED run (not charged) are no longer silent (a
+            run that never reaches the settle seam is NTF-1/2's stranded-run scope). Written by the settle
+            drain, tenant-scoped inside the projector; carries NO amount  (view_assessments)
 
         Each item is ``{id, kind, severity, title, body, ts}`` with a STABLE id (``finding:<ref>`` /
         ``billing:<state>`` / ``monitor:<report_id>`` / ``outcome:<slug>:<nonce>``) the edge/UI uses for
@@ -1271,7 +1272,7 @@ class Provisioner:
 
         # 4) Assessment OUTCOMES (NTF-3) — the settle drain projects every verified completion/cancellation/
         #    failure to a tenant-scoped ``assessment_outcome`` record, so a COMPLETED run with ZERO findings and
-        #    a FAILED run (credits refunded) are no longer silent. Same axis as findings (view_assessments),
+        #    a FAILED/CANCELED run (not charged) are no longer silent. Same axis as findings (view_assessments),
         #    skip-on-deny; tenant-scoped INSIDE the projector by the org's own server-derived slug set (the IDOR
         #    class — another tenant's outcome is structurally unreachable). Advisory: the record carries NO
         #    amount, so no money figure decides a notification. failed → high / canceled → medium (needs
@@ -1287,10 +1288,10 @@ class Provisioner:
                 outcome = str(o.get("outcome") or "").strip().lower()
                 if outcome == "failed":
                     sev, head, body = ("high", "Assessment failed",
-                                       "An assessment run failed. Reserved credits were refunded.")
+                                       "An assessment run failed. You were not charged for this run.")
                 elif outcome == "canceled":
                     sev, head, body = ("medium", "Assessment canceled",
-                                       "An assessment run was canceled. Reserved credits were refunded.")
+                                       "An assessment run was canceled. You were not charged for this run.")
                 else:  # completed (the only remaining signed outcome; flat-per-run consumed, no refund)
                     sev, head, body = ("info", "Assessment completed",
                                        "An assessment run completed. View any findings in your assessments.")

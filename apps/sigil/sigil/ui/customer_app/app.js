@@ -520,7 +520,7 @@
     var body;
     if (!enabled) {
       body = h("div.cust-ntf-empty", { text: "Notifications are off. Turn them on to be alerted about findings, "
-        + "billing and monitoring for this workspace." });
+        + "assessment outcomes, billing and monitoring for this workspace." });
     } else if (!ntf.items.length) {
       body = h("div.cust-ntf-empty", { text: "You're all caught up." });
     } else {
