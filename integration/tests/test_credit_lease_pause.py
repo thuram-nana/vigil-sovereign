@@ -161,3 +161,24 @@ def test_pauses_dir_is_a_sibling_that_never_pollutes_the_leases_glob():
     assert B.list_credit_leases(base) == []                          # the pauses marker is not a lease bundle
     assert P.pauses_root(base) != B.leases_root(base)
     assert P.pauses_root(base) != B.settlements_root(base)
+
+
+def test_is_file_raising_fails_closed_reader_is_total_not_just_on_corrupt_content(monkeypatch):
+    """[red-pen MED fold] The reader is documented TOTAL ('never raises') + fail-CLOSED. The corrupt-CONTENT
+    case is covered above; this pins the stat() case. ``Path.is_file()`` swallows ENOENT but NOT EACCES, so on
+    the KEYLESS plane a sovereign-written marker under a DIFFERENT uid makes stat() raise PermissionError. The
+    probe must sit INSIDE the fail-closed try so that raise is CAUGHT -> True (halt), never propagated — a pause
+    reader that threw would crash the gate rather than halt. (Move is_file() back OUTSIDE the try and
+    ``is_lease_paused`` RAISES here instead of returning True.)"""
+    import pathlib
+    base = tempfile.mkdtemp()
+    P.record_lease_pause(base, "cust_abc123", "n1")                 # a real marker exists on disk
+
+    def _boom(self):
+        raise PermissionError(13, "Permission denied (simulated EACCES on stat)")
+
+    monkeypatch.setattr(pathlib.Path, "is_file", _boom)
+    # is_file() raising is "cannot positively read 'not paused'" -> HALT, for BOTH a recorded and an
+    # unrecorded nonce; and it must RETURN (total), never propagate the PermissionError.
+    assert P.is_lease_paused(base, "cust_abc123", "n1") is True
+    assert P.is_lease_paused(base, "cust_abc123", "nonce-not-recorded") is True
