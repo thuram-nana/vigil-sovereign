@@ -118,6 +118,15 @@ def _int_env(name: str, default: int) -> int:
 SPINE_SEG_MAX_BYTES = _int_env("SIGIL_SPINE_SEG_MAX_BYTES", 16 * 1024 * 1024)   # 16 MiB
 SPINE_SEG_MAX_RECORDS = _int_env("SIGIL_SPINE_SEG_MAX_RECORDS", 12_000)
 
+# SCALE-C1b: commit-coalescing group commit (the 1M-scale concurrent-append throughput lift). When ON
+# (>= 1), INDEPENDENT concurrent SpineStore.append() calls (different threads — e.g. the ThreadingHTTPServer
+# bridge + event-capture appenders) are gathered into one group whose actual write is delegated to the
+# EXISTING append_many() on a single LEADER thread — ONE fsync per group instead of one per caller (today's
+# N-serialized-fsyncs wall). DEFAULT-OFF (0): the coalescing queue is never touched and append() is
+# byte-identical to today. A re-entrant spine_lock holder (e.g. envelope.consume's TOCTOU replay gate) and a
+# dedup append ALWAYS take the direct path regardless of this flag, so correctness never depends on it.
+SPINE_GROUP_COMMIT_COALESCE = _int_env("SIGIL_SPINE_GROUP_COMMIT", 0)
+
 # --- ingestion sources ----------------------------------------------------------------
 CLAUDE_PROJECTS = Path(os.environ.get("SIGIL_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
 # Phase-0a thin slice: PENTEST-main only. Slugified cwd = dir name under ~/.claude/projects.

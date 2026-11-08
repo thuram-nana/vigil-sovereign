@@ -19,7 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
+from ..config import (SCOPE, SPINE_GROUP_COMMIT_COALESCE, SPINE_PATH, SPINE_SEG_MAX_BYTES,
+                      SPINE_SEG_MAX_RECORDS)
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
 from vigil_core.models import _GENESIS_PREV       # defined in vigil_core (the reuse.* shims are runtime-only)
 from . import envelope
@@ -72,6 +73,13 @@ _crash_hook: "Any" = None
 # Default look-back window (in records) for opt-in content de-duplication on append. Bounded so dedup is
 # O(window) per append, never O(spine); a caller may override per-append via `dedup_window`.
 _DEDUP_WINDOW = 256
+
+# SCALE-C1b (commit-coalescing group commit). The max number of INDEPENDENT concurrent appends one
+# group-commit leader coalesces into a SINGLE append_many() batch (one fsync). Large enough to amortize the
+# fsync hard under 1M-scale load, bounded so one group can never buffer an unbounded write. Latecomers
+# beyond the cap simply form the NEXT group, led by the next head after notify_all — so the cap bounds a
+# group's size without ever dropping an append.
+_GROUP_COMMIT_MAX = 1024
 
 
 def _maybe_crash(name: str) -> None:
@@ -176,6 +184,21 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
         window *= 4
 
 
+class _Waiter:
+    """One queued append awaiting a group commit (SCALE-C1b). Guarded ENTIRELY by the owning store's
+    `_commit_cv`: `spec` is set at construction (immutable thereafter); `seq`/`error`/`done` are written only
+    by the elected leader under `_commit_cv` and read by this waiter's own thread only once it observes
+    `done` True (the happens-before the Condition provides). A leader is also a `_Waiter` (its own append is
+    in the batch), so the leader's result is published to itself through exactly this struct."""
+    __slots__ = ("spec", "seq", "error", "done")
+
+    def __init__(self, spec: "dict[str, Any]") -> None:
+        self.spec: "dict[str, Any]" = spec
+        self.seq: "int | None" = None
+        self.error: "BaseException | None" = None
+        self.done: bool = False
+
+
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH, *,
                  seg_max_bytes: int | None = None, seg_max_records: int | None = None) -> None:
@@ -216,6 +239,17 @@ class SpineStore:
         # `_UNSET` until first use; then the 32-byte DEK, or None when the vault is not provisioned
         # (opt-in passthrough → plaintext, byte-identical to today).
         self._dek_cache: Any = _UNSET
+        # SCALE-C1b (commit-coalescing group commit, DEFAULT-OFF). A commit-coalescing FRONT-END that sits IN
+        # FRONT OF spine_lock: independent concurrent append() calls are gathered into one group whose actual
+        # write is delegated to the UNCHANGED append_many() on a single LEADER thread — one fsync per group.
+        # These three fields are guarded ENTIRELY by `_commit_cv`, a SEPARATE, NON-reentrant lock that is
+        # NEVER spine_lock (the leader still takes spine_lock + flock FRESH inside append_many, on its own
+        # thread, holding neither this cv nor spine_lock while it writes). Flag OFF ⇒ the queue is never
+        # touched and append() is byte-identical to today.
+        self._group_commit_coalesce: bool = bool(SPINE_GROUP_COMMIT_COALESCE)
+        self._commit_cv = threading.Condition(threading.Lock())
+        self._commit_queue: "list[_Waiter]" = []
+        self._leader_inflight: bool = False
 
     # --- payload field encryption (G1 slice-4) ------------------------------------
     def _spine_dek(self, *, create: bool) -> "bytes | None":
@@ -1035,6 +1069,95 @@ class SpineStore:
                 f"refusing to append record with unknown schema_version {schema_version!r} "
                 f"(known: {sorted(KNOWN_SCHEMA_VERSIONS)}) — upgrade sigil before writing this version")
 
+    # --- SCALE-C1b: concurrent-append coalescing (leader/follower group commit, DEFAULT-OFF) ------------
+    def _holds_spine_lock(self) -> bool:
+        """True iff THIS thread already holds the re-entrant spine lock for this store (an OUTER
+        check-then-append transaction such as envelope.consume's TOCTOU replay gate, ui.provision, or
+        ui.launch_gate). Such a caller MUST take the DIRECT append path: if it instead delegated to the
+        coalescing front-end it could be elected a FOLLOWER behind a LEADER on another thread, and that
+        leader's append_many() would block forever trying to acquire the spine_lock THIS thread holds (a
+        deadlock). The probe fails SAFE — any error means we could not PROVE the lock is unheld, so we return
+        True and the caller goes direct (which is always correct, never a deadlock)."""
+        try:
+            # `_is_owned()` is a same-thread re-entrancy probe on the RLock (False when unheld, True after a
+            # same-thread acquire). It exists on the runtime lock object but not in threading.RLock's stub, so
+            # the attr-defined ignore is a typeshed gap, not a runtime risk (exercised by the C1b tests).
+            return bool(spine_lock(self.path)._is_owned())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — cannot prove the lock is unheld ⇒ treat as held ⇒ direct path
+            return True
+
+    def _finalize_batch(self, batch: "list[_Waiter]", seqs: "list[int] | None",
+                        err: "BaseException | None") -> None:
+        """MUST hold `_commit_cv`. Publish the group-commit outcome to every waiter in `batch`. On SUCCESS,
+        map each append_many seq (contiguous, in list order) to its waiter. On FAILURE (append_many RAISED
+        and rolled back ATOMICALLY — NOTHING was acked), set the SAME error on EVERY waiter so they all raise
+        and may safely retry (at-least-once; append_many's atomic rollback means no partial prefix is left to
+        duplicate). Either way each waiter is marked `done` so its thread stops waiting."""
+        if err is None:
+            assert seqs is not None and len(seqs) == len(batch)
+            for b, sq in zip(batch, seqs):
+                b.seq = sq
+                b.error = None
+                b.done = True
+        else:
+            for b in batch:
+                b.error = err
+                b.done = True
+
+    def _append_coalesced(self, spec: "dict[str, Any]") -> int:
+        """Commit-coalescing front-end for an INDEPENDENT concurrent append() (SCALE-C1b). Enqueue this
+        append, elect ONE leader per group, and have that leader write the whole group via the UNCHANGED
+        append_many() on its own thread — spine_lock + flock + ONE fsync, acquired FRESH inside append_many,
+        contiguous seqs, rotation. Because the real write IS append_many, C1b inherits the full signed-spine
+        contract (chain-order / at-least-once / atomic rollback / fail-closed / durable-before-ack) VERBATIM
+        and adds only thread coordination. Returns the assigned seq, or raises the batch's error.
+
+        Followers are signaled ONLY after append_many() returns — i.e. after its single fsync — so every
+        coalesced ack is durable-before-ack. Latecomers that arrive during the write queue at the tail and are
+        led by the next head after notify_all. Only the queue head, and only while no leader is in flight,
+        ever leads, so there is never a second concurrent leader."""
+        # (a) Pre-flight the payload on THIS caller's own thread, BEFORE enqueue: a non-serializable payload
+        # must fail ONLY its owner (raised right here), so the batch the leader hands to append_many is
+        # all-serializable. Otherwise one poison payload would trip append_many's ATOMIC rollback and fail the
+        # ENTIRE group — a poison append must never take its innocent co-batched neighbours down with it.
+        json.dumps(spec["payload"])
+        w = _Waiter(spec)
+        with self._commit_cv:
+            self._commit_queue.append(w)
+            while not w.done:                                 # re-check under the lock — guards spurious wakeups
+                if (not self._leader_inflight and self._commit_queue
+                        and self._commit_queue[0] is w):
+                    # --- elected LEADER for this group ---
+                    # Set the single-leader gate and DETACH the batch from the queue up front, so the NEXT
+                    # head is exposed but held OFF by `_leader_inflight` until we clear it (that gate is what
+                    # keeps a second leader from running concurrently); latecomers append past it at the tail.
+                    self._leader_inflight = True
+                    batch = self._commit_queue[:_GROUP_COMMIT_MAX]
+                    del self._commit_queue[:len(batch)]
+                    self._commit_cv.release()                 # write holding NEITHER _commit_cv NOR spine_lock
+                    seqs: "list[int] | None" = None
+                    err: "BaseException | None" = None
+                    try:
+                        seqs = self.append_many([b.spec for b in batch])   # fresh spine_lock+flock, ONE fsync
+                    except BaseException as exc:  # noqa: BLE001 — fan the failure out to EVERY batch waiter
+                        err = exc
+                    finally:
+                        # Re-acquire and finalize. append_many has already returned — post-fsync on success,
+                        # or rolled-back-atomically on error — so signaling here is strictly DURABLE-BEFORE-ACK
+                        # (and ack-NOTHING-on-error). The notify_all wakes this group's followers AND the next
+                        # head, which leads the remaining queue + any latecomers.
+                        self._commit_cv.acquire()
+                        self._finalize_batch(batch, seqs, err)
+                        self._leader_inflight = False
+                        self._commit_cv.notify_all()
+                    # loop re-checks `while not w.done`: our own waiter is in the batch → done → exit below
+                else:
+                    self._commit_cv.wait()                    # follower / gated next head: park until signaled
+        if w.error is not None:
+            raise w.error                                     # re-raise for THIS caller (leader or follower)
+        assert w.seq is not None                              # done with no error ⇒ a seq was assigned
+        return w.seq
+
     def append_many(self, specs: "list[dict[str, Any]]") -> "list[int]":
         """Append N records under ONE lock acquisition + ONE fsync — group commit (SCALE-C1).
 
@@ -1140,6 +1263,21 @@ class SpineStore:
         # chain; layer 2 = verify() re-checks kind on read. Shared with append_many via _validate_kind_schema,
         # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path.
         self._validate_kind_schema(kind, schema_version)
+        # SCALE-C1b: COMMIT-COALESCING FRONT-END (default-OFF). Before taking spine_lock, route INDEPENDENT
+        # concurrent appends into one group that a single leader thread writes via the UNCHANGED append_many()
+        # (one fsync per group — the 1M-scale concurrent-append throughput lift). Take the DIRECT path (today's
+        # UNCHANGED code below) whenever ANY of: the flag is OFF; dedup was requested (append_many has no
+        # dedup look-back); or THIS thread already HOLDS spine_lock (a re-entrant check-then-append txn such as
+        # envelope.consume's replay gate — it MUST NOT delegate to a leader on another thread, which would then
+        # deadlock acquiring the spine_lock this thread holds). The _is_owned() probe fails SAFE: if it cannot
+        # prove the lock is UNHELD it returns held, so an unprovable case goes direct, never risking the
+        # deadlock. The direct-path body below is UNCHANGED.
+        if self._group_commit_coalesce and not dedup and not self._holds_spine_lock():
+            return self._append_coalesced({
+                "kind": kind, "source": source, "actor": actor, "payload": payload,
+                "parent_id": parent_id, "supersedes_id": supersedes_id,
+                "ts": ts, "schema_version": schema_version,
+            })
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
         # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
         # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
