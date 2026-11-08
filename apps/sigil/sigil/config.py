@@ -493,6 +493,17 @@ CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
     "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"})
 
 
+# --- Flutterwave OUTBOUND billing egress (Slice A1 — SHIPPED OFF BY DEFAULT) ------------
+# The outbound host allowlist for the provider's /v3/payments (hosted-checkout create) and
+# /v3/transactions/{id}/verify (server-side re-verify) calls, enforced by the stdlib poster/verifier in
+# `governor.flutterwave_egress` BEFORE any socket opens (mirrors CUSTOMER_OIDC_EGRESS_ALLOWLIST above). The
+# egress is itself gated DEFAULT-OFF on the provider secret key (`VIGIL_FLW_SECRET_KEY`): unset ⇒ neither
+# outbound callable is wired, so `create_checkout` refuses and `billing-drain` refuses (no egress, no new
+# surface). An API base/endpoint steered off this host is REFUSED, so a misconfiguration (or a hostile
+# override) cannot turn the key-holding egress into an SSRF proxy. Pinned to Flutterwave's v3 API host.
+FLUTTERWAVE_EGRESS_ALLOWLIST = frozenset({"api.flutterwave.com"})
+
+
 def customer_oidc_enabled() -> bool:
     """True iff customer Google-OIDC login is ON (`VIGIL_CUSTOMER_OIDC_ENABLED` ∈ {1,true,yes,on,enabled}).
     OFF by default and INDEPENDENT of the operator `SIGIL_OIDC_ENABLED`. When OFF the edge's

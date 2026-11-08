@@ -1279,10 +1279,27 @@ def cmd_ops_sweep(a) -> None:
 
 
 def _billing_transaction_verifier():
-    """The server-side Flutterwave ``/v3/transactions/{id}/verify`` caller the billing drain MUST use. No
-    production verifier is provisioned in this codebase yet (the owner-infra deferral), so this returns None
-    and ``billing-drain`` refuses to run. It is the single seam an owner-provisioned verifier plugs into."""
-    return None
+    """The server-side Flutterwave ``/v3/transactions/{id}/verify`` caller the billing drain MUST use (Slice A1).
+    Wired DEFAULT-OFF on the provider secret key: with ``VIGIL_FLW_SECRET_KEY`` set this returns the real stdlib
+    verifier (host-allowlisted egress, secret read AT CALL TIME); unset it returns None and ``billing-drain``
+    refuses to run (fail-closed — a verif-hash alone never grants value). The single seam the drain plugs into."""
+    from .governor import flutterwave_egress as fe
+    if not fe.flutterwave_secret_configured():
+        return None
+    return fe.make_transaction_verifier()
+
+
+def _billing_checkout_creator():
+    """The outbound Flutterwave ``/v3/payments`` hosted-checkout poster injected at
+    ``FlutterwaveBillingProvider(checkout_creator=…)`` (Slice A1). Wired DEFAULT-OFF on the provider secret key:
+    with ``VIGIL_FLW_SECRET_KEY`` set this returns the real stdlib poster (host-allowlisted egress, secret read
+    AT CALL TIME, the OWNER-CATALOG-priced body posted verbatim); unset it returns None so ``create_checkout``
+    keeps raising ``UnsupportedCapability`` (never a simulated checkout). The single seam the checkout path
+    plugs into."""
+    from .governor import flutterwave_egress as fe
+    if not fe.flutterwave_secret_configured():
+        return None
+    return fe.make_checkout_creator()
 
 
 def cmd_billing_drain(a) -> None:
@@ -1315,7 +1332,11 @@ def cmd_billing_drain(a) -> None:
     from .inbound.billing_spool import BillingSpoolWatcher
 
     store = SpineStore()
-    signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier),
+    # The checkout_creator is the OUTBOUND hosted-checkout poster (Slice A1); it is INERT on this inbound drain
+    # path (the drain never calls create_checkout) but is wired at the one construction site so the capability is
+    # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
+    signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier,
+                                                      checkout_creator=_billing_checkout_creator()),
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
                            plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
                            expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
