@@ -145,3 +145,46 @@ def test_readyz_debounces_backend_connects_no_amplification(tmp_path, monkeypatc
     finally:
         srv.shutdown(); sink.close()
         custui._readyz_cache.clear()
+
+
+# ---- red-pen fold: /readyz honours its own 503 contract (misconfig & no-hop-key) --------------------
+def test_readyz_503_on_a_malformed_provisioner_port_not_a_dropped_connection(tmp_path):
+    """A malformed-port provision_base (an out-of-range :99999, e.g. from SIGIL_UI_PORT=99999) must yield the
+    DOCUMENTED clean 503 — not an uncaught ValueError (`u.port` out of range) that drops the connection and
+    stderr-spams a traceback on every probe. (Before the fix, _provision_addr's except wrapped only urlparse,
+    so u.port escaped it.)"""
+    custui._readyz_cache.clear()
+    sessions = tmp_path / "sessions"; sessions.mkdir()
+    srv = build_customer_server(host="127.0.0.1", port=0, hop_key=_HOP,
+                                provision_base="http://127.0.0.1:99999",   # port out of range 0-65535
+                                sessions_dir=str(sessions))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        st, _h, body = _get(base + "/readyz")                  # a well-formed reply, NOT a dropped/empty socket
+        assert st == 503, body
+        d = json.loads(body)
+        assert d["ok"] is False
+        assert any(c["name"] == "provisioner" and not c["ok"] for c in d["checks"])
+    finally:
+        srv.shutdown()
+
+
+def test_readyz_503_when_no_hop_key_configured(tmp_path):
+    """An edge with NO hop key cannot authenticate any provisioner hop (every customer read/action fails
+    closed), so /readyz must report not-ready even though the provisioner port is listening — else an LB keeps
+    routing to an edge that can serve nothing."""
+    custui._readyz_cache.clear()
+    sink, pport = _listen_sink()
+    sessions = tmp_path / "sessions"; sessions.mkdir()
+    srv = build_customer_server(host="127.0.0.1", port=0, hop_key="",       # NO hop key
+                                provision_base=f"http://127.0.0.1:{pport}",
+                                sessions_dir=str(sessions))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        st, _h, body = _get(base + "/readyz")
+        assert st == 503, body                                 # not ready: no hop key ⇒ no customer action
+        assert json.loads(body)["ok"] is False
+    finally:
+        srv.shutdown(); sink.close()

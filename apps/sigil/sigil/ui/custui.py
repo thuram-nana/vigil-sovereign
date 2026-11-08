@@ -101,12 +101,12 @@ def _provision_addr(provision_base: str) -> "tuple[str, int] | None":
     boolean readiness verdict is — so no address ever leaves on the probe body."""
     try:
         u = urlparse(provision_base or "")
-    except ValueError:
+        host = u.hostname
+        port = u.port or (443 if u.scheme == "https" else 80)   # u.port validates the range HERE, inside the guard
+    except ValueError:                                           # bad port (:99999 / :bad) OR malformed IPv6 literal
         return None
-    host = u.hostname
     if not host:
         return None
-    port = u.port or (443 if u.scheme == "https" else 80)
     return host, int(port)
 
 
@@ -319,11 +319,15 @@ class CustomerHandler(BaseHTTPRequestHandler):
     def _readyz(self):
         """Readiness — a LIVE, DEBOUNCED port probe of the edge's one real dependency: the sovereign
         provisioner. Returns 503 when it is not listening (the edge can still serve its static shell, but
-        no customer read/action can complete), so an LB drains this edge instead of serving 502s. The body
-        is a boolean + the check name ONLY — never the provisioner address, so the unauthenticated probe
-        leaks nothing. Side-effect-free: it opens one TCP connection and sends no bytes."""
+        no customer read/action can complete), so an LB drains this edge instead of serving 502s. ALSO 503
+        when the edge holds no hop key: every provisioner hop then fails closed, so no customer read/action
+        can complete regardless of the port being up — a local, no-network check that honours the same
+        contract. The body is a boolean + the check name ONLY — never the provisioner address, so the
+        unauthenticated probe leaks nothing. Side-effect-free: it opens one TCP connection and sends no bytes."""
         addr = _provision_addr(self.server.provision_base)
-        ok = bool(addr) and _provisioner_ready_debounced(*addr)
+        # an edge with NO hop key cannot authenticate a single provisioner hop (serve_customer boots that
+        # degraded mode with a banner), so it is not ready even if the provisioner port is reachable.
+        ok = bool(self.server.hop_key) and bool(addr) and _provisioner_ready_debounced(*addr)
         self._json({"ok": ok, "checks": [{"name": "provisioner", "ok": ok}]}, 200 if ok else 503)
 
     # --- routing -----------------------------------------------------------------------------------
