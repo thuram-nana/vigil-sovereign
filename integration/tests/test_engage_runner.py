@@ -511,3 +511,44 @@ def test_worker_settle_signal_binds_the_jobs_nonce(monkeypatch, tmp_path):
     w(_job(nonce="n2"))
     envs = _completion_envelopes(cs)
     assert len(envs) == 1 and envs[0]["document"]["nonce"] == "n2" and envs[0]["document"]["engagement_slug"] == SLUG
+
+
+# ---- FDX-2: a COMPLETED run's settle DEPENDS on the findings crossing first (a paid run never settles with
+# its FACTs lost). The crossing is REQUIRED, not best-effort: a crossing failure blocks the completed signal
+# and raises (JobRunner re-drives). ------------------------------------------------------------------------
+
+def test_worker_completed_settle_is_gated_on_the_findings_crossing(monkeypatch, tmp_path):
+    """The run SUCCEEDS and produces FACTs, but the crossing fails. No 'completed' settle signal is emitted (so
+    the settle drain never charges) and the worker RAISES → JobRunner marks it failed + release_delivery → it
+    re-drives. The reservation is HELD (never charged) until the FACTs cross — money-safe, nothing lost."""
+    import vigil_integration.jobs.findings_crossing as fc
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    monkeypatch.setattr(fc, "findings_from_report", lambda report: [{"fact": 1}])   # the run produced FACTs
+    monkeypatch.setattr(fc, "cross_confirmed_findings",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("finding spool unwritable")))
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 1})
+    with pytest.raises(RuntimeError, match="finding spool unwritable"):
+        w(_job(nonce="nF"))
+    assert not _completion_envelopes(cs), "a failed crossing must NOT emit a completed settle (no charge)"
+
+
+def test_worker_completed_settle_emits_after_a_successful_crossing(monkeypatch, tmp_path):
+    """With FACTs, the crossing runs FIRST and, on success, the 'completed' settle signal follows — so the
+    settle drain's input (the completion signal) exists only because the FACTs were durably crossed."""
+    import vigil_integration.jobs.findings_crossing as fc
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    crossed = {"n": 0}
+    monkeypatch.setattr(fc, "findings_from_report", lambda report: [{"fact": 1}])
+    monkeypatch.setattr(fc, "cross_confirmed_findings",
+                        lambda *a, **k: crossed.__setitem__("n", crossed["n"] + 1))
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 1})
+    w(_job(nonce="nG"))
+    assert crossed["n"] == 1, "the crossing ran before the settle signal"
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "completed"

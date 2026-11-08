@@ -279,14 +279,22 @@ def make_engage_worker(
                     pass
             raise
         if do_settle:
-            try:                                                   # cross FACTs — best-effort (never blocks settle)
-                from .findings_crossing import cross_confirmed_findings, findings_from_report
-                found = findings_from_report(getattr(result, "report", None))
-                if found:
-                    cross_confirmed_findings(found, engagement_slug=job.slug, signers=sgnrs,
-                                             spool_dir=_finding_spool(base_dir, finding_spool_dir, job.slug))
-            except Exception:  # noqa: BLE001 — crossing is best-effort; a crossing error must not block the settle
-                pass
+            # FDX-2: a COMPLETED run's settle now DEPENDS on its FACTs being durably crossed FIRST. The crossing
+            # is therefore REQUIRED (no longer best-effort): confirmed FACTs are emitted to the finding spool
+            # (itself crash-durable, slice 1/#65) BEFORE the "completed" settle signal. If the crossing fails,
+            # the completed signal is NOT emitted and the error RAISES — JobRunner marks the job failed +
+            # release_delivery, so it RE-DRIVES (resume re-reaches completion from the signed checkpoint and the
+            # crossing retries; the finding spool's content-addressed dedup + the receiver's two-anchor ingest
+            # make the retry idempotent, so a reclaimed-after-cross FACT lands exactly once). Because the settle
+            # drain reads the completion signal, the signal's very EXISTENCE now proves the FACTs were durably
+            # crossed — a paid run can never settle with its FACTs lost. Money-safe direction: a permanently
+            # broken crossing HOLDS the reservation (never charges), never a silent paid-but-empty run; the
+            # terminal FAILED path (above) still refunds a genuine run failure.
+            from .findings_crossing import cross_confirmed_findings, findings_from_report
+            found = findings_from_report(getattr(result, "report", None))
+            if found:
+                cross_confirmed_findings(found, engagement_slug=job.slug, signers=sgnrs,
+                                         spool_dir=_finding_spool(base_dir, finding_spool_dir, job.slug))
             from .completion_signal import emit_completion_signal
             emit_completion_signal(engagement_slug=job.slug, nonce=nonce, outcome="completed",
                                    signers=sgnrs, spool_dir=_completion_spool(base_dir, completion_spool_dir, job.slug))
