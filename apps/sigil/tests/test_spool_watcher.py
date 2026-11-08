@@ -286,6 +286,26 @@ def test_reclaim_after_ingest_does_not_double_append(env):
     assert len(_kinds(store, "finding")) == 1            # STILL exactly one record — no double-append
 
 
+def test_reclaim_dedups_beyond_the_bounded_window(env):
+    # Red-pen fold: the reclaim path uses an UNBOUNDED dedup scan, so a finding whose append landed before a
+    # crash is de-duplicated on reclaim even when MORE than the 256-record bounded default has since
+    # accumulated on the shared spine during the restart gap. With only the bounded window this double-ingests.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    spool_envelope(spool, _finding(ref="dup-beyond"))
+    w.drain()                                            # F appended (near seq 0) + archived
+    assert sum(1 for r in _kinds(store, "finding") if r.payload["finding_ref"] == "dup-beyond") == 1
+    recv = FindingReceiver.from_delegation(store, owner_pubkey=OWNER.public_key_b64,
+                                           delegation=_gov_deleg(), now=NOW, scope="acme")
+    for i in range(300):                                 # push F's seq > 256 behind the tip
+        recv.ingest(_finding(ref=f"noise-{i}"))
+    for m in list(w.processed.glob("*.json")):           # F's archive "never happened" (crash window)
+        m.unlink()
+    (w.working / "f-replay.json").write_text(_finding(ref="dup-beyond"), encoding="utf-8")
+    w.drain()                                            # reclaim F with the UNBOUNDED window
+    assert sum(1 for r in _kinds(store, "finding") if r.payload["finding_ref"] == "dup-beyond") == 1
+
+
 def test_receiver_ingest_is_idempotent_on_content(env):
     # FDX-4 at the receiver: two ingests of the SAME finding append exactly one spine record; the second
     # returns the first's seq (content-dedup), never a second identical finding.
