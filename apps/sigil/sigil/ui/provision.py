@@ -219,7 +219,7 @@ class Provisioner:
         return nxt
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
-               outcome: str = "", reason: str = "", critical: bool = False) -> None:
+               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False) -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -233,6 +233,11 @@ class Provisioner:
             "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
             "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
             "reason": str(reason)[:160]}
+        if attestation:
+            # The customer's inline "I am authorized to test this asset" affirmation, recorded on the
+            # owner-signed append-only spine as the tamper-evident legal attestation (control of a host is not
+            # the same as legal authority to test it) — bound to requester + org + target + this record's ts.
+            payload["authorization_affirmed"] = True
         if critical:
             self.store.append(kind="event", source="provision", actor="WARDEN", payload=payload)  # may raise ⇒ fail-closed
             return
@@ -1267,9 +1272,16 @@ class Provisioner:
         return {"org_id": requester_org_id, "notifications": items[:_NOTIF_MAX], "count": total}
 
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
-                      ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+                      authorized: bool = False, ip: str = "", mfa_at: float = 0.0,
+                      now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint
         the owner-signed LIVE non-destructive target authority — the self-serve billing != testing bridge.
+
+        ``authorized`` is the customer's INLINE affirmation ("I am authorized to test this asset"), ticked on
+        the same verify screen (option A — one step, no separate ceremony). It is REQUIRED and fail-closed:
+        controlling a host's DNS/web-root is not the same as having legal authority to test it, so without the
+        affirmation NO authority is minted. The affirmation is recorded on the owner-signed spine (the verify
+        audit's ``authorization_affirmed``) as the tamper-evident legal attestation, bound to requester + host.
 
         Gated on ``admit_customer(requester, org_id, run_engagement)`` (the testing axis, checked BEFORE the
         fetch and AGAIN inside the mint lock — TOCTOU: a membership revoked during the network fetch cannot
@@ -1288,6 +1300,10 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not register assessment targets for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not authorized:                       # option A: the inline "I am authorized to test this asset"
+                #                                      affirmation is REQUIRED + fail-closed — no authority minted
+                #                                      without it (control of a host != legal authority to test it).
+                raise ProvisionDenied("confirm that you are authorized to test this asset before verifying it")
         from .ownership_fetch import OwnershipFetchError
         try:
             observed = self.target_fetcher.fetch(method, host, now=t)   # network I/O — NO lock held
@@ -1314,7 +1330,7 @@ class Provisioner:
             if not result.get("ok"):
                 raise ProvisionError(str(result.get("error") or "could not authorize the target"))
             self._audit("target_verify", requester=requester, org_id=requester_org_id,
-                        target=host, outcome="authorized", critical=True)
+                        target=host, outcome="authorized", critical=True, attestation=True)
         return {"host": host, "slug": result["slug"], "scope": result["scope"],
                 "environment": result["environment"], "not_before": result["not_before"],
                 "not_after": result["not_after"]}

@@ -104,7 +104,7 @@ def test_customer_assets_tenant_scoped_and_testing_gated():
     _seat(orgs, "org_c", "u_bill", "org_admin")      # billing admin: NO view_assessments
     ch = p.target_challenge("u_op", "org_a", "apme.cm")
     p.target_fetcher = _StubFetcher(ch["well_known_body"])
-    p.target_verify("u_op", "org_a", "apme.cm", "well-known")     # org_a now owns apme.cm (proof recorded)
+    p.target_verify("u_op", "org_a", "apme.cm", "well-known", authorized=True)  # org_a owns apme.cm (proof recorded)
 
     out = p.customer_assets("u_op", "org_a")                      # org_a's own member
     assert [a["host"] for a in out["assets"]] == ["apme.cm"]
@@ -136,7 +136,7 @@ def test_verify_records_proof_and_mints_authority():
     _seat(orgs, "org_a", "u_op", "operator")
     ch = p.target_challenge("u_op", "org_a", "apme.cm")
     p.target_fetcher = _StubFetcher(ch["well_known_body"])        # the customer published the marker
-    r = p.target_verify("u_op", "org_a", "apme.cm", "well-known")
+    r = p.target_verify("u_op", "org_a", "apme.cm", "well-known", authorized=True)
     assert r["slug"].startswith("cust_") and r["scope"] == ["apme.cm"] and r["environment"] == "live"
     got = read_authorization(os.environ["VIGIL_BASE_DIR"], r["slug"])
     assert got is not None
@@ -154,7 +154,7 @@ def test_verify_wrong_token_refused_no_authority():
     _seat(orgs, "org_a", "u_op", "operator")
     p.target_challenge("u_op", "org_a", "apme.cm")
     with pytest.raises(ProvisionDenied):
-        p.target_verify("u_op", "org_a", "apme.cm", "well-known")
+        p.target_verify("u_op", "org_a", "apme.cm", "well-known", authorized=True)  # affirmed, but token is WRONG
     # nothing authorized
     from sigil.ui.target_authorization import _customer_slug
     assert read_authorization(os.environ["VIGIL_BASE_DIR"], _customer_slug("org_a", "apme.cm")) is None
@@ -166,4 +166,47 @@ def test_verify_requires_run_engagement():
     p, s, orgs = _prov(fetcher=_StubFetcher("vigil-site-verification=whatever"))
     _seat(orgs, "org_a", "u_admin", "org_admin")
     with pytest.raises(ProvisionDenied):
-        p.target_verify("u_admin", "org_a", "apme.cm", "well-known")
+        p.target_verify("u_admin", "org_a", "apme.cm", "well-known", authorized=True)
+
+
+def test_verify_requires_authorization_affirmation():
+    """Option A: the inline 'I am authorized to test this asset' affirmation is REQUIRED + fail-closed. Without
+    it NO authority is minted — AND the gate fires BEFORE the network fetch (no token is even read, so a user
+    who has not affirmed authorization costs no outbound request)."""
+    import os
+    from sigil.ui.provision import ProvisionDenied
+    from sigil.ui.target_authorization import _customer_slug
+    from vigil_integration.live.authorization_broker import read_authorization
+    fetcher = _StubFetcher("vigil-site-verification=whatever")
+    p, s, orgs = _prov(fetcher=fetcher)
+    _seat(orgs, "org_a", "u_op", "operator")
+    p.target_challenge("u_op", "org_a", "apme.cm")
+    with pytest.raises(ProvisionDenied, match="authorized to test this asset"):
+        p.target_verify("u_op", "org_a", "apme.cm", "well-known")          # authorized omitted (defaults False)
+    assert fetcher.calls == 0, "the affirmation gate must fire BEFORE the network fetch"
+    assert read_authorization(os.environ["VIGIL_BASE_DIR"], _customer_slug("org_a", "apme.cm")) is None
+
+
+def test_verify_records_authorization_attestation_on_the_owner_signed_spine():
+    """The affirmation is recorded as the owner-signed, tamper-evident legal attestation: the verify mint's
+    critical audit carries authorization_affirmed=True, bound to the requester + org + target."""
+    p, s, orgs = _prov()
+    _seat(orgs, "org_a", "u_op", "operator")
+    ch = p.target_challenge("u_op", "org_a", "apme.cm")
+    p.target_fetcher = _StubFetcher(ch["well_known_body"])
+    seen = []
+    real_append = s.append
+
+    def cap(**kw):
+        pl = kw.get("payload")
+        if isinstance(pl, dict) and pl.get("signal") == "provision.audit":
+            seen.append(pl)
+        return real_append(**kw)
+
+    s.append = cap
+    p.target_verify("u_op", "org_a", "apme.cm", "well-known", authorized=True)
+    s.append = real_append
+    attested = [pl for pl in seen if pl.get("action") == "target_verify" and pl.get("outcome") == "authorized"]
+    assert attested, "the verify mint must write an owner-signed audit"
+    assert attested[0].get("authorization_affirmed") is True, "the authorization affirmation must be recorded"
+    assert attested[0].get("target") == "apme.cm" and attested[0].get("requester") == "u_op"
