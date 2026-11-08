@@ -125,12 +125,16 @@ class FindingReceiver:
             ) from exc
         return cls(store, crucible_trust_root=root, scope=scope, role=OFFENSE_SPINE_ROLE)
 
-    def ingest(self, envelope: "str | bytes") -> int:
+    def ingest(self, envelope: "str | bytes", *, dedup_window: "int | None" = None) -> int:
         """Ingest one inert finding envelope. Returns the appended spine seq.
 
         Fail-closed: raises ``InertFindingError`` if the envelope is not a valid inert finding, or
         if its CRUCIBLE governance signature (anchor 1) does not verify — in which case NOTHING is
         written to the spine. Only a structurally-valid, governance-signed finding is admitted.
+
+        ``dedup_window`` controls how far back the idempotent append looks for an identical prior record:
+        ``None`` uses the store's cheap bounded default (the normal path); a crash-reclaim caller passes an
+        unbounded window so a finding whose append already landed before the crash is always de-duplicated.
         """
         from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE
         self._require_role(OFFENSE_GOVERNANCE_ROLE)   # a spine-delegated receiver cannot ingest findings
@@ -162,12 +166,18 @@ class FindingReceiver:
             )
         # Anchor 2: appended into the owner-signed hash-chain. append() is fsync-durable and returns
         # the assigned seq; the record is now covered by the owner-signed spine head.
+        # IDEMPOTENT (finding FDX-4): dedup on the finding's CONTENT identity — the store keys dedup on
+        # kind/source/actor/payload (excluding seq/ts), and the payload is a deterministic function of the
+        # signed finding cert, so ingesting the SAME finding twice (a crash-reclaim re-ingest where the append
+        # had already landed before the crash) returns the EXISTING seq instead of double-appending. Two
+        # DIFFERENT findings carry different payloads and never falsely dedup. The caller widens dedup_window
+        # to unbounded on the reclaim path so the earlier append is found regardless of intervening records.
         return self.store.append(
             kind=FINDING_KIND, source=FINDING_SOURCE, actor=FINDING_ACTOR,
-            payload=vf.to_spine_payload(),
+            payload=vf.to_spine_payload(), dedup=True, dedup_window=dedup_window,
         )
 
-    def ingest_detection(self, envelope: "str | bytes") -> int:
+    def ingest_detection(self, envelope: "str | bytes", *, dedup_window: "int | None" = None) -> int:
         """Ingest one inert DETECTION-FACT envelope (S7c). Returns the appended spine seq. Same two-anchor,
         fail-closed contract as :meth:`ingest`: the detection cert's offense-spine signature (anchor 1) must
         satisfy this receiver's (owner-delegated spine) trust root, and — for a non-wildcard receiver — the
@@ -198,9 +208,12 @@ class FindingReceiver:
                 f"detection {vd.oracle!r}: engagement_slug {vd.engagement_slug!r} is outside the "
                 f"owner-delegated scope {self._scope!r} — refusing (cross-engagement detection)"
             )
+        # IDEMPOTENT (finding FDX-4), symmetric with ingest(): dedup on the detection FACT's content identity
+        # so a crash-reclaim re-ingest returns the existing seq instead of double-appending (dedup_window is
+        # widened to unbounded by the reclaim caller).
         return self.store.append(
             kind=DETECTION_KIND, source=FINDING_SOURCE, actor=DETECTION_ACTOR,
-            payload=vd.to_spine_payload(),
+            payload=vd.to_spine_payload(), dedup=True, dedup_window=dedup_window,
         )
 
 
