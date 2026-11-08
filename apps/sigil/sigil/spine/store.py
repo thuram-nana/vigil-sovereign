@@ -982,18 +982,48 @@ class SpineStore:
         return changed
 
     # --- write --------------------------------------------------------------------
-    def append(
-        self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
-        parent_id: int | None = None, supersedes_id: int | None = None,
-        ts: str | None = None, schema_version: int = SCHEMA_VERSION,
-        dedup: bool = False, dedup_window: int | None = None,
-    ) -> int:
-        # W5-1 write-path enforcement (layer 1 of the sovereign mirror of the offense blackboard's
-        # Python `if kind not in ALL_EVENT_KINDS` + SQL `CHECK(kind IN (...))`). BOTH checks fail CLOSED —
-        # a record with an out-of-vocabulary kind or an unknown schema version is REFUSED before any lock
-        # is taken or byte written, so nothing junk ever reaches the immutable chain. Enforced here, at the
-        # ONE write path, an unfiltered future caller (e.g. an LLM-emitted `cand.kind`) cannot inject an
-        # arbitrary kind onto the spine. layer 2 = `verify()` re-checks `kind` on read (see below).
+    def _write_record_locked(
+        self, f, pred: "ChainEntry | None", *, kind: str, source: str, actor: str,
+        payload: dict[str, Any], parent_id: int | None, supersedes_id: int | None,
+        ts: str | None, schema_version: int,
+    ) -> "tuple[ChainEntry, int]":
+        """Seal + chain + WRITE one record onto the already-open active-segment file ``f`` at EOF — but do NOT
+        flush or fsync (the caller owns the durability barrier). Returns ``(chain entry, bytes written)``.
+
+        MUST hold the spine lock + flock, and ``f`` MUST already be positioned at the true chain tip (the
+        caller truncates any torn tail first). ``pred`` is the predecessor chain entry (None ⇒ seed the
+        genesis chain at seq 0). ``entry.seq == (pred.seq + 1 if pred else 0)`` by construction, and the
+        content fields are AEAD-sealed under the spine DEK bound to that seq exactly as the single-record path
+        always did. This is the SHARED write core of ``append`` (one record → one fsync) and ``append_many``
+        (N records → one fsync); factoring it out is what lets group commit (SCALE-C1) amortize the fsync
+        across a batch WITHOUT duplicating — or drifting from — the seal/chain/record math."""
+        seq = pred.seq + 1 if pred is not None else 0
+        # G1 slice-4: seal the CONTENT FIELDS at rest under the spine DEK; metadata stays plaintext so keyless
+        # folds work. The DEK is loaded ONLY when the record carries a content field (a pure-metadata/signal
+        # append is never blocked by a locked vault). cert_digest is over the STORED form, so a keyless
+        # verifier still verifies the chain.
+        dek = self._spine_dek(create=True) if envelope.has_content(payload) else None
+        stored_payload = envelope.seal_payload(dek, payload, scope=SCOPE, seq=seq)
+        content = {
+            "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
+            "payload": stored_payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
+        }
+        cert_digest = digest_payload(content)  # over the STORED (content fields sealed) payload
+        entry = (append_entry([pred], cert_digest) if pred is not None
+                 else build_chain([cert_digest])[0])
+        # schema_version sits OUTSIDE content (like seq/ts/chain fields), so it is not part of cert_digest —
+        # that keeps the change additive and legacy records' chain byte-identical (W5-1).
+        record = {
+            "seq": entry.seq, **content, "ts": ts or now_iso(),
+            "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
+            "schema_version": schema_version,
+        }
+        line_bytes = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        f.write(line_bytes)
+        return entry, len(line_bytes)
+
+    def _validate_kind_schema(self, kind: str, schema_version: int) -> None:
+        """Fail CLOSED on an out-of-vocabulary kind or unknown schema version BEFORE any lock/byte (W5-1)."""
         if kind not in KINDS:
             raise SpineError(
                 f"refusing to append record with unknown kind {kind!r} (not in the enforced KINDS "
@@ -1002,6 +1032,83 @@ class SpineStore:
             raise SpineError(
                 f"refusing to append record with unknown schema_version {schema_version!r} "
                 f"(known: {sorted(KNOWN_SCHEMA_VERSIONS)}) — upgrade sigil before writing this version")
+
+    def append_many(self, specs: "list[dict[str, Any]]") -> "list[int]":
+        """Append N records under ONE lock acquisition + ONE fsync — group commit (SCALE-C1).
+
+        The per-record ``fsync`` under the write lock is the spine's write-throughput bottleneck, so a caller
+        that has several records to write (a snapshot fold, a checkpoint, a drain batch, a group-commit
+        leader draining queued concurrent appends) amortizes that single durability barrier across the whole
+        batch instead of paying it per record.
+
+        Each spec is ``{kind, source, actor, payload, parent_id?, supersedes_id?, ts?, schema_version?}`` —
+        the same fields as :meth:`append` EXCEPT ``dedup`` (a batch is not content-deduped; a caller needing
+        dedup uses :meth:`append`). Records are chained in LIST ORDER (record i+1's ``prev_hash`` = record i's
+        ``entry_hash``) and share the ONE fsync, after which every record in the batch is durable. Returns the
+        assigned seqs, in order. An empty ``specs`` writes nothing and returns ``[]``.
+
+        CRASH SEMANTICS — the SAME at-least-once contract as :meth:`append`, at batch granularity. A crash
+        between the writes and the fsync may leave a PREFIX of the batch durable-but-unacked; ``append_many``
+        does not return, so the caller retries, and — exactly as for a single append that crashed after fsync
+        but before its ack — a caller needing exactly-once relies on content-addressed dedup / processed
+        markers (the drains already do). The chain is NEVER corrupted: unacked durable records are valid chain
+        records and the next write continues from the true tip (the torn-tail truncation only removes a
+        partially-written final line, never a committed one)."""
+        if not specs:
+            return []
+        for s in specs:
+            self._validate_kind_schema(s.get("kind"), s.get("schema_version", SCHEMA_VERSION))
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                self._refresh_active_under_lock()
+                active = self._active
+                entries: "list[ChainEntry]" = []
+                placed: "list[tuple[int, int]]" = []       # (offset, nbytes) per record, for the index update
+                with active.open("a+b") as f:
+                    clean_end, last = _last_valid_boundary(active)
+                    pre_size = os.fstat(f.fileno()).st_size
+                    if pre_size > clean_end:
+                        f.truncate(clean_end)
+                        _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before "
+                                     "append_many (%s)", pre_size - clean_end, active)
+                    pred = last if last is not None else self._seam_tip_for_active()
+                    off = clean_end
+                    for s in specs:
+                        entry, n = self._write_record_locked(
+                            f, pred, kind=s["kind"], source=s["source"], actor=s["actor"],
+                            payload=s["payload"], parent_id=s.get("parent_id"),
+                            supersedes_id=s.get("supersedes_id"), ts=s.get("ts"),
+                            schema_version=s.get("schema_version", SCHEMA_VERSION))
+                        entries.append(entry)
+                        placed.append((off, n))
+                        off += n
+                        pred = entry
+                    f.flush()
+                    os.fsync(f.fileno())                   # ONE durability barrier for the whole batch
+                    _maybe_crash("append_after_fsync")     # crash-fuzz: batch durable, not yet acked/sealed
+                    with self._index_lock:
+                        active_str = str(active)
+                        for entry, (o, n) in zip(entries, placed):
+                            if self._seg_scanned.get(active_str) == o:
+                                self._offsets[entry.seq] = (active_str, o)
+                                if entry.seq > self._max_seq:
+                                    self._max_seq = entry.seq
+                                self._seg_scanned[active_str] = o + n
+                self._last = entries[-1]
+                self._maybe_rotate_locked()
+        return [e.seq for e in entries]
+
+    def append(
+        self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
+        parent_id: int | None = None, supersedes_id: int | None = None,
+        ts: str | None = None, schema_version: int = SCHEMA_VERSION,
+        dedup: bool = False, dedup_window: int | None = None,
+    ) -> int:
+        # W5-1 write-path enforcement: a record with an out-of-vocabulary kind or an unknown schema version is
+        # REFUSED before any lock is taken or byte written (fail CLOSED), so nothing junk reaches the immutable
+        # chain; layer 2 = verify() re-checks kind on read. Shared with append_many via _validate_kind_schema,
+        # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path.
+        self._validate_kind_schema(kind, schema_version)
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
         # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
         # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
@@ -1035,42 +1142,16 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
                                      pre_size - clean_end, active)
-                    # Derive the predecessor + seq BEFORE sealing (the field AEAD binds seq) — the SAME chain
-                    # math as append_entry/build_chain, computed one step earlier so seq is known.
-                    if last is not None:
-                        pred, seq = last, last.seq + 1
-                    else:
-                        # active is EMPTY: seed from the prior sealed segment's boundary if this is a rotated
-                        # (non-genesis) segment, else start the genesis chain at seq 0. Never build_chain a
-                        # non-genesis segment from GENESIS (that would fork the chain at seq 0 — invariant 13).
-                        seam = self._seam_tip_for_active()
-                        pred, seq = (seam, seam.seq + 1) if seam is not None else (None, 0)
-                    # G1 slice-4: seal the CONTENT FIELDS at rest under the spine DEK — metadata (incl.
-                    # signal/decision/usage/promotion_key) stays PLAINTEXT so keyless folds work. The DEK is
-                    # loaded ONLY when the record actually carries a content field, so a pure-metadata /
-                    # signal append is never blocked by a locked vault. `cert_digest` is then over the STORED
-                    # form (metadata + ciphertext), so a keyless verifier still verifies the chain.
-                    dek = self._spine_dek(create=True) if envelope.has_content(payload) else None
-                    stored_payload = envelope.seal_payload(dek, payload, scope=SCOPE, seq=seq)
-                    content = {
-                        "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
-                        "payload": stored_payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
-                    }
-                    cert_digest = digest_payload(content)  # over the STORED (content fields sealed) payload
-                    entry = (append_entry([pred], cert_digest) if pred is not None
-                             else build_chain([cert_digest])[0])
-                    # entry.seq == seq by construction (append_entry([pred]).seq == pred.seq+1; genesis == 0).
-                    # `schema_version` sits OUTSIDE `content` (like `seq`/`ts`/the chain fields), so it is not
-                    # part of `cert_digest` — that is what keeps the change additive and legacy records' chain
-                    # byte-identical (W5-1). Stamped on every new record; `KNOWN_SCHEMA_VERSIONS`-validated above.
-                    record = {
-                        "seq": entry.seq, **content, "ts": ts or now_iso(),
-                        "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
-                        "schema_version": schema_version,
-                    }
-                    line = json.dumps(record, ensure_ascii=False) + "\n"
+                    # Derive the predecessor BEFORE writing (the SAME chain math as append_entry/build_chain);
+                    # _write_record_locked derives seq = pred.seq+1 (genesis 0), seals the content fields under
+                    # the spine DEK bound to that seq, and writes the line (no fsync). active EMPTY ⇒ seed from
+                    # the prior sealed segment's boundary (a rotated segment) else the genesis chain — never
+                    # build_chain a non-genesis segment from GENESIS (that would fork at seq 0 — invariant 13).
+                    pred = last if last is not None else self._seam_tip_for_active()
+                    entry, nbytes = self._write_record_locked(
+                        f, pred, kind=kind, source=source, actor=actor, payload=payload,
+                        parent_id=parent_id, supersedes_id=supersedes_id, ts=ts, schema_version=schema_version)
                     offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
-                    f.write(line.encode("utf-8"))
                     f.flush()
                     os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
                     _maybe_crash("append_after_fsync")      # crash-fuzz: record durable, not yet acked/sealed
@@ -1085,7 +1166,7 @@ class SpineStore:
                             self._offsets[entry.seq] = (active_str, offset)
                             if entry.seq > self._max_seq:
                                 self._max_seq = entry.seq
-                            self._seg_scanned[active_str] = offset + len(line.encode("utf-8"))
+                            self._seg_scanned[active_str] = offset + nbytes
                 self._last = entry
                 # write-then-rotate: the record is durable (fsync'd) above BEFORE any seal, so a panic
                 # append is never blocked by rotation for more than the bounded seal-swap (D1). No-op unless
