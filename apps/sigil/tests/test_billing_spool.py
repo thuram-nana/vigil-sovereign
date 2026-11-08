@@ -192,6 +192,61 @@ def test_drain_never_stores_the_secret_on_disk():
             assert _SECRET not in f.read_text(encoding="utf-8", errors="ignore"), f"secret leaked into {f}"
 
 
+def _envelope_bytes(raw: bytes) -> bytes:
+    return json.dumps({"schema": _SCHEMA, "body_b64": base64.b64encode(raw).decode("ascii")}).encode("utf-8")
+
+
+def test_reclaim_re_admits_a_crash_stranded_envelope_so_no_paid_webhook_is_lost():
+    """Audit HIGH (money nothing-lost): a drain CLAIMS a file into working/ before it ingests; a crash there
+    strands a PAID webhook in working/ — out of incoming/, never in processed/. Without reclaim it is lost
+    forever (drain only scans incoming/). With it, the next drain re-admits + mints it."""
+    _s, w, watcher, root = _rig(_ok_tx())
+    (root / "working").mkdir(parents=True, exist_ok=True)
+    (root / "working" / "stranded.json").write_bytes(_envelope_bytes(_body(9911)))
+    # nothing in incoming/ — the only copy is the crash-stranded one in working/
+    res = watcher.drain()
+    assert res["minted"] == 1, "the reclaimed paid webhook must be processed, not silently lost"
+    assert w.available("acme") == 200
+    assert list((root / "working").glob("*.json")) == [], "the reclaimed file is archived, not left stranded"
+
+
+def test_reclaim_does_not_double_credit_after_a_post_mint_crash():
+    """The crash-AFTER-mint-BEFORE-archive case: the tx already credited (no processed/ marker written yet).
+    Reclaim re-admits it and re-ingest credits nothing, because BillingSigner.ingest is idempotent by the
+    verified transaction's event_id — so money is never DOUBLE-credited by the reclaim."""
+    _s, w, watcher, root = _rig(_ok_tx())
+    _spool(root, _body(9911))
+    watcher.drain()
+    assert w.available("acme") == 200
+    # a second delivery of the SAME tx got claimed into working/ but was never archived (distinct bytes so the
+    # content-addressed marker does NOT catch it — ingest's event_id idempotency is the load-bearing backstop).
+    env = json.dumps({"schema": _SCHEMA, "body_b64": base64.b64encode(_body(9911)).decode("ascii"),
+                      "nonce": "distinct-wrapper"}).encode("utf-8")
+    (root / "working").mkdir(parents=True, exist_ok=True)
+    (root / "working" / "stranded.json").write_bytes(env)
+    watcher.drain()
+    assert w.available("acme") == 200, "a reclaimed post-mint envelope must NOT double-credit"
+    assert list((root / "working").glob("*.json")) == []
+
+
+def test_watch_loop_survives_a_drain_error():
+    """Audit MED: watch() must not die on a transient drain fault (IO/spine/dir) and strand every subsequent
+    billing webhook. The guarded loop swallows the error and continues; here stop fires after one iteration."""
+    import threading
+    _s, _w, watcher, _root = _rig(_ok_tx())
+    calls = {"n": 0}
+
+    def boom() -> dict:
+        calls["n"] += 1
+        raise RuntimeError("transient spine/IO fault outside the per-file loop")
+
+    watcher.drain = boom  # type: ignore[method-assign]
+    stop = threading.Event()
+    stop.set()                                   # wait() returns True right after the first (failing) drain
+    watcher.watch(interval=0.0, stop=stop)       # MUST NOT raise despite drain() raising
+    assert calls["n"] == 1, "the loop attempted the drain and swallowed its error instead of dying"
+
+
 def test_drain_failed_recurring_charge_marks_past_due():
     # H4 end-to-end through the drain: a re-verified FAILED recurring (payment_plan) charge drains to a mint (not
     # a noop) and latches the (active) subscription to past_due — the webhook-driven dunning path, fail-closed.

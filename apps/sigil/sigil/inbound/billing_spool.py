@@ -169,8 +169,34 @@ class BillingSpoolWatcher:
         except OSError:
             pass
 
+    def _reclaim_working(self) -> None:
+        """Crash recovery (money nothing-lost) — the parity this drain was missing vs its finding/settle siblings.
+        ``drain`` CLAIMS a file into ``working/`` (atomic rename out of ``incoming/``) BEFORE it ingests; if the
+        daemon dies between that claim and the archive, the file is STRANDED in ``working/`` — out of ``incoming/``
+        so no future drain sees it, and not in ``processed/`` so it was never minted. A genuinely-paid webhook is
+        then SILENTLY LOST (the proxy already 202'd it, so the provider never redelivers). Move every such file
+        back to ``incoming/`` at the START of each drain so the next pass re-processes it. Re-ingest is idempotent
+        TWICE over — the ``processed/<sha256>`` dedup marker AND ``BillingSigner.ingest``'s own ``event_id`` — so a
+        file reclaimed AFTER it already minted credits exactly once. NEVER unlink on a failed move: a webhook that
+        cannot be reclaimed stays in ``working/`` for the next sweep rather than being destroyed (under-crediting a
+        paid tenant is recoverable; destroying a paid webhook is not)."""
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return
+        for f in stale:
+            if f.name.startswith(".tmp-"):
+                continue
+            try:
+                os.replace(f, self.incoming / f.name)
+            except OSError:
+                pass   # leave it in working/ for a later sweep — never destroy a paid webhook
+
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {minted, noop, rejected, deduped, seqs}.
+
+        Begins with a crash-recovery sweep (``_reclaim_working``) that returns any file stranded in ``working/``
+        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook.
 
         For each file: CLAIM it (atomic rename into ``working/``) BEFORE acting, so a failed archive or a re-run
         can never re-read it from ``incoming/`` and double-process. Read it as a bounded regular UTF-8 file, then
@@ -178,6 +204,8 @@ class BillingSpoolWatcher:
         handled (``processed/<sha256>`` exists) is archived WITHOUT re-ingesting. Otherwise run the signer; a
         mint (seq) or a safe no-op (None) both archive to ``processed/`` (handled). ANY failure ⇒ ``rejected/``,
         nothing appended. Never raises on one bad file; never blocks on a hostile one."""
+        self._reclaim_working()                          # crash recovery: re-admit any working/ file a prior
+        #                                                  drain claimed-but-never-archived (money nothing-lost)
         minted, noop, rejected, deduped, seqs = 0, 0, 0, 0, []
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
@@ -226,9 +254,17 @@ class BillingSpoolWatcher:
         return {"minted": minted, "noop": noop, "rejected": rejected, "deduped": deduped, "seqs": seqs}
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
-        """Drain in a loop until ``stop`` (a threading.Event) is set."""
+        """Drain in a loop until ``stop`` (a threading.Event) is set. A single bad drain NEVER kills the money
+        daemon: an unexpected error OUTSIDE the per-file loop (a transient spine / IO / directory fault) is
+        reported to stderr and the loop continues — so the billing-ingress daemon survives a transient blip
+        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator."""
+        import sys as _sys
         while True:
-            self.drain()
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                _sys.stderr.write("vigil billing-drain: WARNING drain error (continuing): "
+                                  f"{type(exc).__name__}: {exc}\n")
             waiter = getattr(stop, "wait", None)
             if stop is not None and waiter is not None:
                 if waiter(interval):
