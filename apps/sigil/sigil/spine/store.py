@@ -1022,8 +1022,10 @@ class SpineStore:
         f.write(line_bytes)
         return entry, len(line_bytes)
 
-    def _validate_kind_schema(self, kind: str, schema_version: int) -> None:
-        """Fail CLOSED on an out-of-vocabulary kind or unknown schema version BEFORE any lock/byte (W5-1)."""
+    def _validate_kind_schema(self, kind: object, schema_version: object) -> None:
+        """Fail CLOSED on an out-of-vocabulary kind or unknown schema version BEFORE any lock/byte (W5-1).
+        Accepts ``object`` so a batch spec's untyped ``dict.get("kind")`` (``Any | None``) is validated the same
+        fail-closed way as append()'s typed ``str`` — a non-str / None / unknown value is simply not in KINDS."""
         if kind not in KINDS:
             raise SpineError(
                 f"refusing to append record with unknown kind {kind!r} (not in the enforced KINDS "
