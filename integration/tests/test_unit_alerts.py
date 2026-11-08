@@ -135,14 +135,15 @@ def _always_on() -> list:
 
 def test_clean_fleet_raises_no_alarm(tmp_path, monkeypatch):
     """NEGATIVE CONTROL that the gate is not a no-op: a fresh, successful heartbeat for every unit fires
-    ZERO alarms. With the optional drains OPTED OUT, only the always-on units are counted healthy."""
+    ZERO alarms. The optional drains have fresh heartbeats here (they have run on this host), so they are
+    watched healthy too — heartbeat presence arms the dead-man even with the monitor flags unset."""
     monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
     monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
-    _write_all_healthy(tmp_path, now=T0)
+    _write_all_healthy(tmp_path, now=T0)   # writes a beat for EVERY unit, drains included
     sink = _RecordingSink()
     summary = ua.run_alert_monitor(tmp_path, now=T0 + 60, sink=sink)
     assert summary["alarms"] == 0
-    assert summary["healthy"] == len(_always_on())   # the opted-out optional drains are not watched
+    assert summary["healthy"] == len(ua.registry())  # drains with a fresh beat are watched (run-state coupling)
     assert sink.alarms == []
 
 
@@ -183,6 +184,38 @@ def test_optional_drain_is_fail_closed_watched_once_enabled(tmp_path, monkeypatc
     states = {s["unit"]: s["state"] for s in summary["statuses"]}
     assert states.get("vigil-finding-drain.service") == ua.ABSENT   # enabled ⇒ fail-closed watched
     assert "vigil-settle-drain.service" not in states               # still opted out
+
+
+def test_optional_drain_with_a_heartbeat_is_watched_even_with_the_flag_unset(tmp_path, monkeypatch):
+    """RUN-STATE COUPLING: a drain that has RUN (a heartbeat on disk) is watched even though the monitor's
+    enable flag was never set — so a fresh beat counts the drain HEALTHY, and (crucially) a later stall will
+    be caught. Without this, an enabled-but-monitor-unflagged drain was invisible to the dead-man."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    ua.write_unit_heartbeat(tmp_path, "vigil-settle-drain.service", now=T0, ok=True, result="success")
+    summary = ua.run_alert_monitor(tmp_path, now=T0 + 60, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    assert states.get("vigil-settle-drain.service") == ua.HEALTHY     # heartbeat present ⇒ watched (flag unset)
+    assert "vigil-finding-drain.service" not in states                # no beat, no flag ⇒ still opted out
+
+
+def test_enabled_money_drain_that_stops_is_caught_even_with_the_monitor_flag_unset(tmp_path, monkeypatch):
+    """THE CLOSED HOLE (money safety): the settle drain fired (wrote a heartbeat) but its monitor enable flag
+    was never set; it then STOPS and its beat goes stale. The dead-man MUST still raise exactly one staleness
+    alarm — a stuck settle drain is money owed either way. Before the run-state coupling this was SILENT."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    _write_all_healthy(tmp_path, now=T0)   # every other unit fresh-healthy, so the stale settle drain is isolated
+    spec = ua._spec_for("vigil-settle-drain.service")
+    old = T0 - spec.staleness_bound_s() - 1
+    ua.write_unit_heartbeat(tmp_path, "vigil-settle-drain.service", now=old, ok=True, result="success")
+    sink = _RecordingSink()
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=sink)
+    assert summary["alarms"] == 1
+    assert len(sink.alarms) == 1
+    a = sink.alarms[0]
+    assert a.kind == "unit-heartbeat-stale"
+    assert "vigil-settle-drain.service" in a.detail
 
 
 def test_failing_one_unit_produces_exactly_one_alert(tmp_path):

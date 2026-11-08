@@ -128,13 +128,26 @@ class UnitSpec:
         derived = int(self.cadence_s * _STALENESS_CADENCE_FACTOR) + self.randomized_delay_s
         return _env_int(self._env_key, derived)
 
-    def watched_by_default(self, env: "Optional[dict[str, str]]" = None) -> bool:
-        """Whether a default monitor cycle (``watched=None``) includes this unit. Always-on units always; an
-        optional unit only when its enable flag is set. An explicit ``watched=[…]`` list bypasses this."""
+    def watched_by_default(self, env: "Optional[dict[str, str]]" = None, *,
+                           state_dir: "Optional[str | os.PathLike]" = None) -> bool:
+        """Whether a default monitor cycle (``watched=None``) includes this unit. Always-on units always. An
+        OPTIONAL drain is watched when EITHER its enable flag is set in the monitor env, OR it has a heartbeat on
+        disk — the drain has demonstrably RUN on this host (its timer is enabled and has fired), so a later stall
+        is a true dead-man event. Coupling the watch-decision to the drain's OWN run-state closes the silent hole
+        where an ENABLED, firing money-drain went UNWATCHED because only the separate monitor flag gated it (set
+        the timer, forget the monitor flag → the settle/finding drain stops and nobody is paged). HEARTBEAT
+        PRESENCE, not a successful parse, is the signal: a corrupt/half-written beat still means "ran here", and
+        ``unit_status`` then classifies it STALE fail-closed. A host that never ran the drain has neither flag nor
+        beat → not watched (no false ABSENT alarm); deliberately disabling a drain means removing its heartbeat
+        (documented teardown). An explicit ``watched=[…]`` list bypasses this gating entirely."""
         if not self.optional:
             return True
         src = os.environ if env is None else env
-        return bool(self.enable_env) and _truthy(src.get(self.enable_env))
+        if bool(self.enable_env) and _truthy(src.get(self.enable_env)):
+            return True
+        if state_dir is not None and _heartbeat_path(Path(state_dir).expanduser(), self.unit).exists():
+            return True
+        return False
 
 
 # Curated to match the committed timer files under infra/systemd/. The cadence values are the OnCalendar /
@@ -294,16 +307,19 @@ def collect_statuses(state_dir: str | os.PathLike, *, watched: Optional[list[str
                      now: Optional[float] = None) -> list[UnitStatus]:
     """The current status of every watched unit (default: the whole registry). Read-only — fires no alarms."""
     now = time.time() if now is None else now
-    specs = _watched_specs(watched)
+    specs = _watched_specs(watched, state_dir)
     return [unit_status(state_dir, s, now=now) for s in specs]
 
 
-def _watched_specs(watched: Optional[list[str]]) -> list[UnitSpec]:
+def _watched_specs(watched: Optional[list[str]],
+                   state_dir: "Optional[str | os.PathLike]" = None) -> list[UnitSpec]:
     if watched is None:
-        # Default cycle: every ALWAYS-ON unit, plus each OPTIONAL unit whose enable flag is set. An opted-out
-        # optional drain is omitted (so a host that does not run the SaaS pipeline gets no false ABSENT alarm);
-        # every always-on unit stays watched fail-closed. An explicit watched=[…] list overrides this gating.
-        return [s for s in HA_UNITS if s.watched_by_default()]
+        # Default cycle: every ALWAYS-ON unit, plus each OPTIONAL drain that is either enable-flagged in the
+        # monitor env OR has a heartbeat on disk (it has run on this host, so a later stall is a real dead-man
+        # event — see UnitSpec.watched_by_default). An optional drain that is neither flagged nor has ever run
+        # is omitted (a host not running the SaaS pipeline gets no false ABSENT alarm); every always-on unit
+        # stays watched fail-closed. An explicit watched=[…] list overrides this gating.
+        return [s for s in HA_UNITS if s.watched_by_default(state_dir=state_dir)]
     out: list[UnitSpec] = []
     for name in watched:
         spec = _spec_for(name)
