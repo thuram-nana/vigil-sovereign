@@ -1086,6 +1086,33 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
+def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
+    """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
+    Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
+    NOT expand a ``%`` specifier inside an ``EnvironmentFile`` *value* (only inside a unit-file directive such as
+    ``Environment=``), and a ``${VAR}`` substitution in ``ExecStart`` is not re-scanned for specifiers — so a
+    shipped ``%h/...`` default in an env file would otherwise reach the drain as the LITERAL string, silently
+    resolve to the wrong directory under ``WorkingDirectory``, and make the drain read/settle NOTHING while
+    exiting 0 (a silent no-op the staleness dead-man reads as HEALTHY, never alarming — and the money settle path
+    can even archive a real completion unsettled → permanent loss). Fail CLOSED: exit non-zero so systemd records
+    the oneshot FAILED and the dead-man raises a failure alarm. An empty value is allowed only when ``required``
+    is False (the caller then falls back to its own default)."""
+    from pathlib import Path
+    v = (value or "").strip()
+    if not v:
+        if required:
+            print(f"{flag} is required and must be an absolute, already-expanded path (got {value!r}). "
+                  f"Refusing to drain.", file=sys.stderr)
+            sys.exit(2)
+        return
+    if "%" in v or not Path(v).is_absolute():
+        print(f"{flag} must be an ABSOLUTE, already-expanded path (got {value!r}). A systemd %h/%S specifier is "
+              f"NOT expanded inside an EnvironmentFile value — set an absolute path, or leave it unset so the "
+              f"unit's Environment= default (which DOES expand %h) stands. Refusing to drain so the dead-man "
+              f"alarms rather than silently processing the wrong directory.", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_inbound(a) -> None:
     """Drain / watch the offense→sovereign inert-finding spool onto the owner-signed spine (P5b).
 
@@ -1097,6 +1124,11 @@ def cmd_inbound(a) -> None:
 
     from .governor.identity import owner_pubkey as _owner_pubkey
     from .inbound import SpoolWatcher
+
+    # Validate the spool FIRST (before any work): fail CLOSED on a spool that still carries an un-expanded %h
+    # (the "EnvironmentFile %h does not expand" misconfig). Otherwise the drain reads the WRONG empty directory
+    # and reports success while real findings sit uncrossed — a silent non-delivery the dead-man cannot see.
+    _require_expanded_path(a.spool, "--spool", required=True)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1147,6 +1179,15 @@ def cmd_settle_drain(a) -> None:
     from .governor.identity import owner_pubkey as _owner_pubkey
     from .inbound.completion_spool import CompletionSpoolWatcher
 
+    # Validate the MONEY paths FIRST (before any work). Fail CLOSED on an un-expanded %h: a literal-%h --spool
+    # silently drains the wrong empty dir, and a literal-%h --base-dir makes read_credit_lease find no lease →
+    # every completion becomes a "safe no-op" that is still ARCHIVED to the dedup ledger (completion_spool.drain),
+    # so a completed run is never charged / a cancel never refunded and a later corrected drain dedup-skips it →
+    # PERMANENT loss. Refuse before the watcher is built (nothing is claimed/archived) so systemd records FAILED
+    # and the dead-man alarms.
+    _require_expanded_path(a.spool, "--spool", required=True)
+    _require_expanded_path(a.base_dir, "--base-dir", required=False)
+
     owner = _owner_pubkey()
     if not owner:
         print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
@@ -1157,6 +1198,7 @@ def cmd_settle_drain(a) -> None:
     except (OSError, ValueError) as e:
         print(f"could not load the offense-governance delegation: {e}", file=sys.stderr)
         sys.exit(2)
+
     watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
                                      delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
     if getattr(a, "settle_cmd", "drain") == "watch":

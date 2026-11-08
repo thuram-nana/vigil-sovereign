@@ -18,10 +18,11 @@
 # INSTALL (paired with the timer):
 #   cp infra/systemd/vigil-finding-drain.{service,timer} ~/.config/systemd/user/
 #   cp infra/systemd/vigil-finding-drain.env.example     ~/.config/vigil/finding-drain.env
-#   $EDITOR ~/.config/vigil/finding-drain.env            # set the spool, the delegation path, the scope, ENABLE=1
+#   $EDITOR ~/.config/vigil/finding-drain.env            # set the delegation path (ABSOLUTE); spool/scope default
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now vigil-finding-drain.timer
-#   # and add VIGIL_FINDING_DRAIN_ENABLED=1 to the vigil-alerts monitor's env so the dead-man watches it.
+#   # then arm the dead-man: add VIGIL_FINDING_DRAIN_ENABLED=1 to the MONITOR's env (~/.config/vigil/alerts.env,
+#   # NOT this drain's env — the monitor reads it there) so `vigil alerts` watches this unit before its first fire.
 
 [Unit]
 Description=VIGIL SaaS findings-crossing drain (one pass: verify + append confirmed FACTs onto the spine)
@@ -29,10 +30,16 @@ Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
 
 [Service]
 Type=oneshot
-
-# REQUIRED config (see vigil-finding-drain.env.example). The ${VAR}s are expanded by systemd from this file.
-EnvironmentFile=-%h/.config/vigil/finding-drain.env
 Environment=PYTHONUNBUFFERED=1
+
+# Path DEFAULTS live HERE, in unit-file Environment= directives, NOT in the EnvironmentFile — systemd expands
+# %h in a directive value but NEVER inside an EnvironmentFile value (a %h there would reach the drain as the
+# LITERAL string "%h/..."). The env file below is loaded AFTER these, so it OVERRIDES them: put the per-
+# deployment delegation there, plus any spool/scope override as an ABSOLUTE path (the CLI refuses a relative /
+# %-bearing --spool, so a mistaken override fails LOUD rather than draining the wrong directory).
+Environment=VIGIL_FINDING_SPOOL=%h/.sigil/spool/findings
+Environment=VIGIL_FINDING_SCOPE=*
+EnvironmentFile=-%h/.config/vigil/finding-drain.env
 WorkingDirectory=%h/.sigil
 
 # One drain pass (the timer owns the cadence). --governance-delegation authorizes FINDINGS; add

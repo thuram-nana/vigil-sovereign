@@ -18,9 +18,10 @@
 # INSTALL (paired with the timer):
 #   cp infra/systemd/vigil-settle-drain.{service,timer} ~/.config/systemd/user/
 #   cp infra/systemd/vigil-settle-drain.env.example     ~/.config/vigil/settle-drain.env
-#   $EDITOR ~/.config/vigil/settle-drain.env
+#   $EDITOR ~/.config/vigil/settle-drain.env   # set VIGIL_SETTLE_DELEGATION (ABSOLUTE); spool/base-dir/scope default
 #   systemctl --user daemon-reload && systemctl --user enable --now vigil-settle-drain.timer
-#   # add VIGIL_SETTLE_DRAIN_ENABLED=1 to the vigil-alerts monitor's env so the dead-man watches it.
+#   # then arm the dead-man: add VIGIL_SETTLE_DRAIN_ENABLED=1 to the MONITOR's env (~/.config/vigil/alerts.env,
+#   # NOT this drain's env) so `vigil alerts` watches this money drain before its first fire.
 
 [Unit]
 Description=VIGIL SaaS settle-on-completion drain (one pass: completed⇒charge, canceled/failed⇒refund; owner-keyed)
@@ -28,8 +29,18 @@ Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
 
 [Service]
 Type=oneshot
-EnvironmentFile=-%h/.config/vigil/settle-drain.env
 Environment=PYTHONUNBUFFERED=1
+
+# Path DEFAULTS live HERE, in unit-file Environment= directives, NOT in the EnvironmentFile — systemd expands
+# %h in a directive value but NEVER inside an EnvironmentFile value. This matters doubly for the MONEY drain: a
+# literal-%h --base-dir would make the lease READ find nothing, so every completion becomes a "safe no-op" that
+# is still archived unsettled → a completed run never charged / a cancel never refunded, permanently + silently.
+# The env file (loaded AFTER, so it overrides) carries the per-deployment delegation + any ABSOLUTE override;
+# the CLI refuses a relative / %-bearing --spool or --base-dir, so a mistaken override fails LOUD (FAILED alarm).
+Environment=VIGIL_SETTLE_SPOOL=%h/.sigil/spool/settle
+Environment=VIGIL_SETTLE_BASE_DIR=%h/.sigil/credit-lease
+Environment=VIGIL_SETTLE_SCOPE=*
+EnvironmentFile=-%h/.config/vigil/settle-drain.env
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil settle-drain drain --spool ${VIGIL_SETTLE_SPOOL} --delegation ${VIGIL_SETTLE_DELEGATION} --scope ${VIGIL_SETTLE_SCOPE} --base-dir ${VIGIL_SETTLE_BASE_DIR}
 

@@ -128,15 +128,22 @@ provisioning that. Enable the two load-bearing "nothing-lost" drains first:
 for d in finding-drain settle-drain; do
   cp infra/systemd/vigil-$d.{service,timer} ~/.config/systemd/user/
   cp infra/systemd/vigil-$d.env.example     ~/.config/vigil/$d.env
-  $EDITOR ~/.config/vigil/$d.env     # set the spool, the owner-signed delegation path, the scope, ENABLE=1
+  # Set ONLY the owner-signed delegation path, as an ABSOLUTE path. The spool, scope and (for settle) the
+  # credit-lease base-dir ship as working %h-expanded defaults in the .service — override them in the env
+  # file ONLY with an absolute path. Do NOT put the ENABLE flag here (it is read by the monitor, below).
+  # A %h or relative path in an env file does NOT expand and the drain refuses it (fails loud), so keep paths absolute.
+  $EDITOR ~/.config/vigil/$d.env
 done
-# Tell the staleness dead-man to watch them (so an ENABLED drain that stops firing is alarmed; an
-# un-enabled host raises no false alarm):
+# Arm the staleness dead-man by setting the watch flags in the MONITOR's env (this is the one place they are
+# read — they are inert in the drains' own env files):
 printf 'VIGIL_FINDING_DRAIN_ENABLED=1\nVIGIL_SETTLE_DRAIN_ENABLED=1\n' >> ~/.config/vigil/alerts.env
 systemctl --user daemon-reload
 systemctl --user enable --now vigil-finding-drain.timer vigil-settle-drain.timer vigil-alerts.timer
 systemctl --user list-timers 'vigil-*'                  # confirm next run
 vigil alerts --once --require-push                       # a fresh drain heartbeat ⇒ no alarm
+# NOTE: `vigil alerts` proves LIVENESS (the drain ran), not DELIVERY. Confirm the pipeline end-to-end by
+# driving a real completion/finding through and checking it crosses (the tenant surface updates / the lease
+# settles) — a drain pointed at the wrong directory would run "healthy" yet move nothing.
 ```
 
 A drain crash loses nothing (slice 1: the finding drain reclaims its own in-flight work + de-duplicates;
