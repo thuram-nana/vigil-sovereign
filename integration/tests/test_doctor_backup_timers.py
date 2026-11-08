@@ -337,3 +337,41 @@ def test_timer_probe_invokes_systemctl_in_user_mode(monkeypatch):
     for c in (is_enabled[0], show[0]):
         assert "--user" in c, f"probe does not target the USER systemd manager: {c}"
         assert c[1] == "--user", f"--user must sit immediately after the systemctl binary: {c}"
+
+
+# ── #75: the queue-root backup-coverage advisory ──────────────────────────────────────────────────────
+# The persisted SecurityJob queue now defaults UNDER base_dir (`<base_dir>/jobs`, backup-covered). An
+# operator who OVERRIDES --queue-root to an OUT-OF-TREE path re-opens the nothing-lost gap; `_posture_backups`
+# surfaces that as an ADVISORY NOTE (never a state change — the production gate keys off the timer state).
+
+def test_queue_root_backup_coverage_flags_only_an_out_of_tree_queue(tmp_path):
+    base = tmp_path / "base"
+    # the default (<base>/jobs) and anything UNDER base_dir are captured → no advisory
+    assert dmod._queue_root_backup_coverage(str(base), str(base / "jobs")) is None
+    assert dmod._queue_root_backup_coverage(str(base), str(base / "jobs" / "deep")) is None
+    assert dmod._queue_root_backup_coverage(str(base), str(base)) is None
+    # nothing configured → silent (the in-tree default is covered; no false alarm)
+    assert dmod._queue_root_backup_coverage(str(base), "") is None
+    assert dmod._queue_root_backup_coverage("", str(base / "jobs")) is None
+    # a queue root OUTSIDE base_dir → a NOTE advisory (the nothing-lost gap, reopened by an override)
+    note = dmod._queue_root_backup_coverage(str(base), str(tmp_path / "ext-queue"))
+    assert note and "OUTSIDE" in note and "queue" in note.lower()
+
+
+def test_posture_backups_appends_out_of_tree_advisory_without_changing_state(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    base = tmp_path / "base"
+    base_state, base_detail = dmod._posture_backup_timers(repo)   # the timer posture, advisory-free
+
+    # an OUT-OF-TREE queue root → the advisory is APPENDED but the STATE is UNCHANGED (advisory-only, so the
+    # production gate — which keys off the state — is never flipped by a misconfigured queue root).
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(base))
+    monkeypatch.setenv("VIGIL_QUEUE_ROOT", str(tmp_path / "ext-queue"))
+    state, detail = dmod._posture_backups(repo)
+    assert state == base_state
+    assert base_detail in detail and "OUTSIDE" in detail
+
+    # negative control: the in-tree default appends NO advisory (state + detail byte-identical to the timers).
+    monkeypatch.setenv("VIGIL_QUEUE_ROOT", str(base / "jobs"))
+    state2, detail2 = dmod._posture_backups(repo)
+    assert state2 == base_state and detail2 == base_detail

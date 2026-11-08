@@ -71,6 +71,31 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+# The canonical persisted SecurityJob queue subdir UNDER --base-dir. KEEP IN SYNC with the
+# ``jobs/done/`` skip in ``backup._iter_base_files`` (the audit trail that is deliberately NOT captured).
+_QUEUE_SUBDIR = "jobs"
+
+
+def _default_queue_root(base_dir: str) -> str:
+    """The canonical persisted SecurityJob queue root: ``<base_dir>/jobs`` (#75).
+
+    Rooting the durable queue UNDER ``base_dir`` is what puts it inside the OFFENSE BACKUP SCOPE —
+    ``create_offense_backup`` captures the ``base_dir`` subtree, so the live queue (``queue/ running/
+    leases/ delivery/ fingerprint/``) is backed up and a host loss never STRANDS an in-flight paid job
+    whose credits were already reserved and whose owner-signed launch lease was already minted. An
+    operator-chosen ``--queue-root`` outside ``base_dir`` is NOT captured (the pre-#75 gap); CI passes an
+    explicit ephemeral ``--queue-root`` (``.vigil-queue``), which still wins via :func:`_resolve_queue_root`
+    and stays intentionally uncovered (idempotency WITHIN one CI run only)."""
+    return os.path.join(base_dir, _QUEUE_SUBDIR)
+
+
+def _resolve_queue_root(queue_root: str, base_dir: str) -> str:
+    """Resolve the effective SecurityJob queue root. An explicitly-passed ``--queue-root`` ALWAYS wins
+    (operator override — including CI's ephemeral ``.vigil-queue``); only an EMPTY one falls back to the
+    backup-covered default under ``base_dir`` (:func:`_default_queue_root`). Backward-compatible: passing a
+    ``--queue-root`` is byte-identical to before — this only changes what an OMITTED one resolves to."""
+    return str(queue_root or "").strip() or _default_queue_root(base_dir)
+
 
 def _cmd_provision(args: argparse.Namespace) -> int:
     from vigil_core.vault import Vault
@@ -2678,9 +2703,9 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
     from .jobs.ci_trigger import ci_job_from_github_env, ci_job_from_inputs
     from .live.ci_annotate import annotation_lines, counts, summary_markdown, warning_annotation
 
-    if not str(getattr(args, "queue_root", "") or "").strip():
-        print("vigil ci-scan: --queue-root is required (the durable SecurityJob queue)", file=sys.stderr)
-        return 2
+    # #75: an OMITTED --queue-root now defaults to <base_dir>/jobs (backup-covered) rather than refusing;
+    # an explicit --queue-root (e.g. CI's ephemeral .vigil-queue) still wins unchanged.
+    queue_root = _resolve_queue_root(getattr(args, "queue_root", ""), args.base_dir)
     fail_on = str(getattr(args, "fail_on", "") or "").strip().lower()
     if fail_on and fail_on not in FAIL_ON_CHOICES:
         # fail-closed on a misconfigured gate: reject a typo'd severity rather than silently not gating.
@@ -2720,7 +2745,7 @@ def _cmd_ci_scan(args: argparse.Namespace) -> int:
 
     try:
         outcomes = run_ci_scan(
-            job, queue_root=args.queue_root, base_dir=args.base_dir, trust_root=trust_root,
+            job, queue_root=queue_root, base_dir=args.base_dir, trust_root=trust_root,
             workspace=workspace, base_ref=base_ref, head_ref=head_ref, max_files=args.max_files)
     except Exception as exc:  # noqa: BLE001 — surface a setup failure as a clean non-zero, never a traceback
         print(f"vigil ci-scan: scan setup failed ({type(exc).__name__}: {exc})", file=sys.stderr)
@@ -3955,10 +3980,15 @@ def _cmd_launch_drain(args: argparse.Namespace) -> int:
 
     from . import launch_drain
 
-    drain = launch_drain.LaunchSeamDrain(base_dir=args.base_dir, queue_root=args.queue_root)
+    # #75 (money path): an OMITTED --queue-root now defaults to <base_dir>/jobs so the paid-launch queue is
+    # backup-covered — a host loss can no longer strand a credits-reserved, owner-lease-signed job whose
+    # SecurityJob lived in an un-backed-up queue. An explicit --queue-root (shared with the other drains and
+    # the runner) still wins unchanged.
+    queue_root = _resolve_queue_root(args.queue_root, args.base_dir)
+    drain = launch_drain.LaunchSeamDrain(base_dir=args.base_dir, queue_root=queue_root)
     if args.watch:
         print(f"  polling customer launch leases on {args.base_dir} → SecurityJob queue "
-              f"({args.queue_root}); Ctrl-C to stop")
+              f"({queue_root}); Ctrl-C to stop")
         try:
             drain.watch(interval=args.interval)
         except KeyboardInterrupt:
@@ -4101,11 +4131,10 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
     if not token:
         print("vigil pr-bot: a GitHub token is required (--github-token or $GITHUB_TOKEN)", file=sys.stderr)
         return 2
-    if not str(getattr(args, "queue_root", "") or "").strip():
-        print("vigil pr-bot: --queue-root is required to drain the queue (omit only for "
-              "--print-fix-authorization)", file=sys.stderr)
-        return 2
     base_dir = args.base_dir
+    # #75: an OMITTED --queue-root now defaults to <base_dir>/jobs (backup-covered) rather than refusing the
+    # drain; an explicit --queue-root (shared with reconcile/webhook-drain) still wins unchanged.
+    queue_root = _resolve_queue_root(getattr(args, "queue_root", ""), base_dir)
     # the pinned governance/authority trust root verifies BOTH the engagement authority (the gate) AND the
     # git-write grant (the comment executor). None ⇒ build_repo_gate refuses every job (fail-closed).
     from framework.v2.authority.store import load_authority_root
@@ -4168,7 +4197,7 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
             codefix_config=fix_cfg, trust_root=trust_root, audit=audit, quorum_factory=_quorum_factory)
 
     runner = make_pr_bot_runner(
-        queue_root=args.queue_root, base_dir=base_dir, trust_root=trust_root,
+        queue_root=queue_root, base_dir=base_dir, trust_root=trust_root,
         checkout=make_pr_bot_checkout(github_token=token, base_dir=base_dir),
         changed_files=make_pr_bot_changed_files(token),
         comment_config=GitHubCommentConfig(github_token=token, comment_enabled=bool(args.comment)),
@@ -5842,9 +5871,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "the content-addressed (slug, nonce) delivery_id; a settled lease drains to none.")
     pxd.add_argument("--base-dir", required=True,
                      help="the credit-lease seam root the sovereign plane publishes leases to (= VIGIL_BASE_DIR)")
-    pxd.add_argument("--queue-root", required=True,
+    pxd.add_argument("--queue-root", default="",
                      help="the SecurityJob queue root (shared with `webhook-drain` / `reconcile`; durable FIFO "
-                          "+ delivery/fingerprint dedup markers)")
+                          "+ delivery/fingerprint dedup markers). Default: <base-dir>/jobs — UNDER base_dir so "
+                          "the paid-launch queue is captured by the offense backup (#75).")
     pxd.add_argument("--watch", action="store_true", help="keep polling as new leases are published; Ctrl-C to stop")
     pxd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
     pxd.set_defaults(func=_cmd_launch_drain)

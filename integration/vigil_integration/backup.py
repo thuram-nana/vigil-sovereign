@@ -131,6 +131,16 @@ _STORE_SQLITE_REL = _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
 # A real SQLite database file begins with this fixed 16-byte header; a file that does not is copied raw.
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# The persisted SecurityJob queue defaults UNDER base_dir (``<base_dir>/jobs`` — see ``cli._default_queue_root``,
+# #75), so this backup captures the LIVE queue (``queue/ running/ leases/ delivery/ fingerprint/`` — exactly what
+# is needed to re-drive an in-flight paid job after a host loss, and to preserve exactly-once: the ``delivery/``
+# seen-set, the ``fingerprint/`` work-dedup, and the per-slug ``leases/``). Its completed-job AUDIT trail
+# (``jobs/done/``) is the ONE part deliberately EXCLUDED: it grows unbounded and is NOT needed to re-drive
+# (claim/pending read ``queue/`` and ``requeue_stale`` reads ``running/`` — never ``done/``). KEEP ``jobs`` in
+# sync with ``cli._QUEUE_SUBDIR``.
+_QUEUE_SUBDIR = "jobs"
+_QUEUE_DONE_SUBDIR = "done"
+
 _log = logging.getLogger(__name__)
 
 
@@ -760,6 +770,11 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
         parts = rel.split("/")
         if rel.endswith(".lock") or parts[0] in ("vault", "live-ui") or rel.startswith("ui/pids/"):
             continue
+        # #75: the persisted SecurityJob queue defaults under ``<base_dir>/jobs`` so its LIVE state is captured
+        # here — but its completed-job AUDIT trail (``jobs/done/``) grows unbounded and is NOT needed to
+        # re-drive, so skip exactly that one subtree (``queue/ running/ leases/ delivery/ fingerprint/`` stay).
+        if len(parts) >= 2 and parts[0] == _QUEUE_SUBDIR and parts[1] == _QUEUE_DONE_SUBDIR:
+            continue
         if rel in skip_names:
             continue
         # W5-4 (#448) × W7-4 (#462): the top-level install manifest is a per-INSTALL/host marker the startup
@@ -1099,6 +1114,25 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
             target.write_bytes(data)
             if _is_sensitive_rel(rel):
                 os.chmod(target, 0o600)
+
+        # [JOBQ-75 fold / L1-2] The live SecurityJob queue is deliberately OWNER-ONLY (the scheduler mkdirs
+        # queue/running/done 0700 + writes job files 0600; SecurityJobQueue chmods delivery/fingerprint/leases
+        # 0700 + markers 0600). The write loop above lands non-sensitive files at the process umask (0644 files
+        # / 0755 dirs), which would expose paid-job metadata (tenant_id, delivery_id, cust_ slug) to other local
+        # UIDs on a multi-user DR host. Re-assert owner-only on the restored DEFAULT queue subtree (keyed to the
+        # <base>/jobs default, as the done/-skip is). Best-effort: a chmod failure never aborts a verified
+        # restore (the content — the nothing-lost guarantee — is already written + re-verified).
+        staged_jobs = staged_base / _QUEUE_SUBDIR
+        if staged_jobs.is_dir():
+            for _qp in staged_jobs.rglob("*"):
+                try:
+                    os.chmod(_qp, 0o700 if _qp.is_dir() else 0o600)
+                except OSError:
+                    pass
+            try:
+                os.chmod(staged_jobs, 0o700)
+            except OSError:
+                pass
 
         # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
         # plaintext-0600) — each with its own AEAD purpose context. The vault dir is built inside the staged

@@ -151,6 +151,15 @@ settle is idempotent per `(slug,nonce)`), and the dead-man alarms if a timer sto
 both runs and recovers without a human. (The remaining drains — `billing-drain`, `monitoring-drain`,
 `ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` — follow the same pattern.)
 
+> **Persisted queue root (#75).** The drains enqueue each `SecurityJob` under the canonical root
+> **`<base_dir>/jobs`** (the default when `--queue-root` is omitted) — it lives UNDER `--base-dir`, so the
+> offense backup (§2b) captures the live queue (`queue/ running/ leases/ delivery/ fingerprint/`) and a host
+> loss never strands an in-flight **paid** job (credits reserved + launch lease signed). Its `jobs/done/`
+> completed-job audit trail is excluded by design (unbounded, not needed to re-drive). Keep
+> `launch-drain`/`webhook-drain`/`reconcile`/`pr-bot` on that default; an **out-of-tree** `--queue-root` is NOT
+> backup-covered (`vigil doctor` flags a `VIGIL_QUEUE_ROOT` resolving outside `--base-dir`). CI's GitHub Action
+> default `.vigil-queue` is deliberately **ephemeral**/uncovered — idempotency within a single CI run only.
+
 ## 3. Point Namecheap at Cloudflare, Cloudflare at the Elastic IP
 
 Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS from Namecheap to Cloudflare
