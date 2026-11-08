@@ -44,16 +44,21 @@ _ATTEMPTS_DIRNAME = ".engage-attempts"
 _MAX_ARM_ATTEMPTS = 3
 
 
-def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> int:
-    """Record a durable per-``(slug, nonce)`` arm attempt and return its 1-based ATTEMPT COUNT. Numbered
-    ``O_EXCL`` markers under ``.engage-attempts``: the Nth call creates ``<key>.<N>`` and returns N. Count 1 is
-    a FRESH arm (``run_engagement`` consumes the single-use floor); count > 1 is a RE-DRIVE (resume — the arm
-    re-validates WITHOUT re-burning the floor, so a crash-after-consume re-delivery is not stranded as a
+def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> "tuple[int, bool]":
+    """Record a durable per-``(slug, nonce)`` arm attempt and return ``(ATTEMPT COUNT, slot_created)``. Numbered
+    ``O_EXCL`` markers under ``.engage-attempts``: the Nth distinct call creates ``<key>.<N>`` and returns N.
+    Count 1 is a FRESH arm (``run_engagement`` consumes the single-use floor); count > 1 is a RE-DRIVE (resume —
+    the arm re-validates WITHOUT re-burning the floor, so a crash-after-consume re-delivery is not stranded as a
     'replay'); count >= ``_MAX_ARM_ATTEMPTS`` is the TERMINAL attempt (its failure is a real abandonment, not a
-    transient retry). FAIL-SAFE: an unusable marker store returns 1 (a FRESH, NON-terminal arm — it never
-    silently resumes an un-attempted lease, and never reports TERMINAL off a broken store, so a transient
+    transient retry). FAIL-SAFE: an unusable marker store returns ``(1, False)`` (a FRESH, NON-terminal arm — it
+    never silently resumes an un-attempted lease, and never reports TERMINAL off a broken store, so a transient
     failure is never mis-refunded). The key is ``sha256(slug\\x00nonce)``; a genuine re-lease (new nonce) gets a
-    NEW key ⇒ a fresh count."""
+    NEW key ⇒ a fresh count.
+
+    ``slot_created`` is True ONLY when THIS call actually minted a new numbered slot. It is False on the two
+    paths that mint NO slot — the FAIL-SAFE OSError (``(1, False)``) and SATURATED (``(MAX+1, False)``) returns —
+    so a later in-flight-pause rollback (:func:`_release_attempt`) can be gated on it and never unlink a slot
+    THIS attempt did not create (which would be a PRIOR attempt's, silently eroding crash budget)."""
     base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
     key = hashlib.sha256((str(slug) + "\x00" + str(nonce)).encode("utf-8")).hexdigest()
     try:
@@ -63,12 +68,12 @@ def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> int:
             try:
                 fd = os.open(d / f"{key}.{n}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(fd)
-                return n
+                return n, True
             except FileExistsError:
                 continue
-        return _MAX_ARM_ATTEMPTS + 1                    # all slots taken ⇒ beyond max (terminal)
+        return _MAX_ARM_ATTEMPTS + 1, False            # all slots taken ⇒ beyond max (terminal); minted NO slot
     except OSError:
-        return 1                                       # fail-safe: fresh, NON-terminal arm (never auto-resume)
+        return 1, False                                # fail-safe: fresh, NON-terminal arm; minted NO slot
 
 
 #: pause/resume PR-3 — the suffix of the durable per-(slug,nonce) "the floor was burned; the next arm must
@@ -299,7 +304,7 @@ def make_engage_worker(
         # bind / settlement, and two concurrent arms of one slug are serialized by the per-slug run lease; the
         # marker only governs whether THIS (slug,nonce) re-burns its own floor. No nonce ⇒ fresh arm (safe).
         nonce = str((job.extra or {}).get("nonce") or "")
-        attempt = _mark_attempt(base_dir, job.slug, nonce) if nonce else 1
+        attempt, _slot_created = _mark_attempt(base_dir, job.slug, nonce) if nonce else (1, False)
         # a re-drive resumes (K4-5a), never re-burns the floor. pause/resume PR-3: an in-flight PAUSE rolls its
         # attempt slot back (so pauses never consume crash-attempt budget), so ``attempt`` alone can read 1 on a
         # post-pause re-drive even though the floor WAS burned on the original arm — the resume-required marker
@@ -353,7 +358,12 @@ def make_engage_worker(
             # Then re-raise unchanged, so JobRunner still marks the job failed + release_delivery → re-enqueue.
             if _is_engagement_paused(_run_exc):
                 if nonce:
-                    _release_attempt(base_dir, job.slug, nonce, attempt)
+                    # Roll back ONLY a slot THIS attempt actually minted — on the _mark_attempt fail-safe /
+                    # saturated paths no slot was created, and unlinking ``<key>.<attempt>`` there would delete a
+                    # PRIOR attempt's slot and silently erode crash budget. resume-required is recorded
+                    # regardless (the floor burn it reflects is independent of whether a slot was minted).
+                    if _slot_created:
+                        _release_attempt(base_dir, job.slug, nonce, attempt)
                     _record_resume_required(base_dir, job.slug, nonce)
                 raise
             # Emit a refunding FAILED completion ONLY on the TERMINAL attempt. A transient failure (attempt <

@@ -186,6 +186,32 @@ def test_no_pause_is_byte_identical(monkeypatch):
     assert not os.path.exists(_resume_marker(base, "n1"))  # a clean run records NO pause/resume marker
 
 
+def test_pause_on_failsafe_mark_does_not_delete_a_prior_slot(monkeypatch):
+    # Red-pen LOW (folded): _mark_attempt's FAIL-SAFE / SATURATED paths return an attempt number but mint NO
+    # slot. A pause must then NOT roll back ``<key>.<attempt>`` — that slot belongs to a PRIOR attempt, and
+    # unlinking it would silently erode crash budget (a genuinely-failing launch would need an extra real crash
+    # to terminate). The _slot_created flag gates the rollback.
+    import vigil_integration.jobs.engage_worker as EW
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner)
+    # a PRIOR crash's slot 1 exists on disk
+    os.makedirs(_attempts_dir(base), exist_ok=True)
+    open(_slot(base, "n1", 1), "w").close()
+    # force THIS attempt onto the fail-safe path: attempt=1 but slot_created=False (no slot minted)
+    monkeypatch.setattr(EW, "_mark_attempt", lambda base_dir, slug, nonce: (1, False))
+    emits: list = []
+
+    def _run(**kw):
+        raise EngagementPaused("paused")
+
+    w = _mk(monkeypatch, base, _run, emits)
+    with pytest.raises(EngagementPaused):
+        w(_job(nonce="n1"))
+    assert emits == []                                     # no settle (pause path)
+    assert os.path.exists(_slot(base, "n1", 1))            # the PRIOR slot survives — crash budget intact
+    assert os.path.exists(_resume_marker(base, "n1"))      # resume-required still recorded (burn-driven, not slot-driven)
+
+
 def test_crash_does_not_set_resume_required(monkeypatch):
     # A genuine crash (NOT a pause) must NOT look like a pause: it consumes its attempt slot (crash budget) and
     # records NO resume-required marker — so crash re-drive resumes via the existing attempt>1 path, unchanged.
