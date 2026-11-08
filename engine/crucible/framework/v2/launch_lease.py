@@ -180,6 +180,22 @@ def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
         # behaviour change on any currently-reachable input, and the arm must never proceed when its
         # anti-replay/revocation state cannot be trusted.
         return False, f"credit-lease settlement status unreadable (fail-closed): {type(e).__name__}", None
+    # pause/resume PR-2: a lease whose (slug, nonce) is PAUSED is a REVERSIBLE operator halt — REFUSE the verify
+    # as a PARALLEL re-check to the settled conjunct above, on BOTH the arm (consume=True) and the enqueue
+    # pre-check (consume=False). Because this is the ONE shared verify+bind chokepoint and the refusal returns
+    # BEFORE verify_customer_launch_lease reaches _advance_floor, a pause NEVER advances/burns the single-use
+    # issued_at floor: a later clear_lease_pause (resume) RE-ARMS the SAME lease and still passes the identical
+    # owner-pin + bind + window checks. DEFAULT-OFF: with no pause marker is_lease_paused is False, so behaviour
+    # is byte-identical to today. FATAL-2: the vigil_integration.live import stays LAZY inside the function (never
+    # at module scope), exactly as the broker import above, so the two-plane boundary + test_two_env_boundary hold.
+    try:
+        from vigil_integration.live.credit_lease_pause import is_lease_paused
+        if is_lease_paused(base, safe, doc.nonce):
+            return False, "lease is paused (operator halt; resume to re-arm)", None
+    except Exception as e:  # noqa: BLE001 — FAIL-CLOSED: is_lease_paused is total (an existing-but-corrupt marker
+        # already returns True/halt), so this backstops the same latent-coupling class the settled re-check does —
+        # if the pause store or its import ever raised, REFUSE rather than fall through to consume.
+        return False, f"credit-lease pause status unreadable (fail-closed): {type(e).__name__}", None
     return True, "ok", doc
 
 
