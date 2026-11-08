@@ -229,7 +229,7 @@ class Provisioner:
         the transaction lock, before the signup commit marker, so a committed signup is always audited.
         Only NON-critical telemetry (`critical=False`, e.g. a login outcome) swallows a write failure,
         following a separate availability policy."""
-        payload = {
+        payload: "dict[str, object]" = {
             "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
             "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
             "reason": str(reason)[:160]}
