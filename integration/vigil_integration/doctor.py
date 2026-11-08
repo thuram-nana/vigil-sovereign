@@ -1085,6 +1085,13 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
     return deps
 
 
+# The supervised SaaS drains whose stall loses money or confirmed results: the settle drain (settle_launch
+# charge/refund) and the finding drain (confirmed-FACT crossing to the tenant). Both are OPTIONAL dead-man
+# units (watched only once enabled/firing), so a WATCHED one in alarm is a real nothing-lost failure that
+# must make `vigil doctor` RED (readiness #69 MONEY gate). Names match infra/systemd/*.service + HA_UNITS.
+_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service")
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1315,7 +1322,22 @@ def collect(repo_root) -> dict:
                   "vigil-alerts.timer` (see infra/systemd/vigil-alerts.*).")
         else:
             for st in bad:
-                _note(f"scheduled unit {st.unit} is {st.state}: {st.detail}")
+                # readiness #69 MONEY gate: the settle drain (settle_launch charge/refund) and the finding
+                # drain (confirmed-FACT crossing) are OPTIONAL units — watched by the dead-man ONLY once
+                # enabled or firing (UnitSpec.watched_by_default). So a WATCHED one in alarm is a real
+                # nothing-lost failure (the drain FAILED its last run — e.g. a standing rejected/ quarantine
+                # made it exit non-zero — or STALE because its timer stopped), not the opt-in-not-enabled
+                # gap the ALL-ABSENT branch above handles. Make it a HARD issue so `vigil doctor` — the
+                # deploy preflight / production gate — goes RED until it is cleared. Non-money units stay
+                # advisory (`vigil alerts` owns the full dead-man).
+                if st.unit in _MONEY_DRAIN_UNITS:
+                    _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
+                           f"stalled/failed settle drain means completed paid runs are not being "
+                           f"charged/refunded; a stalled finding drain means confirmed FACTs are not "
+                           f"crossing to their tenant. Run `vigil alerts --status`, clear any quarantine "
+                           f"(the unit's rejected/ dir), and restart the unit.")
+                else:
+                    _note(f"scheduled unit {st.unit} is {st.state}: {st.detail}")
         d_stale, d_detail = _ua.delivery_is_stale(_ua.default_state_dir())
         report["unit_alerts"]["delivery_stale"] = d_stale
         report["unit_alerts"]["delivery_detail"] = d_detail
