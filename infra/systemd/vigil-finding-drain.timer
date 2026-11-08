@@ -21,8 +21,8 @@ Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
 # immediately, so a tight cadence is cheap; tighten/loosen to your latency need (keep under the dead-man bound).
 OnBootSec=60
 OnUnitActiveSec=60
-# Run once on the next wake if the machine was asleep at the scheduled time.
-Persistent=true
+# (No Persistent= — it only affects OnCalendar= timers; this monotonic timer re-arms 60s after each boot, which
+# already covers a machine that was off.)
 # Smear the start so many hosts do not fire simultaneously.
 RandomizedDelaySec=15
 Unit=vigil-finding-drain.service

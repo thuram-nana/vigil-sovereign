@@ -92,10 +92,13 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _truthy(raw: "str | None") -> bool:
-    """A conservative truthiness for an enable flag: only an explicit affirmative turns a unit ON. Anything
-    else (unset, empty, '0', 'false', garbage) leaves an OPTIONAL unit OFF — so an optional unit is watched
-    fail-closed ONLY on a deliberate opt-in, never by accident."""
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+    """A truthiness for an enable flag: only an affirmative turns a unit ON. Anything else (unset, empty, '0',
+    'false', garbage) leaves an OPTIONAL unit OFF — so an optional unit is early-armed ONLY on a deliberate
+    opt-in, never by accident. The affirmative set is broad (1/true/yes/on/y/t/enable/enabled) so a reasonable
+    operator value is not silently ignored; since the enable flag is only an EARLY-ARM (run-state coupling still
+    watches a drain once it fires), a rejected affirmative is at most a bounded early-arm miss, never a silent
+    un-watch of a firing drain."""
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on", "y", "t", "enable", "enabled"}
 
 
 # ── the unit registry ───────────────────────────────────────────────────────────────────────────────────
@@ -181,6 +184,25 @@ HA_UNITS: tuple[UnitSpec, ...] = (
              "SaaS: drain the engagement-completion settle spool → settle_launch (charge/refund) (60s; opt-in)",
              optional=True, enable_env="VIGIL_SETTLE_DRAIN_ENABLED"),
 )
+
+
+def _validate_registry(units: "tuple[UnitSpec, ...]") -> None:
+    """Fail-fast invariant on the registry (run at import). An OPTIONAL unit MUST name a non-empty
+    ``enable_env``: with an empty one, ``watched_by_default`` short-circuits ``bool("") and …`` to False, so the
+    unit can never be EARLY-ARMED by any env — it would be watched only after its first heartbeat and silently
+    unwatched before it (a darkened dead-man with no knob to turn it on). A unit that must always be watched
+    stays ``optional=False`` (watched unconditionally). This turns a future mis-edit — e.g. flipping an always-on
+    security unit to ``optional`` without wiring an enable flag — into an import-time error rather than a
+    silently-unwatched guard that passes CI."""
+    for u in units:
+        if u.optional and not u.enable_env:
+            raise AssertionError(
+                f"UnitSpec {u.unit!r} is optional but has an empty enable_env — an optional unit MUST name the "
+                f"env var that early-arms its watch (else it is unwatchable before its first heartbeat). A unit "
+                f"that should always be watched must be optional=False.")
+
+
+_validate_registry(HA_UNITS)
 
 _BY_NAME = {u.unit: u for u in HA_UNITS}
 

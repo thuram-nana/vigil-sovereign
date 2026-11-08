@@ -95,6 +95,53 @@ def test_registered_units_and_timers_actually_exist_on_disk():
         assert (_SYSTEMD / u.timer).exists(), f"{u.timer} registered but no timer file"
 
 
+# The security-critical fail-closed guarantee is that the ALWAYS-ON set (watched unconditionally) and the
+# OPTIONAL set (watched only when early-armed or run-proven) are each pinned BY NAME here — independently of the
+# `optional` flag the code reads. Without this pin the fail-closed tests derive their expectation from the same
+# flag, so a regression flipping an always-on unit (e.g. the spine-integrity verifier) to optional would pass CI
+# while that unit goes silently unwatched. Changing either set is therefore a DELIBERATE edit to this pin.
+_PINNED_OPTIONAL = {"vigil-finding-drain.service", "vigil-settle-drain.service"}
+_PINNED_ALWAYS_ON = {
+    "vigil-backup.service", "vigil-backup-push.service", "vigil-backup-drill.service",
+    "vigil-ha-mirror.service", "vigil-integrity.service", "vigil-posture.service",
+    "vigil-reprove.service", "vigil-twin.service", "vigil-checkpoint.service",
+}
+
+
+def test_optional_set_is_exactly_the_two_saas_drains():
+    assert {s.unit for s in ua.registry() if s.optional} == _PINNED_OPTIONAL
+
+
+def test_always_on_set_is_pinned_by_name_not_by_flag():
+    """Flip an always-on unit to optional and THIS fails — independently of any flag-derived count."""
+    assert {s.unit for s in ua.registry() if not s.optional} == _PINNED_ALWAYS_ON
+    # the two partitions exactly cover the registry (no unit in neither / both)
+    assert _PINNED_ALWAYS_ON | _PINNED_OPTIONAL == {s.unit for s in ua.registry()}
+    assert not (_PINNED_ALWAYS_ON & _PINNED_OPTIONAL)
+
+
+def test_registry_rejects_an_optional_unit_with_empty_enable_env():
+    """Import-time invariant: an optional unit with no enable_env (unwatchable before its first heartbeat, with
+    no knob to early-arm it) is refused — so a flip-to-optional cannot silently darken a fail-closed guard."""
+    bad = ua.UnitSpec("vigil-integrity.service", "vigil-integrity.timer", 900, 60, "x",
+                      optional=True, enable_env="")
+    with pytest.raises(AssertionError):
+        ua._validate_registry((bad,))
+    ua._validate_registry(ua.registry())   # the shipped registry satisfies it
+
+
+def test_every_always_on_unit_absent_alarms_with_all_enable_flags_cleared(tmp_path, monkeypatch):
+    """Flag-INDEPENDENT fail-closed proof: with EVERY drain enable flag cleared and an empty state dir, the
+    monitor alarms ABSENT for each PINNED always-on unit (by name), while the opted-out drains stay unwatched."""
+    monkeypatch.delenv("VIGIL_FINDING_DRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_SETTLE_DRAIN_ENABLED", raising=False)
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=_RecordingSink())
+    states = {s["unit"]: s["state"] for s in summary["statuses"]}
+    for unit in _PINNED_ALWAYS_ON:
+        assert states.get(unit) == ua.ABSENT, f"{unit} is not ABSENT-alarmed fail-closed"
+    assert _PINNED_OPTIONAL.isdisjoint(states)   # opted-out drains not watched
+
+
 # ── heartbeat write/read roundtrip ──────────────────────────────────────────────────────────────────────
 def test_heartbeat_write_is_atomic_roundtrip(tmp_path):
     ua.write_unit_heartbeat(tmp_path, "vigil-backup.service", now=T0, ok=True, result="success")
@@ -454,5 +501,8 @@ def test_loop_uses_injected_clock_and_cadence(tmp_path):
 # ── FATAL-2 boundary ────────────────────────────────────────────────────────────────────────────────────
 def test_module_never_imports_sigil_or_framework():
     src = (_REPO / "integration" / "vigil_integration" / "unit_alerts.py").read_text(encoding="utf-8")
-    assert not re.search(r"^\s*(import|from)\s+sigil", src, re.M), "FATAL-2: unit_alerts must not import sigil"
-    assert not re.search(r"^\s*(import|from)\s+framework", src, re.M), "FATAL-2: must not import framework"
+    # The two planes the sovereign-side monitor must never pull in: the sovereign app (sigil) and the whole
+    # offense engine (framework / strix / crucible). The guard matches any of them so a future refactor that
+    # routes through an offense module at import scope reds here, not silently at runtime.
+    assert not re.search(r"^\s*(import|from)\s+(sigil|framework|strix|crucible)\b", src, re.M), \
+        "FATAL-2: unit_alerts must import no sigil / framework / strix / crucible module at module scope"

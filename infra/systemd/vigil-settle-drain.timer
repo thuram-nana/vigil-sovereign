@@ -15,7 +15,7 @@ Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
 [Timer]
 OnBootSec=60
 OnUnitActiveSec=60
-Persistent=true
+# (No Persistent= — it only affects OnCalendar= timers; this monotonic timer re-arms 60s after each boot.)
 RandomizedDelaySec=15
 Unit=vigil-settle-drain.service
 
