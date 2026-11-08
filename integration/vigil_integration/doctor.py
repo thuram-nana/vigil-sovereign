@@ -578,7 +578,49 @@ def _fmt_timer(t: dict) -> str:
     return f"{name}: enabled, never fired"
 
 
+def _queue_root_backup_coverage(base_dir: str, queue_root: str) -> "str | None":
+    """#75 advisory: is the configured SecurityJob ``--queue-root`` captured by the offense backup?
+
+    ``create_offense_backup`` captures the ``base_dir`` subtree only; the persisted queue now DEFAULTS to
+    ``<base_dir>/jobs`` (in-tree, captured — see ``cli._default_queue_root``). An operator who OVERRIDES the
+    queue root to a path OUTSIDE ``base_dir`` re-opens the nothing-lost gap: a host loss strands in-flight
+    paid jobs (credits reserved, launch lease signed) whose SecurityJob lived in an un-backed-up queue.
+
+    Returns an advisory NOTE when a NON-EMPTY ``queue_root`` resolves OUTSIDE ``base_dir``, else ``None``.
+    Pure (path normalization only). Advisory-ONLY — the caller never flips posture STATE on it; it is silent
+    when nothing is configured (the default is in-tree + covered) so it raises no false alarm."""
+    qr = (queue_root or "").strip()
+    bd = (base_dir or "").strip()
+    if not qr or not bd:
+        return None                                   # nothing to assess (default <base_dir>/jobs is covered)
+    try:
+        q = Path(qr).expanduser().resolve()
+        b = Path(bd).expanduser().resolve()
+    except OSError:
+        return None
+    if q == b or q.is_relative_to(b):
+        return None                                   # under base_dir → captured by create_offense_backup
+    return (f"NOTE: SecurityJob queue root {qr} resolves OUTSIDE the backup-captured base_dir {bd} — "
+            "in-flight jobs there are NOT captured by `vigil backup`; a host loss would STRAND them "
+            "(credits reserved, lease signed). Use the default <base_dir>/jobs, or move the queue under "
+            "base_dir, so the durable queue is backup-covered (#75).")
+
+
 def _posture_backups(repo: Path) -> "tuple[str, str]":
+    """Backup-durability posture (:func:`_posture_backup_timers`) PLUS a #75 queue-coverage advisory: when
+    ``VIGIL_QUEUE_ROOT`` names a SecurityJob queue root OUTSIDE the backup-captured ``VIGIL_BASE_DIR`` tree,
+    append a NOTE so a misconfigured deploy is visible at preflight. The posture STATE is UNCHANGED (advisory
+    only — the production gate keys off the timer state, never this NOTE), and the probe is silent when the
+    default in-tree queue (``<base_dir>/jobs``) is in use."""
+    state, detail = _posture_backup_timers(repo)
+    note = _queue_root_backup_coverage(os.environ.get("VIGIL_BASE_DIR", ""),
+                                       os.environ.get("VIGIL_QUEUE_ROOT", ""))
+    if note:
+        detail = f"{detail} | {note}"
+    return state, detail
+
+
+def _posture_backup_timers(repo: Path) -> "tuple[str, str]":
     """Is BACKUP DURABILITY actually running? Reads infra/systemd/*.timer enablement AND each paired
     service's last successful run via systemctl. The state is decided over the DURABILITY set — at least one
     of {vigil-backup, vigil-backup-push} PLUS vigil-backup-drill:

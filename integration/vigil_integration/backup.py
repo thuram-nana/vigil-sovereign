@@ -131,6 +131,16 @@ _STORE_SQLITE_REL = _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
 # A real SQLite database file begins with this fixed 16-byte header; a file that does not is copied raw.
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# The persisted SecurityJob queue defaults UNDER base_dir (``<base_dir>/jobs`` — see ``cli._default_queue_root``,
+# #75), so this backup captures the LIVE queue (``queue/ running/ leases/ delivery/ fingerprint/`` — exactly what
+# is needed to re-drive an in-flight paid job after a host loss, and to preserve exactly-once: the ``delivery/``
+# seen-set, the ``fingerprint/`` work-dedup, and the per-slug ``leases/``). Its completed-job AUDIT trail
+# (``jobs/done/``) is the ONE part deliberately EXCLUDED: it grows unbounded and is NOT needed to re-drive
+# (claim/pending read ``queue/`` and ``requeue_stale`` reads ``running/`` — never ``done/``). KEEP ``jobs`` in
+# sync with ``cli._QUEUE_SUBDIR``.
+_QUEUE_SUBDIR = "jobs"
+_QUEUE_DONE_SUBDIR = "done"
+
 _log = logging.getLogger(__name__)
 
 
@@ -759,6 +769,11 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
         rel = p.relative_to(base).as_posix()
         parts = rel.split("/")
         if rel.endswith(".lock") or parts[0] in ("vault", "live-ui") or rel.startswith("ui/pids/"):
+            continue
+        # #75: the persisted SecurityJob queue defaults under ``<base_dir>/jobs`` so its LIVE state is captured
+        # here — but its completed-job AUDIT trail (``jobs/done/``) grows unbounded and is NOT needed to
+        # re-drive, so skip exactly that one subtree (``queue/ running/ leases/ delivery/ fingerprint/`` stay).
+        if len(parts) >= 2 and parts[0] == _QUEUE_SUBDIR and parts[1] == _QUEUE_DONE_SUBDIR:
             continue
         if rel in skip_names:
             continue
