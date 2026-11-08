@@ -21,7 +21,7 @@ from typing import Any, Iterator
 
 from ..config import (SCOPE, SPINE_GROUP_COMMIT_COALESCE, SPINE_PATH, SPINE_SEG_MAX_BYTES,
                       SPINE_SEG_MAX_RECORDS)
-from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
+from ..reuse import ChainEntry, append_entry, build_chain, canonical_json, digest_payload, verify_chain
 from vigil_core.models import _GENESIS_PREV       # defined in vigil_core (the reuse.* shims are runtime-only)
 from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
@@ -1116,11 +1116,18 @@ class SpineStore:
         coalesced ack is durable-before-ack. Latecomers that arrive during the write queue at the tail and are
         led by the next head after notify_all. Only the queue head, and only while no leader is in flight,
         ever leads, so there is never a second concurrent leader."""
-        # (a) Pre-flight the payload on THIS caller's own thread, BEFORE enqueue: a non-serializable payload
-        # must fail ONLY its owner (raised right here), so the batch the leader hands to append_many is
-        # all-serializable. Otherwise one poison payload would trip append_many's ATOMIC rollback and fail the
-        # ENTIRE group — a poison append must never take its innocent co-batched neighbours down with it.
-        json.dumps(spec["payload"])
+        # (a) Pre-flight the payload on THIS caller's own thread, BEFORE enqueue: a payload the real write
+        # would REJECT must fail ONLY its owner (raised right here), so the batch the leader hands to
+        # append_many is all-writable. Otherwise one poison payload would trip append_many's ATOMIC rollback
+        # and fail the ENTIRE group — a poison append must never take its innocent co-batched neighbours down
+        # with it. Use canonical_json, NOT plain json.dumps: the write path serializes the payload through
+        # canonical_json(sort_keys=True) — seal_payload canonical_json's each content field, and
+        # digest_payload canonical_json's the content — so a payload plain json.dumps ACCEPTS but
+        # canonical_json REJECTS (e.g. a nested dict with mixed str/int keys that sort_keys cannot order) would
+        # pass a plain pre-flight, enter the batch, then raise inside the leader's append_many and poison its
+        # neighbours. Mirroring the write's serializer keeps isolation EXACT (rejects iff the write would) and
+        # strictly supersets the plain-json non-serializable check.
+        canonical_json(spec["payload"])
         w = _Waiter(spec)
         with self._commit_cv:
             self._commit_queue.append(w)
@@ -1267,12 +1274,19 @@ class SpineStore:
         # concurrent appends into one group that a single leader thread writes via the UNCHANGED append_many()
         # (one fsync per group — the 1M-scale concurrent-append throughput lift). Take the DIRECT path (today's
         # UNCHANGED code below) whenever ANY of: the flag is OFF; dedup was requested (append_many has no
-        # dedup look-back); or THIS thread already HOLDS spine_lock (a re-entrant check-then-append txn such as
-        # envelope.consume's replay gate — it MUST NOT delegate to a leader on another thread, which would then
-        # deadlock acquiring the spine_lock this thread holds). The _is_owned() probe fails SAFE: if it cannot
-        # prove the lock is UNHELD it returns held, so an unprovable case goes direct, never risking the
-        # deadlock. The direct-path body below is UNCHANGED.
-        if self._group_commit_coalesce and not dedup and not self._holds_spine_lock():
+        # dedup look-back); the payload CARRIES CONTENT TO SEAL (has_content); or THIS thread already HOLDS
+        # spine_lock (a re-entrant check-then-append txn such as envelope.consume's replay gate — it MUST NOT
+        # delegate to a leader on another thread, which would then deadlock acquiring the spine_lock this
+        # thread holds). A CONTENT append goes DIRECT because its seal needs the spine DEK: on a LOCKED vault
+        # _spine_dek raises VaultLocked INSIDE the leader's append_many, and the leader-exception fan-out would
+        # then fail EVERY co-batched waiter — blocking an innocent pure-metadata/signal append (e.g. a
+        # kill-switch panic) that the direct path guarantees is "never blocked by a locked vault". Routing
+        # content direct keeps that fail-safe: a content seal failure stays isolated to its own caller, exactly
+        # as today, while only never-encrypting metadata/signal appends coalesce. The _is_owned() probe fails
+        # SAFE: if it cannot prove the lock is UNHELD it returns held, so an unprovable case goes direct, never
+        # risking the deadlock. The direct-path body below is UNCHANGED.
+        if (self._group_commit_coalesce and not dedup and not envelope.has_content(payload)
+                and not self._holds_spine_lock()):
             return self._append_coalesced({
                 "kind": kind, "source": source, "actor": actor, "payload": payload,
                 "parent_id": parent_id, "supersedes_id": supersedes_id,

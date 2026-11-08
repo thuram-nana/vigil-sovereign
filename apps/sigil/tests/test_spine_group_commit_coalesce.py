@@ -16,6 +16,7 @@ legacy path. Sovereign leg: PYTHONPATH=apps/sigil:packages/core/vigil_core, SIGI
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import time
@@ -100,6 +101,13 @@ def test_concurrent_appends_coalesce_into_one_contiguous_attributed_chain():
         i = r.payload["i"]
         assert r.actor == f"actor-{i}" and r.source == f"src-{i}", (
             f"cross-attribution at seq {r.seq}: actor={r.actor!r} source={r.source!r} for payload i={i}")
+    # [red-pen MED fold] RETURNED-seq attribution: the seq handed BACK to caller i must be the seq of i's OWN
+    # record. The checks above prove each record is internally consistent (actor-i ↔ payload i) and the returned
+    # set is exactly {0..N-1}, but a _finalize_batch seq→waiter MIS-map would hand caller i a NEIGHBOUR's seq
+    # while EVERY assertion above still passed. Bind returned-seq → caller here so a mis-map cannot false-green.
+    by_seq = {r.payload["i"]: r.seq for r in recs}
+    for i, seq in got.items():
+        assert seq == by_seq[i], f"caller {i} was handed seq {seq}, but its own record is seq {by_seq[i]} (mis-map)"
     ok, why = s.verify()
     assert ok, f"verify() must be green after coalesced concurrent appends: {why}"
 
@@ -293,6 +301,93 @@ def test_poison_payload_fails_only_its_owner_not_the_coalesced_batch(monkeypatch
     assert results["poison"][0] == "err", f"the poison caller MUST raise: {results.get('poison')}"
     assert results["good"][0] == "ok", f"the innocent co-batched append MUST succeed (poison isolated): {results.get('good')}"
     assert [r.seq for r in s.iter_records()] == [0, 1], "chain is contiguous over the good records; poison never landed"
+    assert s.verify()[0]
+
+
+def test_mixed_key_payload_poison_fails_only_its_owner_canonical_mismatch(monkeypatch):
+    """REGRESSION (red-pen MED): the pre-flight must mirror the WRITE's serializer, not plain ``json.dumps``.
+    The write path serializes the payload through ``canonical_json(sort_keys=True)`` (``seal_payload`` on each
+    content field + ``digest_payload`` over the content), so a payload that plain ``json.dumps`` ACCEPTS but
+    ``canonical_json`` REJECTS — a nested dict with mixed str/int keys that ``sort_keys`` cannot order — would
+    pass a plain pre-flight, enter the batch, then RAISE inside the leader's ``append_many`` and poison EVERY
+    innocent co-batched append. With the ``canonical_json`` pre-flight it fails ONLY its own owner, before
+    enqueue. Same harness as the plain poison test, but the poison passes ``json.dumps`` and fails only under
+    canonical ``sort_keys``."""
+    bad_payload = {"mixed": {"z": 1, 2: "y"}}                 # plain json.dumps OK (int key coerced); sort_keys raises
+    json.dumps(bad_payload)                                  # sanity: the OLD plain pre-flight would have PASSED this
+    s = _store_on()
+    primer_leading = threading.Event()
+    let_primer_go = threading.Event()
+    calls = {"n": 0}
+    real_am = s.append_many
+
+    def wrapped(specs):
+        calls["n"] += 1
+        if calls["n"] == 1:                                 # hold the FIRST leader so good+poison queue behind it
+            primer_leading.set()
+            assert let_primer_go.wait(timeout=5)
+        return real_am(specs)
+
+    monkeypatch.setattr(s, "append_many", wrapped)
+    results: dict = {}
+
+    def primer() -> None:
+        results["primer"] = s.append(kind=_KIND, source="primer", actor="primer", payload={"p": 1})
+
+    def good() -> None:
+        assert primer_leading.wait(timeout=5)
+        try:
+            results["good"] = ("ok", s.append(kind=_KIND, source="g", actor="g", payload={"i": 1}))
+        except Exception as e:                              # noqa: BLE001 — must NOT happen (isolation)
+            results["good"] = ("err", type(e).__name__)
+
+    def poison() -> None:
+        assert primer_leading.wait(timeout=5)
+        try:
+            s.append(kind=_KIND, source="p", actor="p", payload=bad_payload)
+            results["poison"] = ("ok", None)
+        except Exception as e:                              # noqa: BLE001 — EXPECTED (fails only its owner)
+            results["poison"] = ("err", type(e).__name__)
+
+    tp = _thr(target=primer, name="primer")
+    tg = _thr(target=good, name="good")
+    tx = _thr(target=poison, name="poison")
+    tp.start()
+    assert primer_leading.wait(timeout=5), "primer never became the leader"
+    tg.start()
+    tx.start()
+    time.sleep(0.2)                                         # let good enqueue + poison pre-raise behind primer
+    let_primer_go.set()
+    _join_all([tp, tg, tx], timeout=10.0)
+    assert results["poison"][0] == "err", f"the mixed-key poison caller MUST raise: {results.get('poison')}"
+    assert results["good"][0] == "ok", \
+        f"the innocent co-batched append MUST succeed (poison isolated): {results.get('good')}"
+    assert [r.seq for r in s.iter_records()] == [0, 1], "chain contiguous over the good records; poison never landed"
+    assert s.verify()[0]
+
+
+def test_content_bearing_append_takes_direct_path_so_a_locked_vault_never_shares_fate(monkeypatch):
+    """REGRESSION (red-pen HIGH): a CONTENT-bearing append (a payload with a sealable content field) must take
+    the DIRECT path, never the coalescing queue. Its seal needs the spine DEK; on a LOCKED vault ``_spine_dek``
+    raises ``VaultLocked`` INSIDE the leader's ``append_many``, and the leader-exception fan-out would then fail
+    EVERY co-batched waiter — blocking an innocent pure-metadata / signal append (e.g. a kill-switch panic)
+    that the direct path guarantees is "never blocked by a locked vault". Routing content direct keeps that
+    fail-safe. Prove the routing: a content append never reaches ``_append_coalesced``; a metadata one does."""
+    s = _store_on()
+    coalesced: list = []
+    real = s._append_coalesced
+
+    def spy(spec):
+        coalesced.append(spec.get("payload"))
+        return real(spec)
+
+    monkeypatch.setattr(s, "_append_coalesced", spy)
+    s.append(kind=_KIND, source="c", actor="c", payload={"text": "sealed secret"})   # CONTENT ("text") → DIRECT
+    s.append(kind=_KIND, source="m", actor="m", payload={"i": 1})                     # pure metadata → COALESCED
+    assert {"i": 1} in coalesced, "a pure-metadata append must take the coalescing path"
+    assert {"text": "sealed secret"} not in coalesced, \
+        "a CONTENT-bearing append must take the DIRECT path (its seal must never share-fate a locked vault)"
+    assert [r.seq for r in s.iter_records()] == [0, 1]
     assert s.verify()[0]
 
 
