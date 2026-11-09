@@ -91,11 +91,24 @@ _SECRETS_KV_CONTEXT = b"sigil/secrets.kv"
 # security.manifest.json were already covered; W7-2 adds the HA witness roster (the failover guard depends on
 # it), the governor budget caps, and the persisted env file. ``sigil.env`` can hold a signing secret (e.g.
 # VIGIL_DESTRUCTION_OWNER_KEY) so it is 0600 on restore (see :func:`_is_sensitive_rel`).
-_CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "budgets.json", "sigil.env")
+_CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "budgets.json", "sigil.env",
+                 # #70: the per-unit EnvironmentFiles the shipped sovereign systemd units read from SIGIL_HOME
+                 # (apps/sigil/deploy/systemd) — operator config a FUNCTIONAL recovery needs; may hold secrets,
+                 # so restored 0600 (see _is_sensitive_rel).
+                 "bridge.env", "cockpit.env", "customer.env", "public.env")
 # Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
 # the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
 # recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
-_STATE_DIRS = ("qdrant", "graph")
+_STATE_DIRS = ("qdrant", "graph",
+               # #70 (backups-everywhere): the SaaS MONEY + delivery state the shipped units place under
+               # SIGIL_HOME by default. `credit-lease/` is the launch seam (owner-signed leases, the SETTLEMENT
+               # markers that make settle exactly-once, pause markers) — `vigil-settle-drain` defaults
+               # VIGIL_SETTLE_BASE_DIR to %h/.sigil/credit-lease; `spool/` holds the settle / finding / billing
+               # spools (incoming = undrained money + delivery signals, processed = their dedup markers). Neither
+               # was in EITHER backup on a default install (the offense leg captures only --base-dir), so a dead
+               # disk lost pending settlements/credit grants and the exactly-once markers. Re-draining a
+               # restored spool is idempotent (the markers + the spine restored from the SAME backup).
+               "credit-lease", "spool")
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -113,6 +126,12 @@ CAPTURED_TOP_LEVEL = frozenset({
     "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
+    "credit-lease",             # #70: the launch seam — leases, settlement (exactly-once) + pause markers
+    "spool",                    # #70: settle / finding / billing spools (pending money + delivery signals)
+    "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
+    "cockpit.env",
+    "customer.env",
+    "public.env",
 })
 # Deliberate exclusions, each with a reason the structural test surfaces. Keeping the REASONS in code is what
 # makes this a *documented* exclusion list (acceptance criterion), not a silent skip.
@@ -137,6 +156,11 @@ _EXCLUSION_REASONS: dict[str, str] = {
                 "regenerate (re-login / re-request / limits reset), never recovery state",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
+    "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
+            "envs/build_envs.sh) — code + third-party packages, no trust or memory state",
+    "checkpoint.witnessed.json": "the witnessed-checkpoint OUTPUT `sigil-checkpoint` re-emits every cadence "
+                                 "from the (captured) spine; the authoritative copies are the witnesses' — "
+                                 "re-derived, never recovery state",
 }
 EXCLUDED_TOP_LEVEL = frozenset(_EXCLUSION_REASONS)
 
@@ -183,7 +207,13 @@ def _is_sensitive_rel(rel: str) -> bool:
     and ANY packaged ``*.key`` file, PLUS ``sigil.env`` (the persisted config / legacy secret tier, which can
     hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY). The whole backup body is AEAD-sealed at rest
     regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
-    return rel.endswith(".key") or rel == "sigil.env"
+    if rel.endswith(".key") or rel == "sigil.env":
+        return True
+    # #70: the unit EnvironmentFiles (may hold secrets) and the SaaS money/delivery state (billing webhook
+    # bodies carry customer data; leases/markers are money state) are owner-only on restore too.
+    if "/" not in rel and rel.endswith(".env"):
+        return True
+    return rel.startswith(("spool/", "credit-lease/"))
 
 
 def _spine_files(home: Path) -> list[tuple[Path, str]]:
