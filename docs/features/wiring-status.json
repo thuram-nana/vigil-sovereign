@@ -190,6 +190,19 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.ready",
+      "name": "vigil ready",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "ready",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_ready"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
       "id": "cli.dossier",
       "name": "vigil dossier",
       "surface": "cli-native",

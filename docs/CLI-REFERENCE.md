@@ -168,6 +168,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil down` | CONTAIN a running `vigil up`: stop + disable the systemd unit, then kill the backends + proxy. |
 | `vigil services` | Docker bring-up: create the egress gateway + qdrant/neo4j/otel services if none exist (idempotent). |
 | `vigil doctor` | Read-only readiness report: prerequisites (binaries, both venvs, writable dirs), UI ports, docker services. |
+| `vigil ready` | Bring-up readiness gate (DEP-2): wait, bounded by `--wait`, until the proxy's `/readyz` answers 200 and `vigil doctor` is ok; exit 0 ready / 1 not ready. Read-only — it enables nothing. Driven at boot by the opt-in `vigil-ready.service`. |
 | `vigil alerts` | Heartbeat-staleness alarms for every HA / scheduled unit (backup, off-host push, drill, HA sync, integrity, posture, reprove). |
 | `vigil unit-heartbeat` | Record that a scheduled unit ran (a systemd `ExecStopPost` hook the alerts monitor reads). |
 | `vigil telemetry` | Live assurance/metrics collector over the signed spine (G2): fact/lead/refusal/tool snapshots. |
