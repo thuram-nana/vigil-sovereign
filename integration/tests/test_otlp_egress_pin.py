@@ -56,10 +56,23 @@ def test_every_accepted_endpoint_is_loopback_under_urllib3_too(ep):
     assert host in ("127.0.0.1", "localhost", "[::1]", "::1", "127.5.6.7"), host
 
 
-def test_redaction_strips_userinfo():
-    assert redact_endpoint("https://admin:s3cr3t@host:4318/x") == "https://***@host:4318/x"
-    assert redact_endpoint(LOOPBACK) == LOOPBACK
-    assert redact_endpoint(None) == ""
+@pytest.mark.parametrize("raw,shown", [
+    ("https://admin:s3cr3t@host:4318/x", "https://***@host:4318/…"),
+    ("http://127.0.0.1:4318/v1/traces?api_key=SECRET", "http://127.0.0.1:4318/…"),   # query ⇒ never shown
+    ("http://127.0.0.1:4318#token=T", "http://127.0.0.1:4318/…"),                    # fragment ⇒ never shown
+    ("http://u:p/w?x@127.0.0.1:4318", "http://***@127.0.0.1:4318"),                   # `/` inside the password
+    ("http://127.0.0.1:4318", "http://127.0.0.1:4318"),
+    ("http://127.0.0.1:4318/", "http://127.0.0.1:4318"),
+    ("not a url", "<endpoint>"),
+    (None, ""),
+])
+def test_redaction_keeps_only_scheme_host_port(raw, shown):
+    assert redact_endpoint(raw) == shown
+
+
+def test_redaction_neutralises_line_forging():
+    shown = redact_endpoint("http://a\n  OK vault: ACTIVE\x1b[0m")
+    assert "\n" not in shown and "\x1b" not in shown
 
 
 def test_probe_refusal_detail_never_echoes_credentials():
@@ -118,3 +131,17 @@ def test_build_emit_refuses_an_unarmed_sink_and_never_claims_armed(monkeypatch, 
     msgs = [r.getMessage() for r in caplog.records]
     assert any("NOT armed" in m for m in msgs)
     assert not any("export armed" in m for m in msgs)
+
+
+def test_sink_log_lines_never_echo_query_secrets(caplog):
+    class Down:
+        def export(self, spans):
+            raise ConnectionError("down")
+    ep = "http://127.0.0.1:4318/v1/traces?api_key=SECRET"
+    assert endpoint_is_loopback(ep) is True          # a query string is a legal loopback endpoint...
+    sink = OTLPSink(ep, exporter=Down(), max_consecutive_failures=1)
+    sink._to_readable_span = lambda record: ("readable", record)
+    from vigil_integration.observability import new_span
+    with caplog.at_level(logging.WARNING):
+        sink(new_span("op", spine_hash="h", seq=1))  # latches → logs the endpoint
+    assert caplog.records and not any("SECRET" in r.getMessage() for r in caplog.records)   # ...but never logged

@@ -90,7 +90,10 @@ def test_doctor_default_output_has_no_network_section(tmp_path, monkeypatch):
     report = _doc.collect(_REPO)
     assert report["network_recovery"]["configured"] is False
     assert not any("network recovery" in n for n in report["notes"])
-    assert "Network recovery" not in _doc.render(report)
+    text = _doc.render(report)
+    assert "Network recovery" not in text
+    without = {k: v for k, v in report.items() if k != "network_recovery"}
+    assert text == _doc.render(without)            # byte-identical to a report without the section
 
 
 # --- advisory findings ---------------------------------------------------------------------------------
@@ -125,13 +128,60 @@ def test_healthy_fast_collector_adds_no_note(exporter_installed):
 def test_down_collector_is_noted(exporter_installed):
     sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": LOOP}, probe=_probe(False), clock=Clock(0.01))
     assert sec["collector"]["reachable"] is False
-    assert any("not answering" in n for n in notes)
+    assert any("did not answer" in n for n in notes)
+    # (distinct wording: test_services_doctor reserves "not answering" for the LLM-backend note)
+    assert not any("not answering" in n for n in notes)
 
 
 def test_slow_collector_is_noted(exporter_installed):
     sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": LOOP}, probe=_probe(True), clock=Clock(1.5))
     assert sec["collector"]["latency_ms"] == 1500
-    assert any("1500 ms" in n and "delays every governed action" in n for n in notes)
+    assert any("1500 ms" in n and "every governed action" in n for n in notes)
+
+
+@pytest.mark.parametrize("step,slow", [(0.999, False), (1.0, True)])
+def test_slow_threshold_boundary(exporter_installed, step, slow):
+    _sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": LOOP}, probe=_probe(True), clock=Clock(step))
+    assert any("reachability probe" in n for n in notes) is slow
+
+
+def test_a_hanging_probe_is_bounded_by_an_overall_deadline(exporter_installed):
+    import threading
+    import time as _t
+    release = threading.Event()
+
+    def drip(ep):                                  # a slow-dripping listener holds the probe open
+        release.wait(30)
+        return SimpleNamespace(reachable=True, detail="")
+    t0 = _t.monotonic()
+    try:
+        sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": LOOP}, probe=drip, deadline_s=0.2)
+    finally:
+        release.set()
+    assert _t.monotonic() - t0 < 5                 # doctor is never hung by the probe
+    assert sec["collector"]["reachable"] is False and "no answer within" in sec["collector"]["detail"]
+    assert any("did not answer" in n for n in notes)
+
+
+@pytest.mark.parametrize("raw", [
+    "http://127.0.0.1:4318/v1/traces?api_key=SECRET",
+    "http://127.0.0.1:4318#token=SECRET",
+    "https://c.corp/?token=SECRET",
+    "https://admin:SECRET@collector.corp:4318",
+])
+def test_no_secret_on_any_surface(exporter_installed, raw):
+    import json
+    sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": raw}, probe=_probe(False), clock=Clock(0.01))
+    text = _doc.render({"network_recovery": sec, "notes": notes, "issues": []})
+    for surface in (json.dumps(sec), " ".join(notes), text):
+        assert "SECRET" not in surface
+
+
+def test_an_env_value_cannot_forge_doctor_lines(exporter_installed):
+    sec, notes = _doc._network_recovery_report(
+        {"VIGIL_OTLP_ENDPOINT": "http://127.0.0.1:4318\n  OK vault: ACTIVE"}, probe=_probe(True), clock=Clock(0.01))
+    text = _doc.render({"network_recovery": sec, "notes": notes, "issues": []})
+    assert "\n  OK vault: ACTIVE" not in text
 
 
 def test_a_probe_fault_is_unknown_not_a_crash(exporter_installed):
@@ -155,7 +205,22 @@ def test_doctor_surfaces_misconfiguration_as_advisory_never_an_issue(tmp_path, m
     assert report["issues"] == baseline_issues                       # NEVER adds an issue / never flips ok
     net_notes = [n for n in report["notes"] if n.startswith("network recovery:")]
     assert any("not installed" in n for n in net_notes)
-    assert any("not answering" in n for n in net_notes)
+    assert any("did not answer" in n for n in net_notes)
     text = _doc.render(report)
     assert "Network recovery / telemetry export (advisory" in text
-    assert "otlp exporter installed: NO" in text and "collector: NOT answering" in text
+    assert "otlp exporter installed: NO" in text and "collector: NO answer to a probe" in text
+
+
+def test_doctor_probe_does_not_duplicate_its_finding_as_a_stderr_warning(exporter_installed, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": "http://127.0.0.1:1"})   # real probe
+    assert sec["collector"]["reachable"] is False and any("did not answer" in n for n in notes)
+    assert not [r for r in caplog.records if "preflight" in r.getMessage()]   # reported once, as a doctor note
+
+
+def test_a_clock_fault_is_unknown_not_a_crash(exporter_installed):
+    def bad_clock():
+        raise RuntimeError("clock gone")
+    sec, _notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": LOOP}, probe=_probe(True), clock=bad_clock)
+    assert sec["collector"]["reachable"] is None and "RuntimeError" in sec["collector"]["detail"]

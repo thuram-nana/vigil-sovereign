@@ -101,14 +101,31 @@ _log = logging.getLogger(__name__)
 # backslash, whitespace/control, non-ASCII and ``@`` (no userinfo is ever needed for a loopback collector)
 # removes the whole authority-confusion class instead of chasing parser quirks one at a time.
 _ENDPOINT_SAFE = re.compile(r"\A[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]+\Z")
-_USERINFO = re.compile(r"(//)[^/?#]*@")
+
+
+_SCHEME = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]{0,15})://(.*)\Z", re.S)
 
 
 def redact_endpoint(endpoint: Any) -> str:
-    """A display-safe form of ``endpoint``: any ``user:pass@`` userinfo is replaced by ``***@`` so a refusal
-    or diagnostic message never echoes a credential. Total — never raises."""
+    """A display-safe form of ``endpoint`` for refusals, diagnostics and logs: ONLY ``scheme://host:port`` is
+    kept. Userinfo (even one whose password contains ``/ ? #``) becomes ``***@``; any path / query / fragment —
+    where an ``?api_key=`` would live — becomes ``/…``; non-printable characters (newline / ANSI escapes that
+    could forge diagnostic lines) become ``?``; the result is length-capped. Total — never raises."""
     try:
-        return _USERINFO.sub(r"\1***@", coerce_str(endpoint))
+        s = coerce_str(endpoint)
+        if not s:
+            return ""
+        m = _SCHEME.match(s)
+        if not m:
+            return "<endpoint>"
+        scheme, rest = m.group(1), m.group(2)
+        cred = "@" in rest
+        if cred:
+            rest = rest.rsplit("@", 1)[1]
+        hostport = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
+        tail = rest[len(hostport):]
+        out = f"{scheme}://{'***@' if cred else ''}{hostport}{'/…' if tail.strip('/') else ''}"
+        return "".join(ch if ch.isprintable() else "?" for ch in out)[:200]
     except Exception:  # noqa: BLE001
         return "<unprintable endpoint>"
 
@@ -353,7 +370,7 @@ class OTLPSink:
                 self._recovery.succeeded()
                 self.recovered += 1
                 _log.warning("OTLP collector at %s reachable again — telemetry export resumed (NET-2 "
-                             "half-open probe succeeded)", self.endpoint)
+                             "half-open probe succeeded)", redact_endpoint(self.endpoint))
         else:
             self.dropped += 1
             if probing:
@@ -363,7 +380,7 @@ class OTLPSink:
                 self._recovery.failed()
                 if self._recovery.exhausted:
                     _log.warning("OTLP collector at %s still unreachable after %d recovery probes; telemetry "
-                                 "export silenced for this engagement", self.endpoint,
+                                 "export silenced for this engagement", redact_endpoint(self.endpoint),
                                  self._recovery.attempts)
                 return
             self._consecutive_failures += 1
@@ -381,7 +398,7 @@ class OTLPSink:
                 _log.warning(
                     "OTLP collector at %s unreachable — %d consecutive export failures; telemetry export "
                     "silenced for this engagement (a down collector never denies cognition)",
-                    self.endpoint, self._consecutive_failures)
+                    redact_endpoint(self.endpoint), self._consecutive_failures)
                 if self._recovery is not None:
                     self._recovery.trip()           # NET-2: start the bounded half-open schedule
 

@@ -1143,10 +1143,33 @@ _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service
 # posture control (the production gate is untouched). DEFAULT-OFF: with neither the recovery flag nor an
 # endpoint set it is `configured=False`, adds no note and renders nothing (text output byte-identical).
 _NET_SLOW_COLLECTOR_MS = 1000
+_NET_PROBE_DEADLINE_S = 3.0        # an OVERALL bound on the collector probe (its 2 s timeout is per socket op)
 
 
-def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=None) -> "tuple[dict, list]":
+def _bounded_call(fn, arg, deadline_s: float):
+    """Run ``fn(arg)`` on a daemon thread; return ``(done, result, exc)`` within ``deadline_s``. A probe that a
+    slow-dripping local listener holds open can never hang `vigil doctor` (the thread is abandoned, daemon)."""
+    import threading
+
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["r"] = fn(arg)
+        except BaseException as exc:  # noqa: BLE001 — reported, never propagated off the thread
+            box["e"] = exc
+    t = threading.Thread(target=run, name="vigil-doctor-otlp-probe", daemon=True)
+    t.start()
+    t.join(deadline_s)
+    if t.is_alive():
+        return False, None, None
+    return True, box.get("r"), box.get("e")
+
+
+def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=None,
+                             deadline_s: float = _NET_PROBE_DEADLINE_S) -> "tuple[dict, list]":
     """Return (section, advisory_notes). Total and fail-soft: any probe fault degrades to UNKNOWN wording."""
+    import logging as _logging
     import time as _time
 
     e = os.environ if env is None else env
@@ -1163,7 +1186,7 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
                      "exporter_installed": None, "collector": None,
                      "configured": recovery != "OFF" or bool(raw)}
     if not section["configured"]:
-        return section, notes                 # default: no probe, no extra import — byte-identical
+        return section, notes                 # default: no probe, no exporter lookup, no note — byte-identical
     try:
         # (find_spec on a dotted name imports the PARENT packages, so this only runs once configured)
         import importlib.util
@@ -1192,26 +1215,42 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
         notes.append("network recovery: an OTLP endpoint is configured but the OpenTelemetry OTLP exporter "
                       "(opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed — "
                       "no spans will be exported (none of the shipped hash locks carry it).")
-    _probe = probe or probe_collector
+    if probe is None:
+        _quiet = _logging.getLogger("vigil_integration.doctor.otlp_probe")
+        _quiet.addHandler(_logging.NullHandler())
+        _quiet.propagate = False              # doctor reports the result itself — no duplicate stderr WARNING
+
+        def _probe(ep):
+            return probe_collector(ep, logger=_quiet)
+    else:
+        _probe = probe
     _clock = clock or _time.monotonic
     try:
         t0 = float(_clock())
-        res = _probe(raw)
+        done, res, err = _bounded_call(_probe, raw, deadline_s)
         ms = int(round((float(_clock()) - t0) * 1000))
-        section["collector"] = {"reachable": bool(getattr(res, "reachable", False)), "latency_ms": ms,
-                                "detail": str(getattr(res, "detail", "") or "")}
     except Exception as exc:  # noqa: BLE001 — a probe fault is UNKNOWN, never a crash
+        done, res, err, ms = True, None, exc, None
+    if not done:
+        section["collector"] = {"reachable": False, "latency_ms": ms,
+                                "detail": f"no answer within {deadline_s:g} s"}
+    elif err is not None:
         section["collector"] = {"reachable": None, "latency_ms": None,
-                                "detail": f"probe error: {type(exc).__name__}"}
+                                "detail": f"probe error: {type(err).__name__}"}
         return section, notes
+    else:
+        section["collector"] = {"reachable": bool(getattr(res, "reachable", False)), "latency_ms": ms,
+                                "detail": str(getattr(res, "detail", "") or "")}   # already redacted by the probe
     col = section["collector"]
     if col["reachable"] is False:
-        notes.append(f"network recovery: the OTLP collector at {section['otlp_endpoint']} is not answering "
-                      f"(`vigil services up --with-observability`). Telemetry degrades; runs are unaffected.")
+        notes.append(f"network recovery: the OTLP collector at {section['otlp_endpoint']} did not answer a "
+                      f"reachability probe (`vigil services up --with-observability`). Telemetry degrades; "
+                      f"runs are unaffected.")
     elif col["reachable"] and col["latency_ms"] is not None and col["latency_ms"] >= _NET_SLOW_COLLECTOR_MS:
-        notes.append(f"network recovery: the OTLP collector answered in {col['latency_ms']} ms — a collector "
-                      f"this slow does not trip the export circuit breaker but delays every governed action "
-                      f"by up to the export timeout. Check the collector host.")
+        notes.append(f"network recovery: the OTLP collector took {col['latency_ms']} ms to answer a reachability "
+                      f"probe (connect + a minimal request). Exports to a collector this slow can each wait up to "
+                      f"the export timeout on every governed action, possibly without tripping the circuit "
+                      f"breaker. Check the collector host.")
     return section, notes
 
 
@@ -1674,8 +1713,8 @@ def render(report: dict) -> str:
                 r = col.get("reachable")
                 mark = "OK " if r else ("?? " if r is None else "!! ")
                 lat = col.get("latency_ms")
-                lines.append(f"  {mark}collector: " + ("answering" if r else ("unknown" if r is None
-                             else "NOT answering")) + (f" ({lat} ms)" if lat is not None and r else ""))
+                lines.append(f"  {mark}collector: " + ("answered a probe" if r else ("unknown" if r is None
+                             else "NO answer to a probe")) + (f" ({lat} ms)" if lat is not None and r else ""))
         else:
             lines.append("  .. otlp endpoint ($VIGIL_OTLP_ENDPOINT): unset")
 
