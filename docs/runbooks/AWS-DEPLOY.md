@@ -148,8 +148,10 @@ vigil alerts --once --require-push                       # a fresh drain heartbe
 
 A drain crash loses nothing (slice 1: the finding drain reclaims its own in-flight work + de-duplicates;
 settle is idempotent per `(slug,nonce)`), and the dead-man alarms if a timer stops firing — so the pipeline
-both runs and recovers without a human. (The remaining drains — `billing-drain`, `monitoring-drain`,
-`ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` — follow the same pattern.)
+both runs and recovers without a human. The money-IN `billing-drain` ships its own opt-in
+`vigil-billing-drain.timer` — enable it only once the payment-processor secrets are provisioned (GO-LIVE §9).
+(The remaining drains — `monitoring-drain`, `ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` —
+follow the same pattern.)
 
 > **Persisted queue root (#75).** The drains enqueue each `SecurityJob` under the canonical root
 > **`<base_dir>/jobs`** (the default when `--queue-root` is omitted) — it lives UNDER `--base-dir`, so the

@@ -27,8 +27,10 @@ def test_runs_one_drain_pass_of_the_billing_spool():
 
 def test_the_spool_default_is_a_unit_directive_not_an_env_file_value():
     d = _directives(_UNIT)
-    assert "Environment=VIGIL_BILLING_SPOOL=%h/.sigil/spool/billing" in d       # %h expands only here
-    env = d.index("Environment=VIGIL_BILLING_SPOOL=%h/.sigil/spool/billing")
+    # the GO-LIVE runbook's documented path ($SIGIL_HOME/billing-spool) — a different default would drain an
+    # empty directory "healthily" for every operator who followed the runbook
+    assert "Environment=VIGIL_BILLING_SPOOL=%h/.sigil/billing-spool" in d       # %h expands only here
+    env = d.index("Environment=VIGIL_BILLING_SPOOL=%h/.sigil/billing-spool")
     envfile = d.index("EnvironmentFile=-%h/.config/vigil/billing-drain.env")
     assert env < envfile                                                         # the env file may override it
 
@@ -58,3 +60,10 @@ def test_the_env_example_ships_no_secret_value():
 def test_the_spool_must_match_the_proxy_and_is_documented():
     text = _ENV.read_text()
     assert "VIGIL_BILLING_WEBHOOK_SPOOL" in text and "MUST equal" in text
+    runbook = (_REPO / "docs" / "runbooks" / "GO-LIVE-quickstart.md").read_text()
+    assert "$SIGIL_HOME/billing-spool" in runbook                     # the unit default IS the runbook path
+
+
+def test_one_drainer_rule_is_stated_everywhere():
+    for p in (_UNIT, _ENV, _REPO / "docs" / "runbooks" / "GO-LIVE-quickstart.md"):
+        assert "never both" in p.read_text(), p

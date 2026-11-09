@@ -15,9 +15,14 @@
 # NETWORK: deliberately NOT PrivateNetwork — the server-side re-verify is an HTTPS call to the payment
 # processor (host-allowlisted in sigil.governor.flutterwave_egress).
 #
-# Config (secrets live ONLY in the EnvironmentFile, mode 0600 — never in this unit, never in git):
-#     ~/.config/vigil/billing-drain.env     (see vigil-billing-drain.env.example)
-# The spool default below MUST equal the proxy's VIGIL_BILLING_WEBHOOK_SPOOL, or nothing is ever drained.
+# SECRETS (VIGIL_BILLING_WEBHOOK_SECRET, VIGIL_FLW_SECRET_KEY) — per GO-LIVE §9 inject them from your secret
+# manager, never commit them and prefer not to rest them in plaintext: e.g. a drop-in with systemd
+# `LoadCredentialEncrypted=` + your manager's env injection. The EnvironmentFile below (mode 0600) is the
+# documented FALLBACK — see vigil-billing-drain.env.example.
+# The spool default below is the runbook's ($SIGIL_HOME/billing-spool) and MUST equal the proxy's
+# VIGIL_BILLING_WEBHOOK_SPOOL, or the drain runs "healthy" on an empty directory and credits nothing.
+# ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both (two drainers reclaim each
+# other's in-flight claims: a duplicate ingest, or a false "paid charge UN-MINTED" quarantine alarm).
 #
 # Manual run / logs:
 #     systemctl --user start vigil-billing-drain.service
@@ -38,7 +43,7 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 # Path DEFAULTS live HERE (systemd expands %h in a unit directive, NEVER inside an EnvironmentFile value); the
 # CLI refuses a relative / %-bearing --spool (exit non-zero → a FAILED dead-man alarm, never a silent no-op).
-Environment=VIGIL_BILLING_SPOOL=%h/.sigil/spool/billing
+Environment=VIGIL_BILLING_SPOOL=%h/.sigil/billing-spool
 EnvironmentFile=-%h/.config/vigil/billing-drain.env
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --spool ${VIGIL_BILLING_SPOOL}
