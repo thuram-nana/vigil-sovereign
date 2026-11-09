@@ -140,17 +140,31 @@ def test_budget_is_bounded_forever_once_exhausted():
     assert b.ready() is False
 
 
-def test_success_fully_resets_the_schedule():
+def test_success_re_arms_but_never_refills_the_lifetime_budget():
     clk = Clock()
     b = BoundedBackoff(base=2, cap=8, max_attempts=2, clock=clk)
     b.trip()
     clk.advance(2)
     b.begin_attempt()
     b.succeeded()
-    assert b.attempts == 0 and not b.tripped and b.ready() is False
-    b.trip()                                      # a later outage gets a fresh, equally bounded schedule
+    assert not b.tripped and b.ready() is False   # recovered ⇒ nothing to retry
+    assert b.attempts == 1                        # ...but the spent retry stays spent
+    b.trip()                                      # a later outage waits LONGER (growth is not reset)
+    clk.advance(2)
+    assert b.ready() is False
     clk.advance(2)
     assert b.ready() is True
+    b.begin_attempt()
+    b.succeeded()
+    b.trip()                                      # budget (2) spent across two recoveries ⇒ never again
+    clk.advance(10 ** 9)
+    assert b.exhausted and b.ready() is False
+
+
+def test_next_delay_is_capped_even_after_huge_attempt_counts():
+    b = BoundedBackoff(base=5, cap=60, max_attempts=10 ** 6, clock=Clock())
+    b.attempts = 10 ** 5                          # past the 2**n overflow guard
+    assert b.next_delay() == 60
 
 
 def test_repeated_trips_do_not_postpone_recovery():
@@ -260,7 +274,7 @@ def test_a_transient_drop_recovers_after_the_backoff(caplog):
     for i in range(5):                            # re-armed: every record flows again, no clock needed
         sink(_rec(20 + i))
     assert sink.exported == 6 and col.attempts == 9
-    assert sink._recovery.attempts == 0 and not sink._recovery.tripped
+    assert sink._recovery.attempts == 1 and not sink._recovery.tripped
 
 
 def test_a_failed_probe_stays_latched_and_waits_longer():
@@ -299,6 +313,50 @@ def test_a_persistently_down_collector_costs_a_bounded_number_of_exports(caplog)
     assert sink._consecutive_failures == 3
 
 
+@pytest.mark.parametrize("accept_every", [4, 7])          # >= threshold+1, so the breaker actually latches
+def test_a_flapping_collector_cannot_re_arm_the_sink_forever(caplog, accept_every):
+    # NET-2 red-pen MED: a collector that accepts one request then fails again used to re-arm the sink on
+    # every probe (a success refilled the budget) — 1800 attempts / ~450 recoveries / ~900 WARNINGs an hour.
+    # The budget is now per LIFETIME, so the whole run costs a fixed number of attempts and log lines.
+    class Partial:
+        def __init__(self):
+            self.attempts = 0
+
+        def export(self, spans):
+            self.attempts += 1
+            if self.attempts % accept_every:
+                raise ConnectionError("shedding load")
+            return None
+
+    clk = Clock()
+    col = Partial()
+    max_attempts = 8
+    sink = _sink(col, recovery=BoundedBackoff(base=5, cap=300, max_attempts=max_attempts, clock=clk))
+    with caplog.at_level(logging.WARNING, logger="vigil_integration.live.otel_export"):
+        for i in range(36_000):                   # 10 hours at one record/second
+            clk.advance(1)
+            sink(_rec(i))
+    threshold = 3
+    # Each probe either fails (1 attempt) or recovers and runs to the next latch (<= threshold attempts more):
+    bound = threshold + max_attempts * (1 + threshold)
+    assert col.attempts <= bound, col.attempts
+    assert sink.recovered <= max_attempts
+    assert sink._disabled is True and sink._recovery.exhausted
+    assert len(caplog.records) <= 1 + 2 * max_attempts + 1     # latches + recoveries + one give-up
+
+
+def test_no_exporter_while_latched_spends_no_budget():
+    clk = Clock()
+    col = Collector(up=False)
+    sink = _sink(col, recovery=BoundedBackoff(base=1, cap=1, max_attempts=2, clock=clk))
+    _latch(sink)
+    sink._exporter = None
+    clk.advance(5)
+    for i in range(5):
+        sink(_rec(i))
+    assert sink._recovery.attempts == 0
+
+
 def test_recovery_never_widens_the_loopback_egress_pin():
     clk = Clock()
     col = Collector(up=True)
@@ -325,9 +383,23 @@ def test_a_record_that_cannot_be_converted_does_not_spend_the_budget():
     assert sink._recovery.attempts == 0 and col.attempts == 3
 
 
-def test_the_recovery_clock_never_reaches_span_identity():
+def test_the_recovery_policy_is_consulted_only_by_the_latch_path():
     # The structural determinism guard (test_live_otel_export) keeps wallclock/RNG out of the exporter
-    # source. NET-2's clock lives in net_recovery and may only decide WHEN a probe happens — it must never
-    # be consulted by the identity-bearing conversion.
-    src = inspect.getsource(OTLPSink._to_readable_span)
-    assert "_recovery" not in src and "net_recovery" not in src and "_clock" not in src
+    # source. NET-2's clock lives in net_recovery and may only decide WHEN a probe happens. Pin that the
+    # policy is touched ONLY by the constructor and the latch/export state machine — never by the span
+    # conversion or any identity helper in the module.
+    import vigil_integration.live.otel_export as oe
+
+    allowed = {"OTLPSink.__init__", "OTLPSink._export_one"}
+    touching = set()
+    for name, obj in vars(oe).items():
+        members = [(f"{name}.{m}", f) for m, f in vars(obj).items()] if inspect.isclass(obj) else [(name, obj)]
+        for qual, fn in members:
+            if inspect.isfunction(fn) and getattr(fn, "__module__", None) == oe.__name__:
+                try:
+                    src = inspect.getsource(fn)
+                except (OSError, TypeError):    # generated (e.g. dataclass) methods have no source
+                    continue
+                if "_recovery" in src or "recovery_from_env" in src:
+                    touching.add(qual)
+    assert touching == allowed, touching

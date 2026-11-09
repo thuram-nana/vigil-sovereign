@@ -37,8 +37,9 @@ attacks exactly that:
     count-based — no clock) latches the sink silent so a down collector can never stall the hot path.
     NET-2 (#73, default-OFF via ``VIGIL_NET_RECOVERY_ENABLED``): a latched sink may make a BOUNDED number
     of half-open probe exports on a deterministic backoff (``live.net_recovery``) so a TRANSIENT collector
-    drop recovers instead of silencing telemetry for the rest of the run. Off ⇒ the latch is permanent,
-    exactly as before. The recovery clock decides only WHEN a probe is tried — never a span's identity.
+    drop recovers instead of silencing telemetry for the rest of the run. The budget is per sink LIFETIME
+    (a flapping collector is latched for good once it is spent). Off ⇒ the latch is permanent, exactly as
+    before. The recovery clock decides only WHEN a probe is tried — never a span's identity.
   * **TOTAL on a malformed record.** Any garbage handed to ``__call__`` degrades to ``skipped`` (no
     signal); the sink never raises into the recorder.
 
@@ -315,8 +316,8 @@ class OTLPSink:
             self.exported += 1
             self._consecutive_failures = 0
             if probing:
-                # The collector is back: re-arm the sink and reset the policy (a later outage gets a fresh,
-                # equally bounded schedule).
+                # The collector is back: re-arm the sink. The policy's LIFETIME budget is NOT refilled, so
+                # a flapping collector cannot re-arm the sink indefinitely (NET-2 red-pen MED).
                 self._disabled = False
                 self._recovery.succeeded()
                 self.recovered += 1
@@ -343,7 +344,9 @@ class OTLPSink:
                 # being a silent drip of `dropped++` and becomes one WARNING an operator can see. Logged ONCE
                 # — once `_disabled` latches, `_export_one` returns at the `if self._disabled` guard above and
                 # never re-enters this branch — so a dead collector cannot flood the log; the engine is
-                # UNAFFECTED (this path still swallows and never raises).
+                # UNAFFECTED (this path still swallows and never raises). With NET-2 recovery ON a re-armed
+                # sink can re-latch, but at most once per successful probe, and the policy's LIFETIME budget
+                # caps those — so this logs at most ``1 + max_attempts`` times per sink, still bounded.
                 _log.warning(
                     "OTLP collector at %s unreachable — %d consecutive export failures; telemetry export "
                     "silenced for this engagement (a down collector never denies cognition)",

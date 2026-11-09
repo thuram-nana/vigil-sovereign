@@ -8,10 +8,12 @@ lets an already-degraded path try again, a BOUNDED number of times, on a determi
   * **DEFAULT-OFF.** :func:`recovery_enabled` reads ``VIGIL_NET_RECOVERY_ENABLED`` and is false unless it is
     an explicit truthy token. :func:`recovery_from_env` returns ``None`` when off, and every adopter treats
     ``None`` as "today's behavior, byte-identical" (e.g. the OTLP sink's circuit breaker stays latched).
-  * **BOUNDED.** A :class:`BoundedBackoff` grants at most ``max_attempts`` retries over its lifetime, each
-    gated by an exponentially growing delay capped at ``cap`` seconds. Once exhausted it NEVER grants
-    again (until a success resets it) — a persistently-down peer costs a fixed, small number of attempts,
-    never an unbounded hammer on a hot path.
+  * **BOUNDED — per LIFETIME, not per outage.** A :class:`BoundedBackoff` grants at most ``max_attempts``
+    retries over its WHOLE lifetime, each gated by an exponentially growing delay capped at ``cap``
+    seconds. A successful retry re-arms the path but does NOT refill the budget or reset the delay
+    growth, so a FLAPPING peer (up for one request, down again) is backed off ever harder and finally
+    latched for good — never re-armed indefinitely. Once exhausted it NEVER grants again: a down or
+    flapping peer costs a fixed, small number of attempts, never an unbounded hammer on a hot path.
   * **DETERMINISTIC.** No jitter, no RNG; the clock is injectable (``clock=``) so tests drive time exactly.
   * **FAIL-SAFE.** Any clock fault or malformed config resolves toward "do not retry now" (stay degraded),
     never toward "retry immediately / unbounded". A retry GRANT is only ever permission to *attempt* the
@@ -38,8 +40,9 @@ __all__ = [
 RECOVERY_ENV = "VIGIL_NET_RECOVERY_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# Conservative defaults: first retry after 5 s, doubling, capped at 5 min, at most 8 retries — a peer that
-# stays down is given up on after ~17 min of wall time and 8 attempts total, then the path latches as today.
+# Conservative defaults: first retry after 5 s, doubling, capped at 5 min, at most 8 retries per lifetime — a
+# peer that stays down is given up on after ~15 min of wall time (5+10+20+40+80+160+300+300 s) and 8 attempts
+# total, then the path latches as today.
 DEFAULT_BASE_S = 5.0
 DEFAULT_CAP_S = 300.0
 DEFAULT_MAX_ATTEMPTS = 8
@@ -89,8 +92,9 @@ class BoundedBackoff:
 
     Lifecycle: the adopter calls :meth:`trip` when the path degrades (e.g. a circuit breaker latches), asks
     :meth:`ready` before each would-be retry, calls :meth:`begin_attempt` when it actually retries, then
-    :meth:`succeeded` (full reset) or :meth:`failed` (next, longer delay). After ``max_attempts`` failed
-    retries :attr:`exhausted` is True and :meth:`ready` is permanently False — the path stays degraded.
+    :meth:`succeeded` (re-armed; the next degradation waits afresh) or :meth:`failed` (next, longer delay).
+    The budget is per LIFETIME: after ``max_attempts`` retries — successful or not — :attr:`exhausted` is
+    True and :meth:`ready` is permanently False, so the path stays degraded for good.
 
     Delay before retry ``n`` (1-based) is ``min(cap, base * 2**(n-1))`` measured from the last trip/failure.
     """
@@ -102,7 +106,7 @@ class BoundedBackoff:
         self.cap: float = max(self.base, _positive_float(cap, DEFAULT_CAP_S))
         self.max_attempts: int = _positive_int(max_attempts, DEFAULT_MAX_ATTEMPTS)
         self._clock: Callable[[], float] = clock if callable(clock) else time.monotonic
-        self.attempts: int = 0                 # retries begun since the last success
+        self.attempts: int = 0                 # retries begun over this policy's LIFETIME (never refilled)
         self._since: Optional[float] = None    # when the current wait started (None ⇒ not tripped)
 
     # -- introspection ---------------------------------------------------------------------------------
@@ -175,6 +179,8 @@ class BoundedBackoff:
             self._since = 0.0                 # tripped (so `tripped` reports truthfully), but never ready
 
     def succeeded(self) -> None:
-        """The path recovered: full reset (a later degradation starts a fresh bounded schedule)."""
-        self.attempts = 0
+        """The path recovered: it is no longer degraded, so clear the wait anchor (a later :meth:`trip`
+        starts the next wait). Deliberately does NOT refill the budget or reset the delay growth — a peer
+        that flaps (one success, then down again) would otherwise be re-armed forever (NET-2 red-pen MED).
+        The next wait is therefore LONGER than the last, and the lifetime budget keeps draining."""
         self._since = None
