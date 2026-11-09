@@ -1,0 +1,61 @@
+# VIGIL automated UPGRADE / ROLLBACK DRILL — systemd USER service (oneshot). DEP-3 (#73). OPT-IN.
+# =====================================================================
+# An upgrade you have never drilled against your REAL data is a hope. `vigil upgrade` is crash-safe and
+# deploy_verify proves the pipeline in CI — but on a SYNTHETIC spine. This unit periodically proves THIS box's
+# own sovereign spine still upgrades under the installed build and that the rollback target restores it:
+# `python -m sigil.spine.upgrade_drill` copies the real spine into a throwaway dir, runs the REAL upgrade()
+# orchestrator on the COPY, proves a corrupted deployment is detected, rolls back with restore_from_backup and
+# re-verifies the pre-upgrade record set exactly. A non-zero exit fails the unit, so a box whose data would no
+# longer upgrade/roll back shows up in `systemctl --user status` / journald BEFORE a real upgrade — not during.
+#
+# IT CHANGES NOTHING REAL. The drill only reads the real spine (a content digest taken before + after must
+# match, or the drill FAILS) and ReadOnlyPaths= below makes the real home read-only to this unit at the kernel
+# level. The copy lives under PrivateTmp and is discarded on exit. NOT-RUN (no spine data yet) exits 3.
+#
+# Sovereign plane: it runs in the SOVEREIGN venv (it reads sigil.spine), never the offense one (FATAL-2).
+#
+# Optional config (SIGIL_HOME if non-default — then also update ReadOnlyPaths below):
+#     ~/.config/vigil/upgrade-drill.env
+# Alert monitoring (opt-in, like the SaaS drains): set VIGIL_UPGRADE_DRILL_ENABLED=1 for `vigil alerts` to
+# watch this unit's heartbeat fail-closed from the start; otherwise it is watched once it has run.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-upgrade-drill.service
+#     journalctl --user -u vigil-upgrade-drill -e
+#     .venv-sovereign/bin/python -m sigil.spine.upgrade_drill        # by hand
+#
+# INSTALL (paired with its timer):
+#   cp infra/systemd/vigil-upgrade-drill.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-upgrade-drill.timer
+
+[Unit]
+Description=VIGIL upgrade/rollback drill (copy real spine → upgrade copy → detect corruption → roll back → re-verify)
+Documentation=file:%h/vigil/docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=-%h/.config/vigil/upgrade-drill.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=%h/vigil
+ExecStart=%h/vigil/.venv-sovereign/bin/python -m sigil.spine.upgrade_drill
+
+# --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
+# --- hardening -------------------------------------------------------------
+# PURELY LOCAL (copy + upgrade + restore inside PrivateTmp; no egress): the network is removed, and the REAL
+# sovereign home is read-only to this unit (kernel-enforced, on top of the drill's own before/after digest).
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+ReadOnlyPaths=%h/.sigil
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

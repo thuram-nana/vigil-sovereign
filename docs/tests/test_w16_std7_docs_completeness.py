@@ -298,7 +298,7 @@ ANCHORS: list[tuple[Path, str]] = [
     (AS_BUILT_LIVE, "(`test_engine_live.py`, `PYTHONPATH=integration:engine/crucible:gateway`)"),
     (AS_BUILT_LIVE, "one of the UI's screens"),
     (README, "49 oracle kinds"),  # advanced 33→38→49: pins the now-correct count ("(~38 kinds)" is now forbidden above).
-    (README, "0/12 systemd timers enabled"),
+    (README, "0/13 systemd timers enabled"),
 ]
 
 
@@ -332,11 +332,12 @@ def drift_code_fact_violations() -> list[str]:
     n = _oraclekind_member_count()
     if n < 49:
         errs.append(f"OracleKind has {n} members (<49) — the README's '49 oracle kinds' would overstate")
-    # #6 — infra/systemd really ships 12 .timer units (M4.5 added vigil-twin.timer alongside the original 9;
-    # slice 2a added vigil-finding-drain.timer + vigil-settle-drain.timer for the supervised SaaS drains).
+    # #6 — infra/systemd really ships 13 .timer units (M4.5 added vigil-twin.timer alongside the original 9;
+    # slice 2a added vigil-finding-drain.timer + vigil-settle-drain.timer for the supervised SaaS drains;
+    # DEP-3 (#73) added the opt-in vigil-upgrade-drill.timer).
     timers = sorted(p.name for p in TIMERS_DIR.glob("*.timer"))
-    if len(timers) != 12:
-        errs.append(f"expected 12 systemd .timer units, found {len(timers)}: {timers}")
+    if len(timers) != 13:
+        errs.append(f"expected 13 systemd .timer units, found {len(timers)}: {timers}")
     # #2/#3 — the two test files really have MORE than the stale counts (they were underclaims).
     if _count_test_defs(TEST_ENGINE) <= 17:
         errs.append("test_engine.py no longer has >17 test defs — the underclaim correction is stale")

@@ -1,0 +1,15 @@
+# Weekly trigger for the VIGIL upgrade/rollback drill (DEP-3, #73). OPT-IN — ships disabled like every timer.
+#   systemctl --user enable --now vigil-upgrade-drill.timer
+
+[Unit]
+Description=Weekly trigger for the VIGIL upgrade/rollback drill
+Documentation=file:%h/vigil/docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1800
+Unit=vigil-upgrade-drill.service
+
+[Install]
+WantedBy=timers.target
