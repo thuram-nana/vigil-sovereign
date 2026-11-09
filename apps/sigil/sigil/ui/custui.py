@@ -585,6 +585,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
+        if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
+            return self._launch(action, body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
             return self._monitoring(action, body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
@@ -656,12 +658,13 @@ class CustomerHandler(BaseHTTPRequestHandler):
             payload["host"] = body.get("host", "")              # session org, never body-supplied
             payload["product_id"] = body.get("product_id", "")  # EC-7b: tier product choice (catalog id, not an amount)
             c, r = self._provision("launch_reserve", requester, payload)
-        elif action == "launch/start":
-            payload["lease"] = body.get("lease")                # publish the signed lease -> run (K3)
-            c, r = self._provision("launch_start", requester, payload)
-        else:
+        elif action in ("launch/start", "launch/cancel", "launch/pause", "launch/resume"):
+            # all carry the signed lease; the sovereign re-verifies it owner-pinned + tenant-binds to the session
+            # org. launch/pause|resume (PR-4b) are flag-gated at the route, so the hop 404s when the flag is off.
             payload["lease"] = body.get("lease")
-            c, r = self._provision("launch_cancel", requester, payload)
+            c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
+        else:
+            return self._deny(404, "unknown launch action")
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -771,6 +774,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _pause_resume_on() -> bool:
+    from .. import config as _config
+    return _config.customer_pause_resume_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

@@ -224,6 +224,15 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_pause_resume_enabled() -> bool:
+    """True iff the customer pause/resume launch routes are ON (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`
+    affirmative). OFF by default (pause/resume PR-4b): the edge routes and provisioner actions are absent (404)
+    exactly as an unknown route, and NOTHING records or clears a lease pause — so the whole PR-1..PR-4a pause
+    substrate stays INERT until the owner turns this on. Pausing moves NO money (it is money-doctrine-neutral);
+    this flag gates only the CUSTOMER-facing ability to record/clear a reversible pause on their own lease."""
+    return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def kek_backend() -> str:
     """Which custody backend wraps the at-rest KEK (the key that seals the owner key + secrets):
 
