@@ -232,6 +232,7 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
         return done(FAIL, f"drill error: {type(exc).__name__}: {exc}")
     finally:
         if before is not None:
+            after: Optional[str]
             try:
                 with _shared_writer_lock(src_dir, spine_path.name):
                     after = _tree_digest(src_dir)
