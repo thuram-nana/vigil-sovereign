@@ -961,6 +961,57 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
 
+    def launch_pause(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                     mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — PAUSE a customer launch (reversible operator halt). Gated on
+        ``customer_pause_resume_enabled()`` (default-OFF → the action is a 404 unknown-action), then
+        ``admit_customer(run_engagement)`` + tenant-bind (the lease's org MUST match the session org) + a fresh
+        step-up, exactly like ``launch_cancel``/``launch_start``. Records a ``(slug, nonce)`` pause marker via
+        ``LaunchGate.pause_launch`` — pausing moves NO money; the money-safety (held, re-admitted on resume) is
+        the already-merged PR-1..PR-4a plumbing. Valid at ANY lifecycle stage (reserved / started / running):
+        a paused lease is refused at the arm + enqueue chokepoints and held until resume."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_pause", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+        r = LaunchGate(self.store).pause_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch pause refused"))
+        self._audit("launch_pause", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="paused", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+
+    def launch_resume(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                      mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — RESUME a paused customer launch: clear the ``(slug, nonce)`` pause marker so the
+        SAME lease re-arms and the held delivery re-admits (never re-burning the single-use floor). Same gates as
+        ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
+        launch is a harmless no-op."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_resume", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)
+        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch resume refused"))
+        self._audit("launch_resume", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="resumed", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
     def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
         """Flag gate (default OFF) then ``admit_customer`` on the SESSION org. Caller holds the lock."""

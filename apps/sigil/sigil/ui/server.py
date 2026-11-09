@@ -1500,6 +1500,18 @@ class Handler(BaseHTTPRequestHandler):
         if action == "launch_start":
             return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
                                   mfa_at=body.get("mfa_at"))
+        # pause/resume PR-4b — reversible customer pause/resume of their own launch. Absent (unknown action ->
+        # 404) unless the flag is ON; requester is the hop principal, org from the edge SESSION, the signed lease
+        # from the body (sovereign re-verifies it owner-pinned + tenant-binds to the session org).
+        if action in ("launch_pause", "launch_resume"):
+            from .. import config as _config
+            if not _config.customer_pause_resume_enabled():
+                return None
+            if action == "launch_pause":
+                return p.launch_pause(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                      mfa_at=body.get("mfa_at"))
+            return p.launch_resume(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                   mfa_at=body.get("mfa_at"))
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
         if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
