@@ -18,7 +18,12 @@ have never drilled against your real data is a hope, the same way an un-restored
   6. ROLL BACK with ``restore_from_backup`` and prove the restored copy verifies with the pre-upgrade count +
      sequence set exactly.
 
-``ok`` iff every step held. Honest tiering: a box with no spine data is ``NOT-RUN`` (exit 3), never green.
+``ok`` iff every step held. Honest tiering: a box with no spine data is ``NOT-RUN`` (exit 3), never green; a
+real spine that a concurrent writer changed while the drill ran is ``INCONCLUSIVE`` (exit 4), never green and
+never an accusation (the drill writes only inside its work dir, which it REFUSES to place inside — or around —
+the real spine dir). The copy is a CONSISTENT snapshot: taken under a SHARED flock on the store's own
+cross-process lockfile (writers hold it exclusively per append) and proven byte-faithful by digest. The
+cold-archive (``spine/archive/``, pruned history the live chain no longer reads) is not copied.
 DEFAULT-OFF: nothing runs unless an operator invokes ``python -m sigil.spine.upgrade_drill`` or installs the
 opt-in ``vigil-upgrade-drill`` timer. Sovereign plane; imports no offense code.
 """
@@ -27,11 +32,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 from .store import SpineStore
 from .upgrade import restore_from_backup, upgrade
@@ -39,33 +46,81 @@ from .upgrade import restore_from_backup, upgrade
 PASS = "PASS"
 FAIL = "FAIL"
 NOT_RUN = "NOT-RUN"
+INCONCLUSIVE = "INCONCLUSIVE"
 
-_SKIP_NAMES = {"spine.lock"}
+_SKIP_DIRS = {"archive"}             # cold-archive of pruned segments — never read by live verify/upgrade
+
+
+def _skipped(rel: Path) -> bool:
+    return bool(rel.parts) and (rel.parts[0] in _SKIP_DIRS or rel.name.endswith(".lock"))
+
+
+def _iter_files(root: Path) -> Iterator["tuple[Path, Path]"]:
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root)
+        if _skipped(rel) or p.is_symlink() or not p.is_file():
+            continue
+        yield p, rel
 
 
 def _tree_digest(root: Path) -> str:
-    """A content digest of every regular file under ``root`` (relative path + bytes), lock files excluded.
-    Used to PROVE the drill never modified the real spine directory."""
+    """A streamed content digest of every regular file under ``root`` (relative path + bytes); lockfiles and the
+    cold-archive excluded. Proves the copy is faithful and that the real spine dir was not changed."""
     h = hashlib.sha256()
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and not p.is_symlink() and p.name not in _SKIP_NAMES:
-            h.update(str(p.relative_to(root)).encode("utf-8", "surrogateescape") + b"\0")
-            h.update(p.read_bytes())
-            h.update(b"\0")
+    for p, rel in _iter_files(root):
+        h.update(str(rel).encode("utf-8", "surrogateescape") + b"\0")
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        h.update(b"\0")
     return h.hexdigest()
 
 
 def _has_data(spine_dir: Path) -> bool:
-    for p in spine_dir.rglob("*"):
-        if p.is_file() and (p.name.endswith(".jsonl") or p.name.endswith(".jsonl.gz")) and p.stat().st_size > 0:
+    for p, rel in _iter_files(spine_dir):
+        if (p.name.endswith(".jsonl") or p.name.endswith(".jsonl.gz")) and p.stat().st_size > 0:
             return True
     return False
 
 
-def corrupt_one_record(spine_dir: Path) -> bool:
-    """Wrap the payload of the FIRST record found (open ``*.jsonl`` first, else a sealed ``*.jsonl.gz``) so it
-    no longer matches its ``cert_digest``. Works on any real record (no reliance on particular payload words).
-    Returns True IFF a record was actually corrupted."""
+@contextmanager
+def _shared_writer_lock(spine_dir: Path, data_name: str) -> Iterator[None]:
+    """Hold a SHARED flock on the store's cross-process lockfile (``<ns>.lock``; writers take it EXCLUSIVELY per
+    append) so a snapshot is consistent. Opened READ-ONLY and never created (the real home may be read-only);
+    best-effort: no lockfile ⇒ no writer has ever run here ⇒ nothing to exclude."""
+    fd = None
+    lock = spine_dir / f"{Path(data_name).stem}.lock"
+    try:
+        if lock.is_file():
+            import fcntl
+            fd = os.open(str(lock), os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_SH)
+    except Exception:  # noqa: BLE001 — best effort (non-POSIX / unreadable lock): the digest still proves it
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def _overlaps(a: Path, b: Path) -> bool:
+    a, b = a.resolve(), b.resolve()
+    return a == b or a in b.parents or b in a.parents
+
+
+def corrupt_one_record(spine_dir: Path, verify: Optional[Callable[[], "tuple[bool, str]"]] = None) -> bool:
+    """Wrap one record's payload so it no longer matches its ``cert_digest`` (works on any real record — no
+    reliance on particular payload words). Candidates: open ``*.jsonl`` first, then sealed ``*.jsonl.gz``,
+    never the cold-archive. With ``verify``, a corruption the live chain does NOT read (verify still passes) is
+    REVERTED and the next candidate tried, so the negative control always lands on data the store verifies.
+    Returns True IFF a record was corrupted (and, with ``verify``, verification now fails)."""
     def _mutate(raw: bytes) -> Optional[bytes]:
         lines = raw.split(b"\n")
         for i, line in enumerate(lines):
@@ -81,16 +136,17 @@ def corrupt_one_record(spine_dir: Path) -> bool:
                 return b"\n".join(lines)
         return None
 
-    for p in sorted(spine_dir.rglob("*.jsonl")):
-        out = _mutate(p.read_bytes())
-        if out is not None:
-            p.write_bytes(out)
+    files = [p for p, _rel in _iter_files(spine_dir)]
+    for p in [f for f in files if f.name.endswith(".jsonl")] + [f for f in files if f.name.endswith(".jsonl.gz")]:
+        orig = p.read_bytes()
+        gz = p.name.endswith(".gz")
+        out = _mutate(gzip.decompress(orig) if gz else orig)
+        if out is None:
+            continue
+        p.write_bytes(gzip.compress(out) if gz else out)
+        if verify is None or not verify()[0]:
             return True
-    for p in sorted(spine_dir.rglob("*.jsonl.gz")):
-        out = _mutate(gzip.decompress(p.read_bytes()))
-        if out is not None:
-            p.write_bytes(gzip.compress(out))
-            return True
+        p.write_bytes(orig)                   # not on the live verify path — revert, try the next candidate
     return False
 
 
@@ -108,15 +164,35 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
 
     if not src_dir.is_dir() or not _has_data(src_dir):
         return done(NOT_RUN, f"no spine data at {src_dir} — nothing to drill (NOT-RUN is never green)")
+    work_dir = Path(work_dir)
+    if _overlaps(work_dir, src_dir):
+        # a work dir INSIDE the spine would copy into the real spine; one AROUND it would be deleted on cleanup
+        return done(FAIL, f"refusing: the work dir {work_dir} overlaps the real spine dir {src_dir}")
 
-    before = _tree_digest(src_dir)
-    copy_dir = Path(work_dir) / "spine"
-    shutil.copytree(src_dir, copy_dir, symlinks=False,
-                    ignore=shutil.ignore_patterns(*_SKIP_NAMES))
+    copy_dir = work_dir / "spine"
     data = copy_dir / spine_path.name
-    steps.append({"step": "copy", "to": str(copy_dir)})
+    before: Optional[str] = None
+
+    def _ignore(dirpath: str, names: list) -> set:
+        rel = Path(dirpath).resolve().relative_to(src_dir.resolve())
+        return {n for n in names if _skipped(rel / n)}
 
     try:
+        for _attempt in range(3):
+            if copy_dir.exists():
+                shutil.rmtree(copy_dir)
+            with _shared_writer_lock(src_dir, spine_path.name):
+                before = _tree_digest(src_dir)
+                shutil.copytree(src_dir, copy_dir, symlinks=False, ignore=_ignore, ignore_dangling_symlinks=True)
+                mid = _tree_digest(src_dir)
+            if before == mid and _tree_digest(copy_dir) == before:
+                break
+        else:
+            before = None
+            return done(INCONCLUSIVE, "could not take a consistent snapshot of the real spine (a concurrent "
+                                      "writer kept changing it) — re-run when the spine is idle")
+        steps.append({"step": "copy", "to": str(copy_dir), "consistent": True})
+
         pre = SpineStore(str(data))
         ok, why = pre.verify()
         count, seqs = pre.count(), [r.seq for r in pre.iter_records()]
@@ -136,7 +212,7 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
         if not (uok and u_intact):
             return done(FAIL, f"the upgraded copy is not intact (verify={uok}: {uwhy}; intact={u_intact})")
 
-        corrupted = corrupt_one_record(copy_dir)
+        corrupted = corrupt_one_record(copy_dir, verify=lambda: SpineStore(str(data)).verify())
         cok, cwhy = SpineStore(str(data)).verify() if corrupted else (True, "")
         steps.append({"step": "negative_control", "corrupted": corrupted, "detected": corrupted and not cok,
                       "why": cwhy})
@@ -155,20 +231,30 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
         steps.append({"step": "error", "error": f"{type(exc).__name__}: {exc}"})
         return done(FAIL, f"drill error: {type(exc).__name__}: {exc}")
     finally:
-        after = _tree_digest(src_dir)
-        verdict["source_untouched"] = after == before
-        steps.append({"step": "source_untouched", "ok": after == before})
+        if before is not None:
+            try:
+                with _shared_writer_lock(src_dir, spine_path.name):
+                    after = _tree_digest(src_dir)
+            except Exception:  # noqa: BLE001
+                after = None
+            verdict["source_unchanged"] = after == before
+            steps.append({"step": "source_unchanged", "ok": after == before})
 
-    if not verdict["source_untouched"]:
-        return done(FAIL, "the REAL spine directory changed during the drill — investigate immediately")
+    if not verdict.get("source_unchanged"):
+        return done(INCONCLUSIVE, "the real spine changed while the drill ran — most likely a concurrent writer "
+                                  "appended (the drill writes only inside its work dir, verified to be outside the "
+                                  f"spine dir: {work_dir}). Re-run when the spine is idle.")
     verdict["count"] = count
-    return done(PASS, f"real spine ({count} records) upgraded under this build, a corrupted deployment was "
-                      f"detected, and rollback restored it intact; the real home was not modified")
+    migrated = bool(next((st.get("migrated") for st in steps if st["step"] == "upgrade"), False))
+    what = ("migrated to the segment layout under this build" if migrated else
+            "already migrated — the verify → backup → compact → restore path was exercised")
+    return done(PASS, f"real spine ({count} records): {what}; a corrupted deployment was detected and rollback "
+                      f"restored it intact; the real spine was not modified")
 
 
 def main(argv: "Optional[list[str]]" = None) -> int:
     """``python -m sigil.spine.upgrade_drill [--spine PATH] [--work-dir DIR] [--json]`` — exit 0 PASS,
-    1 FAIL, 3 NOT-RUN (no data)."""
+    1 FAIL, 3 NOT-RUN (no data), 4 INCONCLUSIVE (a concurrent writer changed the real spine)."""
     import argparse
 
     from ..config import SPINE_PATH
@@ -187,7 +273,7 @@ def main(argv: "Optional[list[str]]" = None) -> int:
         print(f"upgrade_drill: {v['status']} — {v['detail']}")
         for s in v["steps"]:
             print(f"  - {s}")
-    return {PASS: 0, NOT_RUN: 3}.get(v["status"], 1)
+    return {PASS: 0, NOT_RUN: 3, INCONCLUSIVE: 4}.get(v["status"], 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

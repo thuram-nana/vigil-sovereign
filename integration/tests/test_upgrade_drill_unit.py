@@ -29,6 +29,7 @@ def test_the_real_home_is_read_only_and_there_is_no_network():
     assert "ReadOnlyPaths=%h/.sigil" in d
     assert not any(ln.startswith("ReadWritePaths=") and ".sigil" in ln for ln in d)
     assert "PrivateNetwork=yes" in d and "PrivateTmp=yes" in d and "ProtectSystem=strict" in d
+    assert "Environment=TMPDIR=/var/tmp" in d          # disk-backed scratch (~3x the spine), still private
 
 
 def test_is_a_non_restarting_oneshot_with_a_heartbeat():

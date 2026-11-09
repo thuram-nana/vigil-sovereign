@@ -10,14 +10,20 @@
 #
 # IT CHANGES NOTHING REAL. The drill only reads the real spine (a content digest taken before + after must
 # match, or the drill FAILS) and ReadOnlyPaths= below makes the real home read-only to this unit at the kernel
-# level. The copy lives under PrivateTmp and is discarded on exit. NOT-RUN (no spine data yet) exits 3.
+# level. The copy lives under the unit's PRIVATE /var/tmp (disk-backed — a big spine never fills a RAM /tmp;
+# allow ~3x the spine dir of scratch) and is discarded on exit.
+#
+# EXIT CODES (any non-zero fails the unit): 0 PASS · 1 FAIL · 3 NOT-RUN (no spine data yet — enable this only
+# once the home holds data, or it fails weekly) · 4 INCONCLUSIVE (a concurrent writer changed the real spine
+# while the drill ran — re-run when idle; the drill only ever writes inside its own work dir).
 #
 # Sovereign plane: it runs in the SOVEREIGN venv (it reads sigil.spine), never the offense one (FATAL-2).
 #
-# Optional config (SIGIL_HOME if non-default — then also update ReadOnlyPaths below):
+# Optional config (SIGIL_HOME if non-default):
 #     ~/.config/vigil/upgrade-drill.env
-# Alert monitoring (opt-in, like the SaaS drains): set VIGIL_UPGRADE_DRILL_ENABLED=1 for `vigil alerts` to
-# watch this unit's heartbeat fail-closed from the start; otherwise it is watched once it has run.
+# Alert monitoring (opt-in, like the SaaS drains): set VIGIL_UPGRADE_DRILL_ENABLED=1 in the MONITOR's env
+# (~/.config/vigil/alerts.env — the vigil-alerts unit reads it) to watch this unit's heartbeat fail-closed from
+# the start; otherwise it is watched once it has run.
 #
 # Manual run / logs:
 #     systemctl --user start vigil-upgrade-drill.service
@@ -38,6 +44,7 @@ Type=oneshot
 
 EnvironmentFile=-%h/.config/vigil/upgrade-drill.env
 Environment=PYTHONUNBUFFERED=1
+Environment=TMPDIR=/var/tmp
 WorkingDirectory=%h/vigil
 ExecStart=%h/vigil/.venv-sovereign/bin/python -m sigil.spine.upgrade_drill
 
