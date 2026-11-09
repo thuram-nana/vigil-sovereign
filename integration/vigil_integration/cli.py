@@ -132,6 +132,37 @@ def _cmd_engage_instruct(args: argparse.Namespace) -> int:
     return 0
 
 
+_OTLP_ENDPOINT_ENV = "VIGIL_OTLP_ENDPOINT"
+
+
+def _resolve_otlp_endpoint(args: argparse.Namespace) -> "Optional[str]":
+    """NET-2b (#73): the opt-in OTLP telemetry destination for ``vigil engage`` — ``--otlp-endpoint``, else
+    ``$VIGIL_OTLP_ENDPOINT``. DEFAULT-OFF: neither set ⇒ ``None`` ⇒ ``EngineConfig.otlp_endpoint`` stays at its
+    default and the engine emits no telemetry (byte-identical to before this flag existed).
+
+    FAIL-CLOSED ON EGRESS, NEVER ON THE RUN: a NON-loopback value is refused HERE, loudly, and telemetry stays
+    OFF — the engagement itself still runs (telemetry never denies cognition). This is belt-and-braces: the
+    ``OTLPSink`` already refuses every export to a non-loopback endpoint, but refusing at the CLI makes the
+    misconfiguration visible instead of a silent per-span ``refused`` counter. Any fault resolving the check
+    (e.g. the observability plane unavailable) also degrades to ``None`` — never to an unchecked endpoint."""
+    raw = str(getattr(args, "otlp_endpoint", "") or "").strip() or os.environ.get(_OTLP_ENDPOINT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        from .live.otel_export import endpoint_is_loopback  # local import: keep the CLI import-light
+        loopback = bool(endpoint_is_loopback(raw))
+    except Exception as exc:  # noqa: BLE001 — cannot prove loopback ⇒ do not wire (fail-closed on egress)
+        print(f"vigil engage: WARNING could not validate the OTLP endpoint ({type(exc).__name__}); "
+              f"telemetry export is OFF for this run.", file=sys.stderr)
+        return None
+    if not loopback:
+        print(f"vigil engage: WARNING refusing non-loopback OTLP endpoint {raw!r} — telemetry egress is pinned "
+              f"to a loopback collector (e.g. http://127.0.0.1:4318, `vigil services up --with-observability`). "
+              f"Telemetry export is OFF for this run; the engagement continues.", file=sys.stderr)
+        return None
+    return raw
+
+
 def _cmd_engage(args: argparse.Namespace) -> int:
     # W9-4b: the opt-in refuse-to-start PRODUCTION gate. Checked FIRST — before the engine wiring is even
     # imported — so a refused production run neither loads the engine nor sends any traffic. INERT unless
@@ -246,6 +277,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
         brain_execute_via_body=bool(getattr(args, "brain_execute_via_body", False)),
         plan_only=bool(getattr(args, "plan_only", False)),
+        otlp_endpoint=_resolve_otlp_endpoint(args),   # NET-2b: opt-in loopback telemetry (default-OFF)
     )
     engine = build_engine(cfg)
     report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
@@ -4861,6 +4893,12 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--brain", default="", choices=("", "hexstrike"),
                     help="drive `think` with a homegrown propose-only decision brain (e.g. hexstrike) "
                          "instead of the Claude/replay path — gate + executor + oracle unchanged")
+    pe.add_argument("--otlp-endpoint", default="",
+                    help="NET-2b (DEFAULT OFF): export each governed action as a secret-free OTel span to a "
+                         "LOOPBACK OTLP/HTTP collector (e.g. http://127.0.0.1:4318 — start one with `vigil "
+                         "services up --with-observability`). Falls back to $VIGIL_OTLP_ENDPOINT. A non-loopback "
+                         "value is refused (telemetry stays off; the engagement still runs). Telemetry is "
+                         "emit-only: it never gates, authorizes or changes a run's result.")
     pe.add_argument("--brain-execute-via-body", action="store_true",
                     help="H1x-1 (DEFAULT OFF): route a GATE-AUTHORIZED brain tool through the ONE canonical "
                          "HexstrikeAgentBody.execute instead of the governed executor. The gate is unchanged "
