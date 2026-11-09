@@ -118,6 +118,7 @@ def test_probe_and_doctor_faults_are_not_ready():
 
 
 @pytest.mark.parametrize("url", ["http://10.0.0.5:8770/readyz", "http://169.254.169.254/readyz",
+                                 "http://localhost:8770/readyz",                    # a NAME is never resolved
                                  "http://evil.com\\@127.0.0.1:8770/readyz", "file:///etc/passwd"])
 def test_non_loopback_url_is_refused_without_any_probe(url, monkeypatch):
     probe = _seq_probe([(True, "")])
@@ -223,14 +224,16 @@ def _lines():
 
 def test_unit_is_a_bounded_failing_oneshot():
     lines = _lines()
-    assert "Type=oneshot" in lines and "RemainAfterExit=yes" in lines
+    assert "Type=oneshot" in lines and "RemainAfterExit=no" in lines    # point-in-time, never a stale "ready"
     assert not any(ln.startswith("Restart=") for ln in lines)
     exec_line = next(ln for ln in lines if ln.startswith("ExecStart="))
     assert not exec_line.startswith("ExecStart=-"), "an unready box must FAIL the unit (no `-` prefix)"
     assert " ready --wait " in exec_line
     wait = float(exec_line.rsplit("--wait", 1)[1].split()[0])
     timeout = float(next(ln for ln in lines if ln.startswith("TimeoutStartSec=")).split("=", 1)[1])
-    assert timeout > wait, "TimeoutStartSec must be a hard backstop above the readiness deadline"
+    worst = wait + rd._PROBE_DEADLINE_S + rd.DOCTOR_DEADLINE_S
+    assert timeout > worst, "TimeoutStartSec must be a hard backstop above the worst-case gate duration"
+    assert "Environment=VIGIL_BIN=/home/kali/vigil/.venv-offense/bin/vigil" in lines   # user PATH lacks ~/.local/bin
 
 
 def test_unit_orders_after_but_never_starts_or_blocks_the_ui():
@@ -240,3 +243,54 @@ def test_unit_orders_after_but_never_starts_or_blocks_the_ui():
     for ln in lines:
         if ln.startswith(("Requires=", "Wants=", "BindsTo=", "Requisite=", "Before=")):
             assert "vigil-command" not in ln and "vigil-bringup" not in ln, ln
+
+
+# --- red-pen folds: overall per-probe / per-doctor deadlines, NaN interval, malformed results -------------
+
+def test_a_dripping_probe_is_bounded_by_its_overall_deadline():
+    import time as _t
+    release = threading.Event()
+
+    def drip(url):
+        release.wait(30)
+        return True, ""
+    t0 = _t.monotonic()
+    try:
+        v = rd.wait_ready(_REPO, url=URL, probe=drip, doctor=_doctor(True), probe_deadline_s=0.2,
+                          clock=Clock(), sleep=lambda s: None)
+    finally:
+        release.set()
+    assert _t.monotonic() - t0 < 5 and v["ready"] is False and "did not answer within" in v["readyz_detail"]
+
+
+def test_a_hanging_doctor_is_bounded_by_its_overall_deadline():
+    import time as _t
+    release = threading.Event()
+
+    def slow_doctor(repo):
+        release.wait(30)
+        return True, []
+    t0 = _t.monotonic()
+    try:
+        v = rd.wait_ready(_REPO, url=URL, probe=_seq_probe([(True, "")]), doctor=slow_doctor,
+                          doctor_deadline_s=0.2, clock=Clock(), sleep=lambda s: None)
+    finally:
+        release.set()
+    assert _t.monotonic() - t0 < 5 and v["ready"] is False
+    assert v["doctor_issues"] and "did not finish within" in v["doctor_issues"][0]
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf")])
+def test_a_non_finite_interval_never_raises(interval):
+    v = rd.wait_ready(_REPO, url=URL, wait_s=4, interval_s=interval, probe=_seq_probe([(False, "d")]),
+                      doctor=_doctor(True), clock=Clock(2.0), sleep=lambda s: None)
+    assert v["ready"] is False and v["attempts"] >= 1
+
+
+@pytest.mark.parametrize("bad", [None, "ok", (True,), (True, "", "extra")])
+def test_malformed_probe_or_doctor_results_are_not_ready(bad):
+    v = rd.wait_ready(_REPO, url=URL, probe=lambda u: bad, doctor=_doctor(True), clock=Clock(), sleep=lambda s: None)
+    assert v["ready"] is False
+    v = rd.wait_ready(_REPO, url=URL, probe=_seq_probe([(True, "")]), doctor=lambda r: bad, clock=Clock(),
+                      sleep=lambda s: None)
+    assert v["ready"] is False and v["doctor_ok"] is False

@@ -19,7 +19,8 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now vigil-ready.service
 #
-# CHECK:   systemctl --user status vigil-ready        (active = READY; failed = not ready by the deadline)
+# CHECK:   systemctl --user status vigil-ready        (last run: status=0/SUCCESS = was READY; failed = not ready)
+#          A POINT-IN-TIME verdict (RemainAfterExit=no): it is NOT a live health signal — re-run to re-check.
 # LOGS:    journalctl --user -u vigil-ready -e
 # RE-RUN:  systemctl --user restart vigil-ready
 # BY HAND: vigil ready --wait 900
@@ -31,11 +32,17 @@ After=vigil-command.service vigil-bringup.service network-online.target
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
+# NOT RemainAfterExit: the verdict is point-in-time; a lingering "active" would read as "still ready" after
+# `vigil down` or a proxy crash.
+RemainAfterExit=no
 WorkingDirectory=/home/kali/vigil
 EnvironmentFile=-/home/kali/vigil/.vigil-live/service.env
+# The systemd USER PATH has no ~/.local/bin, so `vigil doctor` would report the `vigil` entrypoint missing (a
+# hard issue) on a healthy bootstrap install. Pin it (service.env may still override).
+Environment=VIGIL_BIN=/home/kali/vigil/.venv-offense/bin/vigil
 # NO `-` prefix: an unready box must FAIL this unit (that is the whole point — the verdict is visible).
-# Bounded: `--wait` is the readiness deadline; TimeoutStartSec is a hard backstop above it.
+# Bounded: `--wait` is the readiness deadline; worst case ≈ wait + one probe (5 s) + one doctor run (180 s) =
+# 1085 s < TimeoutStartSec, a hard backstop above it.
 ExecStart=/home/kali/vigil/.venv-offense/bin/vigil ready --wait 900
 TimeoutStartSec=1200
 
