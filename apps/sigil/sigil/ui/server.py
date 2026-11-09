@@ -1527,6 +1527,14 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
+        # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
+        if action == "billing_checkout":
+            from .. import config as _config
+            if not _config.customer_checkout_enabled():
+                return None
+            return p.billing_checkout(requester, str(body.get("org_id", "")), str(body.get("price_id", "")),
+                                      ip=ip, mfa_at=body.get("mfa_at"))
         # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
         if action == "billing_overview":
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)

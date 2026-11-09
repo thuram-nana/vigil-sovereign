@@ -233,6 +233,30 @@ def customer_pause_resume_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_checkout_enabled() -> bool:
+    """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
+    default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
+    and nothing ever posts to the payment processor. Even when ON, checkout still refuses unless the owner has
+    provisioned the processor secrets (VIGIL_BILLING_WEBHOOK_SECRET + VIGIL_FLW_SECRET_KEY) — the amount is
+    always the OWNER CATALOG's, and credit is granted ONLY by the verified inbound webhook drain, never here."""
+    return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_billing_return_url() -> "str | None":
+    """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
+    ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value
+    must be an absolute ``https://`` URL with a host — anything else raises ``ValueError`` (checkout fails closed
+    rather than redirecting a paying customer somewhere unintended)."""
+    from urllib.parse import urlparse
+    raw = (os.environ.get("VIGIL_CUSTOMER_BILLING_RETURN_URL") or "").strip()
+    if not raw:
+        return None
+    p = urlparse(raw)
+    if p.scheme != "https" or not p.hostname or any(c.isspace() for c in raw) or "@" in (p.netloc or ""):
+        raise ValueError("VIGIL_CUSTOMER_BILLING_RETURN_URL must be an absolute https:// URL")
+    return raw
+
+
 def kek_backend() -> str:
     """Which custody backend wraps the at-rest KEK (the key that seals the owner key + secrets):
 
