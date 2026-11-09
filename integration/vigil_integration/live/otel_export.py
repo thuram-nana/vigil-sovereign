@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import http.client
 import logging
+import re
 from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Any, Optional
@@ -94,6 +95,24 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------------------------------
 
 
+# NET-2b red-pen HIGH: the characters an endpoint may contain AT ALL. A urllib.parse-vs-urllib3 differential
+# existed: ``http://evil.com\\@127.0.0.1:4318`` parses to host 127.0.0.1 under ``urlparse`` (so the pin passed)
+# but to host ``evil.com`` under urllib3/requests (what the real OTLP exporter uses). Refusing — up front —
+# backslash, whitespace/control, non-ASCII and ``@`` (no userinfo is ever needed for a loopback collector)
+# removes the whole authority-confusion class instead of chasing parser quirks one at a time.
+_ENDPOINT_SAFE = re.compile(r"\A[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]+\Z")
+_USERINFO = re.compile(r"(//)[^/?#]*@")
+
+
+def redact_endpoint(endpoint: Any) -> str:
+    """A display-safe form of ``endpoint``: any ``user:pass@`` userinfo is replaced by ``***@`` so a refusal
+    or diagnostic message never echoes a credential. Total — never raises."""
+    try:
+        return _USERINFO.sub(r"\1***@", coerce_str(endpoint))
+    except Exception:  # noqa: BLE001
+        return "<unprintable endpoint>"
+
+
 def endpoint_is_loopback(endpoint: Any) -> bool:
     """Whether an OTLP ``endpoint`` points at LOOPBACK only — the sole destination this validation
     permits. Fail-closed and DNS-free: accepts an ``http(s)://`` url whose host is a loopback IP literal
@@ -102,12 +121,17 @@ def endpoint_is_loopback(endpoint: Any) -> bool:
     resolves DNS — an unrecognised host is refused rather than looked up. Total: never raises."""
     if not isinstance(endpoint, str) or not endpoint.strip():
         return False
+    raw = endpoint                        # validate the EXACT string the exporter will use (no strip)
+    if not _ENDPOINT_SAFE.match(raw):
+        return False                      # backslash / whitespace / control / non-ASCII / userinfo ``@``
     try:
-        parsed = urlparse(endpoint.strip())
+        parsed = urlparse(raw)
     except Exception:  # noqa: BLE001 — a malformed url degrades to "not loopback", never raises
         return False
     if parsed.scheme.lower() not in ("http", "https"):
         return False
+    if "%" in parsed.netloc:
+        return False                      # no percent-encoding / zone ids in the authority
     host = parsed.hostname
     if not host:
         return False
@@ -173,7 +197,7 @@ def probe_collector(endpoint: Any, *, timeout: float = 2.0,
     log = logger or _log
     ep = coerce_str(endpoint)
     if not endpoint_is_loopback(ep):
-        detail = (f"OTLP endpoint {ep!r} is not loopback — refusing to probe (egress pin); telemetry "
+        detail = (f"OTLP endpoint {redact_endpoint(ep)!r} is not loopback — refusing to probe (egress pin); telemetry "
                   f"export is DISARMED for this endpoint")
         log.warning("OTLP collector preflight refused: %s", detail)
         return CollectorProbe(ep, False, detail)
@@ -184,7 +208,7 @@ def probe_collector(endpoint: Any, *, timeout: float = 2.0,
     except Exception:  # noqa: BLE001 — a malformed url is unreachable, never a crash
         parsed = None
     if parsed is None or not parsed.hostname:
-        detail = f"OTLP endpoint {ep!r} could not be parsed into a host — unreachable"
+        detail = f"OTLP endpoint {redact_endpoint(ep)!r} could not be parsed into a host — unreachable"
         log.warning("OTLP collector preflight failed: %s", detail)
         return CollectorProbe(ep, False, detail)
 
@@ -203,7 +227,7 @@ def probe_collector(endpoint: Any, *, timeout: float = 2.0,
         # reachable. A 4xx to an empty body still proves reachability (we are probing transport, not a payload).
         return CollectorProbe(ep, True, "")
     except Exception as exc:  # noqa: BLE001 — OSError / ConnectionRefused / timeout / protocol error → DOWN
-        detail = f"OTLP collector at {url} is UNREACHABLE: {type(exc).__name__}: {exc}"
+        detail = f"OTLP collector at {redact_endpoint(url)} is UNREACHABLE: {type(exc).__name__}: {exc}"
         # VISIBLE, not silent: an operator running an engagement with telemetry configured sees this at start.
         log.warning("OTLP collector preflight failed — spans will be dropped until it recovers: %s", detail)
         return CollectorProbe(ep, False, detail)
@@ -270,6 +294,13 @@ class OTLPSink:
             self._exporter = None
 
     # -- public contract -----------------------------------------------------------------------------
+
+    @property
+    def armed(self) -> bool:
+        """True iff this sink can actually export: a loopback endpoint AND a live exporter. False when the
+        endpoint was refused by the egress pin or no OTLP exporter is installed/constructible — so a wiring
+        caller can say so VISIBLY instead of registering a sink that silently skips every record (NET-2b)."""
+        return bool(self._loopback and self._exporter is not None)
 
     def __call__(self, record: Any) -> None:
         """The injected-sink entry point. Export ``record`` best-effort; return ``None`` always. Any
@@ -373,7 +404,16 @@ class OTLPSink:
         except Exception:  # noqa: BLE001 — no otlp exporter installed → inert sink
             return None
         try:
-            return OTLPSpanExporter(endpoint=_traces_url(endpoint), timeout=self._timeout)
+            # NET-2b red-pen MED: the exporter is requests-based. A default Session honours ambient
+            # HTTP(S)_PROXY (so "loopback" spans could be relayed to a proxy off-box) and follows redirects
+            # (so anything on the loopback port could bounce spans elsewhere). Pin both shut: no proxy env,
+            # no redirects. If the pinned session cannot be built, there is NO exporter (inert, never egress).
+            import requests
+
+            session = requests.Session()
+            session.trust_env = False          # never route loopback telemetry via an ambient proxy
+            session.max_redirects = 0          # a redirect is never followed (raises → dropped record)
+            return OTLPSpanExporter(endpoint=_traces_url(endpoint), timeout=self._timeout, session=session)
         except Exception:  # noqa: BLE001
             return None
 
