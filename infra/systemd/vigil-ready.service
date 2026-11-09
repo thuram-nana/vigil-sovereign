@@ -1,0 +1,43 @@
+# VIGIL READY — the bring-up READINESS GATE (DEP-2, #73). OPT-IN.
+#
+# WHAT THIS IS FOR. `vigil-bringup.service` is deliberately BEST-EFFORT (its `-` prefix means a failed docker /
+# image bring-up never fails boot) and `vigil-command.service` only proves the proxy PROCESS started. Neither
+# says "this box is actually ready". This oneshot does: after both have started it runs `vigil ready`, which
+# waits (bounded) until the proxy's /readyz answers 200 AND `vigil doctor` reports ok — and the unit FAILS,
+# visibly in `systemctl --user status` / journald, if that does not happen by the deadline.
+#
+# GATING IS NOT ENABLING. This unit reports readiness; it writes nothing, sets no flag and starts nothing.
+# Customer production execution stays flag-held (VIGIL_CUSTOMER_PROD_EXECUTION is the owner's act), whatever
+# this unit says. A downstream unit MAY order itself `After=vigil-ready.service` + `Requires=` to refuse to
+# start on an unready box — that is the gate; nothing here opts any unit into it.
+#
+# ORDERING. After= only (never Requires=/Wants= on the UI or bring-up): it must never START either of them,
+# and it must never delay the UI — it runs after them, it does not sit in front of them.
+#
+# INSTALL (opt-in, alongside vigil-command + vigil-bringup):
+#   cp infra/systemd/vigil-ready.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-ready.service
+#
+# CHECK:   systemctl --user status vigil-ready        (active = READY; failed = not ready by the deadline)
+# LOGS:    journalctl --user -u vigil-ready -e
+# RE-RUN:  systemctl --user restart vigil-ready
+# BY HAND: vigil ready --wait 900
+
+[Unit]
+Description=VIGIL READY — bring-up readiness gate (/readyz + vigil doctor; read-only, enables nothing)
+Documentation=file:/home/kali/vigil/docs/CLI-REFERENCE.md
+After=vigil-command.service vigil-bringup.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/kali/vigil
+EnvironmentFile=-/home/kali/vigil/.vigil-live/service.env
+# NO `-` prefix: an unready box must FAIL this unit (that is the whole point — the verdict is visible).
+# Bounded: `--wait` is the readiness deadline; TimeoutStartSec is a hard backstop above it.
+ExecStart=/home/kali/vigil/.venv-offense/bin/vigil ready --wait 900
+TimeoutStartSec=1200
+
+[Install]
+WantedBy=default.target
