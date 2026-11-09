@@ -159,6 +159,10 @@ _EXCLUSION_REASONS: dict[str, str] = {
                     "the OFFENSE leg's to capture (`vigil backup --base-dir` = that dir); the sovereign process "
                     "must never package it (FATAL-2: it would carry offense private keys), and two legs "
                     "restoring the same tree from different instants would clobber newer settlement markers",
+    "billing-spool": "the money-IN billing-webhook spool at the GO-LIVE runbook path ($SIGIL_HOME/billing-spool, "
+                     "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
+                     "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "
+                     "reconcilable from the processor)",
     "spool": "settle / finding / billing spools of PENDING signals. A capture that is not point-in-time "
              "consistent with the spine can tear exactly-once (a settle landing between the spine read and the "
              "spool read => a lost refund; the reverse => a double grant). Losing pending signals fails SAFE: "

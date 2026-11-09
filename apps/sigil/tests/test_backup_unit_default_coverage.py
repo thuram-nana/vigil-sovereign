@@ -79,7 +79,7 @@ def test_unit_env_files_are_captured(name):
     assert backup.classify_top_level(name) == "captured"
 
 
-@pytest.mark.parametrize("name", ["credit-lease", "spool", "venv", "checkpoint.witnessed.json",
+@pytest.mark.parametrize("name", ["credit-lease", "spool", "billing-spool", "venv", "checkpoint.witnessed.json",
                                   "vigil-tool-state.tsv"])
 def test_money_state_and_rederivable_entries_are_documented_exclusions(name):
     assert backup.classify_top_level(name) == "excluded"
