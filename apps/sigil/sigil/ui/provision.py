@@ -874,6 +874,25 @@ class Provisioner:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
 
+    # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
+    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    _CHECKOUT_MAX = 10
+    _CHECKOUT_WINDOW_S = 600.0
+
+    def _checkout_rate_ok(self, keys, now: float) -> bool:
+        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
+        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
+        win = self.__dict__.setdefault("_checkout_attempts", {})
+        cutoff = now - self._CHECKOUT_WINDOW_S
+        for k in keys:
+            win[k] = [t for t in win.get(k, []) if t > cutoff]
+        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+            return False
+        for k in keys:
+            win[k].append(now)
+        return True
+
     def _checkout_provider(self):
         """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
         processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
@@ -895,9 +914,12 @@ class Provisioner:
         ``admit_customer(manage_billing)`` binds the requester to THEIR org (``create_checkout`` binds the org into
         the tx_ref but explicitly does NOT authorize — this is the edge it delegates to; an ``operator`` who runs
         tests cannot spend money, a billing ``org_admin`` can, billing-authz != testing-authz), then a fresh
-        step-up. MONEY DOCTRINE: the customer names only a catalog ``price_id``; the AMOUNT is the owner catalog's
-        (``catalog.expected_amounts()``), an unknown price is refused, and NOTHING is credited here — credit comes
-        ONLY from the verified inbound webhook drain. Fail-closed: flag off, not admitted, no step-up, processor not
+        step-up and a per-org / per-requester rate limit. MONEY DOCTRINE: the customer names only a catalog
+        ``price_id``; the AMOUNT is the owner catalog's, an unknown price is refused, and NOTHING is credited here —
+        credit comes ONLY from the verified inbound webhook drain. TOP-UPS ONLY (red-pen HIGH): a subscription plan
+        sold through this ONE-TIME payment would carry no ``payment_plan``, so the inbound mapper would treat it as a
+        top-up of a non-top-up price and mint NOTHING — the customer charged, granted nothing. Plans need the
+        recurring payment-plan flow (a separate slice), so only ``topup_purchased`` entries are offered. Fail-closed: flag off, not admitted, no step-up, processor not
         provisioned, an invalid return URL, or any provider refusal raises ``ProvisionDenied``."""
         from .. import config
         if not config.customer_checkout_enabled():
@@ -909,6 +931,9 @@ class Provisioner:
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage billing for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
+                raise ProvisionDenied("too many checkout attempts — try again later")
         try:
             return_url = config.customer_billing_return_url()
         except ValueError as exc:
@@ -918,13 +943,16 @@ class Provisioner:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
             raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
         from ..governor import catalog
-        from ..governor.billing import UnsupportedCapability
+        from ..governor.billing import EVENT_TOPUP, UnsupportedCapability
+        ents = catalog.entitlements()
+        topups = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                  if getattr(ents.get(pid), "kind", None) == EVENT_TOPUP}
         # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None
         email = getattr(acct, "email", None) or None
         try:
-            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=catalog.expected_amounts(),
+            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=topups,
                                             customer_email=email, redirect_url=return_url)
         except (UnsupportedCapability, ValueError) as exc:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,

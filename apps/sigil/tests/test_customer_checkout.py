@@ -102,13 +102,15 @@ def test_billing_admin_gets_a_catalog_priced_tenant_bound_checkout(monkeypatch):
     assert wallet.available(org) == before                     # checkout NEVER credits — only the verified drain does
 
 
-@pytest.mark.parametrize("who", ["tester", "outsider"])
+@pytest.mark.parametrize("who", ["tester", "other_tenant", "nonexistent"])
 def test_non_billing_requesters_are_refused_by_admit(monkeypatch, who):
     from sigil.ui.provision import ProvisionDenied
     _on(monkeypatch)
     p, admin, tester, org, other, _w = _provisioner()
     p._checkout_provider = lambda: pytest.fail("never reached past admit")
-    requester, target_org = (tester, org) if who == "tester" else (admin, "org_nonexistent")
+    requester, target_org = {"tester": (tester, org),             # operator: runs tests, no money authority
+                             "other_tenant": (admin, other),      # a REAL org the admin is not a member of
+                             "nonexistent": (admin, "org_nonexistent")}[who]
     with pytest.raises(ProvisionDenied, match="may not manage billing"):
         p.billing_checkout(requester, target_org, "vigil_topup_1k")
 
@@ -200,3 +202,66 @@ def test_the_edge_route_is_absent_while_the_flag_is_off(monkeypatch):
         next(inspect.getsource(v._checkout) for v in vars(custui).values()
              if inspect.isclass(v) and hasattr(v, "_checkout"))
     assert '"org_id": str(rec.get("org_id")' in body and 'body.get("org_id"' not in body
+
+
+# --- red-pen folds ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("plan", ["vigil_research_monthly", "vigil_pro_monthly", "vigil_team_monthly"])
+def test_a_subscription_plan_is_refused_never_charged_for_nothing(monkeypatch, plan):
+    """Red-pen HIGH: a plan sold through this ONE-TIME payment would carry no payment_plan, so the inbound mapper
+    would mint NOTHING — the customer charged, granted nothing. The edge offers top-ups only."""
+    from sigil.governor import catalog
+    from sigil.ui.provision import ProvisionDenied
+    assert plan in catalog.expected_amounts()                 # it IS a priced catalog item ...
+    _on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    with pytest.raises(ProvisionDenied, match="checkout refused"):
+        p.billing_checkout(admin, org, plan)
+    assert posted == []                                       # ... yet nothing is ever posted to the processor
+
+
+def test_every_offered_price_is_a_topup(monkeypatch):
+    from sigil.governor import catalog
+    from sigil.governor.billing import EVENT_TOPUP
+    _on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    ents = catalog.entitlements()
+    for pid in catalog.expected_amounts():
+        posted: list = []
+        p._checkout_provider = lambda posted=posted: _real_provider(posted)
+        try:
+            p.billing_checkout(admin, org, pid)
+        except Exception:  # noqa: BLE001
+            pass
+        assert bool(posted) == (ents[pid].kind == EVENT_TOPUP), pid
+
+
+def test_step_up_is_required_when_enforced(monkeypatch):
+    from sigil.ui.provision import ProvisionStepUpRequired
+    _on(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    with pytest.raises(ProvisionStepUpRequired):                # the edge prompts for a factor + retries
+        p.billing_checkout(admin, org, "vigil_topup_1k", mfa_at=0.0, now=1000.0)      # no fresh second factor
+    assert posted == []
+    r = p.billing_checkout(admin, org, "vigil_topup_1k", mfa_at=990.0, now=1000.0)   # fresh step-up ⇒ allowed
+    assert r["checkout_url"] == _LINK
+
+
+def test_checkout_creation_is_rate_limited_per_org_and_requester(monkeypatch):
+    from sigil.ui.provision import ProvisionDenied
+    _on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    for _ in range(p._CHECKOUT_MAX):
+        p.billing_checkout(admin, org, "vigil_topup_1k", now=5000.0)
+    with pytest.raises(ProvisionDenied, match="too many checkout attempts"):
+        p.billing_checkout(admin, org, "vigil_topup_1k", now=5001.0)
+    assert len(posted) == p._CHECKOUT_MAX                     # the refused attempt never reached the processor
+    p.billing_checkout(admin, org, "vigil_topup_1k", now=5000.0 + p._CHECKOUT_WINDOW_S + 1)   # window slides
+    assert len(posted) == p._CHECKOUT_MAX + 1
