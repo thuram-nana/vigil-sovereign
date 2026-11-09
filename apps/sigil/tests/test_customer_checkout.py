@@ -26,7 +26,8 @@ def _iso(monkeypatch):
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     for k in ("VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_BILLING_RETURN_URL",
-              "VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY"):
+              "VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY", "VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED",
+              "VIGIL_CUSTOMER_MONITORING_ENABLED"):
         monkeypatch.delenv(k, raising=False)
 
 

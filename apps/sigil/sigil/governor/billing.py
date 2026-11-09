@@ -79,6 +79,13 @@ CAP_REFUND = "refund"                            # refund a transaction
 CAP_RECONCILE = "reconcile"                      # list transactions/settlements / resend missed webhooks
 
 
+class UnaccountedPayment(ValueError):
+    """A charge the processor RE-VERIFIED as ``successful`` that this drain cannot account for (no recoverable
+    tenant, or a price absent from the owner catalog). Raised ONLY when the owner opted in (plan checkout ON):
+    the inbound spool then QUARANTINES the envelope — the drain unit stays FAILED and the dead-man alarms — instead
+    of archiving a paid-but-uncredited charge as a silent no-op. Mints nothing either way (never act on a guess)."""
+
+
 class UnsupportedCapability(RuntimeError):
     """Raised when a billing operation is requested of a provider that does not DECLARE the capability. Surfaced
     explicitly (never a silent simulation) so an unsupported flow fails loudly rather than appearing to succeed."""
@@ -538,7 +545,7 @@ class FlutterwaveBillingProvider(BillingProvider):
     and refunds are declared capabilities exercised by the outbound flows (next slice)."""
 
     def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False,
-                 checkout_creator: "Optional[CheckoutCreator]" = None):
+                 checkout_creator: "Optional[CheckoutCreator]" = None, alarm_unaccounted_plans: bool = False):
         if not isinstance(secret_hash, str) or not secret_hash:
             raise ValueError("Flutterwave webhook secret hash is required")
         if not callable(verifier):
@@ -550,6 +557,11 @@ class FlutterwaveBillingProvider(BillingProvider):
         # Slice F: the outbound hosted-checkout poster (owner-provisioned HTTPS). None ⇒ create_checkout refuses
         # (never silently simulates a checkout). Injected so this module does no I/O and stays offline-testable.
         self._checkout_creator = checkout_creator
+        # Plan checkout (CHK-1b): a RECURRING renewal must still attribute to its tenant. Whether the processor
+        # echoes our tx_ref / meta.org_id on renewals is a sandbox-confirm item, so with plan checkout ON a
+        # verified-SUCCESSFUL payment_plan charge with no recoverable tenant RAISES UnaccountedPayment (quarantine +
+        # alarm) instead of a silent no-op. Default OFF ⇒ byte-identical.
+        self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
 
     def capabilities(self) -> frozenset[str]:
         caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
@@ -602,6 +614,9 @@ class FlutterwaveBillingProvider(BillingProvider):
         event_id = str(vid)                           # fail-closed without it.
         org = _flw_org_id(verified)                   # tenant from the VERIFIED object only (never the body)
         if org is None:
+            if self._alarm_unaccounted_plans and status == "successful" and verified.get("payment_plan"):
+                raise UnaccountedPayment(f"verified successful payment_plan charge {event_id} has no recoverable "
+                                         f"tenant (tx_ref/meta) — paid but UN-MINTED; reconcile by hand")
             return None                               # no recoverable tenant -> never act on a guess
         created = _flw_created(verified)              # stable epoch from the VERIFIED object; fail-closed if absent
         if created is None:
@@ -636,7 +651,7 @@ class FlutterwaveBillingProvider(BillingProvider):
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
-                        nonce: "Optional[str]" = None) -> CheckoutSession:
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> CheckoutSession:
         """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
 
         MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
@@ -678,6 +693,14 @@ class FlutterwaveBillingProvider(BillingProvider):
         }
         if redirect_url:
             payload["redirect_url"] = str(redirect_url)
+        if payment_plan is not None:
+            # CHK-1b: a SUBSCRIPTION checkout subscribes the payer to the processor's recurring plan. The catalog's
+            # subscription price_id IS that payment_plan id, so every renewal re-verifies with payment_plan ==
+            # price_id and maps back to the same catalog entitlement. Validated like any field we post.
+            pp = str(payment_plan)
+            if not pp or len(pp) > 128 or any(ord(c) < 0x21 or ord(c) == 0x7f for c in pp):
+                raise ValueError("payment_plan must be a non-empty printable id")
+            payload["payment_plan"] = pp
         if customer_email:
             payload["customer"] = {"email": str(customer_email)}
         try:
@@ -719,7 +742,7 @@ class BillingSigner:
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
-                 on_monitoring_change=None):
+                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False):
         self.provider = provider
         # AEGIS: a catalog MONITORING plan mints onto its OWN line (governor.monitoring_subscription), never the
         # credit-plan `subscriptions` record (which drives the plan-credit refill). None => monitoring plans mint
@@ -742,6 +765,10 @@ class BillingSigner:
         # skipped (backward-compatible; the primary binding is still "the catalog decides the entitlement for the
         # price_id we set at checkout").
         self._expected = {str(k): (int(v[0]), str(v[1]).upper()) for k, v in dict(expected or {}).items()}
+        # CHK-1b: with plan checkout ON, a verified subscription charge whose price is NOT in the owner catalog is
+        # a paid-but-uncredited charge -> raise UnaccountedPayment (quarantine + alarm). Default OFF ⇒ byte-identical
+        # (the deliberate top-up "unknown price is a safe no-op" decision is untouched either way).
+        self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
@@ -773,6 +800,10 @@ class BillingSigner:
             # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
             return line.mark_past_due(oid, issued_at=event.created)
         if ent is None:
+            if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
+                raise UnaccountedPayment(f"verified subscription charge {event.event_id} for org {oid!r} names "
+                                         f"price {event.price_id!r}, which is not in the owner catalog — paid but "
+                                         f"UN-MINTED; reconcile by hand")
             return None                               # unknown price -> no entitlement -> mint nothing
         # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
         # amount below the owner catalog's expected price (or in the wrong currency): belt-and-suspenders on top of

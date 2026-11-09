@@ -943,17 +943,23 @@ class Provisioner:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
             raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
         from ..governor import catalog
-        from ..governor.billing import EVENT_TOPUP, UnsupportedCapability
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, UnsupportedCapability
         ents = catalog.entitlements()
-        topups = {pid: amt for pid, amt in catalog.expected_amounts().items()
-                  if getattr(ents.get(pid), "kind", None) == EVENT_TOPUP}
+        # CHK-1b: SUBSCRIPTION plans are offered only with the extra plan flag, and NEVER the AEGIS monitoring
+        # plans (the billing drain does not wire the monitoring line, so one would be charged for nothing).
+        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
+        monitoring = catalog.monitoring_price_ids()
+        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                  if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
         # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None
         email = getattr(acct, "email", None) or None
         try:
-            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=topups,
-                                            customer_email=email, redirect_url=return_url)
+            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
+                                            customer_email=email, redirect_url=return_url,
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
         except (UnsupportedCapability, ValueError) as exc:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                         target=str(price_id or ""), outcome="refused")

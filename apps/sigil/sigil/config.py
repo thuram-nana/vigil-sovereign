@@ -242,6 +242,16 @@ def customer_checkout_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_plan_checkout_enabled() -> bool:
+    """True iff customers may also check out SUBSCRIPTION plans (`VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED`
+    affirmative; requires the base checkout flag too). OFF by default (CHK-1b). A plan checkout subscribes the payer
+    to the processor's recurring plan (the catalog price_id IS the payment_plan id); every RENEWAL must then map back
+    to the tenant via the tx_ref / meta we set — a sandbox-confirm item. ENABLE ONLY after a sandbox renewal shows
+    it attributes. While ON, the billing drain QUARANTINES (alarms on) a verified successful plan charge it cannot
+    attribute or price, instead of a silent no-op."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_billing_return_url() -> "str | None":
     """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
     ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value
