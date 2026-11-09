@@ -532,6 +532,7 @@ jobs:
               integration/tests/test_launch_drain.py \
               integration/tests/test_engage_runner.py \
               integration/tests/test_engage_worker_pause_redrive.py \
+              integration/tests/test_launch_pause_redrive_gate.py \
               integration/tests/test_ci_runner.py \
               integration/tests/test_findings_crossing.py \
               integration/tests/test_aegis_saas_acceptance.py \
