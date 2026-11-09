@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .authorize import JobAuthorization, authorize_job
+from .authorize import LEASE_PAUSED_DENIAL, JobAuthorization, authorize_job
 from .model import SecurityJob
 from .queue import ClaimedJob, SecurityJobQueue
 
@@ -69,6 +69,14 @@ class JobRunner:
                 if self.assert_tenant is not None
                 else authorize_job(job, gate=self.gate))
             if authz.refused:
+                # pause/resume PR-4: a REVERSIBLE paused-lease refusal must NOT strand the paid launch — RELEASE
+                # its one-shot delivery so the seam poller re-produces it (and the launch re-drives) once the
+                # pause is cleared. While still paused the poller's own verify refuses re-production, so there is
+                # no churn. A TERMINAL refusal (no_lease / policy / tenant) KEEPS the delivery marker as before
+                # (the job is genuinely un-runnable; re-driving it would spin). Default-OFF: the gate never emits
+                # LEASE_PAUSED_DENIAL until pause recording ships, so this is byte-identical today.
+                if authz.denial_code == LEASE_PAUSED_DENIAL:
+                    self.queue.release_delivery(claimed)
                 return JobOutcome(state="refused", job=job, reason=authz.reason,
                                   denial_code=authz.denial_code)
             # AUTHORIZED — and only now, holding the slug lease, is the worker invoked.

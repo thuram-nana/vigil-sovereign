@@ -37,6 +37,7 @@ from vigil_integration.jobs.engage_worker import (
 from vigil_integration.jobs.launch_trigger import launch_delivery_id
 from vigil_integration.jobs.model import SecurityJob
 from vigil_integration.live.credit_lease_broker import write_credit_lease
+from vigil_integration.live.credit_lease_pause import clear_lease_pause, is_lease_paused, record_lease_pause
 
 # The worker imports framework LAZILY; framework is not on the sovereign-only leg, so skip cleanly there and
 # run in the offense/integration CI leg (same posture as test_engage_runner.py).
@@ -210,6 +211,68 @@ def test_pause_on_failsafe_mark_does_not_delete_a_prior_slot(monkeypatch):
     assert emits == []                                     # no settle (pause path)
     assert os.path.exists(_slot(base, "n1", 1))            # the PRIOR slot survives — crash budget intact
     assert os.path.exists(_resume_marker(base, "n1"))      # resume-required still recorded (burn-driven, not slot-driven)
+
+
+def test_hard2_arm_window_pause_failure_never_settles_and_rolls_back(monkeypatch):
+    # HARD #2: a NON-EngagementPaused run failure while the lease is paused (the gate->arm window) is reversible:
+    # NO FAILED settle even at the terminal attempt (no premature refund/tombstone), the slot is rolled back, and
+    # NO resume-required is recorded (the precondition refused BEFORE the floor burn).
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner)
+    record_lease_pause(base, SLUG, "n1")                   # lease paused after pickup, before arm
+    emits: list = []
+
+    def _run(**kw):
+        raise RuntimeError("precondition refused: lease is paused")   # EngagementRefused-shaped (NOT EngagementPaused)
+
+    w = _mk(monkeypatch, base, _run, emits)
+    for _ in range(_MAX_ARM_ATTEMPTS + 1):                 # past the terminal attempt
+        with pytest.raises(RuntimeError):
+            w(_job(nonce="n1"))
+    assert emits == []                                     # never a FAILED settle while paused
+    assert not os.path.exists(_resume_marker(base, "n1"))  # NO resume-required (floor was not burned)
+
+
+def test_hard2_fail_safe_genuine_failure_with_no_pause_still_terminates(monkeypatch):
+    # FAIL-SAFE: with NO pause marker, a genuine failure is NOT held — it takes the normal path and the terminal
+    # attempt emits the refunding FAILED (so a broken launch still terminates; HARD #2 never swallows it).
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner)                        # no pause recorded
+    emits: list = []
+
+    def _run(**kw):
+        raise RuntimeError("genuine crash")
+
+    w = _mk(monkeypatch, base, _run, emits)
+    for i in range(_MAX_ARM_ATTEMPTS):
+        with pytest.raises(RuntimeError):
+            w(_job(nonce="n1"))
+    assert emits == ["failed"]                             # terminal FAILED fires — not swallowed by HARD #2
+
+
+def test_hard2_cleared_window_pause_re_arms_fresh_not_resume(monkeypatch):
+    # The money-critical distinction from PR-3's in-flight pause: a gate->arm-window pause did NOT burn the floor,
+    # so the re-drive after resume must arm FRESH (resume=False ⇒ consume), NOT resume — else the floor is never
+    # burned and the lease is replayable (a free run). Proven by resume staying False across the re-drive.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner)
+    record_lease_pause(base, SLUG, "n1")
+    seen_resume: list = []
+    emits: list = []
+
+    def _run(**kw):
+        seen_resume.append(kw["resume"])
+        if is_lease_paused(base, SLUG, "n1"):
+            raise RuntimeError("precondition refused (paused)")
+        return {"facts": 0}
+
+    w = _mk(monkeypatch, base, _run, emits)
+    with pytest.raises(RuntimeError):
+        w(_job(nonce="n1"))                                # window-pause failure → HARD #2 (no settle, no resume-required)
+    clear_lease_pause(base, SLUG, "n1")                    # resume
+    w(_job(nonce="n1"))                                    # re-drive
+    assert seen_resume == [False, False]                   # BOTH fresh — the floor was never burned, so never resume
+    assert emits == ["completed"]
 
 
 def test_crash_does_not_set_resume_required(monkeypatch):
