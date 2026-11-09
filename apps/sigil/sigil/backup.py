@@ -99,16 +99,7 @@ _CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "
 # Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
 # the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
 # recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
-_STATE_DIRS = ("qdrant", "graph",
-               # #70 (backups-everywhere): the SaaS MONEY + delivery state the shipped units place under
-               # SIGIL_HOME by default. `credit-lease/` is the launch seam (owner-signed leases, the SETTLEMENT
-               # markers that make settle exactly-once, pause markers) — `vigil-settle-drain` defaults
-               # VIGIL_SETTLE_BASE_DIR to %h/.sigil/credit-lease; `spool/` holds the settle / finding / billing
-               # spools (incoming = undrained money + delivery signals, processed = their dedup markers). Neither
-               # was in EITHER backup on a default install (the offense leg captures only --base-dir), so a dead
-               # disk lost pending settlements/credit grants and the exactly-once markers. Re-draining a
-               # restored spool is idempotent (the markers + the spine restored from the SAME backup).
-               "credit-lease", "spool")
+_STATE_DIRS = ("qdrant", "graph")
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -126,8 +117,6 @@ CAPTURED_TOP_LEVEL = frozenset({
     "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
-    "credit-lease",             # #70: the launch seam — leases, settlement (exactly-once) + pause markers
-    "spool",                    # #70: settle / finding / billing spools (pending money + delivery signals)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
@@ -161,6 +150,20 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "checkpoint.witnessed.json": "the witnessed-checkpoint OUTPUT `sigil-checkpoint` re-emits every cadence "
                                  "from the (captured) spine; the authoritative copies are the witnesses' — "
                                  "re-derived, never recovery state",
+    "vigil-tool-state.tsv": "the offense tool install-state table bootstrap re-derives (`--state-path`) — "
+                            "installer bookkeeping, no trust or memory state",
+    # #70 — the two SaaS money/delivery dirs the shipped units default under SIGIL_HOME. Both DELIBERATELY
+    # excluded from THIS (sovereign) leg; the decision is recorded here so the coverage gate stays honest.
+    "credit-lease": "the CROSS-PLANE launch seam = the shared VIGIL_BASE_DIR both planes agree on (leases, "
+                    "settlement + pause markers, AND the offense engine's own keys / floor / job queue). It is "
+                    "the OFFENSE leg's to capture (`vigil backup --base-dir` = that dir); the sovereign process "
+                    "must never package it (FATAL-2: it would carry offense private keys), and two legs "
+                    "restoring the same tree from different instants would clobber newer settlement markers",
+    "spool": "settle / finding / billing spools of PENDING signals. A capture that is not point-in-time "
+             "consistent with the spine can tear exactly-once (a settle landing between the spine read and the "
+             "spool read => a lost refund; the reverse => a double grant). Losing pending signals fails SAFE: "
+             "credits stay HELD (recover via `ops-sweep reservations`) and payments are re-deliverable / "
+             "reconcilable from the processor — a consistent money-state capture is a tracked design item",
 }
 EXCLUDED_TOP_LEVEL = frozenset(_EXCLUSION_REASONS)
 
@@ -209,11 +212,8 @@ def _is_sensitive_rel(rel: str) -> bool:
     regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
     if rel.endswith(".key") or rel == "sigil.env":
         return True
-    # #70: the unit EnvironmentFiles (may hold secrets) and the SaaS money/delivery state (billing webhook
-    # bodies carry customer data; leases/markers are money state) are owner-only on restore too.
-    if "/" not in rel and rel.endswith(".env"):
-        return True
-    return rel.startswith(("spool/", "credit-lease/"))
+    # #70: the unit EnvironmentFiles (may hold secrets) are owner-only on restore too.
+    return "/" not in rel and rel.endswith(".env")
 
 
 def _spine_files(home: Path) -> list[tuple[Path, str]]:
