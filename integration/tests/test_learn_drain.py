@@ -118,3 +118,52 @@ def test_drain_rejects_a_hostile_symlink(tmp_path):
     w = _watcher(tmp_path)
     r = w.drain()
     assert r["rejected"] == 1 and w.calls == []
+
+
+# --- #73 NET hardening: the watch loop survives a single-drain failure (sibling-drain parity) -------------
+
+class _StopLoop(BaseException):
+    """Raised from the injected sleep to end the (otherwise infinite) watch loop in a test."""
+
+
+def _stop_after(n):
+    state = {"sleeps": 0}
+
+    def sleep(_interval):
+        state["sleeps"] += 1
+        if state["sleeps"] >= n:
+            raise _StopLoop
+    return sleep, state
+
+
+def test_watch_survives_a_drain_error_and_keeps_draining(tmp_path, capsys):
+    import pytest
+    w = _watcher(tmp_path)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("transient spool-dir fault outside the per-file loop")
+        return {"learned": 0, "rejected": 0, "deduped": 0, "no_lead": 0, "halted": 0}
+
+    w.drain = flaky  # type: ignore[method-assign]
+    sleep, state = _stop_after(3)
+    with pytest.raises(_StopLoop):
+        w.watch(interval=0.0, sleep=sleep)
+    assert calls["n"] == 3                         # the failing round did NOT kill the loop; it kept draining
+    err = capsys.readouterr().err
+    assert "learn-drain: WARNING drain error (continuing): OSError" in err
+
+
+def test_watch_still_stops_on_keyboard_interrupt(tmp_path):
+    import pytest
+    w = _watcher(tmp_path)
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    w.drain = interrupted  # type: ignore[method-assign]
+    sleep, _state = _stop_after(2)                 # bounded: a loop that swallowed Ctrl-C ends in _StopLoop, not a hang
+    with pytest.raises(KeyboardInterrupt):         # only Exception is swallowed — Ctrl-C / SIGTERM still stop it
+        w.watch(interval=0.0, sleep=sleep)
