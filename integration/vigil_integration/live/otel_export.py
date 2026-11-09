@@ -35,6 +35,11 @@ attacks exactly that:
     swallowed (a telemetry outage must never deny cognition), tracked only as ``dropped``. A short
     export timeout plus a deterministic consecutive-failure circuit breaker (``max_consecutive_failures``,
     count-based — no clock) latches the sink silent so a down collector can never stall the hot path.
+    NET-2 (#73, default-OFF via ``VIGIL_NET_RECOVERY_ENABLED``): a latched sink may make a BOUNDED number
+    of half-open probe exports on a deterministic backoff (``live.net_recovery``) so a TRANSIENT collector
+    drop recovers instead of silencing telemetry for the rest of the run. The budget is per sink LIFETIME
+    (a flapping collector is latched for good once it is spent). Off ⇒ the latch is permanent, exactly as
+    before. The recovery clock decides only WHEN a probe is tried — never a span's identity.
   * **TOTAL on a malformed record.** Any garbage handed to ``__call__`` degrades to ``skipped`` (no
     signal); the sink never raises into the recorder.
 
@@ -65,6 +70,7 @@ from ..observability.model import (
     redact_attributes,
 )
 from ..tools.mcp_registry import _redact_str  # the F3 free-string scrubber (ONE secret vocabulary)
+from .net_recovery import recovery_from_env  # NET-2: bounded half-open recovery (default-OFF, stdlib-only)
 
 # OTLP HTTP signal path appended to a bare collector base url (per the OTLP/HTTP spec).
 _TRACES_PATH = "/v1/traces"
@@ -73,6 +79,8 @@ _INT64_MIN = -(2 ** 63)
 _INT64_MAX = 2 ** 63 - 1
 # sentinel: opentelemetry probed and found unavailable (distinct from "not yet probed" == None).
 _OTEL_UNAVAILABLE = object()
+# sentinel: resolve the NET-2 recovery policy from the environment (distinct from an explicit ``None`` = off).
+_RECOVERY_FROM_ENV = object()
 
 # The one logger for the export boundary. A collector that is down/unreachable is a TELEMETRY outage —
 # it must never deny cognition (the hot path stays swallow-only) — but it must not be a SILENT drop
@@ -220,7 +228,8 @@ class OTLPSink:
     spine identity, and never lets a down collector break the recorder. Never raises into the caller."""
 
     def __init__(self, endpoint: Any = "http://127.0.0.1:4318", exporter: Any = None, *,
-                 timeout: float = 2.0, max_consecutive_failures: int = 3) -> None:
+                 timeout: float = 2.0, max_consecutive_failures: int = 3,
+                 recovery: Any = _RECOVERY_FROM_ENV) -> None:
         self.endpoint: str = coerce_str(endpoint)
         # EGRESS PIN: a non-loopback endpoint disarms the sink entirely — it will never egress.
         self._loopback: bool = endpoint_is_loopback(self.endpoint)
@@ -239,6 +248,17 @@ class OTLPSink:
         self._consecutive_failures: int = 0
         self._disabled: bool = False          # circuit breaker: latched silent after repeated failures
         self._otel_cache: Any = None          # None=unprobed, tuple=loaded, _OTEL_UNAVAILABLE=absent
+        self.recovered: int = 0               # NET-2: half-open probes that re-armed a latched sink
+
+        # NET-2 (#73): the bounded half-open recovery policy for the latch. DEFAULT-OFF — unset flag ⇒
+        # ``None`` ⇒ the latch is permanent (byte-identical to pre-NET-2). Resolution can never raise into
+        # construction: any fault degrades to ``None`` (no recovery = today's behavior, fail-safe).
+        if recovery is _RECOVERY_FROM_ENV:
+            try:
+                recovery = recovery_from_env()
+            except Exception:  # noqa: BLE001 — a broken policy resolution means "no recovery", never a crash
+                recovery = None
+        self._recovery: Any = recovery
 
         # Injected exporter wins (tests pass a fake). Only build a REAL exporter when it was not injected
         # AND the endpoint is loopback — a non-loopback endpoint never gets a live exporter.
@@ -275,9 +295,14 @@ class OTLPSink:
         if not self._loopback:
             self.refused += 1                       # EGRESS PIN: non-loopback → never egress
             return
+        probing = False
         if self._disabled:
-            self.skipped += 1                       # circuit breaker latched open (collector proven down)
-            return
+            # NET-2: a latched sink stays silent UNLESS the (default-OFF) bounded recovery policy grants a
+            # half-open probe now. No policy / not yet due / budget exhausted ⇒ exactly the old latch.
+            if self._recovery is None or not self._recovery.ready():
+                self.skipped += 1                   # circuit breaker latched open (collector proven down)
+                return
+            probing = True
         if self._exporter is None:
             self.skipped += 1                       # nothing wired to export to
             return
@@ -285,11 +310,31 @@ class OTLPSink:
         if readable is None:
             self.skipped += 1                       # otel absent or record unconvertible → no signal
             return
+        if probing:
+            self._recovery.begin_attempt()          # spend the bounded budget BEFORE touching the network
         if self._do_export(readable):
             self.exported += 1
             self._consecutive_failures = 0
+            if probing:
+                # The collector is back: re-arm the sink. The policy's LIFETIME budget is NOT refilled, so
+                # a flapping collector cannot re-arm the sink indefinitely (NET-2 red-pen MED).
+                self._disabled = False
+                self._recovery.succeeded()
+                self.recovered += 1
+                _log.warning("OTLP collector at %s reachable again — telemetry export resumed (NET-2 "
+                             "half-open probe succeeded)", self.endpoint)
         else:
             self.dropped += 1
+            if probing:
+                # Still down: stay latched; the next probe waits longer. Once the bounded budget is spent the
+                # policy never grants again, so the sink degrades to the permanent pre-NET-2 latch. Logged
+                # once at exhaustion (bounded ⇒ never a log flood).
+                self._recovery.failed()
+                if self._recovery.exhausted:
+                    _log.warning("OTLP collector at %s still unreachable after %d recovery probes; telemetry "
+                                 "export silenced for this engagement", self.endpoint,
+                                 self._recovery.attempts)
+                return
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive_failures:
                 # Stop hammering a down collector — a deterministic, count-based (no-clock) latch so a
@@ -299,11 +344,15 @@ class OTLPSink:
                 # being a silent drip of `dropped++` and becomes one WARNING an operator can see. Logged ONCE
                 # — once `_disabled` latches, `_export_one` returns at the `if self._disabled` guard above and
                 # never re-enters this branch — so a dead collector cannot flood the log; the engine is
-                # UNAFFECTED (this path still swallows and never raises).
+                # UNAFFECTED (this path still swallows and never raises). With NET-2 recovery ON a re-armed
+                # sink can re-latch, but at most once per successful probe, and the policy's LIFETIME budget
+                # caps those — so this logs at most ``1 + max_attempts`` times per sink, still bounded.
                 _log.warning(
                     "OTLP collector at %s unreachable — %d consecutive export failures; telemetry export "
                     "silenced for this engagement (a down collector never denies cognition)",
                     self.endpoint, self._consecutive_failures)
+                if self._recovery is not None:
+                    self._recovery.trip()           # NET-2: start the bounded half-open schedule
 
     def _do_export(self, readable: Any) -> bool:
         """Hand one ReadableSpan to the injected exporter; report success. Every exporter error is
