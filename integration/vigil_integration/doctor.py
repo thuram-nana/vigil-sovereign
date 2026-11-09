@@ -1388,6 +1388,31 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the unit-alerts probe must never crash the report
         report["unit_alerts"] = {"error": f"{type(exc).__name__}: {exc}", "statuses": []}
         _note(f"the unit-alerts monitor could not run: {exc}")
+
+    # pause/resume PR-5 — paused-launch reconciliation. A positively-recorded pause is an EXPECTED held
+    # reservation (the customer paused it; the money-safe PR-1..PR-4a plumbing refuses it at the arm + enqueue
+    # chokepoints and HOLDS it, re-admitting on resume), NOT a stuck / lost / unsettled lease — so it is an
+    # ADVISORY NOTE, never an _issue (it does NOT flip `ok`). It is also NOT an alarm suppressor: a genuinely
+    # stuck lease carries no pause marker and is unaffected (and the #69 money-DRAIN-unit gate above is
+    # untouched — a paused launch creates no settle-drain work). DEFAULT-OFF: with no pause markers the probe
+    # adds nothing and `vigil doctor` is byte-identical. Best-effort — never raises (fail-soft like every probe).
+    try:
+        from .live.credit_lease_pause import paused_launches
+        _pbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+        _paused = paused_launches(_pbase)
+        _n_launches = len(_paused)
+        _n_holds = sum(len(nn) for _s, nn in _paused)
+        report["paused_launches"] = {"count": _n_launches, "holds": _n_holds,
+                                     "slugs": [s for s, _ in _paused]}
+        if _n_launches:
+            _note(f"{_n_launches} customer launch(es) currently PAUSED ({_n_holds} held reservation(s)) — "
+                  f"EXPECTED while pause/resume is enabled. A paused launch is a positively-recorded hold: the "
+                  f"engine refuses it at the arm + enqueue chokepoints and holds it, re-admitting on resume. "
+                  f"This is NOT a stuck/unsettled lease (a genuinely stuck lease carries no pause marker); "
+                  f"clear it via the customer resume action (or owner tooling) when the hold is no longer wanted.")
+    except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
+        report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the paused-launch probe could not run: {exc}")
     return report
 
 
