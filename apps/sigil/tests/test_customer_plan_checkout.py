@@ -34,7 +34,7 @@ def _iso(monkeypatch, tmp_path):
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
     for k in ("VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED",
               "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_BILLING_RETURN_URL",
-              "VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY"):
+              "VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY", "VIGIL_BILLING_PLAN_ALARM"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -181,5 +181,69 @@ def test_the_drain_arms_the_alarm_exactly_when_plan_checkout_is_on():
 
     from sigil import cli
     src = inspect.getsource(cli.cmd_billing_drain)
-    assert "alarm = customer_plan_checkout_enabled()" in src
+    assert "alarm = billing_plan_alarm_enabled()" in src
     assert src.count("alarm_unaccounted_plans=alarm") == 2               # provider AND signer
+
+
+# --- CHK-1b red-pen folds -----------------------------------------------------------------------------------------
+
+def test_a_second_plan_is_refused_while_one_is_active(monkeypatch):
+    """HIGH: two processor subscriptions would double-bill (no processor cancel/upgrade path; newest charge wins)."""
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    from sigil.governor.identity import ensure_owner_keypair
+    ensure_owner_keypair()                                    # the deployment owner identity the product reads with
+    p, admin, _t, org, _o, _w = _provisioner()
+    SubscriptionRegistry(p.store).subscribe(org, "research", 2000, period_start=100.0, period_end=10_000.0,
+                                            issued_at=100.0)
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    with pytest.raises(ProvisionDenied, match="already has a plan"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    assert posted == []
+    p.billing_checkout(admin, org, "vigil_topup_1k", now=5000.0)          # top-ups stay available
+    p.billing_checkout(admin, org, _PLAN, now=10_001.0)                  # once the plan has lapsed, allowed
+    assert [x.get("payment_plan") for x in posted] == [None, _PLAN]
+
+
+def test_a_plan_price_charge_without_payment_plan_alarms():
+    """MED: a successful charge for a catalog PLAN price arriving without payment_plan maps to a top-up."""
+    table = {"7401": {"id": 7401, "status": "successful", "tx_ref": "vigil:org_x:n1", "amount": 99.0,
+                      "currency": "USD", "created_at": 5000.0, "meta": {"price_id": _PLAN}}}
+    prov, signer, _subs = _inbound(table, alarm=True)
+    with pytest.raises(UnaccountedPayment, match="carries no payment_plan"):
+        _deliver(prov, signer, 7401, 5000.0)
+    prov_off, signer_off, _ = _inbound(table, alarm=False)
+    assert _deliver(prov_off, signer_off, 7401, 5000.0) is None
+
+
+@pytest.mark.parametrize("amount,currency", [(79.0, "USD"), (99.0, "NGN")])
+def test_an_underpaid_or_wrong_currency_plan_renewal_alarms(amount, currency):
+    """MED: a renewal billed below the catalog price / in the wrong currency would mint nothing every period."""
+    table = {"7501": {"id": 7501, "status": "successful", "tx_ref": "vigil:org_x:n1", "payment_plan": _PLAN,
+                      "amount": amount, "currency": currency, "created_at": 6000.0}}
+    prov, signer, _subs = _inbound(table, alarm=True)
+    with pytest.raises(UnaccountedPayment, match="catalog expects"):
+        _deliver(prov, signer, 7501, 6000.0)
+    prov_off, signer_off, _ = _inbound(table, alarm=False)
+    assert _deliver(prov_off, signer_off, 7501, 6000.0) is None
+
+
+def test_an_unparseable_timestamp_on_a_paid_plan_charge_alarms():
+    table = {"7601": _charge(7601, "vigil:org_x:n1", "not-a-date")}
+    prov, _signer, _subs = _inbound(table, alarm=True)
+    with pytest.raises(UnaccountedPayment, match="no parseable timestamp"):
+        prov._reverify_and_map({"event": "charge.completed", "data": {"id": 7601}})
+
+
+def test_the_alarm_outlives_turning_plan_sales_off(monkeypatch):
+    """LOW: the drain alarm is not the SELLING flag — plans sold earlier keep renewing after sales stop."""
+    from sigil import config
+    monkeypatch.delenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_BILLING_PLAN_ALARM", raising=False)
+    assert config.billing_plan_alarm_enabled() is False
+    monkeypatch.setenv("VIGIL_BILLING_PLAN_ALARM", "1")
+    assert config.billing_plan_alarm_enabled() is True                  # sales OFF, alarm still ON
+    monkeypatch.delenv("VIGIL_BILLING_PLAN_ALARM")
+    monkeypatch.setenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED", "1")
+    assert config.billing_plan_alarm_enabled() is True

@@ -244,12 +244,22 @@ def customer_checkout_enabled() -> bool:
 
 def customer_plan_checkout_enabled() -> bool:
     """True iff customers may also check out SUBSCRIPTION plans (`VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED`
-    affirmative; requires the base checkout flag too). OFF by default (CHK-1b). A plan checkout subscribes the payer
+    affirmative). Effective only together with the base checkout flag (the edge route is absent without it).
+    OFF by default (CHK-1b). A plan checkout subscribes the payer
     to the processor's recurring plan (the catalog price_id IS the payment_plan id); every RENEWAL must then map back
     to the tenant via the tx_ref / meta we set — a sandbox-confirm item. ENABLE ONLY after a sandbox renewal shows
     it attributes. While ON, the billing drain QUARANTINES (alarms on) a verified successful plan charge it cannot
     attribute or price, instead of a silent no-op."""
     return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def billing_plan_alarm_enabled() -> bool:
+    """Whether the billing drain QUARANTINES (alarms on) an unaccountable paid PLAN charge. ON whenever plan
+    checkout is ON, and independently via `VIGIL_BILLING_PLAN_ALARM` — keep it ON for as long as any plan sold
+    while checkout was enabled may still RENEW: turning plan SALES off must never silence the alarm on renewals
+    that are still being billed (CHK-1b red-pen)."""
+    return customer_plan_checkout_enabled() or (
+        (os.environ.get("VIGIL_BILLING_PLAN_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE)
 
 
 def customer_billing_return_url() -> "str | None":

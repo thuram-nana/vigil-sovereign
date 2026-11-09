@@ -952,6 +952,17 @@ class Provisioner:
         offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
                   if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
         is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
+        if is_plan and str(price_id) in offered:
+            # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
+            # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
+            # org already holds a credit plan that is active or past_due and not yet expired.
+            from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
+            cur = SubscriptionRegistry(self.store).subscription(requester_org_id)
+            if cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan")
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
         # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None

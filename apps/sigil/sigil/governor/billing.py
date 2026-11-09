@@ -620,6 +620,9 @@ class FlutterwaveBillingProvider(BillingProvider):
             return None                               # no recoverable tenant -> never act on a guess
         created = _flw_created(verified)              # stable epoch from the VERIFIED object; fail-closed if absent
         if created is None:
+            if self._alarm_unaccounted_plans and status == "successful" and verified.get("payment_plan"):
+                raise UnaccountedPayment(f"verified successful payment_plan charge {event_id} has no parseable "
+                                         f"timestamp — paid but UN-MINTED; reconcile by hand")
             return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
         if status == "successful":
@@ -799,6 +802,14 @@ class BillingSigner:
             # Webhook-driven dunning (H4): carry the provider event's `created` as the down-latch freshness key so
             # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
             return line.mark_past_due(oid, issued_at=event.created)
+        # CHK-1b red-pen MED: a verified SUCCESSFUL charge for a catalog SUBSCRIPTION price that arrived WITHOUT
+        # payment_plan maps to a top-up and would fall through to "mint nothing" — the charged-for-nothing hole
+        # again. With the plan alarm armed it is quarantined (loud), never a silent no-op.
+        if (self._alarm_unaccounted_plans and event.kind == EVENT_TOPUP and ent is not None
+                and ent.kind == EVENT_SUBSCRIPTION_ACTIVE):
+            raise UnaccountedPayment(f"verified charge {event.event_id} for org {oid!r} names subscription price "
+                                     f"{event.price_id!r} but carries no payment_plan — paid but UN-MINTED; "
+                                     f"reconcile by hand")
         if ent is None:
             if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
                 raise UnaccountedPayment(f"verified subscription charge {event.event_id} for org {oid!r} names "
@@ -814,6 +825,13 @@ class BillingSigner:
             exp = self._expected.get(event.price_id)
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
+                    if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
+                        # CHK-1b red-pen MED: a plan renewal billed at an amount/currency that no longer matches
+                        # the catalog (e.g. the owner repriced) would silently mint nothing every period.
+                        raise UnaccountedPayment(
+                            f"verified plan charge {event.event_id} for org {oid!r} paid "
+                            f"{event.amount_minor} {event.currency} but the catalog expects {exp[0]} {exp[1]} for "
+                            f"{event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
                     return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
             # Red-pen FINDING 1: event_id is the idempotency anchor for the wallet entry_id (top-up) AND the
             # invoice_id (both value paths), but verify_and_parse only checks it is a non-empty str. Bound it to
