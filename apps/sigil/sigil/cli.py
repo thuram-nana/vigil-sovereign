@@ -1328,6 +1328,10 @@ def cmd_billing_drain(a) -> None:
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
+    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
+    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
+    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    _require_expanded_path(a.spool, "--spool", required=True)
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)

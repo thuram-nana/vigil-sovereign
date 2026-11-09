@@ -1,0 +1,61 @@
+# VIGIL SaaS money-IN drain — systemd USER service (oneshot, fired every 60s by its timer). OPT-IN.
+# =====================================================================
+# Front B (from the #69 re-grounding): inbound Flutterwave billing webhooks are spooled by the proxy's
+# /webhooks/billing route (VIGIL_BILLING_WEBHOOK_SPOOL — HMAC-verified, INERT) and, until now, only drained when an
+# operator ran `sigil billing-drain` by hand: a stall DELAYED every paid customer's credit grant. This unit runs ONE
+# drain pass on a cadence, exactly like vigil-settle-drain / vigil-finding-drain do for their spools.
+#
+# The drain itself is unchanged and fail-closed (`sigil billing-drain`): it refuses unless
+# VIGIL_BILLING_DRAIN_ENABLED=1, takes the verif-hash secret ONLY from VIGIL_BILLING_WEBHOOK_SECRET (never argv),
+# refuses without a server-side transaction verifier (VIGIL_FLW_SECRET_KEY), re-verifies EVERY charge with the
+# processor before the OWNER CATALOG decides the credit, and mints exactly once per transaction. A quarantined
+# webhook (a paid charge that could not be minted) makes the pass exit non-zero, so this unit stays FAILED and
+# the dead-man alarms until rejected/ is empty.
+#
+# NETWORK: deliberately NOT PrivateNetwork — the server-side re-verify is an HTTPS call to the payment
+# processor (host-allowlisted in sigil.governor.flutterwave_egress).
+#
+# Config (secrets live ONLY in the EnvironmentFile, mode 0600 — never in this unit, never in git):
+#     ~/.config/vigil/billing-drain.env     (see vigil-billing-drain.env.example)
+# The spool default below MUST equal the proxy's VIGIL_BILLING_WEBHOOK_SPOOL, or nothing is ever drained.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-billing-drain.service
+#     journalctl --user -u vigil-billing-drain -e
+#
+# INSTALL (paired with its timer):
+#   cp infra/systemd/vigil-billing-drain.{service,timer} ~/.config/systemd/user/
+#   install -m 600 infra/systemd/vigil-billing-drain.env.example ~/.config/vigil/billing-drain.env  # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-billing-drain.timer
+
+[Unit]
+Description=VIGIL SaaS money-IN drain (one pass: billing webhook → processor re-verify → owner-signed credit mint)
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+# Path DEFAULTS live HERE (systemd expands %h in a unit directive, NEVER inside an EnvironmentFile value); the
+# CLI refuses a relative / %-bearing --spool (exit non-zero → a FAILED dead-man alarm, never a silent no-op).
+Environment=VIGIL_BILLING_SPOOL=%h/.sigil/spool/billing
+EnvironmentFile=-%h/.config/vigil/billing-drain.env
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --spool ${VIGIL_BILLING_SPOOL}
+
+# --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# IMPORTANT: if VIGIL_BILLING_SPOOL (or SIGIL_HOME) is outside ~/.sigil, ADD it to ReadWritePaths above.

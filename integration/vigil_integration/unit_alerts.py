@@ -185,6 +185,12 @@ HA_UNITS: tuple[UnitSpec, ...] = (
              optional=True, enable_env="VIGIL_SETTLE_DRAIN_ENABLED"),
     # ── DEP-3 (#73): the on-box upgrade/rollback drill. OPTIONAL like the SaaS drains: an install that never
     # enabled it gets no false ABSENT alarm; VIGIL_UPGRADE_DRILL_ENABLED arms it fail-closed from the start ──
+    # ── Front B: the money-IN billing-webhook drain (Flutterwave → server-side re-verify → owner-signed credit
+    # mint). OPTIONAL: watched fail-closed once VIGIL_BILLING_DRAIN_ENABLED is set (the SAME flag that enables the
+    # drain itself), so an install that does not take payments gets no false ABSENT alarm ──
+    UnitSpec("vigil-billing-drain.service", "vigil-billing-drain.timer", 60, 15,
+             "SaaS: drain the inbound billing-webhook spool → re-verify → owner-signed credit mint (60s; opt-in)",
+             optional=True, enable_env="VIGIL_BILLING_DRAIN_ENABLED"),
     UnitSpec("vigil-upgrade-drill.service", "vigil-upgrade-drill.timer", 7 * 24 * 3600, 1800,
              "upgrade/rollback drill — proves this box's real spine still upgrades + rolls back (weekly; opt-in)",
              optional=True, enable_env="VIGIL_UPGRADE_DRILL_ENABLED"),
