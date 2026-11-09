@@ -366,6 +366,15 @@ class HttpExecutor:
     authority: EngagementAuthority | None = None
     killswitch: KillSwitch | None = None
 
+    # pause/resume PR-3 — an OPTIONAL cooperative in-flight halt, a SIBLING of the kill-switch on the same
+    # per-action chokepoint. When set, it is consulted (and re-read from disk) at every gated action, so a
+    # customer launch whose owner-signed lease is PAUSED mid-run stops sending traffic at its very next action
+    # exactly like a kill-switch trip. UNLIKE the kill-switch (which is a terminal stop) a pause is REVERSIBLE:
+    # the engine raises a re-driveable EngagementPaused at the end of the run so the worker re-drives (resume)
+    # rather than settling a half-done run — see framework.v2.engage. Default None ⇒ byte-identical (greenfield /
+    # operator / `make gate` runs, and every customer run until pause/resume is enabled, carry no halt_check).
+    halt_check: Callable[[], bool] | None = None
+
     # When True and no `authority` was supplied, load the engagement's
     # persisted authority document from disk at construction (via
     # `load_authority`). Backward compatible: defaults False, so
@@ -474,6 +483,18 @@ class HttpExecutor:
             )
             return self._refused(
                 f"engagement halted by kill-switch: {self.killswitch.reason()}",
+                status_code=0,
+            )
+
+        # pause/resume PR-3 — cooperative in-flight halt (SIBLING of the kill-switch). Re-read every action so a
+        # lease PAUSED from anywhere (the customer/owner action, another process) stops the NEXT action at once,
+        # without sending further traffic to the target. This DEGRADES the action like the kill-switch; the run
+        # is actually re-driven by the authoritative EngagementPaused the engine raises post-scan. Default-OFF:
+        # halt_check is None for every non-customer run and every customer run until pause/resume is enabled.
+        if self.halt_check is not None and self.halt_check():
+            self._log_event("authority.paused", action_id=action_id)
+            return self._refused(
+                "engagement paused (reversible operator halt; resume to re-arm)",
                 status_code=0,
             )
 

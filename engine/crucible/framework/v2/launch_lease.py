@@ -123,7 +123,7 @@ def _advance_floor(base: Any, safe_slug: str, seq: int) -> "tuple[bool, str]":
 
 
 def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
-                           base: Any, t: float) -> "tuple[bool, str, Any]":
+                           base: Any, t: float, check_pause: bool = True) -> "tuple[bool, str, Any]":
     """Owner-pinned VERIFY + BIND of the seam lease for ``slug`` — everything :func:`verify_customer_launch_lease`
     does EXCEPT the single-use consume. Returns ``(ok, reason, doc)``: on success ``(True, "ok", <lease doc>)``
     (so a caller can read ``doc.units_reserved``), else ``(False, <reason>, None)``. Fail-CLOSED; never raises.
@@ -188,14 +188,19 @@ def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
     # owner-pin + bind + window checks. DEFAULT-OFF: with no pause marker is_lease_paused is False, so behaviour
     # is byte-identical to today. FATAL-2: the vigil_integration.live import stays LAZY inside the function (never
     # at module scope), exactly as the broker import above, so the two-plane boundary + test_two_env_boundary hold.
-    try:
-        from vigil_integration.live.credit_lease_pause import is_lease_paused
-        if is_lease_paused(base, safe, doc.nonce):
-            return False, "lease is paused (operator halt; resume to re-arm)", None
-    except Exception as e:  # noqa: BLE001 — FAIL-CLOSED: is_lease_paused is total (an existing-but-corrupt marker
-        # already returns True/halt), so this backstops the same latent-coupling class the settled re-check does —
-        # if the pause store or its import ever raised, REFUSE rather than fall through to consume.
-        return False, f"credit-lease pause status unreadable (fail-closed): {type(e).__name__}", None
+    # pause/resume PR-3: ``check_pause=False`` is passed ONLY by :func:`read_verified_launch_nonce`, the
+    # in-flight cooperative-halt nonce read — it must surface THIS lease's nonce to DRIVE the pause lookup even
+    # while the lease is paused (the nonce is a property of the lease, not of its pause state), so it skips this
+    # re-check. Every arm / enqueue path keeps the default ``check_pause=True`` → byte-identical to PR-2.
+    if check_pause:
+        try:
+            from vigil_integration.live.credit_lease_pause import is_lease_paused
+            if is_lease_paused(base, safe, doc.nonce):
+                return False, "lease is paused (operator halt; resume to re-arm)", None
+        except Exception as e:  # noqa: BLE001 — FAIL-CLOSED: is_lease_paused is total (an existing-but-corrupt
+            # marker already returns True/halt), so this backstops the same latent-coupling class the settled
+            # re-check does — if the pause store or its import ever raised, REFUSE rather than fall through to consume.
+            return False, f"credit-lease pause status unreadable (fail-closed): {type(e).__name__}", None
     return True, "ok", doc
 
 
@@ -241,3 +246,28 @@ def read_verified_launch_units(slug: str, host: str, tenant: Optional[str], *,
         return int(doc.units_reserved)
     except (TypeError, ValueError):   # a doc that validated already has units_reserved>=1; defence-in-depth
         return None
+
+
+def read_verified_launch_nonce(slug: str, host: str, tenant: Optional[str], *,
+                               base_dir: Any = None, now: Optional[float] = None) -> Optional[str]:
+    """pause/resume PR-3 — the OWNER-SIGNED, keyless lease NONCE for ``slug`` from the VERIFIED + BOUND
+    credit-launch lease (the SAME owner-pinned verify + bind the arm uses: owner-key signature, slug / host /
+    tenant / window, and the K4-1 settlement re-check), or ``None`` when no lease verifies / binds. Verify-ONLY
+    — it NEVER consumes the single-use floor (the engine arm's ``verify_customer_launch_lease(consume=True)``
+    stays the one authoritative consume), so reading the nonce never burns the launch. Never raises.
+
+    It passes ``check_pause=False`` DELIBERATELY: the nonce is the key the in-flight cooperative-halt check
+    (``is_lease_paused(slug, nonce)``) looks a pause up BY, so it must be readable even while the lease is paused
+    — otherwise a pause arriving in the narrow window between the enqueue gate's pass and this read would leave
+    the running engagement with NO halt binding. A settled / wrong-host / wrong-tenant / expired / forged lease
+    still ⇒ ``None`` (those are NOT runnable launches); only the reversible PAUSE conjunct is skipped here."""
+    base = base_dir if base_dir is not None else _base_dir()
+    t = time.time() if now is None else float(now)
+    ok, _reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t, check_pause=False)
+    if not ok or doc is None:
+        return None
+    try:
+        n = str(doc.nonce)
+    except (TypeError, ValueError, AttributeError):   # a doc that validated already carries a nonce; defence-in-depth
+        return None
+    return n or None
