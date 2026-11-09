@@ -1254,6 +1254,62 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
     return section, notes
 
 
+# ── #70: is the cross-plane MONEY SEAM inside what the offense backup captures? (ADVISORY) ─────────────────
+# The credit-lease seam (leases, settlement + pause markers) is the shared VIGIL_BASE_DIR both planes agree on;
+# `vigil-settle-drain` reads/writes it at VIGIL_SETTLE_BASE_DIR (unit default %h/.sigil/credit-lease). It is
+# deliberately NOT in the sovereign `sigil backup` (cross-plane: it also holds offense keys — FATAL-2), so it is
+# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR} from
+# ~/.config/vigil/backup.env, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
+# a dead disk loses every lease + settlement marker. ADVISORY: a note, never an _issue / `ok` flip. DEFAULT-OFF:
+# evaluated only once the money drain is configured (settle-drain.env present) — otherwise nothing changes.
+def _parse_env_file(path: Path) -> "dict | None":
+    """KEY=VALUE lines (``#`` comments, optional quotes). ``None`` if unreadable/absent. Never raises."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _money_seam_backup_coverage(home: "Path | None" = None) -> "tuple[dict, list]":
+    """Return (section, advisory_notes). ``configured`` is False (and no note) unless the settle drain is set up."""
+    h = Path(home) if home is not None else Path.home()
+    cfg = h / ".config" / "vigil"
+    settle = _parse_env_file(cfg / "settle-drain.env")
+    if settle is None:
+        return {"configured": False}, []
+    seam = Path(settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
+    backup = _parse_env_file(cfg / "backup.env")
+    section: dict = {"configured": True, "seam": _display_path(seam), "backup_base_dir": None, "covered": False}
+    if backup is None:
+        return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is backed up by NOTHING: "
+                         f"there is no ~/.config/vigil/backup.env (vigil-backup.service). Point the offense "
+                         f"backup's VIGIL_BASE_DIR at the seam."]
+    base = Path(backup.get("VIGIL_BASE_DIR") or ".vigil-live").expanduser()
+    if not base.is_absolute():
+        base = h / "vigil" / base                         # the unit's WorkingDirectory=%h/vigil
+    section["backup_base_dir"] = _display_path(base)
+    try:
+        s_r, b_r = seam.expanduser().resolve(), base.resolve()
+        covered = s_r == b_r or b_r in s_r.parents
+    except (OSError, RuntimeError):
+        covered = False
+    section["covered"] = covered
+    if covered:
+        return section, []
+    return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is NOT inside the offense "
+                     f"backup's base dir {_display_path(base)} — a dead disk would lose every lease and settlement "
+                     f"marker. Set VIGIL_BASE_DIR in ~/.config/vigil/backup.env to the seam (the same dir both "
+                     f"planes publish to). The sovereign `sigil backup` deliberately never captures it (cross-plane)."]
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1533,6 +1589,16 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")
+
+    # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
+    # configured) adds nothing. Best-effort: never raises.
+    try:
+        _seam, _seam_notes = _money_seam_backup_coverage()
+        report["money_seam_backup"] = _seam
+        for _m in _seam_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the seam-coverage probe must never crash the report
+        report["money_seam_backup"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
 
     # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
     # (nothing configured) adds no note. Best-effort: never raises.
