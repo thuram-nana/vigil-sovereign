@@ -1134,6 +1134,126 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service")
 
 
+# ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
+# One report section that makes the NET-2a/NET-2b configuration VISIBLE: is bounded recovery on, is an OTLP
+# endpoint configured (via $VIGIL_OTLP_ENDPOINT — the per-run `--otlp-endpoint` flag is invisible here), is it
+# loopback, is the exporter installed, and is the collector answering (and how fast — a collector answering
+# just under the export timeout never trips the circuit breaker but delays EVERY governed action).
+# ADVISORY ONLY: it never calls _issue, never flips `ok`, never gates a launch, and it is NOT a security
+# posture control (the production gate is untouched). DEFAULT-OFF: with neither the recovery flag nor an
+# endpoint set it is `configured=False`, adds no note and renders nothing (text output byte-identical).
+_NET_SLOW_COLLECTOR_MS = 1000
+_NET_PROBE_DEADLINE_S = 3.0        # an OVERALL bound on the collector probe (its 2 s timeout is per socket op)
+
+
+def _bounded_call(fn, arg, deadline_s: float):
+    """Run ``fn(arg)`` on a daemon thread; return ``(done, result, exc)`` within ``deadline_s``. A probe that a
+    slow-dripping local listener holds open can never hang `vigil doctor` (the thread is abandoned, daemon)."""
+    import threading
+
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["r"] = fn(arg)
+        except BaseException as exc:  # noqa: BLE001 — reported, never propagated off the thread
+            box["e"] = exc
+    t = threading.Thread(target=run, name="vigil-doctor-otlp-probe", daemon=True)
+    t.start()
+    t.join(deadline_s)
+    if t.is_alive():
+        return False, None, None
+    return True, box.get("r"), box.get("e")
+
+
+def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=None,
+                             deadline_s: float = _NET_PROBE_DEADLINE_S) -> "tuple[dict, list]":
+    """Return (section, advisory_notes). Total and fail-soft: any probe fault degrades to UNKNOWN wording."""
+    import logging as _logging
+    import time as _time
+
+    e = os.environ if env is None else env
+    notes: list = []
+    try:
+        from .live.net_recovery import recovery_enabled
+        recovery = "ON" if recovery_enabled(e) else "OFF"
+    except Exception as exc:  # noqa: BLE001
+        recovery = f"UNKNOWN ({type(exc).__name__})"
+    raw = str(e.get("VIGIL_OTLP_ENDPOINT", "") or "").strip()
+    if raw.lower() in ("off", "none", "0", "false", "no"):
+        raw = ""
+    section: dict = {"recovery": recovery, "otlp_endpoint": None, "otlp_loopback": None,
+                     "exporter_installed": None, "collector": None,
+                     "configured": recovery != "OFF" or bool(raw)}
+    if not section["configured"]:
+        return section, notes                 # default: no probe, no exporter lookup, no note — byte-identical
+    try:
+        # (find_spec on a dotted name imports the PARENT packages, so this only runs once configured)
+        import importlib.util
+        section["exporter_installed"] = bool(
+            importlib.util.find_spec("opentelemetry.sdk.trace") is not None
+            and importlib.util.find_spec("opentelemetry.exporter.otlp.proto.http.trace_exporter") is not None)
+    except Exception:  # noqa: BLE001 — a missing parent package raises: not installed
+        section["exporter_installed"] = False
+    if not raw:
+        notes.append("network recovery: VIGIL_NET_RECOVERY_ENABLED is on but no OTLP endpoint is configured "
+                      "($VIGIL_OTLP_ENDPOINT) — there is no telemetry path for it to recover.")
+        return section, notes
+    try:
+        from .live.otel_export import endpoint_is_loopback, probe_collector, redact_endpoint
+    except Exception as exc:  # noqa: BLE001
+        section["otlp_endpoint"] = "<unreadable>"
+        notes.append(f"network recovery: the OTLP endpoint could not be checked ({type(exc).__name__}).")
+        return section, notes
+    section["otlp_endpoint"] = redact_endpoint(raw)
+    section["otlp_loopback"] = bool(endpoint_is_loopback(raw))
+    if not section["otlp_loopback"]:
+        notes.append(f"network recovery: $VIGIL_OTLP_ENDPOINT {section['otlp_endpoint']!r} is NOT loopback — "
+                      f"`vigil engage` refuses it (telemetry egress is pinned to a loopback collector).")
+        return section, notes
+    if not section["exporter_installed"]:
+        notes.append("network recovery: an OTLP endpoint is configured but the OpenTelemetry OTLP exporter "
+                      "(opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed — "
+                      "no spans will be exported (none of the shipped hash locks carry it).")
+    if probe is None:
+        _quiet = _logging.getLogger("vigil_integration.doctor.otlp_probe")
+        _quiet.addHandler(_logging.NullHandler())
+        _quiet.propagate = False              # doctor reports the result itself — no duplicate stderr WARNING
+
+        def _probe(ep):
+            return probe_collector(ep, logger=_quiet)
+    else:
+        _probe = probe
+    _clock = clock or _time.monotonic
+    try:
+        t0 = float(_clock())
+        done, res, err = _bounded_call(_probe, raw, deadline_s)
+        ms = int(round((float(_clock()) - t0) * 1000))
+    except Exception as exc:  # noqa: BLE001 — a probe fault is UNKNOWN, never a crash
+        done, res, err, ms = True, None, exc, None
+    if not done:
+        section["collector"] = {"reachable": False, "latency_ms": ms,
+                                "detail": f"no answer within {deadline_s:g} s"}
+    elif err is not None:
+        section["collector"] = {"reachable": None, "latency_ms": None,
+                                "detail": f"probe error: {type(err).__name__}"}
+        return section, notes
+    else:
+        section["collector"] = {"reachable": bool(getattr(res, "reachable", False)), "latency_ms": ms,
+                                "detail": str(getattr(res, "detail", "") or "")}   # already redacted by the probe
+    col = section["collector"]
+    if col["reachable"] is False:
+        notes.append(f"network recovery: the OTLP collector at {section['otlp_endpoint']} did not answer a "
+                      f"reachability probe (`vigil services up --with-observability`). Telemetry degrades; "
+                      f"runs are unaffected.")
+    elif col["reachable"] and col["latency_ms"] is not None and col["latency_ms"] >= _NET_SLOW_COLLECTOR_MS:
+        notes.append(f"network recovery: the OTLP collector took {col['latency_ms']} ms to answer a reachability "
+                      f"probe (connect + a minimal request). Exports to a collector this slow can each wait up to "
+                      f"the export timeout on every governed action, possibly without tripping the circuit "
+                      f"breaker. Check the collector host.")
+    return section, notes
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1413,6 +1533,16 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")
+
+    # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
+    # (nothing configured) adds no note. Best-effort: never raises.
+    try:
+        _net, _net_notes = _network_recovery_report()
+        report["network_recovery"] = _net
+        for _m in _net_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the network-recovery probe must never crash the report
+        report["network_recovery"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
     return report
 
 
@@ -1565,6 +1695,28 @@ def render(report: dict) -> str:
             amark = {"VALID": "OK ", "MODIFIED": "!! ", "MISSING": "!! ",
                      "ATTESTED_ONLY": "-- "}.get(st, "?? ")
             lines.append(f"  {amark}{a.get('name', '?')} ({a.get('kind', '?')}): {st}")
+
+    net = report.get("network_recovery")
+    if isinstance(net, dict) and net.get("configured"):
+        # NET-4: rendered ONLY when something is configured (default output byte-identical). Advisory.
+        lines.append("\nNetwork recovery / telemetry export (advisory — does NOT affect the exit code):")
+        lines.append(f"  {'OK ' if net.get('recovery') == 'ON' else '.. '}bounded recovery: {net.get('recovery')}")
+        ep = net.get("otlp_endpoint")
+        if ep:
+            lp = net.get("otlp_loopback")
+            lines.append(f"  {'OK ' if lp else '!! '}otlp endpoint ($VIGIL_OTLP_ENDPOINT): {ep}"
+                         + ("" if lp else "  (NOT loopback — refused)"))
+            ex = net.get("exporter_installed")
+            lines.append(f"  {'OK ' if ex else '!! '}otlp exporter installed: {'yes' if ex else 'NO'}")
+            col = net.get("collector")
+            if isinstance(col, dict):
+                r = col.get("reachable")
+                mark = "OK " if r else ("?? " if r is None else "!! ")
+                lat = col.get("latency_ms")
+                lines.append(f"  {mark}collector: " + ("answered a probe" if r else ("unknown" if r is None
+                             else "NO answer to a probe")) + (f" ({lat} ms)" if lat is not None and r else ""))
+        else:
+            lines.append("  .. otlp endpoint ($VIGIL_OTLP_ENDPOINT): unset")
 
     issues = report.get("issues", [])
     if issues:
