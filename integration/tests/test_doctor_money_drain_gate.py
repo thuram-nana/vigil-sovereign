@@ -71,3 +71,41 @@ def test_doctor_money_drain_absent_on_a_cold_host_is_not_red(tmp_path, monkeypat
 
     report = _doc.collect(_REPO)
     assert not any("MONEY/pipeline drain" in i for i in report["issues"]), report["issues"]
+
+
+def test_doctor_reds_on_a_failed_billing_drain_and_names_the_customer_impact(tmp_path, monkeypatch):
+    """MONEY-5: the money-IN billing drain (#1055) is a money drain too — a FAILED run means a paid webhook stands
+    quarantined: a customer PAID and has NOT been credited until an operator acts."""
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
+    (tmp_path / "hb").mkdir()
+    _fresh_failed_beat(tmp_path / "hb", "vigil-billing-drain.service")
+
+    report = _doc.collect(_REPO)
+    hit = [i for i in report["issues"] if "MONEY/pipeline drain" in i and "vigil-billing-drain.service" in i]
+    assert hit and report["ok"] is False, report["issues"]
+    assert "PAID and has NOT been credited" in hit[0] and "rejected/" in hit[0]
+    assert "charged/refunded" not in hit[0]                       # the money-OUT wording is not reused for it
+    assert not any("vigil-billing-drain.service" in n for n in report["notes"])
+
+
+def test_the_settle_and_finding_messages_are_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
+    (tmp_path / "hb").mkdir()
+    _fresh_failed_beat(tmp_path / "hb", "vigil-settle-drain.service")
+    report = _doc.collect(_REPO)
+    msg = next(i for i in report["issues"] if "vigil-settle-drain.service" in i)
+    assert "completed paid runs are not being charged/refunded" in msg and "PAID and has NOT" not in msg
+
+
+def test_billing_drain_not_enabled_is_not_red(tmp_path, monkeypatch):
+    # an install that takes no payments: the billing drain is OPTIONAL and unwatched -> never a MONEY issue
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VIGIL_BILLING_DRAIN_ENABLED", raising=False)
+    monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
+    (tmp_path / "hb").mkdir()
+    _ua.write_unit_heartbeat(tmp_path / "hb", "vigil-backup.service", ok=True, now=time.time(), result="success",
+                             detail="")                          # alerting IS enabled on this host
+    report = _doc.collect(_REPO)
+    assert not any("vigil-billing-drain.service" in i for i in report["issues"]), report["issues"]
