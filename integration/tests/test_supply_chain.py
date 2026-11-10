@@ -1507,8 +1507,10 @@ def test_no_ci_pip_install_admits_a_version_below_a_lock_floor() -> None:
     assert _floor_offenders('pip install "cryptography>=42"', floors), (
         "negative control broken: the detector does not flag cryptography>=42 against the >=50 floor"
     )
-    assert not _floor_offenders("pip install cryptography>=50.0.1", floors), (
-        "false positive: cryptography>=50.0.1 meets the floor and must not be flagged"
+    # derived from the LOCKED version (a hard-coded `>=50.0.1` broke on the first lock bump past it — a
+    # >= floor AT the locked version meets the floor whatever that version is)
+    assert not _floor_offenders(f"pip install cryptography>={floors['cryptography']}", floors), (
+        f"false positive: cryptography>={floors['cryptography']} meets the floor and must not be flagged"
     )
     assert not _floor_offenders(
         f"pip install cryptography=={floors['cryptography']}", floors
