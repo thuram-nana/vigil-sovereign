@@ -1174,10 +1174,10 @@ def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
             sink = make_sink(otlp_endpoint=otlp_endpoint)
         except Exception:  # noqa: BLE001
             return None
-        # NET-2b red-pen MED: a sink that cannot export (no OTLP exporter installed — none of the shipped hash
-        # locks carry opentelemetry-sdk/-exporter — or the endpoint refused by the egress pin) would silently
-        # SKIP every record while the log claimed "armed". Say so loudly and wire NOTHING (byte-identical to
-        # telemetry-off) rather than register a sink that only pretends.
+        # NET-2b red-pen MED: a sink that cannot export (no OTLP exporter installed — it is the OPT-IN hash
+        # lock infra/supply-chain/otel.lock.txt, not part of either runtime lock — or the endpoint refused by
+        # the egress pin) would silently SKIP every record while the log claimed "armed". Say so loudly and
+        # wire NOTHING (byte-identical to telemetry-off) rather than register a sink that only pretends.
         if sink is not None and getattr(sink, "armed", True) is False:
             _log.warning("OTLP endpoint configured but telemetry export is NOT armed (the OpenTelemetry OTLP "
                          "exporter is not installed, or the endpoint was refused) — no spans will be exported")

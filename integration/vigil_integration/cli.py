@@ -164,11 +164,13 @@ def _resolve_otlp_endpoint(args: argparse.Namespace) -> "Optional[str]":
               f"Telemetry export is OFF for this run; the engagement continues.", file=sys.stderr)
         return None
     if not _otlp_exporter_installed():
-        # NET-2b red-pen MED: none of the shipped hash locks carry the OpenTelemetry SDK/OTLP exporter, so a
-        # wired endpoint would export NOTHING. Say so plainly instead of implying spans are flowing.
+        # NET-2b red-pen MED: the OpenTelemetry SDK/OTLP exporter is NOT in either runtime lock (it ships as the
+        # OPT-IN hash lock infra/supply-chain/otel.lock.txt), so without it a wired endpoint would export
+        # NOTHING. Say so plainly — with the reproducible remedy — instead of implying spans are flowing.
         print("vigil engage: WARNING --otlp-endpoint/$VIGIL_OTLP_ENDPOINT is set but the OpenTelemetry OTLP "
               "exporter (opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed in this "
-              "environment; telemetry export is OFF for this run.", file=sys.stderr)
+              "environment; telemetry export is OFF for this run. It is an opt-in hash lock: rebuild with "
+              "`VIGIL_WITH_OTEL=1 bash envs/build_envs.sh` (see docs/SUPPLY-CHAIN.md).", file=sys.stderr)
         return None
     return raw
 

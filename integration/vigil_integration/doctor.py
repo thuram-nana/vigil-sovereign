@@ -1214,7 +1214,8 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
     if not section["exporter_installed"]:
         notes.append("network recovery: an OTLP endpoint is configured but the OpenTelemetry OTLP exporter "
                       "(opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed — "
-                      "no spans will be exported (none of the shipped hash locks carry it).")
+                      "no spans will be exported. It is an OPT-IN hash lock: rebuild with "
+                      "`VIGIL_WITH_OTEL=1 bash envs/build_envs.sh` (see docs/SUPPLY-CHAIN.md).")
     if probe is None:
         _quiet = _logging.getLogger("vigil_integration.doctor.otlp_probe")
         _quiet.addHandler(_logging.NullHandler())
