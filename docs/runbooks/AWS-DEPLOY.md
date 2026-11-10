@@ -106,6 +106,11 @@ vigil restore ./restore-check --base-dir ./restore-base --crucible-root ./restor
 ```
 (Use `vigil restore`, not `sigil restore` — restore already re-verifies the RESTORED dirs; a trailing
 `sigil verify` would check the live host instead. For an explicit re-check add `vigil verify --base-dir ./restore-base`.)
+`--crucible-root` takes either the CRUCIBLE root (the dir holding `framework/v2` and `targets/`, what
+`$CRUCIBLE_ROOT` names) or its `framework/v2`; a fresh dir is laid out exactly like the engine's: `targets/` (every
+engagement + its evidence) at the root, and the proof db, runs, MLS learning memory (every `tenants/<t>` shard),
+entitlement trust root, DestructionAuthority (kill-switches) and authority root under `framework/v2/`. The
+crypto-shred evidence keystore (`framework/v2/.evidence-keys`) is never in a backup (W16-8).
 
 ### 2c. nginx for the public origin
 

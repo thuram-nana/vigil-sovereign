@@ -4465,9 +4465,11 @@ def _ensure_tools_on_path() -> None:
 
 
 def _resolve_crucible_root() -> Optional[Path]:
-    """The CRUCIBLE root that holds ``.blackboard`` / ``.console/runs`` — from ``$CRUCIBLE_ROOT`` if it points
-    at a real dir, else the in-repo ``engine/crucible/framework/v2``, else None (no CRUCIBLE proof state to
-    capture). Framework-free (no import of ``framework.v2.common.paths``) so the backup verb stays light."""
+    """The CRUCIBLE root for backup / restore — ``$CRUCIBLE_ROOT`` (the crucible root) if it points at a real dir,
+    else the in-repo ``engine/crucible/framework/v2`` (its v2 root), else None (no CRUCIBLE proof state to
+    capture). EITHER spelling is correct: ``backup._CrucibleLayout`` maps each captured unit to where the engine
+    really keeps it (``targets/`` under the crucible root, everything else under ``framework/v2``) — #70c.
+    Framework-free (no import of ``framework.v2.common.paths``) so the backup verb stays light."""
     env = os.environ.get("CRUCIBLE_ROOT")
     if env:
         p = Path(env).expanduser()
