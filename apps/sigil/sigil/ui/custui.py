@@ -362,6 +362,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
                   "/api/customer/notifications": "notifications"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_offers")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
