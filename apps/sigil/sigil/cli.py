@@ -1375,6 +1375,11 @@ def cmd_billing_drain(a) -> None:
         r = watcher.drain()
         print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
+        parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
+        if parked:
+            print(f"  awaiting retry: {parked} billing webhook(s) parked in {watcher.retry} after a transient "
+                  f"processor failure ({r['deferred']} new this pass) — nothing minted for them yet; each is "
+                  f"re-verified on a bounded schedule and quarantined + alarmed if the failure persists")
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:

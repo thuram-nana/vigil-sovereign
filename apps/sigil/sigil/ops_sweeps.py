@@ -12,7 +12,8 @@
 2. DANGLING FLUTTERWAVE tx_refs. Nothing on the spine durably records a started checkout, so the operator supplies
    the started set (JSONL of ``{"tx_ref", "created"}``, e.g. the checkout log / a provider export). Each tx_ref
    older than ``ttl_s`` is classified against the billing spool: ``handled`` (a webhook carrying it was drained to
-   ``processed/``), ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), or ``no_webhook``. REPORT
+   ``processed/``), ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), ``retrying`` (parked in
+   ``retry/`` for a bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``. REPORT
    ONLY: this sweep never mints, never calls the provider, and never moves a file.
 
 SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no framework/offense.
@@ -230,6 +231,8 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
     spool = Path(spool_dir)
     handled = {r for b in _iter_spool_bodies(spool / "processed") if (r := _body_tx_ref(b))}
     quarantined = {r for b in _iter_spool_bodies(spool / "rejected") if (r := _body_tx_ref(b))}
+    # NET-2b: a webhook parked for a bounded transient-verify retry is PENDING, not missing (no retry/ ⇒ unchanged)
+    retrying = {r for b in _iter_spool_bodies(spool / "retry") if (r := _body_tx_ref(b))}
     rows: list[dict] = []
     seen: set[str] = set()
     for c in checkouts:
@@ -240,5 +243,6 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
         if ref in handled:
             continue
         rows.append({"tx_ref": ref, "created": c["created"],
-                     "status": "quarantined" if ref in quarantined else "no_webhook"})
+                     "status": ("quarantined" if ref in quarantined else
+                                "retrying" if ref in retrying else "no_webhook")})
     return {"applied": False, "items": rows}
