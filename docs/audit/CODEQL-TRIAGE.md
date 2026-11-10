@@ -63,7 +63,13 @@ Proposed (not applied — it changes what CodeQL reports): add `'**/analysis/ben
 ## Not yet triaged in depth
 
 - `py/path-injection` ×139 — the bulk; most are paths built from validated slugs / run ids under a fixed root.
-  Needs a per-site pass (a follow-up), not a blanket call.
+  Needs a per-site pass (a follow-up), not a blanket call. **Done for the internet-facing sovereign plane** (the
+  12 sites in `ui/custui.py`, `ui/server.py`, `bridge/server.py`, `ui/durability.py`, `ui/hostcmd.py`): every
+  one is guarded — `resolve()` + containment in the content root (custui SPA, bridge PWA, durability backups),
+  an exact allowlist (`_STATIC_OK`), or a strict id format (`hostcmd.run_status` requires `isalnum()` of a
+  `token_hex` run id). By far the rest sit in the operator console / engine (`console/actions.py` 36,
+  `sessions.py` 13, `oob_collaborator.py` 12, `vigil_core/highwater.py` 11, …): loopback, operator-authenticated
+  surfaces — the next pass.
 - `py/redos` ×3 / `py/polynomial-redos` ×7 — mostly oracle regexes evaluated on TARGET responses (a slow regex
   is a robustness risk to the scanner, not a vulnerability in the target); changing an oracle regex must keep
   the committed eval baselines byte-identical, so this is its own slice.
