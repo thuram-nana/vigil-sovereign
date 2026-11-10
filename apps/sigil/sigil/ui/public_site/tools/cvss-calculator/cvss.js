@@ -53,11 +53,17 @@
     return "CVSS:3.1/" + ORDER.map(function (id) { return id + ":" + sel[id]; }).join("/");
   }
 
+  // The vector string is user-controlled (a pasted / linked vector): only a metric id from OUR OWN ORDER list
+  // ever becomes a key, so a crafted id can never write an inherited property (CodeQL js/remote-property-
+  // injection). The upper-casing already blocked `__proto__`; this makes it structural.
   function parseVector(str) {
     var sel = {}, parts = String(str || "").replace(/^CVSS:3\.1\//i, "").split("/");
     parts.forEach(function (p) {
-      var kv = p.split(":"), id = (kv[0] || "").toUpperCase(), v = (kv[1] || "").toUpperCase();
-      if (VALID[id] && VALID[id].indexOf(v) !== -1) sel[id] = v;
+      var kv = p.split(":"), raw = (kv[0] || "").toUpperCase(), v = (kv[1] || "").toUpperCase();
+      for (var i = 0; i < ORDER.length; i++) {
+        var id = ORDER[i];
+        if (id === raw && VALID[id] && VALID[id].indexOf(v) !== -1) { sel[id] = v; break; }
+      }
     });
     return sel;
   }

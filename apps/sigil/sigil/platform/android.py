@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ..perception.capture import Frame, _ocr
+from ..perception.capture import Frame, _ocr, private_capture_path
 from .base import CapabilityDescriptor, host_id
 
 
@@ -32,7 +31,7 @@ class AndroidBackend:
     def capture_screen(self) -> Optional[Frame]:
         if not _has_screencap():
             return None                                # honest gap — no screencap (often root-only)
-        out = tempfile.mktemp(suffix=".png", prefix="sigil-screen-")
+        out = private_capture_path("sigil-screen-", ".png")
         try:
             subprocess.run(["screencap", "-p", out], capture_output=True, timeout=20)
         except (subprocess.SubprocessError, OSError):
@@ -44,7 +43,7 @@ class AndroidBackend:
     def capture_camera(self) -> Optional[Frame]:
         if not _has_camera():
             return None                                # honest gap — termux-api not installed
-        out = tempfile.mktemp(suffix=".jpg", prefix="sigil-cam-")
+        out = private_capture_path("sigil-cam-", ".jpg")
         try:
             subprocess.run(["termux-camera-photo", "-c", "0", out],
                            capture_output=True, timeout=30)
