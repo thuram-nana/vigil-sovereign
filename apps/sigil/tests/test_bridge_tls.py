@@ -189,4 +189,3 @@ def test_serve_pins_the_tls_floor_explicitly():
     src = inspect.getsource(server.serve)
     i = src.index("ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)")
     assert "ctx.minimum_version = ssl.TLSVersion.TLSv1_2" in src[i:src.index("wrap_socket", i)]
-
