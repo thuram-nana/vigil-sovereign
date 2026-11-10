@@ -39,7 +39,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from vigil_core.hopauth import stamp_hop_assertion  # noqa: E402
+from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
@@ -287,10 +287,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")
-        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<sha256(body)>"), matching the
+        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<body_binding(body)>"), matching the
         # cockpit's recomputation over the bytes it receives — a captured assertion cannot be replayed with a
-        # swapped body to mint an attacker-chosen grant.
-        bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+        # swapped body to mint an attacker-chosen grant. The body can carry a password, so the binding is a
+        # KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding), never a fast hash.
+        bound_role = f"{action}:{body_binding(self.server.hop_key, data)}"
         sig = stamp_hop_assertion(self.server.hop_key, principal, bound_role, "POST", path, ts)
         req = urllib.request.Request(
             self.server.provision_base + path, data=data, method="POST",
@@ -589,6 +590,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
             return self._monitoring(action, body)
+        if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
+            return self._checkout(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -665,6 +668,19 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
         else:
             return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _checkout(self, body: dict):
+        """Front B CHK-1 — open a hosted checkout. REQUESTER + ORG from the SERVER-side session, never the body (a
+        body org_id is ignored): a customer can only ever fund THEIR bound org. The body carries ONLY the catalog
+        ``price_id``; the amount is the owner catalog's (sovereign side). Returns the processor's hosted link."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "price_id": body.get("price_id", ""),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_checkout", requester, payload)
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -774,6 +790,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _checkout_on() -> bool:
+    from .. import config as _config
+    return _config.customer_checkout_enabled()
 
 
 def _pause_resume_on() -> bool:

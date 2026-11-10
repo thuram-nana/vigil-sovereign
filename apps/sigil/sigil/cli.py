@@ -1354,8 +1354,12 @@ def cmd_billing_drain(a) -> None:
     # The checkout_creator is the OUTBOUND hosted-checkout poster (Slice A1); it is INERT on this inbound drain
     # path (the drain never calls create_checkout) but is wired at the one construction site so the capability is
     # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
+    from .config import billing_plan_alarm_enabled
+    alarm = billing_plan_alarm_enabled()         # CHK-1b: an unaccountable paid plan charge ALARMS (quarantine)
     signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier,
-                                                      checkout_creator=_billing_checkout_creator()),
+                                                      checkout_creator=_billing_checkout_creator(),
+                                                      alarm_unaccounted_plans=alarm),
+                           alarm_unaccounted_plans=alarm,
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
                            plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
                            expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))

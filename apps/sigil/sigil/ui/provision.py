@@ -874,6 +874,112 @@ class Provisioner:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
 
+    # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
+    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    _CHECKOUT_MAX = 10
+    _CHECKOUT_WINDOW_S = 600.0
+
+    def _checkout_rate_ok(self, keys, now: float) -> bool:
+        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
+        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
+        win = self.__dict__.setdefault("_checkout_attempts", {})
+        cutoff = now - self._CHECKOUT_WINDOW_S
+        for k in keys:
+            win[k] = [t for t in win.get(k, []) if t > cutoff]
+        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+            return False
+        for k in keys:
+            win[k].append(now)
+        return True
+
+    def _checkout_provider(self):
+        """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
+        processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
+        verif-hash secret and the processor key are read from the environment and never logged or returned."""
+        import os as _os
+        secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
+        if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
+            return None
+        from ..governor import flutterwave_egress as fe
+        from ..governor.billing import FlutterwaveBillingProvider
+        return FlutterwaveBillingProvider(secret, fe.make_transaction_verifier(),
+                                          checkout_creator=fe.make_checkout_creator())
+
+    def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
+                         mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """Front B CHK-1 — open a HOSTED CHECKOUT so a customer can pay for a catalog item (top-up / plan).
+
+        Gated on ``customer_checkout_enabled()`` (default-OFF → unknown-action 404), then ADMIT-FIRST:
+        ``admit_customer(manage_billing)`` binds the requester to THEIR org (``create_checkout`` binds the org into
+        the tx_ref but explicitly does NOT authorize — this is the edge it delegates to; an ``operator`` who runs
+        tests cannot spend money, a billing ``org_admin`` can, billing-authz != testing-authz), then a fresh
+        step-up and a per-org / per-requester rate limit. MONEY DOCTRINE: the customer names only a catalog
+        ``price_id``; the AMOUNT is the owner catalog's, an unknown price is refused, and NOTHING is credited here —
+        credit comes ONLY from the verified inbound webhook drain. TOP-UPS ONLY (red-pen HIGH): a subscription plan
+        sold through this ONE-TIME payment would carry no ``payment_plan``, so the inbound mapper would treat it as a
+        top-up of a non-top-up price and mint NOTHING — the customer charged, granted nothing. Plans need the
+        recurring payment-plan flow (a separate slice), so only ``topup_purchased`` entries are offered. Fail-closed: flag off, not admitted, no step-up, processor not
+        provisioned, an invalid return URL, or any provider refusal raises ``ProvisionDenied``."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_billing"):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage billing for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
+                raise ProvisionDenied("too many checkout attempts — try again later")
+        try:
+            return_url = config.customer_billing_return_url()
+        except ValueError as exc:
+            raise ProvisionDenied(str(exc)) from None
+        provider = self._checkout_provider()
+        if provider is None:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
+            raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
+        from ..governor import catalog
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, UnsupportedCapability
+        ents = catalog.entitlements()
+        # CHK-1b: SUBSCRIPTION plans are offered only with the extra plan flag, and NEVER the AEGIS monitoring
+        # plans (the billing drain does not wire the monitoring line, so one would be charged for nothing).
+        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
+        monitoring = catalog.monitoring_price_ids()
+        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                  if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
+        if is_plan and str(price_id) in offered:
+            # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
+            # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
+            # org already holds a credit plan that is active or past_due and not yet expired.
+            from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
+            cur = SubscriptionRegistry(self.store).subscription(requester_org_id)
+            if cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan")
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
+        # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
+        # opaque ids, never emails) — the account's OWN registered address, never a body field.
+        acct = self.customers.customer(requester) if self.customers is not None else None
+        email = getattr(acct, "email", None) or None
+        try:
+            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
+                                            customer_email=email, redirect_url=return_url,
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
+        except (UnsupportedCapability, ValueError) as exc:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                        target=str(price_id or ""), outcome="refused")
+            raise ProvisionDenied(f"checkout refused: {exc}") from None
+        self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
+                    outcome="created", critical=True)
+        return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
+                "amount_minor": sess.amount_minor, "currency": sess.currency}
+
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
