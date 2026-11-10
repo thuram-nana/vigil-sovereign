@@ -183,6 +183,11 @@ HA_UNITS: tuple[UnitSpec, ...] = (
     UnitSpec("vigil-settle-drain.service", "vigil-settle-drain.timer", 60, 15,
              "SaaS: drain the engagement-completion settle spool → settle_launch (charge/refund) (60s; opt-in)",
              optional=True, enable_env="VIGIL_SETTLE_DRAIN_ENABLED"),
+    # ── DEP-3 (#73): the on-box upgrade/rollback drill. OPTIONAL like the SaaS drains: an install that never
+    # enabled it gets no false ABSENT alarm; VIGIL_UPGRADE_DRILL_ENABLED arms it fail-closed from the start ──
+    UnitSpec("vigil-upgrade-drill.service", "vigil-upgrade-drill.timer", 7 * 24 * 3600, 1800,
+             "upgrade/rollback drill — proves this box's real spine still upgrades + rolls back (weekly; opt-in)",
+             optional=True, enable_env="VIGIL_UPGRADE_DRILL_ENABLED"),
 )
 
 
