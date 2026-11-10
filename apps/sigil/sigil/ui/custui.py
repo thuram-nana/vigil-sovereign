@@ -39,7 +39,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from vigil_core.hopauth import stamp_hop_assertion  # noqa: E402
+from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
@@ -287,16 +287,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")
-        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<sha256(body)>"), matching the
+        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<body_binding(body)>"), matching the
         # cockpit's recomputation over the bytes it receives — a captured assertion cannot be replayed with a
-        # swapped body to mint an attacker-chosen grant.
-        # CodeQL py/weak-sensitive-data-hashing is SUPPRESSED here, deliberately (owner decision, PR #1056): a
-        # FALSE POSITIVE. This is a request-INTEGRITY binding, not password storage — the digest is only an
-        # input to the keyed hop HMAC below and never leaves this process (the headers carry principal, ts and
-        # that HMAC only); the provisioner does the real password hashing. Any hash or HMAC of a body that can
-        # carry a password trips the query, which accepts only a slow password KDF — wrong for a per-request MAC.
-        # codeql[py/weak-sensitive-data-hashing]
-        bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+        # swapped body to mint an attacker-chosen grant. The body can carry a password, so the binding is a
+        # KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding), never a fast hash.
+        bound_role = f"{action}:{body_binding(self.server.hop_key, data)}"
         sig = stamp_hop_assertion(self.server.hop_key, principal, bound_role, "POST", path, ts)
         req = urllib.request.Request(
             self.server.provision_base + path, data=data, method="POST",

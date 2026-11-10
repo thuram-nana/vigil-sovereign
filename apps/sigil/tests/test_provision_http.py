@@ -24,7 +24,7 @@ import urllib.request
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.spine.store import SpineStore
 from sigil.ui.server import BOOTSTRAP_PATHS, build_server
-from vigil_core.hopauth import stamp_hop_assertion
+from vigil_core.hopauth import body_binding, stamp_hop_assertion
 
 TOKEN = "owner-shared-token-xyz789"
 HOP = "test-provision-hop-key-abc123"
@@ -65,7 +65,7 @@ def _call(port, hop_key, principal, action, body, *, ts=None, extra_headers=None
     tss = str(int(time.time())) if ts is None else str(ts)
     data = json.dumps(body).encode()
     # mirror the edge: role binds the action AND the exact body bytes (NH-1), matching the cockpit's recompute
-    bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+    bound_role = f"{action}:{body_binding(hop_key, data)}"
     sig = stamp_hop_assertion(hop_key, principal, bound_role, "POST", path, tss)
     h = {"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,
          "X-VIGIL-Provision-Ts": tss, "X-VIGIL-Provision-Sig": sig}
@@ -174,14 +174,14 @@ def test_provision_paths_are_not_bootstrap_paths():
 
 
 def test_hop_assertion_is_bound_to_the_body_rejecting_a_swapped_body(tmp_path, monkeypatch):
-    # NH-1: the hop binds sha256(body). A sig stamped over body B1 but POSTed with a DIFFERENT body B2 (a
+    # NH-1: the hop binds body_binding(body). A sig stamped over body B1 but POSTed with a DIFFERENT body B2 (a
     # replay-with-swapped-body) is refused — the recomputed role/MAC no longer matches.
     _isolate(monkeypatch, tmp_path)
     srv, port = _serve(_seed())
     try:
         action, path, tss = "signup_request", "/api/provision/signup_request", str(int(time.time()))
         b1 = json.dumps({"email": "real@acme.com"}).encode()
-        bound = f"{action}:{hashlib.sha256(b1).hexdigest()}"       # sig is over B1...
+        bound = f"{action}:{body_binding(HOP, b1)}"                 # sig is over B1...
         sig = stamp_hop_assertion(HOP, "", bound, "POST", path, tss)
         b2 = json.dumps({"email": "attacker@evil.com"}).encode()   # ...but we POST B2
         req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=b2, method="POST",
