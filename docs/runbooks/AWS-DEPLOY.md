@@ -146,6 +146,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now vigil-finding-drain.timer vigil-settle-drain.timer vigil-alerts.timer
 systemctl --user list-timers 'vigil-*'                  # confirm next run
 vigil alerts --once --require-push                       # a fresh drain heartbeat ⇒ no alarm
+vigil alerts --test-delivery                             # push ONE labelled test alert: proves alarms REACH you
 # NOTE: `vigil alerts` proves LIVENESS (the drain ran), not DELIVERY. Confirm the pipeline end-to-end by
 # driving a real completion/finding through and checking it crosses (the tenant surface updates / the lease
 # settles) — a drain pointed at the wrong directory would run "healthy" yet move nothing.

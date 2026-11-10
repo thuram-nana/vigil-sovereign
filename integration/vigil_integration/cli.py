@@ -3661,6 +3661,8 @@ def _cmd_alerts(args: argparse.Namespace) -> int:
     durable local log and a delivery DEAD-MAN. `--status` is read-only. Exits non-zero on any alarm. EXEC-ONLY
     + boundary-safe: reads/writes inert on-disk JSON and imports only `vigil_core` — never framework/sigil."""
     from . import unit_alerts as _ua
+    if getattr(args, "test_delivery", False):
+        return _ua.cmd_test_delivery(state_dir=args.state_dir, as_json=getattr(args, "json", False))
     return _ua.cmd_alerts(state_dir=args.state_dir, watch=args.watch, cycles=args.cycles,
                           interval=args.interval, status_only=args.status_only,
                           require_push=args.require_push, as_json=getattr(args, "json", False))
@@ -5832,6 +5834,10 @@ def build_parser() -> argparse.ArgumentParser:
     pal.add_argument("--require-push", action="store_true",
                      help="fail-closed: alarm if NO push destination is configured")
     pal.add_argument("--json", action="store_true", help="emit the summary/status as JSON")
+    pal.add_argument("--test-delivery", action="store_true", dest="test_delivery",
+                     help="push ONE labelled test alert through the configured destinations (the same path a real "
+                          "alarm takes) and report each result — prove alerts reach you BEFORE you rely on them. "
+                          "Exit 0 all delivered, 1 any failed, 2 none configured.")
     pal.set_defaults(func=_cmd_alerts)
 
     puh = sub.add_parser("unit-heartbeat",
