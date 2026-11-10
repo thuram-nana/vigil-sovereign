@@ -58,6 +58,30 @@ _OIDC_SID_COOKIE = "vigil_customer_oidc_sid"
 _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         "object-src 'none'; img-src 'self' data:")
 _MAX_BODY = 65536
+
+# How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
+# worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
+# a single-use OIDC code consumed) while the customer is told it failed — so they retry into a duplicate, or are
+# locked out of a login. So the wait is PER ACTION and always exceeds that action's own outbound worst case
+# (each figure below is pinned against the downstream timeout constants by test_custui_hop_budget.py); purely
+# local actions keep the short default so a wedged cockpit still fails fast.
+_HOP_TIMEOUT_S = 10.0
+_SLOW_HOP_TIMEOUTS_S = {
+    # Flutterwave hosted-checkout POST: 15 s per blocking socket op (connect, then read) -> 30 s + margin.
+    "billing_checkout": 45.0,
+    # OIDC: token exchange POST + JWKS GET, 10 s per blocking op each -> 40 s + margin.
+    "oidc_finish": 45.0,
+    # domain-ownership fetch: a 10 s ABSOLUTE wall-clock budget for the whole fetch -> + margin.
+    "target_verify": 20.0,
+    # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
+    "signup_request": 60.0,
+    "recover_request": 60.0,
+}
+
+
+def _hop_timeout(action: str) -> float:
+    """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
+    return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
 # The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
 # the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
 # routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
@@ -298,7 +322,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,
                      "X-VIGIL-Provision-Ts": ts, "X-VIGIL-Provision-Sig": sig})
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=_hop_timeout(action)) as r:
                 return r.status, json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             try:
