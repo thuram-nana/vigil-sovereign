@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -41,7 +42,9 @@ def _provisioner():
     from sigil.ui.login_ratelimit import LoginRateLimiter
     from sigil.ui.provision import Provisioner
     owner = generate_keypair()
-    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    # a fresh path inside a private (0700, atomically created) dir — never tempfile.mktemp (CodeQL
+    # py/insecure-temporary-file: mktemp returns a name another process can claim first).
+    s = SpineStore(str(Path(tempfile.mkdtemp()) / "spine.jsonl"))
     custs = CustomerRegistry(s, owner_key=owner, trusted_pubkey=owner.public_key_b64)
     orgs = OrgRegistry(s, owner_key=owner, trusted_pubkey=owner.public_key_b64)
     clock = itertools.count(1)

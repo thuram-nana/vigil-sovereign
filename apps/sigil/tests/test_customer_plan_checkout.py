@@ -15,6 +15,8 @@ allotment. Pinned:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from test_customer_checkout import _LINK, _on, _provisioner, _real_provider
 
@@ -100,7 +102,7 @@ def test_payment_plan_is_validated():
 
 def _inbound(table, *, alarm=False):
     owner = generate_keypair()
-    s = SpineStore(__import__("tempfile").mktemp(suffix=".jsonl"))
+    s = SpineStore(str(Path(__import__("tempfile").mkdtemp()) / "spine.jsonl"))   # never mktemp (CodeQL)
     subs = SubscriptionRegistry(s, owner_key=owner, trusted_pubkey=owner.public_key_b64)
     prov = FlutterwaveBillingProvider("hash", lambda txid: table.get(str(txid)), alarm_unaccounted_plans=alarm)
     signer = BillingSigner(prov, wallet=WalletRegistry(s, owner_key=owner, trusted_pubkey=owner.public_key_b64),
