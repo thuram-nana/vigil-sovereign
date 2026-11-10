@@ -906,6 +906,53 @@ class Provisioner:
         return FlutterwaveBillingProvider(secret, fe.make_transaction_verifier(),
                                           checkout_creator=fe.make_checkout_creator())
 
+    @staticmethod
+    def _checkout_offered() -> "tuple[dict, dict]":
+        """The ONE definition of what a customer may buy through hosted checkout: ``(offered, entitlements)``
+        where ``offered`` is ``{price_id: (amount_minor, currency)}`` from the OWNER catalog. Shared by
+        ``billing_checkout`` (which refuses anything outside it) and the ``billing_offers`` read (which lists
+        exactly it), so the UI can never show a buy button that checkout would refuse. Top-ups always; credit
+        SUBSCRIPTION plans only with the extra plan flag; NEVER the AEGIS monitoring plans (the billing drain
+        does not wire the monitoring line, so one would be charged for nothing)."""
+        from .. import config
+        from ..governor import catalog
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP
+        ents = catalog.entitlements()
+        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
+        monitoring = catalog.monitoring_price_ids()
+        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                   if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        return offered, ents
+
+    def _org_has_live_plan(self, org_id: str, t: float) -> bool:
+        """True iff the org already holds a credit plan that is active or past_due and not yet expired — the
+        CHK-1b double-billing guard (checkout refuses a second plan; the offers read reports it so the UI does not
+        offer one)."""
+        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
+        cur = SubscriptionRegistry(self.store).subscription(org_id)
+        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+
+    def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                now: "Optional[float]" = None) -> dict:
+        """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
+        like checkout: the checkout flag (default-OFF), then ``admit_customer(manage_billing)`` for the SESSION org
+        (a role that cannot spend money is not shown a price list it cannot use). Lists precisely the shared
+        ``_checkout_offered`` set (owner catalog prices — never a client-supplied amount) and whether the org
+        already holds a live plan (so the UI offers top-ups only, matching checkout's second-plan refusal). Reads
+        only: mints nothing, touches no owner key."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+
+        def project(_store, org_id: str) -> dict:
+            from ..governor import catalog
+            offered, _ents = self._checkout_offered()
+            items = [p for p in catalog.plans() if p.get("price_id") in offered]
+            return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
+                    "plans_enabled": bool(config.customer_plan_checkout_enabled())}
+        return self._customer_read(requester, requester_org_id, "manage_billing", project)
+
     def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
                          mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Front B CHK-1 — open a HOSTED CHECKOUT so a customer can pay for a catalog item (top-up / plan).
@@ -942,23 +989,16 @@ class Provisioner:
         if provider is None:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
             raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
-        from ..governor import catalog
-        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, UnsupportedCapability
-        ents = catalog.entitlements()
-        # CHK-1b: SUBSCRIPTION plans are offered only with the extra plan flag, and NEVER the AEGIS monitoring
-        # plans (the billing drain does not wire the monitoring line, so one would be charged for nothing).
-        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
-        monitoring = catalog.monitoring_price_ids()
-        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
-                  if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, UnsupportedCapability
+        # The ONE shared offered set (top-ups; plans only with the plan flag; never monitoring) — the
+        # billing_offers read lists exactly this, so the UI and checkout cannot disagree.
+        offered, ents = self._checkout_offered()
         is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
         if is_plan and str(price_id) in offered:
             # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
             # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
             # org already holds a credit plan that is active or past_due and not yet expired.
-            from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
-            cur = SubscriptionRegistry(self.store).subscription(requester_org_id)
-            if cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end):
+            if self._org_has_live_plan(requester_org_id, t):
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                             target=str(price_id), outcome="refused_existing_plan")
                 raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "

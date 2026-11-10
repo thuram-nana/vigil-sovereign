@@ -1,6 +1,12 @@
 /* VIGIL customer app — thin layer over the shared kit (tokens.css + components.css).
    No design tokens are redefined here; only customer-app layout glue. */
 
+/* The shared kit (components.css) lays #app out as the COCKPIT's two-column grid (sidebar + content). The customer
+   app renders one full-width shell inside #app, which landed in the sidebar-width column (~440px on a desktop).
+   Scoped to the customer plane only, so the operator cockpit's layout is untouched. */
+body[data-plane="customer"] #app { display: block; }
+
+
 #app { min-height: 100vh; }
 
 .cust-shell { max-width: 1040px; margin: 0 auto; padding: 0 16px 64px; }
@@ -18,7 +24,9 @@
   padding: 6px 12px; border-radius: 8px; font: inherit; opacity: 0.72;
 }
 .cust-nav-link:hover { opacity: 1; }
-.cust-nav-link[aria-current="page"] { opacity: 1; background: var(--surface-2, #1b1b1b); }
+/* The active tab uses tokens the theme DEFINES (--surface-2 is not one: it fell back to near-black behind dark
+   text on the light theme, making the current tab unreadable). */
+.cust-nav-link[aria-current="page"] { opacity: 1; background: var(--bg-3); color: var(--text-0); font-weight: 600; }
 
 /* a centered auth card for the logged-out screens */
 .cust-auth { max-width: 420px; margin: 8vh auto 0; }
@@ -106,3 +114,8 @@
 .cust-ntf-title { font-weight: 600; font-size: 0.9rem; word-break: break-word; }
 .cust-ntf-body { font-size: 0.82rem; opacity: 0.78; margin-top: 2px; word-break: break-word; }
 .cust-ntf-kind { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.5; margin-top: 4px; }
+
+/* CHK-2 — buy credits (hosted checkout) */
+.cust-offer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 0;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); flex-wrap: wrap; }
+.cust-offer p { margin: 2px 0 0; }

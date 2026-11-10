@@ -198,8 +198,108 @@
           ? [kv("Plan", s.plan_id), kv("Status", s.status), kv("Allotment", s.allotment),
              kv("Active now", d.active ? "yes" : "no")]
           : [h("p.cust-muted", { text: "No active subscription." })]),
+        buySection(),
       ]);
     });
+  }
+
+  // ---- CHK-2: buy (hosted checkout) -----------------------------------------------------------------
+  // This page NEVER grants anything. It asks the edge for a hosted-checkout link for a CATALOG price_id (the
+  // amount is the owner catalog's, server side — the page sends no amount) and sends the browser there. Credit
+  // arrives ONLY when the server verifies the payment (signed webhook + processor re-verify), never from here.
+  var TOPUP = "topup_purchased";
+  function isCheckoutUrl(u) {
+    // Only ever navigate to an absolute https link with a host and no embedded credentials.
+    try { var p = new URL(String(u)); return p.protocol === "https:" && !!p.hostname && !p.username && !p.password; }
+    catch (e) { return false; }
+  }
+  function offerLine(o) {
+    if (o.kind === TOPUP) return (o.credits != null ? String(o.credits) + " credits" : "Credit top-up");
+    var per = o.period_days ? " every " + String(o.period_days) + " days" : "";
+    return "Plan: " + String(o.allotment != null ? o.allotment : "") + " credits" + per;
+  }
+  async function startCheckout(o, btn) {
+    btn.disabled = true;
+    try {
+      var r = await VUI.postJSON(API + "/billing/checkout", { price_id: o.price_id });
+      if (!r || !isCheckoutUrl(r.checkout_url)) {
+        err("The payment link we received was not a secure https link, so we did not open it. Nothing was charged.");
+        btn.disabled = false; return;
+      }
+      location.assign(r.checkout_url);            // leave for the processor's hosted page
+    } catch (e) {
+      btn.disabled = false;
+      if (e && e.status === 401 && e.data && e.data.step_up_required) {
+        return err("For your security, this purchase needs a fresh second-factor check. Verify with your "
+          + "authenticator, then try again. Nothing was charged.");
+      }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      err("Checkout could not start" + ((e && e.data && e.data.error) ? ": " + e.data.error : ".")
+        + " Nothing was charged.");
+    }
+  }
+  function buySection() {
+    var holder = h("div#cust-buy", {});
+    (async function () {
+      var d;
+      // Absent while checkout is off (404) and hidden for a role that cannot spend money (403): no buy section.
+      try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { return; }
+      if (here() !== "#/billing") return;
+      var offers = ((d && d.offers) || []).filter(function (o) { return !(d.has_active_plan && o.kind !== TOPUP); });
+      if (!offers.length) return;
+      var rows = offers.map(function (o) {
+        var btn = h("button.btn", { type: "button", text: "Buy " + money(o.amount_minor, o.currency) });
+        btn.addEventListener("click", function () { startCheckout(o, btn); });
+        return h("div.cust-offer", {}, [h("div", {}, [h("strong", { text: String(o.name || o.price_id) }),
+          h("p.cust-muted", { text: offerLine(o) })]), btn]);
+      });
+      var note = d.has_active_plan
+        ? "Your workspace already has a plan, so top-ups are shown. Changing plans is not self-serve yet."
+        : "You pay on the payment processor's secure page. Credits appear here once the payment is verified.";
+      VUI.mount(holder, VUI.card("Buy credits", null, [h("p.cust-muted", { text: note })].concat(rows)));
+    })();
+    return holder;
+  }
+
+  // #/billing/return — where the processor sends the customer back. Its status is DISPLAY-ONLY: nothing here
+  // grants credit (only the server's verified webhook drain does). We show the live balance while it confirms.
+  function returnParams() {
+    var hq = (location.hash || "").split("?")[1] || "";
+    return new URLSearchParams(hq || (location.search || "").replace(/^\?/, ""));
+  }
+  function viewBillingReturn() {
+    var status = String(returnParams().get("status") || "").toLowerCase();
+    var failed = status === "cancelled" || status === "canceled" || status === "failed";
+    var holder = h("div#cust-return-status", {}, h("p.cust-muted", { text: failed ? "" : "Checking your balance…" }));
+    var lead = failed
+      ? "The payment was not completed, so nothing was charged. You can try again from Billing."
+      : "Thank you. Your payment is being confirmed with the payment processor. Credits appear as soon as it is "
+        + "verified — usually within a minute. You can leave this page; nothing else is needed.";
+    if (!failed) {
+      (async function () {
+        for (var i = 0; i < 20; i++) {
+          if (here() !== "#/billing/return") return;
+          try {
+            var d = await VUI.getJSON(API + "/billing");
+            var c = (d && d.credits) || {}, s = d && d.subscription;
+            VUI.mount(holder, h("div", {}, [kv("Available credits", c.available),
+              kv("Plan", s ? (s.plan_id + " (" + s.status + ")") : "none"),
+              h("p.cust-muted", { text: "Last checked " + new Date().toLocaleTimeString() + "." })]));
+          } catch (e) {
+            if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+          }
+          await new Promise(function (res) { setTimeout(res, 3000); });
+        }
+        if (here() === "#/billing/return") {
+          VUI.append(holder, h("p.cust-muted", { text: "Still confirming? It can take a few minutes; your "
+            + "balance on the Billing page updates by itself. Nothing is lost." }));
+        }
+      })();
+    }
+    var back = h("button.cust-nav-link", { type: "button", text: "Back to Billing" });
+    back.addEventListener("click", function () { nav("#/billing"); });
+    return shell(h("div", {}, [h("h2", { text: failed ? "Payment not completed" : "Payment received" }),
+      h("p", { text: lead }), holder, back]), "#/billing");
   }
 
   function viewInvoices() {
@@ -632,6 +732,7 @@
     "#/login": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
     "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
+    "#/billing/return": function () { return authed() ? viewBillingReturn() : viewLogin(); },
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
