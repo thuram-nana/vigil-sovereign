@@ -752,7 +752,11 @@ def effective_config() -> dict:
     the honest "what will SIGIL actually use on this host" view the audit asked for."""
     home = _resolve_home()
     spine = home / "spine"
-    api_key = os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or ""
+    # Only the key's PRESENCE is surfaced — the raw value never enters this dict. `_redact` would mask it by
+    # key NAME anyway, but a name-based sanitizer is invisible to taint analysis (CodeQL
+    # py/clear-text-logging-sensitive-data traced the raw key into `sigil doctor --json`), so keep the secret
+    # out of the data entirely. Output is byte-identical: set -> "***redacted***", unset/empty -> "".
+    api_key_set = bool(os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
     cfg = {
         "SIGIL_HOME": str(home),
         "SPINE_PATH": str(spine / "spine.jsonl"),
@@ -772,7 +776,7 @@ def effective_config() -> dict:
         "KERNEL_BIN": kernel_bin(),
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
-        "ANTHROPIC_API_KEY": api_key,
+        "ANTHROPIC_API_KEY": "***redacted***" if api_key_set else "",
         # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
         # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
         # SECRET name-hint below (and is not placed here at all).
