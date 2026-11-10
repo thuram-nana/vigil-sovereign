@@ -301,27 +301,9 @@ def _single_window(current: Optional[str]) -> KeyResolver:
     return KeyResolver([(current, 0, _INF)] if current else [], current)
 
 
-def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
-    """The succession-aware owner-key resolver for `store`. Memoized on the spine change-token so a fold
-    constructed per governance decision does not re-walk every append.
-
-    NO ROTATION HISTORY (the overwhelmingly common case, and every pre-W9-1 spine) -> a single open window
-    over the caller's `current` key: BYTE-IDENTICAL to the pre-W9-1 single-key `verify_signed(p, core,
-    current)`, and independent of any global on-disk key state (so a caller that passes an explicit anchor
-    is honored exactly). Only once the store actually carries `owner_key_history` records do we anchor on the
-    PINNED genesis and walk the cross-signed chain into seq-windowed epochs.
-
-    Fail-closed on a forked succession: returns a resolver whose every `.at()` is None (DENY-all)."""
-    try:
-        token = store.change_token()
-    except Exception:  # noqa: BLE001 — a store without a change token still works, just uncached
-        token = None
-    ck = (token, current)
-    if token is not None:
-        hit = _RESOLVER_CACHE.get(ck)
-        if hit is not None:
-            return hit
-    history = _history_from_records(store.iter_records())
+def _resolver_from_history(history: list[tuple[int, dict]], current: Optional[str]) -> KeyResolver:
+    """The resolver for an already-collected owner-key `history` — the body of `key_resolver` (shared, so the
+    memoized resolver and the fold cache's fresh one can never disagree)."""
     if not history:
         res = _single_window(current)                  # no rotation -> byte-identical single-key behavior
     else:
@@ -345,11 +327,51 @@ def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
                 windows = ([(e.pubkey, e.start, e.end) for e in succ.epochs]
                            if succ.epochs else ([(current, 0, _INF)] if current else []))
                 res = KeyResolver(windows, current)
+    return res
+
+
+def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
+    """The succession-aware owner-key resolver for `store`. Memoized on the spine change-token so a fold
+    constructed per governance decision does not re-walk every append.
+
+    NO ROTATION HISTORY (the overwhelmingly common case, and every pre-W9-1 spine) -> a single open window
+    over the caller's `current` key: BYTE-IDENTICAL to the pre-W9-1 single-key `verify_signed(p, core,
+    current)`, and independent of any global on-disk key state (so a caller that passes an explicit anchor
+    is honored exactly). Only once the store actually carries `owner_key_history` records do we anchor on the
+    PINNED genesis and walk the cross-signed chain into seq-windowed epochs.
+
+    Fail-closed on a forked succession: returns a resolver whose every `.at()` is None (DENY-all)."""
+    try:
+        token = store.change_token()
+    except Exception:  # noqa: BLE001 — a store without a change token still works, just uncached
+        token = None
+    ck = (token, current)
+    if token is not None:
+        hit = _RESOLVER_CACHE.get(ck)
+        if hit is not None:
+            return hit
+    res = _resolver_from_history(_history_from_records(store.iter_records()), current)
     if token is not None:
         if len(_RESOLVER_CACHE) >= _RESOLVER_CACHE_CAP:
             _RESOLVER_CACHE.clear()                    # simple bound; walks are cheap to recompute
         _RESOLVER_CACHE[ck] = res
     return res
+
+
+def key_resolver_with_horizon(store, *, current: Optional[str]) -> "tuple[KeyResolver, int]":
+    """A FRESH (never memoized) resolver plus its HORIZON: the last spine seq its history scan read (-1 for an
+    empty spine). Used by the incremental fold cache (`spine/fold_cache.py`), which must know exactly which
+    owner-key-history records the resolver reflects: a history record it later folds ABOVE the horizon was not
+    seen, so that build is not cached. Same walk as `key_resolver` (`_resolver_from_history`)."""
+    horizon = [-1]
+
+    def _tracked():
+        for r in store.iter_records():
+            horizon[0] = r.seq
+            yield r
+
+    res = _resolver_from_history(_history_from_records(_tracked()), current)
+    return res, horizon[0]
 
 
 def clear_resolver_cache() -> None:
