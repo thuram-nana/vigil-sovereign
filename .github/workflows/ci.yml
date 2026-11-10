@@ -310,6 +310,11 @@ jobs:
           # pinned CI toolchain lock; vigil_core editable --no-deps. pytest-httpserver ships in the
           # runtime lock. See the vigil_core step above / docs/SUPPLY-CHAIN.md §2 for the rationale.
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          # The OPT-IN OpenTelemetry SDK + OTLP/HTTP exporter, from its own hash lock, LAYERED on the runtime
+          # lock as `VIGIL_WITH_OTEL=1 envs/build_envs.sh` does (every pin it shares with env-offense is identical —
+          # asserted offline in test_supply_chain.py). Without it test_live_otel_export.py importorskip-SKIPPED on every
+          # run; the "OTLP export proof MUST have actually executed" step below now fails this job on a skip.
+          pip install --require-hashes -r infra/supply-chain/otel.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           # NO best-effort `pip install -e apps/sigil` here, and that is the whole point of this slice.
@@ -717,6 +722,12 @@ jobs:
         # failure. --strict-markers/-p no:cacheprovider hygiene lives on the pytest run that produced the
         # report; this step is the assertion that it actually executed.
         run: python .github/scripts/assert_boundary_proof_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
+      - name: the live OTLP export proof MUST have actually executed (a skipped proof fails this required job)
+        # test_live_otel_export.py importorskips the OpenTelemetry SDK. The otel hash lock installed above is
+        # what makes it RUN; this reads the same JUnit report and FAILS unless the named export proofs (a real
+        # span through the real exporter to a loopback endpoint; ReadableSpan export; secret-free wire form; the
+        # composite emit-only/loopback/secret-free/deterministic invariant) executed and were not skipped.
+        run: python .github/scripts/assert_otel_export_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
       - name: WS4 handover-wrapper wiring is exercised (the acceptance entrypoint cannot silently rot)
         # Coverage for the WS4 production handover gate: the bootstrap production step and the
         # `vigil deploy-acceptance` verb both invoke `python -m vigil_integration.sovereign_deploy.acceptance`.

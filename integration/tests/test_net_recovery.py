@@ -12,8 +12,8 @@ The through-line: a TRANSIENT collector drop must be able to auto-recover, but o
   * and never past the loopback egress pin (recovery re-tries the same pinned destination; a non-loopback
     endpoint is still refused before the latch is even consulted).
 
-Runs WITHOUT opentelemetry (the CI hash lock does not ship it): the sink's span conversion is replaced by a
-stub so the latch/recovery state machine is exercised directly.
+Runs WITHOUT needing opentelemetry (it is only in the OPT-IN otel hash lock): the sink's span conversion is
+replaced by a stub so the latch/recovery state machine is exercised directly.
 """
 
 from __future__ import annotations
