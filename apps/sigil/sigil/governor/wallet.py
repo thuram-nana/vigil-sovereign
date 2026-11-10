@@ -51,6 +51,8 @@ from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 CREDIT_GRANT_SIGNAL = "governor.credit_grant"
 CREDIT_DEBIT_SIGNAL = "governor.credit_debit"
@@ -106,6 +108,54 @@ def _check_entry_id(entry_id: Optional[str]) -> str:
     if not e or len(e) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in e):
         raise ValueError("entry_id must be a non-empty, non-control string of <= 128 chars")
     return e
+
+
+def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set) -> None:
+    """Fold ONE record into (granted, debited, seen) — THE wallet fold body, shared by the full `_fold` and the
+    verified fold cache (Front C S0c) so the two can never diverge."""
+    p = r.payload
+    if not isinstance(p, dict):
+        return
+    sig = p.get("signal")
+    if sig != CREDIT_GRANT_SIGNAL and sig != CREDIT_DEBIT_SIGNAL:
+        return
+    oid = p.get("org_id")
+    eid = p.get("entry_id")
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+        return
+    core = _GRANT_CORE if sig == CREDIT_GRANT_SIGNAL else _DEBIT_CORE
+    if not verify_signed(p, core, resolver.at(r.seq)):
+        return                                    # fail-closed: unsigned/forged/wrong-epoch record
+    # Idempotency key is namespaced by SIGNAL (direction), not just (org, entry_id): a grant and a
+    # debit are distinct events even if a caller reuses an entry_id across directions, so they must
+    # occupy DISJOINT dedup spaces — else the second to fold would be silently dropped (free credits,
+    # or lost paid credits). Per-direction replay protection is unchanged (a replayed grant is still an
+    # identical (grant, org, entry_id)).
+    key = (sig, oid, eid)
+    if key in seen:
+        return                                    # idempotent: this entry already counted (replay)
+    seen.add(key)
+    amount = _as_credits(p.get("credits"))
+    if sig == CREDIT_GRANT_SIGNAL:
+        granted[oid] = granted.get(oid, 0) + amount
+    else:
+        debited[oid] = debited.get(oid, 0) + amount
+
+
+class _WalletView:
+    """The cached wallet fold: exactly the full fold's (granted, debited, seen)."""
+
+    __slots__ = ("granted", "debited", "seen")
+
+    def __init__(self, granted: dict, debited: dict, seen: set) -> None:
+        self.granted, self.debited, self.seen = granted, debited, seen
+
+
+def _wallet_step(view: _WalletView, r, resolver) -> None:
+    _apply_wallet_record(r, resolver, view.granted, view.debited, view.seen)
+
+
+_WALLET_FOLD = FoldCache("governor.wallet", step=_wallet_step)
 
 
 @dataclass(frozen=True)
@@ -174,6 +224,32 @@ class WalletRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
+        """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
+        the trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
+            # mirroring accounts._fold. DEFERRED (prune-integration slice): unlike the pubkey-DEPENDENT folds,
+            # the wallet seed is ADDITIVE and was already verified under the key valid at each seq, so a future
+            # prune+rotation path should CARRY this seed (accept a snapshot whose trusted_pubkey is any key in
+            # the succession history) rather than bypass to a rescan — else a pruned tenant's balance would
+            # transiently under-read until the next prune re-commits under the new key. Unreachable today:
+            # SnapshotState.load fails closed on any real prune (the Slice-D/E cutover is unwired), so this
+            # bypass is only taken under the empty (no-prune) snapshot, where genesis-scan == the correct fold.
+            return ({}, {}, set()), -1
+        return (dict(snap.wallet_granted_map()), dict(snap.wallet_debited_map()),
+                set(snap.wallet_seen_set())), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental wallet fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _WalletView(*st), since
+
+        return cached_read(_WALLET_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (granted_total, debited_total, seen) where `seen` is the set of consumed
         (org_id, entry_id) idempotency keys. Each signed record is authenticated under the owner pubkey valid
@@ -185,58 +261,19 @@ class WalletRegistry:
         genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
-            # mirroring accounts._fold. DEFERRED (prune-integration slice): unlike the pubkey-DEPENDENT folds,
-            # the wallet seed is ADDITIVE and was already verified under the key valid at each seq, so a future
-            # prune+rotation path should CARRY this seed (accept a snapshot whose trusted_pubkey is any key in
-            # the succession history) rather than bypass to a rescan — else a pruned tenant's balance would
-            # transiently under-read until the next prune re-commits under the new key. Unreachable today:
-            # SnapshotState.load fails closed on any real prune (the Slice-D/E cutover is unwired), so this
-            # bypass is only taken under the empty (no-prune) snapshot, where genesis-scan == the correct fold.
-            granted: dict[Any, int] = {}
-            debited: dict[Any, int] = {}
-            seen: set = set()
-            since = -1
-        else:
-            granted = dict(snap.wallet_granted_map())
-            debited = dict(snap.wallet_debited_map())
-            seen = set(snap.wallet_seen_set())
-            since = snap.base_seq - 1
+        (granted, debited, seen), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict):
-                continue
-            sig = p.get("signal")
-            if sig != CREDIT_GRANT_SIGNAL and sig != CREDIT_DEBIT_SIGNAL:
-                continue
-            oid = p.get("org_id")
-            eid = p.get("entry_id")
-            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
-                continue
-            core = _GRANT_CORE if sig == CREDIT_GRANT_SIGNAL else _DEBIT_CORE
-            if not verify_signed(p, core, resolver.at(r.seq)):
-                continue                                  # fail-closed: unsigned/forged/wrong-epoch record
-            # Idempotency key is namespaced by SIGNAL (direction), not just (org, entry_id): a grant and a
-            # debit are distinct events even if a caller reuses an entry_id across directions, so they must
-            # occupy DISJOINT dedup spaces — else the second to fold would be silently dropped (free credits,
-            # or lost paid credits). Per-direction replay protection is unchanged (a replayed grant is still an
-            # identical (grant, org, entry_id)).
-            key = (sig, oid, eid)
-            if key in seen:
-                continue                                  # idempotent: this entry already counted (replay)
-            seen.add(key)
-            amount = _as_credits(p.get("credits"))
-            if sig == CREDIT_GRANT_SIGNAL:
-                granted[oid] = granted.get(oid, 0) + amount
-            else:
-                debited[oid] = debited.get(oid, 0) + amount
+            _apply_wallet_record(r, resolver, granted, debited, seen)
         return granted, debited, seen
 
     def balance(self, org_id: str) -> Balance:
         """The current credit position for `org_id` (fail-closed: an unknown/empty org reads as all-zero)."""
         if not isinstance(org_id, str) or not org_id:
             return Balance(org_id="", granted=0, debited=0)
+        hit = self._cached(lambda v: Balance(org_id=org_id, granted=v.granted.get(org_id, 0),
+                                             debited=v.debited.get(org_id, 0)))
+        if hit is not _UNCACHED:
+            return hit
         granted, debited, _ = self._fold()
         return Balance(org_id=org_id, granted=granted.get(org_id, 0), debited=debited.get(org_id, 0))
 
@@ -247,6 +284,13 @@ class WalletRegistry:
 
     def balances(self) -> list[Balance]:
         """Every tenant with ledger activity, in org_id order (the per-tenant billing view)."""
+        hit = self._cached(lambda v: _balances(v.granted, v.debited))
+        if hit is not _UNCACHED:
+            return hit
         granted, debited, _ = self._fold()
-        orgs = sorted(set(granted) | set(debited))
-        return [Balance(org_id=str(o), granted=granted.get(o, 0), debited=debited.get(o, 0)) for o in orgs]
+        return _balances(granted, debited)
+
+
+def _balances(granted: dict, debited: dict) -> list[Balance]:
+    orgs = sorted(set(granted) | set(debited))
+    return [Balance(org_id=str(o), granted=granted.get(o, 0), debited=debited.get(o, 0)) for o in orgs]
