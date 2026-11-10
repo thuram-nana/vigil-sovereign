@@ -2163,3 +2163,39 @@ def test_no_first_party_package_lock_json_only_a_cve_fixture() -> None:
         f"a first-party package-lock.json exists but is not verified: {[str(p) for p in locks]}. "
         "Add it to verify_native_locks.py."
     )
+
+
+# ==========================================================================================
+# Security floors on transitive runtime dependencies
+# ==========================================================================================
+
+#: (package, first fixed release, advisory) — a runtime lock may never pin below the fixed release.
+_TRANSITIVE_ADVISORY_FLOORS: tuple[tuple[str, tuple[int, ...], str], ...] = (
+    ("opentelemetry-api", (1, 45, 1), "GHSA-xcq7-p3pf-p88h / CVE-2026-114603"),
+)
+
+
+def _release_tuple(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:3])
+
+
+def _below_advisory_floor(pins: dict[str, str]) -> list[str]:
+    return [f"{name}=={pins[name]} (< {'.'.join(map(str, fixed))}, {adv})"
+            for name, fixed, adv in _TRANSITIVE_ADVISORY_FLOORS
+            if name in pins and _release_tuple(pins[name]) < fixed]
+
+
+def test_no_runtime_lock_pins_a_transitive_below_its_advisory_floor() -> None:
+    """A transitive pulled in by a parent's range (opentelemetry-api via mcp) can sit on an advisory release with
+    nobody choosing it. The floors in the .in files hold it up across regenerations; this proves the committed
+    locks honour them — and that each floor is actually written into the input."""
+    bad: list[str] = []
+    for lock in RUNTIME_LOCKS:
+        bad += [f"{lock.relative_to(REPO_ROOT)}: {b}" for b in _below_advisory_floor(_lock_versions(lock))]
+    assert not bad, "runtime lock pins a release with a known advisory:\n  " + "\n  ".join(bad)
+    sov_in = (REPO_ROOT / "infra/supply-chain/sovereign.in").read_text(encoding="utf-8")
+    assert re.search(r"^opentelemetry-api>=1\.45\.1\b", sov_in, re.M), \
+        "sovereign.in lost its opentelemetry-api>=1.45.1 security floor (GHSA-xcq7-p3pf-p88h)"
+    # NEGATIVE CONTROL: the vulnerable release is flagged; the fixed one is not.
+    assert _below_advisory_floor({"opentelemetry-api": "1.44.0"})
+    assert not _below_advisory_floor({"opentelemetry-api": "1.45.1"})
