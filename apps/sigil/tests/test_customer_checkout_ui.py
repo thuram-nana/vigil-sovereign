@@ -182,3 +182,28 @@ def test_https_guard_executed():
         "process.exit(1); } }\nconsole.log('ok');\n"
     r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.strip() == "ok", (r.stdout, r.stderr)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_router_resolves_only_own_routes_executed():
+    """The hash is user-controlled: the router's lookup (its OWN source lines, executed under node) resolves only
+    an own ROUTES entry — a prototype-named or unknown key falls back to the home view, never an inherited member
+    (CodeQL js/unvalidated-dynamic-method-call)."""
+    js = _js()
+    a = js.index("  var ROUTE_KEYS = Object.keys(ROUTES);")
+    table = js[a:js.index("\n  }\n", a) + 4]                  # ROUTE_KEYS + routeFor(), verbatim
+    i = js.index("    var view = ROUTES[routeFor(key)];")
+    lookup = js[i:js.index("\n", i)]
+    prog = ("var ROUTES = {'#/': () => 'home', '#/billing/return': () => 'ret'};\n" + table + "\n"
+            "const out = [];\n"
+            "for (const key of ['#/billing/return', '#/', '#/nope', 'constructor', '__proto__', 'toString',\n"
+            "                   'hasOwnProperty', 'valueOf', '#/billing/return/x']) {\n"
+            + lookup + "\n  out.push([key, view()]);\n}\nconsole.log(JSON.stringify(out));\n")
+    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    got = dict(__import__("json").loads(r.stdout))      # pairs: a "__proto__" KEY must survive the round trip
+    assert got == {"#/billing/return": "ret", "#/": "home", "#/nope": "home", "constructor": "home",
+                   "__proto__": "home", "toString": "home", "hasOwnProperty": "home", "valueOf": "home",
+                   "#/billing/return/x": "home"}
+    render = js[js.index("  function render()"):]
+    assert "ROUTES[key]" not in render and "ROUTES[hash" not in render   # the hash itself never indexes ROUTES

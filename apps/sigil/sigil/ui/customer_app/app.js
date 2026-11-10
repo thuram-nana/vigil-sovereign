@@ -738,12 +738,21 @@
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
     "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
   };
+  // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
+  // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash
+  // ("#constructor", "__proto__", "toString", ...) can never reach an inherited member (CodeQL
+  // js/unvalidated-dynamic-method-call).
+  var ROUTE_KEYS = Object.keys(ROUTES);
+  function routeFor(path) {
+    for (var i = 0; i < ROUTE_KEYS.length; i++) { if (ROUTE_KEYS[i] === path) return ROUTE_KEYS[i]; }
+    return "#/";
+  }
 
   function render() {
     if (!state.get().booted) { VUI.mount(root, h("div.cust-shell", {}, h("p.cust-muted", { text: "Loading…" }))); return; }
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
-    var view = ROUTES[key] || ROUTES["#/"];
+    var view = ROUTES[routeFor(key)];
     ntf.open = false;              // a route change closes any open panel (the shell is rebuilt below)
     VUI.mount(root, view());
     setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it
