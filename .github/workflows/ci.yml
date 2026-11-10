@@ -677,6 +677,7 @@ jobs:
               integration/tests/test_backup_roundtrip.py \
               integration/tests/test_backup_staged_restore.py \
               integration/tests/test_backup_sqlite_snapshot.py \
+              integration/tests/test_backup_engine_layout.py \
               integration/tests/test_backup_push_transport.py \
               integration/tests/test_backup_recovery_drill.py \
               integration/tests/test_backup_targets_recovery.py \
