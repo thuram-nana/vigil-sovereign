@@ -533,7 +533,7 @@ def test_release_drops_only_its_own_record(tmp_path):
 
 
 _CLAIM_WORKER = r"""
-import sys, time
+import os, sys, time
 from sigil.reuse import KeyPair
 from sigil.ui import pending_checkout as pc
 pub, priv = sys.stdin.read().split()                 # the throwaway test key, never on argv
@@ -546,6 +546,9 @@ def slow_read(*a):
     time.sleep(0.03 * int(sys.argv[2][1:]))          # STAGGER the read-decide-write windows (test instrumentation)
     return out
 led._read = slow_read
+open(sys.argv[4] + ".ready." + sys.argv[2], "w").close()
+while not os.path.exists(sys.argv[4] + ".go"):         # a start barrier: every process reads the SAME state
+    time.sleep(0.005)
 try:
     led.claim("org_race", "vigil_pro_monthly", "vigil:org_race:" + sys.argv[2], now=float(sys.argv[3]))
     sys.stdout.write("1")
@@ -555,12 +558,19 @@ except pc.PendingCheckoutRefused:
 
 
 def _race(d, k, now: float) -> str:
-    procs = [subprocess.Popen([sys.executable, "-c", _CLAIM_WORKER, str(d), f"n{i}", str(now)], stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, text=True) for i in range(8)]
+    import time
+    bar = f"{d}.barrier"
+    procs = [subprocess.Popen([sys.executable, "-c", _CLAIM_WORKER, str(d), f"n{i}", str(now), bar],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) for i in range(8)]
     for p in procs:
         assert p.stdin is not None
         p.stdin.write(f"{k.public_key_b64} {k.private_key_b64}")
         p.stdin.close()
+    deadline = time.monotonic() + 60
+    while sum(Path(f"{bar}.ready.n{i}").exists() for i in range(8)) < 8:
+        assert time.monotonic() < deadline and all(p.poll() is None for p in procs), "a worker never got ready"
+        time.sleep(0.01)
+    Path(f"{bar}.go").touch()
     out = "".join(p.stdout.read() for p in procs if p.stdout is not None)
     assert all(p.wait(timeout=120) == 0 for p in procs), out
     return out
