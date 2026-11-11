@@ -3,8 +3,10 @@
 **Status:** reported to the owner before any build slice, as the program discipline requires, and **authorised by
 the owner on 2026-11-10** ("I authorise the 1m users plan"): ONE sovereign spine, the S0 trust model and the
 S0-first order (§7 items 1, 2 and 4). The **scale targets (§7 item 3) are still the owner's to set** — S4 cannot
-pass or fail without them. Build status lives in `HANDOFF-SESSION.md`; S0a–S0c (customers, orgs + memberships,
-the money folds) ship as their own default-OFF PRs. Every number below was measured on this repository, on one
+pass or fail without them. Build status lives in `HANDOFF-SESSION.md`. **S0 is built and merged, default-OFF:**
+S0a–S0c (#1068–#1070) and S0d (#1072, #1073, #1074, #1075 and the S0d-3 PR) — every request-path fold on the verified
+cache, the fresh-store tail fast path, the rebuild-and-compare audit, start-up warm-up, `sigil verify` / `vigil
+doctor`. Every number below was measured on this repository, on one
 container, single process — the extrapolations are stated as such.
 
 ## 1. Bottom line

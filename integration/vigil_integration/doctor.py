@@ -1317,6 +1317,49 @@ def _money_seam_backup_coverage(home: "Path | None" = None) -> "tuple[dict, list
                      f"planes publish to). The sovereign `sigil backup` deliberately never captures it (cross-plane)."]
 
 
+def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = None) -> "tuple[dict, list, list]":
+    """Front C S0d — the cockpit's last fold-cache AUDIT (`$SIGIL_HOME/fold_cache_audit.json`, written by
+    `sigil.governor.fold_warm`; read here as inert JSON WITHOUT importing sigil — FATAL-2). Returns (section,
+    issues, notes). No report ⇒ `{"present": False}` and nothing else (the cache is off, or the cockpit has not
+    audited yet: default output unchanged). A recorded MISMATCH is a HARD issue — a cached fold disagreed with a
+    rebuild from the spine (the cockpit already dropped that entry; find out why). A report older than twice its
+    own interval (+1 h) is a NOTE: the cockpit's audit thread is not running."""
+    import datetime as _dt
+    import json as _json
+    p = (Path(home) if home is not None else _sigil_home()) / "fold_cache_audit.json"
+    try:
+        rep = _json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"present": False}, [], []
+    except (OSError, ValueError) as exc:
+        return {"present": True, "error": f"{type(exc).__name__}: {exc}"}, [], [
+            f"the fold-cache audit report {_display_path(p)} is unreadable ({type(exc).__name__})."]
+    if not isinstance(rep, dict):
+        return {"present": True, "error": "not a JSON object"}, [], [
+            f"the fold-cache audit report {_display_path(p)} is not a JSON object."]
+    folds = [f for f in rep.get("folds", []) if isinstance(f, dict)]
+    bad = [f for f in folds if f.get("status") == "MISMATCH"]
+    section = {"present": True, "ts": rep.get("ts"), "pid": rep.get("pid"), "ok": not bad,
+               "matched": sum(1 for f in folds if f.get("status") == "match"), "mismatched": len(bad),
+               "skipped": sum(1 for f in folds if f.get("status") == "skipped")}
+    issues = [f"fold cache MISMATCH in the cockpit (pid {rep.get('pid')}, audit {rep.get('ts')}): "
+              f"{f.get('fold')} at seq {f.get('seq')} differs from a rebuild from the spine "
+              f"({f.get('difference')}). The entry was dropped (the next read rebuilds); run `sigil verify` "
+              f"and treat it as a defect or an in-place spine edit." for f in bad]
+    notes: list = []
+    try:
+        ts = _dt.datetime.fromisoformat(str(rep.get("ts"))).timestamp()
+        interval = float(rep.get("interval_s") or 0)
+        age = (now if now is not None else _dt.datetime.now(_dt.timezone.utc).timestamp()) - ts
+        if interval > 0 and age > 2 * interval + 3600:
+            section["stale"] = True
+            notes.append(f"the last fold-cache audit is {int(age // 3600)} h old (interval {int(interval)} s): "
+                         f"the cockpit's audit thread is not running.")
+    except (TypeError, ValueError):
+        pass
+    return section, issues, notes
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1623,6 +1666,18 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the network-recovery probe must never crash the report
         report["network_recovery"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # Front C S0d — the cockpit's fold-cache audit (rebuild-and-compare). Absent report ⇒ nothing added. A
+    # MISMATCH is a HARD issue; a stale report is a note. Best-effort: never raises.
+    try:
+        _fc, _fc_issues, _fc_notes = _fold_cache_audit_report()
+        report["fold_cache_audit"] = _fc
+        for _m in _fc_issues:
+            _issue(_m)
+        for _m in _fc_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report
+        report["fold_cache_audit"] = {"error": f"{type(exc).__name__}: {exc}", "present": False}
     return report
 
 
@@ -1797,6 +1852,13 @@ def render(report: dict) -> str:
                              else "NO answer to a probe")) + (f" ({lat} ms)" if lat is not None and r else ""))
         else:
             lines.append("  .. otlp endpoint ($VIGIL_OTLP_ENDPOINT): unset")
+
+    fc = report.get("fold_cache_audit")
+    if isinstance(fc, dict) and fc.get("present") and "error" not in fc:
+        # Front C S0d: rendered ONLY when the cockpit has written an audit (default output byte-identical).
+        lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
+                     f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
+                     + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
 
     issues = report.get("issues", [])
     if issues:

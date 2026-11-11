@@ -1799,6 +1799,11 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
     if extras:
         print(f"  (reverse-proxy Host allowlist: {extras})")
+    # Front C S0d: with VIGIL_FOLD_CACHE_ENABLED, warm every verified fold cache in the background (off the
+    # request path) and re-audit them periodically against the spine. A no-op with the cache off.
+    from ..governor import fold_warm
+    if fold_warm.start_background(srv.store, name="cockpit") is not None:
+        print("  (fold cache: warming in the background; periodic audit → `vigil doctor`)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -10,6 +10,11 @@
 > was **authorised by the owner** and its first three build slices (S0a–S0c, the verified fold cache over
 > customers, orgs/memberships and the money folds) are merged default-OFF. **The next agent's first item is Front C
 > S0d (§4.3), then S1→S4, then Gate 5 (§5).**
+>
+> **Update (same session, 2026-11-11): Front C S0 is COMPLETE** — S0d merged as #1072, #1073, #1074, #1075
+> and the S0d-3 PR (which carries this update). Every request-path fold is on the verified cache; per-request
+> stores pay O(new records) via the tail fast path; the cache is warmed at boot and audited against the spine
+> (`sigil verify`, `vigil doctor`). **The next agent's first item is now S1 (§4.4), then S2–S4, then Gate 5.**
 
 ---
 
@@ -161,6 +166,12 @@ ends with the session's attribution footer.
 | #1068 | `6ebe6aa8` | **S0a** — verified incremental fold cache for the customer registry (default-OFF) |
 | #1069 | `3ae2ac61` | **S0b** — orgs + memberships (every `admit_customer`) on the fold cache; shared `governor/fold_read.py` |
 | #1070 | `e836b962` | **S0c** — the money folds (wallet, plan credits incl. settle-path `debited_entry`, subscriptions) on the fold cache |
+| #1071 | `8049bae6` | docs(handoff): complete end-to-end handoff after the 2026-11-10/11 queue |
+| #1072 | `2f8dc3a4` | **S0d-1** — operator accounts + customer credentials (passkeys, TOTP, Google links) on the fold cache |
+| #1073 | `bd68bbe1` | **S0d-2a** — invoices, the EC-4/EC-5 cost ledger (O(1) global pool position), postpaid line + arrears |
+| #1074 | `8269b1ab` | **S0d-2b** — promotion, the agent budget meter, asset ownership, monitoring authority |
+| #1075 | `397e97c5` | **S0d-2c** — kill switch + capability gate (append-proof), customer assessments, margin settles, `challenge()` |
+| S0d-3 | (this) | **S0d-3** — fresh-store tail fast path, rebuild-and-compare audit, boot warm-up, `sigil verify` / `vigil doctor` |
 
 ---
 
@@ -229,7 +240,7 @@ ends with the session's attribution footer.
   onnxruntime 1.31.1, pydantic 2.14.3, qdrant-client 1.20.0, tokenizers 0.23.3; engine `pytest-httpserver>=1.2.0`);
   two latent order-dependent tests made hermetic.
 
-### Front C — 1M users (design authorised; S0a–S0c merged) — see §4.
+### Front C — 1M users (design authorised; S0 = S0a–S0d merged, default-OFF) — see §4.
 
 ---
 
@@ -239,7 +250,8 @@ ends with the session's attribution footer.
 |---|---|---|
 | `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
 | multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
-| `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0a–S0c reads: customers, orgs/memberships, wallet, plan credits, subscriptions) | owner (production); tests set it |
+| `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0: every request-path registry read — §4.2) + the cockpit's boot warm-up / audit thread | owner (production); tests set it |
+| `VIGIL_FOLD_CACHE_AUDIT_S` | seconds between the cockpit's rebuild-and-compare audits (default 21600; 0 = warm-up only) | operator |
 | `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (needs `VIGIL_FLW_SECRET_KEY` + `VIGIL_BILLING_WEBHOOK_SECRET`) | owner |
 | `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` | subscription-plan checkout (needs the base flag) | owner, after a sandbox renewal |
 | `VIGIL_BILLING_PLAN_ALARM` | quarantine an unaccountable paid plan charge | owner (keep ON while plans can renew) |
@@ -269,7 +281,7 @@ Ed25519 signature — ~148–200 µs per record ⇒ ~2.5–3 min per login looku
 full folds; the launch gate's `CreditMeter.available` = 3 more. Signed append ≈ 1.1 ms (~900/s/process before
 group commit).
 
-### 4.2 S0 — the verified fold cache (S0a–S0c MERGED, default-OFF)
+### 4.2 S0 — the verified fold cache (S0a–S0d MERGED, default-OFF)
 **Files:** `apps/sigil/sigil/spine/fold_cache.py` (generic substrate) · `apps/sigil/sigil/governor/fold_read.py`
 (the ONE registry read path) · `key_history.key_resolver_with_horizon` · per registry: a shared one-record step
 used by BOTH the full fold and the cache, a seed method, a view, and `_cached(reader)`.
@@ -295,22 +307,33 @@ falls back to the full fold.
 | S0a | `CustomerRegistry.customer / by_email (email index) / customers / set_password` | ~120–135 µs flat 500→30k | 85 ms → 4.45 s | 28 / 22 of 22 |
 | S0b | `OrgRegistry.orgs / org / memberships / membership_role` ⇒ `admit_customer` (one entry for both folds) | ~121 µs | 76 ms → 1.5 s (250→5k orgs) | 15 / 18 of 18 |
 | S0c | `WalletRegistry`, `PlanCreditLedger` (incl. settle-path `debited_entry`), `SubscriptionRegistry` (one cache per line) ⇒ `CreditMeter.available` | ~355–385 µs | 100 ms → 1.46 s (200→3k tenants) | 11 / 16 of 16 |
+| S0d-1 (#1072) | `AccountsRegistry` (every operator request: `resolve`), `CustomerCredentialRegistry` (passkey / TOTP / Google login; by user / credential id / (iss, sub) pairs) | ~120–140 µs | resolve 231 ms, passkey 2.86 s (20k) | 13 / 22 of 22 |
+| S0d-2a (#1073) | `InvoiceRegistry`, `CostEnvelopeLedger` (`PairedLedgerView`: O(1) `global_position`), `PostpaidRegistry` + `PostpaidArrearsLedger` | 130 µs pool; ~0.6 ms launch reads | 4.6 s pool; 15.7 s (20k tenants) | 10 / 31 of 31 |
+| S0d-2b (#1074) | `PromotionPolicy`, `BudgetLedger.spent` (unsigned, per-(agent, day)), `AssetOwnershipRegistry` (proofs; `KeyedGrantView`), `MonitoringAuthorityRegistry` | ~0.6–0.7 ms launch path | 3.2 s (5k tenants) | 11 / 22 of 22 |
+| S0d-2c (#1075) | `KillSwitch` + `CapabilityGate` (no longer re-scanned on every append), assessments (per-slug index), margin settles, `challenge()` (`live_window`) | ~1.1 ms governed action incl. its append | 526 ms (5k tenants) | 13 / 15 of 16 (+1 equivalent) |
+| S0d-3 | `SpineStore.tail_after` (fresh store per request: anchor + delta from the active tail; sealed anchor via the manifest boundary hash), `FoldCache.audit` via `fold_read.auditing`, `governor/fold_warm.py`, `sigil verify [--folds]`, `vigil doctor` | 0.21–0.42 ms (fresh store) | 14.8 → 69.6 ms per request before | 20 + 6 / 19 of 19 |
 Each slice: full `apps/sigil` suite green with the flag ON and OFF; tests compare the cached public API with the
 same API flag-OFF after every randomized op, and fail if a cached read silently fell back.
 
 **Residuals (documented, not hidden):**
 - **Cold build O(N) once per process** (~2.5 min at 1M) — removing it needs a persisted signed index, which the
-  approved trust model excludes; until then a 1M deploy **warms the cache at start** (S0d item).
-- **Gzip-sealed anchor** — after an operator `compact`, until the next append, each read decompresses the sealed
-  segment holding the anchor (31 ms measured at the 12k-record cap vs 0.3 ms). Fix: verify a sealed anchor
-  against the manifest's boundary hash (S0d item).
-- **Chain-breaking in-place edits before the anchor are not re-read** — that is `SpineStore.verify()`'s job; S0d
-  adds a cached-vs-full compare to `sigil verify` / `vigil doctor`.
+  approved trust model excludes. S0d-3 runs it at boot in the cockpit (`fold_warm.start_background`), off the
+  request path.
+- ~~Gzip-sealed anchor~~ — fixed in S0d-3 (proven from the manifest boundary hash: 29.6 ms → 0.12 ms).
+- **Chain-breaking in-place edits before the anchor are not re-read by a read** — `SpineStore.verify()` and the
+  S0d-3 audit (`sigil verify`, the cockpit's periodic audit → `vigil doctor` HARD issue) catch them.
+- **The fast path trusts the manifest's `boundary_hash`** for a sealed anchor; a tamper that rewrites a sealed
+  segment but leaves the manifest is caught by `verify()` / the audit, not by the read.
+- **Audit cost** — one cold build per fold, in the background, every `VIGIL_FOLD_CACHE_AUDIT_S` (default 6 h).
+- **Two trust roots in one process** thrash a fold (one entry per fold and spine); production uses one.
+- **Kept on their scans by design:** the sovereign `OffenseGate` and the eval capability-grant / offense-
+  attestation folds (owner ceremonies, documented "never cached"), `budget.report` (CLI), `revoke_all`, the eval
+  `_publish` scans, the cockpit HUD's one-time tip scan.
 - **Memory:** one folded state per registry per process — S4 sizes it against the owner's targets.
 - **`SnapshotState.load` is itself O(snapshot) per read once a prune exists** (today the prune cutover is unwired,
   so it returns the cheap empty identity). When prune goes live, memoize the loaded snapshot on the signed head.
 
-### 4.3 S0d — next build slice (exact)
+### 4.3 S0d — DONE (kept for the record of what it covered)
 Follow the S0a–S0c pattern exactly (shared step → seed → view → `_cached` via `fold_read.cached_read`; equivalence
 test comparing the cached public API with flag-OFF after every randomized op; O(new) signature-count test; seeded
 prune + pubkey bypass + same-boundary different-seed; flag-OFF-never-consulted; mutation-verify each index).
@@ -355,7 +378,7 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
 ---
 
 ## 5. REMAINING PROGRAM (agent), in order
-1. **Front C S0d** (§4.3), then **S1, S2a–c, S3, S4** (§4.4). Ask the owner for the S4 targets when S4 starts.
+1. **Front C S1, S2a–c, S3, S4** (§4.4) — S0 is complete. Ask the owner for the S4 targets when S4 starts.
 2. **Gate 5 — hands-on end-to-end** (personal, adversarial, with evidence; do not rely on per-slice red-pens):
    signup (`custui` → `provision.signup_request` / verify email) → buy credits (`billing_checkout` → Flutterwave
    **sandbox**, never a live secret) → webhook → `vigil billing-drain` credits the wallet → prove domain ownership
@@ -394,14 +417,14 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
    delivery proof; `sigil serve-customer` (`apps/sigil/sigil/cli.py::cmd_serve_customer`) and the customer /
    public vhosts (`apps/sigil/deploy/reverse-proxy/vigil-{customer,public}.{nginx.conf,Caddyfile}`,
    `apps/sigil/deploy/REMOTE-HOSTING.md`) exist — going live needs the owner's DNS/TLS.
-4. ⏳ **1M scaling** — design ✅ authorised; S0a–S0c ✅ merged; **S0d, S1, S2a–c, S3, S4 to build**; S4 needs the
-   owner's targets. This is the main remaining distance.
+4. ⏳ **1M scaling** — design ✅ authorised; S0 (S0a–S0d) ✅ merged; **S1, S2a–c, S3, S4 to build**; S4 needs
+   the owner's targets. This is the main remaining distance.
 5. ⏳ **Gate 5** — the personal hands-on end-to-end + at-scale verification, with evidence (§5 item 2).
 6. **[owner]** the held flips and numbers (§6).
 
 Honest status: the customer-SaaS product, the money loop (in and out), offense breadth, production hardening,
 backups and the deploy substrate are **built and merged**; everything new is default-OFF and fail-closed, so
-`main` is always safe and shippable at single-node. The distance to "1,000,000 users" is Front C S0d → S4 plus
+`main` is always safe and shippable at single-node. The distance to "1,000,000 users" is Front C S1 → S4 plus
 Gate 5 and the owner's flips.
 
 ## 8. KEY ANCHORS (quick map)

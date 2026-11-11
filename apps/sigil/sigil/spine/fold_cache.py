@@ -16,8 +16,12 @@ and it is trusted only while it is provably a prefix of the current spine:
     rewrite or reset spine) the entry is DISCARDED and the fold rebuilt from the spine. `entry_hash` links
     `prev_hash`, so an equal anchor means an equal prefix for any chain that `SpineStore.verify()` accepts.
     An in-place edit that BREAKS the chain before the anchor is not re-read here: it is what `verify()` and
-    the chain check exist to catch, and the S0d rebuild-and-compare in `sigil verify` / `vigil doctor` will
-    compare every cached fold with a full fold;
+    the chain check exist to catch, and `audit()` (S0d) rebuilds every cached fold from the spine and
+    compares it with the cached state (`sigil verify --folds`, the cockpit's periodic audit, `vigil doctor`).
+    The anchor is proven, and the new records read, from the END of the active segment when the store offers
+    `tail_after` (S0d — no seq index is built, so a per-request store pays O(new records), not O(segment)); an
+    anchor that is the last record of the segment before the active one is proven against the manifest's
+    `boundary_hash` for it, so a gzip-sealed anchor is never decompressed;
   * KEY ROTATION — a fold verifies each record under the owner key valid at its seq. A newly appended
     owner-key-history record can change those windows (including for EARLIER seqs: a fork or broken chain
     denies all), so meeting one while extending discards the entry. A rebuild whose resolver did not see a
@@ -60,6 +64,51 @@ def clear_all() -> None:
         caches = list(_REGISTRY)
     for c in caches:
         c.clear()
+
+
+_MISSING = object()
+
+
+def _slots_of(cls) -> "tuple[str, ...]":
+    names: list = []
+    for k in cls.__mro__:
+        sl = k.__dict__.get("__slots__", ())
+        names.extend([sl] if isinstance(sl, str) else sl)
+    return tuple(n for n in names if n not in ("__dict__", "__weakref__"))
+
+
+def _first_difference(a, b, path: str = "state") -> "Optional[str]":
+    """The path of the first difference between two folded states, or None when they are equal. Compares by
+    VALUE through dicts, lists, tuples and `__slots__` objects (the registries' views); floats treat NaN as
+    equal to NaN; anything else (sets, frozen dataclasses, primitives) by `==`."""
+    if type(a) is not type(b):
+        return f"{path}: {type(a).__name__} != {type(b).__name__}"
+    if isinstance(a, float):
+        return None if (a == b or (a != a and b != b)) else path
+    if isinstance(a, dict):
+        if a.keys() != b.keys():
+            return f"{path}: keys differ"
+        for k, v in a.items():
+            d = _first_difference(v, b[k], f"{path}[{k!r}]")
+            if d is not None:
+                return d
+        return None
+    if isinstance(a, (list, tuple)):
+        if len(a) != len(b):
+            return f"{path}: length {len(a)} != {len(b)}"
+        for i, (x, y) in enumerate(zip(a, b)):
+            d = _first_difference(x, y, f"{path}[{i}]")
+            if d is not None:
+                return d
+        return None
+    slots = _slots_of(type(a))
+    if slots:
+        for n in slots:
+            d = _first_difference(getattr(a, n, _MISSING), getattr(b, n, _MISSING), f"{path}.{n}")
+            if d is not None:
+                return d
+        return None
+    return None if a == b else path
 
 
 def _store_identity(store) -> str:
@@ -115,12 +164,27 @@ class FoldCache:
     def _extend(self, store, e: _Entry) -> bool:
         """Fold every record after the anchor into `e`. False if one is an owner-key-history record (the
         resolver must be rebuilt). Raises on a fold/read error — the caller discards `e`."""
-        for r in store.iter_records(since_seq=e.seq):
+        return self._fold_into(e, store.iter_records(since_seq=e.seq))
+
+    def _fold_into(self, e: _Entry, records) -> bool:
+        for r in records:
             if r.kind == KEY_HISTORY_KIND:
                 return False
             self._step(e.state, r, e.ctx)
             e.seq, e.entry_hash = r.seq, r.entry_hash
         return True
+
+    def _catch_up(self, store, e: _Entry) -> bool:
+        """Prove the anchor and fold the records appended since (caller holds `e.lock`). The store's tail fast
+        path first (`tail_after`: no seq index built); the indexed `get` + `iter_records` when it cannot decide."""
+        tail = getattr(store, "tail_after", None)
+        if tail is not None and e.entry_hash is not None:
+            delta = tail(e.seq, e.entry_hash)
+            if delta is False:
+                return False
+            if delta is not None:
+                return self._fold_into(e, delta)
+        return self._anchor_holds(store, e) and self._extend(store, e)
 
     def _discard(self, ident: tuple, e: _Entry) -> None:
         e.dead = True
@@ -141,7 +205,7 @@ class FoldCache:
             with e.lock:
                 if not e.dead and e.key == key:
                     try:
-                        if self._anchor_holds(store, e) and self._extend(store, e):
+                        if self._catch_up(store, e):
                             return reader(e.state)
                     except Exception:  # noqa: BLE001 — any doubt: discard and rebuild from the spine
                         pass
@@ -166,3 +230,62 @@ class FoldCache:
                         old.dead = True
                     self._entries[ident] = e
         return out
+
+    # -- S0d: rebuild-and-compare ----------------------------------------------------------------------------
+    def audit(self, store, key: tuple, *, build: Callable[[], "tuple[Any, Any, int, int]"]) -> dict:
+        """Rebuild this fold of `store` from the spine with `build` (the caller's fresh build for `key`) and compare
+        it with the cached entry — the S0d proof that the incremental cache still equals a full fold. It catches
+        what the anchor check does not re-read (an in-place edit BEFORE the anchor) and any defect in a view's
+        incremental bookkeeping. Entries keep no build of their own (it would pin the request's store and
+        registry for the entry's lifetime), so audits run through the registries' own read path
+        (`governor.fold_read.auditing`).
+
+        The fresh fold runs OUTSIDE the entry lock (reads keep being served meanwhile); then, under the lock, the
+        entry is brought to the current tip, the fresh fold catches up to the same seq, and the two states are
+        compared by value. Returns `{"fold", "status", ...}` with status `match`, `MISMATCH` (+ `seq`,
+        `difference`), `empty` (no entry for this store) or `skipped` (+ `reason`: cached under another key, the
+        entry was replaced, the anchor moved, or an owner-key rotation landed mid-audit — the next read rebuilds
+        anyway). A MISMATCH discards the entry: the spine is the source of truth, so the next read rebuilds from
+        it; the report keeps the evidence. Never writes the spine."""
+        ident = (_store_identity(store),)
+        with self._lock:
+            e = self._entries.get(ident)
+        if e is None:
+            return {"fold": self.name, "status": "empty"}
+        if e.key != tuple(key):
+            return {"fold": self.name, "status": "skipped", "reason": "the entry is cached under another key"}
+        state, ctx, since, horizon = build()
+        fseq = since
+        for r in store.iter_records(since_seq=since):
+            if r.kind == KEY_HISTORY_KIND and r.seq > horizon:
+                return {"fold": self.name, "status": "skipped", "reason": "owner-key rotation during the audit"}
+            self._step(state, r, ctx)
+            fseq = r.seq
+        with e.lock:
+            if e.dead:
+                return {"fold": self.name, "status": "skipped", "reason": "entry replaced during the audit"}
+            try:
+                ok = self._catch_up(store, e)
+            except Exception as exc:  # noqa: BLE001 — the read path would discard it too
+                ok, why = False, f"{type(exc).__name__}: {exc}"
+            else:
+                why = "the anchor no longer holds or an owner-key rotation landed"
+            if not ok:
+                self._discard(ident, e)
+                return {"fold": self.name, "status": "skipped", "reason": why + " (rebuilt on the next read)"}
+            if fseq < e.seq:
+                for r in store.iter_records(since_seq=fseq):
+                    if r.seq > e.seq:
+                        break
+                    if r.kind == KEY_HISTORY_KIND:
+                        return {"fold": self.name, "status": "skipped", "reason": "owner-key rotation during the audit"}
+                    self._step(state, r, ctx)
+                    fseq = r.seq
+            if fseq != e.seq:
+                return {"fold": self.name, "status": "skipped",
+                        "reason": f"the fresh fold reached seq {fseq}, the entry seq {e.seq}"}
+            diff = _first_difference(e.state, state)
+            if diff is None:
+                return {"fold": self.name, "status": "match", "seq": e.seq}
+            self._discard(ident, e)
+            return {"fold": self.name, "status": "MISMATCH", "seq": e.seq, "difference": diff}
