@@ -1785,6 +1785,20 @@ def cmd_spine(a) -> None:
         # file unlink) was interrupted — the crash roll-forward, safe to run anytime.
         print("completed a pending prune (manifest rebased + orphan files reclaimed)"
               if store.finish_prune() else "nothing to finish (no committed-but-unreclaimed prune)")
+    elif a.action == "append-rate":
+        # Front C S1 — READ-ONLY: appends/s overall and by signal, from the records' own `ts`. Writes nothing.
+        from .spine import append_rate as _ar
+        since, until = _ar.parse_ts(a.since), _ar.parse_ts(a.until)
+        if (a.since and since is None) or (a.until and until is None):
+            print("append-rate: --since / --until must be ISO-8601 timestamps", file=sys.stderr)
+            sys.exit(2)
+        try:
+            rep = _ar.measure(store.iter_records(), since=since, until=until,
+                              windows=a.window or _ar.DEFAULT_WINDOWS, by=a.by, top=a.top, ceiling=a.ceiling)
+        except ValueError as e:
+            print(f"append-rate: {e}", file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps(rep, sort_keys=True) if a.json else _ar.render(rep))
     elif a.action == "status":
         segs = store.segment_info()
         if not segs:
@@ -2887,9 +2901,21 @@ def main(argv=None) -> None:
                           "non-verifying spine)")
     pup.set_defaults(fn=cmd_upgrade)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; "
-                                       "prune-plan; verify-archive; prune; prune-finish")
+                                       "prune-plan; verify-archive; prune; prune-finish; "
+                                       "append-rate (read-only appends/s by signal)")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
-                                        "prune-plan", "verify-archive", "prune", "prune-finish"])
+                                        "prune-plan", "verify-archive", "prune", "prune-finish", "append-rate"])
+    psp.add_argument("--since", default=None, help="append-rate: count records with ts >= this ISO-8601 time")
+    psp.add_argument("--until", default=None, help="append-rate: count records with ts < this ISO-8601 time")
+    psp.add_argument("--window", type=int, action="append", default=None,
+                     help="append-rate: a peak window in whole seconds (repeatable; default 1, 10, 60)")
+    psp.add_argument("--by", choices=["signal", "kind", "source"], default="signal",
+                     help="append-rate: group by the payload's signal (default), the record kind or its source")
+    psp.add_argument("--top", type=int, default=20, help="append-rate: per-signal rows shown")
+    psp.add_argument("--ceiling", type=float, default=None,
+                     help="append-rate: YOUR measured write ceiling in appends/s — the peak is also shown as a "
+                          "fraction of it (none is assumed)")
+    psp.add_argument("--json", action="store_true", help="append-rate: machine-readable report")
     psp.add_argument("-K", "--boundary", type=int, default=None,
                      help="prune-plan / prune: the segment-aligned boundary K")
     psp.add_argument("--yes", action="store_true",

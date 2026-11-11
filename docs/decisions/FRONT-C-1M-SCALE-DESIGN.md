@@ -105,7 +105,11 @@ multi-shard stays flag-held until it is green (the owner flips it, like `VIGIL_C
 2. **S0b** orgs + memberships (removes the 2 folds from every `admit_customer`).
 3. **S0c** wallet, billing, invoices, cost ledger + EC-5 pool reads (money folds — red-pen hardest).
 4. **S0d** remaining folds; `sigil verify` / `vigil doctor` rebuild-and-compare.
-5. **S1** append-rate instrumentation (read-only); decide on batch-signing only with data.
+5. **S1** append-rate instrumentation (read-only); decide on batch-signing only with data. **Built:**
+   `sigil spine append-rate` (`apps/sigil/sigil/spine/append_rate.py`) — appends/s overall and by payload signal
+   (or kind / source) with the peak over sliding windows, folded from the records' own `ts`. Nothing is added
+   to the append path. `ts` is outside the signed chain, so the report is capacity telemetry, never evidence;
+   it holds no threshold (`--ceiling` takes the operator's own measured figure — the targets stay §7.3).
 6. **S2a** `ShardAssignment` record + keyless verify; **S2b** routing; **S2c** per-shard queue + lease seam.
 7. **S3** migration (pause → drain → copy → epoch bump → resume), with a kill-mid-migration test.
 8. **S4** scale-acceptance gate to the owner's targets.
