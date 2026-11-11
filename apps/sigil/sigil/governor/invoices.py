@@ -285,6 +285,29 @@ class InvoiceRegistry:
         rows = self._fold()
         return sorted((inv for (o, _i), inv in rows.items() if o == org_id), key=self._sort_key)
 
+    def has_purchased_credits(self, org_id: str) -> bool:
+        """True iff ``org_id`` has completed at least one PURCHASE of credits: an owner-signed billing-history line
+        of kind ``topup`` that granted ``credits > 0``. The one mint site of such a line is ``BillingSigner``, after
+        a provider-VERIFIED, catalog-priced top-up payment whose wallet grant took effect (``governor/billing.py``,
+        the ``EVENT_TOPUP`` branch of ``apply``), so a credit GRANT that was not paid for — a trial, a plan refill, a
+        settle refund, any ``WalletRegistry.grant`` — never counts: those write no invoice. Tenant-scoped by the
+        owner-signed ``org_id`` (the caller resolves it server-side; a customer never names another org), and
+        durable across a hard prune (the invoice fold's snapshot seed). Fail-closed: an empty / non-string /
+        unknown org reads as False.
+
+        Two known gaps, both deliberate:
+
+          * **A crash between the wallet grant and its invoice line reads as "not purchased".** ``BillingSigner``
+            grants first and records the invoice second; if the second write fails, the billing drain quarantines
+            the envelope (``inbound/billing_spool.py``) and the provider redelivers. Re-ingesting it — a provider
+            redelivery, or the operator re-admitting the envelope from ``rejected/`` — re-runs the same
+            ``event_id``-idempotent mint, so the wallet is not credited twice and the missing line is written.
+            Until then this reads False: fail-closed for anything gated on it (e.g. a trial unlock).
+          * **A purchase is never revoked.** There is no chargeback or purchase-refund record in this ledger, so a
+            payment the provider later reverses still reads as purchased. Whatever was unlocked on it stays
+            unlocked (an owner-accepted risk, not a guarantee)."""
+        return any(inv.kind == "topup" and inv.credits > 0 for inv in self.invoices(org_id))
+
     def all_invoices(self) -> list[Invoice]:
         """Every invoice across all tenants (the owner/operator billing view), newest-first then org-stable."""
         hit = self._cached(lambda v: list(v.rows.values()))
