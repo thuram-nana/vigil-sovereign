@@ -97,7 +97,7 @@ def seed_rows(snap) -> dict:
     """The claim rows a snapshot carries, in the fold's shape."""
     out: dict = {}
     for row in snap.trial_claim_row:
-        if (isinstance(row, (list, tuple)) and len(row) >= 4 and row[0] in KEY_KINDS
+        if (isinstance(row, (list, tuple)) and len(row) >= 4 and isinstance(row[0], str) and row[0] in KEY_KINDS
                 and isinstance(row[1], str) and isinstance(row[2], str) and (row[0], row[1]) not in out):
             out[(row[0], row[1])] = [row[2], float(as_issued_at(row[3]))]
     return out

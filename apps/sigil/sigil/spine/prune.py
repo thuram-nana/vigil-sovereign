@@ -795,7 +795,10 @@ def stranded_trial_claims(store, archived: list[Segment], K: int) -> list[str]:
     for r in below:
         apply_trial_claim(r.payload, resolver.at(r.seq), rows)
     carried = seed_rows(seed)
-    return sorted({str(v[0]) for key, v in rows.items() if carried.get(key) != v})
+    # Both directions: a dropped / altered claim, and a row the seed invents for a key the fold does not hold.
+    bad = {v[0] for key, v in rows.items() if carried.get(key) != v}
+    bad |= {v[0] for key, v in carried.items() if rows.get(key) != v}
+    return sorted(str(o) for o in bad)
 
 
 def stranded_report_unlocks(store, archived: list[Segment], K: int) -> list[str]:
@@ -808,8 +811,9 @@ def stranded_report_unlocks(store, archived: list[Segment], K: int) -> list[str]
     for r in below:
         apply_report_unlock(r.payload, resolver.at(r.seq), billing, owner)
     c_billing, c_owner = seed_state(seed)
-    bad = {o for o, v in billing.items() if c_billing.get(o) != v} | {o for o, v in owner.items()
-                                                                       if c_owner.get(o) != v}
+    # Both directions: a dropped / altered record, and a row the seed invents (e.g. a phantom owner relock).
+    bad = {o for o in set(billing) | set(c_billing) if billing.get(o) != c_billing.get(o)}
+    bad |= {o for o in set(owner) | set(c_owner) if owner.get(o) != c_owner.get(o)}
     return sorted(str(o) for o in bad)
 
 

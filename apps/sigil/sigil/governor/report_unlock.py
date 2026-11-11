@@ -72,8 +72,8 @@ def apply_report_unlock(p, pubkey: Optional[str], billing: dict, owner: dict) ->
         return False
     oid, eid = p.get("org_id"), p.get("entry_id")
     action, src = p.get("action"), p.get("source_kind")
-    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid and action in ACTIONS
-            and src in SOURCES):
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid and isinstance(action, str)
+            and action in ACTIONS and isinstance(src, str) and src in SOURCES):
         return False
     if src in BILLING_SOURCES:
         if action != "unlock" or oid in billing:
@@ -97,11 +97,11 @@ def seed_state(snap) -> "tuple[dict, dict]":
     owner: dict = {}
     for row in snap.report_unlock_billing:
         if (isinstance(row, (list, tuple)) and len(row) >= 5 and isinstance(row[0], str)
-                and row[2] in BILLING_SOURCES and row[0] not in billing):
+                and isinstance(row[2], str) and row[2] in BILLING_SOURCES and row[0] not in billing):
             billing[row[0]] = [str(row[1]), str(row[2]), str(row[3]), float(as_issued_at(row[4]))]
     for row in snap.report_unlock_owner:
         if (isinstance(row, (list, tuple)) and len(row) >= 5 and isinstance(row[0], str)
-                and row[2] in ACTIONS and row[0] not in owner):
+                and isinstance(row[2], str) and row[2] in ACTIONS and row[0] not in owner):
             owner[row[0]] = [str(row[1]), str(row[2]), str(row[3]), float(as_issued_at(row[4]))]
     return billing, owner
 

@@ -433,4 +433,62 @@ def test_prune_refuses_a_seed_that_corrupts_a_value(tmp_path, monkeypatch):
                                                            for r in seed.trial_claim_row]})
 
     monkeypatch.setattr(prune, "build", corrupt)
-    assert prune.stranded_trial_claims(s, _archived_below(s, 5), 5) == ["org_a"]
+    assert prune.stranded_trial_claims(s, _archived_below(s, 5), 5) == ["org_a", "org_evil"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"action": [], "source_kind": "owner"},
+    {"action": "unlock", "source_kind": {}},
+    {"action": {"a": 1}, "source_kind": ["topup"]},
+])
+def test_a_malformed_unsigned_unlock_never_raises_out_of_a_fold(bad):
+    """A hostile append must stay inert: unhashable field values never reach a set-membership test."""
+    s = _store()
+    reg = _ru(s)
+    reg.unlock("paying", "topup", source_ref="e1", issued_at=1.0)
+    _raw(s, {"signal": REPORT_UNLOCK_SIGNAL, "org_id": "victim", "entry_id": "x", **bad})
+    _raw(s, {"signal": TRIAL_CLAIM_SIGNAL, "key_kind": [], "key_digest": {}, "org_id": "victim"})
+    assert reg.is_unlocked("paying") and not reg.is_unlocked("victim")
+    assert _tc(s).claimant("email", DA) is None
+    b = build(list(s.iter_records()), trusted_pubkey=OP, base_seq=0, snapshot_seq=-1)
+    assert [r[0] for r in b.report_unlock_billing] == ["paying"]
+
+
+def test_malformed_seed_rows_are_skipped():
+    from sigil.governor.report_unlock import seed_state
+    from sigil.governor.trial_claim import seed_rows
+    snap = SnapshotState.from_folded({"trial_claim_row": [[[], DA, "o", 1.0]],
+                                      "report_unlock_billing": [["o", "e", {}, "r", 1.0]],
+                                      "report_unlock_owner": [["o", "e", [], "r", 1.0]]})
+    assert seed_rows(snap) == {} and seed_state(snap) == ({}, {})
+
+
+def test_prune_refuses_a_seed_that_invents_a_row(tmp_path, monkeypatch):
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _segmented(tmp_path)
+    real_build = prune.build
+
+    def phantom(records, **kw):
+        seed = real_build(records, **kw)
+        return seed.model_copy(update={
+            "report_unlock_owner": [*seed.report_unlock_owner, ["org_a", "owner:x", "relock", "p", 99.0]],
+            "trial_claim_row": [*seed.trial_claim_row, ["domain", key_digest("domain", "x.io"), "org_a", 1.0]]})
+
+    monkeypatch.setattr(prune, "build", phantom)
+    archived = _archived_below(s, 5)
+    assert prune.stranded_report_unlocks(s, archived, 5) == ["org_a"]
+    assert prune.stranded_trial_claims(s, archived, 5) == ["org_a"]
+
+
+def test_prune_refuses_a_seed_that_invents_a_billing_unlock(tmp_path, monkeypatch):
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+    s = _segmented(tmp_path)
+    real_build = prune.build
+
+    def phantom(records, **kw):
+        seed = real_build(records, **kw)
+        return seed.model_copy(update={
+            "report_unlock_billing": [*seed.report_unlock_billing, ["org_free", "unlock:topup:x", "topup", "x", 1.0]]})
+
+    monkeypatch.setattr(prune, "build", phantom)
+    assert prune.stranded_report_unlocks(s, _archived_below(s, 5), 5) == ["org_free"]
