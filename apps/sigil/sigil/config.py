@@ -505,6 +505,15 @@ def oidc_enabled() -> bool:
     return (os.environ.get("SIGIL_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def fold_cache_enabled() -> bool:
+    """True iff the verified incremental FOLD CACHE is ON (`VIGIL_FOLD_CACHE_ENABLED` affirmative). OFF by default
+    (Front C S0a): every registry read runs its full signature-verifying fold, byte-identical to a build without
+    the cache. When ON, a registry that supports it (S0a: `CustomerRegistry`) extends an in-memory fold over only
+    the records appended since its last read, anchored to the chain (`spine/fold_cache.py`); on any doubt it
+    rebuilds from the spine. Read at call time, so an operator can turn it off without a restart."""
+    return (os.environ.get("VIGIL_FOLD_CACHE_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def oidc_settings() -> dict:
     """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
     override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
