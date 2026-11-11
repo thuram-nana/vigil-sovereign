@@ -21,7 +21,13 @@ customer host for well-known; the DoH resolver for dns-txt):
   * before any byte is sent, the connected socket's own peer address (``getpeername``) must equal the
     vetted IP — an undeterminable or different peer is refused;
   * https only, NO redirect following (a 30x toward an internal URL is never chased), a hard per-op timeout
-    under an absolute wall-clock budget, and a BOUNDED read (a huge/slow-drip body cannot exhaust memory).
+    under an absolute wall-clock budget — re-armed to the REMAINING budget before every send and every recv,
+    so a server that drip-feeds its status line, headers or body cannot hold the fetch past the deadline —
+    and a BOUNDED read (a huge body cannot exhaust memory).
+
+A failure's ``str()`` is the fetcher's own fixed wording (it reaches the customer); the underlying library
+error text (TLS alerts, socket errors) is carried separately in ``OwnershipFetchError.detail`` for the
+operator audit only.
 
 The ``dns-txt`` VERDICT lives in ``governor.asset_ownership``; this module is the FETCH half. An HTML
 meta-tag method is a follow-on (SS-2). Extensible: a new method adds a branch here + a verdict branch,
@@ -31,6 +37,7 @@ without touching the authorization system. FATAL-2: sovereign-side, stdlib only
 from __future__ import annotations
 
 import http.client
+import io
 import ipaddress
 import json
 import socket
@@ -59,15 +66,23 @@ _META_MAX_BYTES = 262144         # a homepage is bigger than a marker; bounded r
 _DEFAULT_DOH_RESOLVER = "cloudflare-dns.com"  # a PINNED public DoH resolver; operator-overridable, must be public
 _DNS_TYPE_TXT = 16
 _MAX_TXT_ANSWERS = 32            # a sane cap on parsed TXT answers (anti-DoS on a hostile resolver reply)
-
-
 _HTTPS_PORT = 443                # the only port ever connected (https); a module constant, never configuration
 _connect = socket.create_connection  # the TCP connect (module-level so tests can drive it to loopback)
 
 
 class OwnershipFetchError(Exception):
-    """A fetch was refused or failed. The provisioner maps it to a clean customer-facing error without
-    leaking internals."""
+    """A fetch was refused or failed. ``str(e)`` is the fetcher's OWN fixed reason (HTTP status, too large,
+    SSRF refusal, budget spent, TLS failed) and is what the provisioner shows the customer. ``detail`` is the
+    underlying library error text (a TLS alert, a socket error) for the OPERATOR audit only — never echoed
+    to the customer."""
+
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(message)
+        self.detail = str(detail)
+
+
+def _detail(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"
 
 
 def _addr_is_internal(ip_str: Any) -> bool:
@@ -120,6 +135,45 @@ def _require_peer(sock: Any, ip: str) -> None:
         raise OwnershipFetchError("connected peer is not the vetted address — refused (SSRF guard)")
 
 
+class _BudgetedSocket:
+    """The pinned TLS socket as ``http.client`` sees it (``conn.sock``). ``arm`` re-sets the socket timeout
+    to the REMAINING total budget (raising once it is spent) and runs before EVERY send and EVERY recv: a
+    single settimeout bounds each recv separately, so without this a server dripping one byte per recv just
+    inside the per-op timeout holds the fetch for as long as it likes. ``close`` is a no-op: http.client
+    calls it when a ``Connection: close`` / HTTP/1.0 response takes the socket over (and then sets
+    ``conn.sock`` to None); the fetcher closes the real socket itself once the exchange is over."""
+
+    def __init__(self, tls: Any, arm: Callable[[], None]) -> None:
+        self._tls = tls
+        self._arm = arm
+
+    def sendall(self, data: bytes) -> None:
+        self._arm()
+        self._tls.sendall(data)
+
+    def makefile(self, mode: str = "rb", *args: Any, **kwargs: Any) -> io.BufferedReader:
+        return io.BufferedReader(_BudgetedReader(self._tls, self._arm))
+
+    def close(self) -> None:
+        pass
+
+
+class _BudgetedReader(io.RawIOBase):
+    """The raw byte stream under the response: every underlying recv is preceded by ``arm``."""
+
+    def __init__(self, tls: Any, arm: Callable[[], None]) -> None:
+        super().__init__()
+        self._tls = tls
+        self._arm = arm
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        self._arm()
+        return int(self._tls.recv_into(b))
+
+
 class WellKnownFetcher:
     """SSRF-hardened fetcher for both the ``well-known`` and ``dns-txt`` ownership methods. ``resolver`` and
     ``ssl_context`` are injectable (tests inject a resolver to exercise the SSRF gate without real network).
@@ -156,9 +210,10 @@ class WellKnownFetcher:
         """Open an https connection PINNED to a validated-public resolved IP for ``host`` (the SSRF gate +
         rebinding defence): resolve→refuse-if-any-internal→connect-to-validated-IP→verify the connected PEER is
         that IP→TLS with SNI/cert against the HOSTNAME. Shared by both the well-known fetch (host = customer
-        host) and the dns-txt fetch (host = the DoH resolver). Returns ``(conn, tls)``: callers bound I/O on
-        ``tls`` — the socket the request actually goes out on — NOT ``conn.sock``, which http.client sets to
-        None once a ``Connection: close`` (or HTTP/1.0) response hands the socket to the response object.
+        host) and the dns-txt fetch (host = the DoH resolver). Returns ``(conn, tls)``: every send/recv of
+        ``conn`` goes through ``_BudgetedSocket`` over ``tls`` (the socket the peer check vetted), and the
+        caller closes ``tls`` itself — ``conn.sock`` cannot be used for that, http.client sets it to None once
+        a ``Connection: close`` (or HTTP/1.0) response hands the socket to the response object.
         Raises ``OwnershipFetchError`` fail-closed."""
         ip = _resolve_public_ip(host, resolver=self._resolver)     # SSRF gate (raises if any addr internal)
         raw = _connect((ip, _HTTPS_PORT), timeout=self._op_timeout(start))
@@ -171,33 +226,32 @@ class WellKnownFetcher:
             raise                                                  # peer mismatch / budget exhausted
         except Exception as e:  # noqa: BLE001 — a TLS failure is a fail-closed refusal, not a crash
             raw.close()
-            raise OwnershipFetchError(f"TLS to {host!r} failed: {e}") from None
+            raise OwnershipFetchError(f"TLS to {host!r} failed", detail=_detail(e)) from None
         conn = http.client.HTTPSConnection(host, timeout=self._timeout)
-        conn.sock = tls                                            # pinned to the validated IP; no re-resolve
+        conn.auto_open = 0                     # never let http.client dial on its own (an UNPINNED re-resolve)
+        conn.sock = _BudgetedSocket(tls, lambda: tls.settimeout(self._op_timeout(start)))  # pinned; budgeted
         return conn, tls
 
     def _pinned_get(self, host: str, path: str, accept: str, start: float, limit: int,
                     what: str) -> "tuple[int, bytes]":
-        """One bounded GET over the pinned connection: ``(status, body[:limit + 1])``. Every per-op timeout
-        is set on the captured ``tls`` socket (valid for the whole exchange whether the server keeps the
-        connection alive or answers ``Connection: close``). No redirect following (http.client never chases
-        a 30x). Fail-closed: any transport error raises ``OwnershipFetchError``."""
+        """One bounded GET over the pinned connection: ``(status, body[:limit + 1])``. Every send and recv
+        is bounded by the remaining budget on the captured ``tls`` socket (``_BudgetedSocket``), whether the
+        server keeps the connection alive or answers ``Connection: close``. No redirect following
+        (http.client never chases a 30x). Fail-closed: any transport error raises ``OwnershipFetchError``."""
         conn, tls = self._open_pinned_https(host, start)
         resp = None
         try:
-            tls.settimeout(self._op_timeout(start))                # bound request+response by remaining budget
             conn.request("GET", path,
                          headers={"Host": host, "User-Agent": "VIGIL-ownership-verify", "Accept": accept,
                                   "Connection": "close"})
             resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
             if resp.status != 200:
                 return int(resp.status), b""
-            tls.settimeout(self._op_timeout(start))                # bound the body read by remaining budget
             return 200, resp.read(limit + 1)
         except OwnershipFetchError:
             raise
         except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
-            raise OwnershipFetchError(f"{what} fetch failed: {e}") from None
+            raise OwnershipFetchError(f"{what} fetch failed", detail=_detail(e)) from None
         finally:
             if resp is not None:
                 _quiet_close(resp)
