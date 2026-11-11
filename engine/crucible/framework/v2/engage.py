@@ -539,6 +539,33 @@ def _lease_is_paused(base: str, slug: str, nonce: "str | None") -> bool:
         return True
 
 
+def _resume_state_is_launch_bound(slug: str, nonce: "str | None", *, resume: bool) -> bool:
+    """Whether THIS run's phase ledger + scan snapshot must be BOUND to one launch (``PhaseLedger.bind_launch``).
+
+    The ledger and the snapshot are keyed per slug, and a customer slug is reused by every launch of the same
+    (org, host) — so a customer run's resume state has to be scoped to its own launch, or a resumed launch
+    would skip its scan and reload an EARLIER launch's report. Bound iff this is a customer launch:
+
+      * a verified lease nonce was read ⇒ bound to that launch (its records are tagged, and only its own
+        tagged state is ever reused);
+      * no nonce, but a RESUME of a customer engagement ⇒ bound to NOTHING: the launch cannot be identified,
+        so no prior state may be reused and the scan re-runs (the ledger's fail-safe direction: more work,
+        never a foreign report). A fresh run reuses nothing anyway, so the question only arises on resume;
+      * an operator / greenfield run ⇒ NOT bound — the per-slug ledger and a plain ``--resume`` are
+        byte-identical to before.
+
+    TOTAL: if the engagement cannot be classified it is treated as bound-to-nothing on a resume."""
+    if nonce:
+        return True
+    if not resume:
+        return False
+    try:
+        from .launch_lease import customer_engagement_requires_lease
+        return bool(customer_engagement_requires_lease(slug))
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ reuse nothing (re-scan), never another launch's state
+        return True
+
+
 def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int | None":
     """EC-3 — arm THIS run's HARD per-run token ceiling at preflight. Returns the armed ceiling, or None.
 
@@ -1316,7 +1343,15 @@ def run_engagement(
     fused-lead findings and the defender gap-report/efficacy events appear ONCE across fresh+resume
     while ``result.fused_leads``/``fused_facts``/``defense`` are still recomputed. ``resume=False``
     (the default) only ever RECORDS state, so the control flow — and ``make gate`` — is
-    byte-identical."""
+    byte-identical.
+
+    For a CUSTOMER launch the resume state is additionally BOUND TO THE LAUNCH (its owner-signed lease
+    nonce): the ledger and the snapshot are keyed per slug and a customer slug is reused by every launch
+    of the same (org, host), so a resume reuses only the scan its OWN launch completed — never an earlier
+    launch's. And a scan that a reversible PAUSE cut short is recorded ``halted``, not completed, and is
+    not snapshotted: the run raises the re-driveable :class:`EngagementPaused`, and the resumed launch
+    RE-RUNS its scan instead of reloading a truncated report. Operator / greenfield runs are never bound
+    and never pause-gated, so their ledger and a plain ``--resume`` are unchanged."""
     # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
     # gate refusal is recorded as evidence on the spine before it propagates.
     sink = _make_spine_sink(spine, slug)
@@ -1342,14 +1377,15 @@ def run_engagement(
     # NOT complete (never emitted, or crashed mid-emit) keeps the real sink, so its events are
     # emitted exactly once. Grounding/finding-confidence/chaining/intel emit NOTHING to the spine,
     # so they are already re-emit-idempotent and untouched. Empty unless resuming → fresh runs
-    # (and `make gate`, which uses no spine) are byte-identical.
-    _completed_prior = ledger.completed_prior()
-
+    # (and `make gate`, which uses no spine) are byte-identical. The ledger is asked at CALL time
+    # (not snapshotted here) because a customer run binds it to its launch after preflight, which
+    # narrows "completed by a prior run" to THIS launch's own phases; an operator run's answer is
+    # the same whenever it is asked.
     def _emit_sink(phase: str):
         """The sink a re-runnable phase hands to its spine-EMITTING steps: the real ``sink``
         normally, but ``None`` when resuming a phase the prior run already recorded on the spine
         (so it recomputes its in-memory result WITHOUT re-appending the same events)."""
-        return None if (resume and phase in _completed_prior) else sink
+        return None if (resume and phase in ledger.completed_prior()) else sink
 
     # Preflight is the fail-closed AUTHORIZATION gate — it ALWAYS runs, even on resume:
     # re-validating the kill-switch + seed scope on every launch is a safety feature, never a
@@ -1385,7 +1421,27 @@ def run_engagement(
     # post-scan raise below catch.
     _pause_base = _engage_pause_base()
     _pause_nonce = _engage_lease_nonce(slug, seed_url)
-    _pause_halt_check = (lambda: _lease_is_paused(_pause_base, slug, _pause_nonce)) if _pause_nonce else None
+    # LATCHED: remember whether the pause halt ever REFUSED an action in this run. A pause that lands mid-scan
+    # and is cleared again before the scan returns still cut the scan (every action in between came back as a
+    # status-0 refusal), so "is it paused right now?" asked once after the scan is not enough to know the
+    # report is whole.
+    _pause_halt_fired = {"v": False}
+
+    def _pause_halt_latched() -> bool:
+        paused = _lease_is_paused(_pause_base, slug, _pause_nonce)
+        if paused:
+            _pause_halt_fired["v"] = True
+        return paused
+
+    _pause_halt_check = _pause_halt_latched if _pause_nonce else None
+
+    # Bind this run's RESUME STATE (phase ledger + scan snapshot) to its launch. Both are keyed per slug and a
+    # customer slug is reused across launches, so an unbound resume could skip its scan on the strength of an
+    # EARLIER launch's ledger and reload that launch's report — and the run would then settle COMPLETED at
+    # full charge on a report that is not its own. Customer launches only: an operator / greenfield run is
+    # never bound, so its ledger and a plain ``--resume`` are byte-identical.
+    if _resume_state_is_launch_bound(slug, _pause_nonce, resume=resume):
+        ledger.bind_launch(_pause_nonce)
 
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
@@ -1636,6 +1692,7 @@ def run_engagement(
     # are never re-counted). A missing/corrupt snapshot falls through and re-runs (fail-open). A
     # scan exception propagates exactly as before (the phase is NOT completed → retried on resume).
     report: ScanReport | None = None
+    _scan_cut_by_pause = False
     if not ledger.should_run(P_SCAN):
         report = ledger.load_report()
         if report is not None:
@@ -1666,20 +1723,35 @@ def run_engagement(
                 _rb_stopped = _rbx
                 report = ScanReport(target=seed_url)
             else:
-                ledger.complete(P_SCAN)
-                ledger.persist_report(report)
+                # A scan that a PAUSE cut short returns NORMALLY: the executor's halt_check turns every further
+                # action into a status-0 refusal, so the campaign winds down and hands back a report that is
+                # missing everything it did not get to. That report must never be recorded as the completed
+                # scan nor snapshotted — a resume would then skip the scan (should_run is False for a completed
+                # scan), reload the truncated report and settle COMPLETED at the full reservation. So when the
+                # pause halt fired during this scan, or the lease is paused as it returns, record the phase
+                # HALTED (not completed, no snapshot): the resumed run re-runs the scan and delivers the whole
+                # assessment. DEFAULT-OFF: no nonce / no pause marker ⇒ neither is ever true ⇒ byte-identical.
+                _scan_cut_by_pause = (_pause_halt_fired["v"]
+                                      or _lease_is_paused(_pause_base, slug, _pause_nonce))
+                if _scan_cut_by_pause:
+                    ledger.halt(P_SCAN)
+                else:
+                    ledger.complete(P_SCAN)
+                    ledger.persist_report(report)
 
     # pause/resume PR-3 — the AUTHORITATIVE in-flight halt. The traffic phase is done; if THIS customer launch's
     # lease is now paused, RAISE here (a clean body point, OUTSIDE the PhaseLedger swallow-wrappers) so the
     # customer-launch worker RE-DRIVES the launch rather than settling a half-done run. The executor's halt_check
     # already stopped further traffic at the next action; this is what turns that cooperative stop into a
     # re-driveable outcome. Raised BEFORE the best-effort reasoning phases so a paused run wastes no further work.
+    # ``_scan_cut_by_pause`` also raises when the pause was already CLEARED by the time the scan returned: the
+    # scan is still truncated, so the launch must re-drive (and re-scan) rather than settle on it.
     # DEFAULT-OFF: no nonce / no pause marker ⇒ _lease_is_paused is False ⇒ never raised ⇒ byte-identical.
-    if _lease_is_paused(_pause_base, slug, _pause_nonce):
+    if _scan_cut_by_pause or _lease_is_paused(_pause_base, slug, _pause_nonce):
         raise EngagementPaused(
-            f"customer launch {slug!r} cooperatively halted — its credit-launch lease is paused (a reversible "
-            f"operator halt). Re-driveable: resume (clear the pause) re-arms the SAME lease without re-burning "
-            f"its single-use floor.")
+            f"customer launch {slug!r} cooperatively halted — its credit-launch lease was paused mid-run (a "
+            f"reversible operator halt). Re-driveable: resume (clear the pause) re-arms the SAME lease without "
+            f"re-burning its single-use floor, and re-runs a scan the pause cut short.")
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.
