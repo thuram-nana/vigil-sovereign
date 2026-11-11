@@ -282,7 +282,7 @@ def _offered() -> tuple[CatalogEntry, ...]:
 def mintable_entitlements() -> dict[str, Entitlement]:
     """`{price_id: Entitlement}` over the FULL catalog, ignoring every sale flag and `retired` — what the billing
     drain's signer consumes. A SKU that was ever sold keeps minting after its flag is turned off or it is
-    retired, so a renewal is never silently dropped; a line the drain has not wired raises UnaccountedPayment
+    retired, so a renewal is never silently dropped; a signer holding no line for it raises UnaccountedPayment
     under the plan alarm instead (BillingSigner). The money still comes only from this owner catalog."""
     return {e.price_id: e.entitlement() for e in _CATALOG}
 
