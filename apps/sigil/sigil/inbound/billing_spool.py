@@ -240,7 +240,7 @@ class BillingSpoolWatcher:
         try:
             obj = json.loads(self._read_regular(sp))
             n = obj["attempts"]
-        except (OSError, ValueError, KeyError, TypeError):
+        except Exception:  # noqa: BLE001 — ANY fault (a deeply nested ledger raises RecursionError) => untrusted
             return None
         if isinstance(n, bool) or not isinstance(n, int) or n < 0:
             return None
@@ -283,7 +283,8 @@ class BillingSpoolWatcher:
         except Exception:  # noqa: BLE001 — a clock that RAISES proves nothing "not yet due" => re-admit NOW
             pass
         # A bool / NaN / non-number ``now`` (the None of a raising clock included) fails the window test below, or
-        # makes ``float(now)`` raise into that test's own except — either way the envelope is re-admitted NOW.
+        # makes ``float(now)`` raise into that test's own except (an int too large for a float raises OverflowError)
+        # — either way the envelope is re-admitted NOW.
         cap = None
         if recovery_on:
             try:
@@ -300,7 +301,7 @@ class BillingSpoolWatcher:
                     if (isinstance(due_at, (int, float)) and not isinstance(due_at, bool)
                             and 0.0 < float(due_at) - float(now) <= cap):
                         continue                         # not yet due (and a plausible wait) — leave it parked
-                except (OSError, ValueError, KeyError, TypeError):
+                except Exception:  # noqa: BLE001 — ANY fault (OverflowError, RecursionError included) proves nothing
                     pass                                 # untrusted ledger -> re-admit now (bound enforced later)
             dest = self.incoming / f.name
             if dest.exists() or dest.is_symlink():
@@ -336,12 +337,18 @@ class BillingSpoolWatcher:
         if policy.exhausted:
             return (f"rejected (transient {type(exc).__name__} persisted through {attempts} bounded NET-2b "
                     f"retries): {exc}")
-        now = self._now()
-        if isinstance(now, bool) or not isinstance(now, (int, float)) or now != now or now in (float("inf"),
-                                                                                              float("-inf")):
+        # ``_defer`` runs INSIDE drain()'s catch-all handler, so nothing here may raise: a clock that RAISES, or
+        # returns an int too large for a float (``float`` raises OverflowError), quarantines like any other
+        # unreadable clock — it never escapes drain() and leaves the envelope to be re-verified on every pass.
+        try:
+            now = self._now()
+            t = float("nan") if isinstance(now, bool) or not isinstance(now, (int, float)) else float(now)
+        except Exception:  # noqa: BLE001
+            t = float("nan")
+        if t != t or t in (float("inf"), float("-inf")):
             return f"rejected (transient {type(exc).__name__}; clock unreadable — not retried): {exc}"
         parked = self.retry / name
-        state = {"attempts": attempts + 1, "next_at": float(now) + policy.next_delay(),
+        state = {"attempts": attempts + 1, "next_at": t + policy.next_delay(),
                  "last_error": f"{type(exc).__name__}: {exc}"[:500]}
         try:
             self.retry.mkdir(parents=True, exist_ok=True)

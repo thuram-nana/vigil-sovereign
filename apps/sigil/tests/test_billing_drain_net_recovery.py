@@ -702,3 +702,92 @@ def test_a_raising_clock_never_escapes_the_drain_and_the_envelope_is_quarantined
     assert quarantined_count(spool / "rejected") == 1 and w.available("acme") == 0
     assert (spool / "rejected" / (name + ".reason")).read_text() == \
         "rejected (unexpected OSError): clock source unavailable"
+
+
+# --- a tampered ledger or a garbage clock never wedges the drain (red-pen drain-durability fold) ----------------
+# ``_readmit_retries`` runs BEFORE the per-file loop, and ``_defer`` runs INSIDE drain()'s catch-all handler, so an
+# exception from either escaped drain() on EVERY pass while one parked envelope existed: nothing re-admitted,
+# nothing quarantined, and every healthy paid webhook behind it left in incoming/ unclaimed.
+
+_OK_9912 = {**_OK, "data": {**_OK["data"], "id": 9912, "tx_ref": "vigil:acme:n2"}}
+
+
+@pytest.mark.parametrize("ledger,outcome", [
+    (b'{"attempts": 1, "next_at": 1' + b"0" * 400 + b"}", "re-parked"),   # valid JSON; next_at too large for a float
+    (b"[" * 100_000, "quarantined"),                                     # nesting deep enough to raise RecursionError
+], ids=["int-too-large-for-a-float", "deeply-nested"])
+def test_a_tampered_ledger_never_wedges_the_drain_or_the_payments_behind_it(tmp_path, monkeypatch, ledger, outcome):
+    """The window test compared ``float(due_at) - float(now)`` and caught only (OSError, ValueError, KeyError,
+    TypeError): a 401-digit ``next_at`` raised OverflowError, a deeply nested ledger RecursionError, out of drain()
+    on every pass. An untrusted due time now re-admits NOW (as documented) and the bound is kept: a ledger whose
+    ``attempts`` still reads is re-parked with that budget, one that does not read at all is untrusted when the
+    retry fails again, so the envelope is quarantined — never retried without bound."""
+    _on(monkeypatch)
+    proc = _Processor(monkeypatch, [_http(503), _http(503), _OK_9912])
+    w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope(9911), name="a.json")
+    watcher.drain()
+    assert watcher.parked_count() == 1
+    (spool / "retry" / (name + ".state")).write_bytes(ledger)
+    _spool(spool, _envelope(9912), name="b.json")                          # a healthy payment sorted after it
+    res = watcher.drain()                                                   # used to raise on every pass
+    assert res["minted"] == 1 and proc.calls == 3 and w.available("acme") == 200   # the payment behind it credited
+    assert list((spool / "incoming").iterdir()) == [] and list((spool / "working").iterdir()) == []
+    if outcome == "re-parked":
+        assert res["deferred"] == 1 and res["rejected"] == 0 and watcher.parked_count() == 1
+        assert _ledger(spool, name)["attempts"] == 2                       # the budget carried on, never reset
+    else:
+        assert res["deferred"] == 0 and res["rejected"] == 1 and watcher.parked_count() == 0
+        assert quarantined_count(spool / "rejected") == 1
+        assert "untrusted NET-2b retry ledger" in (spool / "rejected" / (name + ".reason")).read_text()
+
+
+def _clock_failing_on(read, bad):
+    """A clock that answers 1000.0 except on its ``read``-th call (1-based), where it raises or returns ``bad``."""
+    n = {"i": 0}
+
+    def clock():
+        n["i"] += 1
+        if n["i"] != read:
+            return 1000.0
+        if isinstance(bad, BaseException):
+            raise bad
+        return bad
+    return clock
+
+
+@pytest.mark.parametrize("bad", [OSError("clock gone at defer"), RuntimeError("clock driver fault"), 10 ** 400],
+                         ids=["raises-OSError", "raises-RuntimeError", "int-too-large-for-a-float"])
+def test_a_clock_that_fails_only_at_defer_time_quarantines_and_never_escapes(tmp_path, monkeypatch, bad):
+    """First pass, no retry/ yet: read 1 stamps the ingest, read 2 dates the deferral. The deferral's read was
+    unguarded (and ``float(now)`` of a huge int raised OverflowError) inside drain()'s catch-all handler, so the
+    envelope stayed in working/ and was reclaimed, re-verified and re-failed on every pass — never parked, never
+    counted, never quarantined, and every envelope sorted after it skipped. It now quarantines like any other
+    unreadable clock."""
+    _on(monkeypatch)
+    proc = _Processor(monkeypatch, [_http(503), _OK_9912])
+    w, watcher, spool = _rig(tmp_path, _clock_failing_on(2, bad))
+    name = _spool(spool, _envelope(9911), name="a.json")
+    _spool(spool, _envelope(9912), name="b.json")                          # sorted AFTER it
+    res = watcher.drain()                                                   # used to raise here
+    assert res["rejected"] == 1 and res["minted"] == 1 and res["deferred"] == 0 and proc.calls == 2
+    assert list((spool / "working").iterdir()) == [] and watcher.parked_count() == 0
+    assert (spool / "rejected" / (name + ".reason")).read_text().startswith(
+        "rejected (transient FlutterwaveEgressError; clock unreadable — not retried)")
+    assert w.available("acme") == 200
+
+
+@pytest.mark.parametrize("bad", [RuntimeError("clock driver fault"), 10 ** 400],
+                         ids=["raises-RuntimeError", "int-too-large-for-a-float"])
+def test_any_clock_fault_at_readmit_time_never_holds_a_webhook_parked(tmp_path, monkeypatch, bad):
+    """The re-admit guard must catch every way a clock can fail, not only the OSError the first test used: a
+    non-OSError raise, and an int too large to compare (``float(now)`` raises OverflowError)."""
+    _on(monkeypatch)
+    _Processor(monkeypatch, [_http(503)])
+    _w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope())
+    watcher.drain()
+    assert watcher.parked_count() == 1                                      # parked, due in 5 s
+    watcher._now = _clock_failing_on(1, bad)
+    watcher._readmit_retries(recovery_on=True)                              # does not raise
+    assert (spool / "incoming" / name).exists() and watcher.parked_count() == 0
