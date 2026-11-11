@@ -180,7 +180,8 @@ def test_worker_seeds_authoritatively_from_scope_ignoring_a_tampered_extra(monke
     w = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 0})
     assert w(_job(seed_host="evil.example")) == {"facts": 0}          # a TAMPERED extra seed
     # ...is ignored — the seed is the authority host; a first arm is a fresh (non-resume) consume.
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
 
 
 def test_worker_refuses_a_live_target_when_the_flag_is_off(monkeypatch):
@@ -216,6 +217,19 @@ def test_worker_resumes_on_re_drive_and_fresh_arms_a_new_nonce(monkeypatch):
     assert [c["resume"] for c in calls] == [False, True, False]
 
 
+def test_worker_binds_the_run_to_its_own_jobs_launch(monkeypatch):
+    # The seam holds ONE lease per slug, so the engine must be told WHICH launch this job is: the worker passes
+    # its job's own nonce (launch_nonce), and a deployment profile can never override it.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    calls = []
+    w = make_engage_worker(trust_root=object(), base_dir=base, profile_kwargs={"launch_nonce": "forged"},
+                           run=lambda **kw: calls.append(kw) or {"facts": 0})
+    w(_job(nonce="n1"))
+    w(_job(nonce="n2"))
+    assert [c["launch_nonce"] for c in calls] == ["n1", "n2"]
+
+
 def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
     # HIGH (red-pen): the worker's EXECUTION-boundary flag re-check must be exercised through the REAL posture
     # read (no injected callable). Env unset -> a LIVE customer arm is refused; env enabled -> it runs.
@@ -229,7 +243,8 @@ def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
     calls = []
     w2 = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 1})
     assert w2(_job())["facts"] == 1
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
 
 
 # ---- EC-7: tiered Quick/Deep run profile (default-OFF ⇒ byte-identical) --------------------------------
@@ -291,7 +306,8 @@ def test_worker_tiering_off_is_byte_identical(monkeypatch):
     w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0,
                            run=_capturing_run(calls, routing_seen))   # NO run_tier_enabled ⇒ real default (off)
     assert w(_job())["facts"] == 0
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]   # exactly the pre-EC-7 call
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]   # exactly the pre-EC-7 call
     assert routing_seen == [None]                          # the routing env was never set
 
 
@@ -339,7 +355,8 @@ def test_runner_drives_an_authorized_launch_through_run_one(monkeypatch, tmp_pat
     assert runner.queue.enqueue(job).enqueued is True
     out = runner.run_one()
     assert out.state == "done", out.reason
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]  # engage worker ran under the lease
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]  # engage worker ran under the lease
 
 
 def test_runner_refuses_a_job_with_no_authority_worker_never_runs(monkeypatch, tmp_path):
@@ -405,7 +422,8 @@ def test_runner_refuses_a_live_customer_by_default_and_runs_only_when_enabled(mo
     r2.queue.enqueue(LaunchTrigger(base_dir=base, now=1000.0).poll()[0])
     out2 = r2.run_one()
     assert out2.state == "done", out2.reason                         # the realistic LIVE production path runs
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
 
 
 # ---- K4-5d(B): the completion SEAM — the worker emits a governance-signed settle signal ----------------

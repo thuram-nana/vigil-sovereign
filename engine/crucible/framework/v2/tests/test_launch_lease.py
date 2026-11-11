@@ -222,3 +222,26 @@ def test_re_lease_new_nonce_runnable_after_old_nonce_settled(monkeypatch):
     write_credit_lease(base, SLUG, _lease(owner, nonce="n2", issued=2000.0), _owner_root(owner))  # genuine re-lease
     ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, consume=False)
     assert ok, reason                                                  # n2 is a fresh, un-settled runnable capability
+
+
+def test_expect_nonce_refuses_another_launchs_lease_before_the_consume(monkeypatch):
+    """The seam holds ONE lease per slug, and a customer slug is reused by every launch of the same (org, host),
+    so the lease on the seam can be a LATER launch's. A caller that names the launch it is running
+    (``expect_nonce`` — the customer worker's job nonce) must be refused on another launch's lease, and the
+    refusal must come BEFORE the consume: the later launch's single-use floor stays unburned for its own arm."""
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _lease(owner, nonce="n2", issued=2000.0))   # launch n2 now holds the seam
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, expect_nonce="n1")
+    assert not ok and "different launch" in reason
+    assert "n1" not in reason and "n2" not in reason                  # no nonce on an operator-facing reason
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, consume=False,
+                                                 expect_nonce="n1")
+    assert not ok and "different launch" in reason                   # the pre-check refuses it too
+    # n2's floor was NOT burned by the refused n1 arm: n2's own fresh arm still consumes it (once)
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, expect_nonce="n2")
+    assert ok, reason
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, expect_nonce="n2")
+    assert not ok and "single-use" in reason
+    # no expect_nonce: the conjunct is absent (byte-identical for every other caller)
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, consume=False)
+    assert ok, reason
