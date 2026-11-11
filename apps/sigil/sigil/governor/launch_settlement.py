@@ -129,9 +129,10 @@ def scan_settlement(store, trusted_pubkey: Optional[str], *, org_id: str, slug: 
         return ev
     s, n = str(slug), str(nonce)
     tail = f"{s}:{n}"
-    wanted: "dict[str, tuple[str, tuple[str, ...], str]]" = {CREDIT_GRANT_SIGNAL: (f"{SETTLE_WALLET_PREFIX}{tail}", _GRANT_CORE, "wallet"),
-              PLAN_GRANT_SIGNAL: (f"{SETTLE_PLAN_PREFIX}{tail}", _PLAN_GRANT_CORE, "plan"),
-              POSTPAID_CREDIT_SIGNAL: (f"{SETTLE_ENTRY_PREFIX}{tail}", _PP_CREDIT_CORE, "postpaid")}
+    wanted: "dict[str, tuple[str, tuple[str, ...], str]]" = {
+        CREDIT_GRANT_SIGNAL: (f"{SETTLE_WALLET_PREFIX}{tail}", _GRANT_CORE, "wallet"),
+        PLAN_GRANT_SIGNAL: (f"{SETTLE_PLAN_PREFIX}{tail}", _PLAN_GRANT_CORE, "plan"),
+        POSTPAID_CREDIT_SIGNAL: (f"{SETTLE_ENTRY_PREFIX}{tail}", _PP_CREDIT_CORE, "postpaid")}
     resolver = None
     for r in store.iter_records(since_seq=ev.through):
         if r.seq > ev.through:
