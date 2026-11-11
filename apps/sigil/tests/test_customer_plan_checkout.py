@@ -244,6 +244,22 @@ def test_a_paid_plan_charge_without_a_currency_alarms_and_never_mints():
     assert subs_off.subscription("org_x") is None
 
 
+@pytest.mark.parametrize("price_id", ["vigil_topup_1k", _PLAN])
+def test_an_armed_alarm_makes_any_paid_charge_without_a_currency_loud(price_id):
+    """A currency-less verify object is malformed for a top-up too, and for a PLAN price that arrived without
+    payment_plan the provider's early return would otherwise also skip apply()'s 'carries no payment_plan'
+    alarm. Armed: loud (quarantine). Not armed: mint nothing, as for any other refused top-up."""
+    assert price_id in catalog.entitlements()
+    table = {"7801": {"id": 7801, "status": "successful", "tx_ref": "vigil:org_x:n1", "amount": 10.0,
+                      "created_at": 7100.0, "meta": {"price_id": price_id}}}
+    prov, signer, _subs = _inbound(table, alarm=True)
+    with pytest.raises(UnaccountedPayment, match="has no currency"):
+        _deliver(prov, signer, 7801, 7100.0)
+    prov_off, signer_off, subs_off = _inbound(table, alarm=False)
+    assert _deliver(prov_off, signer_off, 7801, 7100.0) is None
+    assert subs_off.subscription("org_x") is None
+
+
 def test_an_unparseable_timestamp_on_a_paid_plan_charge_alarms():
     table = {"7601": _charge(7601, "vigil:org_x:n1", "not-a-date")}
     prov, _signer, _subs = _inbound(table, alarm=True)

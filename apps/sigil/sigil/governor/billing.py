@@ -631,10 +631,12 @@ class FlutterwaveBillingProvider(BillingProvider):
                 # A verified SUCCESSFUL charge must name its currency. Without one, BillingSigner.apply's underpay /
                 # wrong-currency cross-check is skipped (it keys on event.currency) and the catalog entitlement would
                 # mint on the price_id alone. Flutterwave populates the currency on every real charge, so its absence
-                # is a malformed verify object: mint nothing (fail-closed); an armed plan alarm makes it loud.
-                if self._alarm_unaccounted_plans and verified.get("payment_plan"):
-                    raise UnaccountedPayment(f"verified successful payment_plan charge {event_id} has no currency "
-                                             f"— paid but UN-MINTED; reconcile by hand")
+                # is a malformed verify object: mint nothing (fail-closed). With the alarm armed this is loud for ANY
+                # paid charge, not only payment_plan ones: returning here also skips apply()'s catalog-aware alarm
+                # for a plan price that arrived without payment_plan, which must not go quiet.
+                if self._alarm_unaccounted_plans:
+                    raise UnaccountedPayment(f"verified successful charge {event_id} for org {org!r} has no "
+                                             f"currency — paid but UN-MINTED; reconcile by hand")
                 return None
             if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
                 return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
