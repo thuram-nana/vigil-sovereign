@@ -1148,12 +1148,12 @@ _BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
 # bring-up must not hold payment intake down on them (a webhook the proxy is not up to accept is lost). Each is
 # listed in the report's `intake_safe_issues`; every other hard issue (a posture control, a spine-integrity
 # violation, a build-integrity tamper, a money-OUT/results drain, …) still refuses the UI. Two kinds qualify:
-#   * the money-IN billing drain alarm (MONEY-5) — the remedy needs the proxy UP (new payments keep spooling);
-#   * a fold-cache MISMATCH (Front C S0d) — EVIDENCE of a cache defect in the process that audited, not live
-#     state: that process already DROPPED the entry, every later read (the launch reservation included) is a fresh
-#     rebuild from the spine, and a newly started `vigil-command` begins with no cached fold at all. A fold that
-#     RAISES fails its read, so the launch path refuses (it never reserves on a state it could not fold). A
-#     tampered spine is the integrity check's RED, which stays a refusal.
+#   * the money-IN billing drain alarm (MONEY-5) — under-credit only, and the remedy needs the proxy UP;
+#   * a fold-cache MISMATCH (Front C S0d) — EVIDENCE recorded by the cockpit that audited, which already DROPPED the
+#     entry (its next read rebuilds from the spine) and keeps serving launches, as a newly started cockpit (empty
+#     cache) would: refusing to START the UI adds no launch safety, and since only a running cockpit rewrites the
+#     report, it would hold intake down until someone deleted the file. A tampered spine is the integrity check's
+#     RED, which stays a refusal.
 _INTAKE_SAFE = "intake_safe_issues"
 
 

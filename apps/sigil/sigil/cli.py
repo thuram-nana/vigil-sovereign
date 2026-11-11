@@ -1395,51 +1395,9 @@ def _resolve_billing_spool(arg: "str | None") -> str:
     return spool
 
 
-# The secrets the drain process itself needs, which it can also read from systemd credentials
-# (`LoadCredential=` / `LoadCredentialEncrypted=<NAME>:<file>` -> $CREDENTIALS_DIRECTORY/<NAME>). A credential
-# never enters the unit-wide environment, so no other Exec line of the unit (the heartbeat hook) ever holds it.
-_BILLING_CREDENTIALS = ("VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY")
-_CREDENTIAL_MAX_BYTES = 64 * 1024
 # How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
 # handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
 _BILLING_LOCK_WAIT_S = 120.0
-
-
-def _load_billing_credentials() -> None:
-    """Load the drain's secrets from ``$CREDENTIALS_DIRECTORY`` into THIS process's environment (where the drain and
-    its egress read them at call time). A credential present there is authoritative over the env-file fallback.
-    Fail-closed: a credential that exists but is not a bounded, readable regular UTF-8 file refuses the drain
-    (exit 2) rather than silently falling back. Nothing is printed but the credential's NAME."""
-    import os
-    import stat as _stat
-    cdir = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()
-    if not cdir:
-        return
-    for name in _BILLING_CREDENTIALS:
-        path = os.path.join(cdir, name)
-        try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            print(f"billing-drain: credential {name} cannot be opened ({type(exc).__name__}) — refusing "
-                  f"(fail-closed)", file=sys.stderr)
-            sys.exit(2)
-        try:
-            st = os.fstat(fd)
-            raw = os.read(fd, _CREDENTIAL_MAX_BYTES + 1) if _stat.S_ISREG(st.st_mode) else None
-        finally:
-            os.close(fd)
-        try:
-            value = raw.decode("utf-8").rstrip("\r\n") if raw is not None and len(raw) <= _CREDENTIAL_MAX_BYTES \
-                else ""
-        except UnicodeDecodeError:
-            value = ""
-        if not value or "\0" in value:
-            print(f"billing-drain: credential {name} is not a non-empty, bounded UTF-8 regular file — refusing "
-                  f"(fail-closed)", file=sys.stderr)
-            sys.exit(2)
-        os.environ[name] = value
 
 
 def cmd_billing_drain(a) -> None:
@@ -1453,11 +1411,10 @@ def cmd_billing_drain(a) -> None:
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
-    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
-    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
-    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    # Front B (money-IN automation): WHICH spool is resolved in one place (`_resolve_billing_spool`), which also
+    # refuses a literal %h / relative path — that would drain NOTHING while exiting 0 (a paid customer never
+    # credited, and the dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
     spool = _resolve_billing_spool(getattr(a, "spool", ""))
-    _load_billing_credentials()
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)

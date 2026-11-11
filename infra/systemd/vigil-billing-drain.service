@@ -16,16 +16,10 @@
 # processor (host-allowlisted in sigil.governor.flutterwave_egress).
 #
 # SECRETS (VIGIL_BILLING_WEBHOOK_SECRET, VIGIL_FLW_SECRET_KEY) — per GO-LIVE §9 inject them from your secret
-# manager, never commit them and prefer not to rest them in plaintext.
-# PREFERRED: systemd credentials, which the drain reads ITSELF from $CREDENTIALS_DIRECTORY/<NAME> (a credential
-# wins over an env value of the same name), so a secret never enters the unit-wide environment. A drop-in
-# (`systemctl --user edit vigil-billing-drain.service`), each file 0600 outside the repo:
-#     [Service]
-#     LoadCredential=VIGIL_FLW_SECRET_KEY:%h/.config/vigil/credstore/VIGIL_FLW_SECRET_KEY
-#     LoadCredential=VIGIL_BILLING_WEBHOOK_SECRET:%h/.config/vigil/credstore/VIGIL_BILLING_WEBHOOK_SECRET
-# (or LoadCredentialEncrypted= with a systemd-creds(1)-encrypted file, where your systemd supports it for user
-# units — then nothing rests in plaintext). Leave those names OUT of the env file.
-# The EnvironmentFile below (mode 0600) is the documented FALLBACK — see vigil-billing-drain.env.example.
+# manager, never commit them and prefer not to rest them in plaintext: e.g. a drop-in with systemd
+# `LoadCredentialEncrypted=` + your manager's env injection. The EnvironmentFile below (mode 0600) is the
+# documented FALLBACK — see vigil-billing-drain.env.example. Only the drain process gets them: the heartbeat hook
+# below runs with an allow-listed environment.
 # THE SPOOL is not named here: the drain DERIVES it — the proxy's own VIGIL_BILLING_WEBHOOK_SPOOL when that is
 # set in the env file below, else the runbook path $SIGIL_HOME/billing-spool — so it follows a moved SIGIL_HOME
 # instead of running "healthy" on an empty ~/.sigil directory and crediting nothing. If you moved SIGIL_HOME
@@ -33,9 +27,10 @@
 # ReadWritePaths; a drain whose SIGIL_HOME holds no owner identity (the move not carried here) REFUSES (FAILED).
 # An explicit VIGIL_BILLING_SPOOL still wins, but the drain REFUSES (unit FAILED) one that contradicts
 # VIGIL_BILLING_WEBHOOK_SPOOL, or that is ~/.sigil/billing-spool while SIGIL_HOME is elsewhere.
-# ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both. It is enforced: each pass
-# holds an exclusive lock (<spool>/working/.drain.lock). A pass that finds it held waits up to 120 s for the
-# other pass to end; still held after that, it touches nothing and FAILS (the dead-man alarms on a stuck drainer).
+# ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both. A second drainer cannot break a
+# pass: each pass holds an exclusive lock (<spool>/working/.drain.lock). A pass that finds it held waits up to
+# 120 s for the other pass to end; still held after that, it touches nothing and FAILS (the dead-man alarms on a
+# stuck drainer).
 #
 # Manual run / logs:
 #     systemctl --user start vigil-billing-drain.service

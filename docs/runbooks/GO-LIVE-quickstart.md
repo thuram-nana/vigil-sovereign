@@ -51,7 +51,8 @@ export SIGIL_HOME=/mnt/vigil-data/.sigil      # a durable, replicated volume —
 mkdir -p "$SIGIL_HOME"
 ```
 
-Persist `SIGIL_HOME` in each unit's env file (`~/.sigil/cockpit.env`, `customer.env`, `public.env`).
+Persist `SIGIL_HOME` in each unit's env file (`~/.sigil/cockpit.env`, `customer.env`, `public.env`, and
+`~/.config/vigil/billing-drain.env` once you run the billing drain — §9).
 
 ## 3. Owner key + vault seal (the single most important secret)
 
@@ -165,10 +166,9 @@ dead-man monitored). It names no spool: the drain derives this same `$SIGIL_HOME
 proxy's `VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into `~/.config/vigil/billing-drain.env` — so **put your
 moved `SIGIL_HOME` in that env file too** (§2); a drain that cannot see it, or a spool that contradicts them, is
 refused (the unit goes FAILED), never drained "healthy". Run the timer **or** `watch`, never both — a per-spool lock
-serialises them, and a pass that cannot get it within 120 s fails loudly. For the two secrets, prefer systemd
-credentials (`LoadCredential=` in a drop-in, which the drain reads itself) over the env file; see
-`infra/systemd/vigil-billing-drain.service`. Point your Flutterwave
-webhook at the operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
+serialises them, and a pass that cannot get it within 120 s fails loudly. See
+`infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave webhook at the
+operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 
 from vigil_integration import doctor as _doc
 
+_REPO = Path(_doc.__file__).resolve().parents[2]
 NOW = dt.datetime(2026, 11, 11, 12, 0, tzinfo=dt.timezone.utc).timestamp()
 
 
@@ -73,3 +75,17 @@ def test_collect_wires_the_section_in(tmp_path, monkeypatch):
     _write(tmp_path, [{"fold": "governor.wallet", "status": "MISMATCH", "seq": 3, "difference": "d"}])
     section, issues, _ = _doc._fold_cache_audit_report()
     assert section["mismatched"] == 1 and issues
+
+
+def test_collect_lists_a_mismatch_as_intake_safe(tmp_path, monkeypatch):
+    """A MISMATCH is EVIDENCE the auditing cockpit already acted on (dropped the entry), and only a RUNNING cockpit
+    rewrites the report — so a scripted bring-up must not hold payment intake down on it: `collect` lists it under
+    `intake_safe_issues` (read by tools/oneshot-bringup). It is still a hard issue; a clean audit adds no key."""
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    _write(tmp_path, [{"fold": "governor.wallet", "status": "match", "seq": 3}])
+    assert "intake_safe_issues" not in _doc.collect(_REPO)
+    _write(tmp_path, [{"fold": "governor.wallet", "status": "MISMATCH", "seq": 3, "difference": "d"}])
+    report = _doc.collect(_REPO)
+    mismatch = [i for i in report["issues"] if i.startswith("fold cache MISMATCH")]
+    assert len(mismatch) == 1 and report["ok"] is False
+    assert report["intake_safe_issues"] == mismatch

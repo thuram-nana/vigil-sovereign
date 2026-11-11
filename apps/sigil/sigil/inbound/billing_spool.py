@@ -378,7 +378,8 @@ class BillingSpoolWatcher:
         """Process every file currently in ``incoming/`` once. Returns {minted, noop, rejected, deduped, seqs}.
 
         Begins with a crash-recovery sweep (``_reclaim_working``) that returns any file stranded in ``working/``
-        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook.
+        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook. The whole pass
+        runs under the single-drainer lock (``_single_drainer``; ``wait_s`` bounds the wait for it).
 
         For each file: CLAIM it (atomic rename into ``working/``) BEFORE acting, so a failed archive or a re-run
         can never re-read it from ``incoming/`` and double-process. Read it as a bounded regular UTF-8 file, then

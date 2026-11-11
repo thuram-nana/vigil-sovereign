@@ -247,7 +247,6 @@ def cli_rig(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "dummy-hash")
     monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SPOOL", raising=False)
     monkeypatch.delenv("VIGIL_BILLING_SPOOL", raising=False)
-    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
     monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: (lambda txid: None))
     monkeypatch.setattr(cli, "_BILLING_LOCK_WAIT_S", 0.3)
     ensure_owner_keypair()
