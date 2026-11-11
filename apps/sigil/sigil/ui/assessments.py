@@ -22,6 +22,7 @@ JSON on the spine). FATAL-2: ``assert_no_offense()`` at import; governor + ui-lo
 """
 from __future__ import annotations
 
+import copy
 from typing import Any, Optional
 
 from ..reuse import assert_no_offense
@@ -29,7 +30,9 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from ..governor.asset_ownership import AssetOwnershipRegistry  # noqa: E402
+from ..governor.fold_read import UNCACHED as _UNCACHED, cached_unsigned_read  # noqa: E402
 from ..governor.orgs import org_tenant_id  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 
 _FINDING_KIND = "finding"
 # The stable, inert cert fields a customer may read for one finding. An allowlist (never a raw cert dump) so a
@@ -75,12 +78,70 @@ def _finding_json(payload: dict, cert: dict) -> dict[str, Any]:
     return out
 
 
+class _AssessmentsView:
+    """Front C S0d — the findings + outcomes index the projectors below read instead of scanning the whole spine
+    per request: `findings[slug]` / `outcomes[slug]` = [(seq, projected json)] in spine order, built from EXACTLY
+    the records the scans keep (same kind / dict / certificate checks; the projection is the same pure
+    function). A record whose engagement slug is unhashable (the scans' `in slug_set` would raise on it) poisons
+    the view, so every read falls back to the unchanged scan and raises exactly where it did."""
+
+    __slots__ = ("findings", "outcomes", "poisoned")
+
+    def __init__(self) -> None:
+        self.findings: dict = {}
+        self.outcomes: dict = {}
+        self.poisoned = False
+
+
+def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
+    kind = getattr(r, "kind", None)
+    if kind != _FINDING_KIND and kind != _OUTCOME_KIND:
+        return
+    p = r.payload
+    if not isinstance(p, dict):
+        return
+    if kind == _FINDING_KIND:
+        cert = p.get("certificate")
+        if not isinstance(cert, dict):
+            return
+        index, slug, row = view.findings, cert.get("engagement_slug"), _finding_json(p, cert)
+    else:
+        index, slug, row = view.outcomes, p.get("engagement_slug"), _outcome_json(p)
+    try:
+        rows = index.setdefault(slug, [])
+    except TypeError:
+        view.poisoned = True
+        return
+    rows.append((int(getattr(r, "seq", 0)), row))
+
+
+_ASSESSMENTS_FOLD = FoldCache("ui.assessments", step=_assessments_step)
+
+
+def _indexed(store, which: str, slugs) -> Any:
+    """[(seq, json)] of the indexed `which` rows ('findings' / 'outcomes') for `slugs`, or `_UNCACHED`. A
+    `live_window` read: the scans never load the snapshot, so a snapshot that cannot be loaded declines."""
+    return cached_unsigned_read(_ASSESSMENTS_FOLD, store, seed=lambda snap: (_AssessmentsView(), -1), live_window=True,
+                                reader=lambda v: [row for s in slugs for row in getattr(v, which).get(s, ())])
+
+
+def _newest_first(rows: list, limit: int) -> "tuple[list, int]":
+    rows.sort(key=lambda t: t[0], reverse=True)     # newest-first by spine seq
+    n = max(1, min(int(limit), 1000))
+    return [copy.deepcopy(j) for _s, j in rows[:n]], len(rows)
+
+
 def assessment_findings(store, org_id: str, *, now: float, limit: int = 200) -> dict[str, Any]:
     """The oracle-confirmed findings for ONE org's authorized assessments, newest-first. PURE read; tenant-
     scoped by the org's server-derived slug set (the IDOR class — a line for another tenant is structurally
     never returned). Assumes the caller was already authorized for ``org_id`` by the route. ``count`` is the
     true total so a client can page without ever seeing another tenant's findings."""
     slug_set = _org_slug_set(store, org_id, now=now)
+    if slug_set:
+        hit = _indexed(store, "findings", slug_set)
+        if hit is not _UNCACHED:
+            page, count = _newest_first(hit, limit)
+            return {"org_id": org_id, "findings": page, "count": count}
     rows: list[tuple[int, dict]] = []
     if slug_set:                                    # no proven hosts -> no slugs -> no findings (fail-closed)
         for r in store.iter_records():
@@ -118,6 +179,11 @@ def assessment_outcomes(store, org_id: str, *, now: float, limit: int = 200) -> 
     ``org_id`` by the route/aggregator. ``count`` is the true total so a client can page without ever seeing
     another tenant's outcomes."""
     slug_set = _org_slug_set(store, org_id, now=now)
+    if slug_set:
+        hit = _indexed(store, "outcomes", slug_set)
+        if hit is not _UNCACHED:
+            page, count = _newest_first(hit, limit)
+            return {"org_id": org_id, "outcomes": page, "count": count}
     rows: list[tuple[int, dict]] = []
     if slug_set:                                    # no proven hosts -> no slugs -> no outcomes (fail-closed)
         for r in store.iter_records():
@@ -142,7 +208,11 @@ def assessment_summary(store, org_id: str, *, now: float) -> dict[str, Any]:
     hosts = AssetOwnershipRegistry(store, owner_key=None).proven_hosts(org_id, now=now)
     by_slug = {_customer_slug(org_id, h): h for h in hosts}
     counts: dict[str, int] = {s: 0 for s in by_slug}
-    if by_slug:
+    hit: Any = _indexed(store, "findings", by_slug) if by_slug else _UNCACHED
+    if hit is not _UNCACHED:
+        for _seq, row in hit:
+            counts[row["engagement_slug"]] += 1
+    elif by_slug:
         for r in store.iter_records():
             if getattr(r, "kind", None) != _FINDING_KIND:
                 continue

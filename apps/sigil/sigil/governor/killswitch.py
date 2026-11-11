@@ -24,9 +24,11 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
+from .fold_read import UNCACHED as _UNCACHED, cached_read
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.killswitch"
@@ -45,6 +47,39 @@ _CORE = ("signal", "state", "issued_at")
 # trust roots never share an entry. Shared across ALL callers on a path.
 _STATE_CACHE: dict[tuple[str, Optional[str]], tuple[tuple, bool]] = {}
 _CACHE_GUARD = threading.Lock()
+
+
+class _Latch:
+    """The kill-switch latch: `engaged` + the release anti-replay high-water `max_issued` (the fold's state)."""
+
+    __slots__ = ("engaged", "max_issued")
+
+    def __init__(self, engaged: bool, max_issued: float) -> None:
+        self.engaged, self.max_issued = engaged, max_issued
+
+
+def _apply_killswitch_record(r, resolver, latch: _Latch) -> None:
+    """Fold ONE spine record into `latch` — THE kill-switch fold body, shared by the authoritative scan and the
+    verified fold cache (Front C S0d) so the two can never diverge."""
+    p = r.payload
+    if p.get("signal") != SIGNAL:
+        return
+    state = p.get("state")
+    if state == "engaged":
+        latch.engaged = True                    # honor ANY engage — halting is fail-safe
+    elif state == "released" and verify_signed(p, _CORE, resolver.at(r.seq)):
+        issued = as_issued_at(p.get("issued_at"))
+        if issued <= latch.max_issued:
+            return                              # REPLAY / stale re-append of an already-honored release
+        latch.max_issued = issued               # consume it so its own replay is refused hereafter
+        latch.engaged = False                   # only an OWNER-SIGNED, FRESH release un-halts
+
+
+def _killswitch_step(latch: _Latch, r, resolver) -> None:
+    _apply_killswitch_record(r, resolver, latch)
+
+
+_KILLSWITCH_FOLD = FoldCache("governor.killswitch", step=_killswitch_step)
 
 
 class KillSwitch:
@@ -82,6 +117,10 @@ class KillSwitch:
         refreshes the shared cache. Semantics are IDENTICAL to a fresh scan, and (unlike a bare file-size
         check) a migration that renames spine.jsonl away can never freeze the token and serve a stale
         un-halting verdict."""
+        hit = cached_read(_KILLSWITCH_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=self._seed,
+                          reader=lambda latch: latch.engaged)
+        if hit is not _UNCACHED:
+            return hit                          # Front C S0d: O(new records) even while the spine is appended to
         key = (str(Path(self.store.path).resolve()), self.trusted_pubkey)
         token = self.store.change_token()
         with _CACHE_GUARD:
@@ -92,6 +131,15 @@ class KillSwitch:
         with _CACHE_GUARD:
             _STATE_CACHE[key] = (token, engaged)
         return engaged
+
+    def _seed(self, st) -> "tuple[_Latch, int]":
+        """(latch, since): the latch seeded from the folded snapshot prefix, or the genesis start when the trusted
+        anchor differs from the snapshot's (see `_scan_engaged`)."""
+        if self.trusted_pubkey != st.trusted_pubkey:
+            return _Latch(False, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
+        return _Latch(st.killswitch_engaged,      # seed from the folded prefix (scalar bool; no mutation)
+                      NO_HIGHWATER if st.killswitch_issued_hw is None    # None ⇒ no release honored in the
+                      else st.killswitch_issued_hw), st.base_seq - 1     # pruned prefix
 
     def _scan_engaged(self) -> bool:
         """The AUTHORITATIVE scan — unchanged semantics (not re-implemented): honor ANY engage (halting
@@ -109,26 +157,7 @@ class KillSwitch:
         in the pruned prefix replayable again — the guard would be silently undone by the pruning work."""
         st = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
-        if self.trusted_pubkey != st.trusted_pubkey:
-            engaged = False                         # pubkey mismatch: folded latch invalid → genesis rescan
-            since_seq = -1
-            max_issued = NO_HIGHWATER               # ...and so is the folded high-water — restart it too
-        else:
-            engaged = st.killswitch_engaged         # seed from the folded prefix (scalar bool; no mutation)
-            since_seq = st.base_seq - 1
-            max_issued = (NO_HIGHWATER if st.killswitch_issued_hw is None
-                          else st.killswitch_issued_hw)   # None ⇒ no release honored in the pruned prefix
+        latch, since_seq = self._seed(st)
         for r in self.store.iter_records(since_seq=since_seq):
-            p = r.payload
-            if p.get("signal") != SIGNAL:
-                continue
-            state = p.get("state")
-            if state == "engaged":
-                engaged = True                      # honor ANY engage — halting is fail-safe
-            elif state == "released" and verify_signed(p, _CORE, resolver.at(r.seq)):
-                issued = as_issued_at(p.get("issued_at"))
-                if issued <= max_issued:
-                    continue                        # REPLAY / stale re-append of an already-honored release
-                max_issued = issued                 # consume it so its own replay is refused hereafter
-                engaged = False                     # only an OWNER-SIGNED, FRESH release un-halts
-        return engaged
+            _apply_killswitch_record(r, resolver, latch)
+        return latch.engaged

@@ -558,12 +558,11 @@ class AssetOwnershipRegistry:
 
     def _challenges_cached(self, reader):
         """`reader(view)` over the verified incremental CHALLENGE fold, else `_UNCACHED`. The challenge fold is a
-        plain scan of the live window (no seed), so the build starts from genesis; the snapshot in the key still
-        rebuilds it after a prune, exactly as the full scan then sees only the live window. Only read where the
-        snapshot is already loaded (`assets_overview`), so a read that raises on an unverifiable prune head
-        raises exactly where the full path does; `challenge()` keeps the full scan."""
+        plain scan of the live window (no seed, no snapshot load), so the build starts from genesis and the read
+        is a `live_window` one: the snapshot still keys the entry (a prune rebuilds it, exactly as the full scan
+        then sees only the live window), and a snapshot that cannot be loaded declines instead of raising."""
         return cached_read(_CHALLENGE_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
-                           seed=lambda snap: (KeyedGrantView({}, {}, {}), -1), reader=reader)
+                           seed=lambda snap: (KeyedGrantView({}, {}, {}), -1), reader=reader, live_window=True)
 
     def _fold_proofs(self) -> dict:
         """Fold the spine into {(org_id, host): proof-field dict} for proofs whose latest state is active —
@@ -586,7 +585,9 @@ class AssetOwnershipRegistry:
         non-superseded token."""
         if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
             return None
-        row = self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).get((org_id, host))
+        row = self._challenges_cached(lambda v: v.active.get((org_id, host)))
+        if row is _UNCACHED:
+            row = self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).get((org_id, host))
         if row is None:
             return None
         return OwnershipChallenge(org_id=org_id, host=host, token=str(row.get("token") or ""),
