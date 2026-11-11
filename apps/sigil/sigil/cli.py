@@ -1398,8 +1398,8 @@ def cmd_billing_drain(a) -> None:
                                                       alarm_unaccounted_plans=alarm),
                            alarm_unaccounted_plans=alarm,
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
-                           plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
-                           expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
+                           plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
+                           expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store))
     watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
     del secret
     if getattr(a, "billing_cmd", "drain") == "watch":

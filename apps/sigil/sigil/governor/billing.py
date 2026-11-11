@@ -885,6 +885,13 @@ class BillingSigner:
         subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /
         replayed period is inert), then hand the change to the provisioner hook."""
         if self.monitoring_subscriptions is None:
+            # S1: the drain mints from the FULL catalog, so a paid monitoring period can reach here on a signer
+            # that has no monitoring line. Under the plan alarm that is a paid-but-un-minted charge -> loud
+            # quarantine, never a silent drop. Alarm off keeps the historical no-op.
+            if self._alarm_unaccounted_plans:
+                raise UnaccountedPayment(f"verified monitoring charge {event.event_id} for org {oid!r} "
+                                         f"(price {event.price_id!r}) reached a signer with no monitoring line "
+                                         f"— paid but UN-MINTED; reconcile by hand")
             return None
         period_end = event.created + float(ent.period_s)
         seq = self.monitoring_subscriptions.subscribe(oid, ent.plan_id, 0, period_start=event.created,

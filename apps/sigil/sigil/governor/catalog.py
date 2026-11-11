@@ -59,6 +59,9 @@ class CatalogEntry:
     period_s: float = 0.0      # subscription period length in seconds
     monitor_hosts: int = 0     # AEGIS monitoring plan: protected-host slots included (0 = not a monitoring plan)
     monitor_respond: bool = False  # AEGIS monitoring plan tier includes respond (mode=block)
+    # No longer SOLD (absent from plans() / checkout), but STILL MINTABLE: a renewal or a late webhook for a
+    # price that was ever sold must mint (or alarm), never be silently dropped. See mintable_entitlements().
+    retired: bool = False
 
     def entitlement(self) -> Entitlement:
         """The sovereign Entitlement the signer mints for this price_id."""
@@ -127,6 +130,8 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
         seen.add(e.price_id)
         if e.kind not in _KNOWN_KINDS:
             raise ValueError(f"catalog entry {e.price_id!r}: unknown kind {e.kind!r}")
+        if not isinstance(e.retired, bool):
+            raise ValueError(f"catalog entry {e.price_id!r}: retired must be a bool")
         if not isinstance(e.amount_minor, int) or e.amount_minor < 0:
             raise ValueError(f"catalog entry {e.price_id!r}: amount_minor must be a non-negative int")
         if not (isinstance(e.currency, str) and len(e.currency) == 3 and e.currency.isalpha()
@@ -266,12 +271,26 @@ def monitoring_price_ids() -> frozenset[str]:
 
 
 def _offered() -> tuple[CatalogEntry, ...]:
-    """The entries ON SALE on this deployment: AEGIS monitoring plans only while VIGIL_CUSTOMER_MONITORING_ENABLED
-    is on (default OFF => the catalog is exactly the pre-AEGIS one: not priced, not listed, not mintable)."""
+    """The entries ON SALE on this deployment: never a retired entry, and AEGIS monitoring plans only while
+    VIGIL_CUSTOMER_MONITORING_ENABLED is on (default OFF => the sale surface is exactly the pre-AEGIS one).
+    SALE only: what the billing drain MINTS is the flag-independent mintable_*() view below."""
     from .. import config
-    if config.customer_monitoring_enabled():
-        return _CATALOG
-    return tuple(e for e in _CATALOG if not e.monitor_hosts)
+    monitoring = config.customer_monitoring_enabled()
+    return tuple(e for e in _CATALOG if not e.retired and (monitoring or not e.monitor_hosts))
+
+
+def mintable_entitlements() -> dict[str, Entitlement]:
+    """`{price_id: Entitlement}` over the FULL catalog, ignoring every sale flag and `retired` — what the billing
+    drain's signer consumes. A SKU that was ever sold keeps minting after its flag is turned off or it is
+    retired, so a renewal is never silently dropped; a line the drain has not wired raises UnaccountedPayment
+    under the plan alarm instead (BillingSigner). The money still comes only from this owner catalog."""
+    return {e.price_id: e.entitlement() for e in _CATALOG}
+
+
+def mintable_expected() -> dict[str, tuple[int, str]]:
+    """`{price_id: (amount_minor, currency)}` over the FULL catalog — the underpay / wrong-currency cross-check
+    paired with mintable_entitlements(), so every mintable price is also amount-checked."""
+    return {e.price_id: (e.amount_minor, e.currency) for e in _CATALOG}
 
 
 def entitlements() -> dict[str, Entitlement]:
