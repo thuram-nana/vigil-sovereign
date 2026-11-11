@@ -26,7 +26,7 @@ from .identity import genesis_owner_pubkey
 
 assert_no_offense()
 
-__all__ = ["UNCACHED", "cached_read"]
+__all__ = ["UNCACHED", "cached_read", "cached_unsigned_read"]
 
 UNCACHED = object()
 
@@ -53,3 +53,22 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
     return cache.read(store, key, build=build, reader=guarded)
+
+
+def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tuple[Any, int]"],
+                         reader: Callable[[Any], Any]) -> Any:
+    """As `cached_read`, for a fold that verifies NO owner signature (the agent budget meter): it depends on the
+    records and the loaded snapshot only, so the key is the snapshot by value and the build carries no
+    resolver. An owner-key-history record still forces a rebuild (harmless: nothing here reads a key)."""
+    if not fold_cache_enabled():
+        return UNCACHED
+    snap = SnapshotState.load(store)
+
+    def build():
+        view, since = seed(snap)
+        return view, None, since, float("inf")
+
+    def guarded(view):
+        return UNCACHED if getattr(view, "poisoned", False) else reader(view)
+
+    return cache.read(store, (snap,), build=build, reader=guarded)
