@@ -263,6 +263,14 @@ class PhaseLedger:
         """A copy of the phases a prior run completed (empty unless resuming)."""
         return set(self._completed_prior)
 
+    def prior_halts(self, phase: str) -> int:
+        """How many times ``phase`` was recorded ``halted`` (a reversible PAUSE cut it short) — on a launch-bound
+        ledger, counted over THIS launch's records only (:meth:`_owns`), so another launch's pauses never count
+        against this one. Read fresh from the file each call. Fail-open like every ledger read: a missing or
+        unreadable ledger counts 0 (the caller then allows the scan — more work, never a lost launch)."""
+        return sum(1 for rec in self._records()
+                   if rec.get("phase") == phase and rec.get("status") == "halted" and self._owns(rec))
+
     def should_run(self, phase: str) -> bool:
         """True unless this phase may be SOUNDLY skipped on ``--resume``.
 
