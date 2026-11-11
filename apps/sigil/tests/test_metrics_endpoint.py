@@ -446,3 +446,38 @@ def test_freshness_is_re_checked_under_the_lock(monkeypatch):
     finally:
         release.set()
         srv.shutdown()
+
+
+def test_n_concurrent_scrapes_within_the_ttl_cause_exactly_one_projection(monkeypatch):
+    """16 scrapes released at once on a fresh server fold the spine ONCE (the others wait for that one fold), and 16
+    more released at once after the interval has passed fold it once more (one wins the lock, the rest serve the
+    last value) — whatever the interleaving."""
+    srv, port, store, calls, clock = _counting_server(monkeypatch)       # the shipped interval
+
+    def burst(n=16):
+        gate = threading.Barrier(n)
+        out: list = []
+
+        def one():
+            gate.wait(5)
+            out.append(_get(port, "/metrics"))
+
+        threads = [threading.Thread(target=one, daemon=True) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        return out
+
+    try:
+        out = burst()
+        assert len(out) == 16 and all(st == 200 for st, _c, _b in out)
+        assert len(calls) == 1, f"{len(calls)} projections for 16 concurrent scrapes on a fresh server"
+        assert {_series_value(b, "vigil_refusals_total") for _s, _c, b in out} == {1.0}
+        _deny(store)
+        clock.t += srv.metrics_projection_ttl_s
+        out = burst()
+        assert len(out) == 16 and all(st == 200 for st, _c, _b in out)
+        assert len(calls) == 2, f"{len(calls) - 1} projections for 16 concurrent scrapes once the interval passed"
+    finally:
+        srv.shutdown()
