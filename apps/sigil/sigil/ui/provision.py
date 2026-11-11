@@ -162,7 +162,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
-                 trial_credits: int = _DEFAULT_TRIAL_CREDITS,
+                 trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -195,7 +195,13 @@ class Provisioner:
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
         self.member_limiter = member_limiter
         self.email_sender = email_sender
-        self.trial_credits = int(trial_credits)
+        # The trial size is validated HERE (fail at boot): an out-of-range value would otherwise half-commit every
+        # sign-up — the account/org/membership are appended before wallet.grant refuses it. 0 means "no trial".
+        from ..governor.trial_policy import check_trial_credits
+        self.trial_credits = check_trial_credits(trial_credits)
+        # Pricing S3 — the owner-signed trial-claim ledger (one trial per canonical mailbox). Consulted only while
+        # VIGIL_TRIAL_PREVIEW_ENABLED is on; None with the flag on ⇒ no preview trial is granted (fail-closed).
+        self.trial_claims = trial_claims
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -286,6 +292,45 @@ class Provisioner:
         nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
         return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
 
+    def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str) -> str:
+        """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
+        append is idempotent, so a retry re-applies it safely. Returns "granted", "none" (trial size 0) or
+        "unavailable" (preview on and this org / mailbox already had a trial).
+
+        Preview OFF: the legacy grant (entry `trial:<org>`), unchanged — except that an org that already holds a
+        `trial-preview:<org>` grant (a retry after the flag was turned off) is not granted a second trial.
+        Preview ON: eligible only if the org holds neither trial entry AND the canonical mailbox is unclaimed or
+        claimed by this same org; then the mailbox claim is written and the trial granted under
+        `trial-preview:<org>`. Not eligible: the account/org/membership still commit, with no trial."""
+        if self.trial_credits == 0:
+            return "none"
+        from .. import config
+        legacy, preview = f"trial:{org_id}", f"trial-preview:{org_id}"
+        if not config.trial_preview_enabled():
+            if self.wallet.has_grant_entry(org_id, preview):
+                return "granted"
+            self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=legacy, source_ref=source_ref,
+                              issued_at=self._next_issued())
+            return "granted"
+        if self.wallet.has_grant_entry(org_id, preview):
+            return "granted"                                    # an idempotent retry of THIS sign-up
+        if self.wallet.has_grant_entry(org_id, legacy) or self.trial_claims is None:
+            return "unavailable"
+        from ..governor.trial_claim import key_digest
+        from ..governor.trial_policy import canonical_email
+        ekey = canonical_email(email)
+        if not ekey:
+            return "unavailable"                                # no mailbox to key the one-per-mailbox limit on
+        digest = key_digest("email", ekey)
+        holder = self.trial_claims.claimant("email", digest)
+        if holder is not None and holder != org_id:
+            return "unavailable"
+        if holder is None:
+            self.trial_claims.claim("email", digest, org_id, issued_at=self._next_issued())
+        self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=preview, source_ref=source_ref,
+                          issued_at=self._next_issued())
+        return "granted"
+
     # -- signup (two-phase) ------------------------------------------------------------------------
     def request_signup(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Phase 1: rate-limit, then issue a single-use verify token and send it. Mints NOTHING yet (no
@@ -358,8 +403,7 @@ class Provisioner:
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
             self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-            self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=f"trial:{org_id}",
-                              source_ref="signup", issued_at=self._next_issued())
+            trial = self._grant_signup_trial(org_id, email, source_ref="signup")
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
@@ -369,7 +413,10 @@ class Provisioner:
             if self.signup_cap_limiter is not None:         # count this signup toward the cap (post-commit)
                 self.signup_cap_limiter.record_failure("signup:global", now=t)
         self.email_tokens.revoke_for_email(email)      # drop any other outstanding tokens for this email
-        return {"username": username, "org_id": org_id}
+        out = {"username": username, "org_id": org_id}
+        if trial == "unavailable":
+            out["trial"] = "unavailable"                # generic: never says which limit applied
+        return out
 
     # -- login / recovery --------------------------------------------------------------------------
     def login(self, email: str, password: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
@@ -511,8 +558,7 @@ class Provisioner:
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
         self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-        self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=f"trial:{org_id}",
-                          source_ref="signup-google", issued_at=self._next_issued())
+        self._grant_signup_trial(org_id, email, source_ref="signup-google")
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
@@ -1580,6 +1626,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     IdP) so no network is touched."""
     from .. import config
     from ..governor.customer_credentials import CustomerCredentialRegistry
+    from ..governor.trial_claim import TrialClaimRegistry
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
@@ -1637,6 +1684,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         signcount=SignCountLedger(config.CUSTOMER_PASSKEY_SIGNCOUNT_DIR),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
+        trial_claims=TrialClaimRegistry(store),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
     )

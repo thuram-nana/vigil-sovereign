@@ -233,6 +233,14 @@ def customer_pause_resume_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def trial_preview_enabled() -> bool:
+    """True iff the free-trial PREVIEW is ON (`VIGIL_TRIAL_PREVIEW_ENABLED` affirmative). OFF by default: sign-up
+    grants the legacy trial exactly as before. ON: a sign-up grants the trial under the `trial-preview:<org>` entry
+    only when the org, its canonical mailbox and its trial entries are all unclaimed (one trial per org and per
+    mailbox), and later slices show that org partial results until it buys credits."""
+    return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_checkout_enabled() -> bool:
     """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
     default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
