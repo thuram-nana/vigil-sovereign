@@ -199,10 +199,17 @@ jobs:
             exit 0
           fi
           port="$(python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-          out="$(timeout 120 "$bin" -u "http://127.0.0.1:${port}/" -silent -no-color -disable-update-check -json -probe </dev/null)"
+          # `|| rc=$?`: under `bash -e` a failing command substitution would end the step on this line,
+          # before anything below could say what happened.
+          rc=0
+          out="$(timeout 120 "$bin" -u "http://127.0.0.1:${port}/" -silent -no-color -disable-update-check -json -probe </dev/null)" || rc=$?
           printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::httpx exited $rc on a refused loopback probe (124 = it hung past the timeout) — the closed-port control cannot be read as evidence"
+            exit 1
+          fi
           if ! printf '%s' "$out" | tr -d ' ' | grep -q '"failed":true'; then
-            echo "::error::this httpx writes no record for a refused probe under -json -probe (fixed upstream in v1.6.10) — the closed-port control cannot be read as evidence"
+            echo "::error::this httpx writes no record for a refused probe when asked for JSON and probe status (fixed upstream in v1.6.10) — the closed-port control cannot be read as evidence"
             exit 1
           fi
 
