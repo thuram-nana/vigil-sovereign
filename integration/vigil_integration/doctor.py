@@ -1360,6 +1360,11 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
     return section, issues, notes
 
 
+#: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
+#: (the full list is in ``report["paused_launches"]["unreadable"]``) — keeps one bad directory from flooding it.
+_UNREADABLE_PAUSE_SLUGS_SHOWN = 10
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1629,8 +1634,15 @@ def collect(repo_root) -> dict:
     # stuck lease carries no pause marker and is unaffected (and the #69 money-DRAIN-unit gate above is
     # untouched — a paused launch creates no settle-drain work). DEFAULT-OFF: with no pause markers the probe
     # adds nothing and `vigil doctor` is byte-identical. Best-effort — never raises (fail-soft like every probe).
+    #
+    # An UNREADABLE / corrupt pause marker is the opposite case and IS a hard issue: the launch gate fails CLOSED
+    # on it (correctly — it cannot positively read "not paused"), so EVERY launch of that slug is held, a new
+    # re-lease included, yet no pause was positively recorded and the count above cannot see it. Left silent
+    # that is a paid launch held with nothing on any operator surface. It is named by SLUG only (the marker's
+    # path-safe filename stem — never a nonce, never marker content); `paused_launches["unreadable"]` is added
+    # ONLY when such a marker exists, so the report stays byte-identical otherwise.
     try:
-        from .live.credit_lease_pause import paused_launches
+        from .live.credit_lease_pause import paused_launches, pauses_root, unreadable_pause_markers
         _pbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
         _paused = paused_launches(_pbase)
         _n_launches = len(_paused)
@@ -1643,6 +1655,18 @@ def collect(repo_root) -> dict:
                   f"engine refuses it at the arm + enqueue chokepoints and holds it, re-admitting on resume. "
                   f"This is NOT a stuck/unsettled lease (a genuinely stuck lease carries no pause marker); "
                   f"clear it via the customer resume action (or owner tooling) when the hold is no longer wanted.")
+        _unreadable = unreadable_pause_markers(_pbase)
+        if _unreadable:
+            report["paused_launches"]["unreadable"] = _unreadable
+            _shown = ", ".join(_unreadable[:_UNREADABLE_PAUSE_SLUGS_SHOWN])
+            _more = len(_unreadable) - _UNREADABLE_PAUSE_SLUGS_SHOWN
+            _issue(f"{len(_unreadable)} customer launch pause marker(s) are UNREADABLE or corrupt — slug(s): "
+                   f"{_shown}{f' (+{_more} more)' if _more > 0 else ''}. The launch gate fails CLOSED on a pause "
+                   f"marker it cannot read, so EVERY launch of each named slug is HELD (a new re-lease included) "
+                   f"although no pause can be positively read — any paid launch of a named slug is stuck "
+                   f"behind it. Inspect {pauses_root(_pbase)}/<slug>.json: restore it from backup, or remove it "
+                   f"if no pause is intended (the customer can re-pause); a held launch then re-admits on the "
+                   f"next poll.")
     except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")

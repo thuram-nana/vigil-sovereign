@@ -182,3 +182,130 @@ def test_is_file_raising_fails_closed_reader_is_total_not_just_on_corrupt_conten
     # unrecorded nonce; and it must RETURN (total), never propagate the PermissionError.
     assert P.is_lease_paused(base, "cust_abc123", "n1") is True
     assert P.is_lease_paused(base, "cust_abc123", "nonce-not-recorded") is True
+
+
+# ---------------------------------------------------------------------------------------------------
+# base_dir=None — the pause substrate resolves the DEFAULT seam base exactly as the lease reader does
+# ---------------------------------------------------------------------------------------------------
+#
+# The lease verify (framework.v2.launch_lease) accepts ``base_dir=None`` and resolves it to ``VIGIL_BASE_DIR``
+# (else ``.vigil-live``); every launch-runner factory defaults ``base_dir=None``. The pause reader used to raise
+# ``TypeError`` on that same None, which the launch gate swallowed as "not paused" — so a paused, queued launch
+# was classified TERMINAL and stranded. These pin that None is resolved, one way, at the path chokepoint.
+# (The equality with the engine's own resolver is pinned where ``framework`` is importable, in
+# test_launch_pause_redrive_gate.py.)
+
+
+def test_none_base_dir_reads_the_default_seam_base(monkeypatch, tmp_path):
+    seam = tmp_path / "seam"
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(seam))
+    assert P.pauses_root(None) == P.pauses_root(str(seam))
+    assert P.pause_path(None, "cust_abc123") == P.pause_path(str(seam), "cust_abc123")
+    assert P.is_lease_paused(None, "cust_abc123", "n1") is False       # answers (no TypeError); DEFAULT-OFF
+    P.record_lease_pause(str(seam), "cust_abc123", "n1")               # the sovereign writer names the seam ...
+    assert P.is_lease_paused(None, "cust_abc123", "n1") is True        # ... and a None-default reader SEES the pause
+    assert P.is_lease_paused(None, "cust_abc123", "other") is False    # still nonce-scoped through the default
+    assert dict(P.paused_launches(None)) == {"cust_abc123": ["n1"]}
+    P.clear_lease_pause(None, "cust_abc123", "n1")                     # the writers resolve None identically
+    assert P.is_lease_paused(str(seam), "cust_abc123", "n1") is False
+
+
+def test_none_base_dir_falls_back_to_dot_vigil_live_when_the_env_is_unset_or_empty(monkeypatch, tmp_path):
+    from pathlib import Path
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VIGIL_BASE_DIR", raising=False)
+    assert P.pauses_root(None) == Path(".vigil-live") / "credit-lease-pauses"
+    monkeypatch.setenv("VIGIL_BASE_DIR", "")                           # empty counts as unset (``or``), as for the lease
+    assert P.pauses_root(None) == Path(".vigil-live") / "credit-lease-pauses"
+    P.record_lease_pause(str(tmp_path / ".vigil-live"), "cust_abc123", "n1")
+    assert P.is_lease_paused(None, "cust_abc123", "n1") is True
+
+
+def test_only_none_is_defaulted_an_explicit_base_is_used_as_given(monkeypatch, tmp_path):
+    # ``is not None`` — the SAME test the lease reader applies — so an explicit base (even "") is never silently
+    # redirected to the env default: a caller that names a seam reads THAT seam.
+    from pathlib import Path
+    env_seam, explicit = tmp_path / "env-seam", tmp_path / "explicit"
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(env_seam))
+    P.record_lease_pause(str(env_seam), "cust_abc123", "n1")
+    assert P.is_lease_paused(str(explicit), "cust_abc123", "n1") is False   # the explicit seam has no pause
+    assert P.pauses_root(str(explicit)) == explicit / "credit-lease-pauses"
+    assert P.pauses_root("") == Path("") / "credit-lease-pauses"            # "" is NOT defaulted
+
+
+# ---------------------------------------------------------------------------------------------------
+# unreadable_pause_markers — the holds the fail-open projection cannot see (what `vigil doctor` reports)
+# ---------------------------------------------------------------------------------------------------
+
+
+def _seed_marker_zoo(base):
+    """One readable pause, one readable-but-empty marker, and three markers the halt reader cannot read."""
+    P.record_lease_pause(base, "cust_ok", "n1")
+    root = P.pauses_root(base)
+    (root / "cust_empty.json").write_text(json.dumps({"kind": P._PAUSE_SCHEMA, "nonces": []}), encoding="utf-8")
+    (root / "cust_corrupt.json").write_text("{ this is not valid json", encoding="utf-8")
+    (root / "cust_foreign.json").write_text(json.dumps({"kind": "something-else", "nonces": ["n1"]}),
+                                            encoding="utf-8")
+    (root / "cust_badset.json").write_text(json.dumps({"kind": P._PAUSE_SCHEMA, "nonces": "n1"}), encoding="utf-8")
+    (root / "notes.txt").write_text("not a marker", encoding="utf-8")
+    return root
+
+
+def test_unreadable_pause_markers_lists_exactly_the_slugs_the_reader_halts_on(tmp_path):
+    base = str(tmp_path)
+    assert P.unreadable_pause_markers(base) == []                       # DEFAULT-OFF: no pauses dir at all
+    assert P.unreadable_pause_markers(str(tmp_path / "nope")) == []     # absent base: total, never raises
+    _seed_marker_zoo(base)
+    got = P.unreadable_pause_markers(base)
+    assert got == ["cust_badset", "cust_corrupt", "cust_foreign"]       # sorted; slug only
+    # The listing IS the halt predicate: a slug is listed iff the fail-CLOSED reader holds a nonce that was
+    # NEVER recorded for it (i.e. it halts every launch of the slug, not just a paused one).
+    for slug in ("cust_ok", "cust_empty", "cust_corrupt", "cust_foreign", "cust_badset"):
+        assert (slug in got) == P.is_lease_paused(base, slug, "a-nonce-never-recorded"), slug
+    # ... and it is exactly what the fail-open projection hides (why a separate probe is needed).
+    assert [s for s, _ in P.paused_launches(base)] == ["cust_ok"]
+
+
+def test_unreadable_pause_markers_reports_a_permission_denied_marker(monkeypatch, tmp_path):
+    # The keyless-plane case: the marker exists but cannot be READ (EACCES). The reader halts on it, so it is a hold.
+    import pathlib
+    base = str(tmp_path)
+    P.record_lease_pause(base, "cust_denied", "n1")
+    P.record_lease_pause(base, "cust_fine", "n1")
+    real = pathlib.Path.read_text
+
+    def _read_text(self, *a, **k):
+        if self.name == "cust_denied.json":
+            raise PermissionError(13, "Permission denied (simulated EACCES on read)")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _read_text)
+    assert P.is_lease_paused(base, "cust_denied", "nonce-not-recorded") is True
+    assert P.unreadable_pause_markers(base) == ["cust_denied"]
+
+
+def test_unreadable_pause_markers_reports_a_marker_that_resolves_outside_the_pauses_dir(tmp_path):
+    # A marker that is a symlink out of the pauses dir fails the reader's containment barrier, so the reader
+    # halts on it even though its TARGET parses cleanly. Listing by the reader's own read (not a second parse of
+    # the globbed file) is what keeps the two in agreement here.
+    base = str(tmp_path / "base")
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text(json.dumps({"kind": P._PAUSE_SCHEMA, "nonces": []}), encoding="utf-8")
+    root = P.pauses_root(base)
+    root.mkdir(parents=True)
+    (root / "cust_link.json").symlink_to(outside)
+    assert P.is_lease_paused(base, "cust_link", "nonce-not-recorded") is True
+    assert P.unreadable_pause_markers(base) == ["cust_link"]
+
+
+def test_unreadable_pause_markers_never_echoes_a_non_canonical_file_name(tmp_path):
+    # A file whose stem is not a canonical safe slug component is not ANY slug's marker (no lookup resolves to
+    # it), so it holds nothing — and its name (which could carry terminal control bytes) is never echoed onto an
+    # operator surface.
+    base = str(tmp_path)
+    root = P.pauses_root(base)
+    root.mkdir(parents=True)
+    (root / "ctrl\x1b[31mx.json").write_text("{ corrupt", encoding="utf-8")
+    (root / " padded.json").write_text("{ corrupt", encoding="utf-8")
+    (root / "cust_real.json").write_text("{ corrupt", encoding="utf-8")
+    assert P.unreadable_pause_markers(base) == ["cust_real"]
