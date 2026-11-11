@@ -56,6 +56,9 @@ from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors subscription._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
+from .ledger_view import PairedLedgerView  # noqa: E402
 
 POSTPAID_SIGNAL = "governor.postpaid"
 POSTPAID_DEBIT_SIGNAL = "governor.postpaid_debit"      # a launch drawn against the line (arrears grows)
@@ -140,6 +143,121 @@ class PostpaidAccount:
         return bool(self.enabled) and self.credit_limit >= 0
 
 
+_SKIP = object()          # the shared fold steps: the record changed nothing
+
+
+def _apply_postpaid_record(rec, resolver, signal: str, enabled: dict, issued: dict, row: dict):
+    """Fold ONE spine record into (enabled, issued, row) — THE postpaid account fold body, shared by the full
+    `_fold` and the verified fold cache (Front C S0d) so the two can never diverge. Returns the org it touched,
+    or `_SKIP`."""
+    p = rec.payload
+    if not isinstance(p, dict) or p.get("signal") != signal:
+        return _SKIP
+    oid = p.get("org_id")
+    if not isinstance(oid, str) or not oid:
+        return _SKIP
+    if p.get("enabled") is True:
+        # DANGEROUS (access-granting) direction: owner-signed + fresh only.
+        if not verify_signed(p, _PP_CORE, resolver.at(rec.seq)):
+            return _SKIP                              # fail-closed: unsigned / forged / wrong-epoch
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(oid, NO_HIGHWATER):
+            return _SKIP                              # REPLAY / stale re-append of an honored open
+        issued[oid] = at
+        enabled[oid] = True
+        row[oid] = [_as_nonneg_int(p.get("credit_limit")), _as_nonneg_int(p.get("net_terms_days"))]
+        return oid
+    # SAFE (access-reducing) direction. A FIXED 0.0 issued_at is the owner-manual latch: honored
+    # ON SIGHT (never fail-open). A POSITIVE issued_at is webhook-driven: applied only if FRESHER
+    # than the last honored open (the fold does NOT advance `issued` here — that stays the open
+    # high-water it compares against), so a stale/replayed close cannot shut a re-opened tenant.
+    dat = as_issued_at(p.get("issued_at"))
+    if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
+        enabled[oid] = False
+        return oid
+    return _SKIP
+
+
+def _account_of(oid, enabled: dict, row: dict) -> Optional[PostpaidAccount]:
+    """The folded PostpaidAccount for `oid`, or None. A bare disable for an org that never had an honored open
+    never had a line — ABSENT (mirrors subscription's row==None drop), so `account()` reads None."""
+    if oid not in enabled:
+        return None
+    r = row.get(oid)
+    if r is None:
+        return None
+    return PostpaidAccount(org_id=str(oid), credit_limit=int(r[0]), net_terms_days=int(r[1]),
+                           enabled=bool(enabled[oid]))
+
+
+class _PostpaidView:
+    """The cached postpaid account fold of ONE signal line: exactly the full fold's (enabled, issued, row);
+    `_account_of` derives an account from it on read, as the full fold does for every org."""
+
+    __slots__ = ("signal", "enabled", "issued", "row")
+
+    def __init__(self, signal: str, enabled: dict, issued: dict, row: dict) -> None:
+        self.signal, self.enabled, self.issued, self.row = signal, enabled, issued, row
+
+
+def _postpaid_step(view: _PostpaidView, rec, resolver) -> None:
+    _apply_postpaid_record(rec, resolver, view.signal, view.enabled, view.issued, view.row)
+
+
+_PP_FOLDS: "dict[str, FoldCache]" = {}
+
+
+def _pp_fold(signal: str) -> FoldCache:
+    """One cache per postpaid account LINE (keyed by the class's SIGNAL, so a future line never shares one)."""
+    c = _PP_FOLDS.get(signal)
+    if c is None:
+        c = _PP_FOLDS.setdefault(signal, FoldCache(f"governor.postpaid:{signal}", step=_postpaid_step))
+    return c
+
+
+def _apply_arrears_record(r, resolver, debited: dict, credited: dict, seen: set):
+    """Fold ONE spine record into (debited, credited, seen) — THE arrears fold body, shared by the full `_fold`
+    and the verified fold cache (Front C S0d). Returns the counted record's `(signal, org_id, entry_id,
+    credits)`, or `_SKIP` (not an arrears record, malformed, unverified, or a replay)."""
+    p = r.payload
+    if not isinstance(p, dict):
+        return _SKIP
+    sig = p.get("signal")
+    if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+        return _SKIP
+    oid = p.get("org_id")
+    eid = p.get("entry_id")
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+        return _SKIP
+    core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+    if not verify_signed(p, core, resolver.at(r.seq)):
+        return _SKIP                                  # fail-closed: unsigned/forged/wrong-epoch record
+    key = (sig, oid, eid)
+    if key in seen:
+        return _SKIP                                  # idempotent: this entry already counted (replay)
+    seen.add(key)
+    amount = _as_credits(p.get("credits"))
+    if sig == POSTPAID_DEBIT_SIGNAL:
+        debited[oid] = debited.get(oid, 0) + amount
+    else:
+        credited[oid] = credited.get(oid, 0) + amount
+    return sig, oid, eid, amount
+
+
+def _new_arrears_view(debited: dict, credited: dict, seen: set) -> PairedLedgerView:
+    return PairedLedgerView(debited, credited, seen, up_signal=POSTPAID_DEBIT_SIGNAL,
+                            reserve_prefix=RESERVE_ENTRY_PREFIX, settle_prefix=SETTLE_ENTRY_PREFIX)
+
+
+def _arrears_step(view: PairedLedgerView, r, resolver) -> None:
+    hit = _apply_arrears_record(r, resolver, view.up, view.down, view.seen)
+    if hit is not _SKIP:
+        view.pair(*hit)
+
+
+_ARREARS_FOLD = FoldCache("governor.postpaid_arrears", step=_arrears_step)
+
+
 class PostpaidRegistry:
     """Owner-signed per-tenant postpaid account-mode state on the spine. Construction mirrors
     SubscriptionRegistry / OrgRegistry / WalletRegistry (owner key + trusted pubkey, defaulting to the
@@ -189,6 +307,26 @@ class PostpaidRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((enabled, issued, row), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
+        trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        enabled = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state", [])}
+        issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued", [])}
+        row = {r[0]: [r[1], r[2]] for r in getattr(snap, f"{self._SNAP}_row", [])}  # oid -> [limit, net_terms]
+        return (enabled, issued, row), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental fold of THIS line (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _PostpaidView(self.SIGNAL, *st), since
+
+        return cached_read(_pp_fold(self.SIGNAL), self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> dict[Any, PostpaidAccount]:
         """Fold the spine into {org_id: PostpaidAccount}. `enabled` is authenticated under the owner pubkey
         valid AT ITS SEQ and gated by the per-org high-water (stale/replayed open ignored); `disabled` is the
@@ -198,50 +336,14 @@ class PostpaidRegistry:
         rotated/empty anchor bypasses the seed and full-scans from genesis (byte-identical under empty)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            enabled: dict[Any, bool] = {}
-            issued: dict[Any, float] = {}
-            row: dict[Any, list] = {}
-            since = -1
-        else:
-            enabled = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state", [])}
-            issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued", [])}
-            row = {r[0]: [r[1], r[2]] for r in getattr(snap, f"{self._SNAP}_row", [])}  # oid -> [limit, net_terms]
-            since = snap.base_seq - 1
+        (enabled, issued, row), since = self._seed(snap)
         for rec in self.store.iter_records(since_seq=since):
-            p = rec.payload
-            if not isinstance(p, dict) or p.get("signal") != self.SIGNAL:
-                continue
-            oid = p.get("org_id")
-            if not isinstance(oid, str) or not oid:
-                continue
-            if p.get("enabled") is True:
-                # DANGEROUS (access-granting) direction: owner-signed + fresh only.
-                if not verify_signed(p, _PP_CORE, resolver.at(rec.seq)):
-                    continue                                  # fail-closed: unsigned / forged / wrong-epoch
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(oid, NO_HIGHWATER):
-                    continue                                  # REPLAY / stale re-append of an honored open
-                issued[oid] = at
-                enabled[oid] = True
-                row[oid] = [_as_nonneg_int(p.get("credit_limit")), _as_nonneg_int(p.get("net_terms_days"))]
-            else:
-                # SAFE (access-reducing) direction. A FIXED 0.0 issued_at is the owner-manual latch: honored
-                # ON SIGHT (never fail-open). A POSITIVE issued_at is webhook-driven: applied only if FRESHER
-                # than the last honored open (the fold does NOT advance `issued` here — that stays the open
-                # high-water it compares against), so a stale/replayed close cannot shut a re-opened tenant.
-                dat = as_issued_at(p.get("issued_at"))
-                if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
-                    enabled[oid] = False
+            _apply_postpaid_record(rec, resolver, self.SIGNAL, enabled, issued, row)
         out: dict[Any, PostpaidAccount] = {}
-        for oid, en in enabled.items():
-            r = row.get(oid)
-            if r is None:
-                # A bare disable for an org that never had an honored open never had a line — treat as ABSENT
-                # (mirrors subscription's row==None drop), so `account()` reads None ("never postpaid").
-                continue
-            out[oid] = PostpaidAccount(org_id=str(oid), credit_limit=int(r[0]), net_terms_days=int(r[1]),
-                                       enabled=bool(en))
+        for oid in enabled:
+            acct = _account_of(oid, enabled, row)
+            if acct is not None:
+                out[oid] = acct
         return out
 
     def account(self, org_id: str) -> Optional[PostpaidAccount]:
@@ -249,6 +351,9 @@ class PostpaidRegistry:
         never set postpaid). Fail-closed on an empty/invalid id."""
         if not isinstance(org_id, str) or not org_id:
             return None
+        hit = self._cached(lambda v: _account_of(org_id, v.enabled, v.row))
+        if hit is not _UNCACHED:
+            return hit
         return self._fold().get(org_id)
 
     def is_postpaid(self, org_id: str) -> bool:
@@ -259,6 +364,10 @@ class PostpaidRegistry:
 
     def accounts(self) -> list[PostpaidAccount]:
         """Every tenant's current postpaid account, in org_id order (the arrears roster)."""
+        hit = self._cached(lambda v: [_account_of(o, v.enabled, v.row)
+                                      for o in sorted(o for o in v.enabled if v.row.get(o) is not None)])
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold()
         return [fold[o] for o in sorted(fold)]
 
@@ -349,10 +458,32 @@ class PostpaidArrearsLedger:
         lease, so only this durable EXISTENCE check is needed here. Fail-closed (False) on an empty id."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return False
+        key = (POSTPAID_DEBIT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return hit
         _debited, _credited, seen = self._fold()
-        return (POSTPAID_DEBIT_SIGNAL, org_id, entry_id) in seen
+        return key in seen
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
+        """((debited, credited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
+        the trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, set()), -1
+        return (dict(snap.postpaid_arrears_debited_map()), dict(snap.postpaid_arrears_credited_map()),
+                set(snap.postpaid_arrears_seen_set())), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental arrears fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold` / pairing scan)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _new_arrears_view(*st), since
+
+        return cached_read(_ARREARS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (debited, credited, seen) keyed per `org_id`, where `seen` holds the consumed
         `(signal, org_id, entry_id)` idempotency keys. Each signed record is authenticated under the owner
@@ -362,39 +493,9 @@ class PostpaidArrearsLedger:
         BYPASSES the snapshot and full-scans from genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            debited: dict[Any, int] = {}
-            credited: dict[Any, int] = {}
-            seen: set = set()
-            since = -1
-        else:
-            debited = dict(snap.postpaid_arrears_debited_map())
-            credited = dict(snap.postpaid_arrears_credited_map())
-            seen = set(snap.postpaid_arrears_seen_set())
-            since = snap.base_seq - 1
+        (debited, credited, seen), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict):
-                continue
-            sig = p.get("signal")
-            if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
-                continue
-            oid = p.get("org_id")
-            eid = p.get("entry_id")
-            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
-                continue
-            core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
-            if not verify_signed(p, core, resolver.at(r.seq)):
-                continue                                  # fail-closed: unsigned/forged/wrong-epoch record
-            key = (sig, oid, eid)
-            if key in seen:
-                continue                                  # idempotent: this entry already counted (replay)
-            seen.add(key)
-            amount = _as_credits(p.get("credits"))
-            if sig == POSTPAID_DEBIT_SIGNAL:
-                debited[oid] = debited.get(oid, 0) + amount
-            else:
-                credited[oid] = credited.get(oid, 0) + amount
+            _apply_arrears_record(r, resolver, debited, credited, seen)
         return debited, credited, seen
 
     def accrued(self, org_id: str) -> int:
@@ -403,8 +504,11 @@ class PostpaidArrearsLedger:
         an empty id. This is the scalar the launch gate tests against the account's `credit_limit`."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: _accrued(v.up, v.down, org_id))
+        if hit is not _UNCACHED:
+            return hit
         debited, credited, _ = self._fold()
-        return max(0, debited.get(org_id, 0) - credited.get(org_id, 0))
+        return _accrued(debited, credited, org_id)
 
     def in_flight_reserved(self, org_id: str) -> int:
         """Σ reserved credits of this tenant's IN-FLIGHT launch draws — owner-signed postpaid DEBITs under
@@ -429,6 +533,9 @@ class PostpaidArrearsLedger:
         (a revenue leak). Seeding the seen-set closes that (symmetric with cost_ledger._in_flight / was_accrued)."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: v.in_flight.get(org_id, 0))
+        if hit is not _UNCACHED:
+            return hit
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}      # in-flight suffix -> reserved credits (first-mint-wins, idempotent)
@@ -472,7 +579,14 @@ class PostpaidArrearsLedger:
         is billable at once. Clamped >= 0; fail-closed to 0 on an empty id."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: max(0, _accrued(v.up, v.down, org_id) - v.in_flight.get(org_id, 0)))
+        if hit is not _UNCACHED:
+            return hit                                # ONE cached read: both terms from the same spine prefix
         return max(0, self.accrued(org_id) - self.in_flight_reserved(org_id))
+
+
+def _accrued(debited: dict, credited: dict, org_id: str) -> int:
+    return max(0, debited.get(org_id, 0) - credited.get(org_id, 0))
 
 
 # ---- PP-2: arrears invoicing (reuses the owner-signed invoice ledger; no new spine record) ---------------
