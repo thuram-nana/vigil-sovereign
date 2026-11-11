@@ -29,7 +29,8 @@ M2 = "https://mirror-two.example/ubuntu/"
 _INSECURE = re.compile(
     r"allow-unauthenticated|allow-insecure|AllowInsecureRepositories|AllowDowngradeToInsecureRepositories|"
     r"AllowWeakRepositories|Trusted|trusted=yes|--force-yes|allow-downgrades|allow-remove-essential|"
-    r"allow-change-held-packages|Check-Valid-Until|Verify-Peer|Verify-Host",
+    r"allow-change-held-packages|Check-Valid-Until|Check-Date|Verify-Peer|Verify-Host|AllowUnauthenticated|"
+    r"apt-key|gpg --import|trusted\.gpg",
     re.IGNORECASE,
 )
 
@@ -40,7 +41,8 @@ def _exe(p: Path, body: str) -> None:
 
 
 # Records each call (tab-separated argv). For a fallback call (one naming Dir::Etc::SourceParts) it also
-# records the source file it was given and that file's mode, then fails if that URI is in STUB_APT_FAIL_URIS.
+# records the source file it was given and that file's mode, then fails if that URI is in STUB_APT_FAIL_URIS
+# or its host is not in STUB_RESOLVABLE (as real apt fails on a mirror it cannot resolve).
 _APT_STUB = r"""#!/usr/bin/env bash
 log="$STUB_APT_LOG"
 parts=""
@@ -59,7 +61,11 @@ uri="$(grep -h '^URIs:' "$parts"/*.sources | head -n1 | sed 's/^URIs: //')"
 for bad in ${STUB_APT_FAIL_URIS:-}; do
   if [ "$bad" = "$uri" ]; then exit 100; fi
 done
-exit 0
+host="${uri#https://}"; host="${host%%/*}"
+for h in ${STUB_RESOLVABLE:-}; do
+  if [ "$h" = "$host" ]; then exit 0; fi
+done
+exit 100
 """
 
 # Resolves only the hosts named in STUB_RESOLVABLE.
@@ -156,7 +162,9 @@ def test_dns_outage_installs_from_a_signed_https_fallback_without_trying_the_def
     assert "Suites: resolute-security" in srcs
     # Both stanzas are pinned to the Ubuntu archive key, and the -security one to a maximum index age.
     assert srcs.count(f"Signed-By: {ring}") == 4   # 2 stanzas, recorded for the update and the install
-    assert srcs.count("Valid-Until-Max: 864000") == 2
+    assert srcs.count("Valid-Until-Max: 1209600") == 2
+    # The fallback keeps the runner's own package lists (it adds its indexes, it does not replace them).
+    assert all("APT::Get::List-Cleanup=0" in c for c in calls), calls
     assert modes == ["644", "644"]   # world-readable source file, seen by both the update and the install
     _assert_no_insecure(calls, srcs)
 
@@ -181,11 +189,13 @@ def test_repeated_failure_on_resolvable_defaults_falls_back(tmp_path: Path):
     _assert_no_insecure(calls, srcs)
 
 
-def test_an_unresolvable_fallback_mirror_is_skipped(tmp_path: Path):
+def test_an_unreachable_fallback_mirror_is_attempted_then_the_next_is_used(tmp_path: Path):
+    """No DNS pre-check skips a fallback mirror (a slow resolver must not skip a working one): apt decides."""
     proc, calls, srcs, _, _ = _run(tmp_path, resolvable=["mirror-two.example"])
     assert proc.returncode == 0, proc.stderr
-    assert "mirror host mirror-one.example does not resolve either; skipping it" in proc.stderr
-    assert f"URIs: {M2}" in srcs and f"URIs: {M1}" not in srcs
+    assert f"mirror {M1} failed; trying the next one" in proc.stderr
+    assert f"URIs: {M1}" in srcs and f"URIs: {M2}" in srcs
+    assert all(_is_fallback(c) for c in calls)   # the defaults were not needed
 
 
 def test_a_failing_fallback_mirror_moves_on_to_the_next(tmp_path: Path):
@@ -197,48 +207,81 @@ def test_a_failing_fallback_mirror_moves_on_to_the_next(tmp_path: Path):
     assert srcs.count(f"URIs: {M1}") == 2 and srcs.count(f"URIs: {M2}") >= 2
 
 
-def test_every_fallback_failing_fails_the_step(tmp_path: Path):
+def test_every_fallback_and_default_failing_fails_the_step(tmp_path: Path):
     proc, calls, srcs, _, _ = _run(tmp_path, resolvable=["mirror-one.example", "mirror-two.example"],
-                                   fail_uris=[M1, M2])
+                                   fail_uris=[M1, M2], default_rc=100)
     assert proc.returncode == 1
     assert "::error::apt-get failed installing: nftables" in proc.stderr
     assert f"URIs: {M1}" in srcs and f"URIs: {M2}" in srcs
+    # The probe fired, so the fallback went first; the defaults were still tried before giving up.
+    assert _is_fallback(calls[0]) and not _is_fallback(calls[-1]), calls
+
+
+def test_a_probe_hit_with_a_failing_fallback_still_tries_the_defaults(tmp_path: Path):
+    """A partial outage or a resolver slower than the probe timeout: the probe fires, no fallback mirror
+    works, but the default mirrors do. The step must pass (it did before the fallback existed)."""
+    proc, calls, _, _, _ = _run(tmp_path, resolvable=[], default_rc=0)
+    assert proc.returncode == 0, proc.stderr
+    assert "trying the default mirrors anyway" in proc.stderr
+    assert any(_is_fallback(c) for c in calls), calls
+    assert [c[0] for c in calls if not _is_fallback(c)] == ["update", "install"], calls
 
 
 def test_a_plain_http_fallback_mirror_is_refused(tmp_path: Path):
     proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"],
-                                mirrors="http://mirror-one.example/ubuntu/")
+                                mirrors="http://mirror-one.example/ubuntu/", default_rc=100)
     assert proc.returncode == 1
     assert "refusing mirror 'http://mirror-one.example/ubuntu/'" in proc.stderr
-    assert calls == []   # nothing was fetched from it
+    assert calls and not any(_is_fallback(c) for c in calls)   # nothing was fetched from it
 
 
 def test_a_mirror_without_a_trailing_slash_is_refused(tmp_path: Path):
     proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"],
-                                mirrors="https://mirror-one.example/ubuntu")
+                                mirrors="https://mirror-one.example/ubuntu", default_rc=100)
     assert proc.returncode == 1
-    assert calls == []
+    assert calls and not any(_is_fallback(c) for c in calls)
 
 
 def test_a_missing_ubuntu_keyring_refuses_the_fallback(tmp_path: Path):
-    proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"], keyring=False)
+    proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"], keyring=False, default_rc=100)
     assert proc.returncode == 1
     assert "keyring" in proc.stderr and "missing" in proc.stderr
-    assert calls == []
+    assert calls and not any(_is_fallback(c) for c in calls)
+
+
+def test_a_keyring_path_that_is_not_a_plain_absolute_path_refuses_the_fallback(tmp_path: Path):
+    """The keyring path is written into Signed-By: a newline must not smuggle a field into the source. Each
+    hostile path is a REAL readable keyring file, so only the path check (not the existence check) stops it."""
+    for i, name in enumerate(("ring\nTrusted: yes", "ring extra", "ring;x")):
+        sub = tmp_path / f"k{i}"
+        sub.mkdir()
+        hostile = sub / name
+        hostile.write_bytes(b"\x99\x01\x0dnot-a-real-key-but-non-empty")
+        bad = str(hostile)
+        proc, calls, srcs, _, _ = _run(sub, resolvable=["mirror-one.example"], default_rc=100,
+                                       extra_env={"APT_RETRY_UBUNTU_KEYRING": bad})
+        assert proc.returncode == 1, bad
+        assert "not a plain absolute path" in proc.stderr, (bad, proc.stderr)
+        assert not any(_is_fallback(c) for c in calls) and srcs == [], bad
 
 
 def test_an_invalid_codename_refuses_the_fallback(tmp_path: Path):
-    proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"], codename="bad name\nTrusted: yes")
-    assert proc.returncode == 1
-    assert "cannot determine a valid Ubuntu codename" in proc.stderr
-    assert calls == []
+    # The first value's FIRST line is valid: a line-by-line check would pass it and write `Trusted: yes`.
+    # (An empty value is not "bad": it means "read /etc/os-release", the normal runner path.)
+    for bad in ("resolute\nTrusted: yes", "bad name", "Resolute", "noble;rm"):
+        sub = tmp_path / f"c{abs(hash(bad))}"
+        sub.mkdir()
+        proc, calls, srcs, _, _ = _run(sub, resolvable=["mirror-one.example"], codename=bad, default_rc=100)
+        assert proc.returncode == 1, bad
+        assert "cannot determine a valid Ubuntu codename" in proc.stderr, (bad, proc.stderr)
+        assert not any(_is_fallback(c) for c in calls) and srcs == [], bad
 
 
 def test_an_empty_mirror_list_disables_the_fallback(tmp_path: Path):
-    proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"], mirrors="")
+    proc, calls, _, _, _ = _run(tmp_path, resolvable=["mirror-one.example"], mirrors="", default_rc=100)
     assert proc.returncode == 1
     assert "no fallback mirror is configured" in proc.stderr
-    assert calls == []
+    assert calls and not any(_is_fallback(c) for c in calls)
 
 
 def test_the_default_mirror_list_is_https_only(tmp_path: Path):
@@ -265,16 +308,32 @@ def test_the_script_never_contains_an_insecure_apt_option():
 
 
 def test_every_workflow_apt_install_goes_through_the_helper():
-    """No workflow may call apt-get directly: a raw call gets neither the hang bound nor the fallback."""
-    raw = re.compile(r"\bapt(-get)?\s+(update|install)\b")
+    """No workflow (or script a workflow runs) may call apt directly: a raw call gets neither the hang bound
+    nor the fallback. Catches flags before the verb (`apt-get -qq update`, `apt-get -o X=Y install`), the
+    apt front-ends, and commands split over backslash continuations."""
+    raw = re.compile(r"\b(apt-get|apt|aptitude|apt-fast|nala)\b[^#\n]*?\s(update|install|upgrade|dist-upgrade)\b")
+    files = sorted((_ROOT / ".github").rglob("*.y*ml")) + sorted(
+        f for f in (_ROOT / ".github").rglob("*.sh") if f.name != "apt-retry.sh")
     offenders = []
-    for wf in sorted((_ROOT / ".github").rglob("*.y*ml")):
-        for n, ln in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
+    for f in files:
+        text = re.sub(r"\\\n\s*", " ", f.read_text(encoding="utf-8"))   # join backslash continuations
+        for n, ln in enumerate(text.splitlines(), 1):
             if ln.lstrip().startswith("#"):
                 continue
-            if raw.search(ln):
-                offenders.append(f"{wf.relative_to(_ROOT)}:{n}: {ln.strip()}")
+            if raw.search(ln.replace("apt-retry.sh", "")):
+                offenders.append(f"{f.relative_to(_ROOT)}:{n}: {ln.strip()}")
     assert not offenders, "use .github/scripts/apt-retry.sh instead of raw apt:\n" + "\n".join(offenders)
+
+
+def test_the_workflow_guard_regex_catches_the_common_spellings():
+    raw = re.compile(r"\b(apt-get|apt|aptitude|apt-fast|nala)\b[^#\n]*?\s(update|install|upgrade|dist-upgrade)\b")
+    for bad in ("sudo apt-get install -y x", "sudo -E apt-get -y install x", "apt-get -qq update",
+                "apt-get --yes install x", "apt-get -o Acquire::Retries=3 install x", "apt install x",
+                "sudo nala install x", "apt-fast install x"):
+        assert raw.search(bad), bad
+    for ok in ('bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" nmap hydra'.replace("apt-retry.sh", ""),
+               "pip install mutmut", "npm install"):
+        assert not raw.search(ok), ok
 
 
 # --- the probe asks about the hosts apt will REALLY contact ----------------------------------------------
@@ -331,11 +390,11 @@ def test_the_security_max_age_is_configurable_and_validated(tmp_path: Path):
                                extra_env={"APT_RETRY_SECURITY_MAX_AGE": "3600"})
     assert proc.returncode == 0, proc.stderr
     assert "Valid-Until-Max: 3600" in srcs
-    for bad in ("", "0", "-5", "10d", "1\nTrusted: yes"):
+    for bad in ("", "0", "00", "0000", "-5", "10d", "1\nTrusted: yes", "12345678901"):
         sub = tmp_path / f"bad{abs(hash(bad))}"
         sub.mkdir()
         proc, _, srcs, _, _ = _run(sub, resolvable=["mirror-one.example"],
                                    extra_env={"APT_RETRY_SECURITY_MAX_AGE": bad})
         assert proc.returncode == 0, (bad, proc.stderr)
-        assert "Valid-Until-Max: 864000" in srcs, (bad, srcs)
+        assert "Valid-Until-Max: 1209600" in srcs, (bad, srcs)
         _assert_no_insecure([], srcs)

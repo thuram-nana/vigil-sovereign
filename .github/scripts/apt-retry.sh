@@ -18,10 +18,12 @@
 # (azure.archive.ubuntu.com, archive.ubuntu.com, security.ubuntu.com) for hours while every other host
 # resolved, so every apt-installing job failed before running a single test, and retries could not help.
 #   * DETECT FAST: before using the default mirrors, resolve the hosts named in the runner's Ubuntu apt
-#     sources (a few seconds each). If any cannot be resolved, skip straight to the fallback instead of
-#     burning the hang ceilings against a mirror that cannot answer.
+#     sources (a few seconds each). If any cannot be resolved, try the fallback FIRST instead of burning the
+#     hang ceilings against a mirror that cannot answer. If the fallback cannot install, the default mirrors
+#     are still tried: a partial outage, or a resolver slower than the probe timeout, can leave them working.
 #   * FALL BACK: try each mirror in APT_RETRY_FALLBACK_MIRRORS in order, from an apt source list written to
-#     a private directory (the runner's own apt configuration is left untouched).
+#     a private directory. /etc/apt is left untouched; the fallback's indexes are ADDED to /var/lib/apt/lists
+#     (APT::Get::List-Cleanup=0), so the runner's own package lists survive for any later apt step.
 #   * INTEGRITY IS UNCHANGED, AND PINNED: a fallback source is HTTPS-only and carries
 #     `Signed-By: <the Ubuntu archive keyring>`, so apt accepts its Release files only if they are signed by
 #     the Ubuntu archive key — stricter than the default sources, which accept any key apt trusts. This
@@ -34,10 +36,11 @@
 #
 # Usage:  apt-retry.sh <package> [<package> ...]
 #
-# Default mirrors: up to APT_RETRY_DEFAULT_ATTEMPTS attempts (default 2), backing off 5s / 15s. Then, or at
-# once if the default mirror hosts do not resolve, one attempt per fallback mirror. Each attempt is itself
-# bounded (update <= _UPDATE_TIMEOUT, install <= _INSTALL_TIMEOUT), so a hang is killed at the first ceiling.
-# Exits non-zero only after the default mirrors and every fallback mirror have failed, so a genuine,
+# Order: if a default mirror host does not resolve, one attempt per fallback mirror first, then the default
+# mirrors; otherwise the default mirrors first, then the fallback. Default mirrors: up to
+# APT_RETRY_DEFAULT_ATTEMPTS attempts (default 2), backing off 5s / 15s. Each attempt is itself bounded
+# (update <= _UPDATE_TIMEOUT, install <= _INSTALL_TIMEOUT), so a hang is killed at the first ceiling.
+# Exits non-zero only after the default mirrors AND every usable fallback mirror have failed, so a genuine,
 # persistent breakage still turns the gate RED.
 #
 # Test seams (all optional): APT_RETRY_UPDATE_TIMEOUT, APT_RETRY_INSTALL_TIMEOUT, APT_RETRY_PROBE_TIMEOUT,
@@ -58,11 +61,21 @@ _INSTALL_TIMEOUT="${APT_RETRY_INSTALL_TIMEOUT:-300}"
 _PROBE_TIMEOUT="${APT_RETRY_PROBE_TIMEOUT:-5}"
 _DEFAULT_ATTEMPTS="${APT_RETRY_DEFAULT_ATTEMPTS:-2}"
 # `-` not `:-`: an explicitly EMPTY value disables the fallback (the tests rely on this).
-# The oldest -security index a fallback mirror may serve (seconds; default 10 days). Ubuntu's InRelease
+# The oldest -security index a fallback mirror may serve (seconds; default 14 days). Ubuntu's InRelease
 # files carry no Valid-Until, so without this a mirror could serve an old, validly-signed security index
 # indefinitely (a freeze). apt enforces it AFTER verifying the signature, so the bound cannot be forged.
-_SECURITY_MAX_AGE="${APT_RETRY_SECURITY_MAX_AGE:-864000}"
-case "$_SECURITY_MAX_AGE" in ''|*[!0-9]*|0) _SECURITY_MAX_AGE=864000 ;; esac
+# Ubuntu republishes -security for a supported release several times a week; 14 days leaves room for a
+# holiday lull without failing a healthy mirror closed.
+_SECURITY_MAX_AGE_DEFAULT=1209600
+_SECURITY_MAX_AGE="${APT_RETRY_SECURITY_MAX_AGE:-${_SECURITY_MAX_AGE_DEFAULT}}"
+case "$_SECURITY_MAX_AGE" in ''|*[!0-9]*) _SECURITY_MAX_AGE="${_SECURITY_MAX_AGE_DEFAULT}" ;; esac
+# Normalise leading zeros (apt reads "00" as 0, which means NO bound) and cap the width so the arithmetic
+# cannot overflow; anything that is not a positive number of seconds falls back to the default.
+if [ "${#_SECURITY_MAX_AGE}" -gt 9 ] || [ "$((10#${_SECURITY_MAX_AGE}))" -le 0 ]; then
+  _SECURITY_MAX_AGE="${_SECURITY_MAX_AGE_DEFAULT}"
+else
+  _SECURITY_MAX_AGE="$((10#${_SECURITY_MAX_AGE}))"
+fi
 _FALLBACK_MIRRORS="${APT_RETRY_FALLBACK_MIRRORS-https://mirrors.edge.kernel.org/ubuntu/ https://mirror.us.leaseweb.net/ubuntu/ https://mirrors.mit.edu/ubuntu/}"
 _SOURCES_FILES="${APT_RETRY_SOURCES_FILES:-/etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list}"
 # The distro-owned Ubuntu archive keyring (package ubuntu-keyring). Newer releases may ship it as .pgp, so
@@ -144,23 +157,28 @@ _codename() {
   ( . /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}" )
 }
 
-# Try every fallback mirror once; exits 0 on the first that installs, 1 when none does.
-_fallback_or_fail() {
-  local why="$1" codename dir m host
+# Try every fallback mirror once. Returns 0 on the first that installs, 1 when none can (it never exits, so
+# the caller can still try the default mirrors). It is always called as an `if` condition, where errexit is
+# off, so every step that could fail is checked explicitly.
+_try_fallback() {
+  local why="$1" codename dir m
   if [ -z "${_FALLBACK_MIRRORS// /}" ]; then
-    echo "::error::apt-get failed installing: ${pkgs[*]} (${why}; no fallback mirror is configured)" >&2
-    exit 1
+    echo "::warning::apt fallback unavailable (${why}): no fallback mirror is configured" >&2
+    return 1
   fi
-  codename="$(_codename)"
-  if ! printf '%s' "$codename" | grep -qE '^[a-z][a-z0-9-]*$'; then
-    echo "::error::apt fallback refused: cannot determine a valid Ubuntu codename (got '${codename}')" >&2
-    exit 1
+  codename="$(_codename || true)"
+  # [[ =~ ]] tests the WHOLE string: a value with a newline (e.g. "resolute<LF>Trusted: yes") cannot pass,
+  # so nothing can be smuggled into the generated source file.
+  if ! [[ "$codename" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "::warning::apt fallback refused: cannot determine a valid Ubuntu codename (got '${codename}')" >&2
+    return 1
   fi
-  if [ ! -r "${_KEYRING}" ] || [ ! -s "${_KEYRING}" ]; then
-    echo "::error::apt fallback refused: the Ubuntu archive keyring ${_KEYRING} is missing, so a fallback mirror's signatures could not be checked" >&2
-    exit 1
+  if ! [[ "$_KEYRING" =~ ^/[A-Za-z0-9._/-]+$ ]] || [ ! -r "${_KEYRING}" ] || [ ! -s "${_KEYRING}" ]; then
+    echo "::warning::apt fallback refused: the Ubuntu archive keyring '${_KEYRING}' is missing or not a plain absolute path, so a fallback mirror's signatures could not be checked" >&2
+    return 1
   fi
-  dir="$(mktemp -d)"
+  dir="$(mktemp -d)" || return 1
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
   _FALLBACK_DIR="$dir"
   for m in ${_FALLBACK_MIRRORS}; do
     case "$m" in
@@ -169,15 +187,11 @@ _fallback_or_fail() {
         echo "::warning::apt fallback: refusing mirror '${m}' (fallback mirrors must be https:// and end in /)" >&2
         continue ;;
     esac
-    host="${m#https://}"
-    host="${host%%/*}"
-    if ! _resolves "$host"; then
-      echo "apt fallback: mirror host ${host} does not resolve either; skipping it" >&2
-      continue
-    fi
+    # No DNS pre-check here: a resolver slower than the probe timeout must not skip a working mirror. The
+    # bounded apt attempt decides, and an unresolvable mirror fails it within seconds.
     # Replace (not append) the list: only this mirror is in play for this attempt.
     rm -f "${dir}"/*.sources
-    cat > "${dir}/vigil-apt-fallback.sources" <<EOF
+    if ! cat > "${dir}/vigil-apt-fallback.sources" <<EOF
 Types: deb
 URIs: ${m}
 Suites: ${codename} ${codename}-updates
@@ -191,29 +205,39 @@ Components: main restricted universe multiverse
 Signed-By: ${_KEYRING}
 Valid-Until-Max: ${_SECURITY_MAX_AGE}
 EOF
-    chmod 0644 "${dir}/vigil-apt-fallback.sources"
+    then
+      echo "::warning::apt fallback: could not write the source list in ${dir}" >&2
+      return 1
+    fi
+    chmod 0644 "${dir}/vigil-apt-fallback.sources" || return 1
     echo "::notice::apt fallback (${why}): installing ${pkgs[*]} from ${m}; Release signatures are checked against ${_KEYRING}" >&2
-    if _attempt -o "Dir::Etc::SourceList=/dev/null" -o "Dir::Etc::SourceParts=${dir}"; then
+    if _attempt -o "Dir::Etc::SourceList=/dev/null" -o "Dir::Etc::SourceParts=${dir}" \
+                -o "APT::Get::List-Cleanup=0"; then
       echo "apt fallback: installed ${pkgs[*]} from ${m}" >&2
-      exit 0
+      return 0
     fi
     echo "apt fallback: mirror ${m} failed; trying the next one" >&2
   done
-  echo "::error::apt-get failed installing: ${pkgs[*]} (${why}; every fallback mirror failed or was unreachable: ${_FALLBACK_MIRRORS}; rc=124 = a step hit its hang timeout)" >&2
-  exit 1
+  echo "::warning::apt fallback (${why}): every fallback mirror failed or was refused: ${_FALLBACK_MIRRORS}" >&2
+  return 1
 }
 
 case "$_DEFAULT_ATTEMPTS" in
   ''|*[!0-9]*) _DEFAULT_ATTEMPTS=2 ;;
 esac
+fallback_tried=0
+unresolved="$(_unresolved_default_hosts || true)"
+if [ -n "$unresolved" ]; then
+  echo "::warning::apt: this runner cannot resolve the default Ubuntu mirror host(s): ${unresolved}— trying the fallback mirrors first" >&2
+  fallback_tried=1
+  if _try_fallback "default mirror host(s) do not resolve: ${unresolved% }"; then
+    exit 0
+  fi
+  echo "::warning::apt: the fallback mirrors did not install ${pkgs[*]}; trying the default mirrors anyway (a partial outage or a slow resolver can still leave them working)" >&2
+fi
 rc=0
 attempt=1
 while [ "$attempt" -le "$_DEFAULT_ATTEMPTS" ]; do
-  unresolved="$(_unresolved_default_hosts)"
-  if [ -n "$unresolved" ]; then
-    echo "::warning::apt: this runner cannot resolve the default Ubuntu mirror host(s): ${unresolved}— switching to the fallback mirrors" >&2
-    _fallback_or_fail "default mirror host(s) do not resolve: ${unresolved% }"
-  fi
   rc=0
   _attempt || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -227,5 +251,11 @@ while [ "$attempt" -le "$_DEFAULT_ATTEMPTS" ]; do
   sleep "$delay"
   attempt=$(( attempt + 1 ))
 done
-echo "::warning::apt-get failed ${_DEFAULT_ATTEMPTS} time(s) on the default mirrors (last rc=${rc}; 124=hang-timeout) — trying the fallback mirrors" >&2
-_fallback_or_fail "default mirrors failed after ${_DEFAULT_ATTEMPTS} attempt(s), last rc=${rc}"
+if [ "$fallback_tried" -eq 0 ]; then
+  echo "::warning::apt-get failed ${_DEFAULT_ATTEMPTS} time(s) on the default mirrors (last rc=${rc}; 124=hang-timeout) — trying the fallback mirrors" >&2
+  if _try_fallback "default mirrors failed after ${_DEFAULT_ATTEMPTS} attempt(s), last rc=${rc}"; then
+    exit 0
+  fi
+fi
+echo "::error::apt-get failed installing: ${pkgs[*]} (default mirrors: ${_DEFAULT_ATTEMPTS} attempt(s), last rc=${rc}, 124=hang-timeout; fallback mirrors: failed, refused or not configured)" >&2
+exit 1
