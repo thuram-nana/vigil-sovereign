@@ -407,3 +407,153 @@ def test_create_refuses_a_leaked_evidence_key_from_the_base_tree(tmp_path):
     finally:
         ob._iter_base_files = real
         monkey.undo()
+
+
+# --- E4d: the committed ``targets/_template`` scaffold is repo content, not part of the targets unit -----------
+
+_REPO = __import__("pathlib").Path(__file__).resolve().parents[2]
+_COMMITTED_TEMPLATE = _REPO / "engine" / "crucible" / "targets" / "_template"
+
+
+def _tree_bytes(root):
+    """Every file under ``root`` with its exact bytes (a byte-level monitor of a dir)."""
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _fresh_checkout(path, *, newer: bool = True):
+    """A crucible root exactly as a fresh checkout has it: the repo's committed ``targets/_template`` and no
+    engagement state. ``newer`` makes it one commit ahead of the backed-up box (a changed file + a new file)."""
+    import shutil
+    assert (_COMMITTED_TEMPLATE / "charter.md").is_file()
+    shutil.copytree(_COMMITTED_TEMPLATE, path / "targets" / "_template")
+    if newer:
+        (path / "targets" / "_template" / "README.md").write_text("# template, one commit newer\n")
+        (path / "targets" / "_template" / "added-in-a-newer-commit.md").write_text("new scaffold file\n")
+    return path
+
+
+def _backup_of_a_box_with_the_template(tmp_path):
+    """An offense backup of a box whose crucible root holds the committed scaffold AND one engagement."""
+    import shutil
+    base = tmp_path / "base"
+    _seed_offense_home(base)
+    croot = tmp_path / "crucible"
+    shutil.copytree(_COMMITTED_TEMPLATE, croot / "targets" / "_template")
+    _seed_targets(croot)
+    dest = tmp_path / "off.vglbk"
+    create_offense_backup(dest, PW, base_dir=base, crucible_root=croot)
+    return dest
+
+
+def test_a_default_restore_onto_a_fresh_checkout_works_and_never_touches_the_template(tmp_path):
+    """The audit repro: a fresh checkout ALWAYS carries ``targets/_template``, so a default restore refused with
+    ``['targets']`` every time. It must restore the engagement without ``--force`` and leave the checkout's
+    committed scaffold byte-identical (here one commit NEWER than the backup's)."""
+    dest = _backup_of_a_box_with_the_template(tmp_path)
+    fresh = _fresh_checkout(tmp_path / "checkout")
+    before = _tree_bytes(fresh / "targets" / "_template")
+    out = restore_offense_backup(dest, tmp_path / "rbase", PW, crucible_root=fresh)
+    assert out["verified"] is True
+    assert (fresh / "targets" / SLUG / "charter.md").read_text() == _CHARTER
+    assert (fresh / "targets" / SLUG / "evidence" / "a-0001" / "response.bin").read_bytes() == _CRED_EVIDENCE
+    assert _tree_bytes(fresh / "targets" / "_template") == before
+
+
+def test_a_forced_restore_replaces_engagements_but_never_rewrites_the_template(tmp_path):
+    """``--force`` over live engagements: the gate still refuses without it; with it every engagement is the
+    backup's (one the backup lacks is dropped — the DR-snapshot semantic) and the committed scaffold is untouched."""
+    dest = _backup_of_a_box_with_the_template(tmp_path)
+    fresh = _fresh_checkout(tmp_path / "checkout")
+    (fresh / "targets" / SLUG).mkdir()
+    (fresh / "targets" / SLUG / "charter.md").write_text("a live charter the backup predates\n")
+    (fresh / "targets" / "later-engagement").mkdir()
+    (fresh / "targets" / "later-engagement" / "charter.md").write_text("made after the backup\n")
+    before = _tree_bytes(fresh / "targets" / "_template")
+    with pytest.raises(OffenseBackupError, match=r"refusing to overwrite live CRUCIBLE proof state \['targets'\]"):
+        restore_offense_backup(dest, tmp_path / "rbase", PW, crucible_root=fresh)
+    restore_offense_backup(dest, tmp_path / "rbase2", PW, crucible_root=fresh, force=True)
+    assert (fresh / "targets" / SLUG / "charter.md").read_text() == _CHARTER
+    assert not (fresh / "targets" / "later-engagement").exists()
+    assert _tree_bytes(fresh / "targets" / "_template") == before
+    assert sorted(p.name for p in (fresh / "targets").iterdir()) == ["_template", SLUG]   # no aside left behind
+
+
+def test_the_template_is_never_captured_but_every_other_targets_entry_is(tmp_path):
+    """The unit boundary on the CAPTURE side: no ``targets/_template`` file is packaged, while engagements, the
+    archived-engagement dir ``targets/.archive`` and an operator's own ``_``-named dir are (none is repo content)."""
+    import shutil
+    base = tmp_path / "base"
+    _seed_offense_home(base)
+    croot = tmp_path / "crucible"
+    shutil.copytree(_COMMITTED_TEMPLATE, croot / "targets" / "_template")
+    _seed_targets(croot)
+    for extra in (".archive/old-engagement", "_practice"):
+        (croot / "targets" / extra).mkdir(parents=True)
+        (croot / "targets" / extra / "charter.md").write_text(f"{extra}\n")
+    dest = tmp_path / "off.vglbk"
+    create_offense_backup(dest, PW, base_dir=base, crucible_root=croot)
+    rels = set(_decrypt_body(dest)["files"])
+    assert not [r for r in rels if r.startswith(f"{_CRUCIBLE_PREFIX}targets/_template/")]
+    for kept in (f"{SLUG}/charter.md", ".archive/old-engagement/charter.md", "_practice/charter.md"):
+        assert f"{_CRUCIBLE_PREFIX}targets/{kept}" in rels, rels
+    # and they all come back on a default restore onto a fresh checkout
+    fresh = _fresh_checkout(tmp_path / "checkout", newer=False)
+    restore_offense_backup(dest, tmp_path / "rbase", PW, crucible_root=fresh)
+    assert (fresh / "targets" / ".archive" / "old-engagement" / "charter.md").read_text() == ".archive/old-engagement\n"
+    assert (fresh / "targets" / "_practice" / "charter.md").read_text() == "_practice\n"
+
+
+def test_an_older_backup_carrying_the_template_never_rewrites_it(tmp_path):
+    """A backup made before this fix packaged ``targets/_template``. Restoring it (default AND ``--force``) onto a
+    newer checkout must never swap that stale copy over the committed scaffold."""
+    import base64
+
+    from vigil_core import sha256_hex
+    dest = _backup_of_a_box_with_the_template(tmp_path)
+    body = _decrypt_body(dest)
+    gov_priv = json.loads(body["secrets"][DEFAULT_GOVERNANCE_KEY_FILE])["private_key_b64"]
+    for p in sorted(_COMMITTED_TEMPLATE.rglob("*")):
+        if p.is_file():                                     # exactly what the pre-fix capture packaged
+            rel = f"{_CRUCIBLE_PREFIX}targets/_template/{p.relative_to(_COMMITTED_TEMPLATE).as_posix()}"
+            body["files"][rel] = base64.b64encode(p.read_bytes()).decode()
+            body["manifest"]["file_sha256"][rel] = sha256_hex(p.read_bytes())
+    body["manifest_sig"] = sign(gov_priv, canonical_json(body["manifest"]))
+    salt = __import__("os").urandom(_SALT_LEN)
+    dest.write_bytes(_MAGIC + salt + seal(_derive_key(PW, salt), canonical_json(body), context=_BODY_CONTEXT))
+    for force in (False, True):
+        fresh = _fresh_checkout(tmp_path / f"checkout-{force}")
+        before = _tree_bytes(fresh / "targets" / "_template")
+        restore_offense_backup(dest, tmp_path / f"rbase-{force}", PW, crucible_root=fresh, force=force)
+        assert (fresh / "targets" / SLUG / "charter.md").read_text() == _CHARTER
+        assert _tree_bytes(fresh / "targets" / "_template") == before, f"force={force}"
+
+
+def test_the_force_gate_still_sees_engagements_behind_a_symlinked_targets_dir(tmp_path):
+    """The gate follows a symlinked ``targets/`` (as it always has): a live engagement there still refuses a
+    default restore — leaving the scaffold out of the unit must not turn the gate off for that layout."""
+    dest = _backup_of_a_box_with_the_template(tmp_path)
+    elsewhere = tmp_path / "engagements-disk"
+    (elsewhere / SLUG).mkdir(parents=True)
+    (elsewhere / SLUG / "charter.md").write_text("live charter\n")
+    croot = tmp_path / "checkout"
+    croot.mkdir()
+    (croot / "targets").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(OffenseBackupError, match=r"\['targets'\]"):
+        restore_offense_backup(dest, tmp_path / "rbase", PW, crucible_root=croot)
+    assert (elsewhere / SLUG / "charter.md").read_text() == "live charter\n"
+
+
+def test_the_scaffold_set_is_exactly_the_committed_targets_content():
+    """Pin ``_CRUCIBLE_TARGETS_SCAFFOLD`` to the repo: every tracked path under ``engine/crucible/targets/`` lies
+    in a scaffold entry, and every scaffold entry is tracked. A new committed entry there must be added to the set
+    (or a fresh checkout's restore refuses again)."""
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        pytest.skip("git is not available")
+    r = subprocess.run(["git", "-C", str(_REPO), "ls-files", "engine/crucible/targets"],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        pytest.skip("not a git checkout")
+    top = {line.split("/")[3] for line in r.stdout.splitlines() if line.count("/") >= 3}
+    assert top == set(ob._CRUCIBLE_TARGETS_SCAFFOLD), top
