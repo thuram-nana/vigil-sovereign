@@ -24,12 +24,16 @@ and it is trusted only while it is provably a prefix of the current spine:
     `boundary_hash` for it, so a gzip-sealed anchor is never decompressed;
   * CONTINUITY — every record folded must CHAIN from the one before it (`seq == prev + 1` and `prev_hash ==` the
     previous `entry_hash`; the first record after an anchor chains from the anchor; a seeded read starts exactly
-    after its seed), and every pass must reach the tip the store read from disk when it was opened. A read that
-    skips or repeats a record — `iter_records` reading to the live end of a file another process is still appending to (a half-written
-    line is skipped as malformed and the NEXT record is yielded), a stale seq index or `.idx` sidecar, a
-    duplicate-seq line — is never folded into an entry: a catch-up discards the entry and rebuilds; a rebuild raises
-    `FoldDiscontinuity` and the caller answers from its full fold. Without this a single torn read was cached for
-    the life of the process (the entry anchored past the hole: a debit or a kill-switch engage missing for good);
+    after its seed; the first record of a pass with no anchor links from the live window's base — GENESIS, or
+    the retained boundary after a prune), and every pass must reach the tip the store read from disk when it was
+    opened (re-read from disk before a pass is declared short). A read that skips a record — `iter_records`
+    reading to the live end of a file another process is still appending to (a half-written line is skipped as
+    malformed and the NEXT record is yielded), including the very first record of a fresh spine, or a stale seq
+    index or `.idx` sidecar — is never folded into an entry: a catch-up discards the entry and rebuilds; a
+    rebuild raises `FoldDiscontinuity` and the caller answers from its full fold. Without this a single torn
+    read was cached for the life of the process (the entry anchored past the hole: a debit or a kill-switch
+    engage missing for good). The audit tells a torn tail from an edit: a hole inside the range the entry had
+    already folded is persistent, so it is a MISMATCH and the entry is discarded;
   * KEY ROTATION — a fold verifies each record under the owner key valid at its seq. A newly appended
     owner-key-history record can change those windows (including for EARLIER seqs: a fork or broken chain
     denies all), so meeting one while extending discards the entry. A rebuild whose resolver did not see a
@@ -137,6 +141,37 @@ def _store_tip(store) -> "Optional[int]":
     return n - 1 if isinstance(n, int) else None
 
 
+def _disk_tip(store) -> "Optional[int]":
+    """The tip as the spine's files say NOW (the last record of the active segment, or of the last sealed one —
+    an O(tail) read, never the seq index), or None when the store cannot say. Consulted only when a pass ends
+    below `_store_tip`: a long-lived store's in-memory tip can sit above the disk (a truncated tail), and that
+    alone must not turn every read into a rebuild."""
+    try:
+        last = store._read_last_entry()
+    except Exception:  # noqa: BLE001 — undecidable: keep the stricter in-memory tip
+        return None
+    return last.seq if last is not None else -1
+
+
+def _ends_below_tip(store, seq: int, tip: "Optional[int]") -> bool:
+    """True when a pass that folded up to `seq` skipped records: it ends below the tip the store read at open
+    AND below the tip on disk now."""
+    if tip is None or seq >= tip:
+        return False
+    fresh = _disk_tip(store)
+    return fresh is None or seq < fresh
+
+
+def _live_base(store) -> "Optional[str]":
+    """The prev_hash the spine's first LIVE record links from (GENESIS, or the retained boundary after a prune),
+    or None for a store that does not expose one. An anchor-less pass checks its first record against it, so a
+    torn read that skipped the first record of a fresh spine cannot be cached as the whole spine."""
+    try:
+        return store._live_base_prev_hash()
+    except Exception:  # noqa: BLE001 — undecidable here: the pass checks nothing extra (the full fold's own rule)
+        return None
+
+
 def _store_identity(store) -> str:
     try:
         return str(Path(store.path).resolve())
@@ -190,12 +225,18 @@ class FoldCache:
     def _extend(self, store, e: _Entry) -> bool:
         """Fold every record after the anchor into `e`. False if one is an owner-key-history record (the
         resolver must be rebuilt). Raises on a fold/read error — the caller discards `e`."""
-        return self._fold_into(e, store.iter_records(since_seq=e.seq))
+        base = _live_base(store) if e.entry_hash is None else None
+        return self._fold_into(e, store.iter_records(since_seq=e.seq), base)
 
-    def _fold_into(self, e: _Entry, records) -> bool:
+    def _fold_into(self, e: _Entry, records, base: "Optional[str]" = None) -> bool:
+        """Fold `records` into `e`; False (rebuild) at the first one that does not chain — from the anchor, or,
+        for an entry that has folded nothing yet, from `base` (the live window's first prev_hash)."""
         for r in records:
             if e.entry_hash is not None and (r.seq != e.seq + 1 or r.prev_hash != e.entry_hash):
                 return False                       # not chained from the anchor / the previous record: rebuild
+            if e.entry_hash is None and ((e.seq >= 0 and r.seq != e.seq + 1)
+                                         or (base is not None and r.prev_hash != base)):
+                return False                       # an anchor-less pass must start at the live window's base
             if r.kind == KEY_HISTORY_KIND:
                 return False
             self._step(e.state, r, e.ctx)
@@ -212,8 +253,8 @@ class FoldCache:
             if delta is False:
                 return False
             if delta is not None:
-                return self._fold_into(e, delta) and (tip is None or e.seq >= tip)
-        return self._anchor_holds(store, e) and self._extend(store, e) and (tip is None or e.seq >= tip)
+                return self._fold_into(e, delta) and not _ends_below_tip(store, e.seq, tip)
+        return self._anchor_holds(store, e) and self._extend(store, e) and not _ends_below_tip(store, e.seq, tip)
 
     def _discard(self, ident: tuple, e: _Entry) -> None:
         e.dead = True
@@ -245,17 +286,21 @@ class FoldCache:
         tip = _store_tip(store)
         state, ctx, since, horizon = build()
         e = _Entry(key=key, state=state, ctx=ctx, seq=since)
+        base = _live_base(store)
         cacheable = True
         for r in store.iter_records(since_seq=since):
             if e.entry_hash is not None and (r.seq != e.seq + 1 or r.prev_hash != e.entry_hash):
                 raise FoldDiscontinuity(f"{self.name}: seq {r.seq} does not chain from seq {e.seq}")
             if e.entry_hash is None and since >= 0 and r.seq != since + 1:
                 raise FoldDiscontinuity(f"{self.name}: the read after seq {since} starts at seq {r.seq}")
+            if e.entry_hash is None and base is not None and r.prev_hash != base:
+                raise FoldDiscontinuity(f"{self.name}: the first record read (seq {r.seq}) does not link from "
+                                        f"the live window's base")
             if r.kind == KEY_HISTORY_KIND and r.seq > horizon:
                 cacheable = False                  # a rotation the resolver did not see: answer, don't keep
             self._step(state, r, ctx)
             e.seq, e.entry_hash = r.seq, r.entry_hash
-        if tip is not None and e.seq < tip:
+        if _ends_below_tip(store, e.seq, tip):
             raise FoldDiscontinuity(f"{self.name}: the read ended at seq {e.seq}, below the tip {tip}")
         with e.lock:
             out = reader(state)
@@ -279,7 +324,8 @@ class FoldCache:
         The fresh fold runs OUTSIDE the entry lock (reads keep being served meanwhile); then, under the lock, the
         entry is brought to the current tip, the fresh fold catches up to the same seq, and the two states are
         compared by value. Returns `{"fold", "status", ...}` with status `match`, `MISMATCH` (+ `seq`,
-        `difference`), `empty` (no entry for this store) or `skipped` (+ `reason`: cached under another key, the
+        `difference`; also a hole in the spine inside the range the entry had folded — an edit, never a torn
+        read), `empty` (no entry for this store) or `skipped` (+ `reason`: cached under another key, the
         entry was replaced, the anchor moved, or an owner-key rotation landed mid-audit — the next read rebuilds
         anyway). A MISMATCH discards the entry: the spine is the source of truth, so the next read rebuilds from
         it; the report keeps the evidence. Never writes the spine."""
@@ -298,13 +344,31 @@ class FoldCache:
             self._discard(ident, e)
             raise
 
+    def _hole(self, ident: tuple, e: _Entry, at: int, after: int, folded: int) -> dict:
+        """The fresh fold met a record that does not chain (at seq `at`, after seq `after`). A torn read only
+        happens at the live END of the spine: when the hole lies inside what the entry had already folded
+        (`after < folded`), those bytes were complete when it folded them, so the hole is an edit to the spine
+        (a deleted or rewritten record, a truncated segment) — persistent, and the full fold reads the spine
+        differently from the entry. Discard it (the next read rebuilds, meets the hole and answers UNCACHED, as
+        the full fold does) and report a MISMATCH. Past the entry's seq it may be a torn tail: skip."""
+        if after < folded:
+            self._discard(ident, e)
+            return {"fold": self.name, "status": "MISMATCH", "seq": folded,
+                    "difference": f"the spine is not contiguous at seq {at} (after seq {after}), inside the "
+                                  f"cached range: an edit before the anchor"}
+        return {"fold": self.name, "status": "skipped",
+                "reason": f"the fresh fold's read is not contiguous at seq {at} (re-run the audit)"}
+
     def _audit_entry(self, store, ident: tuple, e: _Entry, build) -> dict:
+        folded = e.seq                                     # what the entry had folded when the audit began
         state, ctx, since, horizon = build()
         fseq, fhash = since, None
+        base = _live_base(store)
         for r in store.iter_records(since_seq=since):
             if fhash is not None and (r.seq != fseq + 1 or r.prev_hash != fhash):
-                return {"fold": self.name, "status": "skipped",
-                        "reason": f"the fresh fold's read is not contiguous at seq {r.seq} (re-run the audit)"}
+                return self._hole(ident, e, r.seq, fseq, folded)
+            if fhash is None and ((since >= 0 and r.seq != since + 1) or (base is not None and r.prev_hash != base)):
+                return self._hole(ident, e, r.seq, fseq, folded)
             if r.kind == KEY_HISTORY_KIND and r.seq > horizon:
                 return {"fold": self.name, "status": "skipped", "reason": "owner-key rotation during the audit"}
             self._step(state, r, ctx)
@@ -326,8 +390,7 @@ class FoldCache:
                     if r.seq > e.seq:
                         break
                     if fhash is not None and (r.seq != fseq + 1 or r.prev_hash != fhash):
-                        return {"fold": self.name, "status": "skipped",
-                                "reason": f"the fresh fold's read is not contiguous at seq {r.seq} (re-run the audit)"}
+                        return self._hole(ident, e, r.seq, fseq, e.seq)   # below the caught-up entry: an edit
                     if r.kind == KEY_HISTORY_KIND:
                         return {"fold": self.name, "status": "skipped", "reason": "owner-key rotation during the audit"}
                     self._step(state, r, ctx)

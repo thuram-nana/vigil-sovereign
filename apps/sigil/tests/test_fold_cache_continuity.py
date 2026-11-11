@@ -8,7 +8,9 @@ the life of the process — the entry anchored PAST the hole, so every later rea
     half-written line is skipped as malformed and the NEXT record is yielded (no attacker needed);
   * a STALE seq index persisted as the `.idx` sidecar (a long-lived store that indexed a segment before a live
     rollback writes its stale offsets when the segment is sealed) — or a planted one;
-  * a DUPLICATE-seq line after the anchor (the seq index is last-wins, the full scan first-wins).
+  * a DUPLICATE-seq line after the anchor that does not chain from it (the seq index is last-wins, the full scan
+    first-wins);
+  * a torn read of the FIRST record of a fresh spine (a pass with no anchor yet must link from the live base).
 
 Each test drives the real scenario and requires the cached answer to EQUAL the flag-OFF full fold on the same bytes.
 """
@@ -266,6 +268,7 @@ CHAIN = [_rec(0, "g", "h0"), _rec(1, "h0", "h1"), _rec(2, "h1", "h2"), _rec(3, "
 
 @pytest.mark.parametrize("label,recs", [
     ("a skipped record", [CHAIN[0], CHAIN[1], CHAIN[3]]),
+    ("a skipped seq whose record links from the previous one", [CHAIN[0], CHAIN[1], _rec(3, "h1", "h3")]),
     ("a repeated seq", [CHAIN[0], CHAIN[1], _rec(1, "h0", "h1"), CHAIN[2]]),
     ("a record that does not link from its predecessor", [CHAIN[0], CHAIN[1], _rec(2, "zz", "h2")]),
 ])
@@ -284,6 +287,7 @@ def test_a_contiguous_rebuild_is_cached(tmp_path):
 
 @pytest.mark.parametrize("label,more", [
     ("the next record skips a seq", [_rec(5, "h4", "h5")]),
+    ("the next record links from the anchor but skips a seq", [_rec(5, "h3", "h5")]),
     ("the next record does not link from the anchor", [_rec(4, "zz", "h4")]),
 ])
 def test_a_catch_up_that_does_not_chain_from_the_anchor_rebuilds(tmp_path, label, more):
@@ -307,15 +311,59 @@ def test_the_read_path_answers_uncached_on_a_discontinuity(tmp_path, monkeypatch
     assert fold_read.cached_unsigned_read(c, _Scripted(tmp_path, CHAIN), seed=seed, reader=list) == [0, 1, 2, 3]
 
 
-def test_the_audit_skips_a_non_contiguous_fresh_fold(tmp_path):
-    c = _counting_cache("test.cont.audit")
+@pytest.mark.parametrize("label,torn", [
+    ("a skipped record", [_rec(5, "h4", "h5")]),
+    ("the right seq, a broken link", [_rec(4, "zz", "h4")]),
+])
+def test_the_audit_skips_a_fresh_fold_torn_past_the_entrys_seq(tmp_path, label, torn):
+    """The live END of the spine (past what the entry had folded) can be mid-write: a torn read there is skipped."""
+    c = _counting_cache(f"test.cont.audit.{label}")
     s = _Scripted(tmp_path, CHAIN)
     c.read(s, ("k",), build=_build, reader=list)
-    s.recs = [CHAIN[0], CHAIN[2], CHAIN[3]]                  # the audit's own fresh read is torn
+    s.recs = CHAIN + torn
+    s.tail_after = lambda seq, h: [r for r in s.recs if r.seq > seq][:0]   # the entry's own catch-up: nothing new
     rep = c.audit(s, ("k",), build=_build)
-    assert rep["status"] == "skipped" and "not contiguous" in rep["reason"]
+    assert rep["status"] == "skipped" and "not contiguous" in rep["reason"], rep
+    assert c._entries, "a possibly-torn tail read does not drop the entry"
     s.recs = CHAIN
     assert c.audit(s, ("k",), build=_build)["status"] == "match"
+
+
+@pytest.mark.parametrize("label,edited", [
+    ("a deleted record", [CHAIN[0], CHAIN[2], CHAIN[3]]),
+    ("a rewritten link", [CHAIN[0], CHAIN[1], _rec(2, "zz", "h2"), CHAIN[3]]),
+    ("a first record that does not link from the base", [_rec(1, "h0", "h1"), CHAIN[2], CHAIN[3]]),
+])
+def test_the_audit_reports_a_hole_inside_the_cached_range_as_a_mismatch_and_drops_the_entry(tmp_path, label,
+                                                                                           edited):
+    """Records the entry had folded were complete when it folded them, so a hole there is an EDIT to the spine,
+    never a torn read: a MISMATCH (a hard issue in `vigil doctor`), and the entry is dropped so the next read
+    answers as the full fold does."""
+    c = _counting_cache(f"test.cont.audit.hole.{label}")
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    c.read(s, ("k",), build=_build, reader=list)
+    s.recs = edited
+    rep = c.audit(s, ("k",), build=_build)
+    assert rep["status"] == "MISMATCH" and "not contiguous" in rep["difference"], rep
+    assert not c._entries
+    with pytest.raises(fold_cache.FoldDiscontinuity):
+        c.read(s, ("k",), build=_build, reader=list)
+
+
+def test_the_audit_holds_a_seeded_fresh_fold_to_its_seed(tmp_path):
+    """A seeded fresh fold must start right after its seed, exactly as a seeded rebuild must."""
+    c = _counting_cache("test.cont.audit.seeded")
+
+    def seeded():
+        return [], None, 1, float("inf")
+
+    s = _Scripted(tmp_path, CHAIN)
+    assert c.read(s, ("k",), build=seeded, reader=list) == [2, 3]
+    s.recs = [CHAIN[0], CHAIN[1], CHAIN[3]]                  # seq 2 deleted: the fresh fold starts at seq 3
+    rep = c.audit(s, ("k",), build=seeded)
+    assert rep["status"] == "MISMATCH" and "not contiguous at seq 3" in rep["difference"], rep
+    assert not c._entries
 
 
 def test_the_resolver_horizon_stops_at_the_first_non_contiguous_record(tmp_path):
@@ -391,25 +439,185 @@ def test_a_tail_fast_path_delta_that_ends_below_the_stores_tip_rebuilds(tmp_path
     assert c.read(ok, ("k",), build=_build, reader=list) == [0, 1, 2, 3, 4, 5]
 
 
-def test_the_audit_skips_when_its_catch_up_read_is_not_contiguous(tmp_path):
+@pytest.mark.parametrize("label,third", [
+    ("a skipped record", [_rec(3, "h2", "h3"), _rec(4, "h3", "h4"), _rec(5, "h4", "h5")]),
+    ("a skipped seq whose record links", [_rec(3, "h1", "h3"), _rec(4, "h3", "h4"), _rec(5, "h4", "h5")]),
+    ("the right seq, a broken link", [_rec(2, "zz", "h2"), _rec(3, "h2", "h3"), _rec(4, "h3", "h4"),
+                                      _rec(5, "h4", "h5")]),
+])
+def test_the_audit_holds_its_catch_up_read_to_the_same_rule(tmp_path, label, third):
     """The audit's fresh fold can lag the entry (appends land between the two); the read that brings it up to the
-    entry's seq is held to the same continuity rule."""
-    c = _counting_cache("test.cont.audit.catchup")
+    entry's seq is held to the same continuity rule — and since every record up to the entry's seq was complete
+    when the entry folded it, a hole there is an edit: a MISMATCH, and the entry is dropped."""
+    c = _counting_cache(f"test.cont.audit.catchup.{label}")
     grown = CHAIN + [_rec(4, "h3", "h4"), _rec(5, "h4", "h5")]
     s = _Scripted(tmp_path, grown)
     c.read(s, ("k",), build=_build, reader=list)
     # 1st read: the fresh fold reaches seq 1; 2nd: the entry's own catch-up (nothing new); 3rd: the fresh fold's
-    # catch-up to the entry's seq 5 — which skips seq 2
-    reads = iter([CHAIN[:2], grown, [grown[3], grown[4], grown[5]]])
+    # catch-up to the entry's seq 5 — which does not chain at seq 2 or 3
+    reads = iter([CHAIN[:2], grown, third])
     s.iter_records = lambda *, since_seq=-1: iter([r for r in next(reads, grown) if r.seq > since_seq])
     s.tail_after = None
     rep = c.audit(s, ("k",), build=_build)
-    assert rep["status"] == "skipped" and "not contiguous" in rep["reason"], rep
+    assert rep["status"] == "MISMATCH" and "not contiguous" in rep["difference"], rep
+    assert not c._entries
 
 
 def test_the_resolver_horizon_stops_at_a_record_that_does_not_link(tmp_path):
     s = _Scripted(tmp_path, [CHAIN[0], CHAIN[1], _rec(2, "zz", "h2"), _rec(3, "h2", "h3")])
     assert kh.key_resolver_with_horizon(s, current=PUB)[1] == 1
+
+
+def test_the_resolver_horizon_stops_at_a_skipped_seq_even_when_its_record_links(tmp_path):
+    s = _Scripted(tmp_path, [CHAIN[0], CHAIN[1], _rec(3, "h1", "h3")])
+    assert kh.key_resolver_with_horizon(s, current=PUB)[1] == 1
+
+
+# ======================================================================================================
+# 4b. a pass with NO anchor yet must start at the live window's base (a torn read of a fresh spine's first record)
+# ======================================================================================================
+def test_an_anchorless_rebuild_whose_first_record_does_not_link_from_the_base_raises(tmp_path):
+    c = _counting_cache("test.cont.base.rebuild")
+    s = _Scripted(tmp_path, CHAIN[1:])                       # record 0 skipped: record 1 links from h0, not "g"
+    s._live_base_prev_hash = lambda: "g"
+    with pytest.raises(fold_cache.FoldDiscontinuity, match="live window's base"):
+        c.read(s, ("k",), build=_build, reader=list)
+    assert not c._entries
+    s.recs = CHAIN
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
+
+
+def test_a_catch_up_from_an_entry_cached_on_an_empty_spine_checks_its_first_record(tmp_path):
+    c = _counting_cache("test.cont.base.catchup")
+    s = _Scripted(tmp_path, [])
+    s._live_base_prev_hash = lambda: "g"
+    assert c.read(s, ("k",), build=_build, reader=list) == []                    # an empty entry (no anchor)
+    s.recs = CHAIN[1:]                                       # the catch-up's read skipped record 0
+    with pytest.raises(fold_cache.FoldDiscontinuity):
+        c.read(s, ("k",), build=_build, reader=list)
+    s.recs = CHAIN
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
+    s.recs = []
+    c.clear()
+    assert c.read(s, ("k",), build=_build, reader=list) == []
+    s.recs = CHAIN
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]         # control: a whole catch-up
+
+
+def test_a_catch_up_from_an_empty_seeded_entry_must_start_right_after_the_seed(tmp_path):
+    c = _counting_cache("test.cont.base.seeded")
+
+    def seeded():
+        return [], None, 1, float("inf")
+
+    s = _Scripted(tmp_path, CHAIN[:2])                       # nothing after the seed yet: an empty seeded entry
+    assert c.read(s, ("k",), build=seeded, reader=list) == []
+    s.recs = [CHAIN[0], CHAIN[1], _rec(3, "h2", "h3")]       # seq 2 skipped
+    with pytest.raises(fold_cache.FoldDiscontinuity, match="starts at seq 3"):
+        c.read(s, ("k",), build=seeded, reader=list)
+
+
+def _torn_first_record(tmp_path, monkeypatch):
+    """A fresh (empty) spine whose first records another writer is appending: the read meets half of record 0
+    at EOF, then the rest of it plus record 1 land — the pass yields record 1 first."""
+    twin = tmp_path / "twin" / "spine.jsonl"
+    twin.parent.mkdir()
+    tw = _wallet(str(twin))
+    tw.grant("org_a", 100, "topup", entry_id="g1", issued_at=1.0)
+    tw.debit("org_a", 1, entry_id="d1", issued_at=2.0)
+    data = twin.read_bytes()
+    path = str(tmp_path / "spine.jsonl")
+    open(path, "wb").close()
+    cut = data.index(b"\n") // 2
+
+    def raw(b):
+        with open(path, "ab") as f:
+            f.write(b)
+
+    st = {"done": False}
+    real_warning = store_mod._log.warning
+
+    def warning(msg, *a, **k):
+        if "malformed line during iter_records" in msg and not st["done"]:
+            st["done"] = True
+            raw(data[cut:])
+        return real_warning(msg, *a, **k)
+
+    monkeypatch.setattr(store_mod._log, "warning", warning)
+    return path, raw, data, cut, st
+
+
+def test_a_torn_first_record_of_a_fresh_spine_is_never_cached(tmp_path, monkeypatch):
+    path, raw, data, cut, st = _torn_first_record(tmp_path, monkeypatch)
+    real = kh.key_resolver_with_horizon
+
+    def resolver_then_half_a_record(store, *, current):
+        out = real(store, current=current)
+        raw(data[:cut])
+        return out
+
+    monkeypatch.setattr(kh, "key_resolver_with_horizon", resolver_then_half_a_record)
+    _wallet(path, key=None).balance("org_a")                 # the cold build meets the torn read
+    assert st["done"], "the interleaving was exercised"
+    monkeypatch.setattr(kh, "key_resolver_with_horizon", real)
+    later = [_wallet(path, key=None).balance("org_a").available for _ in range(3)]
+    assert later == [99] * 3
+    assert _full(monkeypatch, lambda: _wallet(path, key=None).balance("org_a").available) == 99
+
+
+def test_a_torn_first_record_after_an_empty_cached_entry_is_never_folded(tmp_path, monkeypatch):
+    path = str(tmp_path / "spine.jsonl")
+    open(path, "wb").close()
+    assert _wallet(path, key=None).balance("org_a").available == 0         # caches an EMPTY entry (no anchor)
+    assert wal._WALLET_FOLD._entries
+    twin = tmp_path / "twin" / "spine.jsonl"
+    twin.parent.mkdir()
+    tw = _wallet(str(twin))
+    tw.grant("org_a", 100, "topup", entry_id="g1", issued_at=1.0)
+    tw.debit("org_a", 1, entry_id="d1", issued_at=2.0)
+    data = twin.read_bytes()
+    cut = data.index(b"\n") // 2
+    with open(path, "ab") as f:
+        f.write(data[:cut])                                  # the writer is mid-way through record 0
+    s = SpineStore(path)                                     # the request's store (tip -1: the half line skipped)
+    st = {"done": False}
+    real_warning = store_mod._log.warning
+
+    def warning(msg, *a, **k):
+        if "malformed line during iter_records" in msg and not st["done"]:
+            st["done"] = True
+            with open(path, "ab") as f:
+                f.write(data[cut:])
+        return real_warning(msg, *a, **k)
+
+    monkeypatch.setattr(store_mod._log, "warning", warning)
+    WalletRegistry(s, owner_key=None, trusted_pubkey=PUB).balance("org_a")
+    assert st["done"], "the interleaving was exercised"
+    monkeypatch.setattr(store_mod._log, "warning", real_warning)
+    later = [_wallet(path, key=None).balance("org_a").available for _ in range(3)]
+    assert later == [99] * 3
+    assert _full(monkeypatch, lambda: _wallet(path, key=None).balance("org_a").available) == 99
+
+
+# ======================================================================================================
+# 4c. a long-lived store whose in-memory tip sits ABOVE the disk (a truncated tail) still caches
+# ======================================================================================================
+def test_a_tip_above_the_disk_is_re_read_before_a_pass_is_declared_short(tmp_path):
+    c = _counting_cache("test.cont.tip.fresh")
+    s = _WithTip(tmp_path, CHAIN, tip=5)                     # opened when the spine reached seq 5; now it ends at 3
+    s._read_last_entry = lambda: SimpleNamespace(seq=3)
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
+    assert len(c._entries) == 1
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]       # the catch-up keeps it
+    assert len(c._entries) == 1
+    s._read_last_entry = lambda: SimpleNamespace(seq=5)      # the disk agrees: the pass really is short
+    with pytest.raises(fold_cache.FoldDiscontinuity, match="below the tip"):
+        c.read(s, ("k",), build=_build, reader=list)
+    s._read_last_entry = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+    with pytest.raises(fold_cache.FoldDiscontinuity, match="below the tip"):
+        c.read(s, ("k",), build=_build, reader=list)         # undecidable: the stricter in-memory tip stands
+    s._read_last_entry = lambda: None                        # the disk holds no record at all
+    assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
 
 
 # ======================================================================================================
@@ -456,7 +664,7 @@ def test_a_warm_read_over_a_lost_active_segment_raises_like_the_full_fold(tmp_pa
         _cust(p).by_email("user2@example.com")
 
 
-@pytest.mark.parametrize("which", ["active", "sealed", "the segments directory"])
+@pytest.mark.parametrize("which", ["active", "sealed", "the oldest of two sealed", "the segments directory"])
 def test_tail_after_is_undecidable_when_a_segment_is_missing(tmp_path, which):
     p = tmp_path / "spine.jsonl"
     w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
@@ -464,6 +672,11 @@ def test_tail_after_is_undecidable_when_a_segment_is_missing(tmp_path, which):
     for i in range(4):
         _noise(w, i)
     assert w.rotate()
+    if which == "the oldest of two sealed":
+        for i in range(2):
+            _noise(w, 20 + i)
+        assert w.rotate()
+        assert len(read_manifest(w._layout).sealed_in_order()) == 2
     anchor = list(SpineStore(p).iter_records())[-1]
     for i in range(3):
         _noise(w, 10 + i)
@@ -475,6 +688,73 @@ def test_tail_after_is_undecidable_when_a_segment_is_missing(tmp_path, which):
     else:
         w._layout.seg_path(m.active() if which == "active" else m.sealed_in_order()[0]).unlink()
     assert probe.tail_after(anchor.seq, anchor.entry_hash) is None
+
+
+def test_the_segment_presence_check_stats_a_segment_outside_the_segments_dir(tmp_path):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
+    w.migrate()
+    _noise(w, 0)
+    inside = read_manifest(w._layout).active()
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "seg-x.jsonl").write_text("")
+    outside = SimpleNamespace(file="elsewhere/seg-x.jsonl")
+    assert w._segments_present([inside, outside]) is True
+    assert w._segments_present([inside, SimpleNamespace(file="elsewhere/seg-y.jsonl")]) is False
+    assert w._segments_present([SimpleNamespace(file=f"{w._layout.segments_dir.name}/seg-nope.jsonl")]) is False
+    (w._layout.segments_dir / "sub").mkdir()                 # a path BELOW the segments dir: stat it, never a name
+    (w._layout.segments_dir / "sub" / "seg-z.jsonl").write_text("")
+    assert w._segments_present([SimpleNamespace(file=f"{w._layout.segments_dir.name}/sub/seg-z.jsonl")]) is True
+
+
+def test_tail_after_is_undecidable_when_the_manifest_is_gone_but_a_sealed_segment_remains(tmp_path, monkeypatch):
+    """A long-lived store still holds the real active segment's path: proving the anchor from its tail would answer
+    warm over a spine the full fold refuses to read (invariant 15: a manifest-removed segmented spine)."""
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
+    w.migrate()
+    wk = ks.KillSwitch(w, owner_key=OWNER, trusted_pubkey=PUB)
+    for i in range(3):
+        _noise(w, i)
+    assert w.rotate()
+    wk.engage(by="owner", reason="panic")
+    _noise(w, 9)
+    anchor = list(SpineStore(p).iter_records())[-1]
+    probe = SpineStore(p)
+    assert probe.tail_after(anchor.seq, anchor.entry_hash) == []                 # control
+    reader = ks.KillSwitch(probe, owner_key=OWNER, trusted_pubkey=PUB)
+    assert reader.is_engaged() is True                                         # warm
+    w._layout.manifest_path.unlink()
+    assert probe.tail_after(anchor.seq, anchor.entry_hash) is None
+    with pytest.raises(store_mod.SpineError):
+        _full(monkeypatch, lambda: ks.KillSwitch(SpineStore(p), owner_key=OWNER, trusted_pubkey=PUB).is_engaged())
+    ks._STATE_CACHE.clear()
+    with pytest.raises(store_mod.SpineError):
+        ks.KillSwitch(probe, owner_key=OWNER, trusted_pubkey=PUB).is_engaged()
+
+
+def test_a_deleted_record_before_the_anchor_is_a_mismatch_and_the_next_read_equals_the_full_fold(tmp_path,
+                                                                                                monkeypatch):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p)
+    for i in range(2):
+        _noise(w, i)
+    assert ks.KillSwitch(w, owner_key=OWNER, trusted_pubkey=PUB).engage(by="owner", reason="panic") == 2
+    for i in range(3, 6):
+        _noise(w, i)
+
+    def reader():
+        return ks.KillSwitch(SpineStore(p), owner_key=OWNER, trusted_pubkey=PUB)
+
+    assert reader().is_engaged() is True                                       # warm, anchored at seq 5
+    lines = p.read_bytes().splitlines(keepends=True)
+    p.write_bytes(b"".join(lines[:2] + lines[3:]))           # delete the engage line (inside the cached range)
+    full = _full(monkeypatch, lambda: reader().is_engaged())
+    res = fold_read.audit_with(lambda: reader().is_engaged())
+    assert [r["status"] for r in res] == ["MISMATCH"], res
+    assert "not contiguous" in res[0]["difference"]
+    ks._STATE_CACHE.clear()
+    assert reader().is_engaged() is full
 
 
 def test_an_audit_whose_fresh_fold_raises_discards_the_entry(tmp_path):

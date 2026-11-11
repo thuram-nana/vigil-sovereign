@@ -1420,9 +1420,14 @@ class SpineStore:
                 names = {e.name for e in it}
         except OSError:
             return False
+        prefix = d.name + "/"
         for sg in segs:
-            p = self._layout.seg_path(sg)
-            if (p.name not in names) if p.parent == d else not p.exists():
+            f = sg.file
+            name = f[len(prefix):] if f.startswith(prefix) else ""
+            if name and "/" not in name:
+                if name not in names:
+                    return False
+            elif not self._layout.seg_path(sg).exists():  # a segment outside the segments dir: stat it
                 return False
         return True
 
@@ -1444,13 +1449,18 @@ class SpineStore:
           * False — the record at `seq` is provably NOT the anchor (a different hash, or the spine now ends
             before `seq`: a rollback, rewrite or reset);
           * None — undecidable within `max_bytes` of the tail (a large delta, a gap at `seq`, a non-monotonic
-            tail, a rotation since the anchor that left more than one segment behind it), or a segment the manifest
-            names is missing (one `stat` per segment): the caller takes the indexed path, which re-resolves a
-            superseded manifest and raises on a lost segment as the full fold does."""
+            tail, a rotation since the anchor that left more than one segment behind it), a segment the manifest
+            names is missing (one listing of the segments dir), or the manifest is gone while a sealed segment is
+            still on disk: the caller takes the indexed path, which re-resolves a superseded manifest and raises on
+            a lost segment or a removed manifest as the full fold does."""
         if seq < 0:
             return None
         m = read_manifest(self._layout)
         if m is None:
+            try:
+                self._guard_manifest_absent_segmented()   # invariant 15, as the full fold's resolve runs it
+            except SpineError:
+                return None                               # the indexed path raises exactly as the full fold does
             target, prev = self._read_target(), None
         else:
             act = m.active()
