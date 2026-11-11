@@ -36,10 +36,12 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from . import key_history as _kh  # noqa: E402
-from .asset_ownership import AssetOwnershipRegistry, _check_host, _check_org_id  # noqa: E402
+from .asset_ownership import _SKIP, AssetOwnershipRegistry, KeyedGrantView, _check_host, _check_org_id  # noqa: E402
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SIGNAL = "governor.monitoring_authority"
 MODE_OBSERVE = "observe"
@@ -90,6 +92,46 @@ class MonitoringGrant:
 
     def covers(self, now: float) -> bool:
         return self.not_before <= float(now) < self.not_after
+
+
+def _apply_authority_record(r, resolver, state: dict, issued: dict, rows: dict):
+    """Fold ONE spine record into (state, issued, rows) — THE monitoring-authority fold body, shared by the full
+    `_fold` and the verified fold cache (Front C S0d). Returns the (org_id, host) it touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SIGNAL:
+        return _SKIP
+    oid, host = p.get("org_id"), p.get("host")
+    if not isinstance(oid, str) or not oid or not isinstance(host, str) or not host:
+        return _SKIP
+    key = (oid, host)
+    st = p.get("state")
+    if st == "revoked":
+        state[key] = "revoked"
+        return key
+    if st == "active":
+        if p.get("mode") not in _MODES:
+            return _SKIP
+        if not verify_signed(p, _CORE, resolver.at(r.seq)):
+            return _SKIP
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(key, NO_HIGHWATER):
+            return _SKIP
+        issued[key] = at
+        state[key] = "active"
+        rows[key] = {"mode": p.get("mode"), "not_before": p.get("not_before"),
+                     "not_after": p.get("not_after"), "proof_sha256": p.get("proof_sha256"),
+                     "issued_at": at}
+        return key
+    return _SKIP
+
+
+def _authority_step(view: KeyedGrantView, r, resolver) -> None:
+    key = _apply_authority_record(r, resolver, view.state, view.issued, view.rows)
+    if key is not _SKIP:
+        view.sync(key)
+
+
+_AUTHORITY_FOLD = FoldCache("governor.monitoring_authority", step=_authority_step)
 
 
 class MonitoringAuthorityRegistry:
@@ -146,7 +188,7 @@ class MonitoringAuthorityRegistry:
     def retire(self, org_id: str, host: str) -> None:
         """Ownership of (org, host) lapsed: revoke the grant if one is on the spine, and ALWAYS unpublish."""
         oid, h = _check_org_id(org_id), _check_host(host)
-        if (oid, h) in self._fold():
+        if self.grant_for(oid, h) is not None:
             self.revoke(oid, h)
         else:
             unpublish(oid, h)
@@ -154,48 +196,40 @@ class MonitoringAuthorityRegistry:
     def revoke_org(self, org_id: str) -> list[int]:
         """Revoke every active grant of one org (offboarding / decommission hook)."""
         oid = _check_org_id(org_id)
-        return [self.revoke(oid, h) for (o, h) in sorted(self._fold()) if o == oid]
+        return [self.revoke(oid, g.host) for g in self.grants(oid)]
 
     # -- reads ----------------------------------------------------------------------------------------
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, rows), since): the HARD-PRUNE SEED (SnapshotState v6), or the empty genesis start when
+        the trusted anchor differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        state = dict(snap.monitoring_authority_state_map())
+        issued = dict(snap.monitoring_authority_issued_map())
+        rows = {(r[0], r[1]): {"mode": r[2], "not_before": r[3], "not_after": r[4],
+                               "proof_sha256": (r[5] if len(r) > 5 else ""),
+                               "issued_at": issued.get((r[0], r[1]), 0.0)}
+                for r in snap.monitoring_authority_row}
+        return (state, issued, rows), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental monitoring-authority fold (`fold_read.cached_read`,
+        flag-gated), else `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return KeyedGrantView(*st), since
+
+        return cached_read(_AUTHORITY_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> dict:
         """{(org_id, host): row} for grants whose latest state is active. Seeds from SnapshotState (v6) then
         folds the live window; bypasses the seed (genesis scan) if the trusted anchor differs."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, issued, rows, since = {}, {}, {}, -1
-        else:
-            state = dict(snap.monitoring_authority_state_map())
-            issued = dict(snap.monitoring_authority_issued_map())
-            rows = {(r[0], r[1]): {"mode": r[2], "not_before": r[3], "not_after": r[4],
-                                   "proof_sha256": (r[5] if len(r) > 5 else ""),
-                                   "issued_at": issued.get((r[0], r[1]), 0.0)}
-                    for r in snap.monitoring_authority_row}
-            since = snap.base_seq - 1
+        (state, issued, rows), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != SIGNAL:
-                continue
-            oid, host = p.get("org_id"), p.get("host")
-            if not isinstance(oid, str) or not oid or not isinstance(host, str) or not host:
-                continue
-            key = (oid, host)
-            st = p.get("state")
-            if st == "revoked":
-                state[key] = "revoked"
-            elif st == "active":
-                if p.get("mode") not in _MODES:
-                    continue
-                if not verify_signed(p, _CORE, resolver.at(r.seq)):
-                    continue
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue
-                issued[key] = at
-                state[key] = "active"
-                rows[key] = {"mode": p.get("mode"), "not_before": p.get("not_before"),
-                             "not_after": p.get("not_after"), "proof_sha256": p.get("proof_sha256"),
-                             "issued_at": at}
+            _apply_authority_record(r, resolver, state, issued, rows)
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
 
     @staticmethod
@@ -210,7 +244,9 @@ class MonitoringAuthorityRegistry:
         """The current active grant record (window NOT applied), or None. Use ``active_at`` for a decision."""
         if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
             return None
-        row = self._fold().get((org_id, host))
+        row = self._cached(lambda v: v.active.get((org_id, host)))
+        if row is _UNCACHED:
+            row = self._fold().get((org_id, host))
         return None if row is None else self._to_grant((org_id, host), row)
 
     def active_at(self, org_id: str, host: str, *, now: float) -> Optional[MonitoringGrant]:
@@ -237,4 +273,8 @@ class MonitoringAuthorityRegistry:
 
     def grants(self, org_id: str) -> list[MonitoringGrant]:
         """Every active grant record of one org (window not applied), in host order."""
+        if isinstance(org_id, str):
+            hit = self._cached(lambda v: v.of_org(org_id))
+            if hit is not _UNCACHED:
+                return [self._to_grant((org_id, h), row) for h, row in hit]
         return [self._to_grant(k, row) for k, row in sorted(self._fold().items()) if k[0] == org_id]

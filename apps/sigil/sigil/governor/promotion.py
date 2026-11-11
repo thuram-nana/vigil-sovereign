@@ -22,9 +22,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
+from .fold_read import UNCACHED as _UNCACHED, cached_read
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.promotion"
@@ -32,6 +34,49 @@ NO_PROMOTION_AGENTS = frozenset({"ENVOY", "DELEGATE"})   # outbound + account ac
 # `issued_at` MUST be in the core: outside it, an attacker could re-stamp a captured grant's freshness
 # past the high-water without breaking the signature — exactly the replay this guard refuses.
 _CORE = ("signal", "state", "agent", "scope", "issued_at")
+
+
+def _apply_promotion_record(r, resolver, state: dict, issued: dict) -> None:
+    """Fold ONE spine record into (state, issued) — THE promotion fold body, shared by the full `_fold` and the
+    verified fold cache (Front C S0d) so the two can never diverge."""
+    p = r.payload
+    if p.get("signal") != SIGNAL or p.get("state") not in ("granted", "revoked"):
+        return
+    if not verify_signed(p, _CORE, resolver.at(r.seq)):   # under the owner key valid at this seq
+        return                                # fail-closed: an unsigned/forged record is not counted
+    key = (p.get("agent"), p.get("scope"))
+    if p["state"] == "granted":
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(key, NO_HIGHWATER):
+            return                            # REPLAY / stale re-append of an already-honored grant
+        issued[key] = at                      # consume it so its own replay is refused hereafter
+    state[key] = p["state"]                   # latest verified (and, for a grant, FRESH) wins
+
+
+class _PromotionView:
+    """The cached promotion fold: exactly the full fold's (state, issued)."""
+
+    __slots__ = ("state", "issued")
+
+    def __init__(self, state: dict, issued: dict) -> None:
+        self.state, self.issued = state, issued
+
+
+def _promotion_step(view: _PromotionView, r, resolver) -> None:
+    _apply_promotion_record(r, resolver, view.state, view.issued)
+
+
+_PROMOTION_FOLD = FoldCache("governor.promotion", step=_promotion_step)
+
+
+def _granted(state: dict) -> "list[dict]":
+    # Mirror is_promoted's structural denylist early-return (NO_PROMOTION_AGENTS): if such an agent ever
+    # carried an owner-signed grant (e.g. a currently-promotable agent later ADDED to the denylist), it is
+    # NOT enforced — so it must not be LISTED either, or the card would show a phantom promotion. This is
+    # the "a mint-side gate must be mirrored at the read surface" invariant applied to the read.
+    return [{"agent": a, "scope": s}
+            for (a, s), v in sorted(state.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1])))
+            if v == "granted" and a not in NO_PROMOTION_AGENTS]
 
 
 class PromotionPolicy:
@@ -66,6 +111,25 @@ class PromotionPolicy:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "tier": "A0", "decision": "auto"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def _seed(self, st) -> "tuple[tuple[dict, dict], int]":
+        """((state, issued), since): the HARD-PRUNE SEED from `st`, or the empty genesis start when the trusted
+        pubkey differs from the snapshot's (see `_fold`)."""
+        if self.trusted_pubkey != st.trusted_pubkey:
+            return ({}, {}), -1
+        # PER-(agent, scope) high-water, seeded from the SAME snapshot under the SAME pubkey condition
+        # — otherwise the first hard prune would reset it and make every pruned grant replayable.
+        return (dict(st.promotion_map()), dict(st.promotion_issued_map())), st.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental promotion fold (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(st):
+            s, since = self._seed(st)
+            return _PromotionView(*s), since
+
+        return cached_read(_PROMOTION_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> dict:
         """THE fold — one implementation, shared by `state_all` and `is_promoted`.
 
@@ -83,25 +147,9 @@ class PromotionPolicy:
         empty snapshot: base_seq==0 => since_seq=-1 => the full scan, and an empty seed either way."""
         st = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
-        if self.trusted_pubkey != st.trusted_pubkey:
-            state, since, issued = {}, -1, {}
-        else:
-            # PER-(agent, scope) high-water, seeded from the SAME snapshot under the SAME pubkey condition
-            # — otherwise the first hard prune would reset it and make every pruned grant replayable.
-            state, since, issued = dict(st.promotion_map()), st.base_seq - 1, dict(st.promotion_issued_map())
+        (state, issued), since = self._seed(st)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if p.get("signal") != SIGNAL or p.get("state") not in ("granted", "revoked"):
-                continue
-            if not verify_signed(p, _CORE, resolver.at(r.seq)):   # under the owner key valid at this seq
-                continue                          # fail-closed: an unsigned/forged record is not counted
-            key = (p.get("agent"), p.get("scope"))
-            if p["state"] == "granted":
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue                      # REPLAY / stale re-append of an already-honored grant
-                issued[key] = at                  # consume it so its own replay is refused hereafter
-            state[key] = p["state"]               # latest verified (and, for a grant, FRESH) wins
+            _apply_promotion_record(r, resolver, state, issued)
         return state
 
     def state_all(self) -> list[dict]:
@@ -109,17 +157,15 @@ class PromotionPolicy:
         (literally: both call ``_fold``), so a listed grant is exactly one ``is_promoted`` would confirm. A
         later ``revoke`` supersedes; an unsigned / forged / REPLAYED grant (e.g. one a prompt-injected agent
         wrote via the shared ``store``) is NOT listed, so this can never over-report the owner's grants."""
-        state = self._fold()
-        # Mirror is_promoted's structural denylist early-return (NO_PROMOTION_AGENTS): if such an agent ever
-        # carried an owner-signed grant (e.g. a currently-promotable agent later ADDED to the denylist), it is
-        # NOT enforced — so it must not be LISTED either, or the card would show a phantom promotion. This is
-        # the "a mint-side gate must be mirrored at the read surface" invariant applied to the read.
-        return [{"agent": a, "scope": s}
-                for (a, s), v in sorted(state.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1])))
-                if v == "granted" and a not in NO_PROMOTION_AGENTS]
+        hit = self._cached(lambda v: _granted(v.state))
+        return _granted(self._fold()) if hit is _UNCACHED else hit
 
     def is_promoted(self, agent: str, scope: str = "*") -> bool:
         if agent in NO_PROMOTION_AGENTS:
             return False                          # never — structural, not policy
-        state = self._fold()
-        return state.get((agent, scope)) == "granted" or state.get((agent, "*")) == "granted"
+        hit = self._cached(lambda v: _is_granted(v.state, agent, scope))
+        return _is_granted(self._fold(), agent, scope) if hit is _UNCACHED else hit
+
+
+def _is_granted(state: dict, agent: str, scope: str) -> bool:
+    return state.get((agent, scope)) == "granted" or state.get((agent, "*")) == "granted"
