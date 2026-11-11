@@ -1664,7 +1664,6 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
-    from ..governor.identity import owner_keypair, owner_pubkey
     from .login_ratelimit import LoginRateLimiter
     from .pending_checkout import PendingPlanCheckouts
     from .signcount import SignCountLedger
@@ -1689,10 +1688,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                 poster, fetcher = customer_oidc_http_post, customer_oidc_jwks_fetcher
             oidc_provider = GoogleOidcIdentityProvider(oidc_cfg, http_post=poster, jwks_fetcher=fetcher,
                                                        now_fn=now_fn)
+    orgs = OrgRegistry(store)          # resolves the deployment owner identity once (reused for the pending records)
     return Provisioner(
         store,
         customers=CustomerRegistry(store),
-        orgs=OrgRegistry(store),
+        orgs=orgs,
         wallet=WalletRegistry(store),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
@@ -1706,10 +1706,10 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
-        # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
         # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key).
-        pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=owner_keypair(),
-                                               trusted_pubkey=owner_pubkey()),
+        pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=orgs.owner_key,
+                                               trusted_pubkey=orgs.trusted_pubkey),
+        # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
         checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,
                                           base_lock_s=Provisioner._CHECKOUT_WINDOW_S,

@@ -125,13 +125,11 @@ class PendingPlanCheckouts:
         except OSError as exc:
             return None, f"unreadable ({type(exc).__name__})"
         try:
-            raw = os.read(fd, _MAX_BYTES + 1)
+            raw = os.read(fd, _MAX_BYTES)              # bounded: a larger (never written) file fails to parse below
         except OSError as exc:
             return None, f"unreadable ({type(exc).__name__})"
         finally:
             os.close(fd)
-        if len(raw) > _MAX_BYTES:
-            return None, "oversized"
         try:
             rec = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):

@@ -17,8 +17,8 @@ error, corruption, a hostile file), `locked()` DENIES (returns a lockout) rather
 attacker must never be able to bypass the limiter by corrupting its state. A genuinely ABSENT marker is the
 normal "no failures yet" case and is allowed (that is not an error).
 
-CONCURRENCY: every read-modify-write of a marker (`record_failure`, `record_success`, `admit`) runs under ONE
-exclusive cross-process `flock` on `<dir>/.limiter.lock`, so concurrent requests — in one process or several —
+CONCURRENCY: every read-modify-write of a marker (`record_failure`, `admit`) runs under ONE exclusive
+cross-process `flock` on `<dir>/.limiter.lock`, so concurrent requests — in one process or several —
 can never lose an update (two failures read the same count and write one), and a marker is only ever REPLACED
 (temp + `os.replace`), never unlinked first, so `locked()` (a lock-free read) never sees a LOCKED key's marker
 absent and allows it. `record_failure` stays best-effort (if the flock cannot be taken it still records).
@@ -242,19 +242,10 @@ class LoginRateLimiter:
                 os.close(fd)                           # releases the flock
 
     def record_success(self, key: str) -> None:
-        """Clear all failure/lock state for `key` (a legitimate success resets the counter). Serialized under the
-        directory flock when it can be taken, so it cannot interleave with a concurrent read-modify-write."""
+        """Clear all failure/lock state for `key` (a legitimate success resets the counter)."""
         if not isinstance(key, str) or not key:
             return
-        try:
-            fd: "Optional[int]" = self._lock()
-        except OSError:
-            fd = None
-        try:
-            self._unlink(self._marker(key))
-        finally:
-            if fd is not None:
-                os.close(fd)
+        self._unlink(self._marker(key))
 
     def check(self, *keys: str, now: "Optional[float]" = None) -> "Optional[float]":
         """Convenience: the MAX remaining lockout across several keys (per-account AND per-IP), or None if

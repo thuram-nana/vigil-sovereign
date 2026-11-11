@@ -143,6 +143,19 @@ def test_the_factory_wires_the_durable_checkout_limiter(tmp_path, monkeypatch):
     assert lim.base_lock_s >= Provisioner._CHECKOUT_WINDOW_S
 
 
+def test_the_factory_wires_the_owner_signed_pending_records(tmp_path, monkeypatch):
+    from sigil import config
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.spine.store import SpineStore
+    from sigil.ui.pending_checkout import PendingPlanCheckouts
+    from sigil.ui.provision import build_provisioner
+    monkeypatch.setattr(config, "PENDING_PLAN_CHECKOUT_DIR", tmp_path / "pending")
+    kp = ensure_owner_keypair()
+    led = build_provisioner(SpineStore(str(tmp_path / "s.jsonl"))).pending_checkouts
+    assert isinstance(led, PendingPlanCheckouts) and led.dir == tmp_path / "pending"
+    assert led.owner_key.public_key_b64 == led.trusted_pubkey == kp.public_key_b64
+
+
 # --- (b) the pending plan-checkout record ---------------------------------------------------------------------
 
 _PLAN = "vigil_pro_monthly"
@@ -337,6 +350,21 @@ def test_a_spine_read_fault_refuses_the_plan_and_frees_the_claim(monkeypatch):
     assert len(posted) == 1
 
 
+@pytest.mark.parametrize("row", [{"outcome": "refused"}, {"outcome": "rate_limited"}, {"action": "launch_reserve"},
+                                 {"org_id": "org_other"}])
+def test_only_a_created_plan_checkout_of_this_org_holds_the_window(monkeypatch, row):
+    """The spine backstop counts a row only when a payable link exists for THIS org: a CREATED billing_checkout."""
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.store.append(kind="event", source="provision", actor="WARDEN", payload={
+        "signal": "provision.audit", "action": "billing_checkout", "requester": admin, "org_id": org,
+        "target": _PLAN, "outcome": "created", "reason": "", "tx_ref": f"vigil:{org}:x", "expires_at": 9e9, **row})
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    assert len(posted) == 1
+
+
 def test_the_offers_read_reports_a_plan_checkout_in_progress(monkeypatch):
     from sigil.ui.pending_checkout import DEFAULT_TTL_S
     _plans_on(monkeypatch)
@@ -350,6 +378,8 @@ def test_the_offers_read_reports_a_plan_checkout_in_progress(monkeypatch):
     assert p.customer_billing_offers(admin, org, now=5000.0 + DEFAULT_TTL_S)["plan_checkout_pending"] is False
     _record_path(p).write_text("{corrupt", encoding="utf-8")
     assert p.customer_billing_offers(admin, org, now=5001.0)["plan_checkout_pending"] is True   # fail-closed
+    p.pending_checkouts = None
+    assert p.customer_billing_offers(admin, other, now=5001.0)["plan_checkout_pending"] is True  # unwired: fail-closed
     monkeypatch.delenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED")
     assert p.customer_billing_offers(admin, org, now=5001.0)["plan_checkout_pending"] is False  # no plans offered
 
@@ -476,28 +506,85 @@ def test_release_drops_only_its_own_record(tmp_path):
 
 
 _CLAIM_WORKER = r"""
-import sys
+import sys, time
 from sigil.reuse import KeyPair
-from sigil.ui.pending_checkout import PendingCheckoutRefused, PendingPlanCheckouts
-kp = KeyPair(public_key_b64=sys.argv[2], private_key_b64=sys.argv[3])
-led = PendingPlanCheckouts(sys.argv[1], owner_key=kp, trusted_pubkey=kp.public_key_b64)
+from sigil.ui import pending_checkout as pc
+pub, priv = sys.stdin.read().split()                 # the throwaway test key, never on argv
+kp = KeyPair(public_key_b64=pub, private_key_b64=priv)
+led = pc.PendingPlanCheckouts(sys.argv[1], owner_key=kp, trusted_pubkey=kp.public_key_b64)
+real_read = led._read
+
+def slow_read(*a):
+    out = real_read(*a)
+    time.sleep(0.05)                                 # widen the read-decide-write window (test instrumentation)
+    return out
+led._read = slow_read
 try:
-    led.claim("org_race", "vigil_pro_monthly", "vigil:org_race:" + sys.argv[4], now=1000.0)
+    led.claim("org_race", "vigil_pro_monthly", "vigil:org_race:" + sys.argv[2], now=float(sys.argv[3]))
     sys.stdout.write("1")
-except PendingCheckoutRefused:
+except pc.PendingCheckoutRefused:
     sys.stdout.write("0")
 """
 
 
-def test_racing_claims_from_separate_processes_admit_exactly_one(tmp_path):
-    import os
+def _race(d, k, now: float) -> str:
+    procs = [subprocess.Popen([sys.executable, "-c", _CLAIM_WORKER, str(d), f"n{i}", str(now)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True) for i in range(8)]
+    for p in procs:
+        assert p.stdin is not None
+        p.stdin.write(f"{k.public_key_b64} {k.private_key_b64}")
+        p.stdin.close()
+    out = "".join(p.stdout.read() for p in procs if p.stdout is not None)
+    assert all(p.wait(timeout=120) == 0 for p in procs), out
+    return out
 
+
+def test_racing_claims_from_separate_processes_admit_exactly_one(tmp_path):
     from sigil.reuse import generate_keypair
     k = generate_keypair()                                    # a throwaway test key, never a real owner key
-    d = tmp_path / "pc"
-    env = {**os.environ}
-    procs = [subprocess.Popen([sys.executable, "-c", _CLAIM_WORKER, str(d), k.public_key_b64, k.private_key_b64,
-                               f"n{i}"], stdout=subprocess.PIPE, text=True, env=env) for i in range(8)]
-    out = "".join(p.communicate(timeout=120)[0] for p in procs)
-    assert all(p.returncode == 0 for p in procs), out
-    assert sorted(out) == ["0"] * 7 + ["1"], out
+    assert sorted(_race(tmp_path / "pc", k, 1000.0)) == ["0"] * 7 + ["1"]
+
+
+def test_racing_claims_over_an_expired_record_admit_exactly_one(tmp_path):
+    """The expired-record path is read -> unlink -> write: without the claim lock, a slower process could unlink the
+    record a faster one has just written and publish its own — two pending plan checkouts, two links."""
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S, PendingPlanCheckouts
+    k = generate_keypair()
+    led = PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64)
+    led.claim("org_race", _PLAN, "vigil:org_race:old", now=1000.0)
+    assert sorted(_race(tmp_path / "pc", k, 1000.0 + DEFAULT_TTL_S + 1)) == ["0"] * 7 + ["1"]
+
+
+def test_a_claim_never_overwrites_a_record_it_did_not_read(tmp_path, monkeypatch):
+    """Publishing is an exclusive create (os.link), so a record that appears between the read and the write (a
+    writer that does not honour the lock) is never clobbered: the claim fails closed instead."""
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import PendingCheckoutRefused, PendingPlanCheckouts
+    k = generate_keypair()
+    led = PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64)
+    led.claim("org_a", _PLAN, "vigil:org_a:first", now=100.0)
+    before = led._marker("org_a").read_bytes()
+    monkeypatch.setattr(led, "_read", lambda marker, org_id: (None, ""))   # it "saw" no record
+    with pytest.raises(PendingCheckoutRefused) as ei:
+        led.claim("org_a", _PLAN, "vigil:org_a:second", now=101.0)
+    assert ei.value.code == "refused_pending_io"
+    assert led._marker("org_a").read_bytes() == before
+
+
+@pytest.mark.parametrize("window", [("x", 200.0), (200.0, None), (200.0, 200.0), (300.0, 200.0)])
+def test_a_signed_record_with_a_malformed_window_is_never_trusted(tmp_path, window):
+    import json as _json
+
+    from sigil.governor.authn import signed_payload
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import SIGNAL, PendingCheckoutRefused, PendingPlanCheckouts
+    k = generate_keypair()
+    led = PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64)
+    core = {"signal": SIGNAL, "org_id": "org_a", "price_id": _PLAN, "tx_ref": "vigil:org_a:n",
+            "created_at": window[0], "expires_at": window[1]}
+    led.dir.mkdir(parents=True)
+    led._marker("org_a").write_text(_json.dumps(signed_payload(core, k)), encoding="utf-8")
+    with pytest.raises(PendingCheckoutRefused, match="unavailable") as ei:
+        led.claim("org_a", _PLAN, "vigil:org_a:m", now=250.0)
+    assert ei.value.code == "refused_pending_invalid" and "malformed validity window" in ei.value.detail
