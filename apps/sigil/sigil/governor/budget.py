@@ -237,7 +237,8 @@ class BudgetLedger:
         day_iso — e.g. report() — may under-count post-prune: the accepted live-meter semantic.)"""
         if isinstance(agent, str) and isinstance(day_iso, str) and len(day_iso) == _DAY_LEN:
             hit = cached_unsigned_read(_BUDGET_FOLD, self.store, seed=lambda st: (_BudgetView(), st.base_seq - 1),
-                                       reader=lambda v: v.usage.get((agent, day_iso)))
+                                       reader=lambda v: tuple(v.usage.get((agent, day_iso)) or ()) or None)
+            # (a COPY taken under the entry lock: the live counter list is extended in place by later reads)
             if hit is not _UNCACHED:
                 if hit is None:
                     return Spend(actions=0, interrupts=0, tokens=0, cost_usd=0.0)

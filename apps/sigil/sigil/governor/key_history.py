@@ -345,7 +345,8 @@ def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
         token = store.change_token()
     except Exception:  # noqa: BLE001 — a store without a change token still works, just uncached
         token = None
-    ck = (token, current)
+    from .identity import genesis_owner_pubkey
+    ck = (token, current, genesis_owner_pubkey())       # a genesis RE-PIN changes the walk without any append
     if token is not None:
         hit = _RESOLVER_CACHE.get(ck)
         if hit is not None:

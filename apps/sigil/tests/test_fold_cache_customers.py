@@ -287,10 +287,24 @@ def test_genesis_repin_is_part_of_the_key(home, monkeypatch):
     reg = CustomerRegistry(store)
     u, _ = reg.create("g@acme.com", issued_at=_iss())
     assert reg.customer(u) is not None                            # warm, under the true genesis
-    identity.pin_genesis(generate_keypair().public_key_b64, force=True)   # repin (no resolver clear)
-    store.append(kind="event", source="t", actor="u", payload={"signal": "noise"})
+    from sigil.governor import capability as capm
+    from sigil.governor import killswitch as ks
+    gate, caps = ks.KillSwitch(store), capm.CapabilityGate(store)
+    gate.engage(by="owner", reason="t")
+    gate.release(issued_at=time.time())
+    caps.disable("voice")
+    caps.enable("voice", issued_at=time.time())
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "")
+    assert gate.is_engaged() is False and caps.is_enabled("voice") is True   # warm the flag-OFF memo caches too
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    assert gate.is_engaged() is False and caps.is_enabled("voice") is True
+    identity.pin_genesis(generate_keypair().public_key_b64, force=True)   # repin (no resolver clear), NO append
     assert _cached_answers(reg, [u], ["g@acme.com"]) == _full_answers(reg, [u], ["g@acme.com"])
     assert reg.customer(u) is None, "a genesis that does not chain to the current key denies all"
+    cached, cached_cap = gate.is_engaged(), caps.is_enabled("voice")
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "")
+    assert gate.is_engaged() is cached is True, "the release no longer verifies: both paths are halted"
+    assert caps.is_enabled("voice") is cached_cap is False, "the enable no longer verifies: both paths deny"
 
 
 def test_a_rotation_the_build_did_not_see_is_answered_but_not_cached(home, monkeypatch):

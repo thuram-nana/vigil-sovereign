@@ -28,7 +28,7 @@ def as_issued_at(value) -> float:
     mapped to the bottom instead."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # OverflowError: an int too large for a float (10**400)
         return 0.0
     return f if math.isfinite(f) else 0.0
 
@@ -59,7 +59,8 @@ def verify_signed(payload: dict, core_fields: Sequence[str], trusted_pubkey: Opt
     core = {k: payload.get(k) for k in core_fields}
     try:
         return verify_one(trusted_pubkey, _canon(core), sig)
-    except (IntegrityError, TypeError):
-        # malformed base64 / wrong-length / non-decodable sig or key material → NOT authentic
-        # (fail-closed contract; a hostile append-only event must never raise out of the fold).
+    except (IntegrityError, TypeError, ValueError):
+        # malformed base64 / wrong-length / non-decodable sig or key material, or a core value that cannot be
+        # canonicalized (a lone surrogate -> UnicodeEncodeError, a ValueError) → NOT authentic (fail-closed
+        # contract; a hostile append-only event must never raise out of the fold).
         return False
