@@ -280,7 +280,7 @@ ends with the session's attribution footer.
 |---|---|---|
 | `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost × K (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
 | `VIGIL_MODEL_GATEWAY_ENABLED` / `VIGIL_MODEL_GATEWAY_PORT` (8742) | the cockpit starts the sovereign model gateway (loopback) | owner / operator |
-| `VIGIL_BILLING_MARKUP_K` (6) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
+| `VIGIL_BILLING_MARKUP_K` · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
 | `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
 Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
@@ -537,7 +537,7 @@ sovereign gateway's meter.
 
 | Setting | Value | Why / env |
 |---|---|---|
-| Markup K | **6** → AI = 16.7% of revenue → **≥ 73% gross margin** after ≤ 4.8% card fees + ~5% infra | `VIGIL_BILLING_MARKUP_K` (≥ 1, ≤ 100) |
+| Markup K | owner-set in the private deploy environment from calibration (M5); no value is recorded here | `VIGIL_BILLING_MARKUP_K` (≥ 1, ≤ 100) |
 | Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
 | Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
 | Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |
