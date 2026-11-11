@@ -36,6 +36,7 @@ Import-clean: pydantic + stdlib + the F1 safety seam (``wrap_untrusted`` / ``par
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -133,6 +134,32 @@ def is_safe_repo_path(path: Any) -> tuple[bool, str]:
     if any(seg in _BULK_TOKENS or seg.startswith("-") for seg in segments if seg):
         return False, "path segment is a flag/wildcard"
     return True, ""
+
+
+def confined_repo_file(root: str, rel: Any) -> str:
+    """The REAL path of the regular file ``rel`` names under the checkout ``root``, or ``""``. The content
+    of a cloned repository is third-party controlled, and ``is_safe_repo_path`` is purely LEXICAL: it stops
+    ``..``/absolute/flag paths but not a symlink the repo itself committed (``settings.py -> ~/.ssh/id_ed25519``,
+    ``conf -> /etc``). So a file is readable only when (a) its name is not itself a link, and (b) its fully
+    RESOLVED path still sits under the resolved ``root`` — which also covers a symlinked PARENT directory,
+    the case a final-component check misses. A directory link that stays inside the checkout is fine.
+    Callers open the returned real path, never the lexical one. Total — never raises."""
+    ok, _why = is_safe_repo_path(rel)
+    if not ok:
+        return ""
+    try:
+        local = os.path.join(root, rel.strip())
+        if os.path.islink(local):
+            return ""
+        real_root = os.path.realpath(root)
+        real_local = os.path.realpath(local)
+        if os.path.commonpath([real_root, real_local]) != real_root:
+            return ""
+        if not os.path.isfile(real_local):
+            return ""
+    except (OSError, ValueError):
+        return ""
+    return real_local
 
 
 def parse_edit_blocks(text: str) -> list[EditBlock]:

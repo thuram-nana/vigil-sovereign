@@ -101,3 +101,46 @@ def test_symlinked_clone_path_is_refused(tmp_path):
     link = area / "sneaky"
     os.symlink(str(outside), str(link))
     assert actions_mod._confined_clone_path(CHAT, str(link)) == ""
+
+
+# --- clone CONTENT is hostile, and the workdir is the clone ROOT only ---------------------------------
+
+def test_files_in_instruction_skips_symlinks_planted_in_the_clone(tmp_path):
+    """A cloned repo can commit ``settings.py -> <host file>`` / ``conf -> <host dir>``. Naming them in an
+    instruction must not select them as model context (symlinked file AND symlinked parent directory)."""
+    wd = Path(_clone_area_repo())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP-SECRET-HOST-FILE\n", encoding="utf-8")
+    (wd / "settings.py").symlink_to(outside / "secret.txt")
+    (wd / "conf").symlink_to(outside, target_is_directory=True)
+    got = actions_mod._files_in_instruction(str(wd), "please tidy settings.py and conf/secret.txt and x.py")
+    assert got == ["x.py"]
+
+
+def test_files_in_instruction_returns_only_existing_regular_files():
+    """A name that is absent, or that names a DIRECTORY, is not model context — only real files are."""
+    wd = Path(_clone_area_repo())
+    (wd / "pkg.d").mkdir()
+    assert actions_mod._files_in_instruction(str(wd), "touch missing.py, pkg.d and x.py") == ["x.py"]
+
+
+def test_confined_clone_path_is_the_clone_root_only():
+    """Clones are created at ``<live>/clones/<chat>/<name>`` and nowhere deeper, so that — not any nested
+    directory — is the only valid workdir. ``<clone>/.git`` in particular must never be one."""
+    wd = _clone_area_repo()
+    (Path(wd) / "pkg").mkdir()
+    assert actions_mod._confined_clone_path(CHAT, wd) == str(Path(wd).resolve())
+    for nested in ("/.git", "/.git/hooks", "/pkg"):
+        assert actions_mod._confined_clone_path(CHAT, wd + nested) == "", nested
+
+
+def test_apply_into_dot_git_is_refused_so_no_hook_can_be_planted():
+    """With ``<clone>/.git`` as the workdir, ``git apply``'s own ``.git`` protection no longer applies (the
+    diff path is just ``hooks/post-checkout``) — a reviewed diff would install an executable hook."""
+    wd = _clone_area_repo()
+    hook = ("diff --git a/hooks/post-checkout b/hooks/post-checkout\nnew file mode 100755\n--- /dev/null\n"
+            "+++ b/hooks/post-checkout\n@@ -0,0 +1,2 @@\n+#!/bin/sh\n+true\n")
+    out = actions_mod.apply_codebase_edit(CHAT, wd + "/.git", hook)
+    assert out["ok"] is False and "no such cloned codebase" in out["error"]
+    assert not (Path(wd) / ".git" / "hooks" / "post-checkout").exists()

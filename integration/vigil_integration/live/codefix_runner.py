@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -49,7 +50,7 @@ _MAX_CONTEXT_BYTES = 8192            # per sibling file
 _PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
 _MAX_CONTEXT_FILES = 10              # finding file + up to N related files (graph neighborhood or same-dir siblings)
 _MAX_TOTAL_CONTEXT_BYTES = 64000     # global budget across the repo-context set
-_PATCH_NAME = ".vigil-fix.patch"
+_PATCH_PREFIX = ".vigil-fix-"         # staged OUTSIDE the clone (mkstemp in base_dir) — see CodefixSession.build
 _DEPCACHE_BOX = "/vigil-depcache"   # read-only mount point for the offline dep cache/wheelhouse
 
 
@@ -304,11 +305,25 @@ class CodefixSession:
                 diffs.append(dt if dt.endswith("\n") else dt + "\n")
         if not diffs:
             return _Exec(False, reason="no diff text to apply")
-        patch_path = os.path.join(self.workdir, _PATCH_NAME)
+        # SECURITY: the patch is staged OUTSIDE the clone. Everything inside the clone is authored by the
+        # cloned repo, which can commit `.vigil-fix.patch -> <operator-writable host file>`; a plain
+        # open(..., "w") there follows the link and overwrites the target with the diff text. mkstemp in the
+        # clone's PARENT (base_dir — ours, not the repo's) creates a fresh 0600 file with O_EXCL under a
+        # random name, so no repo-planted entry can be opened; `git -C <clone> apply` takes the absolute path.
         try:
-            with open(patch_path, "w", encoding="utf-8") as fh:
+            os.makedirs(self.config.base_dir, exist_ok=True)
+            fd, patch_path = tempfile.mkstemp(prefix=_PATCH_PREFIX, suffix=".patch",
+                                              dir=os.path.abspath(self.config.base_dir))
+        except OSError as exc:
+            return _Exec(False, reason=f"could not stage patch file: {exc}")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(diffs))
         except OSError as exc:
+            try:
+                os.unlink(patch_path)
+            except OSError:
+                pass
             return _Exec(False, reason=f"could not stage patch file: {exc}")
         # An LLM-proposed unified diff often has imperfect hunk headers (wrong @@ line counts) or benign
         # whitespace drift — strict `git apply` rejects those as a "corrupt patch" even when the intent

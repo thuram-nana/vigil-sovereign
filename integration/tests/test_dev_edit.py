@@ -124,3 +124,49 @@ def test_propose_fail_closed_on_sovereignty_refusal(tmp_path, monkeypatch):
 
 def test_propose_empty_instruction(tmp_path):
     assert dev_edit.propose_dev_edit(_git_repo(tmp_path), "   ") == ""
+
+
+# --- clone CONTENT is hostile: symlinks a cloned third-party repo can plant ---------------------------
+
+def test_read_context_never_follows_a_symlink_out_of_the_clone(tmp_path):
+    """A cloned repo can commit ``settings.py -> <host file>`` or ``conf -> <host dir>``; naming that file
+    in an edit instruction must NOT put the host file's content in the model prompt. Covers the symlinked
+    FILE and the symlinked PARENT DIRECTORY (a final-component check alone misses the second)."""
+    wd = Path(_git_repo(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP-SECRET-HOST-FILE\n", encoding="utf-8")
+    (wd / "settings.py").symlink_to(outside / "secret.txt")
+    (wd / "conf").symlink_to(outside, target_is_directory=True)
+    ctx = dev_edit._read_context(str(wd), ["settings.py", "conf/secret.txt", "x.py"])
+    assert ctx == [("x.py", "a = 1\n")], "a symlink in the clone leaked an out-of-clone file to the model"
+
+
+def test_read_context_refuses_a_link_but_keeps_real_files_behind_an_in_clone_dir_link(tmp_path):
+    """A symlinked FILE is refused even when it resolves inside the clone (it can alias ``.git/config``, and
+    ``git apply`` cannot patch through a link anyway); a real file reached through a directory link that
+    stays INSIDE the clone is still readable — containment, not 'no links anywhere', is the rule."""
+    wd = Path(_git_repo(tmp_path))
+    (wd / "pkg").mkdir()
+    (wd / "pkg" / "ok.py").write_text("b = 2\n", encoding="utf-8")
+    (wd / "alias.py").symlink_to(wd / "x.py")
+    (wd / "pkglink").symlink_to(wd / "pkg", target_is_directory=True)
+    ctx = dev_edit._read_context(str(wd), ["alias.py", "pkglink/ok.py", "pkg/ok.py"])
+    assert ctx == [("pkglink/ok.py", "b = 2\n"), ("pkg/ok.py", "b = 2\n")]
+
+
+def test_apply_never_writes_through_a_patch_symlink_planted_in_the_clone(tmp_path):
+    """A cloned repo can commit ``.vigil-fix.patch -> <operator-writable host file>``. The patch is staged
+    OUTSIDE the clone, so applying a reviewed diff leaves the link's target byte-identical, does not touch
+    the repo's own entry, and leaves no staged patch behind."""
+    wd = Path(_git_repo(tmp_path))
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("ORIGINAL\n", encoding="utf-8")
+    planted = wd / ".vigil-fix.patch"
+    planted.symlink_to(victim)
+    out = dev_edit.apply_dev_edit(str(wd), _DIFF, operator_present=True)
+    assert victim.read_text(encoding="utf-8") == "ORIGINAL\n", "the patch was written through a repo symlink"
+    assert out["ok"] is True and out["applied"] == ["x.py"]
+    assert (wd / "x.py").read_text() == "a = 2\n"
+    assert planted.is_symlink(), "the repo's own entry must not be touched"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["authorized_keys", "repo"], "a staged patch was left behind"
