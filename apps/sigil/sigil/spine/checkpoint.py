@@ -65,6 +65,31 @@ def _owner_keys() -> tuple[str, str]:
     return priv, _PUB.read_text(encoding="utf-8").strip()
 
 
+def _genesis_pin(pub: str) -> str:
+    """The pinned genesis owner key (`owner.genesis.pub`, beside the owner key), or `pub` absent a pin."""
+    # The genesis pin lives beside the owner key (`_PUB.parent`), so a test that monkeypatches this module's
+    # KEYS_DIR/_PUB is respected, and prod reads the same file `identity.pin_genesis` writes. Absent a pin
+    # (no rotation), the current key IS the genesis.
+    try:
+        txt = (_PUB.parent / "owner.genesis.pub").read_text(encoding="utf-8").strip()
+        if txt:
+            return txt
+    except OSError:
+        pass
+    return pub
+
+
+def owner_succession(store: SpineStore | None = None):
+    """The validated cross-signed owner-key succession walked from the pinned genesis
+    (`governor.key_history.Succession`), or None when it is forked/ambiguous (`SuccessionError`). Full scan."""
+    _, pub = _owner_keys()                                     # current on-disk key (also ensures one exists)
+    from ..governor import key_history as _kh
+    try:
+        return _kh.succession_from_store(store or SpineStore(), genesis_pubkey=_genesis_pin(pub))
+    except _kh.SuccessionError:
+        return None
+
+
 def trust_root(store: SpineStore | None = None) -> TrustRoot:
     """The 1-of-1 head trust root, W9-1 SUCCESSION-AWARE. The anchor is the CURRENT owner key AS VALIDATED
     by walking the cross-signed succession chain from the pinned genesis — not the raw on-disk `owner.pub`.
@@ -74,23 +99,8 @@ def trust_root(store: SpineStore | None = None) -> TrustRoot:
     this is byte-identical to the pre-W9-1 single-key root. A forked/ambiguous succession falls back to the
     on-disk current key (the grant folds independently fail closed on a fork)."""
     _, pub = _owner_keys()                                     # current on-disk key (also ensures one exists)
-    from ..governor import key_history as _kh
-    st = store or SpineStore()
-    # The genesis pin lives beside the owner key (`_PUB.parent`), so a test that monkeypatches this module's
-    # KEYS_DIR/_PUB is respected, and prod reads the same file `identity.pin_genesis` writes. Absent a pin
-    # (no rotation), the current key IS the genesis.
-    genesis = pub
-    try:
-        txt = (_PUB.parent / "owner.genesis.pub").read_text(encoding="utf-8").strip()
-        if txt:
-            genesis = txt
-    except OSError:
-        pass
-    try:
-        succ = _kh.succession_from_store(st, genesis_pubkey=genesis)
-        current = succ.current or pub
-    except _kh.SuccessionError:
-        current = pub                                         # forked → do not widen; keep the on-disk key
+    succ = owner_succession(store)
+    current = (succ.current if succ is not None else "") or pub   # forked → do not widen; keep the on-disk key
     return TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id=OWNER_KEY_ID, name="owner", public_key_b64=current)])
 
@@ -106,6 +116,21 @@ def _read_head_on_disk() -> SignedChainHead | None:
         return None
 
 
+def _advance_floor_best_effort(head: SignedChainHead, owner_kp: KeyPair) -> None:
+    """Advance the floor UNDER THE CALLER'S `floor_lock` (re-loads prior inside advance -> last-writer-
+    monotonic). BEST-EFFORT so a floor problem never bricks signing (consolidate + warden-anchor route here
+    too), AND a not-advanced floor only ever REJECTS MORE — never a false-CLEAN — so warning is fail-SAFE."""
+    import sys
+    try:
+        advance_floor(head, owner_key=owner_kp, _locked=True)   # G2: owner-signed floor
+    except FloorDowngrade as e:                         # the INTENDED downward-refusal (e.g. post-reset) — benign
+        print(f"warning: durable anti-rollback floor not advanced ({e}); run `sigil floor reset` after "
+              f"a deliberate reset/restore", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — a REAL IO/write/corrupt-or-wrong-scope-load failure — surface loudly
+        print(f"ERROR: durable anti-rollback floor WRITE FAILED ({e}) — the floor may be stale; "
+              f"investigate before trusting `sigil verify`", file=sys.stderr)
+
+
 def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> SignedChainHead:
     """Sign the spine head + advance the durable anti-rollback floor as one critical section under a single
     `floor_lock` (best-effort on non-POSIX / an unwritable home — see floor_lock), so two racing
@@ -116,34 +141,110 @@ def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> Signe
     store = store or SpineStore()
     priv, pub = _owner_keys()
     owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)   # G2: sign the durable floor too
-    head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
+    entries = store.entries()
+    standing = standing_pruned_head(store, entries, use_floor=not force)
+    if standing is not None:
+        # A HARD-PRUNED spine is re-anchored as a pruned (v2) head that carries the committed boundary forward.
+        # A plain v1 head here would declare "no prune" over the retained window: `verify_checkpoint` then
+        # reports tampering, and every seeded fold reads an EMPTY seed over a truncated window — the kill
+        # switch released, wallets zero — silently.
+        try:
+            return sign_pruned_head(store, base_seq=standing.base_seq, base_prev_hash=standing.base_prev_hash,
+                                    cumulative_merkle_root=standing.cumulative_merkle_root,
+                                    snapshot_seq=standing.snapshot_seq, force=force, reanchor=True)
+        except _StaleSign:
+            return _read_head_on_disk() or standing        # a longer head already stands (monotonic guard)
+    head = sign_head(entries, engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
     with floor_lock():                                      # serialize head+floor commit across all callers
+        disk = _read_head_on_disk()
+        if disk is not None and disk.snapshot_seq >= 0:
+            # A prune COMMITTED after we read the spine (its pruned head landed between our read and this lock):
+            # never overwrite it with a plain head — that is exactly the empty-seed fail-open. It stands.
+            return disk
         if not force:
             # MONOTONIC HEAD GUARD: never roll head.json back to a shorter head — a concurrent checkpoint()
             # that already committed a LONGER head (and advanced the floor to it) would otherwise be undone
             # on disk, and the (higher) floor would then spurious-TAMPER the shorter head we wrote.
-            disk = _read_head_on_disk()
             if disk is not None and disk.entry_count > head.entry_count:
                 return disk                                 # our sign is stale; the newer head stands
         _atomic_write_text(HEAD_PATH, head.model_dump_json())   # FIX 3: never leave a torn head on a crash
-        # Advance the floor UNDER THE SAME LOCK (re-loads prior inside advance -> last-writer-monotonic).
-        # BEST-EFFORT so a floor problem never bricks signing (consolidate + warden-anchor route here too),
-        # AND a not-advanced floor only ever REJECTS MORE — never a false-CLEAN — so warning is fail-SAFE.
-        try:
-            advance_floor(head, owner_key=owner_kp, _locked=True)   # G2: owner-signed floor
-        except FloorDowngrade as e:                         # the INTENDED downward-refusal (e.g. post-reset) — benign
-            import sys
-            print(f"warning: durable anti-rollback floor not advanced ({e}); run `sigil floor reset` after "
-                  f"a deliberate reset/restore", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001 — a REAL IO/write/corrupt-or-wrong-scope-load failure — surface loudly
-            import sys
-            print(f"ERROR: durable anti-rollback floor WRITE FAILED ({e}) — the floor may be stale; "
-                  f"investigate before trusting `sigil verify`", file=sys.stderr)
+        _advance_floor_best_effort(head, owner_kp)
     return head
 
 
+class _StaleSign(ValueError):
+    """A longer head already stands on disk: this sign is stale (the monotonic head guard)."""
+
+
+class CheckpointRefused(ValueError):
+    """`checkpoint()` refuses to sign, and writes nothing: the spine was hard-pruned (its live window starts above
+    seq 0) but no verifying owner-signed pruned head stands to carry the prune boundary forward. A plain head
+    there would anchor the retained window as the whole spine and every snapshot-seeded fold would read an
+    EMPTY seed (the kill switch released, wallets zero). `sigil` exits 2 with the message."""
+
+
+def _standing_head_signers(store: SpineStore, head: SignedChainHead) -> "list[str]":
+    """The owner keys a STANDING head may legitimately be signed by: the trust root's key (the succession tip),
+    and the key the validated succession says was authoritative AT the head's `last_seq` — a rotation appends
+    its record BEFORE `checkpoint()` re-signs, so at that instant the standing head is still under the
+    incumbent key. Nothing older: a head signed by a key retired before `last_seq` is refused (it could only be
+    a forgery by a retired-key holder), and a forked succession admits only the trust root's key."""
+    keys = [a.public_key_b64 for a in trust_root(store).authorizers]
+    succ = owner_succession(store)
+    if succ is not None:
+        at = succ.pubkey_valid_at(head.last_seq)
+        if at and at not in keys:
+            keys.append(at)
+    return keys
+
+
+def standing_pruned_head(store: SpineStore, entries: list | None = None, *,
+                         use_floor: bool = True) -> SignedChainHead | None:
+    """The standing head iff it COMMITS A PRUNE that this spine still matches — owner-signed (under the key the
+    succession allows, see `_standing_head_signers`) over a live window that starts exactly at its `base_seq` /
+    `base_prev_hash`, and within the durable floor (`use_floor=False` only for `sigil floor reset`, which
+    re-seeds the floor). None for an un-pruned spine. Raises `CheckpointRefused` (fail CLOSED — nothing is
+    signed) when the live window does not start at genesis yet no such head stands: there is then no owner-signed
+    boundary to carry forward, and a fresh head would silently un-prune the spine. Commands that MUTATE the spine
+    before re-signing (`key rotate`, `warden-anchor-set`, `consolidate --sign`) call this first, so a refusal
+    leaves the spine untouched."""
+    if entries is None:
+        entries = store.entries()
+    disk = _read_head_on_disk()
+    first = entries[0].seq if entries else 0
+    if disk is None or disk.snapshot_seq < 0:
+        if first != 0:
+            raise CheckpointRefused(
+                f"refusing to sign a head: the spine's live window starts at seq {first} (a hard-pruned spine) "
+                f"but no owner-signed pruned head stands to carry its boundary forward. Recover from a `sigil "
+                f"backup` taken after the prune (`sigil restore` into a fresh SIGIL_HOME, then `sigil verify`). "
+                f"Re-signing cannot fix this: a fresh head would declare no prune and every seeded fold would "
+                f"read an empty seed")
+        return None
+    try:
+        floor = load_floor() if use_floor else None
+    except Exception as e:  # noqa: BLE001 — a present-but-corrupt floor never certifies a carry-forward
+        raise CheckpointRefused(f"refusing to sign a head: the durable anti-rollback floor is unreadable ({e}) "
+                                f"— run `sigil verify`; see `sigil floor` for a deliberate reset") from e
+    for key in _standing_head_signers(store, disk):
+        tr = TrustRoot(threshold=1, authorizers=[AuthorizerKey(key_id=OWNER_KEY_ID, name="owner",
+                                                               public_key_b64=key)])
+        try:
+            ok, _ = classify_head(disk, entries, tr, floor=floor)
+        except Exception:  # noqa: BLE001 — malformed signature material: not this key
+            ok = False
+        if ok:
+            return disk
+    raise CheckpointRefused(
+        f"refusing to sign a head: the standing head declares a prune (base_seq {disk.base_seq}, snapshot "
+        f"{disk.snapshot_seq}) but does not verify over this spine under the owner key — its boundary cannot "
+        f"be trusted or carried forward. Run `sigil verify`; recover from a `sigil backup` (`sigil restore` "
+        f"into a fresh SIGIL_HOME)")
+
+
 def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
-                     cumulative_merkle_root: str, snapshot_seq: int) -> SignedChainHead:
+                     cumulative_merkle_root: str, snapshot_seq: int, force: bool = False,
+                     reanchor: bool = False) -> SignedChainHead:
     """Sign the v2 (cold-archive hard-prune) head over the RETAINED live window [base_seq..T] — the DURABLE
     COMMIT of a prune (hard-prune Slice E). Written + floor-advanced under a single `floor_lock`, exactly
     like `checkpoint()`, so it is the crash-atomic commit instant: a crash BEFORE this leaves the un-pruned
@@ -166,22 +267,29 @@ def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
         raise ValueError(
             f"pruned head anchor mismatch: retained window must start at seq {base_seq} linking from "
             f"{base_prev_hash[:12]}… (got {'<empty>' if not live else f'{live[0].seq}/{live[0].prev_hash[:12]}…'})")
-    prior_floor = load_floor()
-    head = SignedChainHead(
-        schema_version=2, engagement_slug=SCOPE, last_seq=live[-1].seq,
-        entry_count=base_seq + len(live), head_hash=live[-1].entry_hash,
-        base_seq=base_seq, base_prev_hash=base_prev_hash, base_count=base_seq,
-        cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
-        prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
-    msg = evidence_signing_bytes(_head_payload(head))
-    head = head.model_copy(update={"signatures": [Signature(key_id=OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
     with floor_lock():                                     # head + floor commit as one critical section
+        # The meta-chain parent is the floor's recorded head, read UNDER the lock (as `advance_floor` re-reads
+        # it): two concurrent re-anchors would otherwise both chain from the same parent, and the second head
+        # would neither be the floor's head nor its child — a META-CHAIN BREAK that `sigil verify` reports.
+        prior_floor = load_floor()
+        head = SignedChainHead(
+            schema_version=2, engagement_slug=SCOPE, last_seq=live[-1].seq,
+            entry_count=base_seq + len(live), head_hash=live[-1].entry_hash,
+            base_seq=base_seq, base_prev_hash=base_prev_hash, base_count=base_seq,
+            cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
+            prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
+        msg = evidence_signing_bytes(_head_payload(head))
+        head = head.model_copy(update={"signatures": [Signature(key_id=OWNER_KEY_ID,
+                                                                 signature_b64=sign(priv, msg))]})
         disk = _read_head_on_disk()
-        if disk is not None and disk.entry_count > head.entry_count:
-            raise ValueError(f"refusing to write a pruned head with entry_count {head.entry_count} < the "
+        if not force and disk is not None and disk.entry_count > head.entry_count:
+            raise _StaleSign(f"refusing to write a pruned head with entry_count {head.entry_count} < the "
                              f"on-disk head's {disk.entry_count} (would roll the spine back)")
         _atomic_write_text(HEAD_PATH, head.model_dump_json())
-        advance_floor(head, owner_key=owner_kp, _locked=True)   # UPWARD (entry_count/base_seq both grow)
+        if reanchor:                                       # `checkpoint()` of an already-pruned spine
+            _advance_floor_best_effort(head, owner_kp)
+        else:                                              # the prune COMMIT: the floor must move with it
+            advance_floor(head, owner_key=owner_kp, _locked=True)   # UPWARD (entry_count/base_seq both grow)
     return head
 
 
@@ -242,6 +350,12 @@ def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
 def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
     store = store or SpineStore()
     if not HEAD_PATH.exists():
+        from .snapshot import live_window_start
+        k = live_window_start(store)
+        if k > 0:
+            return False, (f"no signed head on a hard-pruned spine (the live window starts at seq {k}) — recover "
+                           f"from a `sigil backup` taken after the prune (`sigil restore` into a fresh SIGIL_HOME); "
+                           f"`sigil sign` cannot re-anchor a pruned spine without its head")
         return False, "no signed head — run `sigil sign` to anchor the spine"
     raw = HEAD_PATH.read_text(encoding="utf-8")
     try:
