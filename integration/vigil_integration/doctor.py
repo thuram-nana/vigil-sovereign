@@ -1365,6 +1365,49 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
 _UNREADABLE_PAUSE_SLUGS_SHOWN = 10
 
 
+def _split_pause_holds(base: str, paused: "list[tuple[str, list[str]]]", *, now: float):
+    """Split the recorded pauses into ``(live, expired, n_settled)`` for the paused-launch probe.
+
+    * A pause on a SETTLED ``(slug, nonce)`` holds nothing (a settled lease never runs again; settle does not
+      remove the marker), so it is only counted.
+    * A pause whose lease is the one on the seam and whose ``not_after <= now`` can never be re-admitted (the seam
+      poller, the pickup gate and the arm all refuse the window), so resume cannot start it: it is listed apart
+      from the live holds, whose note says they re-admit on resume.
+    * Everything else stays a LIVE hold, including any pause whose lease or settlement cannot be read: a pause
+      leaves that bucket only on a POSITIVE read. The lease is not signature-verified here; this is read-only and
+      only chooses which advisory note a pause is counted under (it never touches the halt decision)."""
+    from .live.credit_lease_broker import is_lease_settled, read_credit_lease
+    live: "list[tuple[str, list[str]]]" = []
+    expired: "list[tuple[str, list[str]]]" = []
+    n_settled = 0
+    for slug, nonces in paused:
+        on_seam = None
+        try:
+            bundle = read_credit_lease(base, slug)
+            if bundle is not None:
+                d = bundle.signed_lease.document
+                on_seam = (str(d.nonce), float(d.not_after.timestamp()))
+        except Exception:  # noqa: BLE001 — an unreadable lease keeps the pause a live hold
+            on_seam = None
+        keep, gone = [], []
+        for n in nonces:
+            try:
+                if is_lease_settled(base, slug, n):
+                    n_settled += 1
+                    continue
+            except Exception:  # noqa: BLE001 — an unreadable settlement keeps the pause a live hold
+                pass
+            if on_seam is not None and on_seam[0] == n and now >= on_seam[1]:
+                gone.append(n)
+            else:
+                keep.append(n)
+        if keep:
+            live.append((slug, keep))
+        if gone:
+            expired.append((slug, gone))
+    return live, expired, n_settled
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1640,11 +1683,19 @@ def collect(repo_root) -> dict:
     # re-lease included, yet no pause was positively recorded and the count above cannot see it. Left silent
     # that is a paid launch held with nothing on any operator surface. It is named by SLUG only (the marker's
     # path-safe filename stem — never a nonce, never marker content); `paused_launches["unreadable"]` is added
-    # ONLY when such a marker exists, so the report stays byte-identical otherwise.
+    # ONLY when such a marker exists, so the report stays byte-identical otherwise. The same holds for a pauses
+    # DIRECTORY that cannot be searched or listed (`store_unreadable`): a failed lookup holds every launch of every
+    # tenant, and either failure blinds the per-file counts, so both are hard issues; they carry no slug at all.
+    #
+    # A pause whose lease has EXPIRED, or was SETTLED, is not a live hold that "re-admits on resume", so it is
+    # counted apart (`expired` / `settled`, each added only when non-zero) and never under that note.
     try:
-        from .live.credit_lease_pause import paused_launches, pauses_root, unreadable_pause_markers
+        import time as _time
+
+        from .live.credit_lease_pause import (STORE_LOOKUP_FAILS, pause_store_unreadable, paused_launches,
+                                              pauses_root, unreadable_pause_markers)
         _pbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
-        _paused = paused_launches(_pbase)
+        _paused, _expired, _n_settled = _split_pause_holds(_pbase, paused_launches(_pbase), now=_time.time())
         _n_launches = len(_paused)
         _n_holds = sum(len(nn) for _s, nn in _paused)
         report["paused_launches"] = {"count": _n_launches, "holds": _n_holds,
@@ -1655,6 +1706,18 @@ def collect(repo_root) -> dict:
                   f"engine refuses it at the arm + enqueue chokepoints and holds it, re-admitting on resume. "
                   f"This is NOT a stuck/unsettled lease (a genuinely stuck lease carries no pause marker); "
                   f"clear it via the customer resume action (or owner tooling) when the hold is no longer wanted.")
+        if _expired:
+            _n_exp_holds = sum(len(nn) for _s, nn in _expired)
+            report["paused_launches"]["expired"] = {"count": len(_expired), "holds": _n_exp_holds,
+                                                    "slugs": [s for s, _ in _expired]}
+            _note(f"{len(_expired)} paused customer launch(es) have an EXPIRED lease ({_n_exp_holds} "
+                  f"reservation(s)), listed apart from the held launches because resume cannot re-admit them: "
+                  f"the seam poller, the pickup gate and the arm all refuse an expired lease. A customer resume "
+                  f"still lifts the halt on a run that armed inside the window and is still in progress (it then "
+                  f"completes and settles). An expired reservation that never settles is listed by "
+                  f"`sigil ops-sweep reservations`.")
+        if _n_settled:
+            report["paused_launches"]["settled"] = _n_settled    # inert: a settled lease never runs again
         _unreadable = unreadable_pause_markers(_pbase)
         if _unreadable:
             report["paused_launches"]["unreadable"] = _unreadable
@@ -1667,6 +1730,23 @@ def collect(repo_root) -> dict:
                    f"behind it. Inspect {pauses_root(_pbase)}/<slug>.json: restore it from backup, or remove it "
                    f"if no pause is intended (the customer can re-pause); a held launch then re-admits on the "
                    f"next poll.")
+        _store = pause_store_unreadable(_pbase)
+        if _store:
+            report["paused_launches"]["store_unreadable"] = _store
+            if _store == STORE_LOOKUP_FAILS:
+                _issue(f"the customer launch pause store {pauses_root(_pbase)} cannot be searched by this "
+                       f"process. The launch gate fails CLOSED on a pause state it cannot read, so EVERY customer "
+                       f"launch of EVERY tenant is HELD although no pause can be positively read, and the paused "
+                       f"and unreadable counts above cannot see it. Give every service that reads the seam read "
+                       f"and search access to that directory (the writer creates it 0700, so it must be owned by "
+                       f"the service user, e.g. after a restore made as another user); held launches then "
+                       f"re-admit on the next poll.")
+            else:
+                _issue(f"the customer launch pause store {pauses_root(_pbase)} cannot be listed by this process, "
+                       f"so doctor cannot see which launches are paused or which pause markers are unreadable "
+                       f"(an unreadable marker holds every launch of its slug). Give every service that reads the "
+                       f"seam read and search access to that directory (the writer creates it 0700, owned by the "
+                       f"service user).")
     except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")

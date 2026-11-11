@@ -54,6 +54,10 @@ from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-so
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
 _MAX_LEASE_HOURS = 24.0 * 7     # a launch lease caps at a week; a longer engagement re-leases
+#: What ``resume_launch`` tells the customer when it lifts the pause of a lease whose window has closed.
+_RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run already in "
+                           "progress continues and settles normally, but a launch that has not started will not "
+                           "start")
 
 
 class LaunchGate:
@@ -548,7 +552,8 @@ class LaunchGate:
         (the window is checked at the arm, not per action). The sovereign plane cannot know whether such a run is
         in flight, so refusing the pause would take away the customer's only stop control for it — a pause must
         always be able to HALT. On a lease that is expired and idle the marker is inert (the keyless verify
-        refuses the window before it ever consults the pause); :meth:`resume_launch` is where expiry is refused."""
+        refuses the window before it ever consults the pause), and :meth:`resume_launch` still clears it on an
+        expired lease, so a pause is always reversible."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
@@ -572,28 +577,34 @@ class LaunchGate:
         an absent/already-cleared pause is a no-op), so — unlike pause — it does not refuse a settled lease (a
         settled lease simply has no pause to clear and will not run regardless).
 
-        An EXPIRED lease (``now >= not_after`` — the same half-open window the keyless verify enforces) is
-        REFUSED and NOTHING is cleared. It can no longer be re-admitted (the seam poller, the pickup gate and the
-        arm all refuse the window), so answering ``launch_resumed`` would report a launch as running again that
-        never will; and leaving the marker in place keeps any run still in flight from before the expiry halted,
-        instead of un-halting it on a request we are refusing. ``now`` is a datetime / POSIX timestamp (``None``
-        ⇒ the current time); an unreadable ``now`` or lease window refuses (fail-closed)."""
+        An EXPIRED lease (``now >= not_after`` — the same half-open window the keyless verify enforces) is STILL
+        CLEARED, and the reply says so (``expired: True`` plus a ``detail``). The marker is also the in-flight
+        HALT: a run that armed inside the window keeps running after ``not_after`` (the window is checked at the
+        arm, not per action) and the engine's halt checks read only the marker. Refusing the clear would leave
+        such a run halted for good — floor burned, no completion, so the reservation could never settle, and a
+        started lease cannot be cancelled — so a customer must always be able to lift their own pause. Clearing
+        cannot make an expired lease runnable: the seam poller, the pickup gate and the arm all refuse the window,
+        so a launch that has not started still never starts. ``now`` is a datetime / POSIX timestamp (``None`` ⇒
+        the current time); an unreadable ``now`` or lease window refuses and clears nothing (fail-closed),
+        because the reply could not say which of the two cases applies."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
         s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
         try:
+            # a NaN / infinite ``now`` cannot become a datetime (ValueError / OverflowError), so it refuses here
             now_ts = (datetime.now(timezone.utc) if now is None else self._as_dt(now)).timestamp()
-            unexpired = now_ts < doc.not_after.timestamp()     # POSITIVELY inside the window (a NaN clock is not)
+            expired = now_ts >= doc.not_after.timestamp()
         except (TypeError, ValueError, OSError, OverflowError, AttributeError):
             return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
-        if not unexpired:
-            return {"ok": False, "error": "this lease has expired and can no longer run, so it cannot be "
-                    "resumed (nothing was changed)"}
         try:
             from vigil_integration.live.credit_lease_pause import clear_lease_pause
             with self._lock:
                 clear_lease_pause(self._seam_base(), s, non)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
             return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
-        return {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}
+        out = {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}
+        if expired:
+            out["expired"] = True
+            out["detail"] = _RESUMED_EXPIRED_DETAIL
+        return out

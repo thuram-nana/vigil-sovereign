@@ -16,23 +16,25 @@ that a pause/resume cycle never breaks the single-settle invariant — so the co
 Runs with the integration PYTHONPATH (the authority broker + add_customer_target + credit_lease_pause live
 across the seam), mirroring test_launch_gate.py.
 
-Lease EXPIRY (audit fold): the owner-pinned verify is signature-only, so both actions used to answer ``ok`` on
-an expired lease. RESUME now refuses one (it can never be re-admitted, so reporting ``launch_resumed`` would
-describe a launch that will never run) and leaves the pause in place. PAUSE deliberately still records: the
-marker is also the IN-FLIGHT halt, and a run that armed inside the window keeps sending traffic after
-``not_after`` — refusing would remove the customer's only stop control for it.
+Lease EXPIRY: the owner-pinned verify is signature-only, so both actions see an expired lease as valid. Both
+still act on it, because the marker is also the IN-FLIGHT halt and a run that armed inside the window keeps
+running after ``not_after``. PAUSE must record (it is the customer's only stop control for that run), and
+RESUME must clear (otherwise that run stays halted for good, with its floor burned, no completion and a
+reservation that can never settle). The expiry only changes the RESUME reply: it carries ``expired: True`` and a
+``detail`` saying a launch that has not started will not start. Clearing cannot make an expired lease runnable,
+because the seam poller, the pickup gate and the arm all refuse the window.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * pause_launch skips record_lease_pause            -> test_pause_launch_records_the_marker_resume_clears_it
   * drop the expect_org_id tenant-bind on pause      -> test_pause_is_tenant_bound
   * drop the settled refusal in pause_launch         -> test_pause_refuses_a_settled_lease
   * drop the customer_pause_resume_enabled flag gate -> test_launch_pause_is_denied_when_the_flag_is_off
-  * drop the expiry refusal in resume_launch         -> test_resume_refuses_an_expired_lease_and_leaves_the_pause_in_place
-  * expiry boundary ``>=`` -> ``>``                    -> test_resume_refuses_an_expired_lease_and_leaves_the_pause_in_place
-  * clear the marker before refusing an expired lease -> test_resume_refuses_an_expired_lease_and_leaves_the_pause_in_place
-  * unreadable ``now`` treated as "not expired"       -> test_resume_refuses_when_the_clock_cannot_be_read
+  * resume refuses (or skips the clear on) an expired lease -> test_resume_on_an_expired_lease_still_lifts_the_pause_and_says_so
+  * expiry boundary ``>=`` -> ``>``                    -> test_resume_on_an_expired_lease_still_lifts_the_pause_and_says_so
+  * in-window reply gains the ``expired`` key        -> test_resume_on_an_expired_lease_still_lifts_the_pause_and_says_so
+  * unreadable / NaN ``now`` treated as a clock      -> test_resume_refuses_when_the_clock_cannot_be_read
   * resume ignores ``now`` / the real clock           -> test_resume_without_now_uses_the_real_clock
-  * provisioner stops passing its clock to the gate  -> test_launch_resume_refuses_an_expired_lease_on_the_provisioners_clock
+  * provisioner drops the ``expired`` reply / its clock -> test_launch_resume_lifts_an_expired_pause_and_tells_the_customer
   * pause_launch starts refusing an expired lease    -> test_pause_still_records_on_an_expired_lease_because_the_marker_is_the_in_flight_halt
 """
 from __future__ import annotations
@@ -168,27 +170,34 @@ def test_a_pause_resume_cycle_does_not_break_single_settle():
     assert second["ok"] and second["action"] == "launch_already_settled"  # idempotent: never a second charge/refund
 
 
-# ---------------------------------------------------------------- lease expiry (pause records, resume refuses)
-def test_resume_refuses_an_expired_lease_and_leaves_the_pause_in_place():
+# ---------------------------------------------------------------- lease expiry (both act; resume says so)
+def test_resume_on_an_expired_lease_still_lifts_the_pause_and_says_so():
+    # MONEY-SAFETY: a run that armed in-window and is still running after not_after is halted by this marker
+    # alone. If resume refused to clear it, that run would end EngagementPaused with its floor burned and no
+    # completion, nothing would re-admit the expired lease, and a started lease cannot be cancelled: the paid
+    # reservation could never settle. So the pause is ALWAYS lifted; the expiry only changes the reply.
     s = _store()
     lease, slug, nonce = _reserve(s)
     g = _gate(s)
-    assert g.pause_launch(signed_lease=lease, expect_org_id="org_a")["ok"]
     # ``now >= not_after`` is expired — the SAME half-open window the keyless verify enforces, so the boundary
-    # instant itself is refused (the offense plane would refuse to arm it at that instant too).
+    # instant itself counts as expired (the offense plane would refuse to arm it at that instant too).
     for when in (_NOT_AFTER, _NOT_AFTER + 1, _NOT_AFTER + 10 * 86400):
+        assert g.pause_launch(signed_lease=lease, expect_org_id="org_a")["ok"]
+        assert _paused(slug, nonce)
         out = g.resume_launch(signed_lease=lease, expect_org_id="org_a", now=when)
-        assert not out["ok"] and "expired" in out["error"], (when, out)
-        assert "action" not in out                                    # never reported as launch_resumed
-        assert _paused(slug, nonce)                                   # NOTHING cleared: a refusal changes no state
-    # one tick inside the window it is still a live launch and resumes normally
+        assert out["ok"] and out["action"] == "launch_resumed", (when, out)
+        assert not _paused(slug, nonce), when                          # the halt is lifted
+        assert out["expired"] is True and "will not start" in out["detail"], out   # ... and the reply is honest
+    # one tick inside the window it is a live launch: the reply is exactly the pre-existing one
+    assert g.pause_launch(signed_lease=lease, expect_org_id="org_a")["ok"]
     out = g.resume_launch(signed_lease=lease, expect_org_id="org_a", now=_NOT_AFTER - 0.001)
-    assert out["ok"] and out["action"] == "launch_resumed" and not _paused(slug, nonce)
+    assert out == {"ok": True, "action": "launch_resumed", "org_id": "org_a", "slug": slug, "nonce": nonce}
+    assert not _paused(slug, nonce)
 
 
 def test_resume_refuses_when_the_clock_cannot_be_read():
-    # FAIL-CLOSED: if "is this lease still in its window?" cannot be answered, resume refuses (and clears nothing)
-    # rather than assume the lease is live.
+    # FAIL-CLOSED: if "is this lease still in its window?" cannot be answered, the reply could not say which case
+    # applies, so resume refuses (and clears nothing) rather than guess.
     s = _store()
     lease, slug, nonce = _reserve(s)
     g = _gate(s)
@@ -200,22 +209,23 @@ def test_resume_refuses_when_the_clock_cannot_be_read():
 
 
 def test_resume_without_now_uses_the_real_clock():
-    # ``now=None`` is the CURRENT time, not "skip the check": a caller that passes no clock still cannot resume
-    # an expired lease, and can resume a live one.
+    # ``now=None`` is the CURRENT time, not "skip the check": with no clock passed, an expired lease is still
+    # reported expired, and a live one is not.
     import time
     s = _store()
     old_lease, old_slug, old_nonce = _reserve(s)                      # window ended in 1970
     g = _gate(s)
     assert g.pause_launch(signed_lease=old_lease, expect_org_id="org_a")["ok"]
     out = g.resume_launch(signed_lease=old_lease, expect_org_id="org_a")
-    assert not out["ok"] and "expired" in out["error"] and _paused(old_slug, old_nonce)
+    assert out["ok"] and out.get("expired") is True and not _paused(old_slug, old_nonce)
     t = time.time()
     _setup(s, "org_live", "bpme.cm", now=t)                           # a second tenant, authorized on the real clock
     live = g.reserve_launch(requester="u", org_id="org_live", host="bpme.cm", units=10, now=t)
     assert live["ok"], live
     assert g.pause_launch(signed_lease=live["lease"], expect_org_id="org_live")["ok"]
     assert _paused(live["slug"], live["nonce"])
-    assert g.resume_launch(signed_lease=live["lease"], expect_org_id="org_live")["ok"]
+    out = g.resume_launch(signed_lease=live["lease"], expect_org_id="org_live")
+    assert out["ok"] and "expired" not in out
     assert not _paused(live["slug"], live["nonce"])
 
 
@@ -233,18 +243,20 @@ def test_pause_still_records_on_an_expired_lease_because_the_marker_is_the_in_fl
     assert _paused(slug, nonce)                                       # the halt IS recorded
 
 
-def test_launch_resume_refuses_an_expired_lease_on_the_provisioners_clock(monkeypatch):
-    # The customer action end to end: the provisioner hands ITS clock to the gate, so an expired lease is denied
-    # (never audited/reported as resumed) and its pause stays; in-window it resumes exactly as before.
-    from sigil.ui.provision import ProvisionDenied, build_provisioner
+def test_launch_resume_lifts_an_expired_pause_and_tells_the_customer(monkeypatch):
+    # The customer action end to end: the provisioner hands ITS clock to the gate. On an expired lease the pause
+    # is lifted and the customer is told the window has closed; in-window the reply is exactly as before.
+    from sigil.ui.provision import build_provisioner
     monkeypatch.setenv("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", "1")
     s = _store()
     lease, slug, nonce = _reserve(s)
     p = build_provisioner(s)
     assert p.launch_pause("u", "org_a", lease, now=_IN_WINDOW) == {"slug": slug, "nonce": nonce}
-    with pytest.raises(ProvisionDenied, match="expired"):
-        p.launch_resume("u", "org_a", lease, now=_NOT_AFTER)
-    assert _paused(slug, nonce)
+    out = p.launch_resume("u", "org_a", lease, now=_NOT_AFTER)
+    assert out["slug"] == slug and out["nonce"] == nonce
+    assert out["expired"] is True and "will not start" in out["detail"]
+    assert not _paused(slug, nonce)
+    assert p.launch_pause("u", "org_a", lease, now=_IN_WINDOW) == {"slug": slug, "nonce": nonce}
     assert p.launch_resume("u", "org_a", lease, now=_IN_WINDOW) == {"slug": slug, "nonce": nonce}
     assert not _paused(slug, nonce)
 

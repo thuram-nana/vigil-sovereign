@@ -58,6 +58,7 @@ __all__ = [
     "clear_lease_pause",
     "is_lease_paused",
     "unreadable_pause_markers",
+    "pause_store_unreadable",
 ]
 
 _PAUSE_DIRNAME = "credit-lease-pauses"
@@ -247,11 +248,13 @@ def unreadable_pause_markers(base_dir: Any) -> "list[str]":
     re-lease included) is HELD although no pause was positively recorded. :func:`paused_launches` skips such a
     marker (it only projects holds it can read), so without this the hold is invisible to ``vigil doctor``.
 
-    Each candidate is classified by the SAME :func:`_marker_nonces` read the halt reader uses, so what is listed
-    here is precisely what halts — never more, never less. READ-ONLY, total, never raises: an absent / unlistable
-    pauses dir yields ``[]``. Only the slug (the marker's canonical, path-safe filename stem) is returned — never
-    a nonce, never marker content. A file whose stem is not a canonical safe slug component is not any slug's
-    marker (no lookup resolves to it), so it is not listed and its name is never echoed."""
+    Each candidate is classified by the SAME :func:`_marker_nonces` read the halt reader uses, so every slug listed
+    here halts. READ-ONLY, total, never raises: an absent / unlistable pauses dir yields ``[]``. That is why this
+    list alone is not the whole picture: when the pauses DIRECTORY itself cannot be listed or searched, the halt
+    reader may hold slugs this list cannot see (every slug, when a lookup in it fails), and that state is reported
+    by :func:`pause_store_unreadable` instead. Only the slug (the marker's canonical, path-safe filename stem) is
+    returned — never a nonce, never marker content. A file whose stem is not a canonical safe slug component is
+    not any slug's marker (no lookup resolves to it), so it is not listed and its name is never echoed."""
     out: "list[str]" = []
     try:
         entries = sorted(pauses_root(base_dir).glob("*.json"))
@@ -264,3 +267,40 @@ def unreadable_pause_markers(base_dir: Any) -> "list[str]":
         if _marker_nonces(base_dir, slug) is None:
             out.append(slug)                         # exists but unreadable/corrupt/foreign -> a real hold
     return out
+
+
+#: A slug that is never any launch's (customer slugs are ``cust_<24hex>``) and is never written: the pause store
+#: probe looks it up exactly as the halt reader looks up a slug that has NO marker.
+_STORE_PROBE_SLUG = "vigil-pause-store-probe"
+
+#: :func:`pause_store_unreadable` answers.
+STORE_LOOKUP_FAILS = "lookup"
+STORE_LISTING_FAILS = "listing"
+
+
+def pause_store_unreadable(base_dir: Any) -> Optional[str]:
+    """Whether the pauses DIRECTORY itself cannot be read, as opposed to one marker file in it.
+
+      * ``None`` — the directory is absent (DEFAULT-OFF: nothing was ever paused) or can be listed and searched.
+      * ``"lookup"`` (:data:`STORE_LOOKUP_FAILS`) — a slug with NO marker cannot be read as "not paused" (for
+        example the directory is not searchable by this uid, after a restore under another owner). The halt
+        reader fails CLOSED on that, so EVERY customer launch of EVERY slug is held, and the per-file listings
+        (:func:`paused_launches`, :func:`unreadable_pause_markers`) see nothing because the glob swallows the
+        error.
+      * ``"listing"`` (:data:`STORE_LISTING_FAILS`) — lookups work but the directory cannot be enumerated, so the
+        per-file listings are blind: a corrupt marker in it would hold every launch of its slug unseen.
+
+    The lookup check is the halt reader's own :func:`_marker_nonces` on a slug that has no marker, so "lookup"
+    is reported exactly when the reader would hold a launch that was never paused. READ-ONLY, total, never raises.
+    It returns only one of these fixed words, never a slug, a nonce or marker content."""
+    try:
+        if _marker_nonces(base_dir, _STORE_PROBE_SLUG) is None:
+            return STORE_LOOKUP_FAILS
+        with os.scandir(pauses_root(base_dir)) as it:
+            for _ in it:
+                pass
+    except (FileNotFoundError, NotADirectoryError):
+        return None                                  # no pauses dir: nothing recorded, and lookups answer "not paused"
+    except Exception:  # noqa: BLE001 — any other failure to enumerate (EACCES, EIO, ...) is a blind store
+        return STORE_LISTING_FAILS
+    return None

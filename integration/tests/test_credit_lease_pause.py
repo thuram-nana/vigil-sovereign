@@ -309,3 +309,85 @@ def test_unreadable_pause_markers_never_echoes_a_non_canonical_file_name(tmp_pat
     (root / " padded.json").write_text("{ corrupt", encoding="utf-8")
     (root / "cust_real.json").write_text("{ corrupt", encoding="utf-8")
     assert P.unreadable_pause_markers(base) == ["cust_real"]
+
+
+# ---------------------------------------------------------------------------------------------------
+# pause_store_unreadable — the pauses DIRECTORY itself cannot be read (the all-tenant form of an unreadable
+# marker). Root bypasses permission bits, so the deterministic tests simulate the two errno classes the kernel
+# returns; the real-permission test runs wherever the suite is not root.
+# ---------------------------------------------------------------------------------------------------
+
+
+def _deny(monkeypatch, root, *, lookup: bool, listing: bool):
+    """Make ``root`` behave like a directory this uid cannot search (``lookup``) and/or cannot list (``listing``),
+    the way a root-owned 0700 restore does for the service uid: stat of a child raises EACCES, scandir raises
+    EACCES. Everything outside ``root`` is untouched."""
+    import os as _os
+    real_stat, real_scandir = _os.stat, _os.scandir
+    root_s = str(root)
+
+    def _stat(path, *a, **k):
+        if lookup and _os.fspath(path).startswith(root_s + _os.sep):
+            raise PermissionError(13, "Permission denied (simulated: directory not searchable)")
+        return real_stat(path, *a, **k)
+
+    def _scandir(path=".", *a, **k):
+        if listing and _os.fspath(path) == root_s:
+            raise PermissionError(13, "Permission denied (simulated: directory not listable)")
+        return real_scandir(path, *a, **k)
+
+    monkeypatch.setattr(_os, "stat", _stat)
+    monkeypatch.setattr(_os, "scandir", _scandir)
+
+
+def test_pause_store_unreadable_is_none_by_default_and_for_a_healthy_store(tmp_path):
+    base = str(tmp_path)
+    assert P.pause_store_unreadable(base) is None                        # DEFAULT-OFF: no pauses dir at all
+    assert P.pause_store_unreadable(str(tmp_path / "nope")) is None      # absent base: total, never raises
+    _seed_marker_zoo(base)                                               # a healthy dir (unreadable FILES are
+    assert P.pause_store_unreadable(base) is None                        # reported per slug, not as the store)
+    (tmp_path / "f").write_text("x", encoding="utf-8")                   # a base that is a FILE: lookups answer
+    assert P.is_lease_paused(str(tmp_path / "f"), "cust_x", "n") is False   # "no marker", so nothing is held ...
+    assert P.pause_store_unreadable(str(tmp_path / "f")) is None         # ... and the store is not reported
+
+
+def test_an_unsearchable_pause_store_holds_every_slug_and_is_reported_as_a_lookup_failure(monkeypatch, tmp_path):
+    base = str(tmp_path)
+    P.record_lease_pause(base, "cust_other", "n-other")                  # one clean marker for ANOTHER slug
+    _deny(monkeypatch, P.pauses_root(base), lookup=True, listing=True)
+    # the halt reader fails CLOSED for a slug that was never paused (unchanged, and why this is an all-tenant hold);
+    # on a real permission failure the per-file listings are blind too (pathlib's glob swallows the error — pinned
+    # by the real-permission test below, since the glob binds its own scandir), so the store probe reports it
+    assert P.is_lease_paused(base, "cust_never_paused", "n1") is True
+    assert P.pause_store_unreadable(base) == P.STORE_LOOKUP_FAILS == "lookup"
+
+
+def test_a_searchable_but_unlistable_pause_store_is_reported_as_a_listing_failure(monkeypatch, tmp_path):
+    base = str(tmp_path)
+    P.record_lease_pause(base, "cust_other", "n-other")
+    _deny(monkeypatch, P.pauses_root(base), lookup=False, listing=True)
+    assert P.is_lease_paused(base, "cust_never_paused", "n1") is False   # lookups still answer, but the store
+    assert P.is_lease_paused(base, "cust_other", "n-other") is True      # cannot be enumerated
+    assert P.pause_store_unreadable(base) == P.STORE_LISTING_FAILS == "listing"
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "geteuid") or __import__("os").geteuid() == 0,
+                    reason="root bypasses directory permission bits")
+def test_pause_store_unreadable_on_real_directory_permissions(tmp_path):
+    import os as _os
+    base = str(tmp_path)
+    P.record_lease_pause(base, "cust_other", "n-other")
+    root = P.pauses_root(base)
+    try:
+        _os.chmod(root, 0o000)                                           # neither listable nor searchable
+        assert P.is_lease_paused(base, "cust_never_paused", "n1") is True
+        assert P.paused_launches(base) == [] and P.unreadable_pause_markers(base) == []   # the listings are blind
+        assert P.pause_store_unreadable(base) == "lookup"
+        _os.chmod(root, 0o400)                                           # listable, not searchable
+        assert P.pause_store_unreadable(base) == "lookup"
+        _os.chmod(root, 0o100)                                           # searchable, not listable
+        assert P.is_lease_paused(base, "cust_never_paused", "n1") is False
+        assert P.pause_store_unreadable(base) == "listing"
+    finally:
+        _os.chmod(root, 0o700)
+    assert P.pause_store_unreadable(base) is None
