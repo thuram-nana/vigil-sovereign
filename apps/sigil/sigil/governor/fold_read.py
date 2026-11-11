@@ -8,8 +8,10 @@ when a prune exists, the same order as `SnapshotState.load` itself). `cached_rea
 those into the cache key, builds the per-entry owner-key resolver with its scan horizon, and asks the registry
 only for its seed — so no registry can forget one of them (`spine/fold_cache.py` holds the trust model).
 
-`UNCACHED` means "no cached answer": the flag is off, or the registry's view declared it cannot answer
-(`view.poisoned`). The caller then runs its unchanged full fold.
+`UNCACHED` means "no cached answer": the flag is off, the registry's view declared it cannot answer
+(`view.poisoned`), or — for a `live_window` fold, whose full path is a plain scan that never loads the snapshot —
+the snapshot could not be loaded (the full path would still answer, so the cache declines rather than raise). The
+caller then runs its unchanged full fold.
 
 FATAL-2: sovereign-side. No framework/strix import.
 """
@@ -31,17 +33,32 @@ __all__ = ["UNCACHED", "cached_read", "cached_unsigned_read"]
 UNCACHED = object()
 
 
+def _snapshot(store, live_window: bool):
+    if not live_window:
+        return SnapshotState.load(store)               # raises exactly as the seeded full fold would
+    try:
+        return SnapshotState.load(store)
+    except Exception:  # noqa: BLE001 — the live-window full scan never loads it: decline, never raise
+        return None
+
+
 def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any], "tuple[Any, int]"],
-                reader: Callable[[Any], Any]) -> Any:
+                reader: Callable[[Any], Any], live_window: bool = False) -> Any:
     """`reader(view)` over `cache`'s verified fold of `store`, or `UNCACHED`.
 
     `seed(snap) -> (view, since_seq)` builds the registry's fresh starting view from the loaded snapshot (its
     hard-prune seed, or the empty genesis start under the pubkey bypass) and the seq the full fold starts after
     — the same starting point its uncached fold uses. `SnapshotState.load` raises exactly as the full fold
-    would on an unverifiable prune head."""
+    would on an unverifiable prune head.
+
+    `live_window=True` is for a fold whose full path scans the live window from genesis WITHOUT loading the
+    snapshot: the snapshot still keys the entry (a prune moves the live window, so the entry rebuilds), but a load
+    failure answers `UNCACHED` instead of raising."""
     if not fold_cache_enabled():
         return UNCACHED
-    snap = SnapshotState.load(store)
+    snap = _snapshot(store, live_window)
+    if snap is None:
+        return UNCACHED
     key = (trusted_pubkey, genesis_owner_pubkey(), snap)
 
     def build():
@@ -56,13 +73,16 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
 
 
 def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tuple[Any, int]"],
-                         reader: Callable[[Any], Any]) -> Any:
+                         reader: Callable[[Any], Any], live_window: bool = False) -> Any:
     """As `cached_read`, for a fold that verifies NO owner signature (the agent budget meter): it depends on the
     records and the loaded snapshot only, so the key is the snapshot by value and the build carries no
-    resolver. An owner-key-history record still forces a rebuild (harmless: nothing here reads a key)."""
+    resolver. An owner-key-history record still forces a rebuild (harmless: nothing here reads a key).
+    `live_window` as in `cached_read`."""
     if not fold_cache_enabled():
         return UNCACHED
-    snap = SnapshotState.load(store)
+    snap = _snapshot(store, live_window)
+    if snap is None:
+        return UNCACHED
 
     def build():
         view, since = seed(snap)

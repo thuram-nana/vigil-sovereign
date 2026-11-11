@@ -65,6 +65,8 @@ from ..governor.identity import owner_pubkey  # noqa: E402  (reads verify under 
 from ..governor.invoices import InvoiceRegistry  # noqa: E402
 from ..governor.orgs import OrgRegistry  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed for the settle seen-set, mirrors _fold)
+from ..governor.fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 
 # The REVENUE basis — the owner-signed invoice kinds that are a CHARGE. The ``payment`` kind (a PP-2b receipt
 # against postpaid arrears: money IN, reducing outstanding, NOT a charge) is DELIBERATELY excluded from revenue
@@ -94,6 +96,48 @@ def _margin_pct(billed_minor: int, margin_minor: Optional[int]) -> Optional[floa
     return round((margin_minor / billed_minor) * 100.0, 2)
 
 
+def _apply_settle_event(r, resolver, seen: set, out: dict) -> None:
+    """Fold ONE spine record into (seen, out) — THE settle-stream body, shared by `_settle_events`' full scan and
+    the verified fold cache (Front C S0d) so the two can never diverge."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != COST_SETTLE_SIGNAL:
+        return
+    oid = p.get("org_id")
+    eid = p.get("entry_id")
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+        return
+    if not verify_signed(p, _SETTLE_CORE, resolver.at(r.seq)):
+        return                                    # fail-closed: unsigned / forged / wrong-epoch record
+    key = (COST_SETTLE_SIGNAL, oid, eid)
+    if key in seen:
+        return                                    # idempotent (replay / pre-prune) guard, mirrors the fold
+    seen.add(key)
+    out.setdefault(oid, []).append((as_issued_at(p.get("issued_at")), _as_tokens(p.get("tokens"))))
+
+
+class _SettleView:
+    """The cached settle stream: exactly the scan's (seen, out)."""
+
+    __slots__ = ("seen", "out")
+
+    def __init__(self, seen: set) -> None:
+        self.seen = seen
+        self.out: dict = {}
+
+
+def _settle_step(view: _SettleView, r, resolver) -> None:
+    _apply_settle_event(r, resolver, view.seen, view.out)
+
+
+_SETTLE_FOLD = FoldCache("ui.margin.settle_events", step=_settle_step)
+
+
+def _settle_seed(snap, trusted_pubkey: Optional[str]) -> "tuple[set, int]":
+    if trusted_pubkey != snap.trusted_pubkey:
+        return set(), -1
+    return set(snap.cost_seen_set()), snap.base_seq - 1
+
+
 def _settle_events(store, trusted_pubkey: Optional[str]) -> dict[str, list[tuple[float, int]]]:
     """Per-tenant list of ``(issued_at, tokens)`` for every owner-signed ``governor.cost_settle`` on the spine —
     the raw settle stream the per-PERIOD view attributes by ``issued_at``. There is NO public per-period read on
@@ -107,31 +151,21 @@ def _settle_events(store, trusted_pubkey: Optional[str]) -> dict[str, list[tuple
     snapshot per-org aggregate, which carries no per-settle ``issued_at``). The per-TENANT ``committed_tokens``
     total uses the snapshot-durable ``committed_cost()``, and the per-period view reconciles any difference as the
     ``unscoped`` bucket, so the periods always sum back to the durable lifetime total. A rotated/empty anchor
-    genesis-scans (byte-identical under the empty snapshot)."""
+    genesis-scans (byte-identical under the empty snapshot). Front C S0d: through the verified fold cache when on."""
+    def seed(snap):
+        seen, since = _settle_seed(snap, trusted_pubkey)
+        return _SettleView(seen), since
+
+    hit = cached_read(_SETTLE_FOLD, store, trusted_pubkey=trusted_pubkey, seed=seed,
+                      reader=lambda v: {oid: list(events) for oid, events in v.out.items()})
+    if hit is not _UNCACHED:
+        return hit
     snap = SnapshotState.load(store)
     resolver = _kh.key_resolver(store, current=trusted_pubkey)
-    if trusted_pubkey != snap.trusted_pubkey:
-        seen: set = set()
-        since = -1
-    else:
-        seen = set(snap.cost_seen_set())
-        since = snap.base_seq - 1
+    seen, since = _settle_seed(snap, trusted_pubkey)
     out: dict[str, list[tuple[float, int]]] = {}
     for r in store.iter_records(since_seq=since):
-        p = r.payload
-        if not isinstance(p, dict) or p.get("signal") != COST_SETTLE_SIGNAL:
-            continue
-        oid = p.get("org_id")
-        eid = p.get("entry_id")
-        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
-            continue
-        if not verify_signed(p, _SETTLE_CORE, resolver.at(r.seq)):
-            continue                                  # fail-closed: unsigned / forged / wrong-epoch record
-        key = (COST_SETTLE_SIGNAL, oid, eid)
-        if key in seen:
-            continue                                  # idempotent (replay / pre-prune) guard, mirrors the fold
-        seen.add(key)
-        out.setdefault(oid, []).append((as_issued_at(p.get("issued_at")), _as_tokens(p.get("tokens"))))
+        _apply_settle_event(r, resolver, seen, out)
     return out
 
 
