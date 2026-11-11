@@ -15,6 +15,10 @@ Boundary + authority invariants (this is the ONE inert seam — treat every byte
   * FAIL-CLOSED: a bad/absent signature, a wrong pubkey, a non-bounded-regular-UTF-8 file, or any error →
     the file moves to ``rejected/`` and NOTHING is learned. A per-slug offense kill-switch DEFERS a grant
     (moved back to ``incoming/`` to retry after release), never silently drops it.
+  * NO POISON FILE, NO STRANDED FILE: a body that cannot be parsed or verified for ANY reason (a deeply nested
+    document → ``RecursionError``, a lone surrogate → ``UnicodeEncodeError``, …) is quarantined like any other
+    bad grant — it never raises out of ``drain()``, so the files after it are still processed in the same pass.
+    Every pass begins by reclaiming ``working/`` (a claim a crashed pass never finished), like the sibling drains.
   * The offense re-derives the lead from ITS OWN intel — the grant is a signed POINTER, not the lead — so a
     tampered seam can at most cause an advisory skill for a CVE already in the offense's scope.
 """
@@ -56,6 +60,8 @@ def verify_grant(envelope: dict, owner_pubkey: str) -> Optional[dict]:
             return None
     except (IntegrityError, TypeError):
         return None                                          # malformed sig/key material → not authentic
+    except Exception:  # noqa: BLE001 — a core that cannot even be canonicalised (a lone surrogate →
+        return None    # UnicodeEncodeError, …) is not authentic either: fail-closed, never a raise
     return core
 
 
@@ -139,9 +145,33 @@ class LearnGrantWatcher:
         deep_learn(lead, skills_dir=self.skills_dir, now=now)
         return "learned"
 
+    def _reclaim_working(self) -> None:
+        """Crash recovery — the parity this drain was missing vs its siblings (``spool_watcher`` /
+        ``billing_spool`` / ``webhook_drain`` / ``completion_spool``). ``drain`` CLAIMS a grant into ``working/``
+        (atomic rename out of ``incoming/``) BEFORE it acts; a pass that dies between that claim and the archive /
+        quarantine / un-claim STRANDS the file there — out of ``incoming/`` so no later pass sees it, and not in
+        ``processed/`` so it was never learned. Move every such file back to ``incoming/`` at the START of each
+        pass. Re-processing is safe: the ``processed/<sha256>`` marker dedups a grant that was already archived,
+        and ``deep_learn`` rewrites the same advisory skills for the same lead (it mints no fact). NEVER unlink
+        on a failed move: the grant stays in ``working/`` for the next sweep rather than being silently dropped."""
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return
+        for f in stale:
+            if f.name.startswith(".tmp-"):
+                continue
+            try:
+                os.replace(f, self.incoming / f.name)
+            except OSError:
+                pass   # leave it in working/ for a later sweep — never destroy an owner-signed grant
+
     def drain(self) -> dict:
-        """Process every file in ``incoming/`` once. Returns {learned, rejected, deduped, no_lead, halted}."""
+        """Process every file in ``incoming/`` once. Returns {learned, rejected, deduped, no_lead, halted}.
+        Begins with a crash-recovery sweep of ``working/`` (``_reclaim_working``). Never raises on one bad file:
+        an unparseable / unverifiable body is quarantined and the pass moves on to the next file."""
         learned = rejected = deduped = no_lead = halted = 0
+        self._reclaim_working()                              # a claim a crashed pass never finished rejoins incoming/
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
                 continue
@@ -166,8 +196,9 @@ class LearnGrantWatcher:
                 continue
             try:
                 envelope = json.loads(text)
-            except ValueError as exc:
-                self._quarantine(claimed, f"not valid JSON: {exc}")
+            except Exception as exc:  # noqa: BLE001 — ANY parse failure (non-JSON, deep nesting → RecursionError,
+                # …) is a hostile body: quarantined the way the sibling drains do, never a raise out of the pass
+                self._quarantine(claimed, f"not parseable JSON: {type(exc).__name__}: {exc}")
                 rejected += 1
                 continue
             core = verify_grant(envelope, self.owner_pubkey) if isinstance(envelope, dict) else None
