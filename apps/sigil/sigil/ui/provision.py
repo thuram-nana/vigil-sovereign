@@ -1147,7 +1147,9 @@ class Provisioner:
         """pause/resume PR-4b — RESUME a paused customer launch: clear the ``(slug, nonce)`` pause marker so the
         SAME lease re-arms and the held delivery re-admits (never re-burning the single-use floor). Same gates as
         ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
-        launch is a harmless no-op."""
+        launch is a harmless no-op. On an EXPIRED lease the pause is still lifted (so a run in progress past
+        ``not_after`` is never left halted for good), and the reply carries ``expired: True`` plus a ``detail``
+        saying that a launch which has not started will not start; an in-window reply is unchanged."""
         from .. import config
         if not config.customer_pause_resume_enabled():
             raise ProvisionDenied("customer pause/resume is not enabled")
@@ -1159,12 +1161,17 @@ class Provisioner:
                 self._audit("launch_resume", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
             self._require_stepup(mfa_at, now=t)
-        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id,
+                                                 now=t)
         if not r.get("ok"):
             raise ProvisionDenied(str(r.get("error") or "launch resume refused"))
         self._audit("launch_resume", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="resumed", critical=True)
-        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+        out = {"slug": r.get("slug"), "nonce": r.get("nonce")}
+        if r.get("expired"):
+            out["expired"] = True
+            out["detail"] = str(r.get("detail") or "")
+        return out
 
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
     def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
