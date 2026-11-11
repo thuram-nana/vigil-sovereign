@@ -639,7 +639,8 @@ provider key. The offense plane only ever holds a per-run **model grant**.
    meter, the restore of an unsettled meter).
 3. Re-test on top of M1 + main, then PR. State these interim limits in the PR:
    - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
-     pre-metering placeholders), i.e. metered caps of ~$0.005 / ~$0.033 — runs would stop at once.
+     pre-metering placeholders), so the metered caps would be a small fraction of one run's cost — runs would stop
+     at once.
    - The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
    - The gateway must be enabled with metered billing (doctor HARD issue otherwise).
 

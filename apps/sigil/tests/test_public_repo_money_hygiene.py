@@ -39,6 +39,7 @@ _MK = "VIGIL_BILLING_" + "MARKUP_K"
 _TM = "VIGIL_BILLING_" + "TARGET_" + "MARGIN"
 _DEF = "DEFAULT_" + "MARKUP"
 _PCT = "%"
+_Z = str(0)
 
 
 def _ids(text: str, source: str = "<t>") -> set[str]:
@@ -61,10 +62,26 @@ def _ids(text: str, source: str = "<t>") -> set[str]:
     (f'{_DEF}_K = Fraction("{_KD}")', "default-value"),
     (f"we keep a {_D}{_PCT} gross margin", "percent-margin"),
     (f"about {_D}.5 {_PCT} margin", "percent-margin"),
+    (f"a {_D} percent target margin", "percent-margin"),
+    (f"{_D}{_PCT} (gross) margin", "percent-margin"),
+    (f"gross margin is ~{_D}{_PCT}", "margin-then-percent"),
+    (f"target margin {_D} percent", "margin-then-percent"),
+    (f"price = {_D[0]}× cost", "cost-multiplier"),
+    (f"priced at {_D[0]}.{_D[1]}x the direct cost", "cost-multiplier"),
+    (f"a markup of {_D[0]}x", "cost-multiplier"),
+    (f"os.environ.get('{_MK}', '{_KD}')", "setting-value"),
+    (f"process.env.{_MK} ?? '{_KD}'", "setting-value"),
+    (f"  - {_TM}=${{X:-0.{_D}}}", "setting-value"),
+    (f"{_TM}=.{_D}", "setting-value"),
+    (f"vigil_billing_target_margin: {_Z}.{_D}", "setting-value"),
+    (f"'targetMargin': {_Z}.{_D}", "setting-value"),
+    (f"markup_k = {_KD}", "setting-value"),
+    (f"{_DEF} = .{_D}", "default-value"),
+    (f"markup K ≤ 100; prod {_KD}", "markup-k-cell"),
     (f"margin target: {_D}", "margin-target"),
     (f"a margin of {_D} points", "margin-target"),
     (f"| Markup K | **{_KD}** |", "markup-k-cell"),
-    (f"the gross margin: ~{_D}{_PCT}", "margin-colon-percent"),
+    (f"the gross margin: ~{_D}{_PCT}", "margin-then-percent"),
     (f"markup uses K = {_KD} today", "k-near-wording"),
     (f"K -> {_KD} gives the margin", "k-near-wording"),
     (f"K → {_KD} (markup)", "k-near-wording"),
@@ -218,3 +235,37 @@ def test_ci_clean_text_passes(repo: Path, tmp_path_factory) -> None:
 def test_cli_exit_status(repo: Path) -> None:
     _track(repo, "x.env.example", f"{_TM}=0.{_D}\n")
     assert mh.main(["tree", "--root", str(repo)]) == 1
+
+
+# --- review folds ----------------------------------------------------------------------------------
+
+def test_a_value_wrapped_onto_the_next_line_is_caught() -> None:
+    text = f"we price every scan at a {_D}{_PCT}\ngross margin over direct cost\n"
+    hits = mh.scan_text(text, "docs/x.md")
+    assert [(h.line, h.pattern) for h in hits] == [(1, "percent-margin")]
+    assert mh.scan_text(f"{_MK} =\n  {_KD}\n", "x.env") != []
+
+
+def test_priced_copy_in_a_markup_file_is_not_excused_as_css() -> None:
+    assert mh.scan_text(f"<p>Our margin: {_D}{_PCT} on every call</p>", "web/Pricing.tsx") != []
+    assert mh.scan_text(f'const copy = "margin: {_D}{_PCT} on every scan";', "web/copy.js") != []
+    # a real inline style is still layout
+    assert mh.scan_text(f'<div style="margin: {_D}{_PCT}; padding: 2px">', "public_site/index.html") == []
+
+
+def test_tolerance_wording_never_excuses_money_wording() -> None:
+    line = f"price at a {_D}{_PCT} margin (tolerance aside)"
+    assert mh.scan_text(line, "docs/decisions/PRICING-RED-PEN-DESIGN.md") != []
+
+
+def test_ci_reads_only_base_to_head(repo: Path) -> None:
+    _track(repo, "a.txt", "a\n")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    _track(repo, "b.txt", "b\n")
+    _git(repo, "commit", "-q", "-m", "clean head")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    _track(repo, "c.txt", "c\n")
+    _git(repo, "commit", "-q", "-m", f"after head: {_D}{_PCT} gross margin")
+    assert [lb for lb, _ in mh.ci_texts(repo, base, None, None, head)] == [f"commit {head[:12]}"]
+    assert mh.main(["ci", "--root", str(repo), "--base", base, "--head", head, "--head-ref", ""]) == 0

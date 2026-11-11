@@ -35,37 +35,58 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # (pattern id, compiled pattern). Each is a VALUE carried next to markup or margin wording.
+_NUM = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)"
+_PCT = r"(?:%|\s*(?:percent|per\s*cent|pct)\b)"
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # A markup or target-margin setting assigned a number, in any env/config/code spelling:
-    # VIGIL_BILLING_MARKUP_K=..., MARKUP_K = "...", VIGIL_BILLING_TARGET_MARGIN: ..., (...), a table cell
-    # "| NAME | <n> |", a call argument "NAME, <n>"
-    ("setting-value", re.compile(r"\w*(?:MARKUP_K|TARGET_MARGIN)[`\"']?\s*(?::=|[=:(|,])\s*[`\"'(]*\s*[-+]?\.?\d")),
+    # A markup or target-margin setting assigned a number, in any env/config/code spelling and case:
+    # VIGIL_BILLING_MARKUP_K=..., markup_k: ..., "targetMargin": ..., target-margin = ..., a table cell
+    # "| NAME | <n> |", a call argument "getenv('NAME', '<n>')", a shell fallback "${NAME:-<n>}".
+    ("setting-value", re.compile(
+        r"(?:markup[\s_-]*k|target[\s_-]*margin)\b[`\"']?\s*(?::=|:-|\?\?|\|\||[=:(|,])\s*[`\"'(]*\s*"
+        r"(?:\$\{\w*:-)?[`\"']?" + _NUM,
+        re.IGNORECASE)),
     # A code default for the markup or the margin, optionally annotated or wrapped:
     # DEFAULT_MARKUP = "...", DEFAULT_MARKUP: str = ..., DEFAULT_TARGET_MARGIN = Fraction("...")
     ("default-value", re.compile(
-        r"DEFAULT_\w*(?:MARKUP|MARGIN)\w*\s*(?::\s*[\w.\[\], ]+?\s*)?=\s*(?:[\w.]+\()?\s*[\"']?\d")),
-    # "<n>% margin", "<n> % gross margin"
-    ("percent-margin", re.compile(r"\d+(?:\.\d+)?\s*%\s*(?:gross\s+)?margin", re.IGNORECASE)),
+        r"DEFAULT_\w*(?:MARKUP|MARGIN)\w*\s*(?::\s*[\w.\[\], ]+?\s*)?=\s*(?:[\w.]+\()?\s*(?:\$\{\w*:-)?[\"']?" + _NUM)),
+    # "<n>% margin", "<n> % gross margin", "<n> percent target margin", "<n>% (gross) margin"
+    ("percent-margin", re.compile(
+        r"\d+(?:\.\d+)?\s*" + _PCT + r"[\s()]*(?:(?:gross|target|net|profit|operating|contribution|blended"
+        r"|minimum|average|overall)[\s()]+){0,2}margin", re.IGNORECASE)),
     # "margin target: <n>", "margin of <n>"
     ("margin-target", re.compile(r"margin[\s_-]+(?:target|of)[\s_-]*[:=]?[\s_-]*\d", re.IGNORECASE)),
-    # "Markup K | <n>" (a table cell), "markup K: <n>"; a bound written with <, >, ≤ or ≥ is allowed.
-    ("markup-k-cell", re.compile(r"(?i:markup)\s+K\b[^\n\d≤≥<>]{0,12}\d")),
-    # "gross margin: <n>%", "margin = ~<n>%"
-    ("margin-colon-percent", re.compile(r"margin\s*[:=]\s*[~≈≥>]?\s*\d+(?:\.\d+)?\s*%", re.IGNORECASE)),
+    # "margin: <n>%", "gross margin is ~<n>%", "target margin <n> percent" — the value AFTER the wording.
+    ("margin-then-percent", re.compile(
+        r"\bmargin\b[^\n\d;]{0,24}?[~≈≥>]?\s*\d+(?:\.\d+)?\s*" + _PCT, re.IGNORECASE)),
+    # A multiplier on cost: "<n>x cost", "<n>× the direct cost", "price = <n>×", "markup of <n>x".
+    ("cost-multiplier", re.compile(
+        r"\d+(?:\.\d+)?\s*[x×]\s*(?:the\s+|our\s+)?(?:direct|ai|model|run|compute|unit|delivery)\s+cost\b"
+        r"|\bpric\w*\s+(?:at\s+)?\d+(?:\.\d+)?\s*[x×](?![\w])"
+        r"|\b(?:price|markup|margin)\b[^\n\d;]{0,16}?\d+(?:\.\d+)?\s*[x×](?![\w])", re.IGNORECASE)),
 )
 
 # "K = <n>", "K -> <n>", "K → <n>" counts only within this many characters of markup/margin wording.
 _K_ASSIGN = re.compile(r"\bK\s*(?:=|->|→)\s*\d")
 _K_CONTEXT = re.compile(r"markup|margin", re.IGNORECASE)
 K_WINDOW = 40
+# "Markup K | <n>", "markup K: <n>": any number within the window after the wording, unless that number is a
+# bound (directly preceded by <, >, ≤ or ≥, as in "(≥ 1, ≤ 100)").
+_MARKUP_K = re.compile(r"(?i:markup)\s+K\b")
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_BOUND = "≤≥<>"
 
-# Lines that may match a pattern without being a price. Each entry: (path regex or None for any
-# path, line regex the WHOLE line must match). A line carrying money wording is never excused.
-_MONEY_WORDS = re.compile(r"gross|profit|markup|target|revenue|cogs|price", re.IGNORECASE)
-_ALLOW: tuple[tuple[re.Pattern[str] | None, re.Pattern[str]], ...] = (
-    # CSS box-model margins ("margin: 0 5%", "margin-top: 2%") in a stylesheet or markup file.
-    (re.compile(r"\.(?:css|scss|less|html?|svg|jsx?|tsx?|vue)$"),
-     re.compile(r".*(?<![\w-])margin(?:-[a-z-]+)?\s*:\s*[-\d.%\sa-z()]*[;\"'}]?.*")),
+# Lines that may match a pattern without being a price. Each entry: (path regex, line regex the WHOLE line
+# must match). A line carrying money wording is never excused.
+_MONEY_WORDS = re.compile(r"gross|profit|markup|target|revenue|cogs|price|our\s+margin|\bfee", re.IGNORECASE)
+_CSS_DECL = r"(?<![\w-])margin(?:-[a-z-]+)?\s*:\s*[-\d.%\sa-z()]*"
+_ALLOW: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = (
+    # A stylesheet: CSS box-model margins anywhere on the line.
+    (re.compile(r"\.(?:css|scss|less)$"), re.compile(r".*" + _CSS_DECL + r".*")),
+    # Markup / script files: only a bare declaration line, or a declaration inside a style attribute/object.
+    (re.compile(r"\.(?:html?|svg|jsx?|tsx?|vue)$"),
+     re.compile(r"\s*(?:[a-z-]+\s*:\s*[-\w.%#\s(),]*;\s*)*[a-z-]+\s*:\s*[-\w.%#\s(),]*;?\s*(?:/\*.*\*/)?\s*")),
+    (re.compile(r"\.(?:html?|svg|jsx?|tsx?|vue)$"),
+     re.compile(r".*\bstyle\s*=\s*[\"'{][^\"'}]*" + _CSS_DECL + r"[^\"'}]*[\"'}].*")),
     # The pricing design doc's model-token TOLERANCE ("within a <n>% margin" of a meter reading) is
     # an accuracy bound on a measurement, not a price.
     (re.compile(r"(?:^|/)docs/decisions/PRICING-RED-PEN-DESIGN\.md$"),
@@ -86,12 +107,10 @@ class Hit:
 
 
 def _allowed(source: str, line: str) -> bool:
-    if _MONEY_WORDS.search(line) and "toleran" not in line.lower():
+    if _MONEY_WORDS.search(line):
         return False
     for path_re, line_re in _ALLOW:
-        if path_re is not None and not path_re.search(source):
-            continue
-        if line_re.fullmatch(line):
+        if path_re.search(source) and line_re.fullmatch(line):
             return True
     return False
 
@@ -103,15 +122,28 @@ def _line_hits(line: str) -> list[str]:
         if _K_CONTEXT.search(window):
             found.append("k-near-wording")
             break
+    for m in _MARKUP_K.finditer(line):
+        tail = line[m.end(): m.end() + K_WINDOW]
+        if any(not tail[:n.start()].rstrip().endswith(tuple(_BOUND)) for n in _NUMBER.finditer(tail)):
+            found.append("markup-k-cell")
+            break
     return found
 
 
 def scan_text(text: str, source: str = "<text>") -> list[Hit]:
+    """Per line, plus each pair of adjacent lines joined (a value wrapped onto the next line is still one
+    statement); a joined-pair hit not already seen on either line is reported at the first line."""
     hits: list[Hit] = []
-    for n, line in enumerate(text.splitlines(), start=1):
-        pids = _line_hits(line)
-        if pids and not _allowed(source, line):
-            hits.extend(Hit(source, n, pid) for pid in pids)
+    lines = text.splitlines()
+    per_line = [_line_hits(ln) for ln in lines]
+    for n, line in enumerate(lines):
+        if per_line[n] and not _allowed(source, line):
+            hits.extend(Hit(source, n + 1, pid) for pid in per_line[n])
+        if n + 1 < len(lines):
+            joined = line.rstrip() + " " + lines[n + 1].lstrip()
+            extra = [p for p in _line_hits(joined) if p not in per_line[n] and p not in per_line[n + 1]]
+            if extra and not _allowed(source, joined):
+                hits.extend(Hit(source, n + 1, pid) for pid in extra)
     return hits
 
 
