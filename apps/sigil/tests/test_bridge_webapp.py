@@ -172,3 +172,26 @@ if __name__ == "__main__":
             print(f"  ERROR {fn.__name__}: {e}")
             traceback.print_exc()
     print(f"{passed}/{len(fns)} Phase-9 W1-C (Companion PWA) guarantees hold")
+
+
+def test_esc_is_safe_in_a_quoted_attribute_executed():
+    """CQ-1: esc() output is placed inside `data-seq="…"` — it must escape BOTH quote styles, or a value
+    carrying `"` ends the attribute and the rest becomes markup (CodeQL js/incomplete-html-attribute-
+    sanitization). Executes the webapp's OWN esc() under node."""
+    if not shutil.which("node"):
+        print("  SKIP  node not present")
+        return
+    src = (WEBAPP / "app.js").read_text(encoding="utf-8")
+    start = src.index("var ESC_MAP = ")
+    end = src.index("};", src.index("var esc = function")) + 2
+    prog = src[start:end] + "\nprocess.stdout.write(JSON.stringify(process.argv.slice(1).map(esc)));\n"
+    hostile = ['1" onmouseover="alert(1)', "1' autofocus onfocus='alert(1)", "<img src=x>", "a&b", "42"]
+    out = subprocess.run(["node", "-e", prog, *hostile], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got == ["1&quot; onmouseover=&quot;alert(1)", "1&#39; autofocus onfocus=&#39;alert(1)",
+                   "&lt;img src=x&gt;", "a&amp;b", "42"]
+    for g in got:
+        assert '"' not in g and "'" not in g and "<" not in g
+    attr = '<button data-seq="' + got[0] + '">'                  # what refreshPending() builds
+    assert attr.count('"') == 2                                  # the attribute cannot be broken out of

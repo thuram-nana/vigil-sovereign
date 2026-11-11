@@ -108,7 +108,7 @@ def _evidence_verify(bundle: Path) -> int:
 
 def test_offense_backup_restore_roundtrip_reverifies(tmp_path):
     base = tmp_path / "src-base"
-    croot = tmp_path / "src-crucible"
+    croot = tmp_path / "src-crucible" / "framework" / "v2"        # the engine's REAL v2 root (#70c)
     _seed_offense_home(base)
     _seed_evidence_bundle(croot)
 
@@ -118,7 +118,7 @@ def test_offense_backup_restore_roundtrip_reverifies(tmp_path):
 
     # restore into FRESH dirs (simulating new hardware where the originals are gone)
     new_base = tmp_path / "restored-base"
-    new_croot = tmp_path / "restored-crucible"
+    new_croot = tmp_path / "restored-crucible" / "framework" / "v2"
     res = restore_offense_backup(dest, str(new_base), PW, crucible_root=str(new_croot))
     assert res["verified"] is True
     # the restore's OWN post-write evidence re-verify must have re-verified the bundle SOUND (exit 0 internally).
@@ -143,12 +143,12 @@ def test_corrupt_restored_evidence_byte_flips_bundle_not_sound(tmp_path):
     """Teeth check: after a clean restore, flip one byte of a restored raw evidence artifact → the bundle
     verify now exits non-zero (the certificate's artifact sha256 no longer matches). Proves the re-verify is
     real, not a rubber stamp."""
-    base, croot = tmp_path / "b", tmp_path / "c"
+    base, croot = tmp_path / "b", tmp_path / "c" / "framework" / "v2"
     _seed_offense_home(base)
     _seed_evidence_bundle(croot)
     dest = tmp_path / "o.vglbk"
     create_offense_backup(dest, PW, base_dir=str(base), crucible_root=str(croot))
-    new_base, new_croot = tmp_path / "nb", tmp_path / "nc"
+    new_base, new_croot = tmp_path / "nb", tmp_path / "nc" / "framework" / "v2"
     restore_offense_backup(dest, str(new_base), PW, crucible_root=str(new_croot))
 
     bundle = new_croot / ".console" / "runs" / RUN_ID / "bundle"
@@ -396,7 +396,7 @@ def test_expect_governance_pubkey_pin_rejects_a_wrong_key_and_accepts_the_right_
     """With `expect_pubkey`, restore refuses a manifest not signed by the pinned governance key (a forged
     backup any passphrase-holder could mint), and accepts the genuine one. Proves the pin is real authenticity,
     not decoration."""
-    base, croot = tmp_path / "b", tmp_path / "c"
+    base, croot = tmp_path / "b", tmp_path / "c" / "framework" / "v2"
     _seed_offense_home(base)
     _seed_evidence_bundle(croot)
     dest = tmp_path / "o.vglbk"

@@ -228,6 +228,11 @@ class ClaudeCodeBackend(LLMBackend):
             cognitive_sections=prompt.cognitive_sections,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            # EC-1a: this backend already folds cache tokens into tokens_in above; also record the
+            # breakdown in the provenance fields so the EC-6 margin dashboard reads claude_code's
+            # cache usage like the other Anthropic-family backends (was silently 0/0).
+            cache_creation_input_tokens=_as_int(usage.get("cache_creation_input_tokens", 0)),
+            cache_read_input_tokens=_as_int(usage.get("cache_read_input_tokens", 0)),
             latency_ms=latency_ms,
         )
 

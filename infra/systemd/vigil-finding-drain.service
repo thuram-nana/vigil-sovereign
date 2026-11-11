@@ -1,0 +1,68 @@
+# VIGIL SaaS — findings-crossing drain (systemd USER service, oneshot)
+# =====================================================================
+# Readiness slice 2. Runs ONE pass of `sigil inbound drain`: claims every inert finding/detection envelope
+# the offense side spooled, verifies each under its owner-signed delegation (fail-closed), and appends the
+# confirmed FACTs onto the owner-signed spine — from where the tenant assessment surface reads them. The
+# paired timer (vigil-finding-drain.timer) fires this on a tight cadence, so a confirmed finding crosses to
+# the customer WITHIN one cadence instead of sitting in the spool until a human runs the drain by hand.
+#
+# This is SOVEREIGN-plane (`sigil`, the %h/.sigil venv): it imports no offense engine; verification is
+# vigil_core only. There is NO network ingest endpoint — the seam is a local directory this command drains.
+# A crash mid-drain loses nothing (the drain reclaims its own working/ and de-duplicates on reclaim).
+#
+# OPT-IN: this unit is shipped but NOT enabled by bootstrap — the SaaS pipeline needs a per-deployment
+# owner-signed OFFENSE_GOVERNANCE delegation. Enable it only after you have provisioned that delegation and
+# filled ~/.config/vigil/finding-drain.env. The staleness dead-man (`vigil alerts`) watches this unit ONLY
+# when VIGIL_FINDING_DRAIN_ENABLED is set in the monitor's env, so an un-enabled host raises no false alarm.
+#
+# INSTALL (paired with the timer):
+#   cp infra/systemd/vigil-finding-drain.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-finding-drain.env.example     ~/.config/vigil/finding-drain.env
+#   $EDITOR ~/.config/vigil/finding-drain.env            # set the delegation path (ABSOLUTE); spool/scope default
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-finding-drain.timer
+#   # then arm the dead-man: add VIGIL_FINDING_DRAIN_ENABLED=1 to the MONITOR's env (~/.config/vigil/alerts.env,
+#   # NOT this drain's env — the monitor reads it there) so `vigil alerts` watches this unit before its first fire.
+
+[Unit]
+Description=VIGIL SaaS findings-crossing drain (one pass: verify + append confirmed FACTs onto the spine)
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+
+# Path DEFAULTS live HERE, in unit-file Environment= directives, NOT in the EnvironmentFile — systemd expands
+# %h in a directive value but NEVER inside an EnvironmentFile value (a %h there would reach the drain as the
+# LITERAL string "%h/..."). The env file below is loaded AFTER these, so it OVERRIDES them: put the per-
+# deployment delegation there, plus any spool/scope override as an ABSOLUTE path (the CLI refuses a relative /
+# %-bearing --spool, so a mistaken override fails LOUD rather than draining the wrong directory).
+Environment=VIGIL_FINDING_SPOOL=%h/.sigil/spool/findings
+Environment=VIGIL_FINDING_SCOPE=*
+EnvironmentFile=-%h/.config/vigil/finding-drain.env
+WorkingDirectory=%h/.sigil
+
+# One drain pass (the timer owns the cadence). --governance-delegation authorizes FINDINGS; add
+# --spine-delegation ${VIGIL_FINDING_SPINE_DELEGATION} too if this host also crosses detection FACTs.
+ExecStart=%h/.sigil/venv/bin/sigil inbound drain --spool ${VIGIL_FINDING_SPOOL} --governance-delegation ${VIGIL_FINDING_GOV_DELEGATION} --scope ${VIGIL_FINDING_SCOPE}
+
+# --- heartbeat + staleness alarm (W8-1) ------------------------------------
+# Record that this unit RAN (and its SERVICE_RESULT) so `vigil alerts` raises a staleness alarm if the timer
+# stops firing, or a failure alarm if a drain errors. The heartbeat tool lives in the offense venv.
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
+# --- hardening -------------------------------------------------------------
+# The drain reads the local spool and WRITES the sovereign spine + its heartbeat, both under ~/.sigil. Network
+# is NOT locked down: unwrapping a KMS-sealed owner KEK (VIGIL_KEK_BACKEND=kms) needs an outbound aws kms call.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: if SIGIL_HOME is set to a non-default path in finding-drain.env, add it to ReadWritePaths above.

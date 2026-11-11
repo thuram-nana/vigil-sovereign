@@ -34,7 +34,19 @@ distinguish them: it RAISES on a transient / ambiguous failure (network error, t
 returns None / a non-"successful" object ONLY for a DEFINITIVE answer. Under that contract a transient failure
 propagates as an exception and this drain QUARANTINES the envelope to ``rejected/`` (recoverable — it can be
 moved back to ``incoming/`` and re-drained once the provider is reachable), whereas a definitive no-op archives
-to ``processed/`` (correctly final). A verifier that instead swallowed a transient error into None would let the
+to ``processed/`` (correctly final).
+
+NET-2b (#73, DEFAULT-OFF behind ``VIGIL_NET_RECOVERY_ENABLED``): a provider blip should not need an operator. With
+the flag ON, a failure the egress marks RETRY-CURABLE (``FlutterwaveEgressError.transient`` — a transport fault or
+an HTTP 408/425/429/5xx; nothing else, so a forged / malformed / plan-alarm / spine failure still quarantines on
+sight) is DEFERRED to ``retry/`` with a small ``<name>.state`` ledger, and re-admitted to ``incoming/`` on the
+SHARED NET-2 schedule (``live.net_recovery``: 5 s doubling to 5 min, at most 8 retries per envelope ≈ 15 min).
+Once that bound is spent the envelope is QUARANTINED exactly as before (and the unit alarms), so a provider that
+stays down still reaches an operator. Nothing is minted on a deferred pass, and a re-admitted envelope re-enters
+the SAME claim / sha256-dedup / ``event_id``-idempotent path, so a retry can never double-credit. Fail-safe: an
+unreadable ledger, a bad clock, or a failed move resolves toward quarantine (today's behaviour), never an unbounded
+retry; and every pass re-admits ``retry/`` whatever the flag, so turning it OFF strands nothing. OFF and with no
+``retry/`` directory the drain is byte-identical to before. A verifier that instead swallowed a transient error into None would let the
 drain treat a real payment as a final no-op and bury it — which is why the contract is RAISE-on-transient. The
 backstop for any residual gap is periodic RECONCILIATION (sweep recent tx_refs against the provider and mint any
 missed) — the provider's CAP_RECONCILE capability, a later slice. This is a money-SAFE direction either way: the
@@ -91,6 +103,9 @@ class BillingSpoolWatcher:
         for d in (self.incoming, self.working, self.processed, self.rejected):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
+        # NET-2b: envelopes awaiting a bounded transient-verify retry. Created ONLY by a deferral (flag ON), so an
+        # OFF drain leaves the spool tree byte-identical.
+        self.retry = self.spool / "retry"
 
     # -- ingest one envelope (fail-closed) ---------------------------------------------------------
     def _ingest_text(self, text: str) -> Optional[int]:
@@ -169,8 +184,157 @@ class BillingSpoolWatcher:
         except OSError:
             pass
 
+    def _reclaim_working(self) -> None:
+        """Crash recovery (money nothing-lost) — the parity this drain was missing vs its finding/settle siblings.
+        ``drain`` CLAIMS a file into ``working/`` (atomic rename out of ``incoming/``) BEFORE it ingests; if the
+        daemon dies between that claim and the archive, the file is STRANDED in ``working/`` — out of ``incoming/``
+        so no future drain sees it, and not in ``processed/`` so it was never minted. A genuinely-paid webhook is
+        then SILENTLY LOST (the proxy already 202'd it, so the provider never redelivers). Move every such file
+        back to ``incoming/`` at the START of each drain so the next pass re-processes it. Re-ingest is idempotent
+        TWICE over — the ``processed/<sha256>`` dedup marker AND ``BillingSigner.ingest``'s own ``event_id`` — so a
+        file reclaimed AFTER it already minted credits exactly once. NEVER unlink on a failed move: a webhook that
+        cannot be reclaimed stays in ``working/`` for the next sweep rather than being destroyed (under-crediting a
+        paid tenant is recoverable; destroying a paid webhook is not)."""
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return
+        for f in stale:
+            if f.name.startswith(".tmp-"):
+                continue
+            try:
+                os.replace(f, self.incoming / f.name)
+            except OSError:
+                pass   # leave it in working/ for a later sweep — never destroy a paid webhook
+
+    # -- NET-2b: bounded auto-retry of a transient provider failure (default-OFF) ---------------------
+    @staticmethod
+    def _recovery_on() -> bool:
+        """``VIGIL_NET_RECOVERY_ENABLED`` via the shared NET-2 reader. Any import / read fault reads OFF (today's
+        quarantine-on-sight behaviour) — the fail-safe direction."""
+        try:
+            from vigil_integration.live.net_recovery import recovery_enabled
+            return recovery_enabled() is True
+        except Exception:  # noqa: BLE001 — a missing / broken reader must never turn retries ON
+            return False
+
+    @staticmethod
+    def _is_transient(exc: BaseException) -> bool:
+        """True ONLY for a failure the outbound egress explicitly marked retry-curable. Anything else — a raw
+        ``OSError`` from a spine write, ``UnaccountedPayment`` (the plan alarm), a guard refusal — is NOT."""
+        from ..governor.flutterwave_egress import FlutterwaveEgressError
+        return isinstance(exc, FlutterwaveEgressError) and exc.transient is True
+
+    def _state_path(self, name: str) -> Path:
+        return self.retry / (name + ".state")
+
+    def _read_attempts(self, name: str) -> Optional[int]:
+        """Retries already spent on ``name`` (0 when it has no ledger). None when a ledger EXISTS but cannot be
+        trusted (unreadable / malformed / out of range) — the caller treats that as the budget being spent."""
+        sp = self._state_path(name)
+        if not sp.exists() and not sp.is_symlink():
+            return 0
+        try:
+            obj = json.loads(self._read_regular(sp))
+            n = obj["attempts"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            return None
+        return n
+
+    def _clear_state(self, name: str) -> None:
+        """Drop ``name``'s retry ledger once the envelope is final (archived, deduped or quarantined)."""
+        self._safe_unlink(self._state_path(name))
+
+    def _readmit_retries(self, *, recovery_on: bool) -> None:
+        """Move every DUE envelope in ``retry/`` back to ``incoming/`` (flag OFF: every one, so turning the flag
+        off strands nothing). A ledger that is unreadable or whose time cannot be compared re-admits NOW — the
+        bound is enforced at the next failure, where an untrusted ledger counts as spent. A remaining wait LONGER
+        than the schedule's cap (a wall clock stepped backwards, or a tampered ``next_at``) is impossible by
+        construction and also re-admits NOW, so no paid webhook can sit parked — healthy, un-alarmed — for longer
+        than one capped delay. A collision with a same-named file already in ``incoming/`` waits a pass (never
+        overwrites a pending webhook)."""
+        if not self.retry.is_dir():
+            return
+        try:
+            parked = sorted(self.retry.glob("*.json"))
+        except OSError:
+            return
+        now = self._now()                                # a bool / NaN / non-number clock fails the window test
+        cap = None                                       # below (or raises into the except) => re-admit NOW
+        if recovery_on:
+            try:
+                from vigil_integration.live.net_recovery import BoundedBackoff
+                cap = BoundedBackoff().cap
+            except Exception:  # noqa: BLE001 — without the schedule nothing can be proven "not yet due"
+                cap = None
+        for f in parked:
+            if f.name.startswith(".tmp-"):
+                continue
+            if recovery_on and cap is not None:
+                try:
+                    due_at = json.loads(self._read_regular(self._state_path(f.name)))["next_at"]
+                    if (isinstance(due_at, (int, float)) and not isinstance(due_at, bool)
+                            and 0.0 < float(due_at) - float(now) <= cap):
+                        continue                         # not yet due (and a plausible wait) — leave it parked
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass                                 # untrusted ledger -> re-admit now (bound enforced later)
+            dest = self.incoming / f.name
+            if dest.exists() or dest.is_symlink():
+                continue
+            try:
+                os.replace(f, dest)
+            except OSError:
+                pass                                     # stays parked for a later pass — never destroyed
+
+    def parked_count(self) -> int:
+        """How many webhooks currently wait in ``retry/`` for a bounded NET-2b retry (0 when there is none)."""
+        try:
+            return sum(1 for f in self.retry.glob("*.json") if not f.name.startswith(".tmp-"))
+        except OSError:
+            return 0
+
+    def _defer(self, claimed: Path, exc: BaseException) -> str:
+        """Park a transiently-failed envelope for a bounded retry. Returns ``"deferred"`` when parked, else a
+        quarantine REASON (the bound is spent, or the deferral itself could not be made safely)."""
+        from vigil_integration.live.net_recovery import BoundedBackoff
+        name = claimed.name
+        attempts = self._read_attempts(name)
+        policy = BoundedBackoff()
+        if attempts is None:
+            return (f"rejected (transient {type(exc).__name__} and an untrusted NET-2b retry ledger — not "
+                    f"retried): {exc}")
+        policy.attempts = attempts
+        if policy.exhausted:
+            return (f"rejected (transient {type(exc).__name__} persisted through {attempts} bounded NET-2b "
+                    f"retries): {exc}")
+        now = self._now()
+        if isinstance(now, bool) or not isinstance(now, (int, float)) or now != now or now in (float("inf"),
+                                                                                              float("-inf")):
+            return f"rejected (transient {type(exc).__name__}; clock unreadable — not retried): {exc}"
+        parked = self.retry / name
+        if parked.exists() or parked.is_symlink():          # never clobber a DIFFERENT parked webhook of the
+            return (f"rejected (transient {type(exc).__name__}; a same-named envelope is already awaiting a "
+                    f"NET-2b retry — not overwritten): {exc}")          # same name (quarantine = recoverable)
+        state = {"attempts": attempts + 1, "next_at": float(now) + policy.next_delay(),
+                 "last_error": f"{type(exc).__name__}: {exc}"[:500]}
+        try:
+            self.retry.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.retry, 0o700)
+            tmp = self.retry / (".tmp-" + name + ".state")
+            tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, self._state_path(name))      # ledger FIRST: a crash before the park below leaves the
+            os.replace(claimed, parked)                  # file in working/ (reclaimed next pass, budget counted)
+        except OSError as oexc:
+            return f"rejected (transient {type(exc).__name__}; NET-2b deferral failed: {oexc}): {exc}"
+        return "deferred"
+
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {minted, noop, rejected, deduped, seqs}.
+
+        Begins with a crash-recovery sweep (``_reclaim_working``) that returns any file stranded in ``working/``
+        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook.
 
         For each file: CLAIM it (atomic rename into ``working/``) BEFORE acting, so a failed archive or a re-run
         can never re-read it from ``incoming/`` and double-process. Read it as a bounded regular UTF-8 file, then
@@ -178,7 +342,12 @@ class BillingSpoolWatcher:
         handled (``processed/<sha256>`` exists) is archived WITHOUT re-ingesting. Otherwise run the signer; a
         mint (seq) or a safe no-op (None) both archive to ``processed/`` (handled). ANY failure ⇒ ``rejected/``,
         nothing appended. Never raises on one bad file; never blocks on a hostile one."""
+        self._reclaim_working()                          # crash recovery: re-admit any working/ file a prior
+        #                                                  drain claimed-but-never-archived (money nothing-lost)
+        recovery_on = self._recovery_on()
+        self._readmit_retries(recovery_on=recovery_on)   # NET-2b: due parked envelopes rejoin incoming/
         minted, noop, rejected, deduped, seqs = 0, 0, 0, 0, []
+        deferred = 0
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
                 continue                                 # a producer's in-flight temp; skip until renamed in
@@ -199,16 +368,26 @@ class BillingSpoolWatcher:
                     os.replace(claimed, marker)          # archive the duplicate over its identical marker
                 except OSError:
                     self._safe_unlink(claimed)
+                self._clear_state(claimed.name)
                 deduped += 1
                 continue
             try:
                 seq = self._ingest_text(text)
             except BillingSpoolError as exc:
                 self._quarantine(claimed, f"rejected (fail-closed): {exc}")
+                self._clear_state(claimed.name)
                 rejected += 1
                 continue
             except Exception as exc:  # noqa: BLE001 — any unexpected error is still a refusal, never an append
-                self._quarantine(claimed, f"rejected (unexpected {type(exc).__name__}): {exc}")
+                reason = f"rejected (unexpected {type(exc).__name__}): {exc}"
+                if recovery_on and self._is_transient(exc):
+                    outcome = self._defer(claimed, exc)  # NET-2b: park for a bounded retry, nothing minted
+                    if outcome == "deferred":
+                        deferred += 1
+                        continue
+                    reason = outcome
+                self._quarantine(claimed, reason)
+                self._clear_state(claimed.name)
                 rejected += 1
                 continue
             # handled (minted or a safe no-op). Archive to the dedup marker. If the archive fails the record is
@@ -218,17 +397,29 @@ class BillingSpoolWatcher:
                 os.replace(claimed, marker)
             except OSError:
                 self._safe_unlink(claimed)
+            self._clear_state(claimed.name)
             if seq is None:
                 noop += 1
             else:
                 minted += 1
                 seqs.append(seq)
-        return {"minted": minted, "noop": noop, "rejected": rejected, "deduped": deduped, "seqs": seqs}
+        out = {"minted": minted, "noop": noop, "rejected": rejected, "deduped": deduped, "seqs": seqs}
+        if recovery_on:
+            out["deferred"] = deferred                   # NET-2b only: the OFF result shape is unchanged
+        return out
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
-        """Drain in a loop until ``stop`` (a threading.Event) is set."""
+        """Drain in a loop until ``stop`` (a threading.Event) is set. A single bad drain NEVER kills the money
+        daemon: an unexpected error OUTSIDE the per-file loop (a transient spine / IO / directory fault) is
+        reported to stderr and the loop continues — so the billing-ingress daemon survives a transient blip
+        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator."""
+        import sys as _sys
         while True:
-            self.drain()
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                _sys.stderr.write("vigil billing-drain: WARNING drain error (continuing): "
+                                  f"{type(exc).__name__}: {exc}\n")
             waiter = getattr(stop, "wait", None)
             if stop is not None and waiter is not None:
                 if waiter(interval):

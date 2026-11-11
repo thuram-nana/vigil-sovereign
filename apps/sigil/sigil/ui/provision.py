@@ -49,6 +49,9 @@ _ORG_ID_PREFIX = "org_"
 # run_engagement) and `owner` — a customer can never hand a teammate any offense‑adjacent or global
 # authority (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
+# The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
+# so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
+_NOTIF_MAX = 100
 
 
 class ProvisionError(Exception):
@@ -111,6 +114,44 @@ def _federated_org_id(iss: str, sub: str) -> str:
     """The org id a Google auto-provision DETERMINISTICALLY maps to (pure function of `(iss, sub)`,
     domain-separated `"fo:"`). A valid `_TENANT_RE` tenant id; idempotent re-target on a retry."""
     return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
+
+
+def _sign_monitoring(owner_key, grant):
+    """Owner-sign the publishable ``SignedMonitoringAuthority`` for an ACTIVE registry grant. The private key
+    is used only inside ``sign_monitoring_authority`` and never written anywhere."""
+    from datetime import datetime, timezone
+    from vigil_core.monitoring_authority import (MonitoringAuthority, MonitoringMode,
+                                                 sign_monitoring_authority)
+    if owner_key is None:
+        raise ValueError("minting a monitoring authority requires the owner key")
+    doc = MonitoringAuthority(
+        org_id=grant.org_id, host=grant.host, mode=MonitoringMode(grant.mode),
+        not_before=datetime.fromtimestamp(grant.not_before, tz=timezone.utc),
+        not_after=datetime.fromtimestamp(grant.not_after, tz=timezone.utc), issued_by="owner")
+    return sign_monitoring_authority(doc, {"owner": owner_key.private_key_b64})
+
+
+def _publish_monitoring(base, org_id: str, host: str, data: bytes):
+    """Atomically publish signed public bytes: 0700 dir, 0600 temp file in the same dir, fsync, rename."""
+    import os
+    from pathlib import Path
+    d = Path(base)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    from ..governor.monitoring_authority import monitoring_filename
+    final = d / monitoring_filename(org_id, host)
+    tmp = d / (".tmp-" + secrets.token_hex(8))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return final
 
 
 class Provisioner:
@@ -178,7 +219,7 @@ class Provisioner:
         return nxt
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
-               outcome: str = "", reason: str = "", critical: bool = False) -> None:
+               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False) -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -188,10 +229,15 @@ class Provisioner:
         the transaction lock, before the signup commit marker, so a committed signup is always audited.
         Only NON-critical telemetry (`critical=False`, e.g. a login outcome) swallows a write failure,
         following a separate availability policy."""
-        payload = {
+        payload: "dict[str, object]" = {
             "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
             "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
             "reason": str(reason)[:160]}
+        if attestation:
+            # The customer's inline "I am authorized to test this asset" affirmation, recorded on the
+            # owner-signed append-only spine as the tamper-evident legal attestation (control of a host is not
+            # the same as legal authority to test it) — bound to requester + org + target + this record's ts.
+            payload["authorization_affirmed"] = True
         if critical:
             self.store.append(kind="event", source="provision", actor="WARDEN", payload=payload)  # may raise ⇒ fail-closed
             return
@@ -771,15 +817,25 @@ class Provisioner:
                 "meta_tag": ch.meta_tag, "marker": ch.marker}
 
     def launch_reserve(self, requester: str, requester_org_id: str, host: str, *,
-                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+                       product_id: str = "", ip: str = "", mfa_at: float = 0.0,
+                       now: "Optional[float]" = None) -> dict:
         """Reserve credits + mint a launch lease for ONE offense launch against (org, host). Delegates to the
         LaunchGate, which composes admit_customer(run_engagement) + a current ownership proof + a verifying
         owner-signed EngagementAuthority + a sufficient credit balance, then reserves + mints under the spine
-        lock. requester/org are the SERVER-authenticated session principal (never body fields); the credit
-        `units` are SERVER-decided (``config.LAUNCH_UNITS``), never customer-supplied (money doctrine). Returns
-        the signed lease for the edge to relay; the offense launch verifies it before any traffic."""
+        lock. requester/org are the SERVER-authenticated session principal (never body fields).
+
+        The credit ``units`` are SERVER-decided and never a customer-supplied amount (money doctrine). EC-7b:
+        a customer MAY pick a tiered launch PRODUCT (``product_id`` — e.g. the Quick/Deep scan); the units it
+        reserves come from the OWNER CATALOG (``catalog.launch_product``), exactly as ``price_id`` maps to
+        credits — the customer names a product, never a number. An unknown / not-offered ``product_id`` is
+        REFUSED fail-closed (never a silent fallback to a different tier). No ``product_id`` ⇒ the default
+        per-launch units (``config.LAUNCH_UNITS``), byte-identical to pre-EC-7b. The run tier is then DERIVED
+        at engage time from these signed units (vigil_core.run_tier), so the product choice flows through the
+        already-signed ``units_reserved`` — no new signed field. Returns the signed lease for the edge to
+        relay; the offense launch verifies it before any traffic."""
         t = self._now() if now is None else float(now)
         from .. import config
+        from ..governor import catalog
         from .launch_gate import LaunchGate
         # E3c red-pen fold: gate step-up AFTER authority, never before (non-negotiable #5 — a non-member is
         # refused by admit, NOT told to step up) and consistent with launch_cancel/launch_start. launch_reserve
@@ -793,16 +849,176 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not launch assessments for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: AFTER admit (no-op unless enforcement is on)
+        # EC-7b: resolve the reserved units from the chosen PRODUCT via the owner catalog (AFTER authz).
+        # Fail-closed on an unknown / not-offered product; empty product_id keeps the default units.
+        units = int(config.LAUNCH_UNITS)
+        pid = str(product_id or "").strip()
+        if pid:
+            product = catalog.launch_product(pid)    # None when unknown, not offered, or EC-7 flag off
+            if product is None:
+                self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied(f"unknown or unavailable launch product: {pid!r}")
+            units = int(product.units)
         r = LaunchGate(self.store).reserve_launch(
-            requester=requester, org_id=requester_org_id, host=host, units=config.LAUNCH_UNITS, now=t)
+            requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
         if not r.get("ok"):
             self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
                         target=host, outcome="denied")
             raise ProvisionDenied(str(r.get("error") or "launch reservation refused"))
         self._audit("launch_reserve", requester=requester, org_id=requester_org_id, target=host,
                     outcome="reserved", critical=True)
-        return {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
-                                  "lease", "trust_root") if k in r}
+        out = {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
+                                 "lease", "trust_root") if k in r}
+        if pid:
+            out["product_id"] = pid                  # echo the resolved product for the edge/UI
+        return out
+
+    # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
+    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    _CHECKOUT_MAX = 10
+    _CHECKOUT_WINDOW_S = 600.0
+
+    def _checkout_rate_ok(self, keys, now: float) -> bool:
+        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
+        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
+        win = self.__dict__.setdefault("_checkout_attempts", {})
+        cutoff = now - self._CHECKOUT_WINDOW_S
+        for k in keys:
+            win[k] = [t for t in win.get(k, []) if t > cutoff]
+        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+            return False
+        for k in keys:
+            win[k].append(now)
+        return True
+
+    def _checkout_provider(self):
+        """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
+        processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
+        verif-hash secret and the processor key are read from the environment and never logged or returned."""
+        import os as _os
+        secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
+        if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
+            return None
+        from ..governor import flutterwave_egress as fe
+        from ..governor.billing import FlutterwaveBillingProvider
+        return FlutterwaveBillingProvider(secret, fe.make_transaction_verifier(),
+                                          checkout_creator=fe.make_checkout_creator())
+
+    @staticmethod
+    def _checkout_offered() -> "tuple[dict, dict]":
+        """The ONE definition of what a customer may buy through hosted checkout: ``(offered, entitlements)``
+        where ``offered`` is ``{price_id: (amount_minor, currency)}`` from the OWNER catalog. Shared by
+        ``billing_checkout`` (which refuses anything outside it) and the ``billing_offers`` read (which lists
+        exactly it), so the UI can never show a buy button that checkout would refuse. Top-ups always; credit
+        SUBSCRIPTION plans only with the extra plan flag; NEVER the AEGIS monitoring plans (the billing drain
+        does not wire the monitoring line, so one would be charged for nothing)."""
+        from .. import config
+        from ..governor import catalog
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP
+        ents = catalog.entitlements()
+        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
+        monitoring = catalog.monitoring_price_ids()
+        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                   if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        return offered, ents
+
+    def _org_has_live_plan(self, org_id: str, t: float) -> bool:
+        """True iff the org already holds a credit plan that is active or past_due and not yet expired — the
+        CHK-1b double-billing guard (checkout refuses a second plan; the offers read reports it so the UI does not
+        offer one)."""
+        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
+        cur = SubscriptionRegistry(self.store).subscription(org_id)
+        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+
+    def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                now: "Optional[float]" = None) -> dict:
+        """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
+        like checkout: the checkout flag (default-OFF), then ``admit_customer(manage_billing)`` for the SESSION org
+        (a role that cannot spend money is not shown a price list it cannot use). Lists precisely the shared
+        ``_checkout_offered`` set (owner catalog prices — never a client-supplied amount) and whether the org
+        already holds a live plan (so the UI offers top-ups only, matching checkout's second-plan refusal). Reads
+        only: mints nothing, touches no owner key."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+
+        def project(_store, org_id: str) -> dict:
+            from ..governor import catalog
+            offered, _ents = self._checkout_offered()
+            items = [p for p in catalog.plans() if p.get("price_id") in offered]
+            return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
+                    "plans_enabled": bool(config.customer_plan_checkout_enabled())}
+        return self._customer_read(requester, requester_org_id, "manage_billing", project)
+
+    def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
+                         mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """Front B CHK-1 — open a HOSTED CHECKOUT so a customer can pay for a catalog item (top-up / plan).
+
+        Gated on ``customer_checkout_enabled()`` (default-OFF → unknown-action 404), then ADMIT-FIRST:
+        ``admit_customer(manage_billing)`` binds the requester to THEIR org (``create_checkout`` binds the org into
+        the tx_ref but explicitly does NOT authorize — this is the edge it delegates to; an ``operator`` who runs
+        tests cannot spend money, a billing ``org_admin`` can, billing-authz != testing-authz), then a fresh
+        step-up and a per-org / per-requester rate limit. MONEY DOCTRINE: the customer names only a catalog
+        ``price_id``; the AMOUNT is the owner catalog's, an unknown price is refused, and NOTHING is credited here —
+        credit comes ONLY from the verified inbound webhook drain. TOP-UPS ONLY (red-pen HIGH): a subscription plan
+        sold through this ONE-TIME payment would carry no ``payment_plan``, so the inbound mapper would treat it as a
+        top-up of a non-top-up price and mint NOTHING — the customer charged, granted nothing. Plans need the
+        recurring payment-plan flow (a separate slice), so only ``topup_purchased`` entries are offered. Fail-closed: flag off, not admitted, no step-up, processor not
+        provisioned, an invalid return URL, or any provider refusal raises ``ProvisionDenied``."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_billing"):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage billing for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
+                raise ProvisionDenied("too many checkout attempts — try again later")
+        try:
+            return_url = config.customer_billing_return_url()
+        except ValueError as exc:
+            raise ProvisionDenied(str(exc)) from None
+        provider = self._checkout_provider()
+        if provider is None:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
+            raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, UnsupportedCapability
+        # The ONE shared offered set (top-ups; plans only with the plan flag; never monitoring) — the
+        # billing_offers read lists exactly this, so the UI and checkout cannot disagree.
+        offered, ents = self._checkout_offered()
+        is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
+        if is_plan and str(price_id) in offered:
+            # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
+            # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
+            # org already holds a credit plan that is active or past_due and not yet expired.
+            if self._org_has_live_plan(requester_org_id, t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan")
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
+        # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
+        # opaque ids, never emails) — the account's OWN registered address, never a body field.
+        acct = self.customers.customer(requester) if self.customers is not None else None
+        email = getattr(acct, "email", None) or None
+        try:
+            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
+                                            customer_email=email, redirect_url=return_url,
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
+        except (UnsupportedCapability, ValueError) as exc:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                        target=str(price_id or ""), outcome="refused")
+            raise ProvisionDenied(f"checkout refused: {exc}") from None
+        self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
+                    outcome="created", critical=True)
+        return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
+                "amount_minor": sess.amount_minor, "currency": sess.currency}
 
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
@@ -891,6 +1107,224 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
 
+    def launch_pause(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                     mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — PAUSE a customer launch (reversible operator halt). Gated on
+        ``customer_pause_resume_enabled()`` (default-OFF → the action is a 404 unknown-action), then
+        ``admit_customer(run_engagement)`` + tenant-bind (the lease's org MUST match the session org) + a fresh
+        step-up, exactly like ``launch_cancel``/``launch_start``. Records a ``(slug, nonce)`` pause marker via
+        ``LaunchGate.pause_launch`` — pausing moves NO money; the money-safety (held, re-admitted on resume) is
+        the already-merged PR-1..PR-4a plumbing. Valid at ANY lifecycle stage (reserved / started / running):
+        a paused lease is refused at the arm + enqueue chokepoints and held until resume."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_pause", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+        r = LaunchGate(self.store).pause_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch pause refused"))
+        self._audit("launch_pause", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="paused", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+
+    def launch_resume(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                      mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — RESUME a paused customer launch: clear the ``(slug, nonce)`` pause marker so the
+        SAME lease re-arms and the held delivery re-admits (never re-burning the single-use floor). Same gates as
+        ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
+        launch is a harmless no-op."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_resume", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)
+        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch resume refused"))
+        self._audit("launch_resume", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="resumed", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+
+    # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
+    def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
+        """Flag gate (default OFF) then ``admit_customer`` on the SESSION org. Caller holds the lock."""
+        from .. import config
+        if not config.customer_monitoring_enabled():
+            raise ProvisionDenied("customer monitoring is not enabled on this deployment")
+        if not self.orgs.admit_customer(username=requester, org_id=org_id, permission=permission):
+            self._audit(action, requester=requester, org_id=org_id, target=host, outcome="denied")
+            raise ProvisionDenied("requester may not manage monitoring for this org")
+
+    def _monitor_plan_admit(self, reg, org_id: str, host: str, mode: str, now: float) -> float:
+        """AE-5 billing gate (server-side; the CATALOG decides money): the session org needs an ACTIVE, in-period
+        MONITORING subscription (its own line, never the credit plan) with a free host slot (re-authorizing an
+        already-granted host reuses its slot; a slot is held only by a grant that is ``active_at`` — window +
+        current matching ownership proof), and mode=block needs a plan tier that includes respond. Returns the
+        plan's ``period_end`` (the grant is clamped to it). Raises ValueError (refused + audited)."""
+        from ..governor.asset_ownership import _check_host
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_authority import MODE_BLOCK
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            raise ValueError("an active monitoring plan is required")
+        if mode == MODE_BLOCK and not plan.respond:
+            raise ValueError("block mode requires a monitoring plan that includes respond")
+        h = _check_host(host)
+        used = {g.host for g in reg.grants(org_id) if reg.active_at(org_id, g.host, now=now) is not None} - {h}
+        if len(used) >= plan.host_slots:
+            raise ValueError("no free protected-host slot on the monitoring plan")
+        return float(sub.period_end)
+
+    def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
+                          window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Owner-sign + publish a DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag →
+        ``admit_customer(manage_monitoring)`` (org_admin; never run_engagement/offense) → step-up → registry
+        grant (requires a CURRENT ownership proof, clamped to its expiry) → owner-signed
+        ``SignedMonitoringAuthority`` published atomically for the keyless gateway. The window is SERVER-
+        decided (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it. A BLOCK grant turns
+        on NO enforcement by itself (AE-3 gates enforcement per request)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry, _check_mode
+        with self._lock:
+            self._monitor_admit("monitor_authorize", requester, requester_org_id, host, "manage_monitoring")
+            self._require_stepup(mfa_at, now=t)      # AFTER admit (no-op unless enforcement is on)
+            window = float(config.MONITORING_WINDOW_SECONDS)
+            if window_s is not None:
+                if isinstance(window_s, bool):
+                    raise ProvisionError("window_s must be a positive number of seconds")
+                try:
+                    asked = float(window_s)
+                except (TypeError, ValueError):
+                    raise ProvisionError("window_s must be a positive number of seconds") from None
+                if not math.isfinite(asked) or asked <= 0.0:
+                    raise ProvisionError("window_s must be a positive number of seconds")
+                window = min(window, asked)          # the client may only ask for SHORTER
+            try:
+                m = _check_mode(mode)
+                reg = MonitoringAuthorityRegistry(self.store)
+                period_end = self._monitor_plan_admit(reg, requester_org_id, host, m, t)
+                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=min(t + window, period_end),
+                              now=t, issued_at=self._next_issued())
+            except ValueError as e:
+                self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            try:
+                signed = _sign_monitoring(reg.owner_key, g)
+                path = _publish_monitoring(config.monitoring_publish_dir(), g.org_id, g.host,
+                                           signed.model_dump_json().encode("utf-8"))
+            except Exception as e:  # noqa: BLE001 — fail-closed: never leave an active-but-unpublished grant
+                reg.revoke(g.org_id, g.host)
+                self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=g.host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not publish the monitoring authority: {type(e).__name__}") from e
+            self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=g.host,
+                        outcome=f"granted_{g.mode}", critical=True)
+        return {"org_id": g.org_id, "host": g.host, "mode": g.mode, "not_before": g.not_before,
+                "not_after": g.not_after, "published": path.name, "authority": signed.model_dump(mode="json")}
+
+    def monitor_plan_changed(self, org_id: str, *, now: "Optional[float]" = None) -> dict:
+        """The monitoring subscription for ``org_id`` changed (new plan / renewal): enforce the CURRENT plan on
+        the org's existing grants. Retire (revoke + unpublish) what the plan no longer pays for, then RE-MINT —
+        owner key, provisioner path, republished — each surviving grant minted in a PRIOR period, with the new
+        window (clamped to the plan's period_end and the ownership proof), so monitoring continues across
+        periods. Owner/billing-driven (no tenant session); flag-gated like every monitoring path."""
+        from .. import config
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry, plan_enforcement
+        if not config.customer_monitoring_enabled():
+            raise ProvisionDenied("customer monitoring is not enabled on this deployment")
+        t = self._now() if now is None else float(now)
+        retired: list[str] = []
+        renewed: list[str] = []
+        with self._lock:
+            reg = MonitoringAuthorityRegistry(self.store)
+            retire, renew, sub = plan_enforcement(
+                self.store, org_id, now=t, subscriptions=MonitoringSubscriptionRegistry(self.store, owner_key=None),
+                authority=reg)
+            for h in retire:
+                reg.retire(org_id, h)
+                retired.append(h)
+            for old in renew:
+                try:
+                    g = reg.grant(org_id, old.host, mode=old.mode, not_before=t,
+                                  not_after=min(t + float(config.MONITORING_WINDOW_SECONDS), float(sub.period_end)),
+                                  now=t, issued_at=self._next_issued())
+                    signed = _sign_monitoring(reg.owner_key, g)
+                    _publish_monitoring(config.monitoring_publish_dir(), g.org_id, g.host,
+                                        signed.model_dump_json().encode("utf-8"))
+                except Exception:  # noqa: BLE001 — fail-closed: a grant that cannot be renewed is retired
+                    reg.retire(org_id, old.host)
+                    retired.append(old.host)
+                    continue
+                renewed.append(g.host)
+            for h in retired:
+                self._audit("monitor_plan_enforce", requester="owner", org_id=org_id, target=h,
+                            outcome="retired", critical=True)
+            for h in renewed:
+                self._audit("monitor_plan_enforce", requester="owner", org_id=org_id, target=h,
+                            outcome="renewed", critical=True)
+        return {"org_id": org_id, "retired": retired, "renewed": renewed}
+
+    def monitor_revoke(self, requester: str, requester_org_id: str, host: str, *, ip: str = "",
+                       now: "Optional[float]" = None) -> dict:
+        """Revoke (the SAFE direction) + unpublish one (session org, host) grant. Idempotent; admit-gated so
+        a tenant can only revoke ITS OWN org's grants. No step-up (revoking only ever reduces authority)."""
+        from .. import config
+        from ..governor.asset_ownership import _check_host
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_revoke", requester, requester_org_id, host, "manage_monitoring")
+            try:
+                h = _check_host(host)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            was_active = reg.grant_for(requester_org_id, h) is not None
+            from ..governor.monitoring_authority import unpublish
+            removed = unpublish(requester_org_id, h, config.monitoring_publish_dir())
+            if was_active:
+                reg.revoke(requester_org_id, h)
+            self._audit("monitor_revoke", requester=requester, org_id=requester_org_id, target=h,
+                        outcome="revoked" if was_active else "noop", critical=True)
+        return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
+
+    def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                     now: "Optional[float]" = None) -> dict:
+        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership)."""
+        t = self._now() if now is None else float(now)
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_list", requester, requester_org_id, "", "read")
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            rows = [{"host": g.host, "mode": g.mode, "not_before": g.not_before, "not_after": g.not_after,
+                     "active": reg.active_at(requester_org_id, g.host, now=t) is not None}
+                    for g in reg.grants(requester_org_id)]
+        return {"org_id": requester_org_id, "grants": rows}
+
+    def monitor_events(self, requester: str, requester_org_id: str, *, ip: str = "", limit: int = 200) -> dict:
+        """The SESSION org's drained AEGIS monitoring events (gateway-reported; org-scoped read)."""
+        from ..inbound.monitoring_spool import monitoring_events
+        with self._lock:
+            self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
+        return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
     # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
     def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:
         """Shared gate for a customer-plane READ: ``admit_customer(permission)`` for the SESSION org (NO
@@ -934,10 +1368,150 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
 
+    def customer_notifications(self, requester: str, requester_org_id: str, *, ip: str = "",
+                               now: "Optional[float]" = None) -> dict:
+        """The SESSION org's actionable notifications, aggregated ACROSS only the surfaces the requester is
+        entitled to read and ranked most-severe-first — the read behind the customer notification centre.
+
+        Four sources, each behind its OWN permission (no global leg), skip-on-deny so a role sees exactly
+        what it may read and nothing else (a billing-only admin never sees assessment findings, and vice
+        versa; a non-member / revoked member gets an empty list, never another tenant's data):
+          * oracle-confirmed assessment FINDINGS       (view_assessments)
+          * BILLING standing — dunning / lapsed / exhausted, derived from owner-signed spine STATES only
+            (past_due & canceled are signed subscription statuses; zero credits is the natural floor — NO
+            invented threshold decides a notification)                              (view_billing)
+          * confirmed/lead AEGIS MONITORING alerts, only when monitoring is enabled AND permitted (reuses
+            ``monitor_events``' own flag+admit gate; its fail-closed refusal simply contributes nothing).
+          * assessment OUTCOMES (NTF-3) — a verified completion/cancellation/failure SETTLED a run, so a
+            COMPLETED run with ZERO findings and a FAILED/CANCELED run (not charged) are no longer silent (a
+            run that never reaches the settle seam is NTF-1/2's stranded-run scope). Written by the settle
+            drain, tenant-scoped inside the projector; carries NO amount  (view_assessments)
+
+        Each item is ``{id, kind, severity, title, body, ts}`` with a STABLE id (``finding:<ref>`` /
+        ``billing:<state>`` / ``monitor:<report_id>`` / ``outcome:<slug>:<nonce>``) the edge/UI uses for
+        read-tracking — no timestamp is invented for a finding (its cert carries none). ``org_id`` is the
+        hop-bound session principal, NEVER a body field, so org A can never read org B. A read takes no lock,
+        mints nothing, holds no owner key."""
+        t = self._now() if now is None else float(now)
+        # Display-severity -> rank (most-severe first). Findings carry their cert severity verbatim; billing
+        # and monitoring assign from the vocabulary below. Unknown severities rank as "medium" (actionable),
+        # never silently last.
+        _rank = {"critical": 0, "high": 1, "medium": 2, "moderate": 2, "low": 3, "info": 4, "informational": 4}
+        items: list[dict] = []
+
+        # 1) Assessment findings — each confirmed FACT is a notification. admit_customer returns bool (no raise),
+        #    so a denied source is simply skipped. Tenant-scoped inside the projector by the org's own slug set.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            from . import assessments as _assess
+            found = _assess.assessment_findings(self.store, requester_org_id, now=t)
+            for f in found.get("findings", []):
+                ref = str(f.get("finding_ref") or "").strip()
+                if not ref:
+                    continue
+                sev = str(f.get("severity") or "medium").strip().lower() or "medium"
+                items.append({"id": "finding:" + ref, "kind": "finding", "severity": sev,
+                              "title": str(f.get("title") or ref),
+                              "body": str(f.get("summary") or ""), "ts": None})
+
+        # 2) Billing standing — dunning / lapsed / exhausted, from owner-signed STATES only (no money number
+        #    decides a notification). past_due (dunning) is the sharpest; a canceled subscription and an
+        #    exhausted (zero) credit balance each raise their own one-shot, stable-id notice.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_billing"):
+            from . import billing as _billing
+            ov = _billing.billing_overview(self.store, requester_org_id, now=t)
+            sub = ov.get("subscription") or {}
+            status = str(sub.get("status") or "")
+            if status == "past_due":
+                items.append({"id": "billing:past_due", "kind": "billing", "severity": "high",
+                              "title": "Payment past due",
+                              "body": "Your subscription payment is past due. Settle it to keep your plan active.",
+                              "ts": None})
+            elif status == "canceled":
+                items.append({"id": "billing:canceled", "kind": "billing", "severity": "medium",
+                              "title": "Subscription canceled",
+                              "body": "Your subscription is canceled. Resubscribe to restore plan credits.",
+                              "ts": None})
+            credits = ov.get("credits") or {}
+            try:
+                avail = int(credits.get("available") or 0)
+            except (TypeError, ValueError):
+                avail = 0
+            if avail <= 0:
+                items.append({"id": "billing:no_credits", "kind": "billing", "severity": "medium",
+                              "title": "Out of assessment credits",
+                              "body": "You have no assessment credits available. Top up to launch new assessments.",
+                              "ts": None})
+
+        # 3) Monitoring alerts — AEGIS-SaaS. monitor_events self-gates on the default-OFF flag AND
+        #    admit_customer, raising ProvisionDenied when off or not permitted; we treat that as "no source"
+        #    (byte-identical to a build without monitoring). A confirmed attack is high; a lead is low.
+        try:
+            mon = self.monitor_events(requester, requester_org_id, ip=ip)
+        except ProvisionDenied:
+            mon = None
+        if mon:
+            for ev in mon.get("events", []):
+                rid = str(ev.get("report_id") or "").strip()
+                if not rid:
+                    continue
+                decision = str(ev.get("decision") or "").strip().lower()
+                host = str(ev.get("host") or "")
+                klass = str(ev.get("attack_class") or "activity")
+                confirmed = decision == "confirmed"
+                title = ("Confirmed " + klass if confirmed else "Lead: " + klass) + (" on " + host if host else "")
+                body = "AEGIS " + (decision or "event")
+                action = str(ev.get("action") or "")
+                if action:
+                    body += " — action " + action
+                items.append({"id": "monitor:" + rid, "kind": "monitoring",
+                              "severity": "high" if confirmed else "low", "title": title, "body": body,
+                              "ts": ev.get("ts")})
+
+        # 4) Assessment OUTCOMES (NTF-3) — the settle drain projects every verified completion/cancellation/
+        #    failure to a tenant-scoped ``assessment_outcome`` record, so a COMPLETED run with ZERO findings and
+        #    a FAILED/CANCELED run (not charged) are no longer silent. Same axis as findings (view_assessments),
+        #    skip-on-deny; tenant-scoped INSIDE the projector by the org's own server-derived slug set (the IDOR
+        #    class — another tenant's outcome is structurally unreachable). Advisory: the record carries NO
+        #    amount, so no money figure decides a notification. failed → high / canceled → medium (needs
+        #    attention); completed → info (done). Stable id ``outcome:<slug>:<nonce>`` for read-tracking.
+        if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            from . import assessments as _assess
+            outs = _assess.assessment_outcomes(self.store, requester_org_id, now=t)
+            for o in outs.get("outcomes", []):
+                slug = str(o.get("engagement_slug") or "").strip()
+                nonce = str(o.get("nonce") or "").strip()
+                if not slug or not nonce:
+                    continue
+                outcome = str(o.get("outcome") or "").strip().lower()
+                if outcome == "failed":
+                    sev, head, body = ("high", "Assessment failed",
+                                       "An assessment run failed. You were not charged for this run.")
+                elif outcome == "canceled":
+                    sev, head, body = ("medium", "Assessment canceled",
+                                       "An assessment run was canceled. You were not charged for this run.")
+                else:  # completed (the only remaining signed outcome; flat-per-run consumed, no refund)
+                    sev, head, body = ("info", "Assessment completed",
+                                       "An assessment run completed. View any findings in your assessments.")
+                items.append({"id": "outcome:" + slug + ":" + nonce, "kind": "assessment",
+                              "severity": sev, "title": head, "body": body, "ts": o.get("ts")})
+
+        # Stable, severity-ranked order; a stable sort keeps within-source order (findings + monitoring are
+        # already newest-first). Cap the returned list; ``count`` is the TRUE pre-cap total for the UI badge.
+        total = len(items)
+        items.sort(key=lambda n: _rank.get(str(n.get("severity") or "").lower(), 2))
+        return {"org_id": requester_org_id, "notifications": items[:_NOTIF_MAX], "count": total}
+
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
-                      ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+                      authorized: bool = False, ip: str = "", mfa_at: float = 0.0,
+                      now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint
         the owner-signed LIVE non-destructive target authority — the self-serve billing != testing bridge.
+
+        ``authorized`` is the customer's INLINE affirmation ("I am authorized to test this asset"), ticked on
+        the same verify screen (option A — one step, no separate ceremony). It is REQUIRED and fail-closed:
+        controlling a host's DNS/web-root is not the same as having legal authority to test it, so without the
+        affirmation NO authority is minted. The affirmation is recorded on the owner-signed spine (the verify
+        audit's ``authorization_affirmed``) as the tamper-evident legal attestation, bound to requester + host.
 
         Gated on ``admit_customer(requester, org_id, run_engagement)`` (the testing axis, checked BEFORE the
         fetch and AGAIN inside the mint lock — TOCTOU: a membership revoked during the network fetch cannot
@@ -956,6 +1530,10 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not register assessment targets for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not authorized:                       # option A: the inline "I am authorized to test this asset"
+                #                                      affirmation is REQUIRED + fail-closed — no authority minted
+                #                                      without it (control of a host != legal authority to test it).
+                raise ProvisionDenied("confirm that you are authorized to test this asset before verifying it")
         from .ownership_fetch import OwnershipFetchError
         try:
             observed = self.target_fetcher.fetch(method, host, now=t)   # network I/O — NO lock held
@@ -982,7 +1560,7 @@ class Provisioner:
             if not result.get("ok"):
                 raise ProvisionError(str(result.get("error") or "could not authorize the target"))
             self._audit("target_verify", requester=requester, org_id=requester_org_id,
-                        target=host, outcome="authorized", critical=True)
+                        target=host, outcome="authorized", critical=True, attestation=True)
         return {"host": host, "slug": result["slug"], "scope": result["scope"],
                 "environment": result["environment"], "not_before": result["not_before"],
                 "not_after": result["not_after"]}

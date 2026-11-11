@@ -18,16 +18,16 @@
 # rebinding Host/Origin allowlist) and the proxy binds loopback:
 #
 #     CRUCIBLE_API_KEY=... \
-#     vigil up --domain vigil.example.com --host 127.0.0.1 --port 8770 --no-browser
+#     vigil up --domain console.vigilguard.net --host 127.0.0.1 --port 8770 --no-browser
 #
 # (Set CRUCIBLE_API_KEY when the gated offense api is internet-fronted — WS-B doctrine.)
-# Then point DNS A/AAAA for vigil.example.com at THIS host and run Caddy with this file.
+# Then point DNS A/AAAA for console.vigilguard.net at THIS host and run Caddy with this file.
 #
 # NOTE: Caddy preserves the incoming Host header to the upstream by default, so the
-# vigil up proxy (and, through it, each backend) receives `Host: vigil.example.com` —
+# vigil up proxy (and, through it, each backend) receives `Host: console.vigilguard.net` —
 # exactly what the allowlist expects. Do not rewrite the Host.
 
-vigil.example.com {
+console.vigilguard.net {
 	encode zstd gzip
 
 	# Server-Sent Events: disable response buffering so events flush immediately and keep the
@@ -44,7 +44,7 @@ vigil.example.com {
 	reverse_proxy 127.0.0.1:8770
 
 	# Belt-and-braces: only accept the exact host this site serves.
-	@badhost not host vigil.example.com
+	@badhost not host console.vigilguard.net
 	respond @badhost 421
 
 	header {
@@ -57,11 +57,11 @@ vigil.example.com {
 # ------------------------------------------------------------------------------
 # ALTERNATIVE (advanced): federate to the three backends directly, WITHOUT the
 # vigil up proxy. Only do this if you run the three backends yourself (e.g. via
-# systemd) with `--allow-host vigil.example.com --allow-origin https://vigil.example.com`
+# systemd) with `--allow-host console.vigilguard.net --allow-origin https://console.vigilguard.net`
 # on each, and you serve the vigil-ui bundle from Caddy's file_server. You lose the
 # single-command launch; prefer forwarding to `vigil up` above.
 #
-# vigil.example.com {
+# console.vigilguard.net {
 #     @sov path /sovereign/*
 #     handle @sov { uri strip_prefix /sovereign; reverse_proxy 127.0.0.1:8733 { flush_interval -1 } }
 #     @offapi path /offense/api/v1/*

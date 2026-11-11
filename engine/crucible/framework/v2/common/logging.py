@@ -72,6 +72,17 @@ def _engagement_log_path() -> Path:
     return paths.v2_root() / ".crucible-v2.log"
 
 
+def current_engagement() -> str | None:
+    """The engagement slug bound to THIS context (``bind_engagement``), or ``None`` when unbound.
+    A read-only accessor over the ``_BOUND_SLUG`` ContextVar for call sites that carry no slug of
+    their own — e.g. the L2 response cache (EC-1b) keys on the engagement scope so a cached answer
+    is never reused across engagements. Never raises."""
+    try:
+        return _BOUND_SLUG.get()
+    except Exception:
+        return None
+
+
 def _scrub(_logger: Any, _name: str, event_dict: Any) -> Any:
     """Processor: mask secret-keyed fields (token/cookie/authorization/password/…)
     BEFORE the event is serialised to disk (X2). Deterministic + total — an

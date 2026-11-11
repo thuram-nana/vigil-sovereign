@@ -564,6 +564,9 @@ def serve(*, addr: str, port: int = _DEFAULT_PORT, spine_path=None, tls: bool = 
         import ssl
         certfile, keyfile, fp = ensure_bridge_cert(addr)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # Pin the floor EXPLICITLY (CodeQL py/insecure-protocol): never rely on the interpreter / OpenSSL build
+        # default to refuse TLS 1.0/1.1 on the phone-approval channel.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(certfile, keyfile)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)   # wrap the listener before serve_forever
         print(f"  SIGIL bridge → https://{addr}:{bound}/   (WireGuard-bound; loopback/private only — NO wire secret)")

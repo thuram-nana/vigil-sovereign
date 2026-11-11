@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ..perception.capture import Frame, _ocr
+from ..perception.capture import Frame, _ocr, private_capture_path
 from .base import CapabilityDescriptor, host_id, probe_always_on, probe_gpu_vlm
 
 
@@ -16,7 +15,7 @@ class MacOSBackend:
     def capture_screen(self) -> Optional[Frame]:
         if not shutil.which("screencapture"):
             return None
-        out = tempfile.mktemp(suffix=".png", prefix="sigil-screen-")
+        out = private_capture_path("sigil-screen-", ".png")
         try:
             subprocess.run(["screencapture", "-x", out], capture_output=True, timeout=20)
         except (subprocess.SubprocessError, OSError):

@@ -68,7 +68,7 @@ jobs:
           python -m pip install --upgrade pip
           # These tools are intentionally NOT in the committed hash-locks (they never run on a PR); a
           # scheduled job may install from the index. atheris needs clang/libFuzzer headers.
-          sudo apt-get update && sudo apt-get install -y clang
+          bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" clang
           pip install mutmut cosmic-ray atheris
           # the security-critical modules must be importable for the suites the mutants are scored against
           pip install -e packages/core/vigil_core --no-deps

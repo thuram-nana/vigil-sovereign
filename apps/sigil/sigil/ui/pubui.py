@@ -111,8 +111,35 @@ class PublicHandler(BaseHTTPRequestHandler):
                 return rp, _CTYPES.get(rp.suffix.lower(), "application/octet-stream")
         return None
 
+    # --- health / readiness (probe surface) ----------------------------------------------------------
+    # The site is keyless + cookieless, so these need no auth to bypass — they are answered FIRST, ahead of
+    # content routing, and carry NO filesystem path or secret (a boolean + the check name only). `/healthz`
+    # is pure liveness (the process answers); `/readyz` checks the edge's REAL dependency — its packaged
+    # content root — so an LB drains an edge whose site tree is missing/unreadable rather than serving 404s.
+    def _probe_json(self, obj, code: int = 200):
+        body = json.dumps(obj).encode("utf-8")
+        # no-store: a readiness verdict must never be cached by an intermediary/orchestrator probe.
+        self._send_headers(code, "application/json; charset=utf-8", len(body), cache="no-store")
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _readyz(self):
+        root = self.server.root
+        try:
+            ready = root.is_dir() and (root / "index.html").is_file()
+        except OSError:                      # a disk/permission fault reading the root is NOT ready
+            ready = False
+        self._probe_json({"ok": ready, "checks": [{"name": "content_root", "ok": ready}]},
+                         200 if ready else 503)
+
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/healthz":
+            return self._probe_json({"ok": True})
+        if path == "/readyz":
+            return self._readyz()
         if path == "/api/cve" or path.startswith("/api/cve/"):
             return self._cve_api(path)
         # pretty dynamic CVE routes map to a static shell that client-side JS then fills from /api/cve.

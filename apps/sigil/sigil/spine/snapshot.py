@@ -51,11 +51,16 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 5   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 9   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
-#                            governor.customer_credential (customer_credential_state/issued/row). Every bump is
+#                            governor.customer_credential (customer_credential_state/issued/row); v6 (AEGIS-SaaS AE-0) ADDED
+#                            governor.monitoring_authority (monitoring_authority_state/issued/row); v7 (AEGIS fold)
+#                            ADDED governor.monitoring_subscription (monitoring_subscription_state/issued/row); v8 (PP-1)
+#                            ADDED governor.postpaid (postpaid_state/issued/row) + the postpaid arrears ledger
+#                            (postpaid_arrears_debited/credited/seen); v9 (EC-4) ADDED the per-tenant cost
+#                            envelope ledger (cost_reserved/cost_settled/cost_seen). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -67,9 +72,13 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 5   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
-    #                           3->4 Slice H (governor.invoice billing history). Every snapshot this build emits
-    #                           carries the v4 keys; a pre-bump build refuses it cleanly via the refuse-newer gate.
+    schema_version: int = 9   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
+    #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
+    #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
+    #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger).
+    #                           Every snapshot this build emits carries the v9 keys; a pre-bump build refuses it
+    #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
     trusted_pubkey: str = ""          # owner pubkey the pubkey-dependent folds were computed under
@@ -159,6 +168,11 @@ class SnapshotState(BaseModel):
     ownership_proof_row: list = []    # [[org_id, host, method, token_sha256, verified_at, expires_at], ...] — the
     #                                   fields to REBUILD an active `OwnershipProof` (issued_at joins from
     #                                   ownership_proof_issued; state="active"). expires_at is owner-signed.
+    monitoring_authority_state: list = []  # [[org_id, host, "active"|"revoked"], ...] — AE-0
+    #                                   governor.monitoring_authority LWW per (org_id, host). Keep revoked (v6).
+    monitoring_authority_issued: list = []  # [[org_id, host, issued_at], ...] — per-(org,host) active high-water;
+    #                                   MUST cross a prune or a captured owner-signed grant becomes replay-resurrectable.
+    monitoring_authority_row: list = []  # [[org_id, host, mode, not_before, not_after, proof_sha256], ...] — rebuild a grant.
     customer_credential_state: list = []  # [[username, cred_key, "active"|"revoked"], ...] —
     #                                   governor.customer_credential LWW, keyed PER-(username, cred_key). Keep
     #                                   revoked (Slice E2a schema v5; mirrors ownership_proof).
@@ -186,6 +200,24 @@ class SnapshotState(BaseModel):
     subscription_row: list = []       # [[org_id, plan_id, period_start, period_end, allotment], ...] — the plan
     #                                   fields to REBUILD the Subscription from the seed (status joins from
     #                                   subscription_state).
+    monitoring_subscription_state: list = []   # [[org_id, status], ...] — governor.monitoring_subscription: the
+    #                                   AEGIS monitoring plan line, SEPARATE from governor.subscription (schema v7);
+    #                                   same LWW / high-water / row shape as subscription_* below.
+    monitoring_subscription_issued: list = []  # [[org_id, issued_at], ...]
+    monitoring_subscription_row: list = []     # [[org_id, plan_id, period_start, period_end, allotment], ...]
+    postpaid_state: list = []         # [[org_id, enabled_bool], ...] — governor.postpaid (PP-1): the account-mode
+    #                                   LWW line (enabled = drawing against a credit line). SEPARATE sub-state from
+    #                                   subscription; same high-water / row shape idiom.
+    postpaid_issued: list = []        # [[org_id, issued_at], ...] — per-org enabled anti-replay high-water
+    postpaid_row: list = []           # [[org_id, credit_limit, net_terms_days], ...] — the last-enabled line
+    postpaid_arrears_debited: list = []   # [[org_id, Σ credits], ...] — governor.postpaid_debit (ADDITIVE accrual)
+    postpaid_arrears_credited: list = []  # [[org_id, Σ credits], ...] — governor.postpaid_credit (reversals/payments)
+    postpaid_arrears_seen: list = []      # [[signal, org_id, entry_id], ...] — consumed arrears idempotency keys
+    # EC-4: the per-tenant token-cost envelope ledger (governor.cost_reserve/cost_settle), ADDITIVE per-org,
+    # idempotent per (signal, org_id, entry_id) — mirrors the postpaid arrears sub-state above exactly.
+    cost_reserved: list = []              # [[org_id, Σ tokens], ...] — governor.cost_reserve (reserved envelopes)
+    cost_settled: list = []               # [[org_id, Σ tokens], ...] — governor.cost_settle (actual settled cost)
+    cost_seen: list = []                  # [[signal, org_id, entry_id], ...] — consumed cost idempotency keys
     invoice_row: list = []            # [[org_id, invoice_id, kind, price_id, amount_minor, currency, credits,
     #                                   period_start, period_end, issued_at], ...] — governor.invoice billing
     #                                   HISTORY (Slice H schema v4). ADDITIVE append-only (NOT LWW), idempotent
@@ -252,6 +284,12 @@ class SnapshotState(BaseModel):
     #   membership_row is a raw list-of-rows: `OrgRegistry._fold_memberships` rebuilds the Membership objects
     #   from it (joining issued_at from membership_issued_map), keyed PER-(org_id, username).
 
+    def monitoring_authority_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.monitoring_authority_state}
+
+    def monitoring_authority_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.monitoring_authority_issued}
+
     def ownership_proof_state_map(self) -> dict[tuple, str]:
         return {(row[0], row[1]): row[2] for row in self.ownership_proof_state}
 
@@ -299,6 +337,31 @@ class SnapshotState(BaseModel):
         return {(row[0], row[1], row[2]) for row in self.plan_seen}      # (signal, org_id, entry_id)
     #   `PlanCreditLedger._fold` seeds (granted, debited, seen) from these, keyed per (org_id, period_end); a
     #   tranche is spendable only while period_end > now (non-rollover), applied at read time in `available`.
+
+    #   postpaid_state/issued stay raw ([[org_id, enabled_bool]] / [[org_id, issued_at]]): `PostpaidRegistry._fold`
+    #   reads them via getattr (like subscription), rebuilding the PostpaidAccount with postpaid_row.
+    def postpaid_arrears_debited_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.postpaid_arrears_debited}   # org_id -> Σ accrued credits
+
+    def postpaid_arrears_credited_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.postpaid_arrears_credited}  # org_id -> Σ reversed credits
+
+    def postpaid_arrears_seen_set(self) -> set:
+        return {(row[0], row[1], row[2]) for row in self.postpaid_arrears_seen}   # (signal, org_id, entry_id)
+    #   `PostpaidArrearsLedger._fold` seeds (debited, credited, seen) from these, keyed per org_id; accrued =
+    #   debited - credited (clamped >= 0). The seen-set is the idempotency/anti-replay guard that MUST survive a
+    #   prune (a pruned debit stays counted, so a tenant can never draw past their line by waiting out a prune).
+
+    #   EC-4: `CostEnvelopeLedger._fold` seeds (reserved, settled, seen) from these, keyed per org_id; committed =
+    #   Σ settled, in-flight = Σ reserved-but-unsettled. Same prune-durability contract as the arrears seen-set.
+    def cost_reserved_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.cost_reserved}      # org_id -> Σ reserved envelope tokens
+
+    def cost_settled_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.cost_settled}       # org_id -> Σ settled actual tokens
+
+    def cost_seen_set(self) -> set:
+        return {(row[0], row[1], row[2]) for row in self.cost_seen}   # (signal, org_id, entry_id)
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -437,6 +500,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.customers import _core_fields as _cust_core_fields
     # governor.customer_credential — the per-customer passkey/TOTP/OIDC-link substrate (Slice E2a). Its signed
     # core is CONDITIONAL on the credential material; mirror the SAME helper the live fold uses (drift guard).
+    from ..governor.monitoring_authority import SIGNAL as _MA_SIGNAL
+    from ..governor.monitoring_authority import _CORE as _MA_CORE
+    from ..governor.monitoring_authority import _MODES as _MA_MODES
     from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL
     from ..governor.customer_credentials import _cred_core as _cred_core_fields
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
@@ -467,6 +533,19 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                      _as_period as _p_as_period)
     # subscription signed-core + helpers imported from the live module (never restated — same drift guard);
     # the fold below carries the per-org status/high-water/plan-row across a prune exactly as it does orgs.
+    from ..governor.monitoring_subscription import MONITORING_SUBSCRIPTION_SIGNAL as _MSUB_SIGNAL
+    # postpaid (PP-1): the account-mode LWW signal/core + the ADDITIVE arrears ledger signals/cores, imported
+    # from the live module (never restated — the same drift guard the other folds use).
+    from ..governor.postpaid import (POSTPAID_SIGNAL as _PP_SIGNAL, POSTPAID_DEBIT_SIGNAL as _PPDEBIT_SIGNAL,
+                                     POSTPAID_CREDIT_SIGNAL as _PPCREDIT_SIGNAL, _PP_CORE as _PPACCT_CORE,
+                                     _PP_DEBIT_CORE as _PPDEBIT_CORE, _PP_CREDIT_CORE as _PPCREDIT_CORE,
+                                     _as_nonneg_int as _pp_as_nonneg)
+    # cost ledger (EC-4): the ADDITIVE per-tenant token-cost reserve/settle signals/cores + the tokens clamp,
+    # imported from the live module (never restated — same drift guard). Carried across a prune so a pruned
+    # reserve/settle stays counted and its entry_id stays consumed, exactly like the postpaid arrears fold.
+    from ..governor.cost_ledger import (COST_RESERVE_SIGNAL as _CRES_SIGNAL, COST_SETTLE_SIGNAL as _CSET_SIGNAL,
+                                        _RESERVE_CORE as _CRES_CORE, _SETTLE_CORE as _CSET_CORE,
+                                        _as_tokens as _c_as_tokens)
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL as _SUB_SIGNAL, _SUB_CORE as _SUBS_CORE,
                                          STATUS_ACTIVE as _SUB_ACTIVE, _DOWN_STATES as _SUB_DOWN,
                                          _as_allotment as _sub_as_allotment)
@@ -517,6 +596,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     op_issued: dict[tuple, float] = dict(s.ownership_proof_issued_map()) if s else {}   # (org,host) -> high-water
     op_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5]]
                                  for r in s.ownership_proof_row} if s else {}   # ->[method,sha,verified,expires]
+    ma_state: dict[tuple, str] = dict(s.monitoring_authority_state_map()) if s else {}   # (org,host) -> state
+    ma_issued: dict[tuple, float] = dict(s.monitoring_authority_issued_map()) if s else {}   # (org,host) -> hw
+    ma_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], (r[5] if len(r) > 5 else "")]
+                                 for r in s.monitoring_authority_row} if s else {}   # ->[mode,nb,na,proof_sha]
     cc_state: dict[tuple, str] = dict(s.customer_credential_state_map()) if s else {}   # (user,cred_key) -> state
     cc_issued: dict[tuple, float] = dict(s.customer_credential_issued_map()) if s else {}   # (user,cred_key) -> hw
     cc_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]
@@ -530,6 +613,20 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     sub_state: dict[Any, str] = dict(s.subscription_state_map()) if s else {}   # org_id -> status (LWW)
     sub_issued: dict[Any, float] = dict(s.subscription_issued_map()) if s else {}   # org_id -> active high-water
     sub_row: dict[Any, list] = {r[0]: [r[1], r[2], r[3], r[4]] for r in s.subscription_row} if s else {}
+    msub_state: dict[Any, str] = {r[0]: r[1] for r in s.monitoring_subscription_state} if s else {}
+    msub_issued: dict[Any, float] = {r[0]: r[1] for r in s.monitoring_subscription_issued} if s else {}
+    msub_row: dict[Any, list] = ({r[0]: [r[1], r[2], r[3], r[4]] for r in s.monitoring_subscription_row}
+                                 if s else {})
+    sub_lines = {_SUB_SIGNAL: (sub_state, sub_issued, sub_row), _MSUB_SIGNAL: (msub_state, msub_issued, msub_row)}
+    pp_state: dict[Any, bool] = {r[0]: r[1] for r in s.postpaid_state} if s else {}      # org_id -> enabled (LWW)
+    pp_issued: dict[Any, float] = {r[0]: r[1] for r in s.postpaid_issued} if s else {}   # org_id -> enabled hw
+    pp_row: dict[Any, list] = {r[0]: [r[1], r[2]] for r in s.postpaid_row} if s else {}  # org_id -> [limit, net]
+    pp_debited: dict[Any, int] = dict(s.postpaid_arrears_debited_map()) if s else {}     # org_id -> Σ draws
+    pp_credited: dict[Any, int] = dict(s.postpaid_arrears_credited_map()) if s else {}   # org_id -> Σ reversals
+    pp_seen: set = set(s.postpaid_arrears_seen_set()) if s else set()                    # consumed arrears keys
+    cl_reserved: dict[Any, int] = dict(s.cost_reserved_map()) if s else {}               # org_id -> Σ reserved tok
+    cl_settled: dict[Any, int] = dict(s.cost_settled_map()) if s else {}                 # org_id -> Σ settled tok
+    cl_seen: set = set(s.cost_seen_set()) if s else set()                                # consumed cost keys
     # invoice history: (org_id, invoice_id) -> [kind, price_id, amount_minor, currency, credits, p_start, p_end,
     # issued_at]. ADDITIVE append-only (NOT LWW); the key presence IS the idempotency seen-set (mirror wallet).
     inv_rows: dict[tuple, list] = ({(r[0], r[1]): list(r[2:10]) for r in s.invoice_row
@@ -707,6 +804,24 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         op_state[opkey] = "active"
                         op_row[opkey] = [p.get("method"), p.get("token_sha256"),
                                          p.get("verified_at"), p.get("expires_at")]
+        # --- governor.monitoring_authority LWW + PER-(org_id, host) high-water (AE-0; mirrors the proof fold so
+        #     an active grant whose only record is pruned survives with its high-water intact). ---
+        if sig == _MA_SIGNAL:
+            oid = p.get("org_id")
+            host = p.get("host")
+            if isinstance(oid, str) and oid and isinstance(host, str) and host:
+                makey = (oid, host)
+                mst = p.get("state")
+                if mst == "revoked":
+                    ma_state[makey] = "revoked"
+                elif (mst == "active" and p.get("mode") in _MA_MODES
+                      and verify_signed(p, _MA_CORE, vpk)):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > ma_issued.get(makey, NO_HIGHWATER):
+                        ma_issued[makey] = at
+                        ma_state[makey] = "active"
+                        ma_row[makey] = [p.get("mode"), p.get("not_before"), p.get("not_after"),
+                                         p.get("proof_sha256")]
         # --- governor.customer_credential LWW + PER-(username, cred_key) high-water (mirrors the ownership_proof
         #     fold EXACTLY, so an active passkey/TOTP/OIDC-link whose only grant is pruned survives and its
         #     high-water is NOT reset — else a captured owner-signed active credential becomes replay-
@@ -767,23 +882,78 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; down-states:
         #     owner-manual 0.0 honored on sight, webhook-driven freshness-gated vs the active high-water)
         #     — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
-        if sig == _SUB_SIGNAL:
+        if sig in sub_lines:       # the credit-plan line AND the separate AEGIS monitoring line (same shape)
+            l_state, l_issued, l_row = sub_lines[sig]
             soid = p.get("org_id")
             if isinstance(soid, str) and soid:
                 sst = p.get("status")
                 if sst in _SUB_DOWN:
                     sdat = as_issued_at(p.get("issued_at"))     # mirror _fold: 0.0 on sight; else fresher-only
-                    if sdat <= 0.0 or sdat > sub_issued.get(soid, NO_HIGHWATER):
-                        sub_state[soid] = sst
+                    if sdat <= 0.0 or sdat > l_issued.get(soid, NO_HIGHWATER):
+                        l_state[soid] = sst
                 elif sst == _SUB_ACTIVE and verify_signed(p, _SUBS_CORE, vpk):
                     at = as_issued_at(p.get("issued_at"))
-                    if at > sub_issued.get(soid, NO_HIGHWATER):
-                        sub_issued[soid] = at
-                        sub_state[soid] = _SUB_ACTIVE
-                        sub_row[soid] = [str(p.get("plan_id") or ""),
-                                         float(as_issued_at(p.get("period_start"))),
-                                         float(as_issued_at(p.get("period_end"))),
-                                         _sub_as_allotment(p.get("allotment"))]
+                    if at > l_issued.get(soid, NO_HIGHWATER):
+                        l_issued[soid] = at
+                        l_state[soid] = _SUB_ACTIVE
+                        l_row[soid] = [str(p.get("plan_id") or ""),
+                                       float(as_issued_at(p.get("period_start"))),
+                                       float(as_issued_at(p.get("period_end"))),
+                                       _sub_as_allotment(p.get("allotment"))]
+        # --- governor.postpaid LWW account mode (PP-1): enabled = owner-verified + FRESH per-org high-water;
+        #     disabled = safe direction (owner-manual 0.0 on sight, webhook-driven freshness-gated). Mirrors
+        #     PostpaidRegistry._fold EXACTLY so build() == scan. Distinct enabled-bool shape (not a status str). ---
+        if sig == _PP_SIGNAL:
+            ppoid = p.get("org_id")
+            if isinstance(ppoid, str) and ppoid:
+                if p.get("enabled") is True:
+                    if verify_signed(p, _PPACCT_CORE, vpk):
+                        at = as_issued_at(p.get("issued_at"))
+                        if at > pp_issued.get(ppoid, NO_HIGHWATER):   # stale/replayed open ⇒ no effect
+                            pp_issued[ppoid] = at
+                            pp_state[ppoid] = True
+                            pp_row[ppoid] = [_pp_as_nonneg(p.get("credit_limit")),
+                                             _pp_as_nonneg(p.get("net_terms_days"))]
+                else:
+                    dat = as_issued_at(p.get("issued_at"))   # 0.0 on sight; else fresher-than-open only
+                    if dat <= 0.0 or dat > pp_issued.get(ppoid, NO_HIGHWATER):
+                        pp_state[ppoid] = False
+        # --- governor.postpaid_debit/credit: ADDITIVE per-org arrears ledger, idempotent per (signal, org, entry)
+        #     — mirrors PostpaidArrearsLedger._fold / WalletRegistry._fold EXACTLY (verify under the key valid at
+        #     the seq; already-seen key ignored; credits clamped >= 0). Carried across a prune so a pruned draw
+        #     stays counted (a tenant cannot draw past the line by waiting out a prune). ---
+        if sig == _PPDEBIT_SIGNAL or sig == _PPCREDIT_SIGNAL:
+            paoid = p.get("org_id")
+            paeid = p.get("entry_id")
+            if isinstance(paoid, str) and paoid and isinstance(paeid, str) and paeid:
+                pacore = _PPDEBIT_CORE if sig == _PPDEBIT_SIGNAL else _PPCREDIT_CORE
+                if verify_signed(p, pacore, vpk):
+                    pakey = (sig, paoid, paeid)              # namespaced by signal — mirror the ledger fold
+                    if pakey not in pp_seen:
+                        pp_seen.add(pakey)
+                        pac = _w_as_credits(p.get("credits"))
+                        if sig == _PPDEBIT_SIGNAL:
+                            pp_debited[paoid] = pp_debited.get(paoid, 0) + pac
+                        else:
+                            pp_credited[paoid] = pp_credited.get(paoid, 0) + pac
+        # --- governor.cost_reserve/cost_settle: ADDITIVE per-tenant token-cost envelope ledger, idempotent per
+        #     (signal, org, entry) — mirrors CostEnvelopeLedger._fold EXACTLY (verify under the key valid at the
+        #     seq; already-seen key ignored; tokens clamped >= 0). Carried across a prune so a pruned reserve/
+        #     settle stays counted + its entry_id stays consumed (reserve/settle replay is closed across a prune). ---
+        if sig == _CRES_SIGNAL or sig == _CSET_SIGNAL:
+            cloid = p.get("org_id")
+            cleid = p.get("entry_id")
+            if isinstance(cloid, str) and cloid and isinstance(cleid, str) and cleid:
+                clcore = _CRES_CORE if sig == _CRES_SIGNAL else _CSET_CORE
+                if verify_signed(p, clcore, vpk):
+                    clkey = (sig, cloid, cleid)              # namespaced by signal — mirror the ledger fold
+                    if clkey not in cl_seen:
+                        cl_seen.add(clkey)
+                        clt = _c_as_tokens(p.get("tokens"))
+                        if sig == _CRES_SIGNAL:
+                            cl_reserved[cloid] = cl_reserved.get(cloid, 0) + clt
+                        else:
+                            cl_settled[cloid] = cl_settled.get(cloid, 0) + clt
         # --- governor.invoice: ADDITIVE append-only billing history, idempotent per (org_id, invoice_id) —
         #     mirrors InvoiceRegistry._fold EXACTLY (first mint of an invoice_id wins; verify under the key valid
         #     at the seq). Carried across a prune so a pruned invoice line is not lost and cannot be replayed. ---
@@ -856,6 +1026,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         ownership_proof_state=[[k[0], k[1], v] for k, v in op_state.items()],
         ownership_proof_issued=[[k[0], k[1], i] for k, i in op_issued.items()],
         ownership_proof_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in op_row.items()],
+        monitoring_authority_state=[[k[0], k[1], v] for k, v in ma_state.items()],
+        monitoring_authority_issued=[[k[0], k[1], i] for k, i in ma_issued.items()],
+        monitoring_authority_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in ma_row.items()],
         customer_credential_state=[[k[0], k[1], v] for k, v in cc_state.items()],
         customer_credential_issued=[[k[0], k[1], i] for k, i in cc_issued.items()],
         customer_credential_row=[[k[0], k[1], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]
@@ -869,6 +1042,18 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         subscription_state=[[o, v] for o, v in sub_state.items()],
         subscription_issued=[[o, i] for o, i in sub_issued.items()],
         subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in sub_row.items()],
+        monitoring_subscription_state=[[o, v] for o, v in msub_state.items()],
+        monitoring_subscription_issued=[[o, i] for o, i in msub_issued.items()],
+        monitoring_subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in msub_row.items()],
+        postpaid_state=[[o, v] for o, v in pp_state.items()],
+        postpaid_issued=[[o, i] for o, i in pp_issued.items()],
+        postpaid_row=[[o, r[0], r[1]] for o, r in pp_row.items()],
+        postpaid_arrears_debited=[[o, c] for o, c in pp_debited.items()],
+        postpaid_arrears_credited=[[o, c] for o, c in pp_credited.items()],
+        postpaid_arrears_seen=[[sg, o, e] for (sg, o, e) in pp_seen],
+        cost_reserved=[[o, t] for o, t in cl_reserved.items()],
+        cost_settled=[[o, t] for o, t in cl_settled.items()],
+        cost_seen=[[sg, o, e] for (sg, o, e) in cl_seen],
         invoice_row=[[k[0], k[1], *r] for k, r in inv_rows.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],

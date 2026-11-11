@@ -45,9 +45,9 @@ def _owner_root(owner):
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)])
 
 
-def _lease(owner, *, nonce="n1", issued=1000.0):
+def _lease(owner, *, nonce="n1", issued=1000.0, units=10):
     t = _dt.datetime.fromtimestamp(issued, tz=timezone.utc)
-    doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=10,
+    doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=units,
                             not_before=t - _dt.timedelta(hours=1), not_after=t + _dt.timedelta(hours=8),
                             nonce=nonce, issued_at=issued)
     return sign_credit_launch_lease(doc, {"owner": owner.private_key_b64})
@@ -61,14 +61,15 @@ def _customer_authority(slug, scope, *, env="twin", issued_by="customer:org_a", 
 
 
 def _rig(monkeypatch, owner, *, env="twin", issued_by="customer:org_a", write_lease=True,
-         settled=False, now=1000.0):
+         settled=False, now=1000.0, units=10):
     """Write a REAL owner-signed lease to a fresh seam (so the lease pre-check verifies for real) and
     monkeypatch the offense authority store: load_authority_root → the owner root (for the lease verify),
-    load_verified_authority → a constructed customer authority (so authorize_action runs over it for real)."""
+    load_verified_authority → a constructed customer authority (so authorize_action runs over it for real).
+    ``units`` sets the lease's signed ``units_reserved`` (EC-7 derives the run tier from it)."""
     from framework.v2.authority import store as authz_store
     base = tempfile.mkdtemp()
     if write_lease:
-        write_credit_lease(base, SLUG, _lease(owner, nonce="n1", issued=now), _owner_root(owner))
+        write_credit_lease(base, SLUG, _lease(owner, nonce="n1", issued=now, units=units), _owner_root(owner))
         if settled:
             record_lease_settlement(base, SLUG, "n1")
     monkeypatch.setattr(authz_store, "load_authority_root", lambda path=None: _owner_root(owner))
@@ -179,7 +180,8 @@ def test_worker_seeds_authoritatively_from_scope_ignoring_a_tampered_extra(monke
     w = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 0})
     assert w(_job(seed_host="evil.example")) == {"facts": 0}          # a TAMPERED extra seed
     # ...is ignored — the seed is the authority host; a first arm is a fresh (non-resume) consume.
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
 
 
 def test_worker_refuses_a_live_target_when_the_flag_is_off(monkeypatch):
@@ -215,6 +217,19 @@ def test_worker_resumes_on_re_drive_and_fresh_arms_a_new_nonce(monkeypatch):
     assert [c["resume"] for c in calls] == [False, True, False]
 
 
+def test_worker_binds_the_run_to_its_own_jobs_launch(monkeypatch):
+    # The seam holds ONE lease per slug, so the engine must be told WHICH launch this job is: the worker passes
+    # its job's own nonce (launch_nonce), and a deployment profile can never override it.
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    calls = []
+    w = make_engage_worker(trust_root=object(), base_dir=base, profile_kwargs={"launch_nonce": "forged"},
+                           run=lambda **kw: calls.append(kw) or {"facts": 0})
+    w(_job(nonce="n1"))
+    w(_job(nonce="n2"))
+    assert [c["launch_nonce"] for c in calls] == ["n1", "n2"]
+
+
 def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
     # HIGH (red-pen): the worker's EXECUTION-boundary flag re-check must be exercised through the REAL posture
     # read (no injected callable). Env unset -> a LIVE customer arm is refused; env enabled -> it runs.
@@ -228,7 +243,102 @@ def test_worker_prod_flag_via_the_REAL_default_env_read(monkeypatch):
     calls = []
     w2 = make_engage_worker(trust_root=object(), base_dir=base, run=lambda **kw: calls.append(kw) or {"facts": 1})
     assert w2(_job())["facts"] == 1
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
+
+
+# ---- EC-7: tiered Quick/Deep run profile (default-OFF ⇒ byte-identical) --------------------------------
+
+def _capturing_run(calls, routing_seen):
+    """A mock engine recording the kwargs it is called with AND the live CRUCIBLE_MODEL_ROUTING env at call
+    time (so a test can assert the EC-7 routing scope is active DURING the run, then restored after)."""
+    import os as _os
+
+    def _run(**kw):
+        calls.append(kw)
+        routing_seen.append(_os.environ.get("CRUCIBLE_MODEL_ROUTING"))
+        return {"facts": 0}
+    return _run
+
+
+def test_worker_deep_tier_from_real_signed_units(monkeypatch):
+    # EC-7 ON + a 20-unit OWNER-SIGNED lease ⇒ "deep": the worker overlays the FULL engagement roster
+    # (browser/SSO/GraphQL/access-control) + holds model-routing OFF (capable models). units read
+    # AUTHORITATIVELY from the signed lease via the REAL read_verified_launch_units path (now in-window).
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=20)
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0,
+                           run_tier_enabled=lambda: True, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    kw = calls[0]
+    assert kw["profile"] == "full"
+    assert (kw["enable_domxss"] and kw["enable_browser_xss"] and kw["enable_sso"]
+            and kw["enable_graphql_dos"] and kw["enable_access_control"])
+    assert routing_seen == ["0"]                          # deep ⇒ routing OFF during the run (capable models)
+
+
+def test_worker_quick_tier_from_real_signed_units(monkeypatch):
+    # EC-7 ON + a 3-unit OWNER-SIGNED lease ⇒ "quick": the lean default roster (surface flips NOTHING) +
+    # model-routing ON (the cheaper per-binding tiers are eligible).
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=3)
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0,
+                           run_tier_enabled=lambda: True, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    kw = calls[0]
+    assert kw["profile"] == "surface"
+    assert not any(k.startswith("enable_") for k in kw)  # surface turns on NO extra passes (lean roster)
+    assert routing_seen == ["1"]                          # quick ⇒ routing ON during the run
+
+
+def test_worker_tiering_off_is_byte_identical(monkeypatch):
+    # EC-7 OFF (the REAL default env read — VIGIL_TIERED_PRODUCTS unset): no profile/enable_* kwargs are added
+    # and CRUCIBLE_MODEL_ROUTING is NEVER touched — byte-identical to pre-EC-7 even with a 20-unit lease.
+    monkeypatch.delenv("VIGIL_TIERED_PRODUCTS", raising=False)
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=20)
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0,
+                           run=_capturing_run(calls, routing_seen))   # NO run_tier_enabled ⇒ real default (off)
+    assert w(_job())["facts"] == 0
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]   # exactly the pre-EC-7 call
+    assert routing_seen == [None]                          # the routing env was never set
+
+
+def test_worker_tier_fails_safe_to_quick_when_units_unverifiable(monkeypatch):
+    # EC-7 ON but the units read fails (no verifiable lease ⇒ None) ⇒ fail-SAFE to "quick"/surface, NEVER a
+    # silent escalation to the costlier "deep". Inject read_units→None (a missing/forged/settled lease).
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=20)   # a deep lease exists, but the reader returns None
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                           read_units=lambda *a, **k: None, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    assert calls[0]["profile"] == "surface"               # fail-safe ⇒ quick ⇒ surface (NOT deep/full)
+    assert not any(k.startswith("enable_") for k in calls[0])
+    assert routing_seen == ["1"]                           # quick ⇒ routing ON
+
+
+def test_worker_routing_env_is_restored_after_the_run(monkeypatch):
+    # The EC-7 routing scope must RESTORE the prior CRUCIBLE_MODEL_ROUTING exactly — including unset (popped).
+    import os as _os
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=20)
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0,
+                           run_tier_enabled=lambda: True, run=lambda **kw: {"facts": 0})
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)   # (a) prior UNSET ⇒ restored to unset
+    w(_job(nonce="r1"))
+    assert "CRUCIBLE_MODEL_ROUTING" not in _os.environ
+    monkeypatch.setenv("CRUCIBLE_MODEL_ROUTING", "on")           # (b) prior SET ⇒ restored to the prior value
+    w(_job(nonce="r2"))
+    assert _os.environ["CRUCIBLE_MODEL_ROUTING"] == "on"
 
 
 # ---- the runner: execution SOLELY via run_one ---------------------------------------------------------
@@ -245,7 +355,8 @@ def test_runner_drives_an_authorized_launch_through_run_one(monkeypatch, tmp_pat
     assert runner.queue.enqueue(job).enqueued is True
     out = runner.run_one()
     assert out.state == "done", out.reason
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]  # engage worker ran under the lease
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]  # engage worker ran under the lease
 
 
 def test_runner_refuses_a_job_with_no_authority_worker_never_runs(monkeypatch, tmp_path):
@@ -311,7 +422,8 @@ def test_runner_refuses_a_live_customer_by_default_and_runs_only_when_enabled(mo
     r2.queue.enqueue(LaunchTrigger(base_dir=base, now=1000.0).poll()[0])
     out2 = r2.run_one()
     assert out2.state == "done", out2.reason                         # the realistic LIVE production path runs
-    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False}]
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False,
+                      "launch_nonce": "n1"}]
 
 
 # ---- K4-5d(B): the completion SEAM — the worker emits a governance-signed settle signal ----------------
@@ -417,3 +529,73 @@ def test_worker_settle_signal_binds_the_jobs_nonce(monkeypatch, tmp_path):
     w(_job(nonce="n2"))
     envs = _completion_envelopes(cs)
     assert len(envs) == 1 and envs[0]["document"]["nonce"] == "n2" and envs[0]["document"]["engagement_slug"] == SLUG
+
+
+# ---- FDX-2: a COMPLETED run's settle DEPENDS on the findings crossing first (a paid run never settles with
+# its FACTs lost). The crossing is REQUIRED, not best-effort: a crossing failure blocks the completed signal
+# and raises (JobRunner re-drives). ------------------------------------------------------------------------
+
+def test_worker_completed_settle_is_gated_on_the_findings_crossing(monkeypatch, tmp_path):
+    """The run SUCCEEDS and produces FACTs, but the crossing fails to spool them durably. cross_confirmed_findings
+    is TOTAL — it COUNTS a per-finding spool/sign failure and RETURNS CrossingResult(errors>0) WITHOUT raising, so
+    the worker must INSPECT the result (NOT rely on it to raise — the trap the FDX-2 red-pen caught). It does:
+    it raises on errors>0, emits NO 'completed' settle (the drain never charges), and JobRunner re-drives. The
+    reservation is HELD until the FACTs cross — money-safe, nothing lost. Faithful to the real contract: the
+    patched crossing RETURNS a CrossingResult with errors, exactly as the real function does on a spool failure."""
+    import vigil_integration.jobs.findings_crossing as fc
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    monkeypatch.setattr(fc, "findings_from_report", lambda report: [{"fact": 1}])   # the run produced FACTs
+    monkeypatch.setattr(fc, "cross_confirmed_findings",                              # spool write failed → COUNTED,
+                        lambda *a, **k: fc.CrossingResult(crossed=0, leads=0, errors=1))   # not raised
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 1})
+    with pytest.raises(RuntimeError, match="crossing incomplete"):
+        w(_job(nonce="nF"))
+    assert not _completion_envelopes(cs), "a crossing that errored must NOT emit a completed settle (no charge)"
+
+
+def test_worker_crossing_errors_from_the_REAL_cross_confirmed_findings_gate_the_settle(monkeypatch, tmp_path):
+    """Threads the REAL cross_confirmed_findings (not a wholesale patch): a per-finding failure in the crossing
+    loop (here confirm_and_certify raising, e.g. an unwritable finding spool surfaces the same way) is caught +
+    counted as errors by the real Total function, which RETURNS — and the worker's .errors inspection then gates
+    the settle. Proves the gate works against the real function's actual (non-raising) contract, which is the
+    exact premise the FDX-2 red-pen found the first cut violated."""
+    import vigil_integration.jobs.findings_crossing as fc
+    import vigil_integration.oracle_adapter as oa
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    monkeypatch.setattr(fc, "findings_from_report", lambda report: [{"fact": 1}])
+    # deep: the real cross_confirmed_findings loop catches this per-finding error -> errors=1 (never raises)
+    monkeypatch.setattr(oa, "confirm_and_certify",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("finding spool unwritable")))
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 1})
+    with pytest.raises(RuntimeError, match="crossing incomplete"):
+        w(_job(nonce="nR"))
+    assert not _completion_envelopes(cs), "the real crossing's errors must gate the completed settle (no charge)"
+
+
+def test_worker_completed_settle_emits_after_a_successful_crossing(monkeypatch, tmp_path):
+    """With FACTs, the crossing runs FIRST and returns a CLEAN CrossingResult (errors=0) — only then does the
+    'completed' settle signal follow, so the drain's input exists only because the FACTs were durably crossed.
+    A FACT that legitimately did not re-fire counts in `leads`, NOT `errors`, and does NOT block the settle."""
+    import vigil_integration.jobs.findings_crossing as fc
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin")
+    cs = str(tmp_path / "completion-spool")
+    crossed = {"n": 0}
+
+    def _ok(*a, **k):
+        crossed["n"] += 1
+        return fc.CrossingResult(crossed=1, leads=0, errors=0)
+    monkeypatch.setattr(fc, "findings_from_report", lambda report: [{"fact": 1}])
+    monkeypatch.setattr(fc, "cross_confirmed_findings", _ok)
+    w = make_engage_worker(trust_root=object(), base_dir=base, completion_spool_dir=cs,
+                           run=lambda **kw: {"facts": 1})
+    w(_job(nonce="nG"))
+    assert crossed["n"] == 1, "the crossing ran before the settle signal"
+    envs = _completion_envelopes(cs)
+    assert len(envs) == 1 and envs[0]["document"]["outcome"] == "completed"

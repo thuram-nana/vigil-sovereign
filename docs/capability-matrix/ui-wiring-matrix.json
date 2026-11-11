@@ -307,14 +307,14 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 199,
+    "routes": 200,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 28,
       "pending": 0,
-      "ui-driven": 171
+      "ui-driven": 172
     },
-    "ui_calls": 165
+    "ui_calls": 166
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -409,6 +409,14 @@
       "kind": "exact",
       "method": "GET",
       "path": "/api/billing/invoices",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/margin",
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
@@ -2612,6 +2620,11 @@
     {
       "method": "GET",
       "path": "/api/billing/invoices",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/margin",
       "plane": "sovereign"
     },
     {

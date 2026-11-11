@@ -185,6 +185,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active ownership proof(s) {stranded_proofs}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
+    # (c, AEGIS-SaaS AE-0) the SAME floor for governor.monitoring_authority: an active owner-signed monitoring
+    # grant whose only record sits below K must be carried into the seed, or the prune drops it AND resets the
+    # per-(org,host) high-water (a captured grant could then resurrect a REVOKED monitoring authority).
+    stranded_ma = stranded_active_monitoring_authorities(store, archived, K)
+    if stranded_ma:
+        raise PruneUnsafe(f"K={K} would strand active monitoring authorit(ies) {stranded_ma}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -201,6 +209,12 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, AEGIS fold) the SAME floor for the SEPARATE governor.monitoring_subscription line.
+    stranded_msubs = stranded_active_monitoring_subscriptions(store, archived, K)
+    if stranded_msubs:
+        raise PruneUnsafe(f"K={K} would strand active monitoring subscription(s) {stranded_msubs}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed; "
+                          f"lower K or resolve")
     # (c, Slice E2a customer credentials) the SAME floor for governor.customer_credential: an active passkey/
     # TOTP/OIDC-link whose only owner-signed grant sits below K must be carried into the seed, or the prune
     # drops it AND resets the per-(username, cred_key) high-water (re-opening credential replay-resurrection).
@@ -226,6 +240,47 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand invoice(s) for tenant(s) {stranded_invs}: a below-K billing-history "
                           f"line would not be carried into the snapshot seed (losing the invoice or re-opening "
                           f"invoice replay); lower K or resolve")
+    # (c, PP-1 postpaid) the SAME floor for governor.postpaid: an ENABLED credit line whose only owner-signed
+    # set_account sits below K must be carried into the seed, or the prune drops the line + resets the per-org
+    # high-water (re-opening replay of a disabled line). Fail-closed, like the subscription floor.
+    stranded_pp = stranded_active_postpaid(store, archived, K)
+    if stranded_pp:
+        raise PruneUnsafe(f"K={K} would strand active postpaid account(s) {stranded_pp}: their only owner-signed "
+                          f"set_account sits below K and would not be carried into the snapshot seed (resetting "
+                          f"the per-org anti-replay high-water); lower K or resolve")
+    # (c, PP-1 postpaid arrears) the SAME floor for the ADDITIVE arrears ledger: a prune must carry every below-K
+    # tenant's drawn balance AND the consumed-entry_id set into the seed, or it would LOWER the drawn balance
+    # (letting a tenant draw past their line) AND drop the anti-replay seen-set (re-opening accrual replay).
+    stranded_ppa = stranded_postpaid_arrears(store, archived, K)
+    if stranded_ppa:
+        raise PruneUnsafe(f"K={K} would strand postpaid arrears for tenant(s) {stranded_ppa}: a below-K drawn "
+                          f"balance or consumed entry_id would not be carried into the snapshot seed (lowering "
+                          f"the line's drawn balance or re-opening accrual replay); lower K or resolve")
+    # (c, PP-2 postpaid in-flight) a reserve that is still IN-FLIGHT (settle not yet landed) must not be pruned:
+    # PP-2's `in_flight_reserved` is a LIVE pairing scan, so a pruned unsettled reserve would be billed as
+    # consumed (over-billing a possibly-cancelled launch). Fail-closed, distinct from the aggregate arrears floor.
+    stranded_ppr = stranded_active_postpaid_reserves(store, archived, K)
+    if stranded_ppr:
+        raise PruneUnsafe(f"K={K} would strand an in-flight postpaid reserve for tenant(s) {stranded_ppr}: a "
+                          f"below-K reserve whose settle has not yet landed would be hidden from the PP-2 "
+                          f"in-flight scan, over-billing the (possibly cancelled) launch; lower K or let it settle")
+    # (c, EC-4 cost ledger) the SAME floor for the ADDITIVE token-cost ledger: a prune must carry every below-K
+    # tenant's reserved/settled totals AND the consumed-entry_id set into the seed, or it would LOWER a tenant's
+    # committed real cost (corrupting the per-tenant margin record) AND drop the anti-replay seen-set (re-opening
+    # reserve/settle replay). Fail-closed, mirroring the postpaid arrears floor.
+    stranded_cl = stranded_cost_ledger(store, archived, K)
+    if stranded_cl:
+        raise PruneUnsafe(f"K={K} would strand cost-ledger totals for tenant(s) {stranded_cl}: a below-K reserved "
+                          f"or settled token total or consumed entry_id would not be carried into the snapshot "
+                          f"seed (zeroing attributed cost or re-opening reserve/settle replay); lower K or resolve")
+    # (c, EC-4 in-flight cost envelope) a cost reserve still IN-FLIGHT (settle not yet landed) must not be pruned:
+    # `in_flight_envelope` is a LIVE pairing scan, so a pruned unsettled reserve would vanish from the pending pool
+    # draw (EC-5 pool meter under-counts, over-admitting past the cap). Fail-closed, distinct from the aggregate floor.
+    stranded_clr = stranded_active_cost_reserves(store, archived, K)
+    if stranded_clr:
+        raise PruneUnsafe(f"K={K} would strand an in-flight cost reserve for tenant(s) {stranded_clr}: a below-K "
+                          f"reserve whose settle has not yet landed would be hidden from the in-flight envelope "
+                          f"scan, under-counting the pending pool draw; lower K or let it settle")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -456,6 +511,45 @@ def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> 
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
 
+def stranded_active_monitoring_authorities(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS-SaaS AE-0) — ACTIVE monitoring grants (`governor/monitoring_authority.py`) whose only
+    owner-signed record sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed.
+    EMPTY in the happy path. Mirrors `stranded_active_ownership_proofs`. Returns ``host@org_id``. VERIFIED-active
+    only (a forged/unsigned grant never blocks a prune). Read-only."""
+    from ..governor.monitoring_authority import SIGNAL as MA_SIGNAL, _CORE as MA_CORE, _MODES as MA_MODES
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    st: dict[tuple, str] = {}
+    hw: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != MA_SIGNAL:
+            continue
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == "revoked":
+            st[key] = "revoked"
+        elif rst == "active" and p.get("mode") in MA_MODES and verify_signed(p, MA_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > hw.get(key, NO_HIGHWATER):
+                hw[key], st[key] = at, "active"
+    active = {k for k, v in st.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.monitoring_authority_state_map()
+    carried = {(row[0], row[1]) for row in seed.monitoring_authority_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
 def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:
     """§7(c, Slice E2a) — the ACTIVE customer credentials (`governor/customer_credentials.py`) whose only
     owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
@@ -665,7 +759,294 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
     return sorted(str(o) for o in stranded)
 
 
-def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+def stranded_active_monitoring_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS monitoring subscription) — the SAME tripwire as ``stranded_active_subscriptions`` for the
+    SEPARATE ``governor.monitoring_subscription`` line (seed sub-state ``monitoring_subscription_*``, schema v7)."""
+    from ..governor.monitoring_subscription import MONITORING_SUBSCRIPTION_SIGNAL
+    return stranded_active_subscriptions(store, archived, K, _signal=MONITORING_SUBSCRIPTION_SIGNAL,
+                                         _seed_field="monitoring_subscription_state")
+
+
+def stranded_active_postpaid(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-1 postpaid account) — the tenants (`governor/postpaid.py`) whose ENABLED postpaid credit line
+    has its only owner-signed `set_account` in the pruned prefix [0..K) yet NOT carried into the snapshot seed:
+    a prune would silently drop the line AND reset the per-org high-water (re-opening replay of a disabled line
+    via a captured `set_account`). EMPTY in the happy path — `SnapshotState.build()` carries each verified-
+    enabled account. Fail-closed tripwire mirroring `stranded_active_subscriptions` for the enabled-bool account
+    line; verified under the owner key valid at each seq; seed round-tripped through `model_dump`/`model_validate`.
+    Read-only."""
+    from ..governor.postpaid import POSTPAID_SIGNAL, _PP_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    enabled: dict[Any, bool] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != POSTPAID_SIGNAL:
+            continue
+        oid = p.get("org_id")
+        if not isinstance(oid, str) or not oid:
+            continue
+        if p.get("enabled") is True:
+            if verify_signed(p, _PP_CORE, resolver.at(r.seq)):
+                at = as_issued_at(p.get("issued_at"))
+                if at > issued.get(oid, NO_HIGHWATER):
+                    issued[oid], enabled[oid] = at, True
+        else:
+            dat = as_issued_at(p.get("issued_at"))        # 0.0 on sight; else fresher-than-open only
+            if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
+                enabled[oid] = False
+    active = {o for o, en in enabled.items() if en}       # enabled lines below K that MUST survive the prune
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = {r[0]: r[1] for r in seed.postpaid_state}
+    carried = {o for o in active if seed_state.get(o) is True}
+    return sorted(str(o) for o in (active - carried))
+
+
+def stranded_postpaid_arrears(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-1 postpaid arrears) — the tenants whose per-org arrears balance
+    (`governor.postpaid_debit`/`postpaid_credit`) or anti-replay seen-set sits in the pruned prefix [0..K) yet
+    would NOT be carried exactly into the snapshot seed: a prune would silently LOWER the drawn balance (letting
+    a tenant draw past their credit line) and/or drop a consumed `entry_id` (re-opening accrual replay — a pruned
+    debit re-appended above K would re-accrue). EMPTY in the happy path. Fail-closed tripwire mirroring
+    `stranded_active_wallets` (per-org debited/credited + seen); verified under the owner key valid at each seq;
+    the seed round-trips through `model_dump`/`model_validate`. Read-only."""
+    from ..governor.postpaid import (POSTPAID_DEBIT_SIGNAL, POSTPAID_CREDIT_SIGNAL, _PP_DEBIT_CORE, _PP_CREDIT_CORE)
+    from ..governor.wallet import _as_credits
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    debited: dict[Any, int] = {}
+    credited: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror PostpaidArrearsLedger._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        amt = _as_credits(p.get("credits"))
+        if sig == POSTPAID_DEBIT_SIGNAL:
+            debited[oid] = debited.get(oid, 0) + amt
+        else:
+            credited[oid] = credited.get(oid, 0) + amt
+    active = set(debited) | set(credited)
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sd, sc = seed.postpaid_arrears_debited_map(), seed.postpaid_arrears_credited_map()
+    ss = seed.postpaid_arrears_seen_set()
+    stranded: set = set()
+    for o in active:
+        if sd.get(o, 0) != debited.get(o, 0) or sc.get(o, 0) != credited.get(o, 0):
+            stranded.add(str(o))          # a drawn-balance the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
+    return sorted(stranded)
+
+
+def stranded_active_postpaid_reserves(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, PP-2 postpaid in-flight) — the tenants with an IN-FLIGHT postpaid RESERVE (a ``reserve-postpaid:``
+    debit whose matching ``settle-postpaid:`` settle record has NOT landed) sitting in the pruned prefix [0..K).
+
+    PP-2 arrears invoicing EXCLUDES in-flight reserves from the billing basis via
+    ``PostpaidArrearsLedger.in_flight_reserved`` — a LIVE pairing scan (the per-reserve amounts it needs are NOT
+    in the aggregate `stranded_postpaid_arrears` seed, which carries only per-org debited/credited totals + the
+    seen-set). Pruning an UNSETTLED reserve would hide it from that live scan, so `net_settled_consumed` would
+    inflate toward `accrued` and OVER-bill the in-flight (and possibly later-cancelled) launch, with no claw-back
+    (the delta model only bills forward) — the red-pen MED. `stranded_postpaid_arrears` does NOT prevent this: it
+    only checks the aggregate balance + seen-set survive, both of which a pruned reserve's debit still satisfies.
+
+    Fail-closed tripwire: block the prune while a below-K reserve is still in-flight (no settle in the archived
+    prefix NOR the live tail [K..]). A SETTLED reserve (settle present anywhere) IS prunable — once settled it
+    leaves the in-flight set and `accrued` (snapshot-seeded) carries its net consumption. Signature-verified so a
+    forged settle cannot unblock the prune. Read-only. EMPTY in the happy path (no in-flight launch straddles the
+    prune horizon; launches normally settle within their lifetime)."""
+    from ..governor.postpaid import (POSTPAID_DEBIT_SIGNAL, POSTPAID_CREDIT_SIGNAL, _PP_DEBIT_CORE,
+                                     _PP_CREDIT_CORE, RESERVE_ENTRY_PREFIX, SETTLE_ENTRY_PREFIX)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+
+    def _pairs(records):
+        for r in records:
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != POSTPAID_DEBIT_SIGNAL and sig != POSTPAID_CREDIT_SIGNAL:
+                continue
+            oid, eid = p.get("org_id"), p.get("entry_id")
+            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+                continue
+            core = _PP_DEBIT_CORE if sig == POSTPAID_DEBIT_SIGNAL else _PP_CREDIT_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                              # fail-closed: a forged settle must not unblock the prune
+            if sig == POSTPAID_DEBIT_SIGNAL and eid.startswith(RESERVE_ENTRY_PREFIX):
+                yield ("reserve", oid, eid[len(RESERVE_ENTRY_PREFIX):])
+            elif sig == POSTPAID_CREDIT_SIGNAL and eid.startswith(SETTLE_ENTRY_PREFIX):
+                yield ("settle", oid, eid[len(SETTLE_ENTRY_PREFIX):])
+
+    reserves: dict[str, str] = {}      # in-flight-candidate suffix -> org_id, for reserves in the PRUNED prefix
+    settled: set = set()               # suffixes with a landed settle, archived OR live
+    for kind, oid, suf in _pairs(sorted(below, key=lambda r: r.seq)):
+        if kind == "reserve":
+            reserves.setdefault(suf, oid)
+        else:
+            settled.add(suf)
+    for kind, _oid, suf in _pairs(store.iter_records(since_seq=K - 1)):   # live tail: a settle here also counts
+        if kind == "settle":
+            settled.add(suf)
+    return sorted({oid for suf, oid in reserves.items() if suf not in settled})
+
+
+def stranded_cost_ledger(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, EC-4 cost ledger) — the tenants whose per-org token-cost totals
+    (`governor.cost_reserve`/`governor.cost_settle`) or anti-replay seen-set sits in the pruned prefix [0..K) yet
+    would NOT be carried exactly into the snapshot seed: a prune would silently LOWER a tenant's committed real
+    cost (zeroing attributed Anthropic spend, corrupting the per-tenant margin record) and/or drop a consumed
+    `entry_id` (re-opening reserve/settle replay — a pruned record re-appended above K would double-count). EMPTY
+    in the happy path. Fail-closed tripwire mirroring `stranded_postpaid_arrears` (per-org reserved/settled + seen);
+    verified under the owner key valid at each seq; the seed round-trips through `model_dump`/`model_validate`.
+    Read-only."""
+    from ..governor.cost_ledger import (COST_RESERVE_SIGNAL, COST_SETTLE_SIGNAL, _RESERVE_CORE, _SETTLE_CORE,
+                                        _as_tokens)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    reserved: dict[Any, int] = {}
+    settled: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror CostEnvelopeLedger._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        amt = _as_tokens(p.get("tokens"))
+        if sig == COST_RESERVE_SIGNAL:
+            reserved[oid] = reserved.get(oid, 0) + amt
+        else:
+            settled[oid] = settled.get(oid, 0) + amt
+    active = set(reserved) | set(settled)
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sr, sst = seed.cost_reserved_map(), seed.cost_settled_map()
+    ss = seed.cost_seen_set()
+    stranded: set = set()
+    for o in active:
+        if sr.get(o, 0) != reserved.get(o, 0) or sst.get(o, 0) != settled.get(o, 0):
+            stranded.add(str(o))          # a committed-cost / reserved total the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))              # a consumed entry_id the seed drops (reserve/settle anti-replay durability)
+    return sorted(stranded)
+
+
+def stranded_active_cost_reserves(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, EC-4 in-flight cost envelope) — the tenants with an IN-FLIGHT cost RESERVE (a ``reserve-cost:``
+    `governor.cost_reserve` whose matching ``settle-cost:`` `governor.cost_settle` has NOT landed) sitting in the
+    pruned prefix [0..K).
+
+    `CostEnvelopeLedger.in_flight_envelope` is a LIVE pairing scan (the per-reserve amounts it needs are NOT in
+    the aggregate `stranded_cost_ledger` seed, which carries only per-org reserved/settled totals + the seen-set).
+    Pruning an UNSETTLED reserve would hide it from that live scan, so the pending pool draw (held OUT of committed
+    cost) would silently vanish — the global pool meter (EC-5) would under-count the in-flight envelope and could
+    over-admit launches past the pool cap. `stranded_cost_ledger` does NOT prevent this: it only checks the
+    aggregate reserved/settled totals + seen-set survive, all of which a pruned reserve's record still satisfies.
+
+    Fail-closed tripwire: block the prune while a below-K reserve is still in-flight (no settle in the archived
+    prefix NOR the live tail [K..]). A SETTLED reserve (settle present anywhere) IS prunable — once settled it
+    leaves the in-flight set and `committed_cost` (snapshot-seeded) carries its settled cost. Signature-verified so
+    a forged settle cannot unblock the prune. Read-only. EMPTY in the happy path (no in-flight launch straddles the
+    prune horizon; launches normally settle within their lifetime)."""
+    from ..governor.cost_ledger import (COST_RESERVE_SIGNAL, COST_SETTLE_SIGNAL, _RESERVE_CORE, _SETTLE_CORE,
+                                        RESERVE_COST_PREFIX, SETTLE_COST_PREFIX)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+
+    def _pairs(records):
+        for r in records:
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            sig = p.get("signal")
+            if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+                continue
+            oid, eid = p.get("org_id"), p.get("entry_id")
+            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+                continue
+            core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+            if not verify_signed(p, core, resolver.at(r.seq)):
+                continue                              # fail-closed: a forged settle must not unblock the prune
+            if sig == COST_RESERVE_SIGNAL and eid.startswith(RESERVE_COST_PREFIX):
+                yield ("reserve", oid, eid[len(RESERVE_COST_PREFIX):])
+            elif sig == COST_SETTLE_SIGNAL and eid.startswith(SETTLE_COST_PREFIX):
+                yield ("settle", oid, eid[len(SETTLE_COST_PREFIX):])
+
+    reserves: dict[str, str] = {}      # in-flight-candidate suffix -> org_id, for reserves in the PRUNED prefix
+    settled: set = set()               # suffixes with a landed settle, archived OR live
+    for kind, oid, suf in _pairs(sorted(below, key=lambda r: r.seq)):
+        if kind == "reserve":
+            reserves.setdefault(suf, oid)
+        else:
+            settled.add(suf)
+    for kind, _oid, suf in _pairs(store.iter_records(since_seq=K - 1)):   # live tail: a settle here also counts
+        if kind == "settle":
+            settled.add(suf)
+    return sorted({oid for suf, oid in reserves.items() if suf not in settled})
+
+
+def stranded_active_subscriptions(store, archived: list[Segment], K: int, *, _signal: Optional[str] = None,
+                                  _seed_field: str = "subscription_state") -> list[str]:
     """§7(c, SaaS subscription) — the tenants (`governor/subscription.py`) whose subscription is `active` with
     its only owner-signed grant in the pruned prefix [0..K) yet NOT carried into the snapshot seed: a prune
     would silently drop the plan (and reset the per-org high-water, re-opening replay of a lapsed plan). EMPTY
@@ -673,6 +1054,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     mirroring `stranded_active_accounts`; verified under the owner key valid at each seq; seed round-tripped
     through `model_dump`/`model_validate`. Read-only."""
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL, _SUB_CORE, STATUS_ACTIVE, _DOWN_STATES)
+    signal = SUBSCRIPTION_SIGNAL if _signal is None else _signal
     from ..governor import key_history as _kh
     from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
@@ -685,7 +1067,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     issued: dict[Any, float] = {}
     for r in sorted(below, key=lambda r: r.seq):
         p = r.payload
-        if not isinstance(p, dict) or p.get("signal") != SUBSCRIPTION_SIGNAL:
+        if not isinstance(p, dict) or p.get("signal") != signal:
             continue
         oid = p.get("org_id")
         if not isinstance(oid, str) or not oid:
@@ -700,7 +1082,7 @@ def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> lis
     active = {o for o, v in status.items() if v == STATUS_ACTIVE}
     seed = SnapshotState.model_validate(
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
-    seed_state = seed.subscription_state_map()
+    seed_state = {r[0]: r[1] for r in getattr(seed, _seed_field)}
     carried = {o for o in active if seed_state.get(o) == STATUS_ACTIVE}
     return sorted(str(o) for o in (active - carried))
 

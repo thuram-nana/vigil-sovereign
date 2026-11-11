@@ -578,7 +578,49 @@ def _fmt_timer(t: dict) -> str:
     return f"{name}: enabled, never fired"
 
 
+def _queue_root_backup_coverage(base_dir: str, queue_root: str) -> "str | None":
+    """#75 advisory: is the configured SecurityJob ``--queue-root`` captured by the offense backup?
+
+    ``create_offense_backup`` captures the ``base_dir`` subtree only; the persisted queue now DEFAULTS to
+    ``<base_dir>/jobs`` (in-tree, captured — see ``cli._default_queue_root``). An operator who OVERRIDES the
+    queue root to a path OUTSIDE ``base_dir`` re-opens the nothing-lost gap: a host loss strands in-flight
+    paid jobs (credits reserved, launch lease signed) whose SecurityJob lived in an un-backed-up queue.
+
+    Returns an advisory NOTE when a NON-EMPTY ``queue_root`` resolves OUTSIDE ``base_dir``, else ``None``.
+    Pure (path normalization only). Advisory-ONLY — the caller never flips posture STATE on it; it is silent
+    when nothing is configured (the default is in-tree + covered) so it raises no false alarm."""
+    qr = (queue_root or "").strip()
+    bd = (base_dir or "").strip()
+    if not qr or not bd:
+        return None                                   # nothing to assess (default <base_dir>/jobs is covered)
+    try:
+        q = Path(qr).expanduser().resolve()
+        b = Path(bd).expanduser().resolve()
+    except OSError:
+        return None
+    if q == b or q.is_relative_to(b):
+        return None                                   # under base_dir → captured by create_offense_backup
+    return (f"NOTE: SecurityJob queue root {qr} resolves OUTSIDE the backup-captured base_dir {bd} — "
+            "in-flight jobs there are NOT captured by `vigil backup`; a host loss would STRAND them "
+            "(credits reserved, lease signed). Use the default <base_dir>/jobs, or move the queue under "
+            "base_dir, so the durable queue is backup-covered (#75).")
+
+
 def _posture_backups(repo: Path) -> "tuple[str, str]":
+    """Backup-durability posture (:func:`_posture_backup_timers`) PLUS a #75 queue-coverage advisory: when
+    ``VIGIL_QUEUE_ROOT`` names a SecurityJob queue root OUTSIDE the backup-captured ``VIGIL_BASE_DIR`` tree,
+    append a NOTE so a misconfigured deploy is visible at preflight. The posture STATE is UNCHANGED (advisory
+    only — the production gate keys off the timer state, never this NOTE), and the probe is silent when the
+    default in-tree queue (``<base_dir>/jobs``) is in use."""
+    state, detail = _posture_backup_timers(repo)
+    note = _queue_root_backup_coverage(os.environ.get("VIGIL_BASE_DIR", ""),
+                                       os.environ.get("VIGIL_QUEUE_ROOT", ""))
+    if note:
+        detail = f"{detail} | {note}"
+    return state, detail
+
+
+def _posture_backup_timers(repo: Path) -> "tuple[str, str]":
     """Is BACKUP DURABILITY actually running? Reads infra/systemd/*.timer enablement AND each paired
     service's last successful run via systemctl. The state is decided over the DURABILITY set — at least one
     of {vigil-backup, vigil-backup-push} PLUS vigil-backup-drill:
@@ -1085,6 +1127,239 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
     return deps
 
 
+# The supervised SaaS drains whose stall loses money or confirmed results: the settle drain (settle_launch
+# charge/refund) and the finding drain (confirmed-FACT crossing to the tenant). Both are OPTIONAL dead-man
+# units (watched only once enabled/firing), so a WATCHED one in alarm is a real nothing-lost failure that
+# must make `vigil doctor` RED (readiness #69 MONEY gate). Names match infra/systemd/*.service + HA_UNITS.
+# MONEY-5: the money-IN billing drain (#1055) joins them. A FAILED billing drain means a paid webhook is standing
+# in rejected/ (the processor never redelivers): a customer PAID and has NOT been credited until an operator acts —
+# an operator-visible money failure, so RED, not an advisory note. Like the others it is OPTIONAL (watched only
+# once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected; and `vigil ready`
+# only REPORTS (nothing Requires= it), so a RED here never holds the proxy that accepts new payments down.
+_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service")
+_BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
+
+
+# ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
+# One report section that makes the NET-2a/NET-2b configuration VISIBLE: is bounded recovery on, is an OTLP
+# endpoint configured (via $VIGIL_OTLP_ENDPOINT — the per-run `--otlp-endpoint` flag is invisible here), is it
+# loopback, is the exporter installed, and is the collector answering (and how fast — a collector answering
+# just under the export timeout never trips the circuit breaker but delays EVERY governed action).
+# ADVISORY ONLY: it never calls _issue, never flips `ok`, never gates a launch, and it is NOT a security
+# posture control (the production gate is untouched). DEFAULT-OFF: with neither the recovery flag nor an
+# endpoint set it is `configured=False`, adds no note and renders nothing (text output byte-identical).
+_NET_SLOW_COLLECTOR_MS = 1000
+_NET_PROBE_DEADLINE_S = 3.0        # an OVERALL bound on the collector probe (its 2 s timeout is per socket op)
+
+
+def _bounded_call(fn, arg, deadline_s: float):
+    """Run ``fn(arg)`` on a daemon thread; return ``(done, result, exc)`` within ``deadline_s``. A probe that a
+    slow-dripping local listener holds open can never hang `vigil doctor` (the thread is abandoned, daemon)."""
+    import threading
+
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["r"] = fn(arg)
+        except BaseException as exc:  # noqa: BLE001 — reported, never propagated off the thread
+            box["e"] = exc
+    t = threading.Thread(target=run, name="vigil-doctor-otlp-probe", daemon=True)
+    t.start()
+    t.join(deadline_s)
+    if t.is_alive():
+        return False, None, None
+    return True, box.get("r"), box.get("e")
+
+
+def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=None,
+                             deadline_s: float = _NET_PROBE_DEADLINE_S) -> "tuple[dict, list]":
+    """Return (section, advisory_notes). Total and fail-soft: any probe fault degrades to UNKNOWN wording."""
+    import logging as _logging
+    import time as _time
+
+    e = os.environ if env is None else env
+    notes: list = []
+    try:
+        from .live.net_recovery import recovery_enabled
+        recovery = "ON" if recovery_enabled(e) else "OFF"
+    except Exception as exc:  # noqa: BLE001
+        recovery = f"UNKNOWN ({type(exc).__name__})"
+    raw = str(e.get("VIGIL_OTLP_ENDPOINT", "") or "").strip()
+    if raw.lower() in ("off", "none", "0", "false", "no"):
+        raw = ""
+    section: dict = {"recovery": recovery, "otlp_endpoint": None, "otlp_loopback": None,
+                     "exporter_installed": None, "collector": None,
+                     "configured": recovery != "OFF" or bool(raw)}
+    if not section["configured"]:
+        return section, notes                 # default: no probe, no exporter lookup, no note — byte-identical
+    try:
+        # (find_spec on a dotted name imports the PARENT packages, so this only runs once configured)
+        import importlib.util
+        section["exporter_installed"] = bool(
+            importlib.util.find_spec("opentelemetry.sdk.trace") is not None
+            and importlib.util.find_spec("opentelemetry.exporter.otlp.proto.http.trace_exporter") is not None)
+    except Exception:  # noqa: BLE001 — a missing parent package raises: not installed
+        section["exporter_installed"] = False
+    if not raw:
+        notes.append("network recovery: VIGIL_NET_RECOVERY_ENABLED is on but no OTLP endpoint is configured "
+                      "($VIGIL_OTLP_ENDPOINT) — there is no telemetry path for it to recover.")
+        return section, notes
+    try:
+        from .live.otel_export import endpoint_is_loopback, probe_collector, redact_endpoint
+    except Exception as exc:  # noqa: BLE001
+        section["otlp_endpoint"] = "<unreadable>"
+        notes.append(f"network recovery: the OTLP endpoint could not be checked ({type(exc).__name__}).")
+        return section, notes
+    section["otlp_endpoint"] = redact_endpoint(raw)
+    section["otlp_loopback"] = bool(endpoint_is_loopback(raw))
+    if not section["otlp_loopback"]:
+        notes.append(f"network recovery: $VIGIL_OTLP_ENDPOINT {section['otlp_endpoint']!r} is NOT loopback — "
+                      f"`vigil engage` refuses it (telemetry egress is pinned to a loopback collector).")
+        return section, notes
+    if not section["exporter_installed"]:
+        notes.append("network recovery: an OTLP endpoint is configured but the OpenTelemetry OTLP exporter "
+                      "(opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed — "
+                      "no spans will be exported. It is an OPT-IN hash lock: rebuild with "
+                      "`VIGIL_WITH_OTEL=1 bash envs/build_envs.sh` (see docs/SUPPLY-CHAIN.md).")
+    if probe is None:
+        _quiet = _logging.getLogger("vigil_integration.doctor.otlp_probe")
+        _quiet.addHandler(_logging.NullHandler())
+        _quiet.propagate = False              # doctor reports the result itself — no duplicate stderr WARNING
+
+        def _probe(ep):
+            return probe_collector(ep, logger=_quiet)
+    else:
+        _probe = probe
+    _clock = clock or _time.monotonic
+    try:
+        t0 = float(_clock())
+        done, res, err = _bounded_call(_probe, raw, deadline_s)
+        ms = int(round((float(_clock()) - t0) * 1000))
+    except Exception as exc:  # noqa: BLE001 — a probe fault is UNKNOWN, never a crash
+        done, res, err, ms = True, None, exc, None
+    if not done:
+        section["collector"] = {"reachable": False, "latency_ms": ms,
+                                "detail": f"no answer within {deadline_s:g} s"}
+    elif err is not None:
+        section["collector"] = {"reachable": None, "latency_ms": None,
+                                "detail": f"probe error: {type(err).__name__}"}
+        return section, notes
+    else:
+        section["collector"] = {"reachable": bool(getattr(res, "reachable", False)), "latency_ms": ms,
+                                "detail": str(getattr(res, "detail", "") or "")}   # already redacted by the probe
+    col = section["collector"]
+    if col["reachable"] is False:
+        notes.append(f"network recovery: the OTLP collector at {section['otlp_endpoint']} did not answer a "
+                      f"reachability probe (`vigil services up --with-observability`). Telemetry degrades; "
+                      f"runs are unaffected.")
+    elif col["reachable"] and col["latency_ms"] is not None and col["latency_ms"] >= _NET_SLOW_COLLECTOR_MS:
+        notes.append(f"network recovery: the OTLP collector took {col['latency_ms']} ms to answer a reachability "
+                      f"probe (connect + a minimal request). Exports to a collector this slow can each wait up to "
+                      f"the export timeout on every governed action, possibly without tripping the circuit "
+                      f"breaker. Check the collector host.")
+    return section, notes
+
+
+# ── #70: is the cross-plane MONEY SEAM inside what the offense backup captures? (ADVISORY) ─────────────────
+# The credit-lease seam (leases, settlement + pause markers) is the shared VIGIL_BASE_DIR both planes agree on;
+# `vigil-settle-drain` reads/writes it at VIGIL_SETTLE_BASE_DIR (unit default %h/.sigil/credit-lease). It is
+# deliberately NOT in the sovereign `sigil backup` (cross-plane: it also holds offense keys — FATAL-2), so it is
+# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR} from
+# ~/.config/vigil/backup.env, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
+# a dead disk loses every lease + settlement marker. ADVISORY: a note, never an _issue / `ok` flip. DEFAULT-OFF:
+# evaluated only once the money drain is configured (settle-drain.env present) — otherwise nothing changes.
+def _parse_env_file(path: Path) -> "dict | None":
+    """KEY=VALUE lines (``#`` comments, optional quotes). ``None`` if unreadable/absent. Never raises."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _money_seam_backup_coverage(home: "Path | None" = None) -> "tuple[dict, list]":
+    """Return (section, advisory_notes). ``configured`` is False (and no note) unless the settle drain is set up."""
+    h = Path(home) if home is not None else Path.home()
+    cfg = h / ".config" / "vigil"
+    settle = _parse_env_file(cfg / "settle-drain.env")
+    if settle is None:
+        return {"configured": False}, []
+    seam = Path(settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
+    backup = _parse_env_file(cfg / "backup.env")
+    section: dict = {"configured": True, "seam": _display_path(seam), "backup_base_dir": None, "covered": False}
+    if backup is None:
+        return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is backed up by NOTHING: "
+                         f"there is no ~/.config/vigil/backup.env (vigil-backup.service). Point the offense "
+                         f"backup's VIGIL_BASE_DIR at the seam."]
+    base = Path(backup.get("VIGIL_BASE_DIR") or ".vigil-live").expanduser()
+    if not base.is_absolute():
+        base = h / "vigil" / base                         # the unit's WorkingDirectory=%h/vigil
+    section["backup_base_dir"] = _display_path(base)
+    try:
+        s_r, b_r = seam.expanduser().resolve(), base.resolve()
+        covered = s_r == b_r or b_r in s_r.parents
+    except (OSError, RuntimeError):
+        covered = False
+    section["covered"] = covered
+    if covered:
+        return section, []
+    return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is NOT inside the offense "
+                     f"backup's base dir {_display_path(base)} — a dead disk would lose every lease and settlement "
+                     f"marker. Set VIGIL_BASE_DIR in ~/.config/vigil/backup.env to the seam (the same dir both "
+                     f"planes publish to). The sovereign `sigil backup` deliberately never captures it (cross-plane)."]
+
+
+def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = None) -> "tuple[dict, list, list]":
+    """Front C S0d — the cockpit's last fold-cache AUDIT (`$SIGIL_HOME/fold_cache_audit.json`, written by
+    `sigil.governor.fold_warm`; read here as inert JSON WITHOUT importing sigil — FATAL-2). Returns (section,
+    issues, notes). No report ⇒ `{"present": False}` and nothing else (the cache is off, or the cockpit has not
+    audited yet: default output unchanged). A recorded MISMATCH is a HARD issue — a cached fold disagreed with a
+    rebuild from the spine (the cockpit already dropped that entry; find out why). A report older than twice its
+    own interval (+1 h) is a NOTE: the cockpit's audit thread is not running."""
+    import datetime as _dt
+    import json as _json
+    p = (Path(home) if home is not None else _sigil_home()) / "fold_cache_audit.json"
+    try:
+        rep = _json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"present": False}, [], []
+    except (OSError, ValueError) as exc:
+        return {"present": True, "error": f"{type(exc).__name__}: {exc}"}, [], [
+            f"the fold-cache audit report {_display_path(p)} is unreadable ({type(exc).__name__})."]
+    if not isinstance(rep, dict):
+        return {"present": True, "error": "not a JSON object"}, [], [
+            f"the fold-cache audit report {_display_path(p)} is not a JSON object."]
+    folds = [f for f in rep.get("folds", []) if isinstance(f, dict)]
+    bad = [f for f in folds if f.get("status") == "MISMATCH"]
+    section = {"present": True, "ts": rep.get("ts"), "pid": rep.get("pid"), "ok": not bad,
+               "matched": sum(1 for f in folds if f.get("status") == "match"), "mismatched": len(bad),
+               "skipped": sum(1 for f in folds if f.get("status") == "skipped")}
+    issues = [f"fold cache MISMATCH in the cockpit (pid {rep.get('pid')}, audit {rep.get('ts')}): "
+              f"{f.get('fold')} at seq {f.get('seq')} differs from a rebuild from the spine "
+              f"({f.get('difference')}). The entry was dropped (the next read rebuilds); run `sigil verify` "
+              f"and treat it as a defect or an in-place spine edit." for f in bad]
+    notes: list = []
+    try:
+        ts = _dt.datetime.fromisoformat(str(rep.get("ts"))).timestamp()
+        interval = float(rep.get("interval_s") or 0)
+        age = (now if now is not None else _dt.datetime.now(_dt.timezone.utc).timestamp()) - ts
+        if interval > 0 and age > 2 * interval + 3600:
+            section["stale"] = True
+            notes.append(f"the last fold-cache audit is {int(age // 3600)} h old (interval {int(interval)} s): "
+                         f"the cockpit's audit thread is not running.")
+    except (TypeError, ValueError):
+        pass
+    return section, issues, notes
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -1315,7 +1590,29 @@ def collect(repo_root) -> dict:
                   "vigil-alerts.timer` (see infra/systemd/vigil-alerts.*).")
         else:
             for st in bad:
-                _note(f"scheduled unit {st.unit} is {st.state}: {st.detail}")
+                # readiness #69 MONEY gate: the settle drain (settle_launch charge/refund) and the finding
+                # drain (confirmed-FACT crossing) are OPTIONAL units — watched by the dead-man ONLY once
+                # enabled or firing (UnitSpec.watched_by_default). So a WATCHED one in alarm is a real
+                # nothing-lost failure (the drain FAILED its last run — e.g. a standing rejected/ quarantine
+                # made it exit non-zero — or STALE because its timer stopped), not the opt-in-not-enabled
+                # gap the ALL-ABSENT branch above handles. Make it a HARD issue so `vigil doctor` — the
+                # deploy preflight / production gate — goes RED until it is cleared. Non-money units stay
+                # advisory (`vigil alerts` owns the full dead-man).
+                if st.unit in _MONEY_DRAIN_UNITS and st.unit == _BILLING_DRAIN_UNIT:
+                    _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
+                           f"failed/stalled billing drain means paid webhooks are quarantined or not being "
+                           f"drained: a customer PAID and has NOT been credited. Read each `.reason` in the billing "
+                           f"spool's rejected/ (default ~/.sigil/billing-spool), fix the cause, move the envelope "
+                           f"back to incoming/, and run `sigil billing-drain drain --spool <spool>` (or restart "
+                           f"the unit) — re-ingest is idempotent, a payment is credited once.")
+                elif st.unit in _MONEY_DRAIN_UNITS:
+                    _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
+                           f"stalled/failed settle drain means completed paid runs are not being "
+                           f"charged/refunded; a stalled finding drain means confirmed FACTs are not "
+                           f"crossing to their tenant. Run `vigil alerts --status`, clear any quarantine "
+                           f"(the unit's rejected/ dir), and restart the unit.")
+                else:
+                    _note(f"scheduled unit {st.unit} is {st.state}: {st.detail}")
         d_stale, d_detail = _ua.delivery_is_stale(_ua.default_state_dir())
         report["unit_alerts"]["delivery_stale"] = d_stale
         report["unit_alerts"]["delivery_detail"] = d_detail
@@ -1324,6 +1621,63 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the unit-alerts probe must never crash the report
         report["unit_alerts"] = {"error": f"{type(exc).__name__}: {exc}", "statuses": []}
         _note(f"the unit-alerts monitor could not run: {exc}")
+
+    # pause/resume PR-5 — paused-launch reconciliation. A positively-recorded pause is an EXPECTED held
+    # reservation (the customer paused it; the money-safe PR-1..PR-4a plumbing refuses it at the arm + enqueue
+    # chokepoints and HOLDS it, re-admitting on resume), NOT a stuck / lost / unsettled lease — so it is an
+    # ADVISORY NOTE, never an _issue (it does NOT flip `ok`). It is also NOT an alarm suppressor: a genuinely
+    # stuck lease carries no pause marker and is unaffected (and the #69 money-DRAIN-unit gate above is
+    # untouched — a paused launch creates no settle-drain work). DEFAULT-OFF: with no pause markers the probe
+    # adds nothing and `vigil doctor` is byte-identical. Best-effort — never raises (fail-soft like every probe).
+    try:
+        from .live.credit_lease_pause import paused_launches
+        _pbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+        _paused = paused_launches(_pbase)
+        _n_launches = len(_paused)
+        _n_holds = sum(len(nn) for _s, nn in _paused)
+        report["paused_launches"] = {"count": _n_launches, "holds": _n_holds,
+                                     "slugs": [s for s, _ in _paused]}
+        if _n_launches:
+            _note(f"{_n_launches} customer launch(es) currently PAUSED ({_n_holds} held reservation(s)) — "
+                  f"EXPECTED while pause/resume is enabled. A paused launch is a positively-recorded hold: the "
+                  f"engine refuses it at the arm + enqueue chokepoints and holds it, re-admitting on resume. "
+                  f"This is NOT a stuck/unsettled lease (a genuinely stuck lease carries no pause marker); "
+                  f"clear it via the customer resume action (or owner tooling) when the hold is no longer wanted.")
+    except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
+        report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the paused-launch probe could not run: {exc}")
+
+    # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
+    # configured) adds nothing. Best-effort: never raises.
+    try:
+        _seam, _seam_notes = _money_seam_backup_coverage()
+        report["money_seam_backup"] = _seam
+        for _m in _seam_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the seam-coverage probe must never crash the report
+        report["money_seam_backup"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
+    # (nothing configured) adds no note. Best-effort: never raises.
+    try:
+        _net, _net_notes = _network_recovery_report()
+        report["network_recovery"] = _net
+        for _m in _net_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the network-recovery probe must never crash the report
+        report["network_recovery"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # Front C S0d — the cockpit's fold-cache audit (rebuild-and-compare). Absent report ⇒ nothing added. A
+    # MISMATCH is a HARD issue; a stale report is a note. Best-effort: never raises.
+    try:
+        _fc, _fc_issues, _fc_notes = _fold_cache_audit_report()
+        report["fold_cache_audit"] = _fc
+        for _m in _fc_issues:
+            _issue(_m)
+        for _m in _fc_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report
+        report["fold_cache_audit"] = {"error": f"{type(exc).__name__}: {exc}", "present": False}
     return report
 
 
@@ -1476,6 +1830,35 @@ def render(report: dict) -> str:
             amark = {"VALID": "OK ", "MODIFIED": "!! ", "MISSING": "!! ",
                      "ATTESTED_ONLY": "-- "}.get(st, "?? ")
             lines.append(f"  {amark}{a.get('name', '?')} ({a.get('kind', '?')}): {st}")
+
+    net = report.get("network_recovery")
+    if isinstance(net, dict) and net.get("configured"):
+        # NET-4: rendered ONLY when something is configured (default output byte-identical). Advisory.
+        lines.append("\nNetwork recovery / telemetry export (advisory — does NOT affect the exit code):")
+        lines.append(f"  {'OK ' if net.get('recovery') == 'ON' else '.. '}bounded recovery: {net.get('recovery')}")
+        ep = net.get("otlp_endpoint")
+        if ep:
+            lp = net.get("otlp_loopback")
+            lines.append(f"  {'OK ' if lp else '!! '}otlp endpoint ($VIGIL_OTLP_ENDPOINT): {ep}"
+                         + ("" if lp else "  (NOT loopback — refused)"))
+            ex = net.get("exporter_installed")
+            lines.append(f"  {'OK ' if ex else '!! '}otlp exporter installed: {'yes' if ex else 'NO'}")
+            col = net.get("collector")
+            if isinstance(col, dict):
+                r = col.get("reachable")
+                mark = "OK " if r else ("?? " if r is None else "!! ")
+                lat = col.get("latency_ms")
+                lines.append(f"  {mark}collector: " + ("answered a probe" if r else ("unknown" if r is None
+                             else "NO answer to a probe")) + (f" ({lat} ms)" if lat is not None and r else ""))
+        else:
+            lines.append("  .. otlp endpoint ($VIGIL_OTLP_ENDPOINT): unset")
+
+    fc = report.get("fold_cache_audit")
+    if isinstance(fc, dict) and fc.get("present") and "error" not in fc:
+        # Front C S0d: rendered ONLY when the cockpit has written an audit (default output byte-identical).
+        lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
+                     f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
+                     + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
 
     issues = report.get("issues", [])
     if issues:

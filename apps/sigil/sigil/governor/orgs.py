@@ -88,6 +88,8 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — the fold mirrors accounts._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0b — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 # Dedicated payload signals under the generic enforced `kind="event"` record (mirrors accounts' SIGNAL),
 # so a NEW kind need not be registered with the W5-1 write-path guard — the signal disambiguates the fold.
@@ -232,6 +234,134 @@ def org_tenant_id(org: "Union[Org, str]") -> str:
 
 
 # ---------------------------------------------------------------------------------------------------
+# The fold bodies — ONE step per signal, shared by the full folds and the verified fold cache (Front C S0b),
+# so the two can never diverge.
+# ---------------------------------------------------------------------------------------------------
+
+_SKIP = object()          # a step: the record did not touch any org / membership
+
+
+def _apply_org_record(r, resolver, state: dict, issued: dict, orgs: dict):
+    """Fold ONE record into the org (state, issued, orgs). Returns the org_id it touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != ORG_SIGNAL:
+        return _SKIP
+    org_id = p.get("org_id")
+    if not isinstance(org_id, str) or not org_id:
+        return _SKIP
+    rec_state = p.get("state")
+    if rec_state == "revoked":
+        state[org_id] = "revoked"                 # honor ANY revoke (even unsigned) — safe direction
+        return org_id
+    if rec_state == "active":
+        if not verify_signed(p, _ORG_CORE, resolver.at(r.seq)):
+            return _SKIP                          # fail-closed: unsigned/forged/ wrong-epoch-key grant
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(org_id, NO_HIGHWATER):
+            return _SKIP                          # REPLAY / stale re-append of an already-honored grant
+        issued[org_id] = at                       # consume it so its own replay is refused hereafter
+        state[org_id] = "active"
+        orgs[org_id] = Org(org_id=org_id, name=str(p.get("name") or ""),
+                           owner=str(p.get("owner") or ""), created_at=at, state="active")
+        return org_id
+    return _SKIP
+
+
+def _apply_membership_record(r, resolver, state: dict, issued: dict, mems: dict):
+    """Fold ONE record into the membership (state, issued, mems). Returns the (org_id, username) it touched,
+    or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != MEMBERSHIP_SIGNAL:
+        return _SKIP
+    org_id = p.get("org_id")
+    username = p.get("username")
+    if not isinstance(org_id, str) or not org_id or not isinstance(username, str) or not username:
+        return _SKIP
+    key = (org_id, username)
+    rec_state = p.get("state")
+    if rec_state == "revoked":
+        state[key] = "revoked"
+        return key
+    if rec_state == "active":
+        if not verify_signed(p, _MEMBERSHIP_CORE, resolver.at(r.seq)):
+            return _SKIP
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(key, NO_HIGHWATER):
+            return _SKIP
+        issued[key] = at
+        state[key] = "active"
+        mems[key] = Membership(org_id=org_id, username=username, role=str(p.get("role") or ""),
+                               issued_at=at, state="active")
+        return key
+    return _SKIP
+
+
+class _OrgsView:
+    """The cached org + membership folds in ONE entry (an `admit_customer` reads both): each fold's own
+    (state, issued, entities) plus the indexes kept in step — `active_orgs` / `active_mems` (exactly
+    `_fold_orgs()` / `_fold_memberships()`) and `members` (org_id -> active member usernames)."""
+
+    __slots__ = ("org_state", "org_issued", "orgs", "active_orgs",
+                 "mem_state", "mem_issued", "mems", "active_mems", "members")
+
+    def __init__(self, org_seed: tuple, mem_seed: tuple) -> None:
+        self.org_state, self.org_issued, self.orgs = org_seed
+        self.mem_state, self.mem_issued, self.mems = mem_seed
+        self.active_orgs: dict = {}
+        self.active_mems: dict = {}
+        self.members: "dict[str, set]" = {}
+        for o in list(self.orgs):
+            self.sync_org(o)
+        for k in list(self.mems):
+            self.sync_mem(k)
+
+    def sync_org(self, o) -> None:
+        org = self.orgs.get(o) if self.org_state.get(o) == "active" else None
+        if org is None:
+            self.active_orgs.pop(o, None)
+        else:
+            self.active_orgs[o] = org
+
+    def sync_mem(self, k) -> None:
+        m = self.mems.get(k) if self.mem_state.get(k) == "active" else None
+        if m is None:
+            if self.active_mems.pop(k, None) is not None:
+                names = self.members.get(k[0])
+                if names is not None:
+                    names.discard(k[1])
+                    if not names:
+                        del self.members[k[0]]
+            return
+        self.active_mems[k] = m
+        self.members.setdefault(k[0], set()).add(k[1])
+
+    def memberships(self, org_id) -> list:
+        if org_id is None:
+            return [self.active_mems[k] for k in sorted(self.active_mems)]
+        names = self.members.get(org_id, ()) if isinstance(org_id, str) else ()
+        return [self.active_mems[(org_id, u)] for u in sorted(names)]
+
+    def membership_role(self, username: str, org_id: str):
+        if org_id not in self.active_orgs:             # a revoked/unknown org admits no one
+            return None
+        m = self.active_mems.get((org_id, username))
+        return m.role if m is not None else None
+
+
+def _orgs_step(view: _OrgsView, r, resolver) -> None:
+    o = _apply_org_record(r, resolver, view.org_state, view.org_issued, view.orgs)
+    if o is not _SKIP:
+        view.sync_org(o)
+        return
+    k = _apply_membership_record(r, resolver, view.mem_state, view.mem_issued, view.mems)
+    if k is not _SKIP:
+        view.sync_mem(k)
+
+
+_ORGS_FOLD = FoldCache("governor.org+membership", step=_orgs_step)
+
+
+# ---------------------------------------------------------------------------------------------------
 # The registry — owner-signed org + membership grants on the spine. Construction mirrors AccountsRegistry
 # (and KillSwitch/PromotionPolicy): the owner signing key and trusted pubkey default to the persisted owner
 # identity, and tests inject explicit keypairs.
@@ -292,6 +422,10 @@ class OrgRegistry:
         # complete.)
         for _m in self.memberships(oid):
             self._append_revoked_membership(oid, _m.username)
+        # Offboarding also revokes + unpublishes every monitoring authority of the org (safe direction).
+        from .monitoring_authority import MonitoringAuthorityRegistry
+        MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
+                                    trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
         return seq
 
     # -- owner mutations: memberships ---------------------------------------------------------------
@@ -306,7 +440,7 @@ class OrgRegistry:
         oid = _check_org_id(org_id)
         u = _check_member_username(username)
         r = _check_member_role(role)
-        if oid not in self._fold_orgs():
+        if self.org(oid) is None:
             raise ValueError(f"no such active org {oid!r} (create it first, or it was revoked)")
         return self._append_active_membership(oid, u, r, issued_at=float(issued_at))
 
@@ -353,6 +487,42 @@ class OrgRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware folds; full genesis scan — see DEFERRED hard-prune note) --
+    def _org_seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, orgs), since): the org fold's HARD-PRUNE SEED from `snap`, or the empty genesis start
+        under the pubkey-dependent bypass (our anchor differs from the snapshot's)."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        state = dict(snap.org_state_map())                # org_id -> "active"|"revoked" (LWW; keep revoked)
+        issued = dict(snap.org_issued_map())              # org_id -> per-org high-water
+        orgs = {row[0]: Org(org_id=str(row[0]), name=str(row[1] or ""), owner=str(row[2] or ""),
+                            created_at=issued.get(row[0], 0.0), state="active")
+                for row in snap.org_row}                  # rebuild the honored-active Orgs from the seed
+        return (state, issued, orgs), snap.base_seq - 1
+
+    def _membership_seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, mems), since): the membership fold's seed, with the same bypass as `_org_seed`."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        state = dict(snap.membership_state_map())         # (org_id, username) -> "active"|"revoked" (keep revoked)
+        issued = dict(snap.membership_issued_map())       # (org_id, username) -> per-pair high-water
+        mems = {(row[0], row[1]): Membership(
+                    org_id=str(row[0]), username=str(row[1]), role=str(row[2] or ""),
+                    issued_at=issued.get((row[0], row[1]), 0.0), state="active")
+                for row in snap.membership_row}            # rebuild honored-active Memberships from the seed
+        return (state, issued, mems), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental org + membership fold (`fold_read.cached_read`,
+        flag-gated), else `_UNCACHED` (the caller then runs the full folds). Both folds start from the same
+        snapshot boundary, so one entry serves both."""
+        def seed(snap):
+            org_seed, since = self._org_seed(snap)
+            mem_seed, _since = self._membership_seed(snap)
+            return _OrgsView(org_seed, mem_seed), since
+
+        return cached_read(_ORGS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold_orgs(self) -> dict[str, Org]:
         """Fold the spine into {org_id: Org} for orgs whose latest state is active. Each `active` grant is
         authenticated under the owner pubkey valid AT ITS SEQ (`resolver.at`), and the per-org high-water
@@ -367,35 +537,9 @@ class OrgRegistry:
         ⇒ since==-1 ⇒ the genesis scan, empty seed either way)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, issued, orgs, since = {}, {}, {}, -1
-        else:
-            state = dict(snap.org_state_map())                # org_id -> "active"|"revoked" (LWW; keep revoked)
-            issued = dict(snap.org_issued_map())              # org_id -> per-org high-water
-            orgs = {row[0]: Org(org_id=str(row[0]), name=str(row[1] or ""), owner=str(row[2] or ""),
-                                created_at=issued.get(row[0], 0.0), state="active")
-                    for row in snap.org_row}                  # rebuild the honored-active Orgs from the seed
-            since = snap.base_seq - 1
+        (state, issued, orgs), since = self._org_seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != ORG_SIGNAL:
-                continue
-            org_id = p.get("org_id")
-            if not isinstance(org_id, str) or not org_id:
-                continue
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[org_id] = "revoked"                 # honor ANY revoke (even unsigned) — safe direction
-            elif rec_state == "active":
-                if not verify_signed(p, _ORG_CORE, resolver.at(r.seq)):
-                    continue                              # fail-closed: unsigned/forged/ wrong-epoch-key grant
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(org_id, NO_HIGHWATER):
-                    continue                              # REPLAY / stale re-append of an already-honored grant
-                issued[org_id] = at                       # consume it so its own replay is refused hereafter
-                state[org_id] = "active"
-                orgs[org_id] = Org(org_id=org_id, name=str(p.get("name") or ""),
-                                   owner=str(p.get("owner") or ""), created_at=at, state="active")
+            _apply_org_record(r, resolver, state, issued, orgs)
         return {o: org for o, org in orgs.items() if state.get(o) == "active"}
 
     def _fold_memberships(self) -> dict[tuple, Membership]:
@@ -407,42 +551,16 @@ class OrgRegistry:
         survives and its high-water is not reset (same pubkey-dependent bypass as `_fold_orgs`)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, issued, mems, since = {}, {}, {}, -1
-        else:
-            state = dict(snap.membership_state_map())         # (org_id, username) -> "active"|"revoked" (keep revoked)
-            issued = dict(snap.membership_issued_map())       # (org_id, username) -> per-pair high-water
-            mems = {(row[0], row[1]): Membership(
-                        org_id=str(row[0]), username=str(row[1]), role=str(row[2] or ""),
-                        issued_at=issued.get((row[0], row[1]), 0.0), state="active")
-                    for row in snap.membership_row}            # rebuild honored-active Memberships from the seed
-            since = snap.base_seq - 1
+        (state, issued, mems), since = self._membership_seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != MEMBERSHIP_SIGNAL:
-                continue
-            org_id = p.get("org_id")
-            username = p.get("username")
-            if not isinstance(org_id, str) or not org_id or not isinstance(username, str) or not username:
-                continue
-            key = (org_id, username)
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[key] = "revoked"
-            elif rec_state == "active":
-                if not verify_signed(p, _MEMBERSHIP_CORE, resolver.at(r.seq)):
-                    continue
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue
-                issued[key] = at
-                state[key] = "active"
-                mems[key] = Membership(org_id=org_id, username=username, role=str(p.get("role") or ""),
-                                       issued_at=at, state="active")
+            _apply_membership_record(r, resolver, state, issued, mems)
         return {k: m for k, m in mems.items() if state.get(k) == "active"}
 
     def orgs(self) -> list[Org]:
         """The current active orgs (owner's workspace list), in org_id order."""
+        hit = self._cached(lambda v: [v.active_orgs[o] for o in sorted(v.active_orgs)])
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold_orgs()
         return [fold[o] for o in sorted(fold)]
 
@@ -450,10 +568,16 @@ class OrgRegistry:
         """The current active `Org` for `org_id`, or None (fail-closed — unknown/revoked treated as absent)."""
         if not isinstance(org_id, str) or not org_id:
             return None
+        hit = self._cached(lambda v: v.active_orgs.get(org_id))
+        if hit is not _UNCACHED:
+            return hit
         return self._fold_orgs().get(org_id)
 
     def memberships(self, org_id: Optional[str] = None) -> list[Membership]:
         """The current active memberships, optionally scoped to one org, in (org_id, username) order."""
+        hit = self._cached(lambda v: v.memberships(org_id))
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold_memberships()
         keys = sorted(fold) if org_id is None else sorted(k for k in fold if k[0] == org_id)
         return [fold[k] for k in keys]
@@ -465,6 +589,9 @@ class OrgRegistry:
         — so this is not an allowlist self-reference."""
         if not isinstance(username, str) or not username or not isinstance(org_id, str) or not org_id:
             return None
+        hit = self._cached(lambda v: v.membership_role(username, org_id))
+        if hit is not _UNCACHED:
+            return hit
         if org_id not in self._fold_orgs():            # a revoked/unknown org admits no one
             return None
         m = self._fold_memberships().get((org_id, username))

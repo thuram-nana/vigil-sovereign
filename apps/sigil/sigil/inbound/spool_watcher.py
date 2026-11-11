@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,6 +33,11 @@ from ..spine.store import SpineStore
 from .finding_receiver import FindingReceiver
 
 _MAX_BYTES = 256 * 1024  # mirror the validator's envelope cap; a larger file is rejected unread
+# Dedup look-back for the RECLAIM path only: effectively unbounded (store clamps to the whole spine), so a
+# re-ingested finding whose append had already landed before a crash is found regardless of how many records
+# the shared spine accumulated during the restart gap. The O(spine) scan is paid only during crash recovery
+# (reclaim is rare); the normal incoming/ path keeps the cheap bounded default.
+_RECLAIM_DEDUP_WINDOW = 1 << 62
 
 
 class SpoolWatcher:
@@ -58,9 +64,14 @@ class SpoolWatcher:
             os.chmod(d, 0o700)
 
     # -- ingest one file (fail-closed) -------------------------------------------------------------
-    def _ingest_text(self, text: str) -> int:
+    def _ingest_text(self, text: str, *, reclaim: bool = False) -> int:
         """Route by kind to an owner-delegated receiver and ingest. Raises InertFindingError on any
-        refusal (nothing is written). A missing delegation for the file's kind is itself a refusal."""
+        refusal (nothing is written). A missing delegation for the file's kind is itself a refusal.
+
+        ``reclaim=True`` (a file recovered from ``working/`` after a crash, the only path where the append may
+        have ALREADY landed) widens the receiver's idempotency dedup to the whole spine, so the earlier append
+        is found and the re-ingest de-duplicates to it no matter how many records intervened during the gap."""
+        dedup_window = _RECLAIM_DEDUP_WINDOW if reclaim else None
         try:
             obj = json.loads(text)
         except ValueError as exc:
@@ -75,14 +86,14 @@ class SpoolWatcher:
             recv = FindingReceiver.from_spine_delegation(
                 self.store, owner_pubkey=self.owner_pubkey, delegation=self.spine_delegation,
                 now=now, scope=self.scope)
-            return recv.ingest_detection(text)
+            return recv.ingest_detection(text, dedup_window=dedup_window)
         # a finding (or anything without kind=="detection") goes through the governance path
         if self.governance_delegation is None:
             raise InertFindingError("no offense-governance delegation configured — refusing findings")
         recv = FindingReceiver.from_delegation(
             self.store, owner_pubkey=self.owner_pubkey, delegation=self.governance_delegation,
             now=now, scope=self.scope)
-        return recv.ingest(text)
+        return recv.ingest(text, dedup_window=dedup_window)
 
     def _quarantine(self, path: Path, reason: str) -> None:
         dest = self.rejected / path.name
@@ -129,17 +140,58 @@ class SpoolWatcher:
         except UnicodeDecodeError as exc:          # a non-UTF-8 blob is hostile input, not a crash
             raise OSError(f"not valid UTF-8: {exc}") from exc
 
+    def _reclaim_working(self) -> set[str]:
+        """Crash recovery (no-loss): move any file stranded in ``working/`` — a claim (``os.replace`` into
+        working/) that was interrupted before the file was archived to ``processed/`` or quarantined to
+        ``rejected/``, i.e. a mid-drain crash — back to ``incoming/`` so it is reprocessed, and RETURN the set
+        of reclaimed names. Without this, ``drain()`` (which scans ONLY ``incoming/``) would never look at a
+        stranded file again and the confirmed FACT it carries would be SILENTLY LOST. This is the load-bearing
+        durability guarantee: the FACT is recovered.
+
+        A reclaimed file is the one case where re-ingest can hit an append that ALREADY LANDED before the crash
+        (record on the spine, ``processed/`` archive not yet done). ``drain()`` therefore ingests a reclaimed
+        file with an UNBOUNDED dedup scan (see ``_ingest_text(reclaim=True)``) so the earlier append is found
+        and the re-ingest de-duplicates to it regardless of how many records the shared spine accumulated
+        during the restart gap — not merely within the cheap bounded window the normal path uses. Reclaim is
+        rare (a crash interrupts at most the in-flight claims), so the O(spine) scan is paid only in recovery.
+
+        On a move failure the file is LEFT in ``working/`` (never deleted), so the next drain's reclaim retries
+        it — a reclaim can never itself lose the FACT it exists to save."""
+        reclaimed: set[str] = set()
+        try:
+            stale = list(self.working.glob("*.json"))
+        except OSError:
+            return reclaimed
+        for f in stale:
+            try:
+                os.replace(f, self.incoming / f.name)
+                reclaimed.add(f.name)
+            except OSError:
+                # Leave it in working/ for the next reclaim — NEVER unlink (that would lose the FACT this
+                # sweep exists to save). A persistently-unmovable file is a filesystem fault for the operator,
+                # not a reason to drop a confirmed finding.
+                continue
+        return reclaimed
+
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {ingested, rejected, deduped, seqs}.
 
-        For each file: CLAIM it out of ``incoming/`` (atomic rename into ``working/``) BEFORE anything else,
-        so a failed archive or a re-run can never re-read it from ``incoming/`` and double-append. Read it as
-        a bounded regular UTF-8 file, then compute the dedup identity from the READ BYTES (not the producer-
-        chosen filename — so a mismatched name cannot suppress a different finding). If that identical
-        envelope was already ingested (``processed/<sha256>`` exists), the claimed copy is a re-spool and is
-        archived WITHOUT re-appending (idempotent). Otherwise ingest and archive to ``processed/<sha256>``
-        (the dedup marker). ANY failure → ``rejected/``, nothing appended. Never raises on one bad file;
-        never blocks on a hostile one."""
+        Begins with a crash-recovery sweep of ``working/`` (``_reclaim_working``): a file a mid-drain crash
+        left stranded there — claimed out of ``incoming/`` but not yet archived/quarantined — is moved back
+        to ``incoming/`` so its FACT is never lost. For each file: CLAIM it out of ``incoming/`` (atomic
+        rename into ``working/``) BEFORE anything else, so a failed archive or a re-run can never re-read it
+        from ``incoming/`` and double-append. Read it as a bounded regular UTF-8 file, then compute the dedup
+        identity from the READ BYTES (not the producer-chosen filename — so a mismatched name cannot suppress
+        a different finding). If that identical envelope was already ingested (``processed/<sha256>`` exists),
+        the claimed copy is a re-spool and is archived WITHOUT re-appending (idempotent). Otherwise ingest and
+        archive to ``processed/<sha256>`` (the dedup marker). The append is ALSO idempotent on the finding's
+        content identity (``FindingReceiver`` uses ``dedup=True``): on the normal path a cheap bounded window;
+        on the RECLAIM path an UNBOUNDED spine scan, so a reclaimed file whose ingest had already appended
+        before a crash (no ``processed/`` marker yet) deduplicates to that earlier record rather than
+        double-ingesting, no matter how many records the shared spine accumulated during the restart gap.
+        ANY failure → ``rejected/``, nothing appended. Never raises on one bad file; never blocks on a hostile
+        one."""
+        reclaimed = self._reclaim_working()
         ingested, rejected, deduped, seqs = 0, 0, 0, []
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
@@ -167,7 +219,7 @@ class SpoolWatcher:
                 deduped += 1
                 continue
             try:
-                seq = self._ingest_text(text)
+                seq = self._ingest_text(text, reclaim=src.name in reclaimed)
             except InertFindingError as exc:
                 self._quarantine(claimed, f"rejected (fail-closed): {exc}")
                 rejected += 1
@@ -195,9 +247,18 @@ class SpoolWatcher:
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
         """Drain in a loop until ``stop`` (a threading.Event) is set. Each round is a fresh ``drain()``
-        (delegations are re-verified against the current clock, so an expired delegation stops admitting)."""
+        (delegations are re-verified against the current clock, so an expired delegation stops admitting).
+
+        A single bad drain NEVER kills the daemon: ``drain()`` already quarantines per-file failures, but an
+        unexpected error OUTSIDE the per-file loop (e.g. a transient spine/IO fault) is caught here, reported
+        to stderr, and the loop continues — so the results-delivery drain survives a blip rather than silently
+        dying and stranding every subsequent finding in ``incoming/`` (mirrors the money drains' watch loop)."""
         while True:
-            self.drain()
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                sys.stderr.write("vigil finding-drain: WARNING drain error (continuing): "
+                                 f"{type(exc).__name__}: {exc}\n")
             if stop is not None and getattr(stop, "wait", None) is not None:
                 if stop.wait(interval):
                     return

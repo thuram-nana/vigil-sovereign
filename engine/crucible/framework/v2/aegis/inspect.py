@@ -418,7 +418,10 @@ _MAX_RESPONSE_CHARS = 2_000_000
 # executable TOKEN the payload would place in script/attribute context (the script content, an
 # event-handler value, a javascript: URL). If the payload reflected verbatim, that token lands in an
 # executable position and the oracle fires; an HTML-encoded reflection leaves it inert (no fire).
-_XSS_SCRIPT_RE = re.compile(r"(?is)<script[^>]*>(.*?)</script>")
+# The END tag is matched the way a browser ends a script element: `</script` then optional whitespace /
+# attributes up to `>` — so `</script >` and `</script\n foo>` close it too (a bare `</script>` filter misses
+# them: CodeQL py/bad-tag-filter, and an attacker's choice of end-tag spelling must not hide a payload).
+_XSS_SCRIPT_RE = re.compile(r"(?is)<script\b[^>]*>(.*?)</script\b[^>]*>")
 _XSS_ONATTR_RE = re.compile(r"""(?is)\bon\w+\s*=\s*["']?([^"'>][^"'>]*)""")
 _XSS_JSURL_RE = re.compile(r"(?is)javascript:([^\s\"'>]+)")
 _MIN_XSS_MARKER = 4

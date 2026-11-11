@@ -48,6 +48,8 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed re-entrant txn lock)
+from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-source the gate<->ledger entry-id scheme)
+                                 SETTLE_ENTRY_PREFIX, postpaid_is_overdue)
 
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
@@ -59,11 +61,16 @@ class LaunchGate:
     production they default to the owner-key-backed sovereign registries over ``store``."""
 
     def __init__(self, store, *, orgs=None, ownership=None, meter=None, wallet=None,
-                 owner_key=None, base_dir: Optional[str] = None):
+                 postpaid=None, arrears=None, invoices=None, owner_key=None, base_dir: Optional[str] = None,
+                 cost_ledger=None, pool=None):
         from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.cost_ledger import CostEnvelopeLedger
+        from ..governor.cost_pool import GlobalCostPool
         from ..governor.identity import owner_keypair
+        from ..governor.invoices import InvoiceRegistry
         from ..governor.metering import CreditMeter, PlanCreditLedger
         from ..governor.orgs import OrgRegistry
+        from ..governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
         from ..governor.subscription import SubscriptionRegistry
         from ..governor.wallet import WalletRegistry
         self.store = store
@@ -73,6 +80,22 @@ class LaunchGate:
         self.wallet = wallet if wallet is not None else WalletRegistry(store)
         self.meter = meter if meter is not None else CreditMeter(
             self.wallet, PlanCreditLedger(store), SubscriptionRegistry(store))
+        # PP-1 enterprise postpaid: a tenant with an owner-signed ENABLED credit line draws against it (accruing
+        # arrears) instead of burning prepaid credits. Absent/disabled ⇒ the prepaid path below is byte-identical.
+        self.postpaid = postpaid if postpaid is not None else PostpaidRegistry(store)
+        self.arrears = arrears if arrears is not None else PostpaidArrearsLedger(store)
+        # PP-3 dunning: the gate reads the owner-signed invoice ledger to refuse a launch when the line is OVERDUE.
+        self.invoices = invoices if invoices is not None else InvoiceRegistry(store)
+        # EC-5: the owner-signed cost ledger the gate WRITES the reserve/settle cost pair into (the EC-4
+        # gate-writes-the-pair wiring, gated default-OFF behind config.cost_ledger_write_enabled), and the
+        # GLOBAL cost-pool meter it reads as one more fail-closed conjunct. The pool reads the SAME ledger, so
+        # the pair it meters is the pair the gate writes (single-sourced). DEFAULT-OFF: an unbounded pool
+        # (config.global_pool_tokens() None) never folds and the write flag is off ⇒ byte-identical to pre-EC-5.
+        self._cost_ledger = cost_ledger if cost_ledger is not None else CostEnvelopeLedger(
+            store, owner_key=self.owner_key)
+        from .. import config
+        self._pool = pool if pool is not None else GlobalCostPool(
+            self._cost_ledger, budget_tokens=config.global_pool_tokens())
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
 
@@ -140,6 +163,48 @@ class LaunchGate:
             self.wallet.debit(oid, from_wallet, engagement_id=slug,
                               entry_id=f"reserve-wallet:{slug}:{nonce}", issued_at=now_ts)
 
+    def _write_cost_reserve(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> None:
+        """EC-5: owner-sign the cost-ledger RESERVE for this launch — the token envelope ``units * E`` it may
+        spend — gated DEFAULT-OFF behind ``config.cost_ledger_write_enabled()`` (off ⇒ NO record appended,
+        byte-identical). Idempotent per ``(slug, nonce)`` via the shared ``reserve-cost:`` prefix contract.
+        FAIL-SAFE: the cost ledger is ADVISORY metering, NEVER a gate on the real launch beyond the explicit
+        pool-REFUSE conjunct — a cost-write error is swallowed (logged) so it can never break a real launch."""
+        from .. import config
+        if not config.cost_ledger_write_enabled():
+            return
+        try:
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+            from ..governor.cost_ledger import RESERVE_COST_PREFIX
+            self._cost_ledger.reserve(oid, units * ENVELOPE_TOKENS_PER_CREDIT,
+                                      entry_id=f"{RESERVE_COST_PREFIX}{slug}:{nonce}", engagement_id=slug,
+                                      issued_at=now_ts)
+        except Exception:  # noqa: BLE001 — advisory metering: a cost-write failure never breaks the launch
+            import logging
+            logging.getLogger(__name__).warning("EC-5 cost-reserve write failed (advisory; launch unaffected)",
+                                                 exc_info=True)
+
+    def _write_cost_settle(self, oid: str, slug: str, nonce: str, consumed: int, reserved: int,
+                           now_ts: float) -> None:
+        """EC-5: owner-sign the cost-ledger SETTLE for this launch — the ACTUAL tokens consumed (the
+        conservative credit-envelope PROXY ``consumed * E`` until the keyless actual-token delivery lands),
+        CLAMPED to the reserved envelope ``reserved * E`` so a forged over-report can never over-settle. All
+        arguments come from the VERIFIED lease (never a wire value). Gated DEFAULT-OFF + idempotent per
+        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve)."""
+        from .. import config
+        if not config.cost_ledger_write_enabled():
+            return
+        try:
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+            from ..governor.cost_ledger import SETTLE_COST_PREFIX
+            self._cost_ledger.settle(oid, consumed * ENVELOPE_TOKENS_PER_CREDIT,
+                                     entry_id=f"{SETTLE_COST_PREFIX}{slug}:{nonce}",
+                                     reserved_cap=reserved * ENVELOPE_TOKENS_PER_CREDIT, engagement_id=slug,
+                                     issued_at=now_ts)
+        except Exception:  # noqa: BLE001 — advisory metering: a cost-write failure never breaks the settle
+            import logging
+            logging.getLogger(__name__).warning("EC-5 cost-settle write failed (advisory; settle unaffected)",
+                                                 exc_info=True)
+
     def reserve_launch(self, *, requester: str, org_id: str, host: str, units: int, now: Any,
                        duration_hours: Any = _DEFAULT_LEASE_HOURS, nonce: Optional[str] = None) -> dict:
         """Authorize + reserve + mint for ONE launch. Returns ``{ok: True, lease, ...}`` with the signed lease
@@ -190,8 +255,30 @@ class LaunchGate:
             if not self._authority_ok(h, slug, t):
                 return (f"no current owner-signed engagement authority for {h} (org {oid}) — the owner must "
                         f"authorize this target (offense_authority stays at the owner key)")
-            if self.meter.available(oid, now_ts) < u:
+            acct = self.postpaid.account(oid)
+            if acct is not None and acct.is_enabled():
+                # POSTPAID (PP-1): the credit conjunct is the owner-signed credit LINE, not the prepaid balance —
+                # admit the launch iff the drawn arrears plus this reservation stay within the signed limit.
+                acc = self.arrears.accrued(oid)
+                if acc + u > acct.credit_limit:
+                    return (f"over postpaid credit line: drawing {u} on top of {acc} accrued would exceed the "
+                            f"{acct.credit_limit}-credit limit (org {oid})")
+                # PP-3 DUNNING: an OVERDUE line (any unpaid arrears invoice past its net-terms due date) refuses
+                # NEW launches — the SAFE access-reducing direction. Reversible: paying the invoice (PP-2b) clears
+                # it and launches resume. An already in-flight launch still settles; only new reserves are refused.
+                if postpaid_is_overdue(self.invoices, self.postpaid, oid, now_ts):
+                    return (f"postpaid line is OVERDUE (unpaid arrears invoice past net terms, org {oid}): settle "
+                            f"the outstanding invoice before launching new assessments")
+            elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
+            # EC-5 GLOBAL COST POOL conjunct (AFTER the per-tenant credit conjunct): when the pool is ARMED and
+            # over capacity (REFUSE_NEW / HARD_STOP, or unmeasurable ⇒ fail-closed REFUSE_NEW) refuse this NEW
+            # launch — the safe, reversible access-reducing direction (an in-flight launch still settles and
+            # frees the pool, so the pool auto-relaxes with no owner-signed un-latch). UNBOUNDED (default) ⇒
+            # gate_refusal() short-circuits to None WITHOUT folding ⇒ byte-identical no-op.
+            pool_refusal = self._pool.gate_refusal()
+            if pool_refusal is not None:
+                return pool_refusal
             return None
 
         pre = _gated()                                   # cheap pre-check outside the lock (fast refusal)
@@ -201,12 +288,28 @@ class LaunchGate:
             re = _gated()                                # TOCTOU: re-check every conjunct inside the lock
             if re is not None:
                 return {"ok": False, "error": re}
-            before = self.meter.available(oid, now_ts)
-            self._spend(oid, u, slug, non, now_ts)       # plan-first then wallet (idempotent per slug/nonce)
-            if before - self.meter.available(oid, now_ts) < u:
-                # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
-                # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
-                return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            acct = self.postpaid.account(oid)
+            if acct is not None and acct.is_enabled():
+                # POSTPAID (PP-1): ACCRUE `u` against the credit line. The accrual-delta invariant mirrors the
+                # prepaid availability-delta — a reused nonce's idempotent accrue no-ops ⇒ no delta ⇒ refuse and
+                # mint NOTHING, so a reservation is ALWAYS backed by a real, incremental draw. No prepaid bucket
+                # is touched, so a postpaid tenant never consumes wallet/plan credits.
+                before_acc = self.arrears.accrued(oid)
+                self.arrears.accrue(oid, u, engagement_id=slug,
+                                    entry_id=f"{RESERVE_ENTRY_PREFIX}{slug}:{non}", issued_at=now_ts)
+                if self.arrears.accrued(oid) - before_acc < u:
+                    return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            else:
+                before = self.meter.available(oid, now_ts)
+                self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent per slug/nonce)
+                if before - self.meter.available(oid, now_ts) < u:
+                    # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
+                    # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
+                    return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+            # EC-5: after the real (incremental) reserve succeeds, write the cost-ledger RESERVE for the pool
+            # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
+            # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
+            self._write_cost_reserve(oid, u, slug, non, now_ts)
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
                 not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts)
@@ -271,6 +374,40 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        # POSTPAID (PP-1) settle. Detect a postpaid reservation by its PRUNE-DURABLE arrears debit marker —
+        # `arrears.was_accrued(reserve-postpaid:{slug}:{nonce})`, which reads the SnapshotState-seeded seen-set,
+        # NOT a live scan of the individual debit record (a hard prune can drop that record while carrying only
+        # the per-org balance + seen-set into the seed — the red-pen HIGH: a live scan read False post-prune and
+        # mis-routed the settle to the prepaid wallet, minting credits + leaving the arrears un-reversed). It is
+        # also NOT the account's CURRENT enabled state (the owner may disable the line between reserve and
+        # settle). A postpaid reservation touched no plan/wallet bucket, so REVERSE the unconsumed draw
+        # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
+        # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared settlement marker +
+        # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
+        if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
+            with self._lock:
+                try:
+                    from vigil_integration.live.credit_lease_broker import (
+                        is_lease_settled, record_lease_settlement, tombstone_credit_lease,
+                    )
+                    if is_lease_settled(self._seam_base(), s, non):
+                        return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
+                                "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
+                    record_lease_settlement(self._seam_base(), s, non)
+                    tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
+                except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no reversal yet)
+                    return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
+                            f"{type(e).__name__}"}
+                # ALWAYS record the settlement — even a FULL-consumption settle whose refund is 0. The record's
+                # presence clears the reserve from the arrears IN-FLIGHT set (`in_flight_reserved`), so PP-2 bills
+                # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
+                # prior `if refund > 0` left a fully-consumed launch with no settle record -> invoiced $0.)
+                self.arrears.settle(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
+                # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
+                # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
+                self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
+            return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
+                    "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
@@ -328,6 +465,9 @@ class LaunchGate:
             if wallet_refund > 0:
                 self.wallet.grant(oid, wallet_refund, "refund", source_ref=s,
                                   entry_id=f"settle-wallet:{s}:{non}", issued_at=now_ts)
+            # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
+            # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
+            self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
         return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                 "refunded": refund, "refunded_plan": plan_refund, "refunded_wallet": wallet_refund,
                 "net_spend": consumed}
@@ -370,3 +510,67 @@ class LaunchGate:
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         return {"ok": True, "action": "launch_published", "org_id": doc.org_id, "slug": doc.engagement_slug,
                 "scope_host": doc.scope_host}
+
+    def _verify_lease_for_pause(self, signed_lease: Any, expect_org_id: Optional[str]):
+        """Owner-pinned verify + tenant-bind for a pause/resume request (same guarantee as publish/settle): the
+        signed lease must verify under OUR owner key (never a wire/seam value) and — when a customer calls — its
+        ``org_id`` must equal the session org, so a customer can never pause/resume another tenant's lease.
+        Returns ``(doc, None)`` on success or ``(None, {ok: False, error})`` on any refusal (fail-closed)."""
+        from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
+        kp = self.owner_key
+        if kp is None:
+            return None, {"ok": False, "error": "pause/resume requires the owner key (internal)"}
+        try:
+            signed = SignedCreditLaunchLease.model_validate(signed_lease)
+        except Exception:  # noqa: BLE001 — a malformed lease is a fail-closed refusal
+            return None, {"ok": False, "error": "pause/resume requires the signed launch lease from reserve_launch"}
+        owner_root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, reason = verify_credit_launch_lease(signed, owner_root)   # PINNED to our owner key, not the wire
+        if not ok:
+            return None, {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
+        doc = signed.document
+        if expect_org_id is not None and doc.org_id != expect_org_id:
+            return None, {"ok": False, "error": "this lease belongs to a different org"}
+        return doc, None
+
+    def pause_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+        """pause/resume PR-4b (producer) — RECORD a reversible ``(slug, nonce)`` pause marker for a customer's
+        own owner-signed lease, so the already-merged PR-2..PR-4a money-safety plumbing HALTS the launch at every
+        window (held, re-admitted on resume). Verifies the lease owner-pinned + tenant-binds (``expect_org_id``);
+        the record is done UNDER ``self._lock`` (the spine lock = the PR-1 caller-serialization the non-atomic
+        pause-marker read-modify-write requires). Pausing moves NO money (no credit/amount/signature touched).
+        A SETTLED/canceled lease is refused (it is no longer a runnable launch, so there is nothing to pause).
+        Idempotent: re-pausing the same (slug, nonce) re-writes the same marker."""
+        doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
+        if err is not None:
+            return err
+        s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
+        try:
+            from vigil_integration.live.credit_lease_broker import is_lease_settled
+            from vigil_integration.live.credit_lease_pause import record_lease_pause
+            with self._lock:
+                if is_lease_settled(self._seam_base(), s, non):
+                    return {"ok": False, "error": "this lease has already been settled/canceled and cannot be paused"}
+                record_lease_pause(self._seam_base(), s, non)
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-pause
+            return {"ok": False, "error": f"could not record the launch pause (fail-closed): {type(e).__name__}"}
+        return {"ok": True, "action": "launch_paused", "org_id": oid, "slug": s, "nonce": non}
+
+    def resume_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+        """pause/resume PR-4b (producer) — CLEAR the ``(slug, nonce)`` pause marker so the SAME lease re-arms
+        (PR-2 re-check passes; PR-3/PR-4a re-admit the held delivery). Same owner-pinned verify + tenant-bind as
+        :meth:`pause_launch`; the clear is UNDER ``self._lock``. Clearing is always safe + idempotent (a clear of
+        an absent/already-cleared pause is a no-op), so — unlike pause — it does not refuse a settled lease (a
+        settled lease simply has no pause to clear and will not run regardless)."""
+        doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
+        if err is not None:
+            return err
+        s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
+        try:
+            from vigil_integration.live.credit_lease_pause import clear_lease_pause
+            with self._lock:
+                clear_lease_pause(self._seam_base(), s, non)
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
+            return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
+        return {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}

@@ -268,7 +268,12 @@ def _scrub_log(run_dir: Path) -> tuple[Optional[str], int]:
             if not isinstance(obj, dict):
                 dropped += 1
                 continue
-            scrubbed = _scrub(None, "", obj)  # the live logger's secret masker, reused verbatim
+            # Key-NAME masking (the live logger's masker) THEN value-level redaction — the same
+            # two-pass the terminal transcript gets (_scrub_jsonl_file). Key-masking alone misses a
+            # secret carried as a VALUE under a non-secret key (a `target` URL with userinfo
+            # credentials, a pasted `Authorization: Bearer …` in a free-text field) — a realistic
+            # structlog capture that would otherwise ship UNMASKED in the governance-signed dossier.
+            scrubbed = _deep_redact_values(_scrub(None, "", obj))
             out_lines.append(json.dumps(scrubbed, sort_keys=True, default=str))
     if not out_lines and dropped == 0:
         return (None, 0)
@@ -1309,30 +1314,42 @@ def _canon_json(obj: Any) -> bytes:
 
 # Value-level secret patterns (red-pen BLOCK): the session artifacts carry targets / names / labels / chat
 # text as VALUES under NON-secret keys, so the key-name masker alone lets a URL with basic-auth or a pasted
-# token ship in the clear. These strip the credential from the value itself.
+# token ship in the clear. ``_URL_USERINFO_RE`` + ``_TOKENLIKE_RE`` cover the two shapes the canonical
+# log/JSON redactors DON'T (a ``scheme://user:pass@host`` credential, and a bare token id with no key/header
+# around it). The credential-HEADER values (Authorization Basic/Bearer, Cookie, Set-Cookie, x-api-key) and
+# secret-named ``k=v`` / ``"k":"v"`` assignments are delegated to the canonical maskers below, so this never
+# re-implements (and mis-implements) them — the earlier bespoke inline regex masked only to the first space
+# (leaking an ``Authorization: Basic <creds>`` payload) and over-masked benign ``auth:`` prose.
 _URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+(?::[^/\s@]*)?@")
-_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/\-]+=*")
 _TOKENLIKE_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{8,}|ghp_[A-Za-z0-9]{20,}|gh[opsu]_[A-Za-z0-9]{20,}"
     r"|xox[baprs]-[A-Za-z0-9\-]{8,}|AKIA[0-9A-Z]{12,}"
     r"|eyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,})\b")
-_INLINE_SECRET_RE = re.compile(
-    r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?)\b"
-    r"\s*[:=]\s*\S+")
 
 
 def _redact_value_secrets(s: Any) -> Any:
-    """Best-effort VALUE-level secret redaction for a free-text / URL string (complements the KEY-NAME
-    masker): strips URL credentials (``scheme://user:pass@host`` → ``scheme://[redacted]@host``), Bearer /
-    JWT / API tokens, and inline ``secret=…``. Deterministic; a non-string passes through unchanged. This is
-    best-effort pattern matching, not a guarantee every conceivable secret is caught — but it closes the
-    common URL-userinfo + token leaks on a hand-to-anyone artifact."""
+    """Best-effort VALUE-level secret redaction for a free-text / URL / JSON string (complements the
+    KEY-NAME masker). Composes the canonical, vetted maskers so credential shapes are caught consistently
+    with the rest of the engine and benign prose is preserved:
+
+      * ``scheme://user:pass@host`` → ``scheme://[redacted]@host``          (URL userinfo)
+      * credential-HEADER values masked to end-of-line — Authorization Basic/Bearer, Cookie, Set-Cookie,
+        x-api-key, … — plus a secret-named ``k=v`` whose NAME is a secret key (``redact_log_message``)
+      * a JSON ``"<secret-key>":"<value>"`` assignment (``redact_json_secrets`` — the quote-after-key form
+        ``redact_log_message`` cannot see)
+      * a bare token SHAPE with no surrounding key (``_TOKENLIKE_RE``)
+
+    Deterministic + idempotent; a non-string passes through unchanged. Best-effort pattern matching, not a
+    guarantee every conceivable secret is caught (a bare AWS secret, a PEM block, inline db-URL *password*
+    without a scheme carry no recognised shape) — but it closes the common header / URL-userinfo / token /
+    JSON-value leaks on a hand-to-anyone, governance-SIGNED artifact without eating non-secret content."""
     if not isinstance(s, str) or not s:
         return s
+    from ..common.redact import redact_json_secrets, redact_log_message
     out = _URL_USERINFO_RE.sub(lambda m: m.group(1) + "[redacted]@", s)
-    out = _BEARER_RE.sub("Bearer [redacted]", out)
+    out = redact_log_message(out)       # header values to EOL + is_secret_key-gated k=v (no over-masking)
+    out = redact_json_secrets(out)      # JSON "<secretkey>":"value"
     out = _TOKENLIKE_RE.sub("[redacted]", out)
-    out = _INLINE_SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", out)
     return out
 
 

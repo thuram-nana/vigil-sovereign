@@ -45,6 +45,8 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors asset_ownership._fold_proofs)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SIGNAL = "governor.customer_credential"
 
@@ -106,6 +108,116 @@ class CustomerCredential:
     # oidc
     federated_iss: Optional[str] = None
     federated_sub: Optional[str] = None
+
+
+_SKIP = object()          # `_apply_credential_record`: the record did not touch any (username, cred_key)
+
+
+def _apply_credential_record(r, resolver, state: dict, issued: dict, rows: dict):
+    """Fold ONE spine record into (state, issued, rows) — THE credential fold body, shared by the full `_fold`
+    and the verified fold cache (Front C S0d). Returns the (username, cred_key) it touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SIGNAL:
+        return _SKIP
+    u = p.get("username")
+    ck = p.get("cred_key")
+    if not isinstance(u, str) or not u or not isinstance(ck, str) or not ck:
+        return _SKIP
+    key = (u, ck)
+    st = p.get("state")
+    if st == "revoked":
+        state[key] = "revoked"                 # safe direction: honor ANY revoke (even unsigned)
+        return key
+    if st == "active":
+        if not verify_signed(p, _cred_core(p), resolver.at(r.seq)):
+            return _SKIP                       # fail-closed: unsigned/forged/wrong-epoch grant
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(key, NO_HIGHWATER):
+            return _SKIP                       # REPLAY / stale re-append of an already-honored grant
+        issued[key] = at
+        state[key] = "active"
+        rows[key] = {"kind": p.get("kind"), "issued_at": at, "cose_alg": p.get("cose_alg"),
+                     "public_key_spki_b64": p.get("public_key_spki_b64"), "uv": p.get("uv"),
+                     "sealed_secret": p.get("sealed_secret"), "federated_iss": p.get("federated_iss"),
+                     "federated_sub": p.get("federated_sub")}
+        return key
+    return _SKIP
+
+
+class _CredentialsView:
+    """The cached credential fold: the full fold's (state, issued, rows) plus `active` (exactly `_fold()`'s
+    result) and three read indexes kept in step — `by_user` (username -> its cred_keys), `by_ck` (cred_key ->
+    the usernames holding it, any kind) and `by_fed` ((iss, sub) -> the (username, cred_key) oidc credentials
+    binding it: pairs, so two credentials of one user still count as two, exactly as the full scan does) — so
+    a login's passkey / Google / TOTP resolution is O(1) instead of a scan. An (owner-signed, never minted)
+    oidc credential whose iss/sub is not hashable is left out of `by_fed`: it can never equal the str
+    (iss, sub) a lookup asks for, exactly as the full scan's `==` never matches it."""
+
+    __slots__ = ("state", "issued", "rows", "active", "by_user", "by_ck", "by_fed")
+
+    def __init__(self, state: dict, issued: dict, rows: dict) -> None:
+        self.state, self.issued, self.rows = state, issued, rows
+        self.active: dict = {}
+        self.by_user: "dict[str, set]" = {}
+        self.by_ck: "dict[str, set]" = {}
+        self.by_fed: "dict[tuple, set]" = {}
+        for k in list(rows):
+            self.sync(k)
+
+    @staticmethod
+    def _fed_key(row: dict):
+        if row.get("kind") != KIND_OIDC:
+            return None
+        return (row.get("federated_iss"), row.get("federated_sub"))
+
+    def _unindex(self, k, row: dict) -> None:
+        u, ck = k
+        for idx, ik, member in ((self.by_user, u, ck), (self.by_ck, ck, u)):
+            names = idx.get(ik)
+            if names is not None:
+                names.discard(member)
+                if not names:
+                    del idx[ik]
+        fk = self._fed_key(row)
+        if fk is not None:
+            try:
+                names = self.by_fed.get(fk)
+            except TypeError:                   # unhashable: never indexed (see the class docstring)
+                return
+            if names is not None:
+                names.discard(k)
+                if not names:
+                    del self.by_fed[fk]
+
+    def sync(self, k) -> None:
+        row = self.rows.get(k) if self.state.get(k) == "active" else None
+        old = self.active.get(k)
+        if old is row:
+            return
+        if old is not None:
+            self._unindex(k, old)
+        if row is None:
+            self.active.pop(k, None)
+            return
+        self.active[k] = row
+        u, ck = k
+        self.by_user.setdefault(u, set()).add(ck)
+        self.by_ck.setdefault(ck, set()).add(u)
+        fk = self._fed_key(row)
+        if fk is not None:
+            try:
+                self.by_fed.setdefault(fk, set()).add(k)
+            except TypeError:                   # unhashable: never indexed (see the class docstring)
+                pass
+
+
+def _credentials_step(view: _CredentialsView, r, resolver) -> None:
+    k = _apply_credential_record(r, resolver, view.state, view.issued, view.rows)
+    if k is not _SKIP:
+        view.sync(k)
+
+
+_CREDENTIALS_FOLD = FoldCache("governor.customer_credential", step=_credentials_step)
 
 
 class CustomerCredentialRegistry:
@@ -182,11 +294,41 @@ class CustomerCredentialRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     def _refuse_cross_user(self, credential_id: str, username: str) -> None:
+        holders = self._cached(lambda v: sorted(v.by_ck.get(credential_id, ())))
+        if holders is not _UNCACHED:
+            if any(u != username for u in holders):
+                raise ValueError("this credential_id is already bound to another customer")
+            return
         for (u, ck), row in self._fold().items():
             if ck == credential_id and u != username:
                 raise ValueError("this credential_id is already bound to another customer")
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, rows), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
+        trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        state = dict(snap.customer_credential_state_map())
+        issued = dict(snap.customer_credential_issued_map())
+        # flat row [username, cred_key, kind, cose_alg, public_key_spki_b64, uv, sealed_secret,
+        # federated_iss, federated_sub, issued_at] -> the material dict the live fold also builds.
+        rows = {(r[0], r[1]): {"kind": r[2], "cose_alg": r[3], "public_key_spki_b64": r[4], "uv": r[5],
+                               "sealed_secret": r[6], "federated_iss": r[7], "federated_sub": r[8],
+                               "issued_at": r[9]}
+                for r in snap.customer_credential_row}
+        return (state, issued, rows), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental credential fold (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _CredentialsView(*st), since
+
+        return cached_read(_CREDENTIALS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> "dict[tuple, dict]":
         """Fold the spine into {(username, cred_key): record dict} for credentials whose latest state is
         active — the hard-prune-durable fold every resolver reads. Mirrors `asset_ownership._fold_proofs`
@@ -194,45 +336,9 @@ class CustomerCredentialRegistry:
         LIVE window only; a rotated/empty anchor bypasses the seed and full-scans from genesis."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state: "dict[tuple, str]" = {}
-            issued: "dict[tuple, float]" = {}
-            rows: "dict[tuple, dict]" = {}
-            since = -1
-        else:
-            state = dict(snap.customer_credential_state_map())
-            issued = dict(snap.customer_credential_issued_map())
-            # flat row [username, cred_key, kind, cose_alg, public_key_spki_b64, uv, sealed_secret,
-            # federated_iss, federated_sub, issued_at] -> the material dict the live fold also builds.
-            rows = {(r[0], r[1]): {"kind": r[2], "cose_alg": r[3], "public_key_spki_b64": r[4], "uv": r[5],
-                                   "sealed_secret": r[6], "federated_iss": r[7], "federated_sub": r[8],
-                                   "issued_at": r[9]}
-                    for r in snap.customer_credential_row}
-            since = snap.base_seq - 1
+        (state, issued, rows), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != SIGNAL:
-                continue
-            u = p.get("username")
-            ck = p.get("cred_key")
-            if not isinstance(u, str) or not u or not isinstance(ck, str) or not ck:
-                continue
-            key = (u, ck)
-            st = p.get("state")
-            if st == "revoked":
-                state[key] = "revoked"                 # safe direction: honor ANY revoke (even unsigned)
-            elif st == "active":
-                if not verify_signed(p, _cred_core(p), resolver.at(r.seq)):
-                    continue                           # fail-closed: unsigned/forged/wrong-epoch grant
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue                           # REPLAY / stale re-append of an already-honored grant
-                issued[key] = at
-                state[key] = "active"
-                rows[key] = {"kind": p.get("kind"), "issued_at": at, "cose_alg": p.get("cose_alg"),
-                             "public_key_spki_b64": p.get("public_key_spki_b64"), "uv": p.get("uv"),
-                             "sealed_secret": p.get("sealed_secret"), "federated_iss": p.get("federated_iss"),
-                             "federated_sub": p.get("federated_sub")}
+            _apply_credential_record(r, resolver, state, issued, rows)
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
 
     @staticmethod
@@ -252,6 +358,10 @@ class CustomerCredentialRegistry:
         """Every active credential for `username`, in cred_key order (the customer's enrolled factors)."""
         if not isinstance(username, str) or not username:
             return []
+        hit = self._cached(lambda v: [(username, ck, v.active[(username, ck)])
+                                      for ck in sorted(v.by_user.get(username, ()))])
+        if hit is not _UNCACHED:
+            return [self._to_cred(u, ck, row) for u, ck, row in hit]
         fold = self._fold()
         out = [self._to_cred(u, ck, row) for (u, ck), row in fold.items() if u == username]
         return sorted(out, key=lambda c: c.cred_key)
@@ -260,7 +370,9 @@ class CustomerCredentialRegistry:
         """The active TOTP credential for `username` (carrying the sealed secret), or None."""
         if not isinstance(username, str) or not username:
             return None
-        row = self._fold().get((username, _CRED_KEY_TOTP))
+        row = self._cached(lambda v: v.active.get((username, _CRED_KEY_TOTP)))
+        if row is _UNCACHED:
+            row = self._fold().get((username, _CRED_KEY_TOTP))
         return self._to_cred(username, _CRED_KEY_TOTP, row) if row is not None else None
 
     def by_credential_id(self, credential_id: str) -> Optional[CustomerCredential]:
@@ -270,8 +382,11 @@ class CustomerCredentialRegistry:
         cid = str(credential_id or "").strip()
         if not cid:
             return None
-        hits = [(u, ck, row) for (u, ck), row in self._fold().items()
-                if ck == cid and row.get("kind") == KIND_PASSKEY]
+        hits = self._cached(lambda v: [(u, cid, v.active[(u, cid)]) for u in sorted(v.by_ck.get(cid, ()))
+                                       if v.active[(u, cid)].get("kind") == KIND_PASSKEY])
+        if hits is _UNCACHED:
+            hits = [(u, ck, row) for (u, ck), row in self._fold().items()
+                    if ck == cid and row.get("kind") == KIND_PASSKEY]
         if len(hits) != 1:
             return None
         u, ck, row = hits[0]
@@ -285,6 +400,9 @@ class CustomerCredentialRegistry:
     def _federated_username(self, iss: str, sub: str) -> Optional[str]:
         if not iss or not sub:
             return None
+        cached = self._cached(lambda v: sorted(v.by_fed.get((iss, sub), ())))
+        if cached is not _UNCACHED:
+            return cached[0][0] if len(cached) == 1 else None
         hits = [u for (u, ck), row in self._fold().items()
                 if row.get("kind") == KIND_OIDC and row.get("federated_iss") == iss
                 and row.get("federated_sub") == sub]

@@ -81,6 +81,15 @@ LOCKS: dict[str, tuple[Path, Path]] = {
         REPO_ROOT / "infra/supply-chain/build-backends.in",
         REPO_ROOT / "infra/supply-chain/build-backends.lock.txt",
     ),
+    # The OPT-IN telemetry-export extras (opentelemetry-sdk + the OTLP/HTTP exporter). Not a RUNTIME lock —
+    # telemetry export is default-OFF, so it stays out of RUNTIME_LOCKS and out of every default install — but
+    # it is hash-locked, drift-checked and require-hashes installed like the others (A14 + P5 + build_envs.sh
+    # VIGIL_WITH_OTEL=1), so it earns the same existence/hash/coverage checks. It is LAYERED on a runtime lock;
+    # test_otel_lock_agrees_with_runtime_locks_on_shared_packages keeps that layer additive.
+    "otel": (
+        REPO_ROOT / "infra/supply-chain/otel.in",
+        REPO_ROOT / "infra/supply-chain/otel.lock.txt",
+    ),
 }
 
 #: The RUNTIME dependency locks — the "tree" that ships and that CI must test against. The W3-2
@@ -1498,8 +1507,10 @@ def test_no_ci_pip_install_admits_a_version_below_a_lock_floor() -> None:
     assert _floor_offenders('pip install "cryptography>=42"', floors), (
         "negative control broken: the detector does not flag cryptography>=42 against the >=50 floor"
     )
-    assert not _floor_offenders("pip install cryptography>=50.0.1", floors), (
-        "false positive: cryptography>=50.0.1 meets the floor and must not be flagged"
+    # derived from the LOCKED version (a hard-coded `>=50.0.1` broke on the first lock bump past it — a
+    # >= floor AT the locked version meets the floor whatever that version is)
+    assert not _floor_offenders(f"pip install cryptography>={floors['cryptography']}", floors), (
+        f"false positive: cryptography>={floors['cryptography']} meets the floor and must not be flagged"
     )
     assert not _floor_offenders(
         f"pip install cryptography=={floors['cryptography']}", floors
@@ -2163,3 +2174,236 @@ def test_no_first_party_package_lock_json_only_a_cve_fixture() -> None:
         f"a first-party package-lock.json exists but is not verified: {[str(p) for p in locks]}. "
         "Add it to verify_native_locks.py."
     )
+
+
+# ==========================================================================================
+# Security floors on transitive runtime dependencies
+# ==========================================================================================
+
+#: (package, first fixed release, advisory) — a runtime lock may never pin below the fixed release.
+_TRANSITIVE_ADVISORY_FLOORS: tuple[tuple[str, tuple[int, ...], str], ...] = (
+    ("opentelemetry-api", (1, 45, 1), "GHSA-xcq7-p3pf-p88h / CVE-2026-114603"),
+)
+
+
+def _release_tuple(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:3])
+
+
+def _below_advisory_floor(pins: dict[str, str]) -> list[str]:
+    return [f"{name}=={pins[name]} (< {'.'.join(map(str, fixed))}, {adv})"
+            for name, fixed, adv in _TRANSITIVE_ADVISORY_FLOORS
+            if name in pins and _release_tuple(pins[name]) < fixed]
+
+
+def test_no_runtime_lock_pins_a_transitive_below_its_advisory_floor() -> None:
+    """A transitive pulled in by a parent's range (opentelemetry-api via mcp) can sit on an advisory release with
+    nobody choosing it. The floors in the .in files hold it up across regenerations; this proves the committed
+    locks honour them — and that each floor is actually written into the input."""
+    bad: list[str] = []
+    for lock in RUNTIME_LOCKS:
+        bad += [f"{lock.relative_to(REPO_ROOT)}: {b}" for b in _below_advisory_floor(_lock_versions(lock))]
+    assert not bad, "runtime lock pins a release with a known advisory:\n  " + "\n  ".join(bad)
+    sov_in = (REPO_ROOT / "infra/supply-chain/sovereign.in").read_text(encoding="utf-8")
+    assert re.search(r"^opentelemetry-api>=1\.45\.1\b", sov_in, re.M), \
+        "sovereign.in lost its opentelemetry-api>=1.45.1 security floor (GHSA-xcq7-p3pf-p88h)"
+    # NEGATIVE CONTROL: the vulnerable release is flagged; the fixed one is not.
+    assert _below_advisory_floor({"opentelemetry-api": "1.44.0"})
+    assert not _below_advisory_floor({"opentelemetry-api": "1.45.1"})
+# The OPT-IN OpenTelemetry exporter lock (infra/supply-chain/otel.lock.txt)
+#
+# Before it, NO lock carried opentelemetry-sdk / the OTLP/HTTP exporter, so `vigil engage --otlp-endpoint`
+# exported nothing on every locked install and test_live_otel_export.py skipped in every CI job. The lock is
+# an EXTRAS layer for env-offense: installed on top of its locks, opt-in (VIGIL_WITH_OTEL=1), never in a default
+# install. These guards keep it (a) additive — every shared pin identical to env-offense's EFFECTIVE pins (strix
+# overlaid by the framework lock, the build_envs.sh order), (b) opt-in — absent from both runtime locks,
+# (c) coherent — one OpenTelemetry release, (d) off the advisory — opentelemetry-api >= 1.45.1, and (e) actually
+# wired — regenerated, verified and install-proven by A14, installed in P5, offered by build_envs.sh behind the flag.
+# ==========================================================================================
+
+_OTEL_IN = REPO_ROOT / "infra/supply-chain/otel.in"
+_OTEL_LOCK = REPO_ROOT / "infra/supply-chain/otel.lock.txt"
+_OTEL_CORE = ("opentelemetry-api", "opentelemetry-sdk", "opentelemetry-proto",
+              "opentelemetry-exporter-otlp-proto-common", "opentelemetry-exporter-otlp-proto-http")
+_OFFENSE_LOCK = REPO_ROOT / "engine/crucible/framework/v2/requirements.lock.txt"
+_STRIX_LOCK = REPO_ROOT / "infra/supply-chain/strix.lock"
+# GHSA-xcq7-p3pf-p88h / CVE-2026-114603 (TraceState.from_header ReDoS): opentelemetry-api < 1.45.1.
+_OTEL_API_ADVISORY_FIXED = (1, 45, 1)
+
+
+def _offense_effective_pins() -> dict[str, str]:
+    """env-offense's pins as build_envs.sh lays them down: strix.lock FIRST, then the framework lock WINS."""
+    eff = dict(_lock_versions(_STRIX_LOCK))
+    eff.update(_lock_versions(_OFFENSE_LOCK))
+    return eff
+
+
+def _shared_pin_mismatches(extras: dict[str, str], runtime: dict[str, dict[str, str]]) -> list[str]:
+    """Every package the extras lock shares with a runtime lock whose pin DIFFERS (the layer would move it)."""
+    out: list[str] = []
+    for lock_name, rt in runtime.items():
+        for name in sorted(set(extras) & set(rt)):
+            if extras[name] != rt[name]:
+                out.append(f"{name}: otel={extras[name]} {lock_name}={rt[name]}")
+    return out
+
+
+def test_otel_lock_agrees_with_runtime_locks_on_shared_packages() -> None:
+    """The otel lock is installed into env-offense AFTER strix.lock and the framework lock, under
+    --require-hashes. A shared package pinned to a different version would make that install silently CHANGE
+    what env-offense already pinned. Compare against the EFFECTIVE env-offense pins (strix overlaid by the
+    framework lock) — so a future otel closure that reaches a package ONLY strix pins is held to strix's pin too."""
+    otel = _lock_versions(_OTEL_LOCK)
+    eff = _offense_effective_pins()
+    # NOT VACUOUS: the overlap really exists (else "no mismatches" would prove nothing).
+    assert {"requests", "urllib3", "typing-extensions"} <= set(otel) & set(eff), sorted(set(otel) & set(eff))
+    bad = _shared_pin_mismatches(otel, {"env-offense (strix + framework)": eff})
+    assert not bad, (
+        "the otel extras lock disagrees with env-offense on a shared package, so installing it would MOVE a pin "
+        "(otel.in must keep the framework lock as a -c constraint; regenerate):\n  " + "\n  ".join(bad))
+    # ...and with the sovereign lock: one OpenTelemetry API / protobuf release across the whole product.
+    sov = _lock_versions(REPO_ROOT / "infra/supply-chain/sovereign.lock.txt")
+    assert {"opentelemetry-api", "protobuf"} <= set(otel) & set(sov), sorted(set(otel) & set(sov))
+    bad_sov = _shared_pin_mismatches(otel, {"sovereign.lock.txt": sov})
+    assert not bad_sov, ("the otel lock and the sovereign lock disagree on a shared package (otel.in must keep "
+                         "sovereign.lock.txt as a -c constraint; regenerate):\n  " + "\n  ".join(bad_sov))
+    # strix-only packages: the framework lock does not override them, so the otel layer must match strix itself.
+    strix_only = set(_lock_versions(_STRIX_LOCK)) - set(_lock_versions(_OFFENSE_LOCK))
+    assert not _shared_pin_mismatches({n: otel[n] for n in set(otel) & strix_only},
+                                      {"strix.lock": _lock_versions(_STRIX_LOCK)})
+    # NEGATIVE CONTROL: a drifted shared pin IS reported; the identical one is not.
+    assert _shared_pin_mismatches({"protobuf": "9.9.9"}, {"sovereign.lock.txt": {"protobuf": "7.35.1"}})
+    assert not _shared_pin_mismatches({"protobuf": "7.35.1"}, {"sovereign.lock.txt": {"protobuf": "7.35.1"}})
+
+
+def _constraint_targets(in_text: str, in_dir: Path) -> set[Path]:
+    """The resolved paths of every live (uncommented) `-c <file>` line in a pip-compile input."""
+    out: set[Path] = set()
+    for raw in in_text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith(("-c ", "--constraint ")):
+            out.add((in_dir / line.split(None, 1)[1].strip()).resolve())
+    return out
+
+
+def test_otel_input_is_constrained_by_both_runtime_locks() -> None:
+    """What KEEPS the layer additive and the product on ONE OpenTelemetry release across regenerations: both
+    runtime locks are pip-compile constraints (the offense lock for the layer's shared transitives; the sovereign
+    lock so opentelemetry-api / protobuf match what env-sovereign ships via mcp)."""
+    got = _constraint_targets(_OTEL_IN.read_text(encoding="utf-8"), _OTEL_IN.parent)
+    want = {lock.resolve() for lock in RUNTIME_LOCKS}
+    assert want <= got, (f"infra/supply-chain/otel.in must constrain on BOTH runtime locks; missing "
+                         f"{sorted(str(p.relative_to(REPO_ROOT)) for p in want - got)}")
+    assert all(p.is_file() for p in got), f"a -c constraint in otel.in points at a missing file: {sorted(got)}"
+    # NEGATIVE CONTROL: a commented-out constraint does not count.
+    assert not _constraint_targets("# -c sovereign.lock.txt\n", _OTEL_IN.parent)
+
+
+def test_otel_lock_pins_one_coherent_opentelemetry_release() -> None:
+    """The SDK, API, proto and exporters must be ONE release: a mixed set imports but mis-encodes or fails at
+    export time, which reads exactly like 'the collector is down'."""
+    otel = _lock_versions(_OTEL_LOCK)
+    missing = [n for n in _OTEL_CORE if n not in otel]
+    assert not missing, f"otel.lock.txt does not pin {missing} — the exporter path would be incomplete"
+    versions = {otel[n] for n in _OTEL_CORE}
+    assert len(versions) == 1, f"mixed OpenTelemetry release in otel.lock.txt: {{{', '.join(f'{n}={otel[n]}' for n in _OTEL_CORE)}}}"
+
+
+def _release(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:3])
+
+
+def test_otel_lock_is_past_the_opentelemetry_api_advisory() -> None:
+    """GHSA-xcq7-p3pf-p88h / CVE-2026-114603 is fixed in opentelemetry-api 1.45.1. The opt-in lock must never ship
+    the vulnerable release (the floor in otel.in is what holds this across regenerations)."""
+    otel = _lock_versions(_OTEL_LOCK)
+    assert _release(otel["opentelemetry-api"]) >= _OTEL_API_ADVISORY_FIXED, \
+        f"otel.lock.txt pins opentelemetry-api=={otel['opentelemetry-api']} (< 1.45.1, GHSA-xcq7-p3pf-p88h)"
+    assert re.search(r"^opentelemetry-api>=1\.45\.1\b", _OTEL_IN.read_text(encoding="utf-8"), re.M), \
+        "otel.in lost its opentelemetry-api>=1.45.1 security floor"
+    # NEGATIVE CONTROL: the vulnerable release is below the floor; the fixed ones are not.
+    assert _release("1.44.0") < _OTEL_API_ADVISORY_FIXED <= _release("1.45.1") <= _release("1.45.2")
+
+
+def test_otel_lock_carries_no_first_party_or_offense_package() -> None:
+    """FATAL-2: third-party telemetry packages only — never framework/strix/sigil or a first-party member."""
+    forbidden = {"framework", "crucible", "strix", "strix-agent", "sigil", "vigil-core", "vigil-integration",
+                 "vigil-gateway"}
+    hit = sorted(set(_lock_versions(_OTEL_LOCK)) & forbidden)
+    assert not hit, f"otel.lock.txt pins first-party/offense packages {hit}"
+
+
+def test_the_exporter_stays_opt_in_not_in_any_runtime_lock() -> None:
+    """Default-OFF: the network exporter must not ride into every deployment via a runtime lock."""
+    for lock in RUNTIME_LOCKS:
+        leaked = sorted({"opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http"} & set(_lock_versions(lock)))
+        assert not leaked, (f"{lock.relative_to(REPO_ROOT)} now pins {leaked} — the OTLP exporter belongs in the "
+                            f"OPT-IN otel.lock.txt, not a default runtime install")
+    assert _OTEL_LOCK not in RUNTIME_LOCKS
+
+
+def test_a14_regenerates_verifies_and_install_proves_the_otel_lock() -> None:
+    """A lock nothing regenerates, drift-checks or installs is a document, not a control."""
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    # the WHOLE regen invocation (input, committed lock, artifact) — a substring check would be satisfied by
+    # the REQ_IN line below even if the regen call compiled some other .in into the otel artifact.
+    assert re.search(r'regen "\$root" \\\s*infra/supply-chain/otel\.in \\\s*infra/supply-chain/otel\.lock\.txt'
+                     r' \\\s*"\$root/_a14_locks/otel\.lock\.txt"', body), \
+        "the A14 gate does not regenerate the otel lock from otel.in (no harvestable artifact on drift)"
+    assert re.search(r"REQ_IN:\s*infra/supply-chain/otel\.in", body) and \
+        re.search(r"REQ_LOCK:\s*infra/supply-chain/otel\.lock\.txt", body), \
+        "the A14 gate does not run verify-supply-chain.sh (drift + SBOM cross-check) on the otel lock"
+    lines = _logical_lines(body)
+    otel_installs = [ln for ln in lines if "infra/supply-chain/otel.lock.txt" in ln and "pip install" in ln]
+    assert otel_installs and all("--require-hashes" in ln for ln in otel_installs), \
+        "the A14 gate must install the otel lock, and only under --require-hashes"
+    # the proof is LAYERED (offense lock first, in the same venv) and asserts the layer is additive.
+    m = re.search(r"python -m venv (/tmp/a14-otel)\b", body)
+    assert m, "the otel install proof must build its own venv"
+    venv = m.group(1)
+    step = body[m.start():body.find("\n      - name:", m.start())]
+    assert f"{venv}/bin/pip install --require-hashes" in step and \
+        "engine/crucible/framework/v2/requirements.lock.txt" in step, \
+        "the otel install proof must install the offense runtime lock FIRST (the deployed layering)"
+    assert step.index("framework/v2/requirements.lock.txt") < step.index("infra/supply-chain/otel.lock.txt")
+    assert "comm -23" in step and "pip check" in step and "OTLPSpanExporter" in step, \
+        "the otel install proof must assert no runtime pin moved, pip check, and that the exporter imports"
+
+
+def test_ci_p5_installs_the_otel_lock_hashed_after_the_runtime_lock() -> None:
+    """P5 is what turns test_live_otel_export.py from SKIPPED into RUN: it must install the otel lock, hashed,
+    layered after the offense runtime lock (the order envs/build_envs.sh uses)."""
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    start = ci.index("name: integration two-env boundary (P5)")
+    end = re.search(r"^  [A-Za-z0-9_-]+:\s*$", ci[start:], re.M)
+    block = _strip_comments(ci[start:start + end.start()] if end else ci[start:])
+    lines = [ln.strip() for ln in _logical_lines(block)]
+    runtime = "pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt"
+    otel = "pip install --require-hashes -r infra/supply-chain/otel.lock.txt"
+    assert otel in lines, "P5 no longer installs the otel lock under --require-hashes — the export proof will skip"
+    assert lines.index(runtime) < lines.index(otel), "P5 must layer the otel lock AFTER the runtime lock"
+
+
+def test_build_envs_offers_the_otel_layer_opt_in_hashed_and_fail_closed() -> None:
+    """build_envs.sh installs the otel lock ONLY behind VIGIL_WITH_OTEL, only into env-offense, only hashed, and
+    refuses (exit 1) — never an unlocked fallback — when opted in with the lock missing."""
+    script = REPO_ROOT / "envs/build_envs.sh"
+    text = _strip_comments(script.read_text(encoding="utf-8"))
+    assert 'OTEL_LOCK="infra/supply-chain/otel.lock.txt"' in text
+    assert "[warn] VIGIL_WITH_OTEL=" in text, "a near-miss VIGIL_WITH_OTEL value must warn, not silently do nothing"
+    assert 'venv_pip "$venv" --require-hashes -r "$OTEL_LOCK"' in text
+    gate = text[text.index('if [ "$name" = "offense" ] && with_otel; then'):]
+    gate = gate[:gate.index("\n  fi\n")]
+    assert '--require-hashes -r "$OTEL_LOCK"' in gate and "exit 1" in gate, \
+        "the otel layer must be inside the offense+VIGIL_WITH_OTEL gate, hashed, and fail closed when missing"
+    installs = [ln for ln in gate.splitlines() if "venv_pip" in ln or "pip install" in ln]
+    assert installs and all("--require-hashes" in ln for ln in installs), \
+        f"every install inside the otel gate must be hash-enforced (no unlocked fallback): {installs}"
+    # the flag parser, EXECUTED: only affirmatives opt in; unset/0/off/anything else stays OFF.
+    fn = text[text.index("with_otel() {"):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    for value, on in (("", False), ("0", False), ("off", False), ("no", False), ("11", False),
+                      ("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True)):
+        rc = subprocess.run(["bash", "-c", fn + "with_otel"], env={"VIGIL_WITH_OTEL": value, "PATH": "/usr/bin:/bin"},
+                            capture_output=True, timeout=30).returncode
+        assert (rc == 0) is on, f"VIGIL_WITH_OTEL={value!r} → {'ON' if rc == 0 else 'off'}, expected {'ON' if on else 'off'}"

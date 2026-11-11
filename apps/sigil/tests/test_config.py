@@ -76,6 +76,22 @@ def test_effective_config_redacts_secrets():
     assert all("SUPER-SECRET-KEY-abc123" != v for v in cfg.values())
 
 
+def test_effective_config_never_carries_the_raw_api_key_anywhere():
+    """CodeQL py/clear-text-logging-sensitive-data: the raw key must not even ENTER the effective view (a
+    name-based redactor is invisible to taint analysis). Presence only — set -> redacted marker, unset -> ""."""
+    import json as _json
+    for var in ("ANTHROPIC_API_KEY", "SIGIL_ANTHROPIC_API_KEY"):
+        other = "SIGIL_ANTHROPIC_API_KEY" if var == "ANTHROPIC_API_KEY" else "ANTHROPIC_API_KEY"
+        with _env(**{var: "sk-ant-NEVER-PRINTED-9f3", other: None}):
+            cfg = config.effective_config()
+        assert cfg["ANTHROPIC_API_KEY"] == "***redacted***", (var, cfg["ANTHROPIC_API_KEY"])
+        assert "sk-ant-NEVER-PRINTED-9f3" not in _json.dumps(cfg, default=str), var
+    with _env(ANTHROPIC_API_KEY=None, SIGIL_ANTHROPIC_API_KEY=None):
+        assert config.effective_config()["ANTHROPIC_API_KEY"] == ""
+    with _env(ANTHROPIC_API_KEY="", SIGIL_ANTHROPIC_API_KEY=""):
+        assert config.effective_config()["ANTHROPIC_API_KEY"] == ""
+
+
 def test_ingest_repos_override_is_colon_separated():
     with _env(SIGIL_INGEST_REPOS="/opt/repo-a:/opt/repo-b"):
         cfg = config.effective_config()

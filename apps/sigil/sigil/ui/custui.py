@@ -27,6 +27,7 @@ import ipaddress
 import json
 import secrets
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,7 +39,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from vigil_core.hopauth import stamp_hop_assertion  # noqa: E402
+from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
@@ -57,6 +58,30 @@ _OIDC_SID_COOKIE = "vigil_customer_oidc_sid"
 _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         "object-src 'none'; img-src 'self' data:")
 _MAX_BODY = 65536
+
+# How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
+# worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
+# a single-use OIDC code consumed) while the customer is told it failed — so they retry into a duplicate, or are
+# locked out of a login. So the wait is PER ACTION and always exceeds that action's own outbound worst case
+# (each figure below is pinned against the downstream timeout constants by test_custui_hop_budget.py); purely
+# local actions keep the short default so a wedged cockpit still fails fast.
+_HOP_TIMEOUT_S = 10.0
+_SLOW_HOP_TIMEOUTS_S = {
+    # Flutterwave hosted-checkout POST: 15 s per blocking socket op (connect, then read) -> 30 s + margin.
+    "billing_checkout": 45.0,
+    # OIDC: token exchange POST + JWKS GET, 10 s per blocking op each -> 40 s + margin.
+    "oidc_finish": 45.0,
+    # domain-ownership fetch: a 10 s ABSOLUTE wall-clock budget for the whole fetch -> + margin.
+    "target_verify": 20.0,
+    # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
+    "signup_request": 60.0,
+    "recover_request": 60.0,
+}
+
+
+def _hop_timeout(action: str) -> float:
+    """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
+    return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
 # The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
 # the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
 # routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
@@ -67,6 +92,7 @@ _APP_CTYPES = {
     ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
     ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
+    ".wav": "audio/wav",   # the notification chime (same-origin media; strict CSP's default-src 'self' covers it)
 }
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
@@ -81,6 +107,58 @@ def _is_loopback(addr: str) -> bool:
         return ipaddress.ip_address(addr).is_loopback
     except ValueError:
         return False
+
+
+def _listening(host: str, port: int) -> bool:
+    """True if something is LISTENING on (host, port) right now. A short-timeout connect, nothing sent:
+    this REPORTS liveness, it never provisions or mutates anything on the provisioner."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.35):
+            return True
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def _provision_addr(provision_base: str) -> "tuple[str, int] | None":
+    """The (host, port) of the provisioner the edge federates to, parsed from its base URL. Returns None
+    when the base is unset/unparseable (→ the edge cannot be ready). Never surfaced to the caller — only a
+    boolean readiness verdict is — so no address ever leaves on the probe body."""
+    try:
+        u = urlparse(provision_base or "")
+        host = u.hostname
+        port = u.port or (443 if u.scheme == "https" else 80)   # u.port validates the range HERE, inside the guard
+    except ValueError:                                           # bad port (:99999 / :bad) OR malformed IPv6 literal
+        return None
+    if not host:
+        return None
+    return host, int(port)
+
+
+# `/readyz` is UNAUTHENTICATED, so an untrusted caller could hammer it. The check does a live TCP connect to
+# the provisioner backend; without a bound, a probe flood would AMPLIFY into a matching flood of provisioner
+# connects. Debounce it: a result is cached for a short TTL and shared across the ThreadingHTTPServer's
+# request threads, so no matter the incoming /readyz rate the edge opens at most ~1 provisioner connect per
+# TTL per address. The window is tiny, so readiness still reflects reality for an orchestrator's probe.
+# (Mirrors `uiproxy._sovereign_ready_debounced`.)
+_READYZ_TTL = 1.0
+_readyz_lock = threading.Lock()
+_readyz_cache: dict = {}
+
+
+def _provisioner_ready_debounced(host: str, port: int) -> bool:
+    """`_listening(host, port)` behind a short-TTL, thread-safe cache, so an unauthenticated /readyz flood
+    cannot amplify into a flood of provisioner connects. Returns the cached result within the TTL, else does
+    one live connect and caches it."""
+    key = (host, int(port))
+    now = time.monotonic()
+    with _readyz_lock:
+        hit = _readyz_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    ok = _listening(host, port)          # the single live connect, done OUTSIDE the lock
+    with _readyz_lock:
+        _readyz_cache[key] = (now + _READYZ_TTL, ok)
+    return ok
 
 
 class CustomerServer(ThreadingHTTPServer):
@@ -233,17 +311,18 @@ class CustomerHandler(BaseHTTPRequestHandler):
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")
-        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<sha256(body)>"), matching the
+        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<body_binding(body)>"), matching the
         # cockpit's recomputation over the bytes it receives — a captured assertion cannot be replayed with a
-        # swapped body to mint an attacker-chosen grant.
-        bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+        # swapped body to mint an attacker-chosen grant. The body can carry a password, so the binding is a
+        # KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding), never a fast hash.
+        bound_role = f"{action}:{body_binding(self.server.hop_key, data)}"
         sig = stamp_hop_assertion(self.server.hop_key, principal, bound_role, "POST", path, ts)
         req = urllib.request.Request(
             self.server.provision_base + path, data=data, method="POST",
             headers={"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,
                      "X-VIGIL-Provision-Ts": ts, "X-VIGIL-Provision-Sig": sig})
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=_hop_timeout(action)) as r:
                 return r.status, json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             try:
@@ -261,11 +340,34 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if sid:
             self._set_cookie(sid)
 
+    # --- health / readiness (probe surface) --------------------------------------------------------
+    def _readyz(self):
+        """Readiness — a LIVE, DEBOUNCED port probe of the edge's one real dependency: the sovereign
+        provisioner. Returns 503 when it is not listening (the edge can still serve its static shell, but
+        no customer read/action can complete), so an LB drains this edge instead of serving 502s. ALSO 503
+        when the edge holds no hop key: every provisioner hop then fails closed, so no customer read/action
+        can complete regardless of the port being up — a local, no-network check that honours the same
+        contract. The body is a boolean + the check name ONLY — never the provisioner address, so the
+        unauthenticated probe leaks nothing. Side-effect-free: it opens one TCP connection and sends no bytes."""
+        addr = _provision_addr(self.server.provision_base)
+        # an edge with NO hop key cannot authenticate a single provisioner hop (serve_customer boots that
+        # degraded mode with a banner), so it is not ready even if the provisioner port is reachable.
+        ok = bool(self.server.hop_key) and bool(addr) and _provisioner_ready_debounced(*addr)
+        self._json({"ok": ok, "checks": [{"name": "provisioner", "ok": ok}]}, 200 if ok else 503)
+
     # --- routing -----------------------------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
+        # Probe surface (UNAUTHENTICATED, no cookie, no secret) — placed FIRST, ahead of the session/relay
+        # plane, so a k8s/LB liveness+readiness probe (which can present no customer cookie) is answered
+        # without touching any privileged state. `/healthz` is pure liveness (the process answers);
+        # `/readyz` checks the edge's REAL dependency — the sovereign provisioner it federates every
+        # customer read/action to — and returns 503 when it is unreachable, so an orchestrator drains an
+        # edge whose provisioner is down rather than serving 502s from it.
         if path == "/healthz":
             return self._json({"ok": True})
+        if path == "/readyz":
+            return self._readyz()
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:
@@ -280,9 +382,16 @@ class CustomerHandler(BaseHTTPRequestHandler):
         _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
                   "/api/customer/assessments": "assessment_summary",
                   "/api/customer/assessments/findings": "assessment_findings",
-                  "/api/customer/assets": "assets_overview"}
+                  "/api/customer/assets": "assets_overview",
+                  "/api/customer/notifications": "notifications"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_offers")
+        if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("monitor_list")
+        if path == "/api/customer/monitoring/events" and _monitoring_on():
+            return self._customer_read_relay("monitor_events")
         # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
         # Both are served ONLY when customer_oidc_enabled() — otherwise the routes are absent (404), so the
         # edge is byte-identical to a build without customer OIDC (mirrors the operator route-gating).
@@ -503,6 +612,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
+        if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
+            return self._launch(action, body)
+        if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
+            return self._monitoring(action, body)
+        if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
+            return self._checkout(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -545,6 +660,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("target_challenge", requester, payload)
         else:
             payload["method"] = body.get("method", "")
+            # The customer's inline "I am authorized to test this asset" affirmation. Unlike requester/org (which
+            # are session-bound, never body), this is the customer's OWN statement, so it legitimately rides the
+            # body; the provisioner requires it fail-closed before it will mint the target authority.
+            payload["authorized"] = bool(body.get("authorized"))
             c, r = self._provision("target_verify", requester, payload)
         return self._json(r, c)
 
@@ -566,13 +685,47 @@ class CustomerHandler(BaseHTTPRequestHandler):
                                       "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
         if action == "launch/reserve":
             payload["host"] = body.get("host", "")              # session org, never body-supplied
+            payload["product_id"] = body.get("product_id", "")  # EC-7b: tier product choice (catalog id, not an amount)
             c, r = self._provision("launch_reserve", requester, payload)
-        elif action == "launch/start":
-            payload["lease"] = body.get("lease")                # publish the signed lease -> run (K3)
-            c, r = self._provision("launch_start", requester, payload)
-        else:
+        elif action in ("launch/start", "launch/cancel", "launch/pause", "launch/resume"):
+            # all carry the signed lease; the sovereign re-verifies it owner-pinned + tenant-binds to the session
+            # org. launch/pause|resume (PR-4b) are flag-gated at the route, so the hop 404s when the flag is off.
             payload["lease"] = body.get("lease")
-            c, r = self._provision("launch_cancel", requester, payload)
+            c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
+        else:
+            return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _checkout(self, body: dict):
+        """Front B CHK-1 — open a hosted checkout. REQUESTER + ORG from the SERVER-side session, never the body (a
+        body org_id is ignored): a customer can only ever fund THEIR bound org. The body carries ONLY the catalog
+        ``price_id``; the amount is the owner catalog's (sovereign side). Returns the processor's hosted link."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "price_id": body.get("price_id", ""),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_checkout", requester, payload)
+        return self._json(r, c)
+
+    def _monitoring(self, action: str, body: dict):
+        """AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. REQUESTER + ORG from the SERVER-side session, never
+        the body (a body org_id is ignored); host / mode / window_s are the customer's request (the window is
+        server-capped). The sovereign provisioner admits, steps up, mints + publishes."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": body.get("host", ""),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        if action == "monitoring/authorize":
+            payload["mode"] = body.get("mode", "observe")
+            if body.get("window_s") is not None:
+                payload["window_s"] = body.get("window_s")
+            c, r = self._provision("monitor_authorize", requester, payload)
+        else:
+            c, r = self._provision("monitor_revoke", requester, payload)
         return self._json(r, c)
 
     def _mfa(self, action: str, body: dict):
@@ -658,6 +811,21 @@ class CustomerHandler(BaseHTTPRequestHandler):
             "cose_alg": body.get("cose_alg"), "uv": bool(body.get("uv")),
             "client_data_json": body.get("client_data_json", ""), "challenge": ch, "ip": self._ip()})
         return self._json(r, c)
+
+
+def _monitoring_on() -> bool:
+    from .. import config as _config
+    return _config.customer_monitoring_enabled()
+
+
+def _checkout_on() -> bool:
+    from .. import config as _config
+    return _config.customer_checkout_enabled()
+
+
+def _pause_resume_on() -> bool:
+    from .. import config as _config
+    return _config.customer_pause_resume_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

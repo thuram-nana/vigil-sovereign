@@ -59,6 +59,18 @@ from .scanner.campaign import ScanReport, WebScanCampaign
 from .scanner.orchestrator import AttackPath, AutonomousCampaign, ChainedConclusion
 from .worldmodel.graph import WorldModel
 
+# EC-3 — the RUN-SCOPED HARD token budget (shared leaf in vigil_core). Guarded like the kernel's import so
+# the engage path still runs if the shared core is ever absent (then _run_budget is None ⇒ never armed ⇒
+# RunBudgetExceeded is never raised ⇒ the except-clause below is inert ⇒ byte-identical). DEFAULT-OFF.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import run_budget as _run_budget
+    from vigil_core import RunBudgetExceeded as _RunBudgetExceeded
+except Exception:                                          # noqa: BLE001
+    _run_budget = None
+
+    class _RunBudgetExceeded(Exception):  # inert sentinel: nothing raises it when the core is absent
+        pass
+
 if TYPE_CHECKING:  # intel types are only referenced in annotations on the default path
     from .intel.predict import AssetHypothesis
     from .intel.resolve import Entity
@@ -70,6 +82,17 @@ if TYPE_CHECKING:  # intel types are only referenced in annotations on the defau
 class EngagementRefused(RuntimeError):
     """The engagement could not start: kill-switch tripped, seed out of scope, or
     a relay host not on the charter allowlist."""
+
+
+class EngagementPaused(RuntimeError):
+    """pause/resume PR-3 — a RUNNING customer engagement was cooperatively halted because its owner-signed
+    credit-launch lease is PAUSED (a REVERSIBLE operator halt), raised at a clean point after the traffic phase.
+
+    DELIBERATELY NOT a subclass of :class:`EngagementRefused`: a refusal is a TERMINAL 'could not start', whereas
+    a pause is a transient, RE-DRIVEABLE halt. The customer-launch worker catches THIS type specifically to
+    re-drive (resume) the launch WITHOUT emitting the refunding/terminal FAILED settle and WITHOUT consuming a
+    crash-attempt — see ``vigil_integration.jobs.engage_worker``. Default-OFF: never raised until pause/resume
+    is enabled (nothing records a pause), so the engine is byte-identical."""
 
 
 @dataclass
@@ -124,6 +147,12 @@ class EngagementResult:
     # report (graded as leads). Fusion NEVER changes report.active_findings or any oracle verdict.
     fused_leads: int = 0
     fused_facts: int = 0
+    # EC-3 — set when a RUN-SCOPED HARD token-budget stop (RunBudgetExceeded) ended this run early. None on
+    # every normal run (byte-identical). A non-None reason marks a PARTIAL result: the findings-so-far are
+    # RETAINED and the run still returns normally (NOT a crash / NOT a raise), so the downstream
+    # engage_worker emits a COMPLETED signal → completion_spool.settle_launch settles the reservation
+    # consumed-so-far — the launch is neither stranded (lost reservation) nor double-charged.
+    stopped_reason: str | None = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -198,6 +227,21 @@ def resolve_profile(profile: str, args: "argparse.Namespace") -> tuple[list[str]
 def _profile_deferred_packs(profile: str) -> list[str]:
     """The plan-named packs a profile names but has no flag for yet (recorded in the run manifest)."""
     return list(_PROFILE_DEFERRED.get((profile or "surface").lower(), ()))
+
+
+def profile_kwargs(profile: str) -> "dict[str, bool]":
+    """The ``run_engagement`` ``enable_*`` kwargs a ``--profile`` turns ON, as a plain dict — the
+    NON-argparse sibling of :func:`resolve_profile`, for callers (EC-7's keyless engage worker) that drive
+    ``run_engagement`` DIRECTLY rather than through the CLI ``Namespace``. It reads the SAME ``_PROFILE_FLAGS``
+    + ``_PROFILE_FLAG_KWARG`` the CLI ``--profile`` path uses, so the two roster sources can never diverge
+    (a conformance test pins that every key here is a real ``run_engagement`` kwarg). ``surface`` ⇒ ``{}`` —
+    the default roster, byte-identical. Only flags that map 1:1 to a real ``enable_*`` kwarg are returned;
+    a plan-named pack with no flag yet is DEFERRED (see ``_PROFILE_DEFERRED``), never fabricated. PURE: no
+    oracle, no gate change, mints nothing — it only names which EXISTING opt-in passes a roster turns on."""
+    name = (profile or "surface").lower()
+    return {_PROFILE_FLAG_KWARG[dest]: True
+            for dest in _PROFILE_FLAGS.get(name, ())
+            if dest in _PROFILE_FLAG_KWARG}
 
 
 def _record_engagement_profile(run_dir: "str | None", profile: str, flags: dict, deferred: list) -> None:
@@ -424,7 +468,8 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     return trust_root
 
 
-def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool = False) -> None:
+def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool = False,
+                                      expect_nonce: "str | None" = None) -> None:
     """K2 (arm site, customer launches): a CUSTOMER engagement (``cust_`` slug) must present a VERIFIED
     owner-signed credit-launch lease on the cross-plane seam before it arms — a SEPARATE conjunct from the
     EngagementAuthority (G0). The offense plane VERIFIES the public owner-signed lease against OUR pinned owner
@@ -439,7 +484,11 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool 
     engagement that is NOT a customer engagement — no ``cust_`` slug AND no verified owner-signed customer
     authority (``issued_by`` ``customer:``), per ``customer_engagement_requires_lease`` (K4‑0, the structural
     gate that replaces the bare ``cust_`` prefix) — requires NO lease and is byte-identical (no lease
-    consulted). Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
+    consulted). Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises.
+
+    ``expect_nonce`` is the nonce of the launch the caller is RUNNING (the customer-launch worker passes its job's
+    own). The seam holds ONE lease per slug, so it may already be a LATER launch's: the verify then refuses
+    BEFORE the consume, so this run can never arm — nor burn the single-use floor of — another launch's lease."""
     from .launch_lease import customer_engagement_requires_lease, verify_customer_launch_lease
     if not customer_engagement_requires_lease(slug):
         return
@@ -447,11 +496,158 @@ def _engage_launch_lease_precondition(slug: str, seed_url: str, *, resume: bool 
 
     from .common.tenant import tenant_id
     host = urlsplit(seed_url).hostname or ""
-    ok, reason = verify_customer_launch_lease(slug, host, tenant_id(), consume=not resume)
+    ok, reason = verify_customer_launch_lease(slug, host, tenant_id(), consume=not resume,
+                                              expect_nonce=expect_nonce)
     if not ok:
         raise EngagementRefused(
             f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
             f"The lease is reserved + started on the sovereign plane and re-verified here keyless before traffic.")
+
+
+def _engage_pause_base() -> str:
+    """pause/resume PR-3 — the cross-plane seam base the pause substrate + the lease verify SHARE (matches
+    ``launch_lease._base_dir()``), so the in-flight halt looks a pause up under the SAME base the lease was
+    published to."""
+    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+
+
+def _engage_lease_nonce(slug: str, seed_url: str, *, launch_nonce: "str | None" = None) -> "str | None":
+    """pause/resume PR-3 — THIS customer launch's OWNER-SIGNED lease nonce (verify-only, NON-consuming, and
+    readable even while paused), used to BIND the in-flight cooperative-halt check to this exact lease. Returns
+    None for a greenfield / operator run (no lease required) or when no lease verifies. Fail-closed + quiet: any
+    error ⇒ None ⇒ the run carries NO halt binding and is byte-identical to pre-pause/resume behaviour.
+
+    ``launch_nonce`` — the launch the caller is RUNNING (the customer-launch worker passes its job's own nonce).
+    For a customer engagement it is returned as-is, so the halt check and the resume state bind to THAT launch
+    and never to whichever lease currently sits on the seam (one lease per slug, so it can be a later launch's).
+    It is a VERIFIED nonce by the time this is called: the arm precondition just ran with
+    ``expect_nonce=launch_nonce`` and refuses unless the owner-signed lease on the seam carries exactly it."""
+    try:
+        from .launch_lease import customer_engagement_requires_lease, read_verified_launch_nonce
+        if not customer_engagement_requires_lease(slug):
+            return None
+        if launch_nonce:
+            return str(launch_nonce)
+        from urllib.parse import urlsplit
+
+        from .common.tenant import tenant_id
+        host = urlsplit(seed_url).hostname or ""
+        return read_verified_launch_nonce(slug, host, tenant_id(), base_dir=_engage_pause_base())
+    except Exception:  # noqa: BLE001 — a nonce-read failure leaves the run UNHALTED (byte-identical), never sinks it
+        return None
+
+
+def _lease_is_paused(base: str, slug: str, nonce: "str | None") -> bool:
+    """pause/resume PR-3 — TOTAL, FAIL-CLOSED-toward-HALT pause predicate for a customer launch. No nonce ⇒
+    False (greenfield / operator runs are never pause-gated). ``is_lease_paused`` is itself total + fail-closed
+    (an unsafe slug or an existing-but-unreadable/corrupt marker already returns True/halt and NEVER raises), so
+    the only thing this backstops is an import failure of the seam module — which it treats as HALT (the run
+    re-drives, money-safe) rather than silently continuing to send traffic on an unknown pause state. FATAL-2:
+    the ``vigil_integration.live`` import stays LAZY inside the function, exactly as the lease verify does."""
+    if not nonce:
+        return False
+    try:
+        from vigil_integration.live.credit_lease_pause import is_lease_paused
+        return bool(is_lease_paused(base, slug, nonce))
+    except Exception:  # noqa: BLE001 — FAIL-CLOSED toward HALT (re-drive), never continue on an unknown pause state
+        return True
+
+
+def _resume_state_is_launch_bound(slug: str, nonce: "str | None", *, resume: bool) -> bool:
+    """Whether THIS run's phase ledger + scan snapshot must be BOUND to one launch (``PhaseLedger.bind_launch``).
+
+    The ledger and the snapshot are keyed per slug, and a customer slug is reused by every launch of the same
+    (org, host) — so a customer run's resume state has to be scoped to its own launch, or a resumed launch
+    would skip its scan and reload an EARLIER launch's report. Bound iff this is a customer launch:
+
+      * a verified lease nonce was read ⇒ bound to that launch (its records are tagged, and only its own
+        tagged state is ever reused);
+      * no nonce, but a RESUME of a customer engagement ⇒ bound to NOTHING: the launch cannot be identified,
+        so no prior state may be reused and the scan re-runs (the ledger's fail-safe direction: more work,
+        never a foreign report). A fresh run reuses nothing anyway, so the question only arises on resume;
+      * an operator / greenfield run ⇒ NOT bound — the per-slug ledger and a plain ``--resume`` are
+        byte-identical to before.
+
+    TOTAL: if the engagement cannot be classified it is treated as bound-to-nothing on a resume."""
+    if nonce:
+        return True
+    if not resume:
+        return False
+    try:
+        from .launch_lease import customer_engagement_requires_lease
+        return bool(customer_engagement_requires_lease(slug))
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ reuse nothing (re-scan), never another launch's state
+        return True
+
+
+#: pause/resume — the PROPOSED default number of times ONE customer launch may RE-RUN its scan because a pause
+#: cut it short (owner-tunable via ``VIGIL_PAUSE_RESCAN_LIMIT``). A pause-cut scan is discarded and the resumed
+#: launch scans again from the start (the engine has no mid-scan checkpoint), all for ONE flat charge — so the
+#: number of re-scans a launch may cost must be bounded, independently of the crash-attempt budget a pause
+#: deliberately does not consume. 2 re-scans ⇒ at most 3 scan passes per launch, mirroring the worker's
+#: 3-attempt crash budget. Only reachable once customer pause/resume is enabled (default-OFF).
+PAUSE_RESCAN_LIMIT_DEFAULT = 2
+
+
+def _pause_rescan_limit() -> int:
+    """The per-launch cap on pause-induced re-scans: ``VIGIL_PAUSE_RESCAN_LIMIT`` when it is a non-negative
+    integer, else :data:`PAUSE_RESCAN_LIMIT_DEFAULT`. FAIL-CLOSED: an unset, empty, malformed or negative value
+    is the bounded default — never "unbounded"."""
+    raw = os.environ.get("VIGIL_PAUSE_RESCAN_LIMIT", "").strip()
+    try:
+        v = int(raw) if raw else PAUSE_RESCAN_LIMIT_DEFAULT
+    except ValueError:
+        return PAUSE_RESCAN_LIMIT_DEFAULT
+    return v if v >= 0 else PAUSE_RESCAN_LIMIT_DEFAULT
+
+
+def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int | None":
+    """EC-3 — arm THIS run's HARD per-run token ceiling at preflight. Returns the armed ceiling, or None.
+
+    DEFAULT-OFF: when ``VIGIL_RUN_HARD_BUDGET_ENABLED`` is unset this is a no-op — ``run_budget.arm`` refuses
+    to arm, no lease is read, the run is left UNARMED, and the engine (and ``make gate``) is byte-identical.
+    When ON, the ceiling is ``units_reserved × ENVELOPE_TOKENS_PER_CREDIT`` read from the VERIFIED owner-signed
+    credit-launch lease via the SAME owner-pinned verify+bind the K2 arm uses (read NON-consuming here, so the
+    ceiling read never burns the single-use lease) — identical BY CONSTRUCTION to the sovereign reserved
+    envelope (one shared constant; no money number in the engine). A lease-less local run may instead cap via
+    the operator ``VIGIL_RUN_TOKEN_CEILING`` (integer tokens); with neither a verified lease nor that override
+    the run stays UNARMED (so a flag-ON greenfield/operator run — and ``make gate`` — is still byte-identical).
+
+    Best-effort — NEVER raises into the run: a budget that cannot be armed must not sink an otherwise-authorized
+    engagement (the hard stop is a COST guard, not a safety gate; soundness is the oracles' job). It also
+    ``reset()``s first so a ceiling can never leak in from a prior run that reused this thread/context."""
+    if _run_budget is None:
+        return None
+    try:
+        _run_budget.reset()                       # start clean — no stale ceiling from a reused thread/context
+        if not _run_budget.enabled():
+            return None
+        ceiling: "int | None" = None
+        try:
+            from urllib.parse import urlsplit
+
+            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
+
+            from .common.tenant import tenant_id
+            from .launch_lease import customer_engagement_requires_lease, read_verified_launch_units
+            if customer_engagement_requires_lease(slug):
+                host = urlsplit(seed_url).hostname or ""
+                units = read_verified_launch_units(slug, host, tenant_id())
+                if units is not None and int(units) >= 1:
+                    ceiling = int(units) * int(ENVELOPE_TOKENS_PER_CREDIT)
+        except Exception:  # noqa: BLE001 — a lease/ceiling read failure leaves the run unarmed, never sinks it
+            ceiling = None
+        if ceiling is None:
+            raw = os.environ.get("VIGIL_RUN_TOKEN_CEILING", "").strip()   # operator lease-less local cap
+            if raw:
+                try:
+                    v = int(raw)
+                    ceiling = v if v >= 1 else None
+                except ValueError:
+                    ceiling = None
+        return _run_budget.arm(ceiling)
+    except Exception:  # noqa: BLE001 — arming is best-effort; never raise into the engagement
+        return None
 
 
 def _engage_oob_authority(slug: str) -> dict:
@@ -1149,6 +1345,10 @@ def run_engagement(
     fleet_tenant: str = "default",
     fleet_work_kind: "WorkKind | str | None" = None,
     executor: "EngagementExecutor | None" = None,
+    # The customer-launch worker passes the nonce of the launch it is RUNNING (its job's own). Default None ⇒
+    # the engine reads the launch from the lease on the seam exactly as before (operator / CLI / greenfield
+    # runs are untouched). See the docstring's last paragraph.
+    launch_nonce: "str | None" = None,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -1182,7 +1382,25 @@ def run_engagement(
     fused-lead findings and the defender gap-report/efficacy events appear ONCE across fresh+resume
     while ``result.fused_leads``/``fused_facts``/``defense`` are still recomputed. ``resume=False``
     (the default) only ever RECORDS state, so the control flow — and ``make gate`` — is
-    byte-identical."""
+    byte-identical.
+
+    For a CUSTOMER launch the resume state is additionally BOUND TO THE LAUNCH (its owner-signed lease
+    nonce): the ledger and the snapshot are keyed per slug and a customer slug is reused by every launch
+    of the same (org, host), so a resume reuses only the scan its OWN launch completed — never an earlier
+    launch's. And a scan that a reversible PAUSE cut short is recorded ``halted``, not completed, and is
+    not snapshotted: the run raises the re-driveable :class:`EngagementPaused`, and the resumed launch
+    RE-RUNS its scan instead of reloading a truncated report — at most ``VIGIL_PAUSE_RESCAN_LIMIT`` times
+    per launch (:data:`PAUSE_RESCAN_LIMIT_DEFAULT`); past that the run is refused before any traffic and the
+    launch ends through the worker's terminal-failure path (refunded, never charged). A scan that is WHOLE
+    (no action was refused by the pause) is kept even if the lease is paused as it returns. Operator /
+    greenfield runs are never bound and never pause-gated, so their ledger and a plain ``--resume`` are
+    unchanged.
+
+    ``launch_nonce`` names the launch being run (the customer-launch worker passes its job's own nonce). The
+    seam holds ONE lease per slug, so without it a job could arm — and burn the single-use floor of — a LATER
+    launch's lease, and tag its scan as that launch's (which the later launch would then reload and settle
+    on). With it, the arm precondition refuses unless the verified lease on the seam IS that launch's, and the
+    pause halt + the resume state bind to that launch. ``None`` keeps the seam-read behaviour."""
     # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
     # gate refusal is recorded as evidence on the spine before it propagates.
     sink = _make_spine_sink(spine, slug)
@@ -1208,14 +1426,15 @@ def run_engagement(
     # NOT complete (never emitted, or crashed mid-emit) keeps the real sink, so its events are
     # emitted exactly once. Grounding/finding-confidence/chaining/intel emit NOTHING to the spine,
     # so they are already re-emit-idempotent and untouched. Empty unless resuming → fresh runs
-    # (and `make gate`, which uses no spine) are byte-identical.
-    _completed_prior = ledger.completed_prior()
-
+    # (and `make gate`, which uses no spine) are byte-identical. The ledger is asked at CALL time
+    # (not snapshotted here) because a customer run binds it to its launch after preflight, which
+    # narrows "completed by a prior run" to THIS launch's own phases; an operator run's answer is
+    # the same whenever it is asked.
     def _emit_sink(phase: str):
         """The sink a re-runnable phase hands to its spine-EMITTING steps: the real ``sink``
         normally, but ``None`` when resuming a phase the prior run already recorded on the spine
         (so it recomputes its in-memory result WITHOUT re-appending the same events)."""
-        return None if (resume and phase in _completed_prior) else sink
+        return None if (resume and phase in ledger.completed_prior()) else sink
 
     # Preflight is the fail-closed AUTHORIZATION gate — it ALWAYS runs, even on resume:
     # re-validating the kill-switch + seed scope on every launch is a safety feature, never a
@@ -1226,13 +1445,56 @@ def run_engagement(
         # K2: a cust_ launch needs a verified credit lease. Thread `resume` so a --resume RE-VALIDATES the
         # lease (owner-pin + bind + window) but does NOT re-burn the single-use floor the first arm consumed
         # (else every resumed customer engagement dies as a replay, stranding its paid reservation).
-        _engage_launch_lease_precondition(slug, seed_url, resume=resume)
+        # ``launch_nonce`` (the worker's job) is checked against the verified seam lease BEFORE the consume, so a
+        # job never arms another launch's lease.
+        _engage_launch_lease_precondition(slug, seed_url, resume=resume, expect_nonce=launch_nonce or None)
     except EngagementRefused as e:
         ledger.fail(P_PREFLIGHT)
         if sink is not None:
             sink.refusal("preflight", seed_url, reason=str(e), fatal=True)
         raise
     ledger.complete(P_PREFLIGHT)
+
+    # EC-3 — arm the RUN-SCOPED HARD token budget for this run (DEFAULT-OFF; a no-op that reads no lease and
+    # leaves the run UNARMED when VIGIL_RUN_HARD_BUDGET_ENABLED is unset, so the path below is byte-identical).
+    # When armed, the kernel chokepoint raises RunBudgetExceeded once cumulative reasoning tokens reach the
+    # owner-signed reserved envelope; it surfaces as a PARTIAL EngagementResult (stopped_reason) below, never
+    # a crash. ``_rb_stopped`` captures a stop the SCAN propagates; a stop a best-effort phase swallowed is
+    # caught via the run_budget latch at the end.
+    _arm_run_budget(slug, seed_url, resume=resume)
+    _rb_stopped: "Exception | None" = None
+
+    # pause/resume PR-3 — bind THIS run's cooperative in-flight halt to its OWNER-SIGNED lease nonce. Read ONCE
+    # here (verify-only, non-consuming, readable even while paused); for a greenfield / operator run (no lease)
+    # the nonce is None ⇒ no halt_check wired, no post-scan pause raise ⇒ the engine (and ``make gate``) is
+    # BYTE-IDENTICAL. For a customer run, the lease was NOT paused at the enqueue gate (PR-2 refuses a paused
+    # lease there) so the nonce reads cleanly; a pause arriving LATER (mid-run) is what the halt_check + the
+    # post-scan raise below catch.
+    _pause_base = _engage_pause_base()
+    # Bound to the launch the caller is RUNNING when it names one (the worker's job nonce, verified above against
+    # the seam lease), never to whichever lease happens to sit on the seam now.
+    _pause_nonce = _engage_lease_nonce(slug, seed_url, launch_nonce=launch_nonce)
+    # LATCHED: remember whether the pause halt ever REFUSED an action in this run. A pause that lands mid-scan
+    # and is cleared again before the scan returns still cut the scan (every action in between came back as a
+    # status-0 refusal), so "is it paused right now?" asked once after the scan is not enough to know the
+    # report is whole.
+    _pause_halt_fired = {"v": False}
+
+    def _pause_halt_latched() -> bool:
+        paused = _lease_is_paused(_pause_base, slug, _pause_nonce)
+        if paused:
+            _pause_halt_fired["v"] = True
+        return paused
+
+    _pause_halt_check = _pause_halt_latched if _pause_nonce else None
+
+    # Bind this run's RESUME STATE (phase ledger + scan snapshot) to its launch. Both are keyed per slug and a
+    # customer slug is reused across launches, so an unbound resume could skip its scan on the strength of an
+    # EARLIER launch's ledger and reload that launch's report — and the run would then settle COMPLETED at
+    # full charge on a report that is not its own. Customer launches only: an operator / greenfield run is
+    # never bound, so its ledger and a plain ``--resume`` are byte-identical.
+    if _resume_state_is_launch_bound(slug, _pause_nonce, resume=resume):
+        ledger.bind_launch(_pause_nonce)
 
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
@@ -1372,6 +1634,10 @@ def run_engagement(
             # (byte-identical). Without this the "6th gate" was never installed on any real
             # caller and the README's egress claim was false for target traffic.
             egress_allowlist=build_engagement_allowlist(slug=slug),
+            # pause/resume PR-3 — the cooperative in-flight halt: stop sending target traffic at the next gated
+            # action if THIS customer launch's lease is paused mid-run. None for greenfield/operator runs and
+            # for customer runs until pause/resume is enabled ⇒ byte-identical.
+            halt_check=_pause_halt_check,
         )
         # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
         # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
@@ -1479,10 +1745,29 @@ def run_engagement(
     # are never re-counted). A missing/corrupt snapshot falls through and re-runs (fail-open). A
     # scan exception propagates exactly as before (the phase is NOT completed → retried on resume).
     report: ScanReport | None = None
+    _scan_cut_by_pause = False
     if not ledger.should_run(P_SCAN):
         report = ledger.load_report()
         if report is not None:
             ledger.skip(P_SCAN)
+    if resume and report is None and _pause_nonce:
+        # BOUND the pause-induced re-scans of ONE customer launch. Each scan a pause cut short is recorded
+        # ``halted`` under this launch's tag; once more scans than the limit have been cut, no further re-scan
+        # runs for this flat charge. Refused here — BEFORE any traffic — as a plain EngagementRefused, so the
+        # worker takes its ordinary failure path: the launch re-drives cheaply (each re-drive refuses here
+        # again) to its terminal attempt, whose FAILED settle refunds it. Never a charge, never a stranded
+        # reservation. Only a RESUME can be a re-scan: a fresh arm is the launch's first scan (and a fresh arm
+        # of a launch that already scanned is refused at the single-use floor before it gets here). Default-OFF
+        # in effect: only a pause records ``halted``.
+        _cut_scans = ledger.prior_halts(P_SCAN)
+        _rescan_limit = _pause_rescan_limit()
+        if _cut_scans > _rescan_limit:
+            _why = (f"customer launch {slug!r} refused — a pause has already cut its scan short {_cut_scans} "
+                    f"time(s), past the pause re-scan limit of {_rescan_limit} (VIGIL_PAUSE_RESCAN_LIMIT); no "
+                    f"further re-scan is run for this launch")
+            if sink is not None:
+                sink.refusal("pause_rescan_limit", seed_url, reason=_why, fatal=True)
+            raise EngagementRefused(_why)
     if report is None:
         # M3.1 — admit the traffic-sending scan through the fleet bounds when wired.
         # The reload branch above runs NO traffic, so it is deliberately OUTSIDE the
@@ -1497,9 +1782,50 @@ def run_engagement(
             target=seed_url, tenant=fleet_tenant, work_kind=fleet_work_kind,
         ):
             ledger.start(P_SCAN)
-            report = _do_scan()
-            ledger.complete(P_SCAN)
-            ledger.persist_report(report)
+            try:
+                report = _do_scan()
+            except _RunBudgetExceeded as _rbx:
+                # EC-3 FAIL-CLOSED run-budget stop mid-scan: a CLEAN terminal stop, NOT a crash. Mark the
+                # phase failed, keep the findings-so-far (an empty report when the scan produced none before
+                # the ceiling — the scanner returns its report only on completion), and fall through to
+                # return a PARTIAL EngagementResult (stopped_reason set below). Returning normally (not
+                # re-raising) is the MONEY SEAM: the worker emits COMPLETED → settle, never FAILED/refund.
+                ledger.fail(P_SCAN)
+                _rb_stopped = _rbx
+                report = ScanReport(target=seed_url)
+            else:
+                # A scan that a PAUSE cut short returns NORMALLY: the executor's halt_check turns every further
+                # action into a status-0 refusal, so the campaign winds down and hands back a report that is
+                # missing everything it did not get to. That report must never be recorded as the completed
+                # scan nor snapshotted — a resume would then skip the scan (should_run is False for a completed
+                # scan), reload the truncated report and settle COMPLETED at the full reservation. So when the
+                # pause halt REFUSED an action during this scan (the latch), record the phase HALTED (not
+                # completed, no snapshot): the resumed run re-runs the scan and delivers the whole assessment.
+                # A pause that lands AFTER the last gated action refused nothing — the report is whole — so the
+                # scan is recorded completed + snapshotted as usual; the run still raises EngagementPaused below
+                # (the lease is paused) and the resume reloads that whole scan instead of paying for another.
+                # The latch is exact: the executor's halt_check is the only place a pause stops an action.
+                # DEFAULT-OFF: no nonce / no pause marker ⇒ the latch never fires ⇒ byte-identical.
+                _scan_cut_by_pause = _pause_halt_fired["v"]
+                if _scan_cut_by_pause:
+                    ledger.halt(P_SCAN)
+                else:
+                    ledger.complete(P_SCAN)
+                    ledger.persist_report(report)
+
+    # pause/resume PR-3 — the AUTHORITATIVE in-flight halt. The traffic phase is done; if THIS customer launch's
+    # lease is now paused, RAISE here (a clean body point, OUTSIDE the PhaseLedger swallow-wrappers) so the
+    # customer-launch worker RE-DRIVES the launch rather than settling a half-done run. The executor's halt_check
+    # already stopped further traffic at the next action; this is what turns that cooperative stop into a
+    # re-driveable outcome. Raised BEFORE the best-effort reasoning phases so a paused run wastes no further work.
+    # ``_scan_cut_by_pause`` also raises when the pause was already CLEARED by the time the scan returned: the
+    # scan is still truncated, so the launch must re-drive (and re-scan) rather than settle on it.
+    # DEFAULT-OFF: no nonce / no pause marker ⇒ _lease_is_paused is False ⇒ never raised ⇒ byte-identical.
+    if _scan_cut_by_pause or _lease_is_paused(_pause_base, slug, _pause_nonce):
+        raise EngagementPaused(
+            f"customer launch {slug!r} cooperatively halted — its credit-launch lease was paused mid-run (a "
+            f"reversible operator halt). Re-driveable: resume (clear the pause) re-arms the SAME lease without "
+            f"re-burning its single-use floor, and re-runs a scan the pause cut short.")
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.
@@ -1634,6 +1960,22 @@ def run_engagement(
     # the oracle verdict.
     if spine is not None:
         _verify_live_spine_at_close(spine, slug, sink)
+
+    # EC-3 — surface a RUN-SCOPED HARD token-budget stop as a PARTIAL result. The stop reaches here one of
+    # two ways: the SCAN propagated RunBudgetExceeded (``_rb_stopped``), or a best-effort phase — whose
+    # PhaseLedger.run_phase wrapper swallows every exception — caught it, in which case the run_budget LATCH
+    # (``was_exceeded``) is what tells us the ceiling fired. Either way, record a legible stopped_reason + a
+    # NON-fatal spine refusal (the run is complete-with-partial, not refused), then DISARM so the ceiling
+    # never leaks to the next run on this thread. The run still RETURNS normally, so engage_worker emits a
+    # COMPLETED signal and completion_spool settles the reservation consumed-so-far.
+    _rb_exceeded = _rb_stopped is not None or (_run_budget is not None and _run_budget.was_exceeded())
+    if _rb_exceeded and result.stopped_reason is None:
+        reason = str(_rb_stopped) if _rb_stopped is not None else "run token budget exceeded (ceiling reached)"
+        result.stopped_reason = reason
+        if sink is not None:
+            sink.refusal("run-budget", seed_url, reason=reason, fatal=False)
+    if _run_budget is not None:
+        _run_budget.reset()
     return result
 
 

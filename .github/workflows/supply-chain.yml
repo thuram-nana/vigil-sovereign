@@ -142,7 +142,7 @@ jobs:
       #    correct file to commit is already an artifact of the failing run.
       # ------------------------------------------------------------------------------
 
-      - name: regenerate both locks (harvestable artifact)
+      - name: regenerate the locks (harvestable artifact)
         if: always()
         run: |
           set -euo pipefail
@@ -179,6 +179,11 @@ jobs:
                 infra/supply-chain/sovereign.in \
                 infra/supply-chain/sovereign.lock.txt \
                 "$root/_a14_locks/sovereign.lock.txt"
+          # otel (OPT-IN telemetry-export extras): canonical CWD is the repo root (see infra/supply-chain/otel.in).
+          regen "$root" \
+                infra/supply-chain/otel.in \
+                infra/supply-chain/otel.lock.txt \
+                "$root/_a14_locks/otel.lock.txt"
 
       - name: upload regenerated locks
         if: always()
@@ -236,6 +241,18 @@ jobs:
             --report-upgrades \
             --sbom-out=_a14_sbom/sbom-sovereign.cdx.json
 
+      # The OPT-IN OpenTelemetry SDK + OTLP/HTTP exporter lock for env-offense (otel.in is constrained by BOTH
+      # runtime locks, so a regeneration can never drift a shared pin away from what ships). Same verifier,
+      # third pair.
+      - name: verify OTEL extras lock (opentelemetry-sdk + OTLP/HTTP exporter) + SBOM cross-check
+        env:
+          REQ_IN: infra/supply-chain/otel.in
+          REQ_LOCK: infra/supply-chain/otel.lock.txt
+        run: |
+          bash engine/crucible/bin/verify-supply-chain.sh \
+            --report-upgrades \
+            --sbom-out=_a14_sbom/sbom-otel.cdx.json
+
       # ------------------------------------------------------------------------------
       # 3. The hashes have to actually WORK. A lock full of hashes that pip rejects is a
       #    document, not a control. `--require-hashes` makes pip refuse the entire file if
@@ -266,6 +283,28 @@ jobs:
           /tmp/a14-sovereign/bin/pip install --require-hashes \
             -r infra/supply-chain/sovereign.lock.txt
           /tmp/a14-sovereign/bin/python -c "import cryptography, pydantic, qdrant_client; print('sovereign lock installs under --require-hashes')"
+
+      # The otel lock is an EXTRAS layer, so prove it the way it is deployed: ON TOP of the offense runtime lock
+      # (envs/build_envs.sh, VIGIL_WITH_OTEL=1), both under --require-hashes. Then assert the layer changed NO
+      # version the runtime lock had already pinned, `pip check` is clean, and the real exporter imports.
+      - name: prove `pip install --require-hashes` succeeds (otel extras lock, LAYERED on the offense lock)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/a14-otel
+          /tmp/a14-otel/bin/pip install --require-hashes \
+            -r engine/crucible/framework/v2/requirements.lock.txt
+          /tmp/a14-otel/bin/pip freeze | sort > /tmp/a14-otel-before.txt
+          /tmp/a14-otel/bin/pip install --require-hashes \
+            -r infra/supply-chain/otel.lock.txt
+          /tmp/a14-otel/bin/pip freeze | sort > /tmp/a14-otel-after.txt
+          moved="$(comm -23 /tmp/a14-otel-before.txt /tmp/a14-otel-after.txt)"
+          if [ -n "$moved" ]; then
+            echo "::error::the otel lock CHANGED versions the offense runtime lock had pinned — the layer is not additive:"
+            printf '%s\n' "$moved"
+            exit 1
+          fi
+          /tmp/a14-otel/bin/pip check
+          /tmp/a14-otel/bin/python -c "from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter; from opentelemetry.sdk.trace import ReadableSpan; print('otel lock installs under --require-hashes, layered and additive')"
 
       - name: prove `pip install --require-hashes` succeeds (ci-tooling lock, W3-2)
         run: |

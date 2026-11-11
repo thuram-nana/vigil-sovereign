@@ -192,6 +192,73 @@ def test_opaque_surface_appends_no_howto() -> None:
     assert "How to verify, test & patch" not in md
 
 
+def test_fact_howto_renders_from_title_shorthand_when_surface_lacks_a_param() -> None:
+    # A scan's oracle-confirmed FACT records only the seed URL in `surface`; its vulnerable parameter
+    # lives in the engine's title shorthand ("<class> confirmed at <param>"). The richest how-to block
+    # must still render for the PROVEN finding, with the recovered parameter — this is exactly where
+    # "how do I test this myself" matters most. (Regression: before the title fallback, a proven FACT
+    # whose surface was only the seed URL got the thin verification line while some LEADs got the full
+    # block — backwards from intent.)
+    f = make_fact()
+    f.surface = "http://127.0.0.1:18080/"            # bare seed URL — parse_surface yields no parameter
+    f.title = "boolean_sqli confirmed at q"          # the engine's title shorthand carries the parameter
+    g = grade_finding(f)
+    assert g.is_fact
+    h = build_howto(g)
+    assert h.parameter == "q"                         # recovered from the title shorthand
+    assert has_howto(g) is True
+    md = "\n".join(howto_markdown(g))
+    assert "How to verify, test & patch this finding" in md
+    assert "parameter `q`" in md                      # WHERE the vuln is
+    assert "python3 -m framework.v2 verify" in md     # HOW to test it yourself, offline
+
+
+def test_title_param_recovery_is_conservative() -> None:
+    # The fallback recovers a parameter ONLY from the engine's exact oracle marker "confirmed at <token>"
+    # at the end of the title — never from a mid-sentence "at", a bare trailing "at <x>" English idiom, a
+    # trailing path, a multi-word phrase, a different verb, or a passive title. A finding that recorded no
+    # parameter is never given a fabricated one (red-pen BLOCK: howto title-param fabrication).
+    from framework.v2.report.howto import _param_from_title
+    assert _param_from_title("boolean_sqli confirmed at q") == "q"
+    assert _param_from_title("xss confirmed at user_id") == "user_id"
+    assert _param_from_title("Blind SQL injection in product search") is None   # make_fact's own title
+    assert _param_from_title("SQL injection at the login endpoint") is None      # bare "at", not the marker
+    assert _param_from_title("Open redirect at /login") is None                  # trailing path, no marker
+    assert _param_from_title("boolean_sqli observed at q") is None               # different verb, not "confirmed"
+    assert _param_from_title("mitigated the risk at runtime") is None            # English idiom, not the marker
+    assert _param_from_title("Missing Content-Security-Policy") is None          # passive, no shorthand
+    assert _param_from_title("boolean_sqli confirmed at None") is None           # engine f-string of a falsy param
+    assert _param_from_title("xss confirmed at NONE") is None                    # same, any casing
+    assert _param_from_title("") is None and _param_from_title(None) is None
+
+
+def test_title_param_fallback_only_applies_to_proven_facts() -> None:
+    # The title fallback is gated on g.is_fact, so a LEAD (or a demoted finding that kept its
+    # "<class> confirmed at <param>" title) is NEVER given a recovered parameter — only a PROVEN finding,
+    # whose title truly IS the engine's oracle shorthand, gets one. (red-pen BLOCK: not scoped to facts.)
+    lead = make_lead()
+    lead.surface = "http://127.0.0.1:18080/"             # bare URL — parse_surface yields no parameter
+    lead.title = "boolean_sqli confirmed at q"           # a shorthand-shaped title on a LEAD
+    gl = grade_finding(lead)
+    assert not gl.is_fact
+    assert build_howto(gl).parameter is None             # the lead is NOT given the recovered parameter
+
+    fact = make_fact()
+    fact.surface = "http://127.0.0.1:18080/"
+    fact.title = "boolean_sqli confirmed at q"
+    gf = grade_finding(fact)
+    assert gf.is_fact and build_howto(gf).parameter == "q"   # the PROVEN finding is
+
+
+def test_title_param_fallback_does_not_change_a_parsed_surface() -> None:
+    # Byte-compat: when the surface already yields a parameter, the title fallback is never consulted,
+    # so a finding whose surface parsed keeps its exact prior how-to (no behaviour change).
+    f = make_fact()                                   # surface="GET /search?q=" -> param "q"
+    f.title = "boolean_sqli confirmed at DIFFERENT"   # a shorthand that would resolve to another token
+    g = grade_finding(f)
+    assert build_howto(g).parameter == "q"            # the SURFACE wins; the title is not consulted
+
+
 # ---------------------------------------------------------------------------
 # PoC replay pointer only when a reproduce-from-raw capture is present
 # ---------------------------------------------------------------------------

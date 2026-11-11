@@ -320,6 +320,19 @@ def blackboard_dir() -> Path:
     return _tenant_shard(v2_root() / ".blackboard")
 
 
+def cache_dir() -> Path:
+    # EC-1b: the deterministic-cache store root, sharded per tenant exactly like memory_dir() /
+    # blackboard_dir() (one tenant per process; a tenant-A worker can only ever resolve its own shard —
+    # the physical half of the "a cached answer never crosses tenants" guarantee). Owner-only; unsharded
+    # => byte-identical default. The L2 response cache (and future deterministic caches) live under it.
+    return _tenant_shard(v2_root() / ".cache")
+
+
+def cache_l2_db() -> Path:
+    # The L2 deterministic LLM-response cache SQLite store (EC-1b). Per-tenant sharded + owner-only 0600.
+    return cache_dir() / "l2" / "store.sqlite"
+
+
 def dryrun_dir() -> Path:
     return v2_root() / ".dryrun"
 

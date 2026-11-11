@@ -40,6 +40,23 @@ class SecretStore:
         except Exception:  # noqa: BLE001 — vault/config not resolvable → treat as unavailable
             return False
 
+    def _assert_sealing_not_broken(self) -> None:
+        """FAIL CLOSED before the plaintext envfile tier IFF a sealing backend was EXPLICITLY selected but
+        cannot be constructed — a misconfiguration (e.g. VIGIL_KEK_BACKEND=kms with no VIGIL_KMS_KEY_ID),
+        where owner_vault() raises at construction. In that state _sealed_available() swallows the error and
+        returns False, which would otherwise silently write an opted-in sealed secret as 0600 plaintext —
+        defeating the very fail-closed custody this backend exists to provide. The TPM default with an
+        unprovisioned vault does NOT raise here (owner_vault() builds a Vault whose enabled() is False), so
+        the designed, non-bricking envfile degrade for that baseline is unaffected."""
+        try:
+            self._vault()  # construct only (no secret I/O): a selected-but-misconfigured backend raises
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "secret sealing is selected but misconfigured (e.g. VIGIL_KEK_BACKEND=kms with no "
+                "VIGIL_KMS_KEY_ID) — refusing to write the secret in plaintext; fix the vault config or "
+                f"unset the backend. ({e})"
+            ) from e
+
     def _sealed_read_all(self) -> dict:
         from .vault import VaultLocked
         try:
@@ -93,6 +110,10 @@ class SecretStore:
             self._sealed_write(key, value)
             os.environ[key] = value                   # live this process; the at-rest copy is sealed
             return "sealed"
+        # A sealing backend that was explicitly SELECTED but is misconfigured must not degrade an opted-in
+        # sealed secret to the 0600 plaintext tier — fail closed (the TPM-default/unprovisioned baseline is
+        # not "broken" and still degrades to envfile by design).
+        self._assert_sealing_not_broken()
         self._env_upsert(key, value)
         os.environ[key] = value
         return "envfile"

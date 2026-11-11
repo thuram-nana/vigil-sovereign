@@ -68,6 +68,8 @@ from . import key_history as _kh  # noqa: E402  (owner-key succession resolver, 
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed for the proof fold; mirrors orgs)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 # Dedicated payload signals under the generic enforced ``kind="event"`` record (mirrors orgs' signals), so a
 # NEW kind need not be registered with the write-path guard — the signal disambiguates the fold.
@@ -338,6 +340,98 @@ class OwnershipProof:
 _LOAD_FROM_VAULT = object()
 
 
+_SKIP = object()          # the shared fold steps: the record touched no (org_id, host)
+
+
+def _payload_row(p: dict, at: float) -> dict:
+    return dict(p)
+
+
+def _proof_row(p: dict, at: float) -> dict:
+    return {"method": p.get("method"), "token_sha256": p.get("token_sha256"), "verified_at": p.get("verified_at"),
+            "expires_at": p.get("expires_at"), "issued_at": at}
+
+
+def _apply_ownership_record(r, resolver, signal: str, core_fields, row_of, state: dict, issued: dict, rows: dict):
+    """Fold ONE spine record of `signal` into (state, issued, rows) — THE challenge / proof fold body, shared by
+    the full folds and the verified fold cache (Front C S0d) so they can never diverge. Returns the
+    (org_id, host) it touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != signal:
+        return _SKIP
+    org_id = p.get("org_id")
+    host = p.get("host")
+    if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
+        return _SKIP
+    key = (org_id, host)
+    rec_state = p.get("state")
+    if rec_state == "revoked":
+        state[key] = "revoked"                 # honor ANY revoke (even unsigned) — safe direction
+        return key
+    if rec_state == "active":
+        if not verify_signed(p, core_fields, resolver.at(r.seq)):
+            return _SKIP                       # fail-closed: unsigned/forged/wrong-epoch-key grant
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(key, NO_HIGHWATER):
+            return _SKIP                       # REPLAY / stale re-append of an already-honored grant
+        issued[key] = at
+        state[key] = "active"
+        rows[key] = row_of(p, at)
+        return key
+    return _SKIP
+
+
+class KeyedGrantView:
+    """The cached fold of an owner-signed, per-(org_id, host) latest-wins grant line (ownership challenges and
+    proofs here; monitoring authority): the full fold's (state, issued, rows) plus `active` — exactly the full
+    fold's result — and `by_org` (org_id -> its active hosts), kept in step per touched key, so a tenant's
+    reads are O(its own hosts) instead of a scan of the spine."""
+
+    __slots__ = ("state", "issued", "rows", "active", "by_org")
+
+    def __init__(self, state: dict, issued: dict, rows: dict) -> None:
+        self.state, self.issued, self.rows = state, issued, rows
+        self.active: dict = {}
+        self.by_org: "dict[str, set]" = {}
+        for key in list(rows):
+            self.sync(key)
+
+    def sync(self, key) -> None:
+        row = self.rows.get(key) if self.state.get(key) == "active" else None
+        org, host = key
+        if row is None:
+            if self.active.pop(key, None) is not None:
+                hosts = self.by_org[org]
+                hosts.discard(host)
+                if not hosts:
+                    del self.by_org[org]
+            return
+        self.active[key] = row
+        self.by_org.setdefault(org, set()).add(host)
+
+    def of_org(self, org_id: str) -> "list[tuple[str, dict]]":
+        """[(host, row)] of `org_id`'s active grants, in host order."""
+        return [(h, self.active[(org_id, h)]) for h in sorted(self.by_org.get(org_id, ()))]
+
+
+def _challenge_step(view: KeyedGrantView, r, resolver) -> None:
+    key = _apply_ownership_record(r, resolver, CHALLENGE_SIGNAL, _CHALLENGE_CORE, _payload_row,
+                                  view.state, view.issued, view.rows)
+    if key is not _SKIP:
+        view.sync(key)
+
+
+def _proof_step(view: KeyedGrantView, r, resolver) -> None:
+    key = _apply_ownership_record(r, resolver, PROOF_SIGNAL, _PROOF_CORE, _proof_row,
+                                  view.state, view.issued, view.rows)
+    if key is not _SKIP:
+        view.sync(key)
+
+
+_CHALLENGE_FOLD = FoldCache("governor.asset_ownership_challenge", step=_challenge_step)
+_PROOF_FOLD = FoldCache("governor.asset_ownership_proof", step=_proof_step)
+
+
 class AssetOwnershipRegistry:
     def __init__(self, store, *, owner_key=_LOAD_FROM_VAULT, trusted_pubkey: Optional[str] = None):
         self.store = store
@@ -419,7 +513,12 @@ class AssetOwnershipRegistry:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"ownership proof for {h} (org {oid}) REVOKED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        # Cascade: a monitoring authority minted on this proof must not stay published/verifiable.
+        from .monitoring_authority import MonitoringAuthorityRegistry
+        MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
+                                    trusted_pubkey=self.trusted_pubkey).retire(oid, h)
+        return seq
 
     # -- reads (owner-key-succession-aware folds) ---------------------------------------------------
     def _fold(self, signal: str, core_fields):
@@ -433,27 +532,37 @@ class AssetOwnershipRegistry:
         issued: dict[tuple, float] = {}
         rows: dict[tuple, dict] = {}
         for r in self.store.iter_records():
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != signal:
-                continue
-            org_id = p.get("org_id")
-            host = p.get("host")
-            if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
-                continue
-            key = (org_id, host)
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[key] = "revoked"                 # honor ANY revoke (even unsigned) — safe direction
-            elif rec_state == "active":
-                if not verify_signed(p, core_fields, resolver.at(r.seq)):
-                    continue                           # fail-closed: unsigned/forged/wrong-epoch-key grant
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue                           # REPLAY / stale re-append of an already-honored grant
-                issued[key] = at
-                state[key] = "active"
-                rows[key] = dict(p)
+            _apply_ownership_record(r, resolver, signal, core_fields, _payload_row, state, issued, rows)
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
+
+    def _proof_seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, rows), since): the proof fold's HARD-PRUNE SEED from `snap`, or the empty genesis start
+        when the trusted pubkey differs from the snapshot's (see `_fold_proofs`)."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        state = dict(snap.ownership_proof_state_map())           # (org,host) -> "active"|"revoked" (keep revoked)
+        issued = dict(snap.ownership_proof_issued_map())         # (org,host) -> per-pair high-water
+        rows = {(row[0], row[1]): {"method": row[2], "token_sha256": row[3], "verified_at": row[4],
+                                   "expires_at": row[5], "issued_at": issued.get((row[0], row[1]), 0.0)}
+                for row in snap.ownership_proof_row}             # rebuild honored-active proofs from the seed
+        return (state, issued, rows), snap.base_seq - 1
+
+    def _proofs_cached(self, reader):
+        """`reader(view)` over the verified incremental PROOF fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold_proofs`)."""
+        def seed(snap):
+            st, since = self._proof_seed(snap)
+            return KeyedGrantView(*st), since
+
+        return cached_read(_PROOF_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed, reader=reader)
+
+    def _challenges_cached(self, reader):
+        """`reader(view)` over the verified incremental CHALLENGE fold, else `_UNCACHED`. The challenge fold is a
+        plain scan of the live window (no seed, no snapshot load), so the build starts from genesis and the read
+        is a `live_window` one: the snapshot still keys the entry (a prune rebuilds it, exactly as the full scan
+        then sees only the live window), and a snapshot that cannot be loaded declines instead of raising."""
+        return cached_read(_CHALLENGE_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
+                           seed=lambda snap: (KeyedGrantView({}, {}, {}), -1), reader=reader, live_window=True)
 
     def _fold_proofs(self) -> dict:
         """Fold the spine into {(org_id, host): proof-field dict} for proofs whose latest state is active —
@@ -466,38 +575,9 @@ class AssetOwnershipRegistry:
         from genesis (byte-identical under an empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, issued, rows, since = {}, {}, {}, -1
-        else:
-            state = dict(snap.ownership_proof_state_map())           # (org,host) -> "active"|"revoked" (keep revoked)
-            issued = dict(snap.ownership_proof_issued_map())         # (org,host) -> per-pair high-water
-            rows = {(row[0], row[1]): {"method": row[2], "token_sha256": row[3], "verified_at": row[4],
-                                       "expires_at": row[5], "issued_at": issued.get((row[0], row[1]), 0.0)}
-                    for row in snap.ownership_proof_row}             # rebuild honored-active proofs from the seed
-            since = snap.base_seq - 1
+        (state, issued, rows), since = self._proof_seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != PROOF_SIGNAL:
-                continue
-            org_id = p.get("org_id")
-            host = p.get("host")
-            if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
-                continue
-            key = (org_id, host)
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[key] = "revoked"
-            elif rec_state == "active":
-                if not verify_signed(p, _PROOF_CORE, resolver.at(r.seq)):
-                    continue
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(key, NO_HIGHWATER):
-                    continue
-                issued[key] = at
-                state[key] = "active"
-                rows[key] = {"method": p.get("method"), "token_sha256": p.get("token_sha256"),
-                             "verified_at": p.get("verified_at"), "expires_at": p.get("expires_at"),
-                             "issued_at": at}
+            _apply_ownership_record(r, resolver, PROOF_SIGNAL, _PROOF_CORE, _proof_row, state, issued, rows)
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
 
     def challenge(self, org_id: str, host: str) -> Optional[OwnershipChallenge]:
@@ -505,7 +585,9 @@ class AssetOwnershipRegistry:
         non-superseded token."""
         if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
             return None
-        row = self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).get((org_id, host))
+        row = self._challenges_cached(lambda v: v.active.get((org_id, host)))
+        if row is _UNCACHED:
+            row = self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).get((org_id, host))
         if row is None:
             return None
         return OwnershipChallenge(org_id=org_id, host=host, token=str(row.get("token") or ""),
@@ -516,7 +598,9 @@ class AssetOwnershipRegistry:
         expiry filter — use ``has_current_proof`` for the launch/mint gate (which is time-aware)."""
         if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
             return None
-        row = self._fold_proofs().get((org_id, host))
+        row = self._proofs_cached(lambda v: v.active.get((org_id, host)))
+        if row is _UNCACHED:
+            row = self._fold_proofs().get((org_id, host))
         if row is None:
             return None
         return OwnershipProof(
@@ -541,9 +625,12 @@ class AssetOwnershipRegistry:
         """Every host (org_id) currently holds an active, unexpired ownership proof for, in host order."""
         if not isinstance(org_id, str) or not org_id:
             return []
+        rows = self._proofs_cached(lambda v: v.of_org(org_id))
+        if rows is _UNCACHED:
+            rows = [(h, row) for (o, h), row in self._fold_proofs().items() if o == org_id]
         out = []
-        for (o, h), row in self._fold_proofs().items():
-            if o == org_id and float(now) < float(as_issued_at(row.get("expires_at"))):
+        for h, row in rows:
+            if float(now) < float(as_issued_at(row.get("expires_at"))):
                 out.append(h)
         return sorted(out)
 
@@ -564,9 +651,13 @@ class AssetOwnershipRegistry:
         if not isinstance(org_id, str) or not org_id:
             return []
         n = float(now)
-        proofs = {h: row for (o, h), row in self._fold_proofs().items() if o == org_id}
-        challenges = {h: row for (o, h), row in self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).items()
-                      if o == org_id}
+        proofs = self._proofs_cached(lambda v: dict(v.of_org(org_id)))
+        challenges = _UNCACHED if proofs is _UNCACHED else self._challenges_cached(lambda v: dict(v.of_org(org_id)))
+        if proofs is _UNCACHED:
+            proofs = {h: row for (o, h), row in self._fold_proofs().items() if o == org_id}
+        if challenges is _UNCACHED:
+            challenges = {h: row for (o, h), row in self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE).items()
+                          if o == org_id}
         out: list[dict] = []
         for h in sorted(set(proofs) | set(challenges)):
             prow = proofs.get(h)

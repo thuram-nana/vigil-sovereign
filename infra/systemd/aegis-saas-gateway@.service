@@ -1,0 +1,56 @@
+# AEGIS-SaaS (AE-6) MANAGED tenant gateway — one instance per (tenant org, protected host).
+#
+# Instance name = a deployment label (e.g. aegis-saas-gateway@acme-app.service). Each instance reads
+# its OWN env file: /etc/aegis-saas/%i.env (see aegis-saas-gateway.env.example).
+#
+# KEYLESS + DEFAULT-OFF. The gateway holds no signing key: it verifies the tenant's owner-signed
+# monitoring authority (published dir + pinned owner trust root, both read-only) on every request, and
+# with no valid authority it is an uninspected pass-through. The per-(org,host) REPORT secret comes
+# from a 0600 FILE (--monitoring-secret-file) — never argv, never the env. Hard blocking further needs a
+# BLOCK grant + VIGIL_AEGIS_SAAS_ENFORCE=1 + AEGIS_SAAS_MODE=enforce + the AEGIS_RESPOND entitlement.
+# The deployment (pseudonymization) secret is passed via AEGIS_GW_SECRET in the env file, not argv.
+#
+# INSTALL (root, dedicated unprivileged user `aegis`):
+#   install -d -m 0700 -o aegis /etc/aegis-saas /var/lib/aegis-saas
+#   cp infra/systemd/aegis-saas-gateway@.service /etc/systemd/system/
+#   cp infra/systemd/aegis-saas-gateway.env.example /etc/aegis-saas/acme-app.env   # then edit, chmod 600
+#   systemctl daemon-reload && systemctl enable --now aegis-saas-gateway@acme-app
+# Runbook: docs/runbooks/aegis-saas-onboarding.md
+
+[Unit]
+Description=AEGIS-SaaS managed tenant gateway (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aegis
+Group=aegis
+EnvironmentFile=/etc/aegis-saas/%i.env
+ExecStart=/opt/aegis/venv/bin/python -m framework.v2 aegis gateway \
+    --upstream ${AEGIS_SAAS_UPSTREAM} --host ${AEGIS_SAAS_BIND} --port ${AEGIS_SAAS_PORT} \
+    --mode ${AEGIS_SAAS_MODE} --slug aegis-saas-%i \
+    --saas-tenant ${AEGIS_SAAS_TENANT} --saas-host ${AEGIS_SAAS_HOST} \
+    --monitoring-spool ${AEGIS_SAAS_SPOOL_DIR} --monitoring-secret-file ${AEGIS_SAAS_SECRET_FILE}
+
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/aegis-saas
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -64,7 +64,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: initialize CodeQL (python)
-        uses: github/codeql-action/init@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
+        uses: github/codeql-action/init@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (the action pins; the CodeQL bundle is resolved at run time)
         with:
           languages: python
           # security-extended broadens the default query pack; findings are advisory (Security tab).
@@ -87,9 +87,45 @@ jobs:
         # own contract is "green by construction, purely additive"). When GHAS is enabled the upload succeeds
         # and findings populate the Security tab unchanged.
         continue-on-error: true
-        uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
+        uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (the action pins; the CodeQL bundle is resolved at run time)
         with:
           category: "/language:python"
+
+  # ------------------------------------------------------------------------------------------------
+  # 1b. CodeQL — the shipped JavaScript (the customer app, the cockpit kit, the phone bridge PWA, the public
+  #     site tools). Same advisory contract as the Python job. Until this job existed NO JavaScript was
+  #     analysed in CI; a local whole-repo security-extended run found 5 results, all fixed in the PR that
+  #     added this job (CQ-1), so it starts from zero. The CodeQL bundle is resolved by the pinned action at
+  #     run time (CI ran 2.27.4 on 2026-11-10) — the SHA pins the action, not the query pack version.
+  # ------------------------------------------------------------------------------------------------
+  codeql-javascript:
+    name: CodeQL JavaScript (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: initialize CodeQL (javascript)
+        uses: github/codeql-action/init@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (the action pins; the CodeQL bundle is resolved at run time)
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - '**/tests/**'
+              - '**/node_modules/**'
+
+      - name: analyze (javascript)
+        # continue-on-error: same reason as the Python job (a repo without GHAS rejects the SARIF upload).
+        continue-on-error: true
+        uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (the action pins; the CodeQL bundle is resolved at run time)
+        with:
+          category: "/language:javascript-typescript"
 
   # ================================================================================================
   # 2. Secret scanning — gitleaks over the working tree (the GATE) plus the git history (advisory).
