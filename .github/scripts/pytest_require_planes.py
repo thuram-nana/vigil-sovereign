@@ -58,7 +58,7 @@ def required_planes(environ=None) -> frozenset[str]:
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
 
 
-def _skip_reason_pattern(planes: frozenset[str]) -> "re.Pattern[str] | None":
+def _skip_reason_pattern(planes: frozenset[str]) -> re.Pattern[str] | None:
     """A skip reason that says a REQUIRED plane could not be imported, or names the plane at all."""
     if not planes:
         return None
