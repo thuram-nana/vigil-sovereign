@@ -104,13 +104,30 @@ _ENDPOINT_SAFE = re.compile(r"\A[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]+\Z")
 
 
 _SCHEME = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]{0,15})://(.*)\Z", re.S)
+# RFC 3986: the authority ends at the FIRST ``/``, ``?`` or ``#`` (a backslash ends it too — urllib3/requests
+# treat it as ``/``). Everything after that is path / query / fragment, where an ``?api_key=`` lives.
+_AUTHORITY_END = re.compile(r"[/?#\\]")
+# The ONLY text ever echoed after ``scheme://``: a hostname / IPv4 run or a bracketed IPv6 literal, plus an
+# optional all-digit port. An "authority" that is anything else (whitespace, ``&token=…``, a non-numeric port) is
+# not an address and is never shown.
+_HOSTPORT = re.compile(r"(?:\[[0-9A-Fa-f:.]{1,64}\]|[A-Za-z0-9._-]{1,253})(?::[0-9]{0,5})?")
 
 
 def redact_endpoint(endpoint: Any) -> str:
     """A display-safe form of ``endpoint`` for refusals, diagnostics and logs: ONLY ``scheme://host:port`` is
-    kept. Userinfo (even one whose password contains ``/ ? #``) becomes ``***@``; any path / query / fragment —
-    where an ``?api_key=`` would live — becomes ``/…``; non-printable characters (newline / ANSI escapes that
-    could forge diagnostic lines) become ``?``; the result is length-capped. Total — never raises."""
+    kept, and nothing else from the input. The AUTHORITY is isolated first (cut at the first ``/ ? #`` or
+    backslash) and only then searched for userinfo, which becomes ``***@``; any path / query / fragment — where
+    an ``?api_key=`` would live — becomes ``/…``. Two cases show NO part of the authority (``scheme://***``):
+
+      * an ``@`` AFTER the authority. It is ambiguous: RFC 3986 reads it as path / query / fragment text, but an
+        operator who pasted a password containing an unencoded ``/ ? #`` means everything before the LAST ``@`` as
+        userinfo. Under one reading the text after that ``@`` is a secret, under the other the text before the
+        first ``/`` is — so neither side is echoed (splitting at the last ``@`` of the whole string used to print
+        ``?user=ops@corp.example&token=SECRET`` as ``***@corp.example&token=SECRET``);
+      * a "host:port" that is not host:port-shaped (whitespace, ``&token=…``, control characters that could forge
+        a diagnostic line).
+
+    The result is printable and length-capped. Total — never raises."""
     try:
         s = coerce_str(endpoint)
         if not s:
@@ -119,12 +136,14 @@ def redact_endpoint(endpoint: Any) -> str:
         if not m:
             return "<endpoint>"
         scheme, rest = m.group(1), m.group(2)
-        cred = "@" in rest
-        if cred:
-            rest = rest.rsplit("@", 1)[1]
-        hostport = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
-        tail = rest[len(hostport):]
-        out = f"{scheme}://{'***@' if cred else ''}{hostport}{'/…' if tail.strip('/') else ''}"
+        authority = _AUTHORITY_END.split(rest, maxsplit=1)[0]
+        tail = rest[len(authority):]
+        hostport = authority.rsplit("@", 1)[-1]
+        if "@" in tail or not _HOSTPORT.fullmatch(hostport):
+            shown = "***"
+        else:
+            shown = ("***@" if "@" in authority else "") + hostport
+        out = f"{scheme}://{shown}{'/…' if tail.strip('/') else ''}"
         return "".join(ch if ch.isprintable() else "?" for ch in out)[:200]
     except Exception:  # noqa: BLE001
         return "<unprintable endpoint>"

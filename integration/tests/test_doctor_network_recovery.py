@@ -168,6 +168,14 @@ def test_a_hanging_probe_is_bounded_by_an_overall_deadline(exporter_installed):
     "http://127.0.0.1:4318#token=SECRET",
     "https://c.corp/?token=SECRET",
     "https://admin:SECRET@collector.corp:4318",
+    # an `@` AFTER the host used to print whatever followed it as "host:port" on every surface below
+    "http://127.0.0.1:4318/v1/traces?user=ops@corp.example&token=SECRET",
+    "http://127.0.0.1:4318/v1/traces?api_key=abc@SECRET",
+    "http://127.0.0.1:4318/v1/traces#a@SECRET",
+    "http://127.0.0.1:4318/a@SECRET",
+    "https://admin:SEC/RET@collector.corp:4318",          # ...and a password with an unencoded `/` stays hidden
+    "https://SECRET:98765/x@collector.corp:4318",         # ...even when its head is host:port-shaped
+    "http://127.0.0.1:4318&token=SECRET",                 # a "host:port" that is not one is never echoed
 ])
 def test_no_secret_on_any_surface(exporter_installed, raw):
     import json
