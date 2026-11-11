@@ -365,10 +365,17 @@ def key_resolver_with_horizon(store, *, current: Optional[str]) -> "tuple[KeyRes
     seen, so that build is not cached. Same walk as `key_resolver` (`_resolver_from_history`)."""
     horizon = [-1]
     last: list = [None]                                # entry_hash of the last record in the CONTIGUOUS prefix
+    try:
+        base = store._live_base_prev_hash()            # the first record must link from the live window's base
+    except Exception:  # noqa: BLE001 — a store that cannot say: the first record is not checked
+        base = None
 
     def _tracked():
         for r in store.iter_records():
-            if last[0] is not None and (r.seq != horizon[0] + 1 or getattr(r, "prev_hash", None) != last[0]):
+            if last[0] is None and base is not None and getattr(r, "prev_hash", None) != base:
+                last[0] = False                        # the scan's FIRST record is not the spine's first: torn
+            if last[0] is not None and last[0] is not False and (
+                    r.seq != horizon[0] + 1 or getattr(r, "prev_hash", None) != last[0]):
                 last[0] = False                        # a torn / non-contiguous read: the horizon stops here, so a
             if last[0] is False:                       # history record the walk may have missed is above it and the
                 yield r                                # build that folds it is not cached

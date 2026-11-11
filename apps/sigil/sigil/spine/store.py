@@ -1411,13 +1411,28 @@ class SpineStore:
                 continue
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
 
+    def disk_tip(self) -> "int | None":
+        """The last record's seq as the spine's files say NOW (the active segment's tail, or the last sealed one's —
+        O(tail), never the seq index), -1 for an empty spine, or None when that is undecidable: the active segment
+        the manifest names is missing (the full fold raises there) or the tail cannot be read."""
+        m = read_manifest(self._layout)
+        if m is not None:
+            act = m.active()
+            if act is not None and not self._layout.seg_path(act).exists():
+                return None
+        try:
+            last = self._read_last_entry()
+        except Exception:  # noqa: BLE001 — undecidable
+            return None
+        return last.seq if last is not None else -1
+
     def _segments_present(self, segs) -> bool:
         """True iff every one of `segs` (manifest entries) has its file on disk: one directory listing of the
         segments dir, not a `stat` per segment (a warm read of a large spine stays cheap)."""
         d = self._layout.segments_dir
         try:
             with os.scandir(d) as it:
-                names = {e.name for e in it}
+                names = {e.name for e in it if e.is_file()}     # a dangling link / a directory is not a segment
         except OSError:
             return False
         prefix = d.name + "/"

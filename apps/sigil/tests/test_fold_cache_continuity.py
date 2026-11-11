@@ -366,6 +366,77 @@ def test_the_audit_holds_a_seeded_fresh_fold_to_its_seed(tmp_path):
     assert not c._entries
 
 
+def test_a_hole_met_while_a_prune_rebased_the_window_mid_audit_is_skipped_not_a_mismatch(tmp_path):
+    """A hard prune committing DURING the audit rebases the live window under the fresh fold's read: the hole it
+    meets is the prune, not an edit."""
+    c = _counting_cache("test.cont.audit.rebased")
+    s = _Scripted(tmp_path, CHAIN)
+    bases = iter(["g", "g", "k"])                            # the read, the audit's start, the rebase it then meets
+    s._live_base_prev_hash = lambda: next(bases, "k")
+    c.read(s, ("k",), build=_build, reader=list)
+    s.recs = [CHAIN[0], CHAIN[2], CHAIN[3]]
+    rep = c.audit(s, ("k",), build=_build)
+    assert rep["status"] == "skipped" and "not contiguous" in rep["reason"], rep
+
+
+def test_a_seeded_pass_is_not_held_to_the_genesis_base(tmp_path):
+    """In a prune's crash window (the head signed, the manifest not yet rebased) the live base still reads GENESIS
+    while a seeded read starts at the prune boundary: its first record links from the record before the seed, not
+    from the base. The seeded-start rule (seq == since + 1) is what guards it."""
+    c = _counting_cache("test.cont.base.seeded.window")
+
+    def seeded():
+        return [], None, 1, float("inf")
+
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    assert c.read(s, ("k",), build=seeded, reader=list) == [2, 3]
+    assert len(c._entries) == 1
+    assert c.audit(s, ("k",), build=seeded)["status"] == "match"
+    c.clear()
+    s.recs = CHAIN[:2]
+    assert c.read(s, ("k",), build=seeded, reader=list) == []                    # an empty seeded entry
+    entry = next(iter(c._entries.values()))
+    s.recs = CHAIN
+    assert c.read(s, ("k",), build=seeded, reader=list) == [2, 3]                # its catch-up is not refused
+    assert next(iter(c._entries.values())) is entry, "the empty seeded entry was rebuilt, not extended"
+
+
+def test_the_resolver_horizon_does_not_trust_a_scan_whose_first_record_is_not_the_spines_first(tmp_path):
+    s = _Scripted(tmp_path, CHAIN[1:])                       # record 0 skipped by a torn read
+    s._live_base_prev_hash = lambda: "g"
+    assert kh.key_resolver_with_horizon(s, current=PUB)[1] == -1
+    s.recs = CHAIN
+    assert kh.key_resolver_with_horizon(s, current=PUB)[1] == 3
+
+
+def test_disk_tip_is_undecidable_when_the_active_segment_is_missing(tmp_path):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
+    w.migrate()
+    for i in range(3):
+        _noise(w, i)
+    assert w.rotate()
+    _noise(w, 9)
+    assert SpineStore(p).disk_tip() == 3
+    w._layout.seg_path(read_manifest(w._layout).active()).unlink()
+    assert SpineStore(p).disk_tip() is None, "never the last SEALED record when the active segment is gone"
+    assert SpineStore(tmp_path / "empty.jsonl").disk_tip() == -1
+
+
+def test_a_dangling_link_in_the_segments_dir_is_not_a_present_segment(tmp_path):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
+    w.migrate()
+    _noise(w, 0)
+    act = read_manifest(w._layout).active()
+    path = w._layout.seg_path(act)
+    assert w._segments_present([act]) is True
+    path.unlink()
+    path.symlink_to(tmp_path / "nowhere.jsonl")
+    assert w._segments_present([act]) is False
+
+
 def test_the_resolver_horizon_stops_at_the_first_non_contiguous_record(tmp_path):
     """A history record a torn scan may have missed sits ABOVE the horizon, so the build that folds it is not
     cached (the resolver might not reflect that rotation)."""
@@ -605,18 +676,21 @@ def test_a_torn_first_record_after_an_empty_cached_entry_is_never_folded(tmp_pat
 def test_a_tip_above_the_disk_is_re_read_before_a_pass_is_declared_short(tmp_path):
     c = _counting_cache("test.cont.tip.fresh")
     s = _WithTip(tmp_path, CHAIN, tip=5)                     # opened when the spine reached seq 5; now it ends at 3
-    s._read_last_entry = lambda: SimpleNamespace(seq=3)
+    s.disk_tip = lambda: 3
     assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
     assert len(c._entries) == 1
     assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]       # the catch-up keeps it
     assert len(c._entries) == 1
-    s._read_last_entry = lambda: SimpleNamespace(seq=5)      # the disk agrees: the pass really is short
+    s.disk_tip = lambda: 5                                   # the disk agrees: the pass really is short
     with pytest.raises(fold_cache.FoldDiscontinuity, match="below the tip"):
         c.read(s, ("k",), build=_build, reader=list)
-    s._read_last_entry = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+    s.disk_tip = lambda: (_ for _ in ()).throw(OSError("unreadable"))
     with pytest.raises(fold_cache.FoldDiscontinuity, match="below the tip"):
         c.read(s, ("k",), build=_build, reader=list)         # undecidable: the stricter in-memory tip stands
-    s._read_last_entry = lambda: None                        # the disk holds no record at all
+    s.disk_tip = lambda: None                                # undecidable: the stricter in-memory tip stands
+    with pytest.raises(fold_cache.FoldDiscontinuity, match="below the tip"):
+        c.read(s, ("k",), build=_build, reader=list)
+    s.disk_tip = lambda: -1                                  # the disk holds no record at all
     assert c.read(s, ("k",), build=_build, reader=list) == [0, 1, 2, 3]
 
 
@@ -772,3 +846,25 @@ def test_an_audit_whose_fresh_fold_raises_discards_the_entry(tmp_path):
     assert not c._entries
     with pytest.raises(store_mod.SpineError):
         c.read(s, ("k",), build=_build, reader=list)
+
+
+def test_a_live_window_fold_is_keyed_by_the_live_window(tmp_path, monkeypatch):
+    """A live-window fold scans from the window's first record; a prune that rebases the window (after its head —
+    and so the snapshot — already committed) must re-key the entry, never extend the one folded over the old
+    window."""
+    c = _counting_cache("test.cont.window.key")
+
+    def seed(snap):
+        return [], -1
+
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    s.change_token = lambda: ("t",)
+    monkeypatch.setattr(fold_read, "_snapshot", lambda store, lw: "the same snapshot")
+    assert fold_read.cached_unsigned_read(c, s, seed=seed, reader=list, live_window=True) == [0, 1, 2, 3]
+    s.recs = CHAIN[2:]                                       # the window now starts at seq 2, linking from h1
+    s._live_base_prev_hash = lambda: "h1"
+    assert fold_read.cached_unsigned_read(c, s, seed=seed, reader=list, live_window=True) == [2, 3]
+    s._live_base_prev_hash = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+    assert fold_read._window_key(s, True) != fold_read._window_key(s, True)       # undecidable: never matches
+    assert fold_read._window_key(s, False) == ()
