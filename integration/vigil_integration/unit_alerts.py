@@ -183,6 +183,17 @@ HA_UNITS: tuple[UnitSpec, ...] = (
     UnitSpec("vigil-settle-drain.service", "vigil-settle-drain.timer", 60, 15,
              "SaaS: drain the engagement-completion settle spool → settle_launch (charge/refund) (60s; opt-in)",
              optional=True, enable_env="VIGIL_SETTLE_DRAIN_ENABLED"),
+    # ── Front B: the money-IN billing-webhook drain (Flutterwave → server-side re-verify → owner-signed credit
+    # mint). OPTIONAL: watched fail-closed once VIGIL_BILLING_DRAIN_ENABLED is set (the SAME flag that enables the
+    # drain itself), so an install that does not take payments gets no false ABSENT alarm ──
+    UnitSpec("vigil-billing-drain.service", "vigil-billing-drain.timer", 60, 15,
+             "SaaS: drain the inbound billing-webhook spool → re-verify → owner-signed credit mint (60s; opt-in)",
+             optional=True, enable_env="VIGIL_BILLING_DRAIN_ENABLED"),
+    # ── DEP-3 (#73): the on-box upgrade/rollback drill. OPTIONAL like the SaaS drains: an install that never
+    # enabled it gets no false ABSENT alarm; VIGIL_UPGRADE_DRILL_ENABLED arms it fail-closed from the start ──
+    UnitSpec("vigil-upgrade-drill.service", "vigil-upgrade-drill.timer", 7 * 24 * 3600, 1800,
+             "upgrade/rollback drill — proves this box's real spine still upgrades + rolls back (weekly; opt-in)",
+             optional=True, enable_env="VIGIL_UPGRADE_DRILL_ENABLED"),
 )
 
 
@@ -672,6 +683,47 @@ def cmd_unit_heartbeat(unit: str, *, result: str = "", ok: Optional[bool] = None
         ok = result.strip().lower() == "success"
     write_unit_heartbeat(sd, unit, ok=ok, result=result, detail=detail)
     return 0
+
+
+TEST_DELIVERY_KIND = "alert-test-delivery"
+
+
+def cmd_test_delivery(*, state_dir: Optional[str], as_json: bool = False, now: Optional[float] = None,
+                      notifier: Optional[Notifier] = None) -> int:
+    """`vigil alerts --test-delivery` — prove the alerting path REACHES A HUMAN before relying on it (the NTF
+    enablement tail). On a healthy box the monitor pushes nothing, so a broken destination (an expired webhook,
+    a mail wrapper that exits 0 but sends nothing) is otherwise discovered only when a REAL alarm fails to arrive.
+
+    Pushes ONE clearly-labelled ``info`` alarm (kind ``alert-test-delivery``) through EXACTLY the destinations the
+    monitor uses (``build_notifier_from_env``), via the same ``Notifier.deliver`` — so a success genuinely proves
+    the path, records in the durable local log, and refreshes the delivery dead-man like any delivery. It writes no
+    unit heartbeat and runs no monitor cycle.
+
+    Exit: 0 every configured destination accepted it; 1 any destination failed (each failure is printed — fix it
+    and re-run); 2 no push destination is configured (alarms would reach the on-box log only)."""
+    import sys
+    sd = Path(state_dir).expanduser() if state_dir else default_state_dir()
+    n = notifier if notifier is not None else build_notifier_from_env(sd, echo=False)
+    if not n.push_configured:
+        msg = ("no push destination configured — set VIGIL_ALERT_WEBHOOK_URL and/or VIGIL_ALERT_EXEC (e.g. in "
+               "~/.config/vigil/alerts.env); until then alarms reach only the on-box log")
+        print(json.dumps({"ok": False, "reason": msg}) if as_json else f"vigil alerts --test-delivery: {msg}",
+              file=sys.stdout if as_json else sys.stderr)
+        return 2
+    t = time.time() if now is None else now
+    alarm = Alarm(ts=_now_iso(t), severity="info", kind=TEST_DELIVERY_KIND, home=str(sd),
+                  detail="VIGIL alerting TEST — sent on purpose by `vigil alerts --test-delivery`; no action "
+                         "needed. Receiving this means real alarms reach you too.")
+    res = n.deliver(alarm, now=t)
+    ok = res.delivered and not res.failures
+    if as_json:
+        print(json.dumps({"ok": ok, **res.to_dict()}, indent=2, sort_keys=True))
+    else:
+        print(f"vigil alerts --test-delivery: {res.succeeded}/{res.attempted} destination(s) accepted the test "
+              f"alert{'' if ok else ' — FIX the failures below and re-run'}")
+        for f in res.failures:
+            print(f"  FAILED  {f}")
+    return 0 if ok else 1
 
 
 def cmd_alerts(*, state_dir: Optional[str], watch: bool, cycles: int, interval: float,

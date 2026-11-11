@@ -49,6 +49,8 @@ from ..spine.snapshot import SnapshotState  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SIGNAL = "governor.customer"
 
@@ -129,6 +131,86 @@ class CustomerPrincipal:
         return None
 
 
+_SKIP = object()          # `_apply_record`: the record did not touch any username
+
+
+def _apply_record(r, resolver, state: dict, custs: dict, issued: dict):
+    """Fold ONE spine record into (state, custs, issued) — the body of THE customer fold, shared by the full
+    `_fold` and the verified fold cache so the two can never diverge. Returns the username the record
+    touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SIGNAL:
+        return _SKIP
+    username = p.get("username")
+    rec_state = p.get("state")
+    if rec_state == "revoked":
+        state[username] = "revoked"              # honor ANY revoke (even unsigned) — safe direction
+        return username
+    if rec_state == "active":
+        if not verify_signed(p, _core_fields(p), resolver.at(r.seq)):
+            return _SKIP                         # fail-closed: unsigned/forged/wrong-epoch-key grant
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(username, NO_HIGHWATER):
+            return _SKIP                         # REPLAY / stale re-append of an already-honored grant
+        issued[username] = at
+        state[username] = "active"
+        phash = p.get("password_hash")
+        custs[username] = CustomerAccount(
+            username=str(username), email=str(p.get("email") or ""), issued_at=at, state="active",
+            password_hash=(str(phash) if phash else None))
+        return username
+    return _SKIP
+
+
+class _CustomerView:
+    """The cached customer fold: the full fold's own (state, custs, issued) plus the two read indexes it
+    keeps in step — `active` (exactly `_fold()`'s result) and `emails` (email -> active usernames), so a
+    login lookup is O(1) instead of a scan. `poisoned` (an active grant under a non-str username, which no
+    code path mints) makes every read fall back to the full fold rather than reason about mixed-type order."""
+
+    __slots__ = ("state", "custs", "issued", "active", "emails", "poisoned")
+
+    def __init__(self, state: dict, custs: dict, issued: dict) -> None:
+        self.state, self.custs, self.issued = state, custs, issued
+        self.active: dict = {}
+        self.emails: "dict[str, set]" = {}
+        self.poisoned = False
+        for u in list(custs):
+            self.sync(u)
+
+    def sync(self, u) -> None:
+        acct = self.custs.get(u) if self.state.get(u) == "active" else None
+        old = self.active.get(u)
+        if old is acct:
+            return
+        if old is not None:
+            names = self.emails.get(old.email)
+            if names is not None:
+                names.discard(u)
+                if not names:
+                    del self.emails[old.email]
+        if acct is None:
+            self.active.pop(u, None)
+            return
+        if not isinstance(u, str):
+            self.poisoned = True
+        self.active[u] = acct
+        self.emails.setdefault(acct.email, set()).add(u)
+
+    def by_email(self, e: str) -> Optional[CustomerAccount]:
+        names = self.emails.get(e)
+        return self.active[min(names)] if names else None
+
+
+def _cached_step(view: _CustomerView, r, resolver) -> None:
+    u = _apply_record(r, resolver, view.state, view.custs, view.issued)
+    if u is not _SKIP:
+        view.sync(u)
+
+
+_CUSTOMER_FOLD = FoldCache("governor.customer", step=_cached_step)
+
+
 class CustomerRegistry:
     """Owner-signed customer identity grants on the spine, under `governor.customer`. Construction mirrors
     `AccountsRegistry`: the owner signing key + trusted pubkey default to the persisted owner identity."""
@@ -163,7 +245,7 @@ class CustomerRegistry:
         if self.owner_key is None:
             raise ValueError("set_password requires the owner signing key")
         u = _check_username(username)
-        acct = self._fold().get(u)
+        acct = self.customer(u)
         if acct is None:
             raise ValueError(f"no such active customer {u!r} (create it first, or it was revoked)")
         ph = hash_password(str(password or ""))
@@ -192,53 +274,53 @@ class CustomerRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (both go through the ONE fold — mirrors AccountsRegistry._fold) -----------------------
+    def _seed(self, snap) -> "tuple[dict, dict, dict, int]":
+        """(state, custs, issued, since) — the fold's starting point: the HARD-PRUNE SEED from `snap`, or the
+        empty genesis start when the trusted pubkey differs from the snapshot's (the pubkey-DEPENDENT bypass)."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return {}, {}, {}, -1
+        state = dict(snap.customer_state_map())       # username -> "active"|"revoked" (LWW; keep revoked)
+        issued = dict(snap.customer_issued_map())     # username -> per-username high-water
+        custs = {row[0]: CustomerAccount(             # rebuild honored-active CustomerAccounts from the seed
+                    username=str(row[0]), email=str(row[1] or ""),
+                    issued_at=issued.get(row[0], 0.0), state="active",
+                    password_hash=(str(row[2]) if len(row) > 2 and row[2] else None))
+                 for row in snap.customer_cred}
+        return state, custs, issued, snap.base_seq - 1
+
     def _fold(self) -> dict[str, CustomerAccount]:
         """THE fold — called by every read path, so the per-username anti-replay high-water is applied
         identically everywhere. Returns {username: CustomerAccount} for customers whose latest state is
         active. HARD-PRUNE SEED from `SnapshotState` (customer_state/customer_issued/customer_cred), then
         fold forward over the LIVE window only — so a customer whose only grant was pruned SURVIVES and its
         high-water is NOT reset. Pubkey-DEPENDENT bypass (rotated key / empty identity) is byte-identical
-        to a full genesis scan, exactly as `accounts._fold`."""
+        to a full genesis scan, exactly as `accounts._fold`. The verified FOLD CACHE (`_cached`, flag-gated)
+        folds the SAME records with the SAME step and must always equal this."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, custs, issued, since = {}, {}, {}, -1
-        else:
-            state = dict(snap.customer_state_map())       # username -> "active"|"revoked" (LWW; keep revoked)
-            issued = dict(snap.customer_issued_map())     # username -> per-username high-water
-            custs = {row[0]: CustomerAccount(             # rebuild honored-active CustomerAccounts from the seed
-                        username=str(row[0]), email=str(row[1] or ""),
-                        issued_at=issued.get(row[0], 0.0), state="active",
-                        password_hash=(str(row[2]) if len(row) > 2 and row[2] else None))
-                     for row in snap.customer_cred}
-            since = snap.base_seq - 1
+        state, custs, issued, since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != SIGNAL:
-                continue
-            username = p.get("username")
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[username] = "revoked"              # honor ANY revoke (even unsigned) — safe direction
-            elif rec_state == "active":
-                if not verify_signed(p, _core_fields(p), resolver.at(r.seq)):
-                    continue                             # fail-closed: unsigned/forged/wrong-epoch-key grant
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(username, NO_HIGHWATER):
-                    continue                             # REPLAY / stale re-append of an already-honored grant
-                issued[username] = at
-                state[username] = "active"
-                phash = p.get("password_hash")
-                custs[username] = CustomerAccount(
-                    username=str(username), email=str(p.get("email") or ""), issued_at=at, state="active",
-                    password_hash=(str(phash) if phash else None))
+            _apply_record(r, resolver, state, custs, issued)
         return {u: c for u, c in custs.items() if state.get(u) == "active"}
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            state, custs, issued, since = self._seed(snap)
+            return _CustomerView(state, custs, issued), since
+
+        return cached_read(_CUSTOMER_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
 
     def customer(self, username: str) -> Optional[CustomerAccount]:
         """The current active `CustomerAccount` for `username`, or None (fail-closed — revoked/unknown
         treated as absent). Folds ONCE."""
         if not isinstance(username, str) or not username:
             return None
+        hit = self._cached(lambda v: v.active.get(username))
+        if hit is not _UNCACHED:
+            return hit
         return self._fold().get(username)
 
     def by_email(self, email: str) -> Optional[CustomerAccount]:
@@ -248,6 +330,9 @@ class CustomerRegistry:
         e = _normalize_email(email)
         if not e:
             return None
+        hit = self._cached(lambda v: v.by_email(e))
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold()
         for u in sorted(fold):
             if fold[u].email == e:
@@ -257,6 +342,9 @@ class CustomerRegistry:
     def customers(self) -> list[CustomerAccount]:
         """The current active customer fold, in username order (the owner's customer list; the HTTP layer
         never surfaces the password_hash)."""
+        hit = self._cached(lambda v: [v.active[u] for u in sorted(v.active)])
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold()
         return [fold[u] for u in sorted(fold)]
 

@@ -88,3 +88,14 @@ def test_killswitch_refuses_the_run(monkeypatch, tmp_path):
     wd, seen = _wire(monkeypatch, tmp_path, {"ran": True, "exit_code": 0}, killswitch=True)
     out = actions_mod.run_codebase_tests(CHAT, wd, "pytest -q", operator_present=True)
     assert out["ok"] is False and "kill-switch" in out["error"] and "argv" not in seen  # never launched
+
+
+def test_the_command_is_positional_after_end_of_options(monkeypatch, tmp_path):
+    """CQ-1: the command goes LAST, after `--`, so text that begins with `-` (`--approve`, `--workspace=/`)
+    can never be read as one of the sandbox's own options — e.g. self-granting the A3 approval leg."""
+    for present in (True, False):
+        wd, seen = _wire(monkeypatch, tmp_path, {"ran": False, "outcome": "queue", "reason": "q", "tier": "A3"})
+        actions_mod.run_codebase_tests(CHAT, wd, "--approve", operator_present=present)
+        argv = seen["argv"]
+        assert argv[-2:] == ["--", "--approve"]
+        assert ("--approve" in argv[:-2]) is present          # only the operator leg ever adds the real flag

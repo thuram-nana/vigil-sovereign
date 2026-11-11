@@ -1,0 +1,15 @@
+# Every-60s trigger for the VIGIL money-IN billing drain (Front B). OPT-IN — ships disabled like every timer.
+#   systemctl --user enable --now vigil-billing-drain.timer
+
+[Unit]
+Description=Every-60s trigger for the VIGIL money-IN billing-webhook drain
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+# (No Persistent= — it only affects OnCalendar= timers; this monotonic timer re-arms 60s after each boot.)
+Unit=vigil-billing-drain.service
+
+[Install]
+WantedBy=timers.target

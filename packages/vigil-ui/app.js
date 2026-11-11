@@ -2170,11 +2170,18 @@
   // P2 — New Assessment wizard + Live run view
   // ==========================================================================
 
+  // The hash query is user-controlled, so it never names a property: only the keys this app actually reads
+  // (HASH_KEYS) are kept, each written under OUR OWN constant name — a `__proto__` / `constructor` / unknown key
+  // is dropped (CodeQL js/remote-property-injection). Every caller reads one of these names, unchanged.
+  const HASH_KEYS = ["run", "tab", "id", "slug"];
   function hashQuery() {
     const q = (location.hash || "").split("?")[1] || "";
     const out = {};
     q.split("&").forEach(function (kv) { if (!kv) return; const i = kv.indexOf("=");
-      out[decodeURIComponent(i < 0 ? kv : kv.slice(0, i))] = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1)); });
+      const raw = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+      for (let k = 0; k < HASH_KEYS.length; k++) {
+        if (HASH_KEYS[k] === raw) { out[HASH_KEYS[k]] = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1)); break; }
+      } });
     return out;
   }
   function isURL(s) { return /^https?:\/\/.+/i.test(String(s || "").trim()); }

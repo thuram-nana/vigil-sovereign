@@ -175,7 +175,7 @@ def test_workflow_yaml_parses_if_pyyaml_available():
         pytest.skip("PyYAML not installed in this job; structural parse is covered where it is")
     doc = yaml.safe_load(_wf_text())
     jobs = doc["jobs"]
-    assert set(jobs) == {"codeql-python", "secret-scan", "sast"}, jobs.keys()
+    assert set(jobs) == {"codeql-python", "codeql-javascript", "secret-scan", "sast"}, jobs.keys()
 
 
 # --------------------------------------------------------------------------------------------------

@@ -41,6 +41,17 @@ class Frame:
         return cls(kind=kind, sha256=sha256_hex(data), text=text, image_path=image_path)
 
 
+def private_capture_path(prefix: str, suffix: str) -> str:
+    """A fresh output path for one capture, inside its OWN new ``0700`` directory (``tempfile.mkdtemp``).
+
+    Replaces ``tempfile.mktemp`` (CodeQL py/insecure-temporary-file): mktemp only returns a NAME in the shared
+    temp dir, so another local user could pre-create that name (or a symlink to a file of ours) between the
+    name being chosen and the capture tool writing it. A private directory with an unpredictable name cannot
+    be pre-planted, and the file inside it does not exist yet — every capture tool (which expects to create /
+    overwrite its output path) behaves exactly as before."""
+    return str(Path(tempfile.mkdtemp(prefix=prefix)) / ("capture" + suffix))
+
+
 def _ocr(image_path: str) -> str:
     """Extract text via tesseract if present; '' otherwise (no OCR is not a failure of capture)."""
     if not shutil.which("tesseract"):
@@ -57,7 +68,7 @@ def grab_screen() -> Optional[Frame]:
     """Screenshot the current display + OCR it. Returns None if no screenshot tool is available
     or the grab fails. The accessibility-tree path (richer, C4) is a documented seam, not wired
     on headless hosts."""
-    out = tempfile.mktemp(suffix=".png", prefix="sigil-screen-")
+    out = private_capture_path("sigil-screen-", ".png")
     for name, argv in _SCREENSHOT_TOOLS:
         if not shutil.which(name):
             continue
@@ -75,7 +86,7 @@ def grab_camera(device: str = "/dev/video0") -> Optional[Frame]:
     absent, or the grab fails. Camera frames rarely carry text, so OCR is best-effort."""
     if not shutil.which("ffmpeg") or not Path(device).exists():
         return None
-    out = tempfile.mktemp(suffix=".png", prefix="sigil-cam-")
+    out = private_capture_path("sigil-cam-", ".png")
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-f", "v4l2", "-i", device, "-frames:v", "1", out],

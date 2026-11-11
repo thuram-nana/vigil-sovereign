@@ -1033,7 +1033,44 @@ def cmd_verify(a) -> None:
     # to the pre-hardening behavior), so bootstrap/ingest flows are unaffected.
     head_present = config.HEAD_PATH.exists()
     print((("head  OK: " if hok else ("head  FAIL: " if head_present else "head  --: ")) + hmsg))
-    sys.exit(0 if (ok and (hok or not head_present)) else 2)
+    folds_ok = _verify_fold_caches(getattr(a, "folds", False))
+    sys.exit(0 if (ok and (hok or not head_present) and folds_ok) else 2)
+
+
+def _verify_fold_caches(rebuild: bool) -> bool:
+    """Front C S0d — the fold-cache line(s) of `sigil verify`. Always: the cockpit's last background audit
+    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify. With `--folds` (and the
+    cache on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns
+    False iff a mismatch was found."""
+    from . import config
+    ok = True
+    try:
+        rep = json.loads(config.FOLD_AUDIT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        rep = None
+    except (OSError, ValueError) as exc:
+        print(f"folds --: unreadable audit report {config.FOLD_AUDIT_PATH}: {exc}")
+        rep = None
+    if isinstance(rep, dict):
+        bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        ok = not bad
+        print(("folds OK: " if ok else "folds FAIL: ") + f"cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) "
+              + (f"— {len(bad)} MISMATCH: " + ", ".join(f"{f.get('fold')} at seq {f.get('seq')} ({f.get('difference')})"
+                                                      for f in bad) if bad else "— every cached fold equals a rebuild"))
+    if rebuild:
+        if not config.fold_cache_enabled():
+            print("folds --: --folds needs VIGIL_FOLD_CACHE_ENABLED (the fold cache is off)")
+            return ok
+        from .governor import fold_warm
+        store = SpineStore()
+        fold_warm.warm_all(store)
+        now = fold_warm.audit(store)
+        bad = [f for f in now["folds"] if f.get("status") == "MISMATCH"]
+        n = sum(1 for f in now["folds"] if f.get("status") == "match")
+        print(("folds OK: " if not bad else "folds FAIL: ") + f"rebuilt {n} cached folds in this process"
+              + (" — MISMATCH: " + ", ".join(f"{f['fold']} ({f.get('difference')})" for f in bad) if bad else ""))
+        ok = ok and not bad
+    return ok
 
 
 def cmd_status(a) -> None:
@@ -1328,6 +1365,10 @@ def cmd_billing_drain(a) -> None:
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
+    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
+    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
+    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    _require_expanded_path(a.spool, "--spool", required=True)
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1350,8 +1391,12 @@ def cmd_billing_drain(a) -> None:
     # The checkout_creator is the OUTBOUND hosted-checkout poster (Slice A1); it is INERT on this inbound drain
     # path (the drain never calls create_checkout) but is wired at the one construction site so the capability is
     # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
+    from .config import billing_plan_alarm_enabled
+    alarm = billing_plan_alarm_enabled()         # CHK-1b: an unaccountable paid plan charge ALARMS (quarantine)
     signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier,
-                                                      checkout_creator=_billing_checkout_creator()),
+                                                      checkout_creator=_billing_checkout_creator(),
+                                                      alarm_unaccounted_plans=alarm),
+                           alarm_unaccounted_plans=alarm,
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
                            plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
                            expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
@@ -1367,6 +1412,11 @@ def cmd_billing_drain(a) -> None:
         r = watcher.drain()
         print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
+        parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
+        if parked:
+            print(f"  awaiting retry: {parked} billing webhook(s) parked in {watcher.retry} after a transient "
+                  f"processor failure ({r['deferred']} new this pass) — nothing minted for them yet; each is "
+                  f"re-verified on a bounded schedule and quarantined + alarmed if the failure persists")
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:
@@ -2683,7 +2733,11 @@ def main(argv=None) -> None:
     pbud = sub.add_parser("budget", help="per-agent action/interrupt/token/cost budget usage for a UTC day (read-only)")
     pbud.add_argument("--day", help="UTC date YYYY-MM-DD (default: today)")
     pbud.set_defaults(fn=cmd_budget)
-    sub.add_parser("verify").set_defaults(fn=cmd_verify)
+    pv = sub.add_parser("verify")
+    pv.add_argument("--folds", action="store_true",
+                    help="also warm every verified fold cache in this process and rebuild-and-compare it against the "
+                         "spine (Front C S0d; needs VIGIL_FOLD_CACHE_ENABLED)")
+    pv.set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")

@@ -100,7 +100,9 @@ def test_registered_units_and_timers_actually_exist_on_disk():
 # `optional` flag the code reads. Without this pin the fail-closed tests derive their expectation from the same
 # flag, so a regression flipping an always-on unit (e.g. the spine-integrity verifier) to optional would pass CI
 # while that unit goes silently unwatched. Changing either set is therefore a DELIBERATE edit to this pin.
-_PINNED_OPTIONAL = {"vigil-finding-drain.service", "vigil-settle-drain.service"}
+_PINNED_OPTIONAL = {"vigil-finding-drain.service", "vigil-settle-drain.service",
+                    "vigil-upgrade-drill.service",   # DEP-3: opt-in drill (deliberate pin edit)
+                    "vigil-billing-drain.service"}   # Front B: opt-in money-IN drain (deliberate pin edit)
 _PINNED_ALWAYS_ON = {
     "vigil-backup.service", "vigil-backup-push.service", "vigil-backup-drill.service",
     "vigil-ha-mirror.service", "vigil-integrity.service", "vigil-posture.service",
@@ -108,7 +110,7 @@ _PINNED_ALWAYS_ON = {
 }
 
 
-def test_optional_set_is_exactly_the_two_saas_drains():
+def test_optional_set_is_exactly_the_saas_drains_and_the_upgrade_drill():
     assert {s.unit for s in ua.registry() if s.optional} == _PINNED_OPTIONAL
 
 

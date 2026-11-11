@@ -178,3 +178,27 @@ def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:
     except (OSError, ValueError):
         return True            # is_file()/read raised (EACCES, ...) OR unreadable/corrupt/foreign -> fail-CLOSED
     return str(nonce) in {str(n) for n in nonces}   # NONCE-SCOPED: only THIS nonce's pause halts THIS nonce
+
+
+def paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
+    """pause/resume PR-5 (observability) — enumerate the currently-paused launches as ``(slug, [nonces])`` for
+    every marker holding at least one paused nonce. READ-ONLY; TOTAL and fail-SAFE to ``[]`` (an absent /
+    unreadable pauses dir, or an individual unreadable/corrupt/foreign marker, simply contributes nothing — a
+    best-effort projection must never crash ``vigil doctor``; the fail-CLOSED halt decision stays in
+    ``is_lease_paused``). The slug is the marker's filename stem (the path-safe slug component). DEFAULT-OFF:
+    with no markers the result is ``[]``, so doctor is byte-identical until a pause is recorded. A paused launch
+    is a POSITIVELY-recorded held reservation (expected), NOT a stuck/lost lease — callers surface it as an
+    advisory, never an alarm."""
+    out: "list[tuple[str, list[str]]]" = []
+    try:
+        entries = sorted(pauses_root(base_dir).glob("*.json"))
+    except OSError:
+        return out
+    for p in entries:
+        try:
+            nonces = _current_paused_nonces(p)
+        except OSError:                              # defence-in-depth (the helper already fails open to [])
+            continue
+        if nonces:
+            out.append((p.stem, nonces))
+    return out

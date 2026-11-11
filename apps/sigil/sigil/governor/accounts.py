@@ -70,6 +70,8 @@ from ..spine.snapshot import SnapshotState  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (W9-1 succession-aware owner-key resolver)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SIGNAL = "governor.account"
 
@@ -327,6 +329,83 @@ def _as_deadline(value) -> float:
     return f if math.isfinite(f) else 0.0
 
 
+_SKIP = object()          # `_apply_account_record`: the record did not touch any username
+
+
+def _apply_account_record(r, resolver, state: dict, accts: dict, issued: dict):
+    """Fold ONE spine record into (state, accts, issued) — THE account fold body, shared by the full `_fold`
+    and the verified fold cache (Front C S0d) so the two can never diverge. Returns the username the record
+    touched, or `_SKIP`."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SIGNAL:
+        return _SKIP
+    username = p.get("username")
+    rec_state = p.get("state")
+    if rec_state == "revoked":
+        state[username] = "revoked"          # honor ANY revoke (even unsigned) — the safe direction
+        return username
+    if rec_state == "active":
+        if not verify_signed(p, _core_fields(p), resolver.at(r.seq)):
+            return _SKIP                      # fail-closed: an unsigned/forged grant is not counted,
+            #                                   nor one signed by a key not valid at this grant's seq
+            #                                   (field set derived from the payload — see _core_fields)
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(username, NO_HIGHWATER):
+            return _SKIP                      # REPLAY / stale re-append of an already-honored grant
+        issued[username] = at                 # consume it so its own replay is refused hereafter
+        state[username] = "active"
+        upk = p.get("user_pubkey")
+        tsec = p.get("totp_secret")
+        phash = p.get("password_hash")
+        exp = p.get("expires_at")
+        accts[username] = Account(
+            username=str(username), role=str(p.get("role") or ""),
+            cred_hash=str(p.get("cred_hash") or ""), cred_salt=str(p.get("cred_salt") or ""),
+            issued_at=at, state="active",
+            user_pubkey=(str(upk) if upk else None),   # each carried through unchanged (None ⇒ absent):
+            totp_secret=(str(tsec) if tsec else None),  # the SEALED TOTP secret (S4 second factor)
+            password_hash=(str(phash) if phash else None),  # the scrypt password hash (S4 optional)
+            # ABSOLUTE deadline. It is in the signed core, so a tampered value fails verify above; and
+            # _as_deadline is fail-closed — a poisoned value (non-finite, a numeric STRING, a bool, any
+            # non-number) maps to 0.0 ⇒ always-expired ⇒ denied, never a live future deadline.
+            expires_at=(_as_deadline(exp) if exp else None))
+        return username
+    return _SKIP
+
+
+class _AccountsView:
+    """The cached account fold: the full fold's own (state, accts, issued) plus `active` — exactly `_fold()`'s
+    result, kept in step per touched username. Reads sort the WHOLE active map exactly as the full fold's
+    readers do, so even an (owner-signed, never minted) non-str username behaves identically in both paths."""
+
+    __slots__ = ("state", "accts", "issued", "active")
+
+    def __init__(self, state: dict, accts: dict, issued: dict) -> None:
+        self.state, self.accts, self.issued = state, accts, issued
+        self.active: dict = {}
+        for u in list(accts):
+            self.sync(u)
+
+    def sync(self, u) -> None:
+        acct = self.accts.get(u) if self.state.get(u) == "active" else None
+        if acct is None:
+            self.active.pop(u, None)
+            return
+        self.active[u] = acct
+
+    def ordered(self) -> "list[Account]":
+        return [self.active[u] for u in sorted(self.active)]
+
+
+def _accounts_step(view: _AccountsView, r, resolver) -> None:
+    u = _apply_account_record(r, resolver, view.state, view.accts, view.issued)
+    if u is not _SKIP:
+        view.sync(u)
+
+
+_ACCOUNTS_FOLD = FoldCache("governor.account", step=_accounts_step)
+
+
 class AccountsRegistry:
     """Owner-signed account grants on the spine. Construction mirrors KillSwitch/PromotionPolicy: the owner
     signing key and trusted pubkey default to the persisted owner identity."""
@@ -365,7 +444,7 @@ class AccountsRegistry:
         if self.owner_key is None:
             raise ValueError("assign_role requires the owner signing key")
         u, r = _check_username(username), _check_role(role)
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, r, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
@@ -386,7 +465,7 @@ class AccountsRegistry:
             raise ValueError("enroll_pubkey requires the owner signing key")
         u = _check_username(username)
         pk = _check_user_pubkey(user_pubkey)
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
@@ -408,7 +487,7 @@ class AccountsRegistry:
         blob = str(sealed_totp_b64 or "").strip()
         if not blob:
             raise ValueError("enroll_totp requires a non-empty sealed TOTP secret")
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
@@ -428,7 +507,7 @@ class AccountsRegistry:
         if self.owner_key is None:
             raise ValueError("disable_totp requires the owner signing key")
         u = _check_username(username)
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         iat = max(float(issued_at), math.nextafter(acct.issued_at, math.inf))
@@ -447,7 +526,7 @@ class AccountsRegistry:
             raise ValueError("set_password requires the owner signing key")
         u = _check_username(username)
         ph = hash_password(str(password or ""))
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
@@ -466,7 +545,7 @@ class AccountsRegistry:
         if self.owner_key is None:
             raise ValueError("mint_session_bearer requires the owner signing key")
         u = _check_username(username)
-        acct = self._fold().get(u)
+        acct = self._active(u)
         if acct is None:
             raise ValueError(f"no such active account {u!r}")
         iat = max(float(issued_at), math.nextafter(acct.issued_at, math.inf))
@@ -528,6 +607,47 @@ class AccountsRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (both go through the ONE fold) -------------------------------------------------------
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, accts, issued), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
+        trusted pubkey differs from the snapshot's (the pubkey-DEPENDENT bypass — see `_fold`)."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        # PER-USERNAME state / high-water / Account, seeded from the SAME snapshot under the SAME pubkey
+        # condition — otherwise the first hard prune would reset them and re-open the replay HIGH.
+        state = dict(snap.account_state_map())        # username -> "active"|"revoked" (LWW; keep revoked)
+        issued = dict(snap.account_issued_map())      # username -> per-username high-water
+        accts = {row[0]: Account(                     # rebuild the honored-active Accounts from the seed
+                    username=str(row[0]), role=str(row[1] or ""), cred_hash=str(row[2] or ""),
+                    cred_salt=str(row[3] or ""), issued_at=issued.get(row[0], 0.0), state="active",
+                    # seed fields 5/6/7/8 = user_pubkey / totp_secret / password_hash / expires_at (each
+                    # None for a legacy/shorter row) — carried so a KEYED / TOTP-enrolled / password /
+                    # EXPIRING account pruned below base_seq keeps its PoP login, its second factor, its
+                    # password, and its DEADLINE (else a pruned+seeded account silently never-expires).
+                    user_pubkey=(str(row[4]) if len(row) > 4 and row[4] else None),
+                    totp_secret=(str(row[5]) if len(row) > 5 and row[5] else None),
+                    password_hash=(str(row[6]) if len(row) > 6 and row[6] else None),
+                    expires_at=(_as_deadline(row[7]) if len(row) > 7 and row[7] else None))
+                 for row in snap.account_cred}
+        return (state, accts, issued), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental account fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _AccountsView(*st), since
+
+        return cached_read(_ACCOUNTS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
+    def _active(self, username) -> Optional[Account]:
+        """The current active `Account` for `username` (expiry NOT applied), or None — the one lookup every
+        owner mutation and `account()` use, through the fold cache when it is on."""
+        hit = self._cached(lambda v: v.active.get(username))
+        if hit is not _UNCACHED:
+            return hit
+        return self._fold().get(username)
+
     def _fold(self) -> dict[str, Account]:
         """THE fold — one implementation, called by BOTH `resolve()` and `accounts()`, so the per-username
         anti-replay high-water is applied IDENTICALLY at both read surfaces (mirror-the-fix discipline).
@@ -547,59 +667,9 @@ class AccountsRegistry:
         # (not orphaned) while a forged grant minted with a retired key at a later seq is refused. With no
         # rotation the resolver is a single open window over the current key -> byte-identical to before.
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            state, accts, issued, since = {}, {}, {}, -1
-        else:
-            # PER-USERNAME state / high-water / Account, seeded from the SAME snapshot under the SAME pubkey
-            # condition — otherwise the first hard prune would reset them and re-open the replay HIGH.
-            state = dict(snap.account_state_map())        # username -> "active"|"revoked" (LWW; keep revoked)
-            issued = dict(snap.account_issued_map())      # username -> per-username high-water
-            accts = {row[0]: Account(                     # rebuild the honored-active Accounts from the seed
-                        username=str(row[0]), role=str(row[1] or ""), cred_hash=str(row[2] or ""),
-                        cred_salt=str(row[3] or ""), issued_at=issued.get(row[0], 0.0), state="active",
-                        # seed fields 5/6/7/8 = user_pubkey / totp_secret / password_hash / expires_at (each
-                        # None for a legacy/shorter row) — carried so a KEYED / TOTP-enrolled / password /
-                        # EXPIRING account pruned below base_seq keeps its PoP login, its second factor, its
-                        # password, and its DEADLINE (else a pruned+seeded account silently never-expires).
-                        user_pubkey=(str(row[4]) if len(row) > 4 and row[4] else None),
-                        totp_secret=(str(row[5]) if len(row) > 5 and row[5] else None),
-                        password_hash=(str(row[6]) if len(row) > 6 and row[6] else None),
-                        expires_at=(_as_deadline(row[7]) if len(row) > 7 and row[7] else None))
-                     for row in snap.account_cred}
-            since = snap.base_seq - 1
+        (state, accts, issued), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != SIGNAL:
-                continue
-            username = p.get("username")
-            rec_state = p.get("state")
-            if rec_state == "revoked":
-                state[username] = "revoked"          # honor ANY revoke (even unsigned) — the safe direction
-            elif rec_state == "active":
-                if not verify_signed(p, _core_fields(p), resolver.at(r.seq)):
-                    continue                          # fail-closed: an unsigned/forged grant is not counted,
-                    #                                   nor one signed by a key not valid at this grant's seq
-                    #                                   (field set derived from the payload — see _core_fields)
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(username, NO_HIGHWATER):
-                    continue                          # REPLAY / stale re-append of an already-honored grant
-                issued[username] = at                 # consume it so its own replay is refused hereafter
-                state[username] = "active"
-                upk = p.get("user_pubkey")
-                tsec = p.get("totp_secret")
-                phash = p.get("password_hash")
-                exp = p.get("expires_at")
-                accts[username] = Account(
-                    username=str(username), role=str(p.get("role") or ""),
-                    cred_hash=str(p.get("cred_hash") or ""), cred_salt=str(p.get("cred_salt") or ""),
-                    issued_at=at, state="active",
-                    user_pubkey=(str(upk) if upk else None),   # each carried through unchanged (None ⇒ absent):
-                    totp_secret=(str(tsec) if tsec else None),  # the SEALED TOTP secret (S4 second factor)
-                    password_hash=(str(phash) if phash else None),  # the scrypt password hash (S4 optional)
-                    # ABSOLUTE deadline. It is in the signed core, so a tampered value fails verify above; and
-                    # _as_deadline is fail-closed — a poisoned value (non-finite, a numeric STRING, a bool, any
-                    # non-number) maps to 0.0 ⇒ always-expired ⇒ denied, never a live future deadline.
-                    expires_at=(_as_deadline(exp) if exp else None))
+            _apply_account_record(r, resolver, state, accts, issued)
         return {u: a for u, a in accts.items() if state.get(u) == "active"}
 
     def resolve(self, token: str, *, now: Optional[float] = None) -> Optional[Principal]:
@@ -611,9 +681,11 @@ class AccountsRegistry:
         if not isinstance(token, str) or not token:
             return None
         now = time.time() if now is None else now
-        fold = self._fold()
-        for username in sorted(fold):
-            a = fold[username]
+        ordered = self._cached(lambda v: v.ordered())
+        if ordered is _UNCACHED:
+            fold = self._fold()
+            ordered = [fold[u] for u in sorted(fold)]
+        for a in ordered:
             if hmac.compare_digest(sha256_hex((a.cred_salt + token).encode("utf-8")), a.cred_hash):
                 # A bearer is unique to one account (per-account salt + 32-byte secret), so a match is the
                 # only match — an expired match is a hard None, not a fall-through to another account.
@@ -629,7 +701,7 @@ class AccountsRegistry:
         if not isinstance(username, str) or not username:
             return None
         now = time.time() if now is None else now
-        acct = self._fold().get(username)
+        acct = self._active(username)
         if acct is None or acct.expired(now):
             return None
         return acct
@@ -639,5 +711,8 @@ class AccountsRegistry:
         accounts, each carrying its `expires_at`, so the UI can show an "expired"/"expires soon" pill and
         the owner can revoke it. The cred_hash/cred_salt live on the Account object but the HTTP layer never
         surfaces them — only username/role/state/issued_at + expires_at/remaining/expired."""
+        hit = self._cached(lambda v: v.ordered())
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold()
         return [fold[u] for u in sorted(fold)]

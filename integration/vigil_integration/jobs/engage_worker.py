@@ -147,6 +147,23 @@ def _is_engagement_paused(exc: BaseException) -> bool:
     return isinstance(exc, EngagementPaused)
 
 
+def _lease_currently_paused(base_dir: Any, slug: str, nonce: str) -> bool:
+    """pause/resume PR-4 (HARD #2) — True iff THIS (slug, nonce) lease is paused RIGHT NOW. Used to classify a
+    NON-``EngagementPaused`` run failure as a gate→arm-window pause (the PRECONDITION raised ``EngagementRefused``
+    because the lease was paused AFTER the pickup gate passed but BEFORE the arm) vs a genuine failure.
+    ``is_lease_paused`` is total + fail-closed (a corrupt marker ⇒ True/held — correct, the pickup gate refuses
+    it too). FAIL toward False (the genuine-failure/terminal path) ONLY when the seam import is unavailable, so a
+    REAL failure with NO pause marker is never wrongly held — a false POSITIVE here would re-drive forever. No
+    nonce ⇒ False."""
+    if not nonce:
+        return False
+    try:
+        from vigil_integration.live.credit_lease_pause import is_lease_paused
+        return bool(is_lease_paused(base_dir, slug, nonce))
+    except Exception:  # noqa: BLE001 — cannot read the pause store ⇒ treat as a genuine failure (terminates)
+        return False
+
+
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
 #: (``add_customer_target``), so the engine's destructive-confirm gate already refuses destructive tools; the
 #: run therefore stays read-only/non-destructive without a special flag. Left empty = run_engagement's
@@ -315,6 +332,14 @@ def make_engage_worker(
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
         kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
+        kwargs.pop("launch_nonce", None)                           # ...and so is the launch identity
+        # Bind the run to THIS job's launch. The seam holds ONE lease per slug and a customer slug is reused by
+        # every launch of the same (org, host), so the lease on the seam can be a LATER launch's: the engine then
+        # refuses before its arm (so this job never burns that launch's single-use floor) and binds its pause
+        # halt + resume state to this nonce, never to whichever lease is on the seam. No nonce ⇒ not passed
+        # (the engine keeps its seam read, as before).
+        if nonce:
+            kwargs["launch_nonce"] = nonce
         # EC-7 — tiered Quick/Deep run profile (default-OFF ⇒ byte-identical). When the owner has enabled
         # tiered products, DERIVE the run tier from the launch's OWNER-SIGNED units_reserved (the SAME
         # verified+bound lease EC-3 reads for its token ceiling — authoritative, never the tamperable
@@ -365,6 +390,19 @@ def make_engage_worker(
                     if _slot_created:
                         _release_attempt(base_dir, job.slug, nonce, attempt)
                     _record_resume_required(base_dir, job.slug, nonce)
+                raise
+            # pause/resume PR-4 (HARD #2) — a NON-EngagementPaused failure whose lease is NOW paused is the
+            # gate→arm-window pause: the precondition raised EngagementRefused because the lease was paused AFTER
+            # the pickup gate passed but BEFORE _advance_floor, so the single-use floor was NOT burned. Treat it
+            # as a REVERSIBLE halt: emit NO FAILED settle (no premature refund/tombstone — the seam poller holds a
+            # paused lease and re-produces on resume; PR-A's pickup gate catches any racing re-pickup), roll back
+            # the do-nothing attempt slot, and record NO resume-required (the floor was NOT burned, so the re-arm
+            # MUST consume — recording it would skip the burn = a replayable lease / free run). Re-raise ⇒
+            # JobRunner release_delivery + the launch re-drives. FAIL-SAFE: a genuine failure with no pause marker
+            # is NOT held (it terminates normally) — see _lease_currently_paused.
+            if nonce and _lease_currently_paused(base_dir, job.slug, nonce):
+                if _slot_created:
+                    _release_attempt(base_dir, job.slug, nonce, attempt)
                 raise
             # Emit a refunding FAILED completion ONLY on the TERMINAL attempt. A transient failure (attempt <
             # _MAX_ARM_ATTEMPTS) re-drives WITHOUT a premature refund, so it can never spool a FAILED that RACES

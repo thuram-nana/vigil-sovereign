@@ -132,6 +132,59 @@ def _cmd_engage_instruct(args: argparse.Namespace) -> int:
     return 0
 
 
+_OTLP_ENDPOINT_ENV = "VIGIL_OTLP_ENDPOINT"
+_OTLP_OFF = frozenset({"off", "none", "0", "false", "no"})
+
+
+def _resolve_otlp_endpoint(args: argparse.Namespace) -> "Optional[str]":
+    """NET-2b (#73): the opt-in OTLP telemetry destination for ``vigil engage`` — ``--otlp-endpoint``, else
+    ``$VIGIL_OTLP_ENDPOINT``. DEFAULT-OFF: neither set ⇒ ``None`` ⇒ ``EngineConfig.otlp_endpoint`` stays at its
+    default and the engine emits no telemetry (byte-identical to before this flag existed).
+
+    FAIL-CLOSED ON EGRESS, NEVER ON THE RUN: a NON-loopback value is refused HERE, loudly, and telemetry stays
+    OFF — the engagement itself still runs (telemetry never denies cognition). This is belt-and-braces: the
+    ``OTLPSink`` already refuses every export to a non-loopback endpoint, but refusing at the CLI makes the
+    misconfiguration visible instead of a silent per-span ``refused`` counter. Any fault resolving the check
+    (e.g. the observability plane unavailable) also degrades to ``None`` — never to an unchecked endpoint."""
+    # The flag wins over the env; `--otlp-endpoint off` (or an `off` env) is an explicit per-run OFF.
+    raw = str(getattr(args, "otlp_endpoint", "") or "").strip() or os.environ.get(_OTLP_ENDPOINT_ENV, "").strip()
+    if not raw or raw.lower() in _OTLP_OFF:
+        return None
+    try:
+        from .live.otel_export import endpoint_is_loopback, redact_endpoint  # local: keep the CLI import-light
+        loopback = bool(endpoint_is_loopback(raw))
+        shown = redact_endpoint(raw)
+    except Exception as exc:  # noqa: BLE001 — cannot prove loopback ⇒ do not wire (fail-closed on egress)
+        print(f"vigil engage: WARNING could not validate the OTLP endpoint ({type(exc).__name__}); "
+              f"telemetry export is OFF for this run.", file=sys.stderr)
+        return None
+    if not loopback:
+        print(f"vigil engage: WARNING refusing non-loopback OTLP endpoint {shown!r} — telemetry egress is pinned "
+              f"to a loopback collector (e.g. http://127.0.0.1:4318, `vigil services up --with-observability`). "
+              f"Telemetry export is OFF for this run; the engagement continues.", file=sys.stderr)
+        return None
+    if not _otlp_exporter_installed():
+        # NET-2b red-pen MED: the OpenTelemetry SDK/OTLP exporter is NOT in either runtime lock (it ships as the
+        # OPT-IN hash lock infra/supply-chain/otel.lock.txt), so without it a wired endpoint would export
+        # NOTHING. Say so plainly — with the reproducible remedy — instead of implying spans are flowing.
+        print("vigil engage: WARNING --otlp-endpoint/$VIGIL_OTLP_ENDPOINT is set but the OpenTelemetry OTLP "
+              "exporter (opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http) is not installed in this "
+              "environment; telemetry export is OFF for this run. It is an opt-in hash lock: rebuild with "
+              "`VIGIL_WITH_OTEL=1 bash envs/build_envs.sh` (see docs/SUPPLY-CHAIN.md).", file=sys.stderr)
+        return None
+    return raw
+
+
+def _otlp_exporter_installed() -> bool:
+    """Whether the OTLP/HTTP span exporter the sink needs is importable here (no import side effects)."""
+    try:
+        import importlib.util
+        return (importlib.util.find_spec("opentelemetry.sdk.trace") is not None
+                and importlib.util.find_spec("opentelemetry.exporter.otlp.proto.http.trace_exporter") is not None)
+    except Exception:  # noqa: BLE001 — a missing parent package raises; either way it is not installed
+        return False
+
+
 def _cmd_engage(args: argparse.Namespace) -> int:
     # W9-4b: the opt-in refuse-to-start PRODUCTION gate. Checked FIRST — before the engine wiring is even
     # imported — so a refused production run neither loads the engine nor sends any traffic. INERT unless
@@ -246,6 +299,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
         brain_execute_via_body=bool(getattr(args, "brain_execute_via_body", False)),
         plan_only=bool(getattr(args, "plan_only", False)),
+        otlp_endpoint=_resolve_otlp_endpoint(args),   # NET-2b: opt-in loopback telemetry (default-OFF)
     )
     engine = build_engine(cfg)
     report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
@@ -3543,6 +3597,37 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report.get("ok") else 1
 
 
+def _cmd_ready(args: argparse.Namespace) -> int:
+    """`vigil ready` (DEP-2, #73) — the bring-up READINESS GATE: wait (bounded by --wait) until the proxy's
+    /readyz answers 200 AND `vigil doctor` reports ok. Exit 0 = READY, 1 = not ready by the deadline, 2 = a
+    refused (non-loopback) --url. READ-ONLY: it writes nothing and enables nothing — readiness gating is not
+    execution enabling (customer production execution stays flag-held). Pure stdlib, framework-free."""
+    import json
+    import pathlib
+    from . import readiness as _rd
+    url = str(getattr(args, "url", "") or "").strip() or _rd.DEFAULT_READYZ_URL
+    if not _rd.readyz_url_is_loopback(url):
+        print("vigil ready: --url must be a loopback http(s) URL (the probe never leaves the box)", file=sys.stderr)
+        return 2
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    v = _rd.wait_ready(repo, url=url, wait_s=float(getattr(args, "wait", 0) or 0),
+                       interval_s=float(getattr(args, "interval", 2.0) or 2.0))
+    if getattr(args, "json", False):
+        print(json.dumps(v, indent=2, sort_keys=True))
+    else:
+        print(f"vigil ready: {'READY' if v['ready'] else 'NOT READY'} after {v['attempts']} attempt(s), "
+              f"{v['waited_s']}s")
+        print(f"  /readyz ({v['url']}): {'OK' if v['readyz_ok'] else 'NOT OK'}"
+              + (f" — {v['readyz_detail']}" if v["readyz_detail"] else ""))
+        if v["doctor_ok"] is None:
+            print("  vigil doctor: not run (waiting on /readyz)")
+        else:
+            print(f"  vigil doctor: {'ok' if v['doctor_ok'] else 'NOT ok'}")
+            for i in v["doctor_issues"]:
+                print(f"    - {i}")
+    return 0 if v["ready"] else 1
+
+
 def _cmd_verify_integrity(args: argparse.Namespace) -> int:
     """`vigil verify-integrity` (W6-7) — continuously verify the property the product exists to guarantee:
     the spine hash-chain / attestation. One audit by default (chain integrity, signed-head freshness, the
@@ -3576,6 +3661,8 @@ def _cmd_alerts(args: argparse.Namespace) -> int:
     durable local log and a delivery DEAD-MAN. `--status` is read-only. Exits non-zero on any alarm. EXEC-ONLY
     + boundary-safe: reads/writes inert on-disk JSON and imports only `vigil_core` — never framework/sigil."""
     from . import unit_alerts as _ua
+    if getattr(args, "test_delivery", False):
+        return _ua.cmd_test_delivery(state_dir=args.state_dir, as_json=getattr(args, "json", False))
     return _ua.cmd_alerts(state_dir=args.state_dir, watch=args.watch, cycles=args.cycles,
                           interval=args.interval, status_only=args.status_only,
                           require_push=args.require_push, as_json=getattr(args, "json", False))
@@ -4380,9 +4467,11 @@ def _ensure_tools_on_path() -> None:
 
 
 def _resolve_crucible_root() -> Optional[Path]:
-    """The CRUCIBLE root that holds ``.blackboard`` / ``.console/runs`` — from ``$CRUCIBLE_ROOT`` if it points
-    at a real dir, else the in-repo ``engine/crucible/framework/v2``, else None (no CRUCIBLE proof state to
-    capture). Framework-free (no import of ``framework.v2.common.paths``) so the backup verb stays light."""
+    """The CRUCIBLE root for backup / restore — ``$CRUCIBLE_ROOT`` (the crucible root) if it points at a real dir,
+    else the in-repo ``engine/crucible/framework/v2`` (its v2 root), else None (no CRUCIBLE proof state to
+    capture). EITHER spelling is correct: ``backup._CrucibleLayout`` maps each captured unit to where the engine
+    really keeps it (``targets/`` under the crucible root, everything else under ``framework/v2``) — #70c.
+    Framework-free (no import of ``framework.v2.common.paths``) so the backup verb stays light."""
     env = os.environ.get("CRUCIBLE_ROOT")
     if env:
         p = Path(env).expanduser()
@@ -4861,6 +4950,13 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--brain", default="", choices=("", "hexstrike"),
                     help="drive `think` with a homegrown propose-only decision brain (e.g. hexstrike) "
                          "instead of the Claude/replay path — gate + executor + oracle unchanged")
+    pe.add_argument("--otlp-endpoint", default="",
+                    help="NET-2b (DEFAULT OFF): export each governed action as a secret-free OTel span to a "
+                         "LOOPBACK OTLP/HTTP collector (e.g. http://127.0.0.1:4318 — start one with `vigil "
+                         "services up --with-observability`). Falls back to $VIGIL_OTLP_ENDPOINT; `--otlp-endpoint off` "
+                         "disables it for this run. A non-loopback value is refused (telemetry stays off; the "
+                         "engagement still runs). Requires the OpenTelemetry OTLP exporter installed. Telemetry is "
+                         "emit-only: it never gates, authorizes or changes a run's result.")
     pe.add_argument("--brain-execute-via-body", action="store_true",
                     help="H1x-1 (DEFAULT OFF): route a GATE-AUTHORIZED brain tool through the ONE canonical "
                          "HexstrikeAgentBody.execute instead of the governed executor. The gate is unchanged "
@@ -5696,6 +5792,17 @@ def build_parser() -> argparse.ArgumentParser:
     pdoc.add_argument("--json", action="store_true", help="emit the raw report as JSON")
     pdoc.set_defaults(func=_cmd_doctor)
 
+    prd = sub.add_parser("ready",
+                         help="DEP-2 bring-up readiness gate: wait (bounded by --wait) until the proxy's /readyz "
+                              "answers 200 AND `vigil doctor` is ok. Exit 0 = ready, 1 = not ready. Read-only: "
+                              "it enables nothing (customer production execution stays flag-held).")
+    prd.add_argument("--wait", type=float, default=0.0,
+                     help="seconds to keep polling before giving up (default 0 = check once; max 6h)")
+    prd.add_argument("--interval", type=float, default=2.0, help="seconds between attempts (default 2)")
+    prd.add_argument("--url", default="", help="the loopback /readyz URL (default http://127.0.0.1:8770/readyz)")
+    prd.add_argument("--json", action="store_true", help="emit the verdict as JSON")
+    prd.set_defaults(func=_cmd_ready)
+
     pvi = sub.add_parser("verify-integrity",
                          help="continuously verify the spine hash-chain integrity property (chain, "
                               "signed-head freshness, anti-rollback floor, clock skew). One audit by "
@@ -5727,6 +5834,10 @@ def build_parser() -> argparse.ArgumentParser:
     pal.add_argument("--require-push", action="store_true",
                      help="fail-closed: alarm if NO push destination is configured")
     pal.add_argument("--json", action="store_true", help="emit the summary/status as JSON")
+    pal.add_argument("--test-delivery", action="store_true", dest="test_delivery",
+                     help="push ONE labelled test alert through the configured destinations (the same path a real "
+                          "alarm takes) and report each result — prove alerts reach you BEFORE you rely on them. "
+                          "Exit 0 all delivered, 1 any failed, 2 none configured.")
     pal.set_defaults(func=_cmd_alerts)
 
     puh = sub.add_parser("unit-heartbeat",

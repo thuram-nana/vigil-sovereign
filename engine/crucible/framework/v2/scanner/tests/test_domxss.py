@@ -50,3 +50,12 @@ def test_html_extraction_of_inline_scripts() -> None:
     flows = _flows(analyze_html(html))
     assert ("location.hash", "document.write") in flows
     assert ("location.search", "eval") in flows
+
+
+def test_inline_script_closed_with_a_spaced_or_attributed_end_tag_is_still_analyzed() -> None:
+    """A browser ends a script element at `</script >` / `</script\\n x>` too (CodeQL py/bad-tag-filter): a bare
+    `</script>` extractor skipped such an inline script entirely, hiding its source->sink flow."""
+    js = "document.getElementById('o').innerHTML = location.hash;"
+    for end in ("</script >", "</script\n>", "</SCRIPT\t x=1>", "</script>"):
+        flows = _flows(analyze_html("<html><script>" + js + end + "</html>"))
+        assert ("location.hash", "innerHTML") in flows, end

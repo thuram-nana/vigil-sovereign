@@ -160,9 +160,12 @@ export VIGIL_BILLING_WEBHOOK_SECRET=…        # from the secret manager, NOT co
 sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
 ```
 
-Run it as a service alongside the cockpit. Point your Flutterwave webhook at the operator webhook
-ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is **no live paid path** —
-by design.
+To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
+dead-man monitored; it defaults to this same `$SIGIL_HOME/billing-spool`, which must equal the proxy's
+`VIGIL_BILLING_WEBHOOK_SPOOL`). Run the timer **or** `watch`, never both — two drainers reclaim each other's
+in-flight work. See `infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave
+webhook at the operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
+**no live paid path** — by design.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`
 

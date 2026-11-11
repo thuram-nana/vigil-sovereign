@@ -113,6 +113,9 @@ def _make_full_source(tmp_path, *, provision=True):
     (src / "qdrant" / "collection" / "storage.bin").write_bytes(b"QDRANT-VECTORS-\x00\x01\x02")
     (src / "graph" / "current").mkdir(parents=True)
     (src / "graph" / "current" / "kuzu.db").write_bytes(b"KUZU-GRAPH-MIRROR")
+    # #70: the unit EnvironmentFiles the shipped sovereign units read from SIGIL_HOME (captured).
+    for env in ("bridge.env", "cockpit.env", "customer.env", "public.env"):
+        (src / env).write_text(f"# {env}\n")
     return src, v, owner, witness_kp
 
 
