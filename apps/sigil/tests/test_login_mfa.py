@@ -281,6 +281,11 @@ def test_a_preslice_totpless_grant_still_verifies_and_the_conditional_core_is_lo
 
     # MUTATION: make the core UNCONDITIONAL (always include totp_secret) → the 7-field signature now fails
     monkeypatch.setattr(acc, "_core_fields", lambda p: acc._BASE_CORE + ("totp_secret",))
+    # A verification-rule change is a CODE change, which only ever takes effect in a new process. The verified
+    # fold cache (Front C S0, VIGIL_FOLD_CACHE_ENABLED) is per-process and in memory, so drop it here exactly as
+    # that restart would; with the flag unset this is a no-op.
+    from sigil.spine import fold_cache
+    fold_cache.clear_all()
     reg2 = _reg(s, owner)
     assert reg2.resolve(bearer) is None, "an unconditional totp_secret field must lock out the TOTP-less grant"
 
