@@ -128,6 +128,14 @@ KNOWN_ADVISORY: dict[str, str] = {
         "invariant it exercises is ALSO proven in the REQUIRED 'integration two-env boundary (P5)' job on "
         "3.13, so no coverage is lost by leaving this advisory."
     ),
+    "SIGIL suite with the fold cache ON (Front C production configuration)": (
+        "ci.yml — the whole apps/sigil/tests suite on the sovereign lock with VIGIL_FOLD_CACHE_ENABLED=1, the "
+        "configuration Front C's verified fold cache runs in when the operator switches it on. Advisory because "
+        "it is a NEW check: making it a merge blocker is the operator's call (.github/required-status-checks.txt "
+        "+ tools/governance/require-checks.sh --apply). The flag-OFF suite stays blocking in the REQUIRED "
+        "'SIGIL governor gates (P7 — offense gate + authn)' job, and the cache's own tests (test_fold_cache_*.py, "
+        "which switch the flag on themselves) run there too."
+    ),
     "VSCP isolated control plane (sibling)": (
         "vscp-ci.yml (W13-7 #500) — the VSCP sibling application's OWN test suite (registries + signed "
         "issuance + a re-run of the isolation scan). Advisory because it is a NEW check whose promotion to "

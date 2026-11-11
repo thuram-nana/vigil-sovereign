@@ -153,13 +153,20 @@ runtime installs now come from the lock, so the resolved version **is** the pinn
 construction, and `vigil_core` is installed `--no-deps` so its floors resolve to the already-locked
 versions rather than fresh from PyPI.
 
-Every job uses the **offense** framework lock for its third-party runtime subset — even the
-sovereign-side pure-Python jobs (`SIGIL governor`, `SIGIL lint`). That is deliberate: it is the
-light runtime closure (the sovereign lock drags in the `kuzu`/`onnxruntime`/`qdrant` ML stack those
-jobs do not need), it holds **only third-party packages** — no `framework`/`sigil` module, so
-FATAL-2 is untouched — and its shared-package versions are byte-identical to the sovereign lock
+The jobs that **run the SIGIL suite** (`apps/sigil/tests`: `SIGIL governor gates (P7)` and
+`SIGIL suite with the fold cache ON`) install the **sovereign** lock instead —
+`pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt` — because that is the tree
+SIGIL ships: on the offense lock the sovereign-only pins (`mcp`, `onnxruntime`, `numpy`,
+`qdrant-client`, `tokenizers`, `huggingface-hub`, `kuzu`) never met the suite, and the tests that
+need them skipped. No SIGIL test needs a package only the offense lock has, so there is no second
+runtime install to mask a sovereign pin (`apps/sigil/tests/test_ci_suite_legs.py` fails if either job
+installs the offense lock). The other jobs use the **offense** framework lock for their third-party
+runtime subset — including the sovereign-side `SIGIL lint`. That is deliberate: it is the light runtime
+closure (the sovereign lock drags in the `kuzu`/`onnxruntime`/`qdrant` ML stack those jobs do not
+need), it holds **only third-party packages** — no `framework`/`sigil` module, so FATAL-2 is
+untouched — and its shared-package versions are byte-identical to the sovereign lock
 (`test_shared_runtime_versions_agree_across_locks` fails if they ever diverge). The full sovereign
-environment is still exercised under `--require-hashes` by the A14 install proof.
+environment is also exercised under `--require-hashes` by the A14 install proof.
 
 The **CI/test toolchain** (`pytest`, `pytest-asyncio`, `ruff`, `mypy`) is not part of the shipped
 tree, so it is kept out of both runtime locks; it has its own hash-locked subset,

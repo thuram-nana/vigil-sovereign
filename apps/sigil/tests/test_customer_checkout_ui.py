@@ -14,6 +14,7 @@ What these pin:
 from __future__ import annotations
 
 import inspect
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +25,17 @@ from test_custui import _get, _opener, _post, _stack
 from test_customer_checkout import _iso, _on, _provisioner, _real_provider  # noqa: F401  (_iso is autouse)
 
 _APP_JS = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app" / "app.js"
+
+
+def _need_node() -> str:
+    """The node binary, or a SKIP where node is absent — except where VIGIL_REQUIRE_NODE is set (every CI job that
+    runs this file sets it): there a missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            pytest.fail("VIGIL_REQUIRE_NODE is set but node is not on PATH: this job must EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
 
 
 def _plans_on(monkeypatch):
@@ -170,7 +182,6 @@ def test_return_page_never_claims_or_grants_credit():
         assert claim not in view.lower()
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_https_guard_executed():
     """Execute the SPA's own isCheckoutUrl under node: only an absolute https link with a host and no credentials."""
     guard = _fn(_js(), "isCheckoutUrl")
@@ -180,11 +191,10 @@ def test_https_guard_executed():
     prog = guard + "\nconst c = " + __import__("json").dumps(cases) + ";\n" + \
         "for (const [u, want] of Object.entries(c)) { if (isCheckoutUrl(u) !== want) { console.log('BAD', u); " \
         "process.exit(1); } }\nconsole.log('ok');\n"
-    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.strip() == "ok", (r.stdout, r.stderr)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_router_resolves_only_own_routes_executed():
     """The hash is user-controlled: the router's lookup (its OWN source lines, executed under node) resolves only
     an own ROUTES entry — a prototype-named or unknown key falls back to the home view, never an inherited member
@@ -199,7 +209,7 @@ def test_router_resolves_only_own_routes_executed():
             "for (const key of ['#/billing/return', '#/', '#/nope', 'constructor', '__proto__', 'toString',\n"
             "                   'hasOwnProperty', 'valueOf', '#/billing/return/x']) {\n"
             + lookup + "\n  out.push([key, view()]);\n}\nconsole.log(JSON.stringify(out));\n")
-    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     got = dict(__import__("json").loads(r.stdout))      # pairs: a "__proto__" KEY must survive the round trip
     assert got == {"#/billing/return": "ret", "#/": "home", "#/nope": "home", "constructor": "home",

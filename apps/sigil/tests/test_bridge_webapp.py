@@ -14,10 +14,13 @@ These tests assert three things the slice must hold:
 Run: ~/.sigil/venv/bin/python tests/test_bridge_webapp.py
 """
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from sigil.bridge import build_core, envelope_message
 from sigil.gesture.session import arm_request_message
@@ -89,10 +92,21 @@ _NODE_SCRIPT = (
 )
 
 
+def _need_node() -> str:
+    """The node binary, or a SKIP where node is absent — except where VIGIL_REQUIRE_NODE is set (every CI job that
+    runs this file sets it): there a missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            pytest.fail("VIGIL_REQUIRE_NODE is set but node is not on PATH: this job must EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
+
 def _node_canonical(core: dict) -> bytes:
     """Run the SHIPPED JS canonicalJson (canonical.js) under Node over `core`; return its UTF-8 bytes."""
     out = subprocess.run(
-        ["node", "-e", _NODE_SCRIPT, json.dumps(core)],
+        [_need_node(), "-e", _NODE_SCRIPT, json.dumps(core)],
         env={"CANON": str((WEBAPP / "canonical.js").resolve()), "PATH": __import__("os").environ.get("PATH", "")},
         capture_output=True, timeout=30,
     )
@@ -101,10 +115,6 @@ def _node_canonical(core: dict) -> bytes:
 
 
 def test_canonicaljson_parity_via_node():
-    if not shutil.which("node"):
-        print("  SKIP  node not present — canonicalization parity NOT verified (install Node 22 to falsify)")
-        return
-
     # (a) the DOCUMENTED fixed envelope vector — byte-identical to sigil.bridge.envelope.envelope_message
     core = build_core("DEVKEYB64", "read:snapshot", {}, 1, 1700000000)
     expected = b'{"action":"read:snapshot","args":{},"device":"DEVKEYB64","nonce":1,"ts":1700000000,"v":1}'
@@ -178,15 +188,12 @@ def test_esc_is_safe_in_a_quoted_attribute_executed():
     """CQ-1: esc() output is placed inside `data-seq="…"` — it must escape BOTH quote styles, or a value
     carrying `"` ends the attribute and the rest becomes markup (CodeQL js/incomplete-html-attribute-
     sanitization). Executes the webapp's OWN esc() under node."""
-    if not shutil.which("node"):
-        print("  SKIP  node not present")
-        return
     src = (WEBAPP / "app.js").read_text(encoding="utf-8")
     start = src.index("var ESC_MAP = ")
     end = src.index("};", src.index("var esc = function")) + 2
     prog = src[start:end] + "\nprocess.stdout.write(JSON.stringify(process.argv.slice(1).map(esc)));\n"
     hostile = ['1" onmouseover="alert(1)', "1' autofocus onfocus='alert(1)", "<img src=x>", "a&b", "42"]
-    out = subprocess.run(["node", "-e", prog, *hostile], capture_output=True, text=True, timeout=30)
+    out = subprocess.run([_need_node(), "-e", prog, *hostile], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout)
     assert got == ["1&quot; onmouseover=&quot;alert(1)", "1&#39; autofocus onfocus=&#39;alert(1)",

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +20,16 @@ _ROOT = Path(__file__).resolve().parents[3]
 _VUI = _ROOT / "packages" / "vigil-ui" / "app.js"
 _CVSS = _ROOT / "apps" / "sigil" / "sigil" / "ui" / "public_site" / "tools" / "cvss-calculator" / "cvss.js"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+
+def _need_node() -> str:
+    """The node binary, or a SKIP where node is absent — except where VIGIL_REQUIRE_NODE is set (every CI job that
+    runs this file sets it): there a missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            pytest.fail("VIGIL_REQUIRE_NODE is set but node is not on PATH: this job must EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
 
 
 def _slice(src: str, start: str, end_after: str) -> str:
@@ -28,7 +38,7 @@ def _slice(src: str, start: str, end_after: str) -> str:
 
 
 def _node(prog: str):
-    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
