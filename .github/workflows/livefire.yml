@@ -65,7 +65,7 @@ jobs:
         # from-source build, so nikto joins the other provision-fragile tools in the non-blocking nightly
         # run, where a bad pin is a signal rather than a merge-blocker. The capability is proven; only its
         # fast-lane provisioning is unreliable, which is exactly the distinction this split already makes.
-        run: sudo apt-get update && sudo apt-get install -y nmap hydra
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" nmap hydra
 
       - name: install the engine's python deps
         run: |
@@ -135,7 +135,7 @@ jobs:
         # version probe below reads empty and the job fails — a provision flake seen when a runner image
         # ships without XML::Writer (same SHA passed minutes earlier on a runner that had it).
         run: |
-          sudo apt-get update && sudo apt-get install -y nmap hydra sqlmap wapiti libnet-ssleay-perl libxml-writer-perl
+          bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" nmap hydra sqlmap wapiti libnet-ssleay-perl libxml-writer-perl
           # XML::Writer is what `nikto -Version` aborts without, leaving the version probe empty. Assert it
           # imports; if the runner image shipped without it despite the apt package, pull it from CPAN
           # (-T skips its test suite) so the probe below reads a real version rather than failing blind.
