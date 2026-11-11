@@ -20,8 +20,10 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / ".github" / "scripts"
 _PLANE = "vigil_plane_that_does_not_exist"
 
 
-def _run(tmp_path: Path, body: str, *, require: str | None, plugin: bool = True):
+def _run(tmp_path: Path, body: str, *, require: str | None, plugin: bool = True, conftest: str | None = None):
     (tmp_path / "test_sample.py").write_text(textwrap.dedent(body), encoding="utf-8")
+    if conftest is not None:
+        (tmp_path / "conftest.py").write_text(textwrap.dedent(conftest), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "VIGIL_REQUIRE_PLANES"}
     env["PYTHONPATH"] = str(_SCRIPTS)
     if require is not None:
@@ -108,3 +110,71 @@ def test_negative_control_without_the_plugin_the_same_file_goes_green(tmp_path):
     rc, out = _run(tmp_path, _IN_TEST, require=_PLANE, plugin=False)
     assert rc == 0, out
     assert "1 passed, 1 skipped" in out
+
+
+def test_a_custom_reason_still_reports_the_real_import_error(tmp_path):
+    """pytest's Skipped carries only the reason text; the plugin re-imports to name what actually failed."""
+    body = f"""
+        import pytest
+        def test_needs_plane():
+            pytest.importorskip("{_PLANE}.renamed", reason="CRUCIBLE (offense) not importable here")
+    """
+    rc, out = _run(tmp_path, body, require=_PLANE)
+    assert rc == 1, out
+    assert "ModuleNotFoundError" in out and f"{_PLANE}" in out and "not importable here" in out
+
+
+def test_an_xfail_mark_cannot_turn_the_failure_green(tmp_path):
+    body = f"""
+        import pytest
+        @pytest.mark.xfail(strict=True, reason="slice S6")
+        def test_expected_to_fail_for_another_reason():
+            pytest.importorskip("{_PLANE}.x", reason="custom")
+    """
+    rc, out = _run(tmp_path, body, require=_PLANE)
+    assert rc != 0, out
+    assert "skipped for a REQUIRED plane" in out
+
+
+def test_an_alias_taken_in_a_conftest_is_the_patched_function(tmp_path):
+    conftest = """
+        import pytest
+        need = pytest.importorskip
+    """
+    body = f"""
+        from conftest import need
+        def test_uses_the_alias():
+            need("{_PLANE}.x", reason="custom")
+    """
+    rc, out = _run(tmp_path, body, require=_PLANE, conftest=conftest)
+    assert rc == 1, out
+    assert "would SKIP, but this leg requires" in out
+
+
+def test_a_skipif_whose_reason_names_a_required_plane_fails_the_run(tmp_path):
+    body = f"""
+        import pytest
+        @pytest.mark.skipif(True, reason="floor L3/L4 denylist needs {_PLANE}")
+        def test_gated():
+            pass
+    """
+    rc, out = _run(tmp_path, body, require=_PLANE)
+    assert rc == 1, out
+    assert "skipped for a REQUIRED plane" in out and "test_gated" in out
+
+
+def test_an_english_word_plane_matches_only_its_module_forms(tmp_path):
+    """`framework` is also an English word: only `framework.<x>` or the quoted name counts as naming it."""
+    body = """
+        import pytest
+        @pytest.mark.skipif(True, reason="needs the test framework's docker fixture")
+        def test_english():
+            pass
+        @pytest.mark.skipif(True, reason="drives framework.v2.agent_body.interface (offense leg only)")
+        def test_dotted():
+            pass
+    """
+    rc, out = _run(tmp_path, body, require="framework")
+    assert rc == 1, out
+    assert "test_dotted" in out.split("skipped for a REQUIRED plane", 1)[1]
+    assert "test_english" not in out.split("skipped for a REQUIRED plane", 1)[1]
