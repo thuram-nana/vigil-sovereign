@@ -366,7 +366,7 @@ def console_dir() -> Path:
 # guard covers report / worldmodel / coverage / evidence / remediate / reverify alike (fail-closed: a bad id
 # raises ValueError; remediate_plan _safe-wraps it to an honest empty state, every other route lets it
 # bubble to do_GET/do_POST which map it to a clean 404 — never a 500, never a traversal).
-_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")   # \Z, not $: "$" also matches before a trailing "\n"
 
 
 def _safe_run_id(run_id: str) -> str:

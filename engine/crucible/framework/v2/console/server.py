@@ -30,6 +30,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -179,6 +180,33 @@ _SCOPED_ROUTES = {
     # `?slug=` scopes to one engagement; blank is the fleet rollup. Pure projection — no egress, no keys.
     "/api/posture-dashboard": api.posture_dashboard,
 }
+
+# Every slug / run id / name a GET route hands a provider is used as ONE path component under a fixed root
+# (paths.target_dir, paths.authority_path, actions.run_dir, …). Those helpers join it verbatim, so a raw
+# "../x" or "a/../../b" (an HTTP client may send any request-target it likes) used to escape the root — e.g.
+# /api/library/<rel>/x read <rel>/x.authority.json from an arbitrary directory. So the argument is checked
+# HERE, at the boundary those providers sit behind: blank (the providers' own "select an engagement"
+# state) or exactly one safe component — fullmatch, so a trailing newline is refused too. Anything else is
+# a ValueError, which do_GET already maps to a clean 404. (The _SCOPED_ROUTES ``?slug=`` is NOT checked: it
+# is a pure FILTER over recorded slugs / store queries, never joined into a path, and an unknown or odd
+# value there is deliberately an honest empty result — see tests/test_run_scope.py.)
+_ROUTE_ARG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _route_arg(arg: str | None) -> str:
+    s = "" if arg is None else str(arg)
+    if s and (".." in s or _ROUTE_ARG_RE.fullmatch(s) is None):
+        raise ValueError(f"unsafe route argument: {s[:80]!r}")
+    return s
+
+
+def _route_arg_pair(arg: str | None) -> str:
+    """``/api/drift/<curr>[:<prev>]`` — two run ids joined by ':'; each half is checked as one component."""
+    s = "" if arg is None else str(arg)
+    for part in s.split(":", 1):
+        _route_arg(part.strip())
+    return s
+
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
 # NB (A6 / B7 cleanup): the unified UI calls `/api/engagements` (plural, list) and `/api/report/<run>`
@@ -462,6 +490,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 run_q = (q.get("run") or [None])[0]
                 slug_q = (q.get("slug") or [None])[0]
+                if slug_q is not None:
+                    _route_arg(slug_q)     # stream_path joins it under targets_root() verbatim
                 # Replay (from_start OR a Last-Event-ID resume) is honoured for a RUN only. `run` is
                 # validated (_safe_run_id) whereas `slug` indexes straight into targets_root(), so a replay
                 # there would emit the whole contents of a file addressed by an unvalidated name — and put
@@ -479,7 +509,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/blackboard":
                 q = parse_qs(parts.query)
-                slug = (q.get("slug") or [""])[0]
+                slug = _route_arg((q.get("slug") or [""])[0])
                 # durable cursor: the Last-Event-ID reconnect header wins over the ?since= seed.
                 since = 0
                 for src in ((q.get("since") or ["0"])[0], self.headers.get("Last-Event-ID")):
@@ -570,7 +600,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             for prefix, fn in _PREFIX_ROUTES.items():
                 if path.startswith(prefix):
-                    self._json(fn(path[len(prefix):].strip("/")))
+                    arg = path[len(prefix):].strip("/")
+                    arg = _route_arg_pair(arg) if fn is api.drift_data else _route_arg(arg)
+                    self._json(fn(arg))
                     return
             if path.startswith("/api/"):
                 self._json({"error": "unknown endpoint"}, status=404)
