@@ -8,12 +8,15 @@ have never drilled against your real data is a hope, the same way an un-restored
 
 :func:`run_upgrade_drill` is that drill (mirrors ``tools/backup/recovery_drill.sh`` + ``vigil-backup-drill``):
 
-  1. SNAPSHOT the real spine directory into a scratch HOME inside a throwaway work dir. The snapshot is
-     CONSISTENT: taken under a SHARED flock on the store's own cross-process lockfile (writers hold it
-     exclusively per append) and proven byte-faithful by a content digest taken before and after the copy;
-  2. the remaining steps run in a CHILD process whose ``SIGIL_HOME`` (and ``TMPDIR``) is that scratch home,
-     so every path the spine code derives — the signed head, the owner PUBLIC key, the anti-rollback floor —
-     resolves INSIDE the work dir. The child is never told where the real home is;
+  1. SNAPSHOT the real spine directory (and its sibling anti-rollback floor) into a scratch HOME inside a
+     throwaway work dir. The snapshot is CONSISTENT: taken under a SHARED flock on the store's own
+     cross-process lockfile (writers hold it exclusively per append) and proven byte-faithful by a content
+     digest taken before and after the copy; an attempt that raced something outside that lock (a concurrent
+     ``sigil sign`` rewriting the head / floor) is retried, a bounded number of times;
+  2. the remaining steps run in a CHILD process whose ``SIGIL_HOME`` is that scratch home and whose ``TMPDIR``
+     is inside the work dir (it refuses to run otherwise), so every path the spine code derives — the signed
+     head, the owner PUBLIC key, the anti-rollback floor, the upgrade's backup-verify extract — resolves INSIDE
+     the work dir. The child is never told where the real home is;
   3. verify the copy (chain; a pruned window is corroborated by the COPY's own signed head with the owner
      PUBLIC key) and record its count + sequence set;
   4. run the REAL ``upgrade()`` orchestrator on the copy (it takes + verifies its own pre-upgrade backup);
@@ -121,15 +124,13 @@ def _key_fingerprint(spine_dir: Path) -> str:
 
 
 def _private_keys_under(root: Path) -> "list[str]":
-    """Every secret key file anywhere under ``root`` (by name; contents never read)."""
+    """Every secret key file anywhere under ``root``, by NAME (contents never read) — the :func:`_is_secret` rule
+    wherever it sits: a ``*.priv`` / ``*.dek``, or any non-``*.pub`` file inside a ``keys/`` dir."""
     out = []
     for p in root.rglob("*"):
-        try:
-            rel = p.relative_to(root)
-        except ValueError:
-            continue
-        if p.is_file() and (p.name.endswith(".priv") or p.name.endswith(".dek")):
-            out.append(str(rel))
+        if p.is_file() and (p.name.endswith((".priv", ".dek"))
+                            or (p.parent.name == _KEYS_DIR and not p.name.endswith(".pub"))):
+            out.append(str(p.relative_to(root)))
     return sorted(out)
 
 
@@ -403,12 +404,14 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
 
 
 def _child_main(data: str, work_dir: str) -> int:
-    """The isolated child: refuse unless this process's SIGIL_HOME IS the snapshot's scratch home."""
+    """The isolated child: refuse unless this process's SIGIL_HOME IS the snapshot's scratch home and its temp
+    dir (the upgrade's backup-verify extract lands there) is inside the work dir."""
     from .. import config
     d = Path(data)
-    if config.SIGIL_HOME.resolve() != d.parent.parent.resolve():
+    tmp = Path(tempfile.gettempdir()).resolve()
+    if config.SIGIL_HOME.resolve() != d.parent.parent.resolve() or not tmp.is_relative_to(Path(work_dir).resolve()):
         res = {"status": FAIL, "detail": f"refusing: the isolated drill is not scoped to its copy "
-                                         f"(SIGIL_HOME={config.SIGIL_HOME})", "steps": []}
+                                         f"(SIGIL_HOME={config.SIGIL_HOME}, TMPDIR={tmp})", "steps": []}
     else:
         res = drill_copy(d, Path(work_dir))
     print(json.dumps(res, sort_keys=True, default=str))

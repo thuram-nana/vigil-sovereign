@@ -103,14 +103,25 @@ def test_a_source_changed_during_the_drill_still_gets_a_verdict(tmp_path, monkey
     assert "concurrent writes" in v["detail"] and v["count"] == 8           # the SNAPSHOT's records
 
 
-def test_a_drill_that_changes_the_real_owner_keys_fails(tmp_path, monkeypatch):
-    path = _real_spine(tmp_path)
+@pytest.mark.parametrize("keys_dir_existed", [False, True])
+def test_a_drill_that_changes_the_real_owner_keys_fails(tmp_path, monkeypatch, keys_dir_existed):
+    """Tripwire for the defect class (a mint into the REAL home while the drill runs): a new owner keypair over
+    an existing owner.pub (the key kept off-box), or a keys dir that appears, FAILS the drill."""
+    from sigil.reuse import generate_keypair
+    if keys_dir_existed:
+        home = _signed_home(tmp_path, pruned=False)
+        (home / "spine" / "keys" / "owner.priv").unlink()                   # the owner keeps the key off-box
+        path = home / "spine" / "spine.jsonl"
+    else:
+        path = _real_spine(tmp_path)
     real = ud._run_isolated
 
     def minting(data, work):
         kd = path.parent / "keys"
         kd.mkdir(exist_ok=True)
-        (kd / "owner.pub").write_text("a-freshly-minted-key")            # the defect class: a mint into the REAL home
+        kp = generate_keypair()
+        (kd / "owner.priv").write_text(kp.private_key_b64)
+        (kd / "owner.pub").write_text(kp.public_key_b64)
         return real(data, work)
     monkeypatch.setattr(ud, "_run_isolated", minting)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
@@ -219,6 +230,21 @@ def test_an_inconsistent_snapshot_is_inconclusive_not_a_fail(tmp_path, monkeypat
     assert v["status"] == ud.INCONCLUSIVE and "consistent snapshot" in v["detail"]
 
 
+def test_a_snapshot_that_races_a_writer_twice_is_retried_not_inconclusive(tmp_path, monkeypatch):
+    """head.json / floor.json are rewritten by a concurrent ``sigil sign`` OUTSIDE the store's writer lock, so an
+    attempt can race. Bounded retries (at least three attempts) still yield a consistent snapshot and a verdict."""
+    path = _real_spine(tmp_path)
+    real, calls = ud._tree_digest, []
+
+    def racing(root):
+        calls.append(root)
+        return "raced" if len(calls) in (2, 5) else real(root)   # attempts 1 + 2: the mid-copy digest moved
+    monkeypatch.setattr(ud, "_tree_digest", racing)
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
+    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    assert v["status"] == ud.PASS, v
+
+
 def test_the_snapshot_holds_a_shared_lock_on_the_writer_lockfile(tmp_path, monkeypatch):
     import fcntl
     path = _real_spine(tmp_path)
@@ -254,6 +280,43 @@ def test_a_concurrent_writer_never_yields_a_false_accusation(tmp_path):
         t.join(5)
     assert v["status"] == ud.PASS, v                  # a busy box still gets a verdict on a consistent snapshot
     assert "investigate" not in v["detail"]
+
+
+_LIVE_WRITER = """
+import sys, time
+from pathlib import Path
+from sigil.spine.store import SpineStore
+stop, i = Path(sys.argv[2]), 0
+while not stop.exists():
+    SpineStore(sys.argv[1]).append(kind="event", source="live", actor="w", payload={"live": i})
+    i += 1
+    time.sleep(0.005)
+"""
+
+
+def test_a_busy_box_with_a_live_writer_process_still_gets_a_verdict(tmp_path):
+    """The audit repro (weekly INCONCLUSIVE on a busy box): a SEPARATE writer process appends to the real spine
+    the whole time the drill runs. The drill still concludes (PASS on its consistent snapshot), and says the live
+    spine moved on."""
+    import subprocess
+    import time
+    path = _real_spine(tmp_path, n=40)
+    stop = tmp_path / "stop-writer"
+    env, py = _env(path.parent.parent)
+    w = subprocess.Popen([py, "-c", _LIVE_WRITER, str(path), str(stop)], env=env)
+    try:
+        start = SpineStore(str(path)).count()
+        deadline = time.monotonic() + 30
+        while SpineStore(str(path)).count() < start + 5 and time.monotonic() < deadline:
+            time.sleep(0.05)                                    # the writer is demonstrably live before we start
+        v = ud.run_upgrade_drill(path, tmp_path / "work")
+        during = SpineStore(str(path)).count()
+    finally:
+        stop.touch()
+        w.wait(30)
+    assert v["status"] == ud.PASS, v
+    assert v["source_changed_during_drill"] is True and "concurrent writes" in v["detail"]
+    assert start + 5 <= v["count"] < during                     # the drill verified a point-in-time snapshot
 
 
 def test_pass_message_is_honest_about_an_already_migrated_spine(tmp_path):
@@ -364,6 +427,31 @@ def test_the_owner_private_key_is_never_copied_into_the_drill(tmp_path, pruned):
     _assert_no_owner_key_under(work, priv)
 
 
+def test_no_secret_key_file_of_any_kind_reaches_the_drill(tmp_path):
+    """Every secret under ``keys/`` stays behind — the owner private key, the spine DEK and a crash-leftover temp
+    file of the private key (``owner.priv.tmp``, the vault's atomic-write name) — and so does a stray ``*.priv`` /
+    ``*.dek`` elsewhere in the spine dir, while exactly the PUBLIC key files are carried. Proven by walking the
+    work dir AND every tarball for each secret's bytes."""
+    import os
+    home = _signed_home(tmp_path, pruned=False)
+    kd = home / "spine" / "keys"
+    priv = (kd / "owner.priv").read_text()
+    dek = os.urandom(48).hex()
+    (kd / "spine.dek").write_text(dek)
+    (kd / "owner.priv.tmp").write_text(priv)
+    (kd / "owner.genesis.pub").write_text((kd / "owner.pub").read_text())
+    (home / "spine" / "owner-copy.priv").write_text(priv)        # outside keys/: excluded by its suffix
+    (home / "spine" / "old-spine.dek").write_text(dek)
+    work = tmp_path / "work"
+    v = ud.run_upgrade_drill(home / "spine" / "spine.jsonl", work)
+    assert v["status"] == ud.PASS, v
+    assert list(work.rglob("*.tar.gz"))
+    for secret in (priv, dek):
+        _assert_no_owner_key_under(work, secret)
+    assert sorted(p.name for p in (work / "home" / "spine" / "keys").iterdir()) == ["owner.genesis.pub", "owner.pub"]
+    assert not [p for p in work.rglob("*") if p.name.endswith((".priv", ".dek", ".priv.tmp"))]
+
+
 def test_the_owner_private_key_is_not_in_the_work_dir_after_a_failed_drill(tmp_path, monkeypatch):
     home = _signed_home(tmp_path, pruned=False)
     priv = (home / "spine" / "keys" / "owner.priv").read_text()
@@ -410,31 +498,37 @@ def test_the_manual_cli_drill_on_its_own_pruned_home_never_mints_a_key(tmp_path)
     assert _whole_tree(home) == before and not (home / "spine" / "keys" / "owner.priv").exists()
 
 
-def test_verify_never_mints_over_an_existing_owner_public_key(tmp_path):
-    """The lowest layer of the mint: ``trust_root`` (every verify) read the PRIVATE key and generated a new
-    keypair when it was absent — re-keying the trust root over the existing owner.pub. It now reads only the
-    public key."""
+@pytest.mark.parametrize("how", ["verify_checkpoint", "sigil verify"])
+def test_verify_never_mints_over_an_existing_owner_public_key(tmp_path, how):
+    """The lowest layer of the mint: ``trust_root`` (every verify, plain ``sigil verify`` included) read the
+    PRIVATE key and generated a new keypair when it was absent — re-keying the trust root over the existing
+    owner.pub and then reporting the genuine head as TAMPERING. It now reads only the public key."""
     import subprocess
     home = _signed_home(tmp_path, pruned=False)
     (home / "spine" / "keys" / "owner.priv").unlink()
-    pub = (home / "spine" / "keys" / "owner.pub").read_bytes()
+    before = _whole_tree(home / "spine" / "keys")
     env, py = _env(home)
-    code = ("from sigil.spine.checkpoint import verify_checkpoint\n"
-            "from sigil.spine.store import SpineStore\nfrom sigil import config\n"
-            "print(verify_checkpoint(SpineStore(config.SPINE_PATH))[0])")
-    r = subprocess.run([py, "-c", code], env=env, capture_output=True, text=True)
-    assert r.stdout.strip() == "True", r.stdout + r.stderr
-    assert not (home / "spine" / "keys" / "owner.priv").exists()
-    assert (home / "spine" / "keys" / "owner.pub").read_bytes() == pub
+    if how == "sigil verify":
+        r = subprocess.run([py, "-m", "sigil", "verify"], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and "head  OK" in r.stdout, r.stdout + r.stderr
+    else:
+        code = ("from sigil.spine.checkpoint import verify_checkpoint\n"
+                "from sigil.spine.store import SpineStore\nfrom sigil import config\n"
+                "print(verify_checkpoint(SpineStore(config.SPINE_PATH))[0])")
+        r = subprocess.run([py, "-c", code], env=env, capture_output=True, text=True)
+        assert r.stdout.strip() == "True", r.stdout + r.stderr
+    assert _whole_tree(home / "spine" / "keys") == before          # byte-identical: no mint, owner.pub kept
 
 
-def test_a_private_key_in_the_work_dir_fails_the_drill(tmp_path, monkeypatch):
+@pytest.mark.parametrize("leak", ["owner.priv", "tmp/spine.dek", "home/spine/keys/owner.priv.tmp"])
+def test_a_private_key_in_the_work_dir_fails_the_drill(tmp_path, monkeypatch, leak):
     path = _real_spine(tmp_path)
     real = ud._run_isolated
 
     def leaky(data, work):
         res = real(data, work)
-        (work / "owner.priv").write_text("leaked")
+        (work / leak).parent.mkdir(parents=True, exist_ok=True)
+        (work / leak).write_text("leaked")
         return res
     monkeypatch.setattr(ud, "_run_isolated", leaky)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
@@ -452,11 +546,37 @@ def test_the_drill_steps_refuse_a_copy_holding_a_private_key(tmp_path):
     assert not any(st["step"] == "upgrade" for st in v["steps"])
 
 
-def test_the_isolated_child_refuses_unless_scoped_to_its_copy(tmp_path, capsys):
+@pytest.mark.parametrize("scope", ["foreign_home", "foreign_tmp", "scoped"])
+def test_the_isolated_child_refuses_unless_scoped_to_its_copy(tmp_path, capsys, monkeypatch, scope):
+    """The child runs the steps only when BOTH its SIGIL_HOME is the scratch home and its temp dir (where the
+    upgrade's backup-verify extract lands) is inside the work dir."""
+    from sigil import config
     path = _real_spine(tmp_path)
-    home = tmp_path / "work" / "home"
+    work = tmp_path / "work"
+    home = work / "home"
     assert ud._snapshot(path.parent, path.name, home) is not None
-    assert ud.main([ud._CHILD_FLAG, str(home / "spine" / path.name), "--work-dir", str(tmp_path / "work")]) == 0
+    if scope != "foreign_home":
+        monkeypatch.setattr(config, "SIGIL_HOME", home)
+    if scope != "foreign_tmp":
+        (work / "tmp").mkdir()
+        monkeypatch.setattr(ud.tempfile, "tempdir", str(work / "tmp"))
+    assert ud.main([ud._CHILD_FLAG, str(home / "spine" / path.name), "--work-dir", str(work)]) == 0
     res = json.loads(capsys.readouterr().out)
-    assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"]
-    assert not list((tmp_path / "work").rglob("*.tar.gz"))                 # refused before any step ran
+    if scope == "scoped":
+        assert res["status"] == ud.PASS, res                               # positive control
+    else:
+        assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"]
+        assert not list(work.rglob("*.tar.gz"))                            # refused before any step ran
+
+
+def test_the_copy_is_verified_against_the_boxs_own_anti_rollback_floor(tmp_path):
+    """The snapshot carries the sibling anti-rollback floor, so the copy is verified exactly as the box verifies
+    itself: a durable floor the real head violates FAILS the drill (as ``sigil verify`` would) — it is not
+    silently dropped from the copy."""
+    home = _signed_home(tmp_path, pruned=True)
+    floor = json.loads((home / "floor.json").read_text())
+    floor["entry_count"] += 1000                                   # the signed head is now BELOW the floor
+    (home / "floor.json").write_text(json.dumps(floor))
+    v = ud.run_upgrade_drill(home / "spine" / "spine.jsonl", tmp_path / "work")
+    assert v["status"] == ud.FAIL and v["detail"].startswith("the real spine (copied) does not verify"), v
+    assert "TAMPERING" in v["detail"], v
