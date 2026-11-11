@@ -18,6 +18,9 @@ What these pin (each mutation-verified):
   * FAIL-SAFE: an untrusted ledger, an unreadable clock, a name collision or flipping the flag OFF never yields an
     unbounded retry, a clobbered webhook, or a stranded one; a crash mid-deferral keeps the budget;
   * a retry can never double-credit (a twin delivery while parked credits once);
+  * the bound is PER PAYMENT: finalising a same-named TWIN (quarantined, deduped or minted) never touches the
+    PARKED envelope's ledger, so twins cannot hand it a fresh budget — and the twin's quarantine still alarms;
+  * a clock that RAISES at re-admit time never escapes ``drain()`` and never holds a webhook parked;
   * the dangling-checkout sweep reports a parked tx_ref as ``retrying`` (not ``no_webhook``).
 """
 from __future__ import annotations
@@ -529,4 +532,262 @@ def test_a_broken_clock_at_readmit_time_never_holds_a_webhook_parked(tmp_path, m
     sp.write_text(json.dumps({**json.loads(sp.read_text()), "next_at": 1001.0}))   # due in 1 s: a plausible wait
     watcher._now = lambda: bad
     watcher._readmit_retries(recovery_on=True)
+    assert (spool / "incoming" / name).exists() and watcher.parked_count() == 0
+
+
+# --- the retry bound is per PAYMENT: a same-named twin never touches the parked envelope's ledger ---------------
+# The proxy dedups a redelivery only against incoming/, so the processor's identical redelivery (same bytes ->
+# the same content-addressed NAME) can land while the original is parked in retry/.
+
+def _park_with_attempts(tmp_path, monkeypatch, steps, *, attempts, name=None):
+    """Park one envelope and walk it to ``attempts`` on the real schedule. Returns the rig + its ledger bytes."""
+    _on(monkeypatch)
+    clock = _Clock(1000.0)
+    proc = _Processor(monkeypatch, [_http(503)] * attempts + list(steps))
+    w, watcher, spool = _rig(tmp_path, clock)
+    env = _envelope()
+    name = _spool(spool, env, name=name)
+    watcher.drain()
+    for _ in range(attempts - 1):
+        clock.t = _ledger(spool, name)["next_at"]
+        watcher.drain()
+    assert _ledger(spool, name)["attempts"] == attempts and proc.calls == attempts
+    return w, watcher, spool, clock, proc, env, name
+
+
+def test_a_same_named_twin_never_resets_the_parked_payments_retry_budget(tmp_path, monkeypatch):
+    """The audit's repro, inverted. Quarantining the twin used to delete retry/<name>.state — the PARKED
+    envelope's ledger — so its next failure counted as attempt 1 again (5 -> 1)."""
+    _w, watcher, spool, clock, proc, env, name = _park_with_attempts(tmp_path, monkeypatch, [], attempts=5)
+    before = (spool / "retry" / (name + ".state")).read_bytes()
+    _spool(spool, env)                                                      # the identical redelivery
+    res = watcher.drain()                                                   # parked: not due. twin: 503 again
+    assert res["rejected"] == 1 and res["deferred"] == 0 and proc.calls == 6
+    assert "already awaiting a NET-2b retry" in (spool / "rejected" / (name + ".reason")).read_text()
+    assert quarantined_count(spool / "rejected") == 1                       # the twin's quarantine still ALARMS
+    assert (spool / "retry" / name).read_bytes() == env                     # the parked payment is untouched...
+    assert (spool / "retry" / (name + ".state")).read_bytes() == before     # ...and so is ITS budget (attempts 5)
+    clock.t = _ledger(spool, name)["next_at"]
+    assert watcher.drain()["deferred"] == 1
+    assert _ledger(spool, name)["attempts"] == 6                            # 5 -> 6, never back to 1
+
+
+def test_twins_on_every_pass_cannot_extend_the_bound(tmp_path, monkeypatch):
+    """A processor that stays down AND keeps redelivering: the parked payment still gets exactly 8 retries on the
+    schedule, then quarantines with the honest reason. (Each twin reset the budget before: it never exhausted.)"""
+    _on(monkeypatch)
+    clock = _Clock(1000.0)
+    proc = _Processor(monkeypatch, [])                                      # every call: URLError (down)
+    w, watcher, spool = _rig(tmp_path, clock)
+    env = _envelope()
+    name = _spool(spool, env)
+    watcher.drain()
+    delays = []
+    for _ in range(8):
+        led = _ledger(spool, name)
+        _spool(spool, env)                                                  # a twin arrives while it is parked
+        assert watcher.drain()["rejected"] == 1                            # the twin: tried once, quarantined
+        assert _ledger(spool, name) == led                                  # the parked budget did not move
+        delays.append(led["next_at"] - clock.t)
+        clock.t = led["next_at"]
+        watcher.drain()                                                     # the parked envelope's own retry
+    assert delays == _SCHEDULE
+    assert proc.calls == 1 + 8 + 8                                          # first try + 8 retries (+ 8 twins)
+    assert (spool / "rejected" / (name + ".reason")).read_text() == (
+        "rejected (transient FlutterwaveEgressError persisted through 8 bounded NET-2b retries): "
+        "Flutterwave GET transport failure (URLError)")
+    assert watcher.parked_count() == 0 and list((spool / "retry").iterdir()) == []
+    assert quarantined_count(spool / "rejected") == 1 and w.available("acme") == 0
+
+
+def test_a_twin_is_refused_as_a_twin_even_when_the_parked_budget_is_spent(tmp_path, monkeypatch):
+    """The ledger is the PARKED envelope's: a twin is never judged by it ("persisted through 8 retries" for a
+    delivery tried once) and never clears it. The parked envelope then exhausts on its own final retry."""
+    _w, watcher, spool, clock, proc, env, name = _park_with_attempts(tmp_path, monkeypatch, [], attempts=8)
+    _spool(spool, env)
+    assert watcher.drain()["rejected"] == 1
+    assert "already awaiting a NET-2b retry" in (spool / "rejected" / (name + ".reason")).read_text()
+    assert _ledger(spool, name)["attempts"] == 8 and (spool / "retry" / name).exists()
+    clock.t = _ledger(spool, name)["next_at"]
+    assert watcher.drain()["rejected"] == 1 and proc.calls == 10            # 9 for the payment + 1 for the twin
+    assert "persisted through 8 bounded NET-2b retries" in (spool / "rejected" / (name + ".reason")).read_text()
+    assert list((spool / "retry").iterdir()) == []
+
+
+def _twin_bytes(kind, spool, watcher, parked_env):
+    if kind == "malformed":
+        return b"{not json"
+    if kind in ("non_transient", "minted"):
+        return _envelope(9912)                                              # a DIFFERENT webhook, same name
+    assert kind == "deduped"
+    other = _envelope(9913)                                                 # bytes the drain already archived
+    (spool / "processed" / (hashlib.sha256(other).hexdigest() + ".json")).write_bytes(other)
+    return other
+
+
+@pytest.mark.parametrize("kind,step,outcome", [
+    ("malformed", None, "rejected"),                                        # BillingSpoolError quarantine
+    ("non_transient", _http(401), "rejected"),                              # unexpected-error quarantine
+    ("deduped", None, "deduped"),                                           # sha256 dedup archive
+    ("minted", {**_OK, "data": {**_OK["data"], "id": 9912, "tx_ref": "vigil:acme:n2"}}, "minted"),   # success archive
+])
+def test_no_way_of_finalising_a_same_named_twin_touches_the_parked_ledger(tmp_path, monkeypatch, kind, step, outcome):
+    """Every path that finalises a claimed envelope clears "its" ledger by NAME. While a same-named envelope is
+    parked that ledger is not the claimed one's — whichever way the twin ends."""
+    steps = [step] if step is not None else []
+    w, watcher, spool, clock, _proc, env, name = _park_with_attempts(tmp_path, monkeypatch, steps, attempts=3,
+                                                                     name="x.json")
+    before = (spool / "retry" / "x.json.state").read_bytes()
+    _spool(spool, _twin_bytes(kind, spool, watcher, env), name="x.json")
+    res = watcher.drain()                                                   # the parked one is not due
+    assert res[outcome] == 1, res
+    assert (spool / "retry" / "x.json").read_bytes() == env
+    assert (spool / "retry" / "x.json.state").read_bytes() == before        # attempts 3, same next_at
+    assert w.available("acme") == (200 if kind == "minted" else 0)
+    grants = [r for r in w.store.iter_records() if r.payload.get("signal") == "governor.credit_grant"]
+    assert len(grants) == (1 if kind == "minted" else 0)                    # and the parked payment minted nothing
+
+
+def test_a_same_named_twin_that_succeeds_credits_once_and_the_ledger_is_cleaned_up(tmp_path, monkeypatch):
+    """Exactly-once is unchanged by leaving the ledger alone: the identical twin mints, the parked original then
+    dedups against it (nothing credited twice) and ITS final pass clears the ledger — nothing is left behind."""
+    w, watcher, spool, clock, proc, env, name = _park_with_attempts(tmp_path, monkeypatch, [_OK], attempts=2)
+    _spool(spool, env)                                                      # the processor recovered + redelivers
+    res = watcher.drain()
+    assert res["minted"] == 1 and w.available("acme") == 200 and proc.calls == 3
+    assert (spool / "retry" / name).exists() and _ledger(spool, name)["attempts"] == 2   # still the parked one's
+    clock.t = _ledger(spool, name)["next_at"]
+    res = watcher.drain()
+    assert res["deduped"] == 1 and res["minted"] == 0 and proc.calls == 3   # no second verify, no second mint
+    assert w.available("acme") == 200 and list((spool / "retry").iterdir()) == []
+    grants = [r for r in w.store.iter_records() if r.payload.get("signal") == "governor.credit_grant"]
+    assert [g.payload["entry_id"] for g in grants] == ["9911"]
+    assert quarantined_count(spool / "rejected") == 0
+
+
+# --- a clock that RAISES at re-admit time ----------------------------------------------------------------------
+
+def _raising_clock():
+    raise OSError("clock source unavailable")
+
+
+@pytest.mark.parametrize("flag_on", [True, False])
+def test_a_clock_that_raises_at_readmit_time_never_holds_a_webhook_parked(tmp_path, monkeypatch, flag_on):
+    """The re-admit sweep read the clock OUTSIDE any guard, so a raising clock propagated out of drain() (the
+    comment there said it was handled). It now fails toward re-admit, like a clock that returns garbage."""
+    _on(monkeypatch)
+    _Processor(monkeypatch, [_http(503)])
+    _w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope())
+    watcher.drain()
+    assert watcher.parked_count() == 1                                      # parked, due in 5 s
+    watcher._now = _raising_clock
+    watcher._readmit_retries(recovery_on=flag_on)                           # does not raise
+    assert (spool / "incoming" / name).exists() and watcher.parked_count() == 0
+
+
+def test_a_raising_clock_never_escapes_the_drain_and_the_envelope_is_quarantined_not_buried(tmp_path, monkeypatch):
+    """End to end: with the clock gone the parked webhook is re-admitted and — since ingest cannot stamp it either
+    — QUARANTINED (alarm), exactly what an unreadable clock does everywhere else. Never an exception out of the
+    drain, never a paid webhook sitting parked and un-alarmed."""
+    _on(monkeypatch)
+    proc = _Processor(monkeypatch, [_http(503)])
+    w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope())
+    watcher.drain()
+    watcher._now = _raising_clock
+    res = watcher.drain()                                                   # used to raise OSError here
+    assert res["rejected"] == 1 and res["deferred"] == 0 and proc.calls == 1
+    assert watcher.parked_count() == 0 and list((spool / "retry").iterdir()) == []
+    assert quarantined_count(spool / "rejected") == 1 and w.available("acme") == 0
+    assert (spool / "rejected" / (name + ".reason")).read_text() == \
+        "rejected (unexpected OSError): clock source unavailable"
+
+
+# --- a tampered ledger or a garbage clock never wedges the drain (red-pen drain-durability fold) ----------------
+# ``_readmit_retries`` runs BEFORE the per-file loop, and ``_defer`` runs INSIDE drain()'s catch-all handler, so an
+# exception from either escaped drain() on EVERY pass while one parked envelope existed: nothing re-admitted,
+# nothing quarantined, and every healthy paid webhook behind it left in incoming/ unclaimed.
+
+_OK_9912 = {**_OK, "data": {**_OK["data"], "id": 9912, "tx_ref": "vigil:acme:n2"}}
+
+
+@pytest.mark.parametrize("ledger,outcome", [
+    (b'{"attempts": 1, "next_at": 1' + b"0" * 400 + b"}", "re-parked"),   # valid JSON; next_at too large for a float
+    (b"[" * 100_000, "quarantined"),                                     # nesting deep enough to raise RecursionError
+], ids=["int-too-large-for-a-float", "deeply-nested"])
+def test_a_tampered_ledger_never_wedges_the_drain_or_the_payments_behind_it(tmp_path, monkeypatch, ledger, outcome):
+    """The window test compared ``float(due_at) - float(now)`` and caught only (OSError, ValueError, KeyError,
+    TypeError): a 401-digit ``next_at`` raised OverflowError, a deeply nested ledger RecursionError, out of drain()
+    on every pass. An untrusted due time now re-admits NOW (as documented) and the bound is kept: a ledger whose
+    ``attempts`` still reads is re-parked with that budget, one that does not read at all is untrusted when the
+    retry fails again, so the envelope is quarantined — never retried without bound."""
+    _on(monkeypatch)
+    proc = _Processor(monkeypatch, [_http(503), _http(503), _OK_9912])
+    w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope(9911), name="a.json")
+    watcher.drain()
+    assert watcher.parked_count() == 1
+    (spool / "retry" / (name + ".state")).write_bytes(ledger)
+    _spool(spool, _envelope(9912), name="b.json")                          # a healthy payment sorted after it
+    res = watcher.drain()                                                   # used to raise on every pass
+    assert res["minted"] == 1 and proc.calls == 3 and w.available("acme") == 200   # the payment behind it credited
+    assert list((spool / "incoming").iterdir()) == [] and list((spool / "working").iterdir()) == []
+    if outcome == "re-parked":
+        assert res["deferred"] == 1 and res["rejected"] == 0 and watcher.parked_count() == 1
+        assert _ledger(spool, name)["attempts"] == 2                       # the budget carried on, never reset
+    else:
+        assert res["deferred"] == 0 and res["rejected"] == 1 and watcher.parked_count() == 0
+        assert quarantined_count(spool / "rejected") == 1
+        assert "untrusted NET-2b retry ledger" in (spool / "rejected" / (name + ".reason")).read_text()
+
+
+def _clock_failing_on(read, bad):
+    """A clock that answers 1000.0 except on its ``read``-th call (1-based), where it raises or returns ``bad``."""
+    n = {"i": 0}
+
+    def clock():
+        n["i"] += 1
+        if n["i"] != read:
+            return 1000.0
+        if isinstance(bad, BaseException):
+            raise bad
+        return bad
+    return clock
+
+
+@pytest.mark.parametrize("bad", [OSError("clock gone at defer"), RuntimeError("clock driver fault"), 10 ** 400],
+                         ids=["raises-OSError", "raises-RuntimeError", "int-too-large-for-a-float"])
+def test_a_clock_that_fails_only_at_defer_time_quarantines_and_never_escapes(tmp_path, monkeypatch, bad):
+    """First pass, no retry/ yet: read 1 stamps the ingest, read 2 dates the deferral. The deferral's read was
+    unguarded (and ``float(now)`` of a huge int raised OverflowError) inside drain()'s catch-all handler, so the
+    envelope stayed in working/ and was reclaimed, re-verified and re-failed on every pass — never parked, never
+    counted, never quarantined, and every envelope sorted after it skipped. It now quarantines like any other
+    unreadable clock."""
+    _on(monkeypatch)
+    proc = _Processor(monkeypatch, [_http(503), _OK_9912])
+    w, watcher, spool = _rig(tmp_path, _clock_failing_on(2, bad))
+    name = _spool(spool, _envelope(9911), name="a.json")
+    _spool(spool, _envelope(9912), name="b.json")                          # sorted AFTER it
+    res = watcher.drain()                                                   # used to raise here
+    assert res["rejected"] == 1 and res["minted"] == 1 and res["deferred"] == 0 and proc.calls == 2
+    assert list((spool / "working").iterdir()) == [] and watcher.parked_count() == 0
+    assert (spool / "rejected" / (name + ".reason")).read_text().startswith(
+        "rejected (transient FlutterwaveEgressError; clock unreadable — not retried)")
+    assert w.available("acme") == 200
+
+
+@pytest.mark.parametrize("bad", [RuntimeError("clock driver fault"), 10 ** 400],
+                         ids=["raises-RuntimeError", "int-too-large-for-a-float"])
+def test_any_clock_fault_at_readmit_time_never_holds_a_webhook_parked(tmp_path, monkeypatch, bad):
+    """The re-admit guard must catch every way a clock can fail, not only the OSError the first test used: a
+    non-OSError raise, and an int too large to compare (``float(now)`` raises OverflowError)."""
+    _on(monkeypatch)
+    _Processor(monkeypatch, [_http(503)])
+    _w, watcher, spool = _rig(tmp_path, _Clock(1000.0))
+    name = _spool(spool, _envelope())
+    watcher.drain()
+    assert watcher.parked_count() == 1                                      # parked, due in 5 s
+    watcher._now = _clock_failing_on(1, bad)
+    watcher._readmit_retries(recovery_on=True)                              # does not raise
     assert (spool / "incoming" / name).exists() and watcher.parked_count() == 0
