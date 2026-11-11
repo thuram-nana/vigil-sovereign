@@ -162,7 +162,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
-                 checkout_limiter=None, trial_credits: int = _DEFAULT_TRIAL_CREDITS,
+                 checkout_limiter=None, pending_checkouts=None, trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -199,6 +199,10 @@ class Provisioner:
         # not on this instance. None ⇒ checkout is REFUSED (fail-closed: an unwired limiter can never mean
         # "unlimited" outbound processor calls). The factory wires `_CHECKOUT_MAX` per `_CHECKOUT_WINDOW_S`.
         self.checkout_limiter = checkout_limiter
+        # Audit E1b — the owner-signed, expiring, cross-process-exclusive PENDING plan-checkout record (a
+        # `pending_checkout.PendingPlanCheckouts`) that bridges the gap before a paid plan's webhook drains. None ⇒
+        # PLAN checkout is refused (fail-closed); top-ups never touch it.
+        self.pending_checkouts = pending_checkouts
         self.email_sender = email_sender
         self.trial_credits = int(trial_credits)
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -224,7 +228,8 @@ class Provisioner:
         return nxt
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
-               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False) -> None:
+               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
+               tx_ref: str = "") -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -238,6 +243,8 @@ class Provisioner:
             "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
             "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
             "reason": str(reason)[:160]}
+        if tx_ref:
+            payload["tx_ref"] = str(tx_ref)[:128]   # the processor reference this audit row is about (checkout)
         if attestation:
             # The customer's inline "I am authorized to test this asset" affirmation, recorded on the
             # owner-signed append-only spine as the tamper-evident legal attestation (control of a host is not
@@ -1009,16 +1016,44 @@ class Provisioner:
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None
         email = getattr(acct, "email", None) or None
+        nonce: "Optional[str]" = None
+        pending_ref = pending_note = ""
+        if is_plan and str(price_id) in offered:
+            # Audit E1b: `_org_has_live_plan` sees only DRAINED plans, so a paid plan whose webhook has not drained
+            # yet (a drain tick, or NET-2b parking) left room for a second processor subscription. Claim the org's
+            # owner-signed, expiring PENDING plan-checkout record BEFORE the outbound call (exclusive across
+            # processes); a live one refuses this checkout. The tx_ref is fixed up front so the record names it.
+            from ..governor.billing import checkout_tx_ref
+            from .pending_checkout import PendingCheckoutRefused
+            nonce = secrets.token_urlsafe(18)
+            try:
+                pending_ref = checkout_tx_ref(requester_org_id, nonce)
+            except ValueError as exc:
+                raise ProvisionDenied(f"checkout refused: {exc}") from None
+            try:
+                if self.pending_checkouts is None:
+                    raise PendingCheckoutRefused("plan checkout is unavailable right now (contact support)",
+                                                 code="refused_pending_unwired",
+                                                 detail="no pending plan-checkout ledger is wired")
+                pending_note = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref,
+                                                            now=t).get("replaced", "")
+            except PendingCheckoutRefused as exc:
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome=exc.code, reason=exc.detail, tx_ref=pending_ref)
+                raise ProvisionDenied(str(exc)) from None
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
-                                            customer_email=email, redirect_url=return_url,
+                                            customer_email=email, redirect_url=return_url, nonce=nonce,
                                             payment_plan=(str(price_id) if is_plan and price_id in offered else None))
         except (UnsupportedCapability, ValueError) as exc:
+            if pending_ref and self.pending_checkouts is not None:
+                # the processor refused: the customer never received a link, so free the claim for a retry
+                self.pending_checkouts.release(requester_org_id, pending_ref)
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
-                        target=str(price_id or ""), outcome="refused")
+                        target=str(price_id or ""), outcome="refused", tx_ref=pending_ref)
             raise ProvisionDenied(f"checkout refused: {exc}") from None
         self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
-                    outcome="created", critical=True)
+                    outcome="created", reason=pending_note, critical=True, tx_ref=sess.tx_ref)
         return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
                 "amount_minor": sess.amount_minor, "currency": sess.currency}
 
@@ -1586,7 +1621,9 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
+    from ..governor.identity import owner_keypair, owner_pubkey
     from .login_ratelimit import LoginRateLimiter
+    from .pending_checkout import PendingPlanCheckouts
     from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
@@ -1627,6 +1664,9 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
         # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
+        # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key).
+        pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=owner_keypair(),
+                                               trusted_pubkey=owner_pubkey()),
         checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,
                                           base_lock_s=Provisioner._CHECKOUT_WINDOW_S,

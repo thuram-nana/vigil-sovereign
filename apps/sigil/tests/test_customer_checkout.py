@@ -40,6 +40,7 @@ def _provisioner():
     from sigil.spine.store import SpineStore
     from sigil.ui.email_channel import EmailTokenLedger, NullEmailSender
     from sigil.ui.login_ratelimit import LoginRateLimiter
+    from sigil.ui.pending_checkout import PendingPlanCheckouts
     from sigil.ui.provision import Provisioner
     owner = generate_keypair()
     # a fresh path inside a private (0700, atomically created) dir — never tempfile.mktemp (CodeQL
@@ -56,6 +57,8 @@ def _provisioner():
         checkout_limiter=LoginRateLimiter(tempfile.mkdtemp(), max_fails=Provisioner._CHECKOUT_MAX,
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,
                                           base_lock_s=Provisioner._CHECKOUT_WINDOW_S),
+        pending_checkouts=PendingPlanCheckouts(tempfile.mkdtemp(), owner_key=owner,
+                                               trusted_pubkey=owner.public_key_b64),
         email_sender=NullEmailSender(), trial_credits=100, now_fn=lambda: float(next(clock)))
     admin, tester, org, other = ("cust_admin000000000000001", "cust_tester00000000000001", "org_chk1", "org_other")
     custs.create("admin@acme.com", issued_at=1.0, password="password-xyz", username=admin)

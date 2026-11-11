@@ -433,6 +433,15 @@ class CheckoutSession:
 _TX_REF_PREFIX = "vigil"
 
 
+def checkout_tx_ref(org_id: str, nonce: str) -> str:
+    """The tx_ref ``create_checkout`` sets for ``(org_id, nonce)`` — so a caller can record it BEFORE the outbound
+    call (the provisioner's pending plan-checkout record). Validates exactly as ``create_checkout`` does."""
+    org = org_tenant_id(org_id)
+    if not isinstance(nonce, str) or ":" in nonce or not nonce:
+        raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
+    return f"{_TX_REF_PREFIX}:{org}:{nonce}"
+
+
 def _org_from_tx_ref(tx_ref: object) -> Optional[str]:
     if not isinstance(tx_ref, str):
         return None
@@ -687,7 +696,7 @@ class FlutterwaveBillingProvider(BillingProvider):
         n = nonce or secrets.token_urlsafe(18)
         if not isinstance(n, str) or ":" in n or not n:
             raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
-        tx_ref = f"{_TX_REF_PREFIX}:{org}:{n}"
+        tx_ref = checkout_tx_ref(org, n)
         payload: "dict[str, Any]" = {
             "tx_ref": tx_ref,
             "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
