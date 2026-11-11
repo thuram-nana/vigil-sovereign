@@ -9,8 +9,8 @@ The host is CUSTOMER-NAMED, so the whole risk is SSRF. Load-bearing invariants:
     for BOTH methods;
   * dns-txt connects to the PINNED public DoH resolver (which itself passes the SSRF gate), NOT the customer
     host, and parses the TXT answers fail-closed; an unsupported method is refused.
-The real TLS GET is not exercised here (it needs a live server); the security-critical gates + the DoH
-dispatch/parse are.
+The real TLS GET against live loopback servers is exercised in ``test_ownership_fetch_loopback.py``; the
+security-critical gates + the DoH dispatch/parse are here.
 """
 from __future__ import annotations
 
@@ -138,11 +138,16 @@ class _FakeConn:
         pass
 
 
+def _pair(conn):
+    """``_open_pinned_https`` returns ``(conn, tls)`` — the TLS socket the request goes out on."""
+    return conn, conn.sock
+
+
 def test_dns_txt_queries_the_doh_resolver_and_returns_values(monkeypatch):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
     body = json.dumps({"Answer": [{"type": 16, "data": "\"vigil-site-verification=TOK\""}]}).encode()
     fake = _FakeConn(200, body)
-    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: fake)
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: (fake, fake.sock))
     out = f.fetch(METHOD_DNS_TXT, "apme.cm")
     assert out == ["vigil-site-verification=TOK"]
     # it queried TXT at the EXACT challenge name for the proven host (no wildcard/parent)
@@ -152,7 +157,7 @@ def test_dns_txt_queries_the_doh_resolver_and_returns_values(monkeypatch):
 
 def test_dns_txt_non_200_resolver_is_failclosed(monkeypatch):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
-    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _FakeConn(302, b""))  # a redirect -> refused
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _pair(_FakeConn(302, b"")))  # a redirect -> refused
     with pytest.raises(OwnershipFetchError):
         f.fetch(METHOD_DNS_TXT, "apme.cm")
 
@@ -163,7 +168,7 @@ def test_meta_tag_fetches_homepage_html(monkeypatch):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
     html = b"<html><head><meta name='vigil-site-verification' content='TOK'></head></html>"
     fake = _FakeConn(200, html)
-    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: fake)
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: (fake, fake.sock))
     out = f.fetch(METHOD_META_TAG, "apme.cm")
     assert isinstance(out, str) and "vigil-site-verification" in out
     assert fake.requested[0] == ("GET", "/", fake.requested[0][2])     # GETs the homepage root
@@ -171,7 +176,7 @@ def test_meta_tag_fetches_homepage_html(monkeypatch):
 
 def test_meta_tag_non_200_is_failclosed(monkeypatch):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
-    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _FakeConn(301, b""))  # root redirect -> refused
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _pair(_FakeConn(301, b"")))  # root redirect -> refused
     with pytest.raises(OwnershipFetchError):
         f.fetch(METHOD_META_TAG, "apme.cm")
 

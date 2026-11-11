@@ -18,6 +18,8 @@ customer host for well-known; the DoH resolver for dns-txt):
     split-horizon name is refused, not fetched;
   * the socket connects to the VALIDATED resolved IP (pinned) while TLS SNI + cert validation use the
     HOSTNAME — a DNS rebind between resolve-check and connect cannot redirect to a fresh internal address;
+  * before any byte is sent, the connected socket's own peer address (``getpeername``) must equal the
+    vetted IP — an undeterminable or different peer is refused;
   * https only, NO redirect following (a 30x toward an internal URL is never chased), a hard per-op timeout
     under an absolute wall-clock budget, and a BOUNDED read (a huge/slow-drip body cannot exhaust memory).
 
@@ -59,6 +61,10 @@ _DNS_TYPE_TXT = 16
 _MAX_TXT_ANSWERS = 32            # a sane cap on parsed TXT answers (anti-DoS on a hostile resolver reply)
 
 
+_HTTPS_PORT = 443                # the only port ever connected (https); a module constant, never configuration
+_connect = socket.create_connection  # the TCP connect (module-level so tests can drive it to loopback)
+
+
 class OwnershipFetchError(Exception):
     """A fetch was refused or failed. The provisioner maps it to a clean customer-facing error without
     leaking internals."""
@@ -84,7 +90,7 @@ def _resolve_public_ip(host: str, *, resolver: Callable[..., Any]) -> str:
     internal — refusing when ANY resolved address is internal defeats a split-horizon name that returns a
     public AND an internal address."""
     try:
-        infos = resolver(host, 443, type=socket.SOCK_STREAM)
+        infos = resolver(host, _HTTPS_PORT, type=socket.SOCK_STREAM)
     except (socket.gaierror, OSError):
         raise OwnershipFetchError(f"could not resolve {host!r}") from None
     ips = []
@@ -99,6 +105,19 @@ def _resolve_public_ip(host: str, *, resolver: Callable[..., Any]) -> str:
     if not ips:
         raise OwnershipFetchError(f"no addresses for {host!r}")
     return ips[0]
+
+
+def _require_peer(sock: Any, ip: str) -> None:
+    """Fail-closed check that ``sock`` is connected to exactly the vetted ``ip`` (taken from the socket
+    itself via ``getpeername`` BEFORE any byte is sent). Raises ``OwnershipFetchError`` when the peer differs
+    from the vetted address or cannot be determined."""
+    try:
+        peer = sock.getpeername()[0]
+        same = ipaddress.ip_address(str(peer)) == ipaddress.ip_address(str(ip))
+    except Exception:  # noqa: BLE001 — an undeterminable peer is a refusal, never a pass
+        raise OwnershipFetchError("could not determine the connected peer — refused (SSRF guard)") from None
+    if not same:
+        raise OwnershipFetchError("connected peer is not the vetted address — refused (SSRF guard)")
 
 
 class WellKnownFetcher:
@@ -133,25 +152,57 @@ class WellKnownFetcher:
             raise OwnershipFetchError("ownership fetch exceeded its total time budget")
         return min(self._timeout, remaining)
 
-    def _open_pinned_https(self, host: str, start: float) -> http.client.HTTPSConnection:
+    def _open_pinned_https(self, host: str, start: float) -> "tuple[http.client.HTTPSConnection, ssl.SSLSocket]":
         """Open an https connection PINNED to a validated-public resolved IP for ``host`` (the SSRF gate +
-        rebinding defence): resolve→refuse-if-any-internal→connect-to-validated-IP→TLS with SNI/cert against
-        the HOSTNAME. Shared by both the well-known fetch (host = customer host) and the dns-txt fetch (host =
-        the DoH resolver). Raises ``OwnershipFetchError`` fail-closed."""
+        rebinding defence): resolve→refuse-if-any-internal→connect-to-validated-IP→verify the connected PEER is
+        that IP→TLS with SNI/cert against the HOSTNAME. Shared by both the well-known fetch (host = customer
+        host) and the dns-txt fetch (host = the DoH resolver). Returns ``(conn, tls)``: callers bound I/O on
+        ``tls`` — the socket the request actually goes out on — NOT ``conn.sock``, which http.client sets to
+        None once a ``Connection: close`` (or HTTP/1.0) response hands the socket to the response object.
+        Raises ``OwnershipFetchError`` fail-closed."""
         ip = _resolve_public_ip(host, resolver=self._resolver)     # SSRF gate (raises if any addr internal)
-        raw = socket.create_connection((ip, 443), timeout=self._op_timeout(start))
+        raw = _connect((ip, _HTTPS_PORT), timeout=self._op_timeout(start))
         try:
+            _require_peer(raw, ip)                                 # the socket really landed on the vetted IP
             raw.settimeout(self._op_timeout(start))                # bound the TLS handshake by remaining budget
             tls = self._ctx.wrap_socket(raw, server_hostname=host)  # SNI + cert validation against the HOSTNAME
         except OwnershipFetchError:
             raw.close()
-            raise                                                  # budget exhausted setting up the handshake
+            raise                                                  # peer mismatch / budget exhausted
         except Exception as e:  # noqa: BLE001 — a TLS failure is a fail-closed refusal, not a crash
             raw.close()
             raise OwnershipFetchError(f"TLS to {host!r} failed: {e}") from None
         conn = http.client.HTTPSConnection(host, timeout=self._timeout)
         conn.sock = tls                                            # pinned to the validated IP; no re-resolve
-        return conn
+        return conn, tls
+
+    def _pinned_get(self, host: str, path: str, accept: str, start: float, limit: int,
+                    what: str) -> "tuple[int, bytes]":
+        """One bounded GET over the pinned connection: ``(status, body[:limit + 1])``. Every per-op timeout
+        is set on the captured ``tls`` socket (valid for the whole exchange whether the server keeps the
+        connection alive or answers ``Connection: close``). No redirect following (http.client never chases
+        a 30x). Fail-closed: any transport error raises ``OwnershipFetchError``."""
+        conn, tls = self._open_pinned_https(host, start)
+        resp = None
+        try:
+            tls.settimeout(self._op_timeout(start))                # bound request+response by remaining budget
+            conn.request("GET", path,
+                         headers={"Host": host, "User-Agent": "VIGIL-ownership-verify", "Accept": accept,
+                                  "Connection": "close"})
+            resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
+            if resp.status != 200:
+                return int(resp.status), b""
+            tls.settimeout(self._op_timeout(start))                # bound the body read by remaining budget
+            return 200, resp.read(limit + 1)
+        except OwnershipFetchError:
+            raise
+        except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
+            raise OwnershipFetchError(f"{what} fetch failed: {e}") from None
+        finally:
+            if resp is not None:
+                _quiet_close(resp)
+            _quiet_close(conn)
+            _quiet_close(tls)
 
     def fetch(self, method: str, host: str, *, now: Any = None) -> "str | list[str]":
         """Return the ownership observation the verdict re-checks: the well-known body (str) for
@@ -175,52 +226,24 @@ class WellKnownFetcher:
         raise OwnershipFetchError(f"unsupported ownership method {m!r}")
 
     def _fetch_well_known(self, h: str, start: float) -> str:
-        conn = self._open_pinned_https(h, start)
-        try:
-            conn.sock.settimeout(self._op_timeout(start))          # bound request+response by remaining budget
-            conn.request("GET", well_known_path(),
-                         headers={"Host": h, "User-Agent": "VIGIL-ownership-verify", "Accept": "text/plain",
-                                  "Connection": "close"})
-            resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
-            if resp.status != 200:
-                raise OwnershipFetchError(f"well-known returned HTTP {resp.status}")
-            conn.sock.settimeout(self._op_timeout(start))          # bound the body read by remaining budget
-            body = resp.read(self._max_bytes + 1)
-            if len(body) > self._max_bytes:
-                raise OwnershipFetchError("well-known body too large")
-            return body.decode("utf-8", "replace")
-        except OwnershipFetchError:
-            raise
-        except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
-            raise OwnershipFetchError(f"well-known fetch failed: {e}") from None
-        finally:
-            _quiet_close(conn)
+        status, body = self._pinned_get(h, well_known_path(), "text/plain", start, self._max_bytes, "well-known")
+        if status != 200:
+            raise OwnershipFetchError(f"well-known returned HTTP {status}")
+        if len(body) > self._max_bytes:
+            raise OwnershipFetchError("well-known body too large")
+        return body.decode("utf-8", "replace")
 
     def _fetch_meta_tag(self, h: str, start: float) -> str:
         """GET the homepage ``https://<h>/`` (SSRF-hardened, pinned IP, NO redirect following) and return its
         HTML (bounded to 256 KiB) for the verdict to scan for the ``<meta name="vigil-site-verification">``
         tag. A root that 30x-redirects yields a non-200 and is refused (the customer uses DNS-TXT/well-known
         or places the tag on the exact served root) — never chasing a redirect to an internal URL."""
-        conn = self._open_pinned_https(h, start)
-        try:
-            conn.sock.settimeout(self._op_timeout(start))
-            conn.request("GET", "/",
-                         headers={"Host": h, "User-Agent": "VIGIL-ownership-verify", "Accept": "text/html",
-                                  "Connection": "close"})
-            resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
-            if resp.status != 200:
-                raise OwnershipFetchError(f"homepage returned HTTP {resp.status}")
-            conn.sock.settimeout(self._op_timeout(start))
-            body = resp.read(_META_MAX_BYTES + 1)
-            if len(body) > _META_MAX_BYTES:
-                body = body[:_META_MAX_BYTES]                     # bounded: scan the first 256 KiB (the <head>)
-            return body.decode("utf-8", "replace")
-        except OwnershipFetchError:
-            raise
-        except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
-            raise OwnershipFetchError(f"meta-tag fetch failed: {e}") from None
-        finally:
-            _quiet_close(conn)
+        status, body = self._pinned_get(h, "/", "text/html", start, _META_MAX_BYTES, "meta-tag")
+        if status != 200:
+            raise OwnershipFetchError(f"homepage returned HTTP {status}")
+        if len(body) > _META_MAX_BYTES:
+            body = body[:_META_MAX_BYTES]                         # bounded: scan the first 256 KiB (the <head>)
+        return body.decode("utf-8", "replace")
 
     def _fetch_dns_txt(self, h: str, start: float) -> "list[str]":
         """Query ``_vigil-challenge.<h>`` TXT via DNS-over-HTTPS (JSON) at the pinned public resolver, and
@@ -228,27 +251,14 @@ class WellKnownFetcher:
         the customer host), so this is not an SSRF path to the customer's infra; the resolver host still goes
         through the full pinned/validated connect. Fail-closed on any transport/parse error."""
         qname = dns_txt_name(h)                                    # _vigil-challenge.<host> — exact host only
-        conn = self._open_pinned_https(self._doh_resolver, start)
-        try:
-            conn.sock.settimeout(self._op_timeout(start))
-            path = f"/dns-query?name={quote(qname, safe='')}&type=TXT"
-            conn.request("GET", path,
-                         headers={"Host": self._doh_resolver, "User-Agent": "VIGIL-ownership-verify",
-                                  "Accept": "application/dns-json", "Connection": "close"})
-            resp = conn.getresponse()                              # no auto-redirect; a 30x -> non-200 -> refused
-            if resp.status != 200:
-                raise OwnershipFetchError(f"DoH resolver returned HTTP {resp.status}")
-            conn.sock.settimeout(self._op_timeout(start))
-            raw = resp.read(self._max_bytes + 1)
-            if len(raw) > self._max_bytes:
-                raise OwnershipFetchError("DoH response too large")
-            return _parse_doh_txt(raw)
-        except OwnershipFetchError:
-            raise
-        except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
-            raise OwnershipFetchError(f"dns-txt fetch failed: {e}") from None
-        finally:
-            _quiet_close(conn)
+        path = f"/dns-query?name={quote(qname, safe='')}&type=TXT"
+        status, raw = self._pinned_get(self._doh_resolver, path, "application/dns-json", start,
+                                       self._max_bytes, "dns-txt")
+        if status != 200:                                          # no auto-redirect; a 30x -> non-200 -> refused
+            raise OwnershipFetchError(f"DoH resolver returned HTTP {status}")
+        if len(raw) > self._max_bytes:
+            raise OwnershipFetchError("DoH response too large")
+        return _parse_doh_txt(raw)
 
 
 def _parse_doh_txt(raw: bytes) -> "list[str]":
