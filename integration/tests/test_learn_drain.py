@@ -6,7 +6,12 @@ Doctrine under test:
   * FATAL-2: `verify_grant` uses vigil_core only; `deep_learn` is reached lazily (monkeypatched here so the
     drain logic is exercised without importing the offense engine);
   * a hostile spool file (symlink/FIFO/oversize/non-UTF-8) is quarantined, never followed or hung on;
-  * the offense per-slug kill-switch DEFERS (un-claims for retry), 'no_lead' is TERMINAL, dedup is by bytes.
+  * the offense per-slug kill-switch DEFERS (un-claims for retry), 'no_lead' is TERMINAL, dedup is by bytes;
+  * NO POISON FILE: a body that cannot be parsed or verified for ANY reason (deep nesting → RecursionError, a lone
+    surrogate → UnicodeEncodeError) is quarantined, never raised out of ``drain()`` — the files after it are still
+    processed in the SAME pass;
+  * NO STRANDED FILE: every pass first reclaims ``working/`` (a claim a crashed pass never finished), like the
+    sibling drains — and a reclaim never destroys a grant it cannot move.
 """
 
 import hashlib
@@ -118,6 +123,133 @@ def test_drain_rejects_a_hostile_symlink(tmp_path):
     w = _watcher(tmp_path)
     r = w.drain()
     assert r["rejected"] == 1 and w.calls == []
+
+
+# --- poison files: quarantined on ANY parse / verify failure, the rest of the pass still runs ----------------
+
+def _names(d):
+    return sorted(p.name for p in d.iterdir())
+
+
+def _spool_named(spool, name, raw):
+    inc = spool / "incoming"
+    inc.mkdir(parents=True, exist_ok=True)
+    (inc / name).write_text(raw, encoding="utf-8")
+
+
+_DEEP = "[" * 200_000                         # under the 256 KiB cap; json.loads raises RecursionError, not ValueError
+_SURROGATE = ('{"schema": 1, "kind": "learn_grant", "slug": "\\ud800", "vuln_id": "CVE-2024-0001", '
+              '"approval_seq": 5, "sig": "AAAA", "pubkey": "%s"}' % OWNER.public_key_b64)
+
+
+def test_a_deeply_nested_poison_file_is_quarantined_and_the_next_file_still_learns(tmp_path):
+    """`except ValueError` let the RecursionError out of drain(): the pass stopped, the good grant behind the
+    poison file waited, and the poison file sat in working/ forever (never quarantined)."""
+    spool = tmp_path / "spool"
+    _spool_named(spool, "a_poison.json", _DEEP)
+    _spool_named(spool, "b_good.json", json.dumps(_grant(), sort_keys=True))
+    w = _watcher(tmp_path)
+    r = w.drain()                                                   # never raises on one bad file
+    assert r == {"learned": 1, "rejected": 1, "deduped": 0, "no_lead": 0, "halted": 0}
+    assert w.calls == [("loopback", "CVE-2024-0001")]              # the good grant, in the SAME pass
+    assert _names(spool / "working") == [] and _names(spool / "incoming") == []
+    assert _names(spool / "rejected") == ["a_poison.json", "a_poison.json.reason"]
+    assert "RecursionError" in (spool / "rejected" / "a_poison.json.reason").read_text()
+    assert w.drain() == {"learned": 0, "rejected": 0, "deduped": 0, "no_lead": 0, "halted": 0}   # and it is final
+
+
+def test_a_grant_that_cannot_be_canonicalised_is_not_authentic_and_never_raises(tmp_path):
+    """A lone surrogate parses as JSON but cannot be UTF-8 encoded for the signature check: a UnicodeEncodeError
+    (not TypeError / IntegrityError) used to escape verify_grant and drain() the same way."""
+    assert verify_grant(json.loads(_SURROGATE), OWNER.public_key_b64) is None      # fail-closed, no raise
+    spool = tmp_path / "spool"
+    _spool_named(spool, "a_poison.json", _SURROGATE)
+    _spool_named(spool, "b_good.json", json.dumps(_grant(), sort_keys=True))
+    w = _watcher(tmp_path)
+    r = w.drain()
+    assert r["rejected"] == 1 and r["learned"] == 1 and w.calls == [("loopback", "CVE-2024-0001")]
+    assert _names(spool / "working") == []
+    assert "failed owner-signature verification" in (spool / "rejected" / "a_poison.json.reason").read_text()
+
+
+# --- working/ crash-reclaim (sibling-drain parity) -------------------------------------------------------------
+
+def test_a_grant_stranded_in_working_is_reclaimed_and_learned(tmp_path):
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path)
+    (spool / "working" / "stranded.json").write_text(json.dumps(_grant(), sort_keys=True), encoding="utf-8")
+    r = w.drain()
+    assert r["learned"] == 1 and w.calls == [("loopback", "CVE-2024-0001")]
+    assert _names(spool / "working") == [] and len(_names(spool / "processed")) == 1
+
+
+def test_a_pass_killed_mid_learn_strands_nothing(tmp_path):
+    """The real crash: the daemon dies after the claim, inside deep-learn. The next pass reclaims and finishes."""
+    import pytest
+    spool = tmp_path / "spool"
+    _write_incoming(spool, _grant())
+    w = _watcher(tmp_path)
+    real, killed = w._deep_learn, {"n": 0}
+
+    def die_once(slug, vuln_id):
+        killed["n"] += 1
+        if killed["n"] == 1:
+            raise KeyboardInterrupt("daemon killed mid-learn")
+        return real(slug, vuln_id)
+
+    w._deep_learn = die_once  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        w.drain()
+    assert len(_names(spool / "working")) == 1 and _names(spool / "incoming") == []    # stranded by the crash
+    r = w.drain()
+    assert r["learned"] == 1 and _names(spool / "working") == [] and _names(spool / "rejected") == []
+
+
+def test_a_poison_file_stranded_by_an_earlier_crash_is_quarantined_on_the_next_pass(tmp_path):
+    """The audit's end state — a poison file left in working/ by the pre-fix drain — heals itself: it is reclaimed
+    and quarantined (with its reason), and it never becomes a crash loop that blocks the grants behind it."""
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path)
+    (spool / "working" / "a_poison.json").write_text(_DEEP, encoding="utf-8")
+    _spool_named(spool, "b_good.json", json.dumps(_grant(), sort_keys=True))
+    for _ in range(2):                                              # two passes: no loop, nothing re-processed
+        w.drain()
+    assert w.calls == [("loopback", "CVE-2024-0001")]
+    assert _names(spool / "working") == []
+    assert _names(spool / "rejected") == ["a_poison.json", "a_poison.json.reason"]
+
+
+def test_reclaim_never_destroys_a_grant_it_cannot_move(tmp_path, monkeypatch):
+    import os
+
+    from vigil_integration import learn_drain as ld
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path)
+    raw = json.dumps(_grant(), sort_keys=True)
+    (spool / "working" / "stuck.json").write_text(raw, encoding="utf-8")
+    real_replace = os.replace
+
+    def unmovable(src, dst):
+        if os.path.basename(str(src)) == "stuck.json" and os.path.basename(os.path.dirname(str(dst))) == "incoming":
+            raise OSError("EXDEV")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ld.os, "replace", unmovable)
+    assert w.drain()["learned"] == 0
+    assert (spool / "working" / "stuck.json").read_text(encoding="utf-8") == raw      # still there, untouched
+    monkeypatch.setattr(ld.os, "replace", real_replace)
+    assert w.drain()["learned"] == 1 and _names(spool / "working") == []               # the next sweep gets it
+
+
+def test_reclaim_leaves_a_killswitch_deferral_retryable(tmp_path):
+    """A halted grant is un-claimed back to incoming/ (unchanged); the reclaim sweep does not disturb that."""
+    spool = tmp_path / "spool"
+    _write_incoming(spool, _grant())
+    w = _watcher(tmp_path, status="halted")
+    assert w.drain()["halted"] == 1 and w.drain()["halted"] == 1    # still deferred, pass after pass
+    assert len(_names(spool / "incoming")) == 1 and _names(spool / "working") == []
+    w._status = "learned"                                           # the operator releases STOP
+    assert w.drain()["learned"] == 1
 
 
 # --- #73 NET hardening: the watch loop survives a single-drain failure (sibling-drain parity) -------------
