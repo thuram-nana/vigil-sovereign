@@ -289,7 +289,8 @@ def mintable_entitlements() -> dict[str, Entitlement]:
 
 def mintable_expected() -> dict[str, tuple[int, str]]:
     """`{price_id: (amount_minor, currency)}` over the FULL catalog — the underpay / wrong-currency cross-check
-    paired with mintable_entitlements(), so every mintable price is also amount-checked."""
+    paired with mintable_entitlements(), so every mintable price carries its expected amount into the signer's
+    existing cross-check (which applies when the verified event carries a currency)."""
     return {e.price_id: (e.amount_minor, e.currency) for e in _CATALOG}
 
 
