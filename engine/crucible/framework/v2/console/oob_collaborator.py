@@ -60,7 +60,7 @@ from ..common import paths
 # A slug is a single path-safe component — the SAME discipline the console's run ids / engagement slugs use
 # (alnum plus ``-_.``, no separator, no "..", no leading dot). It names a directory under the state dir, so a
 # hostile value must never traverse out of it.
-_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 # The managed relay is loopback-only, ALWAYS. This is not configurable from a request; it is the invariant.
 _HOST = "127.0.0.1"

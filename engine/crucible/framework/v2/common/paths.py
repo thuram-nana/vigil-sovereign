@@ -419,8 +419,27 @@ def ensure_authority_dir_secure() -> Path:
     return d
 
 
+def _slug_component(slug: str) -> str:
+    """Refuse a slug that is not ONE path component; return it unchanged otherwise.
+
+    This is where an engagement slug becomes a filesystem path, so it is where the refusal lives: a caller
+    that forwards an unvalidated slug (a console URL segment, a ``?slug=`` query, a spine roster entry)
+    can then never address anything outside ``targets/`` or the authority dir, whichever helper it goes
+    through. A separator makes the join descend or climb, an absolute value makes pathlib DROP the base,
+    ``.``/``..`` name the base or its parent, and a NUL/control character is never a legitimate slug.
+    Deliberately no charset or length rule beyond that — hand-made target dirs (``_template``, dotted,
+    uppercase, non-ASCII) and the executor's ``<placeholder>`` slugs are legitimate and resolve
+    byte-identically; the empty slug (the "no engagement" value) also resolves as before, to the base
+    itself, which is inside the tree. ``ValueError`` is what the console already maps to its honest-empty
+    shape (``_safe``) or a 404."""
+    s = str(slug)
+    if s in (".", "..") or any(c in "/\\" or ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+        raise ValueError(f"unsafe engagement slug: {slug!r}")
+    return slug
+
+
 def authority_path(slug: str) -> Path:
-    return authority_dir() / f"{slug}.authority.json"
+    return authority_dir() / f"{_slug_component(slug)}.authority.json"
 
 
 def target_credentials_path(slug: str) -> Path:
@@ -508,7 +527,7 @@ def authority_root_path() -> Path:
 
 
 def target_dir(slug: str) -> Path:
-    return targets_root() / slug
+    return targets_root() / _slug_component(slug)
 
 
 def charter_path(slug: str) -> Path:
@@ -562,7 +581,7 @@ def _write_target_dir(slug: str) -> Path:
     session is active, else exactly ``target_dir(slug)`` — so the DEFAULT path is byte-identical
     (and honours any test/deployment override of ``target_dir``); only ephemeral re-roots."""
     if _EPHEMERAL_WRITE_ROOT is not None:
-        return _EPHEMERAL_WRITE_ROOT / slug
+        return _EPHEMERAL_WRITE_ROOT / _slug_component(slug)
     return target_dir(slug)
 
 

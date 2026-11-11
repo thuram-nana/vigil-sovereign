@@ -45,7 +45,7 @@ _MAX_ENTRIES = 5000        # bound the side-car so a runaway caller cannot grow 
 # A charter engagement slug: the same conservative shape `paths`/`_slugify` produce. It is used as a
 # JSON KEY only (never a path component here), but it is validated anyway — defense in depth, and it
 # keeps a junk key out of the store.
-_SAFE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SAFE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 _LOCK = threading.RLock()
 
