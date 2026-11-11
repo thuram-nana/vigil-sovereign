@@ -306,12 +306,12 @@ class LaunchGate:
         # no extra lock: byte-identical). Decided inside the CROSS-PROCESS settle lock, held from the check through
         # the debit, so two reserves in two processes cannot both pass (`_one_launch_locked`).
         one = config.one_launch_per_host_enabled()
-        ix = self._reservation_prescan(oid, slug) if one else None
+        ix = self._reservation_prescan(kp.public_key_b64, oid, slug) if one else None
         with ExitStack() as held:
             held.enter_context(self._lock)
             re = _gated()                                # TOCTOU: re-check every conjunct inside the lock
             if re is None and one:
-                re = self._one_launch_locked(held, oid, h, slug, non, ix, now_ts=now_ts)
+                re = self._one_launch_locked(held, kp.public_key_b64, oid, h, slug, non, ix, now_ts=now_ts)
             if re is not None:
                 return {"ok": False, "error": re}
             acct = self.postpaid.account(oid)
@@ -598,7 +598,7 @@ class LaunchGate:
             ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=s, nonce=non)
             from .. import config
             one = config.one_launch_per_host_enabled()         # E7 (default OFF: no scan — as before)
-            ix = self._reservation_prescan(doc.org_id, s) if one else None
+            ix = self._reservation_prescan(kp.public_key_b64, doc.org_id, s) if one else None
             # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
             # bearer capability is resurrected on the seam. Settled = the seam marker OR the spine's settlement
             # evidence (a lost / stale-restored seam must not resurrect it either), checked and written under the
@@ -623,16 +623,16 @@ class LaunchGate:
                 "scope_host": doc.scope_host}
 
     # -- E7: one outstanding launch per (org, host) + the release of a superseded reservation -----------------
-    def _reservation_prescan(self, oid: str, slug: str):
+    def _reservation_prescan(self, pub: str, oid: str, slug: str):
         """The full, UNLOCKED reservation scan of ``(oid, slug)`` that the locked check then continues (``since``),
         or None when it fails (the locked check then scans in full, and refuses if that fails too)."""
         from ..governor.launch_reservations import scan_reservations
         try:
-            return scan_reservations(self.store, self.owner_key.public_key_b64, org_id=oid, slug=slug)
+            return scan_reservations(self.store, pub, org_id=oid, slug=slug)
         except Exception:  # noqa: BLE001 — retried in full under the lock, which is fail-closed
             return None
 
-    def _one_launch_locked(self, held: Any, oid: str, host: str, slug: str, nonce: str, ix: Any, *,
+    def _one_launch_locked(self, held: Any, pub: str, oid: str, host: str, slug: str, nonce: str, ix: Any, *,
                            now_ts: float) -> Optional[str]:
         """``reserve_launch``'s E7 check: take the cross-process settle lock into ``held`` (kept until the debit and
         the mint are done), continue the scan inside it, and return ``_one_launch_refusal``'s answer. Fail-closed:
@@ -641,7 +641,7 @@ class LaunchGate:
         from ..governor.launch_settlement import settle_lock
         try:
             held.enter_context(settle_lock(self.store))
-            ix = scan_reservations(self.store, self.owner_key.public_key_b64, org_id=oid, slug=slug, since=ix)
+            ix = scan_reservations(self.store, pub, org_id=oid, slug=slug, since=ix)
             return self._one_launch_refusal(oid, host, slug, nonce, ix, now_ts=now_ts)
         except Exception as e:  # noqa: BLE001 — an unanswerable check never lets a second launch through
             return f"could not check for a launch already in progress (fail-closed): {type(e).__name__}"
@@ -695,23 +695,19 @@ class LaunchGate:
         at ``now_ts``, or None. Shared by ``release_superseded_reservation`` (authoritative, inside the settle lock)
         and the sweep's dry-run report.
 
-        * ``outcome_recorded`` — a settle-drain ``assessment_outcome`` record names this launch: it WAS settled
-          (charged or refunded), so a missing settlement marker means the seam lost it — never release.
-        * ``seam_inconsistent`` — a lease of this ``(org, slug)`` that the spine shows settled is missing from the
-          seam settlement marker: the marker (the only record of a completed run's zero-refund settle while
-          ``VIGIL_SETTLE_SPINE_RECORD`` is off) was lost or rolled back, so nothing of this target is released.
         * ``not_superseded`` — no LATER reservation of the same ``(org, slug)`` exists (this is the target's newest
           launch: its customer can still start or cancel it).
         * ``started`` — the lease on the seam is this one (the abandoned-lease sweep owns a started lease).
         * ``in_grace`` — less than ``_MAX_LEASE_HOURS`` + ``grace_s`` since the reserve: its lease may still be
           open, or a run that armed before it was superseded may still be finishing (the same grace the
-          abandoned-lease sweep gives a run past ``not_after``)."""
+          abandoned-lease sweep gives a run past ``not_after``).
+        * ``outcome_recorded`` — a settle-drain ``assessment_outcome`` record names this launch: it WAS settled
+          (charged or refunded), so a missing settlement marker means the seam lost it — never release.
+        * ``seam_inconsistent`` — a lease of this ``(org, slug)`` that the spine shows settled is missing from the
+          seam settlement marker: the marker (the only record of a completed run's zero-refund settle while
+          ``VIGIL_SETTLE_SPINE_RECORD`` is off) was lost or rolled back, so nothing of this target is released."""
         from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
         base = self._seam_base()
-        if res.key in ix.outcomes:
-            return "outcome_recorded"
-        if any(o == oid and s == slug and not is_lease_settled(base, slug, n) for (o, s, n) in ix.settled):
-            return "seam_inconsistent"
         if not any(r.seq > res.seq for r in ix.of(oid, slug)):
             return "not_superseded"
         b = read_credit_lease(base, slug)
@@ -719,6 +715,10 @@ class LaunchGate:
             return "started"
         if now_ts < res.issued_at + _MAX_LEASE_HOURS * 3600.0 + grace_s:
             return "in_grace"
+        if res.key in ix.outcomes:
+            return "outcome_recorded"
+        if any(o == oid and s == slug and not is_lease_settled(base, slug, n) for (o, s, n) in ix.settled):
+            return "seam_inconsistent"
         return None
 
     def release_superseded_reservation(self, *, org_id: str, slug: str, nonce: str, now: Any, grace_s: float = 0.0,
