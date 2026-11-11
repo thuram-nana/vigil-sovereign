@@ -171,12 +171,15 @@ def test_billing_drain_builds_its_signer_from_the_mintable_catalog(monkeypatch, 
     ensure_owner_keypair()
     seen = {}
 
-    class _Spy(BillingSigner):
-        def __init__(self, *a, **kw):
-            seen.update(catalog=dict(kw["catalog"]), expected=dict(kw["expected"]))
-            super().__init__(*a, **kw)
+    real_init = BillingSigner.__init__
 
-    monkeypatch.setattr("sigil.governor.billing.BillingSigner", _Spy)
+    def _spy_init(self, *a, **kw):
+        # Wrap __init__ rather than swapping the class: a module first imported while the class is swapped
+        # (billing_spool's isinstance check) would keep the fake for the rest of the session.
+        seen.update(catalog=dict(kw["catalog"]), expected=dict(kw["expected"]))
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(BillingSigner, "__init__", _spy_init)
     spool = tmp_path / "spool"
     (spool / "incoming").mkdir(parents=True)
     cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
