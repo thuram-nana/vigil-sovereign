@@ -23,9 +23,10 @@ is refused regardless of what is dropped in ``signed/``.
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any, Optional
+
+from vigil_core.seam_base import resolve_seam_base
 
 # ttl for a signed offense token: the offense broker consumes it near-instantly once it appears (0.25s
 # poll), so a short life is ample; capped by the token dead-man's bound (approval_token max_token_lifetime).
@@ -33,9 +34,9 @@ _TOKEN_TTL_SECONDS = 300.0
 
 
 def _base_dir() -> str:
-    """The shared engagement base dir both planes agree on (``vigil up`` sets VIGIL_BASE_DIR for both);
-    matches the offense console's own resolution in ``console/api.approvals``."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    """The shared engagement base dir both planes agree on — the ONE seam-base resolver every plane uses
+    (``vigil_core.seam_base``), so it matches the offense console's ``console/api.approvals``."""
+    return resolve_seam_base()
 
 
 def _owner_keypair():

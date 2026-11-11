@@ -78,11 +78,12 @@ def _seam_base(base_dir: Any) -> Any:
     ``read_verified_launch_nonce``), so a pause is always looked up under the SAME seam the lease it halts was
     read from. Resolved HERE, at the one path chokepoint every pause function goes through, so no caller can
     reach a different base (or a ``TypeError``) by passing the ``None`` default the lease reader accepts — the
-    mismatch that made the launch gate mistake a paused lease for a terminal one and strand it. The engine module
-    cannot be imported from this both-plane module (FATAL-2), so the one-line convention is restated and PINNED
-    equal by ``integration/tests/test_launch_pause_redrive_gate.py``. Only ``None`` is defaulted (``""`` is left
-    as given), matching the lease reader's ``is not None`` test."""
-    return base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    mismatch that made the launch gate mistake a paused lease for a terminal one and strand it. Both resolve it
+    through the ONE seam-base resolver (``vigil_core.seam_base``; the engine module cannot be imported from this
+    both-plane module, FATAL-2); the equality is PINNED by ``integration/tests/test_launch_pause_redrive_gate.py``.
+    Only ``None`` is defaulted (``""`` is left as given), matching the lease reader's ``is not None`` test."""
+    from vigil_core.seam_base import resolve_seam_base
+    return base_dir if base_dir is not None else resolve_seam_base()
 
 
 def pauses_root(base_dir: Any) -> Path:

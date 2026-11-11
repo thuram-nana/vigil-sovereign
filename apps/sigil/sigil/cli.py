@@ -1231,6 +1231,16 @@ def cmd_settle_drain(a) -> None:
     # and the dead-man alarms.
     _require_expanded_path(a.spool, "--spool", required=True)
     _require_expanded_path(a.base_dir, "--base-dir", required=False)
+    # E3a: the seam comes from the ONE resolver the cockpit publishes the lease through (--base-dir >
+    # $VIGIL_BASE_DIR > .vigil-live). Settings that disagree (a legacy VIGIL_SETTLE_BASE_DIR naming another tree,
+    # or --base-dir vs $VIGIL_BASE_DIR) are refused here, before anything is claimed or archived — a drain
+    # pointed at the wrong tree finds no lease and archives every completion unsettled.
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        seam = require_seam_base(a.base_dir or None)
+    except SeamBaseError as e:
+        print(f"settle-drain: {e}", file=sys.stderr)
+        sys.exit(2)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1244,7 +1254,7 @@ def cmd_settle_drain(a) -> None:
         sys.exit(2)
 
     watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
-                                     delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
+                                     delegation=deleg, scope=a.scope, base_dir=seam)
     if getattr(a, "settle_cmd", "drain") == "watch":
         print(f"  watching {a.spool}/incoming → settle_launch (scope={a.scope}); Ctrl-C to stop")
         try:
@@ -2800,7 +2810,8 @@ def main(argv=None) -> None:
                           "* only if the delegation itself is wildcard-scoped)")
     psd.add_argument("--base-dir", default="",
                      help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
-                          "(default: $VIGIL_BASE_DIR)")
+                          "(default: $VIGIL_BASE_DIR, else ./.vigil-live; must agree with $VIGIL_BASE_DIR "
+                          "and any legacy $VIGIL_SETTLE_BASE_DIR, or the drain refuses)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
     pos = sub.add_parser("ops-sweep",

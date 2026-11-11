@@ -211,12 +211,12 @@ def test_none_base_dir_reads_the_default_seam_base(monkeypatch, tmp_path):
 
 
 def test_none_base_dir_falls_back_to_dot_vigil_live_when_the_env_is_unset_or_empty(monkeypatch, tmp_path):
-    from pathlib import Path
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("VIGIL_BASE_DIR", raising=False)
-    assert P.pauses_root(None) == Path(".vigil-live") / "credit-lease-pauses"
+    # the CWD's .vigil-live, absolutised by the one seam-base resolver (E3a)
+    assert P.pauses_root(None) == tmp_path / ".vigil-live" / "credit-lease-pauses"
     monkeypatch.setenv("VIGIL_BASE_DIR", "")                           # empty counts as unset (``or``), as for the lease
-    assert P.pauses_root(None) == Path(".vigil-live") / "credit-lease-pauses"
+    assert P.pauses_root(None) == tmp_path / ".vigil-live" / "credit-lease-pauses"
     P.record_lease_pause(str(tmp_path / ".vigil-live"), "cust_abc123", "n1")
     assert P.is_lease_paused(None, "cust_abc123", "n1") is True
 

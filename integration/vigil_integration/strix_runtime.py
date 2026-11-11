@@ -102,13 +102,11 @@ def resolve_base_dir(explicit: Optional[str] = None) -> str:
     run from a different directory than where ``vigil approve provision-authority`` wrote the authority,
     finds an EMPTY base and every ``exec_command`` fails closed with "no approval authority provisioned".
     Pinning an absolute path resolved at launch time keeps the child bound to the operator's provisioned
-    authority regardless of any later chdir. Total: never raises.
+    authority regardless of any later chdir. Total: never raises. This is the ONE seam-base resolver every
+    plane shares (``vigil_core.seam_base``).
     """
-    raw = explicit or os.environ.get("VIGIL_BASE_DIR") or DEFAULT_BASE_DIR
-    try:
-        return os.path.abspath(os.path.expanduser(str(raw)))
-    except Exception:  # noqa: BLE001 — a pathological value must not sink the launch; return it unmodified
-        return str(raw)
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base(explicit)
 
 
 def strix_child_env(*, base_dir: Optional[str], run_dir: str, slug: str,

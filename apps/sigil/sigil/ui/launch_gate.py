@@ -104,10 +104,10 @@ class LaunchGate:
         self._lock = spine_lock(getattr(store, "path", ""))
 
     def _seam_base(self) -> str:
-        if self._base_dir:
-            return self._base_dir
-        from .target_authorization import _base_dir
-        return _base_dir()
+        """This gate's explicit ``base_dir``, else the shared default — through the ONE seam-base resolver every
+        plane uses (``vigil_core.seam_base``), so the cockpit, the offense engine and the drains meet in one tree."""
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base(self._base_dir)
 
     @staticmethod
     def _as_dt(now: Any) -> datetime:
@@ -453,8 +453,8 @@ class LaunchGate:
                 # FULLY REFUND a charged, completed run (a free run / net-spend != consumption). The settlement
                 # MARKER is written by EVERY settle (incl. refund=0), so guard on it here, atomically under the
                 # lock, so settle_launch is truly idempotent per (slug, nonce) independent of the amount. NOTE:
-                # launch_cancel's gate and the settle-drain's gate must share the settlement root — both default
-                # to _base_dir(), so they align in the default deployment.
+                # launch_cancel's gate and the settle-drain's gate must share the settlement root — both resolve
+                # it through vigil_core.seam_base, and the shipped units set VIGIL_BASE_DIR identically.
                 if is_lease_settled(self._seam_base(), s, non):
                     return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
                             "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}

@@ -638,7 +638,8 @@ def _has_verified_authority(slug: str, host: str = "") -> bool:
                 owner_pubkeys_of,
                 verify_live_offense_attested,
             )
-            _base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            from vigil_core.seam_base import resolve_seam_base
+            _base = resolve_seam_base()
             _ok_att, _att_reason = verify_live_offense_attested(
                 _base, engagement_slug=slug, trusted_owner_pubkeys=owner_pubkeys_of(trust_root),
                 now=_now.timestamp())
@@ -696,7 +697,8 @@ def _install_target_authorization(slug: str) -> "tuple[str, str]":
     except Exception as e:  # noqa: BLE001 — install machinery unavailable ⇒ nothing installed (gate refuses)
         return "", f"install unavailable ({type(e).__name__})"
 
-    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base = resolve_seam_base()
     try:
         ta = read_authorization(base, slug)
     except Exception:  # noqa: BLE001
@@ -1887,7 +1889,8 @@ def _strix_runtime_base_dir() -> str:
         from vigil_integration.strix_runtime import resolve_base_dir
         return resolve_base_dir()
     except Exception:  # noqa: BLE001 — integration package absent ⇒ prior (relative) convention
-        return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base()
 
 
 def _strix_sandbox_gate() -> "tuple[dict, str, str]":
@@ -4255,7 +4258,8 @@ def fix_precondition(run_id: str) -> dict:
     exception. ``why_not`` is "" iff runnable; ``command`` is the equivalent CLI invocation (shown to the
     operator when the console cannot run it here), and ``vigil`` is "" when no entrypoint resolved.
     """
-    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base_dir = resolve_seam_base()
     out = {"runnable": False, "why_not": "", "slug": "", "repo": "", "base_dir": base_dir,
            "spine": "", "vigil": "", "command": "",
            # Fixes-screen local-apply affordance predicate (defaults for every early return).
@@ -4702,7 +4706,8 @@ def _terminal_parse(command) -> "tuple[list | None, str]":
 
 def _terminal_base_dir() -> str:
     """The engine home the `vigil terminal` verb + the terminal history share (mirrors `apply_fix`)."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
 
 
 def terminal_dryrun(command) -> dict:

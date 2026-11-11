@@ -326,6 +326,11 @@ def tiered_products_enabled() -> bool:
     return (os.environ.get("VIGIL_TIERED_PRODUCTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def _seam_base() -> str:
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
+
+
 def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
@@ -333,7 +338,7 @@ def monitoring_publish_dir() -> Path:
     override = (os.environ.get("VIGIL_MONITORING_PUBLISH_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "monitoring_authority"
+    return Path(_seam_base()) / "aegis" / "monitoring_authority"
 
 
 def monitoring_secrets_dir() -> Path:
@@ -343,7 +348,7 @@ def monitoring_secrets_dir() -> Path:
     override = (os.environ.get("VIGIL_MONITORING_SECRETS_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "report_secrets"
+    return Path(_seam_base()) / "aegis" / "report_secrets"
 
 
 def _bool_env(name: str, default: bool = False) -> bool:

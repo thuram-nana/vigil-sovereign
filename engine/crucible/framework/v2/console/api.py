@@ -71,7 +71,8 @@ def status_data() -> dict[str, Any]:
                        # fix). Mirrors the sibling api.approvals(), which already imports os locally.
             from vigil_integration.live.approval_broker import (approvals_root, list_pending,
                                                                  signed_request_ids)
-            base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            from vigil_core.seam_base import resolve_seam_base
+            base = resolve_seam_base()
             root = approvals_root(base)
             signed = signed_request_ids(root)   # already-approved requests are no longer "waiting for you"
             return len([p for p in list_pending(root) if p.request_id not in signed])
@@ -556,7 +557,8 @@ def approvals(slug: str = "") -> dict[str, Any]:
     ``{"pending": []}``, never a traceback."""
     import os
 
-    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base = resolve_seam_base()
 
     def _read() -> list[dict[str, Any]]:
         # approval_broker is import-clean (vigil_core + stdlib only) — safe to import in the offense plane
@@ -1325,7 +1327,8 @@ def _destruction_audit() -> dict[str, Any]:
     import os
     import re
 
-    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base = resolve_seam_base()
     root = Path(base)
     tr_path = root / "destruction-trust-root.json"
     if not tr_path.is_file():
