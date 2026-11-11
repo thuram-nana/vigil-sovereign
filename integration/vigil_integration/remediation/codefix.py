@@ -36,6 +36,8 @@ Import-clean: pydantic + stdlib + the F1 safety seam (``wrap_untrusted`` / ``par
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -132,7 +134,44 @@ def is_safe_repo_path(path: Any) -> tuple[bool, str]:
         return False, "path traversal ('..')"
     if any(seg in _BULK_TOKENS or seg.startswith("-") for seg in segments if seg):
         return False, "path segment is a flag/wildcard"
+    if any(seg.lower() == ".git" for seg in segments):
+        return False, "path inside the repository's .git directory"
     return True, ""
+
+
+def is_inside_git_dir(path: Any) -> bool:
+    """True when ``path`` (after resolving symlinks) is, or sits under, a ``.git`` directory. A working
+    directory there is NOT a checkout: a diff applied, or a file written, relative to it lands in the
+    repository's own metadata (``hooks/post-checkout`` is then executed by the next git command)."""
+    try:
+        real = os.path.realpath(str(path))
+    except (OSError, ValueError, TypeError):
+        return True
+    return any(seg.lower() == ".git" for seg in real.replace("\\", "/").split("/"))
+
+
+def confined_repo_file(root: Any, relpath: Any) -> Optional[str]:
+    """The real path of the REGULAR file ``relpath`` names under ``root``, or ``None``. ``is_safe_repo_path``
+    is purely lexical, and a cloned third-party repository may carry symlinks: a ``README.md`` link to a
+    file elsewhere on the host would otherwise be read (and, for the coder / dev-edit model, sent off
+    the host). So: the lexical check, no symlink as the final component, and the fully resolved path must
+    sit strictly under the resolved root. Total — never raises."""
+    ok, _why = is_safe_repo_path(relpath)
+    if not ok or not root:
+        return None
+    try:
+        local = os.path.join(str(root), str(relpath).strip())
+        if os.path.islink(local):
+            return None
+        real_root = os.path.realpath(str(root))
+        real_local = os.path.realpath(local)
+        if os.path.commonpath([real_root, real_local]) != real_root or real_local == real_root:
+            return None
+        if not os.path.isfile(real_local) or os.path.islink(real_local):
+            return None
+        return real_local
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def parse_edit_blocks(text: str) -> list[EditBlock]:
