@@ -712,9 +712,10 @@ class FlutterwaveBillingProvider(BillingProvider):
                 raise ValueError("payment_plan must be a non-empty printable id")
             payload["payment_plan"] = pp
         if session_minutes is not None:
-            # Audit E1b: bound how long the hosted payment page can be paid — once the session elapses the processor
-            # closes it and fails any uncompleted transaction — so the provisioner's pending plan-checkout record,
-            # which outlives this session, can never lapse while its link could still bill. Ceiling: 1440 minutes.
+            # Audit E1b: bound how long the hosted payment page can be paid (Flutterwave Standard `session_duration`,
+            # minutes, ceiling 1440: once it elapses the processor closes the page and fails any uncompleted
+            # transaction) — so the provisioner's pending plan-checkout record, which outlives this session, cannot
+            # lapse while its link could still bill.
             sm = session_minutes
             if isinstance(sm, bool) or not isinstance(sm, int) or not 1 <= sm <= 1440:
                 raise ValueError("session_minutes must be an int in [1, 1440]")
