@@ -116,6 +116,10 @@ so they cannot share a resolution either.
 Only **third-party** dependencies are locked. The first-party members are installed `-e` from
 the tree and have no registry artifact to hash.
 
+Those are the two **runtime** locks. Optional extras that are not part of a default install get their own
+hash locks layered on top — the OpenTelemetry exporter (`infra/supply-chain/otel.lock.txt`, opt-in; see
+"The OpenTelemetry exporter" below) — never a fresh, unlocked `pip install`.
+
 `sovereign.in` pulls `apps/sigil/requirements.txt` through `-r` rather than restating it, so
 `apps/sigil` stays the single source of truth for its own runtime.
 
@@ -205,6 +209,11 @@ cd <repo root>
 pip-compile --generate-hashes --no-header --strip-extras \
             --output-file=infra/supply-chain/sovereign.lock.txt \
             infra/supply-chain/sovereign.in
+
+# otel (OPT-IN telemetry-export extras) — canonical CWD: the repo root
+pip-compile --generate-hashes --no-header --strip-extras \
+            --output-file=infra/supply-chain/otel.lock.txt \
+            infra/supply-chain/otel.in
 ```
 
 `--no-header` matters: pip-compile's default header embeds the literal `--output-file` path, so
@@ -254,6 +263,56 @@ hash-pinned, covers strix's declared runtime deps, and that no operator install 
 strix's extras unhashed; a hand-built-wheel negative control proves `--require-hashes` actually
 rejects a corrupted or missing hash. It is **not** swept into trivy's `pip:.*\.lock\.txt$`
 pattern (§4) because strix's closure is already scanned through `vendor/strix/uv.lock`.
+
+### The OpenTelemetry exporter — an OPT-IN extras lock, layered on a runtime lock
+
+`vigil engage --otlp-endpoint` (and `$VIGIL_OTLP_ENDPOINT`) export spans through the OpenTelemetry SDK and
+its OTLP/HTTP exporter. **Neither runtime lock carries them**, on purpose: telemetry export is default-OFF,
+and a network exporter in every deployment would widen the shipped surface for a feature most installs never
+turn on. Until this lock existed that meant the exporter was simply *absent* on every locked install — the
+CLI and `vigil doctor` said so honestly, but there was no reproducible way to turn it on, and
+`integration/tests/test_live_otel_export.py` skipped in every CI job.
+
+**`infra/supply-chain/otel.lock.txt`** (compiled from `otel.in` with pip-compile, like the two runtime locks)
+pins `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and their closure — 16 packages, all
+hash-pinned, OpenTelemetry 1.45.x. It is for **env-offense** (where `vigil` runs). To turn export on:
+
+```bash
+VIGIL_WITH_OTEL=1 bash envs/build_envs.sh          # rebuilds env-offense with the layer
+```
+
+(Installing it by hand into an existing env-offense also works — with that env's installer, `--require-hashes`,
+after its locks. `build_envs.sh` builds with `uv` when present, and a uv venv has no `pip` of its own, so use
+`uv pip install --python .venv-offense/bin/python --require-hashes -r infra/supply-chain/otel.lock.txt` there.)
+
+It is an **additive layer**, and that is enforced, not hoped for:
+
+* `otel.in` takes the **offense framework lock as a `-c` constraint**, so every package it shares with
+  env-offense (`requests`, `urllib3`, `typing-extensions`, `certifi`, `idna`, `charset-normalizer`) resolves to
+  the **identical** pin. Installing the layer adds packages and never moves one. `test_supply_chain.py` asserts
+  the agreement offline against env-offense's EFFECTIVE pins (`strix.lock` overlaid by the framework lock — the
+  `build_envs.sh` order — so a package only strix pins is held to strix's pin too); the A14 gate proves it live
+  (installs the offense lock, then the otel lock, both `--require-hashes`, and fails if any previously-installed
+  version changed, then `pip check`s and imports the exporter).
+* It is **also** constrained by the sovereign lock, so `opentelemetry-api` and `protobuf` are the **same
+  release** env-sovereign ships (it pulls `opentelemetry-api` in via `mcp`) — one OpenTelemetry version across
+  the product, asserted offline. Both `sovereign.in` and `otel.in` carry an `opentelemetry-api>=1.45.1` floor for
+  **GHSA-xcq7-p3pf-p88h / CVE-2026-114603** (a `TraceState.from_header` ReDoS, fixed in 1.45.1), and a test
+  fails if either lock ever pins below it. The layer itself is for env-offense.
+* The SDK, API, proto and exporters must be **one OpenTelemetry release** (a mixed set imports but fails at
+  export time, which reads exactly like "the collector is down") — asserted offline.
+* It stays **opt-in**: a test fails if either runtime lock ever starts pinning the SDK or exporter.
+  `build_envs.sh` installs nothing extra unless `VIGIL_WITH_OTEL` is affirmative (`1`/`true`/`yes`/`on`), and
+  opting in with the lock missing is **fatal in every posture** — never an unlocked `pip install opentelemetry-*`.
+* The A14 gate regenerates it (harvestable artifact), drift-checks it and cross-checks a CycloneDX SBOM with
+  `verify-supply-chain.sh`, and trivy scans it (it matches `pip:.*\.lock\.txt$`).
+* CI's **P5** job installs it, so `test_live_otel_export.py` — including a real span pushed through the real
+  exporter to a loopback endpoint — **runs**, and `.github/scripts/assert_otel_export_ran.py` fails that
+  required job if those proofs ever go back to skipping.
+
+Installing the layer does **not** turn telemetry on. Export still needs an explicit, loopback-pinned
+`--otlp-endpoint` / `$VIGIL_OTLP_ENDPOINT`; with neither set, no telemetry path changes (only `vigil doctor`'s
+diagnostic `exporter_installed` field reads differently).
 
 ### Fail-closed vs. degrade — the production posture
 

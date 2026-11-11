@@ -510,3 +510,67 @@ class LaunchGate:
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         return {"ok": True, "action": "launch_published", "org_id": doc.org_id, "slug": doc.engagement_slug,
                 "scope_host": doc.scope_host}
+
+    def _verify_lease_for_pause(self, signed_lease: Any, expect_org_id: Optional[str]):
+        """Owner-pinned verify + tenant-bind for a pause/resume request (same guarantee as publish/settle): the
+        signed lease must verify under OUR owner key (never a wire/seam value) and — when a customer calls — its
+        ``org_id`` must equal the session org, so a customer can never pause/resume another tenant's lease.
+        Returns ``(doc, None)`` on success or ``(None, {ok: False, error})`` on any refusal (fail-closed)."""
+        from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
+        kp = self.owner_key
+        if kp is None:
+            return None, {"ok": False, "error": "pause/resume requires the owner key (internal)"}
+        try:
+            signed = SignedCreditLaunchLease.model_validate(signed_lease)
+        except Exception:  # noqa: BLE001 — a malformed lease is a fail-closed refusal
+            return None, {"ok": False, "error": "pause/resume requires the signed launch lease from reserve_launch"}
+        owner_root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, reason = verify_credit_launch_lease(signed, owner_root)   # PINNED to our owner key, not the wire
+        if not ok:
+            return None, {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
+        doc = signed.document
+        if expect_org_id is not None and doc.org_id != expect_org_id:
+            return None, {"ok": False, "error": "this lease belongs to a different org"}
+        return doc, None
+
+    def pause_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+        """pause/resume PR-4b (producer) — RECORD a reversible ``(slug, nonce)`` pause marker for a customer's
+        own owner-signed lease, so the already-merged PR-2..PR-4a money-safety plumbing HALTS the launch at every
+        window (held, re-admitted on resume). Verifies the lease owner-pinned + tenant-binds (``expect_org_id``);
+        the record is done UNDER ``self._lock`` (the spine lock = the PR-1 caller-serialization the non-atomic
+        pause-marker read-modify-write requires). Pausing moves NO money (no credit/amount/signature touched).
+        A SETTLED/canceled lease is refused (it is no longer a runnable launch, so there is nothing to pause).
+        Idempotent: re-pausing the same (slug, nonce) re-writes the same marker."""
+        doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
+        if err is not None:
+            return err
+        s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
+        try:
+            from vigil_integration.live.credit_lease_broker import is_lease_settled
+            from vigil_integration.live.credit_lease_pause import record_lease_pause
+            with self._lock:
+                if is_lease_settled(self._seam_base(), s, non):
+                    return {"ok": False, "error": "this lease has already been settled/canceled and cannot be paused"}
+                record_lease_pause(self._seam_base(), s, non)
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-pause
+            return {"ok": False, "error": f"could not record the launch pause (fail-closed): {type(e).__name__}"}
+        return {"ok": True, "action": "launch_paused", "org_id": oid, "slug": s, "nonce": non}
+
+    def resume_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+        """pause/resume PR-4b (producer) — CLEAR the ``(slug, nonce)`` pause marker so the SAME lease re-arms
+        (PR-2 re-check passes; PR-3/PR-4a re-admit the held delivery). Same owner-pinned verify + tenant-bind as
+        :meth:`pause_launch`; the clear is UNDER ``self._lock``. Clearing is always safe + idempotent (a clear of
+        an absent/already-cleared pause is a no-op), so — unlike pause — it does not refuse a settled lease (a
+        settled lease simply has no pause to clear and will not run regardless)."""
+        doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
+        if err is not None:
+            return err
+        s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
+        try:
+            from vigil_integration.live.credit_lease_pause import clear_lease_pause
+            with self._lock:
+                clear_lease_pause(self._seam_base(), s, non)
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
+            return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
+        return {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}

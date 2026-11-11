@@ -19,7 +19,7 @@ OTLP/HTTP to the collector. But two gaps remained:
 ## The claim (registered in the claims registry — [W0-3] #398, id `W6-4`)
 
 <!-- CLAIM:W6-4 -->
-> **Registered claim (W0-3 #398):** VIGIL ships a real OTLP collector profile that forwards every received span to a real OTLP-compatible backend (`infra/sidecars/otel-config-backend.yaml` defines an `otlp/backend` exporter with an endpoint and wires it into the traces pipeline, not only the stdout `debug` exporter), selectable in `docker-compose.yml` via `OTEL_CONFIG`; and an UNREACHABLE backend is made VISIBLE rather than silently dropped — `live.otel_export.probe_collector` actively preflights the collector (loopback-pinned, stdlib-only) and, when it is down, returns `reachable=False` with a human-readable detail AND logs a WARNING, so a down telemetry backend never disappears into a silent per-span drop. Both the collector profile and the visible-unreachable preflight are exercised in the required P5 CI leg; the stronger OTLPSpanExporter real-span-arrival e2e is otel-gated and SKIPS in CI (opentelemetry is absent from the runtime locks), so it is NOT claimed as exercised here.
+> **Registered claim (W0-3 #398):** VIGIL ships a real OTLP collector profile that forwards every received span to a real OTLP-compatible backend (`infra/sidecars/otel-config-backend.yaml` defines an `otlp/backend` exporter with an endpoint and wires it into the traces pipeline, not only the stdout `debug` exporter), selectable in `docker-compose.yml` via `OTEL_CONFIG`; and an UNREACHABLE backend is made VISIBLE rather than silently dropped — `live.otel_export.probe_collector` actively preflights the collector (loopback-pinned, stdlib-only) and, when it is down, returns `reachable=False` with a human-readable detail AND logs a WARNING, so a down telemetry backend never disappears into a silent per-span drop. Both the collector profile and the visible-unreachable preflight are exercised in the required P5 CI leg; the stronger OTLPSpanExporter real-span-arrival e2e is exercised there too — P5 installs the opt-in OpenTelemetry hash lock (`infra/supply-chain/otel.lock.txt`) so `test_live_otel_export.py` runs, and `.github/scripts/assert_otel_export_ran.py` fails that required job if it ever skips.
 
 ## What changed
 
@@ -67,21 +67,20 @@ Two layers, matching the two places a backend can be down:
   proves an unreachable backend surfaces a returned error + a logged WARNING (not a silent drop); and the
   backend profile is asserted to route its traces pipeline to a real `otlp` exporter (with the default
   stdout-only profile as the contrast control).
-- `integration/tests/test_live_otel_export.py` — **otel-gated, and it SKIPS in CI**: `opentelemetry` is
-  absent from both P5 runtime locks, so this module `pytest.importorskip`s and **does not run in any CI job
-  today**. Where otel *is* installed it proves the stronger property — a real span, through the real
-  `OTLPSpanExporter`, over real HTTP, arrives at an in-test loopback OTLP endpoint's `/v1/traces` route (plus
-  the circuit-breaker-latch WARNING and its healthy-collector control) — but that proof is **not claimed as
-  exercised in CI**. The load-bearing, CI-run guarantees are the two bullets above (the config profile + the
-  visible-unreachable preflight), which are deliberately otel-free.
+- `integration/tests/test_live_otel_export.py` — otel-gated (`pytest.importorskip`). It skipped in every CI
+  job until P5 began installing the opt-in OpenTelemetry hash lock (`infra/supply-chain/otel.lock.txt`, see
+  `docs/SUPPLY-CHAIN.md`); it now RUNS in the required P5 leg and proves the stronger property — a real span,
+  through the real `OTLPSpanExporter`, over real HTTP, arrives at an in-test loopback OTLP endpoint's
+  `/v1/traces` route (plus the circuit-breaker-latch WARNING and its healthy-collector control).
+  `.github/scripts/assert_otel_export_ran.py` fails P5 if those proofs ever go back to skipping. The two
+  bullets above (the config profile + the visible-unreachable preflight) stay deliberately otel-free.
 
 ## Residual (honest scope)
 
-1. **The real-`OTLPSpanExporter` span-arrival e2e is not exercised in CI.** It lives in the otel-gated
-   `test_live_otel_export.py`, which module-skips because `opentelemetry` is not in the runtime locks. Wiring
-   it to run would need the `opentelemetry-*` packages added to the framework runtime lock (a lockfile change
-   with network/hash resolution out of this sandbox's reach). Until then only the otel-free
-   `test_otlp_collector_backend.py` guarantees are CI-enforced.
+1. **RESOLVED — the real-`OTLPSpanExporter` span-arrival e2e now runs in CI.** Rather than adding the
+   `opentelemetry-*` packages to a runtime lock (which would ship a network exporter in every deployment),
+   they got their own OPT-IN hash lock, `infra/supply-chain/otel.lock.txt`, which P5 installs under
+   `--require-hashes`; `assert_otel_export_ran.py` keeps the proof from silently skipping again.
 2. **A live EXTERNAL backend is not stood up.** The CI-run tests exercise the export destination against a
    **loopback** endpoint (an in-test receiver); standing up a real Jaeger/Tempo/Grafana-Cloud instance and
    running a full engagement against it needs Docker + network + that backend running — it cannot execute in

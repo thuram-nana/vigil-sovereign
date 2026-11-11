@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from vigil_core.hopauth import verify_hop_assertion
+from vigil_core.hopauth import body_binding, verify_hop_assertion
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
@@ -1389,14 +1389,17 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length) if length else b""
         except (ValueError, OSError) as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
-        # NH-1: bind the EXACT request body into the hop assertion (role == "<action>:<sha256(raw)>"). The
+        # NH-1: bind the EXACT request body into the hop assertion (role == "<action>:<body_binding(raw)>"). The
         # edge stamps over the bytes it sends; the cockpit recomputes over the bytes it received. So a
         # captured assertion cannot be replayed within the freshness window with a SWAPPED body (different
         # member_username/role/org) to mint an attacker-chosen owner-signed grant — the hash, role, and MAC
         # all change. principal/method/path/ts stay bound as before; an empty/blank key ⇒ verify ⇒ 403, so
         # the surface is unreachable to anyone but the hop-key-holding edge (never operator RBAC / CSRF).
-        bound_role = f"{action}:{hashlib.sha256(raw).hexdigest()}"
-        if not verify_hop_assertion(_config.provision_hop_key(), principal, bound_role, "POST", path, ts, sig):
+        # The binding is a KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding) — the body can carry a
+        # password, and a password never touches a fast hash. A blank key binds nothing ⇒ verify refuses (403).
+        hop_key = _config.provision_hop_key()
+        bound_role = f"{action}:{body_binding(hop_key, raw)}" if hop_key else ""
+        if not verify_hop_assertion(hop_key, principal, bound_role, "POST", path, ts, sig):
             return self._deny(403, "provision denied (hop)")
         try:
             body = json.loads(raw or b"{}")
@@ -1500,6 +1503,18 @@ class Handler(BaseHTTPRequestHandler):
         if action == "launch_start":
             return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
                                   mfa_at=body.get("mfa_at"))
+        # pause/resume PR-4b — reversible customer pause/resume of their own launch. Absent (unknown action ->
+        # 404) unless the flag is ON; requester is the hop principal, org from the edge SESSION, the signed lease
+        # from the body (sovereign re-verifies it owner-pinned + tenant-binds to the session org).
+        if action in ("launch_pause", "launch_resume"):
+            from .. import config as _config
+            if not _config.customer_pause_resume_enabled():
+                return None
+            if action == "launch_pause":
+                return p.launch_pause(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                      mfa_at=body.get("mfa_at"))
+            return p.launch_resume(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                   mfa_at=body.get("mfa_at"))
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
         if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
@@ -1515,6 +1530,21 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
+        # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
+        if action == "billing_checkout":
+            from .. import config as _config
+            if not _config.customer_checkout_enabled():
+                return None
+            return p.billing_checkout(requester, str(body.get("org_id", "")), str(body.get("price_id", "")),
+                                      ip=ip, mfa_at=body.get("mfa_at"))
+        # Front B CHK-2 — what the session org can buy (the billing page's buy buttons). Same flag + gate as
+        # checkout; absent (unknown action -> 404) while the flag is OFF.
+        if action == "billing_offers":
+            from .. import config as _config
+            if not _config.customer_checkout_enabled():
+                return None
+            return p.customer_billing_offers(requester, str(body.get("org_id", "")), ip=ip)
         # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
         if action == "billing_overview":
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)
@@ -1769,6 +1799,11 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
     if extras:
         print(f"  (reverse-proxy Host allowlist: {extras})")
+    # Front C S0d: with VIGIL_FOLD_CACHE_ENABLED, warm every verified fold cache in the background (off the
+    # request path) and re-audit them periodically against the spine. A no-op with the cache off.
+    from ..governor import fold_warm
+    if fold_warm.start_background(srv.store, name="cockpit") is not None:
+        print("  (fold cache: warming in the background; periodic audit → `vigil doctor`)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

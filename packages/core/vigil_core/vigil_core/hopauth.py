@@ -37,6 +37,31 @@ from typing import Optional
 DEFAULT_HOP_MAX_SKEW_S = 30.0
 
 
+# Body binding (NH-1). Domain-separated so a binding can never collide with any other use of the hop key.
+_BODY_BINDING_SALT = b"vigil/hop-body-binding/v1\x00"
+#: PBKDF2-HMAC-SHA256 work factor for the body binding (~18 ms on a CI runner). See ``body_binding``.
+BODY_BINDING_ITERATIONS = 100_000
+
+
+def body_binding(hop_key: str, body: bytes) -> str:
+    """The digest of the EXACT request body that a body-bound hop assertion folds into its role
+    (``role == "<action>:<body_binding>"`` — NH-1: a captured assertion cannot be replayed within the freshness
+    window with a SWAPPED body, because the binding, the role and the MAC all change).
+
+    RULE: a password never touches a fast hash — not even a keyed one. Hop bodies can carry a password
+    (signup / login / recover / passkey flows), so the binding is PBKDF2-HMAC-SHA256 over the exact body bytes,
+    salted with the hop key (domain-separated) at ``BODY_BINDING_ITERATIONS``. It is therefore both KEYED (no
+    one without the hop key can compute or test a guess against it) and SLOW (even if a binding and the hop key
+    both leaked, recovering a password from it costs a password-hash's work per guess). The binding is only an
+    input to the hop MAC — it is never stored, logged or sent. Both ends hold the hop key already (the edge
+    stamps with it, the cockpit verifies with it) and recompute this over the bytes they send / receive.
+    Requires a non-empty ``hop_key``: a blank key binds nothing, and callers fail closed before reaching here."""
+    if not hop_key:
+        raise ValueError("body_binding requires a non-empty hop key")
+    return hashlib.pbkdf2_hmac("sha256", bytes(body), _BODY_BINDING_SALT + hop_key.encode("utf-8"),
+                               BODY_BINDING_ITERATIONS).hex()
+
+
 def hop_message(principal: str, role: str, method: str, path: str, ts: str) -> bytes:
     """The EXACT bytes signed/verified: ``principal\\nrole\\nmethod\\npath\\nts`` (UTF-8). ``ts`` is a
     STRING (the proxy stamps ``str(int(time.time()))``) and is signed verbatim, so verification recomputes

@@ -68,3 +68,17 @@ def test_cmd_settle_drain_refuses_percent_h_spool(tmp_path, capsys):
         cmd_settle_drain(a)
     assert ei.value.code == 2
     assert "--spool must be an ABSOLUTE" in capsys.readouterr().err
+
+
+def test_cmd_billing_drain_refuses_percent_h_spool(capsys, monkeypatch):
+    """Front B: the money-IN drain (now run by vigil-billing-drain.service from an env value) refuses a literal-%h
+    spool before it can drain NOTHING while exiting 0 (a paid customer never credited, the dead-man reading it
+    healthy). The message assertion isolates THIS guard from the (also exit-2) secret / verifier checks after it."""
+    from sigil.cli import cmd_billing_drain
+    monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "dummy-test-secret")
+    a = types.SimpleNamespace(spool="%h/.sigil/spool/billing", billing_cmd="drain", interval=2.0)
+    with pytest.raises(SystemExit) as ei:
+        cmd_billing_drain(a)
+    assert ei.value.code == 2
+    assert "--spool must be an ABSOLUTE" in capsys.readouterr().err

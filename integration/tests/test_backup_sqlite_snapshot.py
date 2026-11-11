@@ -54,7 +54,7 @@ def _integrity_ok(path: Path) -> bool:
 
 
 def test_store_sqlite_snapshot_backs_up_and_restores_consistent(tmp_path):
-    base, croot = tmp_path / "b", tmp_path / "c"
+    base, croot = tmp_path / "b", tmp_path / "c" / "framework" / "v2"
     _seed_offense_home(base)
     store = croot / ".blackboard" / "store.sqlite"
     _make_store(store, rows=500)
@@ -63,7 +63,7 @@ def test_store_sqlite_snapshot_backs_up_and_restores_consistent(tmp_path):
     summary = create_offense_backup(dest, PW, base_dir=str(base), crucible_root=str(croot))
     assert summary["files"] >= 2                                   # spine + the store snapshot
 
-    new_base, new_croot = tmp_path / "nb", tmp_path / "nc"
+    new_base, new_croot = tmp_path / "nb", tmp_path / "nc" / "framework" / "v2"
     res = restore_offense_backup(dest, str(new_base), PW, crucible_root=str(new_croot))
     assert res["verified"] is True
 

@@ -39,7 +39,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from vigil_core.hopauth import stamp_hop_assertion  # noqa: E402
+from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
@@ -58,6 +58,30 @@ _OIDC_SID_COOKIE = "vigil_customer_oidc_sid"
 _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         "object-src 'none'; img-src 'self' data:")
 _MAX_BODY = 65536
+
+# How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
+# worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
+# a single-use OIDC code consumed) while the customer is told it failed — so they retry into a duplicate, or are
+# locked out of a login. So the wait is PER ACTION and always exceeds that action's own outbound worst case
+# (each figure below is pinned against the downstream timeout constants by test_custui_hop_budget.py); purely
+# local actions keep the short default so a wedged cockpit still fails fast.
+_HOP_TIMEOUT_S = 10.0
+_SLOW_HOP_TIMEOUTS_S = {
+    # Flutterwave hosted-checkout POST: 15 s per blocking socket op (connect, then read) -> 30 s + margin.
+    "billing_checkout": 45.0,
+    # OIDC: token exchange POST + JWKS GET, 10 s per blocking op each -> 40 s + margin.
+    "oidc_finish": 45.0,
+    # domain-ownership fetch: a 10 s ABSOLUTE wall-clock budget for the whole fetch -> + margin.
+    "target_verify": 20.0,
+    # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
+    "signup_request": 60.0,
+    "recover_request": 60.0,
+}
+
+
+def _hop_timeout(action: str) -> float:
+    """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
+    return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
 # The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
 # the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
 # routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
@@ -287,17 +311,18 @@ class CustomerHandler(BaseHTTPRequestHandler):
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")
-        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<sha256(body)>"), matching the
+        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<body_binding(body)>"), matching the
         # cockpit's recomputation over the bytes it receives — a captured assertion cannot be replayed with a
-        # swapped body to mint an attacker-chosen grant.
-        bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+        # swapped body to mint an attacker-chosen grant. The body can carry a password, so the binding is a
+        # KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding), never a fast hash.
+        bound_role = f"{action}:{body_binding(self.server.hop_key, data)}"
         sig = stamp_hop_assertion(self.server.hop_key, principal, bound_role, "POST", path, ts)
         req = urllib.request.Request(
             self.server.provision_base + path, data=data, method="POST",
             headers={"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,
                      "X-VIGIL-Provision-Ts": ts, "X-VIGIL-Provision-Sig": sig})
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=_hop_timeout(action)) as r:
                 return r.status, json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             try:
@@ -361,6 +386,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
                   "/api/customer/notifications": "notifications"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_offers")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
@@ -585,8 +612,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
+        if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
+            return self._launch(action, body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
             return self._monitoring(action, body)
+        if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
+            return self._checkout(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -656,12 +687,26 @@ class CustomerHandler(BaseHTTPRequestHandler):
             payload["host"] = body.get("host", "")              # session org, never body-supplied
             payload["product_id"] = body.get("product_id", "")  # EC-7b: tier product choice (catalog id, not an amount)
             c, r = self._provision("launch_reserve", requester, payload)
-        elif action == "launch/start":
-            payload["lease"] = body.get("lease")                # publish the signed lease -> run (K3)
-            c, r = self._provision("launch_start", requester, payload)
-        else:
+        elif action in ("launch/start", "launch/cancel", "launch/pause", "launch/resume"):
+            # all carry the signed lease; the sovereign re-verifies it owner-pinned + tenant-binds to the session
+            # org. launch/pause|resume (PR-4b) are flag-gated at the route, so the hop 404s when the flag is off.
             payload["lease"] = body.get("lease")
-            c, r = self._provision("launch_cancel", requester, payload)
+            c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
+        else:
+            return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _checkout(self, body: dict):
+        """Front B CHK-1 — open a hosted checkout. REQUESTER + ORG from the SERVER-side session, never the body (a
+        body org_id is ignored): a customer can only ever fund THEIR bound org. The body carries ONLY the catalog
+        ``price_id``; the amount is the owner catalog's (sovereign side). Returns the processor's hosted link."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "price_id": body.get("price_id", ""),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_checkout", requester, payload)
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -771,6 +816,16 @@ class CustomerHandler(BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _checkout_on() -> bool:
+    from .. import config as _config
+    return _config.customer_checkout_enabled()
+
+
+def _pause_resume_on() -> bool:
+    from .. import config as _config
+    return _config.customer_pause_resume_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

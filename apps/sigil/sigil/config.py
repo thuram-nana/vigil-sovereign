@@ -224,6 +224,59 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_pause_resume_enabled() -> bool:
+    """True iff the customer pause/resume launch routes are ON (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`
+    affirmative). OFF by default (pause/resume PR-4b): the edge routes and provisioner actions are absent (404)
+    exactly as an unknown route, and NOTHING records or clears a lease pause — so the whole PR-1..PR-4a pause
+    substrate stays INERT until the owner turns this on. Pausing moves NO money (it is money-doctrine-neutral);
+    this flag gates only the CUSTOMER-facing ability to record/clear a reversible pause on their own lease."""
+    return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_checkout_enabled() -> bool:
+    """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
+    default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
+    and nothing ever posts to the payment processor. Even when ON, checkout still refuses unless the owner has
+    provisioned the processor secrets (VIGIL_BILLING_WEBHOOK_SECRET + VIGIL_FLW_SECRET_KEY) — the amount is
+    always the OWNER CATALOG's, and credit is granted ONLY by the verified inbound webhook drain, never here."""
+    return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_plan_checkout_enabled() -> bool:
+    """True iff customers may also check out SUBSCRIPTION plans (`VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED`
+    affirmative). Effective only together with the base checkout flag (the edge route is absent without it).
+    OFF by default (CHK-1b). A plan checkout subscribes the payer
+    to the processor's recurring plan (the catalog price_id IS the payment_plan id); every RENEWAL must then map back
+    to the tenant via the tx_ref / meta we set — a sandbox-confirm item. ENABLE ONLY after a sandbox renewal shows
+    it attributes. While ON, the billing drain QUARANTINES (alarms on) a verified successful plan charge it cannot
+    attribute or price, instead of a silent no-op."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def billing_plan_alarm_enabled() -> bool:
+    """Whether the billing drain QUARANTINES (alarms on) an unaccountable paid PLAN charge. ON whenever plan
+    checkout is ON, and independently via `VIGIL_BILLING_PLAN_ALARM` — keep it ON for as long as any plan sold
+    while checkout was enabled may still RENEW: turning plan SALES off must never silence the alarm on renewals
+    that are still being billed (CHK-1b red-pen)."""
+    return customer_plan_checkout_enabled() or (
+        (os.environ.get("VIGIL_BILLING_PLAN_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE)
+
+
+def customer_billing_return_url() -> "str | None":
+    """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
+    ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value
+    must be an absolute ``https://`` URL with a host — anything else raises ``ValueError`` (checkout fails closed
+    rather than redirecting a paying customer somewhere unintended)."""
+    from urllib.parse import urlparse
+    raw = (os.environ.get("VIGIL_CUSTOMER_BILLING_RETURN_URL") or "").strip()
+    if not raw:
+        return None
+    p = urlparse(raw)
+    if p.scheme != "https" or not p.hostname or any(c.isspace() for c in raw) or "@" in (p.netloc or ""):
+        raise ValueError("VIGIL_CUSTOMER_BILLING_RETURN_URL must be an absolute https:// URL")
+    return raw
+
+
 def kek_backend() -> str:
     """Which custody backend wraps the at-rest KEK (the key that seals the owner key + secrets):
 
@@ -450,6 +503,35 @@ def oidc_enabled() -> bool:
     case-insensitive). Absent / empty / anything else ⇒ OFF. When OFF the OIDC routes are NOT registered
     at all — the cockpit is byte-identical to a build without OIDC (no /api/oidc/* route, no egress)."""
     return (os.environ.get("SIGIL_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def fold_cache_enabled() -> bool:
+    """True iff the verified incremental FOLD CACHE is ON (`VIGIL_FOLD_CACHE_ENABLED` affirmative). OFF by default
+    (Front C S0a): every registry read runs its full signature-verifying fold, byte-identical to a build without
+    the cache. When ON, a registry that supports it (S0a: `CustomerRegistry`) extends an in-memory fold over only
+    the records appended since its last read, anchored to the chain (`spine/fold_cache.py`); on any doubt it
+    rebuilds from the spine. Read at call time, so an operator can turn it off without a restart."""
+    return (os.environ.get("VIGIL_FOLD_CACHE_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Front C S0d: the cockpit's background fold-cache AUDIT report (`governor/fold_warm.py`), read by `vigil doctor`
+# (stdlib mirror: `$SIGIL_HOME/fold_cache_audit.json`) and printed by `sigil verify`.
+FOLD_AUDIT_PATH = SIGIL_HOME / "fold_cache_audit.json"
+
+
+def fold_cache_audit_interval() -> float:
+    """Seconds between the cockpit's background rebuild-and-compare audits of the fold caches
+    (`VIGIL_FOLD_CACHE_AUDIT_S`, default 21600 = 6 h). 0 (or negative / unparseable-as-positive) disables the
+    PERIODIC audit; the start-up warm-up still runs. Only consulted when `fold_cache_enabled()`. A rebuild costs
+    what a cold start costs (O(spine) per fold), hence the long default."""
+    raw = (os.environ.get("VIGIL_FOLD_CACHE_AUDIT_S") or "").strip()
+    if not raw:
+        return 21600.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 21600.0
+    return v if v > 0 and v == v and v != float("inf") else 0.0
 
 
 def oidc_settings() -> dict:
@@ -699,7 +781,11 @@ def effective_config() -> dict:
     the honest "what will SIGIL actually use on this host" view the audit asked for."""
     home = _resolve_home()
     spine = home / "spine"
-    api_key = os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or ""
+    # Only the key's PRESENCE is surfaced — the raw value never enters this dict. `_redact` would mask it by
+    # key NAME anyway, but a name-based sanitizer is invisible to taint analysis (CodeQL
+    # py/clear-text-logging-sensitive-data traced the raw key into `sigil doctor --json`), so keep the secret
+    # out of the data entirely. Output is byte-identical: set -> "***redacted***", unset/empty -> "".
+    api_key_set = bool(os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
     cfg = {
         "SIGIL_HOME": str(home),
         "SPINE_PATH": str(spine / "spine.jsonl"),
@@ -719,7 +805,7 @@ def effective_config() -> dict:
         "KERNEL_BIN": kernel_bin(),
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
-        "ANTHROPIC_API_KEY": api_key,
+        "ANTHROPIC_API_KEY": "***redacted***" if api_key_set else "",
         # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
         # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
         # SECRET name-hint below (and is not placed here at all).

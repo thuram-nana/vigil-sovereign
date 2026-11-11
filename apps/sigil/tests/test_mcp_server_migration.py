@@ -106,6 +106,12 @@ def test_live_server_registers_eight_tools(tmp_path, monkeypatch) -> None:
     names = {t.name for t in tools}
     assert names == EXPECTED_TOOLS, f"registered tools {sorted(names)} != {sorted(EXPECTED_TOOLS)}"
 
-    # episodic_range needs only the spine (fresh SIGIL_HOME -> empty spine, count 0); a real call
+    # episodic_range needs only the spine; give the server a PRIVATE empty one. `SpineStore()`'s default path is
+    # bound at import, so the monkeypatched SIGIL_HOME alone did NOT isolate it: after any earlier test wrote to
+    # the default spine this read a non-empty store (order-dependent; it only ran where the full sovereign closure
+    # is installed — elsewhere the test skips). A real call:
+    from sigil.spine.store import SpineStore
+    private = tmp_path / "spine" / "spine.jsonl"
+    monkeypatch.setattr(server, "SpineStore", lambda *a, **k: SpineStore(str(private)))
     out = server.episodic_range()
     assert isinstance(out, dict) and "records" in out and out.get("count") == 0, out

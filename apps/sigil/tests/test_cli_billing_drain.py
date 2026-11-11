@@ -125,3 +125,58 @@ def test_drains_catalog_mint_exactly_once_and_never_prints_secret(home, capsys, 
     for p in Path(os.environ["SIGIL_HOME"]).rglob("*"):         # never persisted on the spine either
         if p.is_file():
             assert _SECRET.encode() not in p.read_bytes()
+
+
+def test_net2b_a_transient_processor_failure_is_deferred_not_alarmed_then_credited(home, capsys, monkeypatch):
+    """NET-2b through the real CLI (the vigil-billing-drain unit's ExecStart): with VIGIL_NET_RECOVERY_ENABLED a
+    processor 503 parks the webhook — the pass exits 0 (no false alarm), says so honestly, mints nothing — and the
+    next due pass credits it exactly once. OFF, the same 503 quarantines and exits 1 (covered above + unchanged)."""
+    from sigil.governor import flutterwave_egress as fe
+    pid, credits = _topup()
+    monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.setenv("VIGIL_NET_RECOVERY_ENABLED", "1")
+    good = _verifier(pid)
+    calls = {"n": 0}
+
+    def flaky(txid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            exc = fe.FlutterwaveEgressError("Flutterwave GET returned HTTP 503")
+            exc.transient = True
+            raise exc
+        return good(txid)
+
+    monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: flaky)
+    spool = Path(tempfile.mkdtemp())
+    _spool_charge(spool, 9911)
+    own = Path(home) / "net2b-spine.jsonl"                      # a PRIVATE store: SpineStore()'s default path is
+    monkeypatch.setattr(cli, "SpineStore", lambda: SpineStore(own))   # bound at import and shared across tests
+    before = WalletRegistry(SpineStore(own)).available("acme")
+    assert before == 0
+    ns = SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1)
+    cli.cmd_billing_drain(ns)                                   # returns (exit 0): parked, NOT quarantined
+    text = capsys.readouterr().out
+    assert "0 minted" in text and "awaiting retry: 1 billing webhook(s)" in text and "(1 new this pass)" in text
+    assert "ALARM" not in text
+    assert WalletRegistry(SpineStore(own)).available("acme") == 0       # nothing minted while parked
+    ledger = next((spool / "retry").glob("*.state"))
+    state = json.loads(ledger.read_text())
+    state["next_at"] = 0.0                                       # make it due now (the real wait is 5 s)
+    ledger.write_text(json.dumps(state))
+    cli.cmd_billing_drain(ns)
+    out = capsys.readouterr().out
+    assert "1 minted" in out and "awaiting retry" not in out          # nothing left parked
+    assert WalletRegistry(SpineStore(own)).available("acme") == credits  # credited exactly once
+
+
+def test_net2b_off_the_cli_output_is_unchanged(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.delenv("VIGIL_NET_RECOVERY_ENABLED", raising=False)
+    monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: _verifier(pid))
+    spool = Path(tempfile.mkdtemp())
+    _spool_charge(spool, 9911)
+    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
+    assert capsys.readouterr().out == "  drained: 1 minted, 0 noop, 0 rejected, 0 deduped\n"

@@ -44,6 +44,9 @@ from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
+from .ledger_view import PairedLedgerView  # noqa: E402
 
 COST_RESERVE_SIGNAL = "governor.cost_reserve"
 COST_SETTLE_SIGNAL = "governor.cost_settle"
@@ -103,6 +106,54 @@ def _check_entry_id(entry_id: str, *, prefix: str = "") -> str:
     if prefix and not e.startswith(prefix):
         raise ValueError(f"entry_id must start with {prefix!r} (reserve/settle prefixes are load-bearing)")
     return e
+
+
+_SKIP = object()          # `_apply_cost_record`: the record was not counted
+
+
+def _apply_cost_record(r, resolver, reserved: dict, settled: dict, seen: set):
+    """Fold ONE spine record into (reserved, settled, seen) — THE cost-ledger fold body, shared by the full
+    `_fold` and the verified fold cache (Front C S0d) so the two can never diverge. Returns the counted record's
+    `(signal, org_id, entry_id, tokens)`, or `_SKIP` (not a cost record, malformed, unverified, or a replay)."""
+    p = r.payload
+    if not isinstance(p, dict):
+        return _SKIP
+    sig = p.get("signal")
+    if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
+        return _SKIP
+    oid = p.get("org_id")
+    eid = p.get("entry_id")
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+        return _SKIP
+    core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
+    if not verify_signed(p, core, resolver.at(r.seq)):
+        return _SKIP                                      # fail-closed: unsigned/forged/wrong-epoch record
+    # Idempotency key namespaced by SIGNAL (direction) so a reserve + a settle are disjoint dedup spaces
+    # even if a caller reuses the raw entry_id — mirrors wallet. (In practice the prefixes already differ.)
+    key = (sig, oid, eid)
+    if key in seen:
+        return _SKIP
+    seen.add(key)
+    amount = _as_tokens(p.get("tokens"))
+    if sig == COST_RESERVE_SIGNAL:
+        reserved[oid] = reserved.get(oid, 0) + amount
+    else:
+        settled[oid] = settled.get(oid, 0) + amount
+    return sig, oid, eid, amount
+
+
+def _new_cost_view(reserved: dict, settled: dict, seen: set) -> PairedLedgerView:
+    return PairedLedgerView(reserved, settled, seen, up_signal=COST_RESERVE_SIGNAL,
+                            reserve_prefix=RESERVE_COST_PREFIX, settle_prefix=SETTLE_COST_PREFIX)
+
+
+def _cost_step(view: PairedLedgerView, r, resolver) -> None:
+    hit = _apply_cost_record(r, resolver, view.up, view.down, view.seen)
+    if hit is not _SKIP:
+        view.pair(*hit)
+
+
+_COST_FOLD = FoldCache("governor.cost_ledger", step=_cost_step)
 
 
 @dataclass(frozen=True)
@@ -175,6 +226,26 @@ class CostEnvelopeLedger:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
+        """((reserved, settled, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
+        the trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
+            # mirroring wallet._fold. Unreachable with a real prune today (SnapshotState.load fails closed on any
+            # real prune), so this branch is only taken under the empty snapshot, where genesis-scan == the fold.
+            return ({}, {}, set()), -1
+        return (dict(snap.cost_reserved_map()), dict(snap.cost_settled_map()), set(snap.cost_seen_set())), \
+            snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental cost-ledger fold (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold` / pairing scans)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _new_cost_view(*st), since
+
+        return cached_read(_COST_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed, reader=reader)
+
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (reserved_total, settled_total, seen) where `seen` is the set of consumed
         ``(signal, org_id, entry_id)`` idempotency keys. Each signed record is authenticated under the owner
@@ -184,44 +255,9 @@ class CostEnvelopeLedger:
         anchor BYPASSES the snapshot and full-scans from genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
-            # mirroring wallet._fold. Unreachable with a real prune today (SnapshotState.load fails closed on any
-            # real prune), so this branch is only taken under the empty snapshot, where genesis-scan == the fold.
-            reserved: dict[Any, int] = {}
-            settled: dict[Any, int] = {}
-            seen: set = set()
-            since = -1
-        else:
-            reserved = dict(snap.cost_reserved_map())
-            settled = dict(snap.cost_settled_map())
-            seen = set(snap.cost_seen_set())
-            since = snap.base_seq - 1
+        (reserved, settled, seen), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict):
-                continue
-            sig = p.get("signal")
-            if sig != COST_RESERVE_SIGNAL and sig != COST_SETTLE_SIGNAL:
-                continue
-            oid = p.get("org_id")
-            eid = p.get("entry_id")
-            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
-                continue
-            core = _RESERVE_CORE if sig == COST_RESERVE_SIGNAL else _SETTLE_CORE
-            if not verify_signed(p, core, resolver.at(r.seq)):
-                continue                                      # fail-closed: unsigned/forged/wrong-epoch record
-            # Idempotency key namespaced by SIGNAL (direction) so a reserve + a settle are disjoint dedup spaces
-            # even if a caller reuses the raw entry_id — mirrors wallet. (In practice the prefixes already differ.)
-            key = (sig, oid, eid)
-            if key in seen:
-                continue
-            seen.add(key)
-            amount = _as_tokens(p.get("tokens"))
-            if sig == COST_RESERVE_SIGNAL:
-                reserved[oid] = reserved.get(oid, 0) + amount
-            else:
-                settled[oid] = settled.get(oid, 0) + amount
+            _apply_cost_record(r, resolver, reserved, settled, seen)
         return reserved, settled, seen
 
     def _in_flight(self, org_id: str) -> int:
@@ -274,6 +310,9 @@ class CostEnvelopeLedger:
         the EC-6 reconciliation compares against credits charged."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: v.down.get(org_id, 0))
+        if hit is not _UNCACHED:
+            return hit
         _reserved, settled, _ = self._fold()
         return settled.get(org_id, 0)
 
@@ -281,12 +320,18 @@ class CostEnvelopeLedger:
         """Σ reserved envelope of this tenant's reserved-but-unsettled launches (the pending pool draw)."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: v.in_flight.get(org_id, 0))
+        if hit is not _UNCACHED:
+            return hit
         return self._in_flight(org_id)
 
     def reserved_total(self, org_id: str) -> int:
         """Σ reserved envelope ever (lifetime; fail-closed 0 on empty id)."""
         if not isinstance(org_id, str) or not org_id:
             return 0
+        hit = self._cached(lambda v: v.up.get(org_id, 0))
+        if hit is not _UNCACHED:
+            return hit
         reserved, _settled, _ = self._fold()
         return reserved.get(org_id, 0)
 
@@ -296,19 +341,34 @@ class CostEnvelopeLedger:
         reserve, and by the prune tripwire."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return False
+        key = (COST_RESERVE_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return hit
         _reserved, _settled, seen = self._fold()
-        return (COST_RESERVE_SIGNAL, org_id, entry_id) in seen
+        return key in seen
 
     def tenant_cost(self, org_id: str) -> TenantCost:
         """The full cost position for `org_id` (fail-closed: unknown/empty reads all-zero)."""
         if not isinstance(org_id, str) or not org_id:
             return TenantCost(org_id="", committed_tokens=0, reserved_tokens=0, in_flight_tokens=0)
+        hit = self._cached(lambda v: TenantCost(org_id=org_id, committed_tokens=v.down.get(org_id, 0),
+                                                reserved_tokens=v.up.get(org_id, 0),
+                                                in_flight_tokens=v.in_flight.get(org_id, 0)))
+        if hit is not _UNCACHED:
+            return hit
         reserved, settled, _ = self._fold()
         return TenantCost(org_id=org_id, committed_tokens=settled.get(org_id, 0),
                           reserved_tokens=reserved.get(org_id, 0), in_flight_tokens=self._in_flight(org_id))
 
     def tenant_costs(self) -> list[TenantCost]:
         """Every tenant with cost-ledger activity, in org_id order (the per-tenant margin view)."""
+        hit = self._cached(lambda v: [TenantCost(org_id=str(o), committed_tokens=v.down.get(o, 0),
+                                                 reserved_tokens=v.up.get(o, 0),
+                                                 in_flight_tokens=v.in_flight.get(str(o), 0))
+                                      for o in sorted(set(v.up) | set(v.down))])
+        if hit is not _UNCACHED:
+            return hit
         reserved, settled, _ = self._fold()
         orgs = sorted(set(reserved) | set(settled))
         return [TenantCost(org_id=str(o), committed_tokens=settled.get(o, 0),
@@ -329,7 +389,13 @@ class CostEnvelopeLedger:
         so a pre-prune replay cannot resurrect as a PHANTOM in-flight draw), and the ``{org_id}:{suffix}`` pairing
         (the suffix after the prefix, keyed per org so cross-tenant suffix collisions never pair). The in-flight
         reserve AMOUNTS come from the LIVE window only — ``stranded_active_cost_reserves`` fail-closed refuses a
-        prune that would archive an unsettled reserve, exactly as ``_in_flight`` relies on."""
+        prune that would archive an unsettled reserve, exactly as ``_in_flight`` relies on.
+
+        With the fold cache on (Front C S0d) this is O(1): `PairedLedgerView` keeps both scalars in step."""
+        hit = self._cached(lambda v: GlobalCostPosition(committed_tokens=v.down_total,
+                                                        in_flight_tokens=v.in_flight_total))
+        if hit is not _UNCACHED:
+            return hit
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[tuple[str, str], int] = {}   # (org_id, suffix) -> reserved tokens of an in-flight reserve

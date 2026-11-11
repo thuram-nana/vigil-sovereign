@@ -131,9 +131,9 @@ oracle; timeout → REJECT).
   (`infra/sidecars/otel-config-backend.yaml`, selectable via `OTEL_CONFIG`, forwarding to Jaeger/Tempo/any
   OTLP endpoint — see `docs/decisions/W6-4-otlp-collector-and-backends.md`), and an **unreachable backend is
   now VISIBLE** (`live/otel_export.probe_collector` returns a failure + logs a WARNING) rather than a silent
-  drop — both exercised in the required P5 CI leg (otel-free). Two telemetry pieces remain deferred, and are
-  **NOT** claimed as exercised here: the real-`OTLPSpanExporter` span-arrival e2e is otel-gated and **SKIPS in
-  CI** (`opentelemetry` is absent from the runtime locks, so `test_live_otel_export.py` module-skips), and
+  drop — both exercised in the required P5 CI leg (otel-free). The real-`OTLPSpanExporter`
+  span-arrival e2e (`test_live_otel_export.py`) now also RUNS in P5, which installs the opt-in OpenTelemetry
+  hash lock (`infra/supply-chain/otel.lock.txt`; a skip fails the job). Still deferred, and **NOT** claimed:
   standing up a **live external** backend (a real Jaeger/Tempo instance) is left to owner infra. The engine
   degrades these seams to no-op without affecting a run's truth.
 - **Live *external* network-egress engagement — DONE (2026-07-30).** *(Reconciled: this bullet previously said

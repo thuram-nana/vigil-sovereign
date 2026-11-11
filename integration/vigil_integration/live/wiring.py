@@ -1166,15 +1166,24 @@ def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
         try:
             from .otel_export import probe_collector
             probe = probe_collector(otlp_endpoint)
-            if probe.reachable:
-                _log.info("OTLP collector reachable at %s — engine telemetry export armed", otlp_endpoint)
+            reachable = bool(probe.reachable)
             # (an unreachable collector is already logged at WARNING inside probe_collector — not repeated here)
         except Exception:  # noqa: BLE001 — a preflight failure never blocks wiring the emit seam
-            pass
+            reachable = False
         try:
             sink = make_sink(otlp_endpoint=otlp_endpoint)
         except Exception:  # noqa: BLE001
             return None
+        # NET-2b red-pen MED: a sink that cannot export (no OTLP exporter installed — it is the OPT-IN hash
+        # lock infra/supply-chain/otel.lock.txt, not part of either runtime lock — or the endpoint refused by
+        # the egress pin) would silently SKIP every record while the log claimed "armed". Say so loudly and
+        # wire NOTHING (byte-identical to telemetry-off) rather than register a sink that only pretends.
+        if sink is not None and getattr(sink, "armed", True) is False:
+            _log.warning("OTLP endpoint configured but telemetry export is NOT armed (the OpenTelemetry OTLP "
+                         "exporter is not installed, or the endpoint was refused) — no spans will be exported")
+            return None
+        if reachable:
+            _log.info("OTLP collector reachable at %s — engine telemetry export armed", otlp_endpoint)
     if sink is None:
         return None
 

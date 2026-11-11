@@ -142,3 +142,42 @@ def test_github_signature_fail_closed_on_non_bytes_body_and_hostile_header():
     assert verify_github_signature("not-bytes", _gh_header(_GH_SECRET, _GH_BODY), _GH_SECRET) is False  # type: ignore[arg-type]
     assert verify_github_signature(_GH_BODY, "sha256=café☃", _GH_SECRET) is False
     assert verify_github_signature(bytearray(_GH_BODY), _gh_header(_GH_SECRET, _GH_BODY), _GH_SECRET) is True  # bytearray ok
+
+
+# --- NH-1 body binding: a password never touches a fast hash ------------------------------------------------
+
+def test_body_binding_is_deterministic_and_binds_the_exact_bytes():
+    from vigil_core.hopauth import body_binding
+    body = b'{"email": "a@acme.com", "password": "correct horse"}'
+    assert body_binding("hk", body) == body_binding("hk", body)                    # both ends recompute it
+    assert body_binding("hk", body) != body_binding("hk", body.replace(b"horse", b"house"))  # 1 field swapped
+    assert body_binding("hk", body) != body_binding("hk", body + b" ")             # EXACT bytes, not semantics
+
+
+def test_body_binding_is_keyed_by_the_hop_key():
+    """Without the hop key nobody can compute (or test a password guess against) a binding."""
+    from vigil_core.hopauth import body_binding
+    body = b'{"password": "hunter2"}'
+    assert body_binding("key-A", body) != body_binding("key-B", body)
+
+
+def test_body_binding_is_a_slow_kdf_not_a_fast_hash():
+    """The RULE the binding exists for: a password-bearing body never goes through a fast hash (keyed or not).
+    It must equal PBKDF2-HMAC-SHA256 at >= 100k iterations — and must NOT equal sha256 / a single HMAC."""
+    from vigil_core.hopauth import _BODY_BINDING_SALT, BODY_BINDING_ITERATIONS, body_binding
+    body, key = b'{"new_password": "s3cret"}', "hk"
+    assert BODY_BINDING_ITERATIONS >= 100_000
+    expected = hashlib.pbkdf2_hmac("sha256", body, _BODY_BINDING_SALT + key.encode(), BODY_BINDING_ITERATIONS).hex()
+    assert body_binding(key, body) == expected
+    assert body_binding(key, body) != hashlib.sha256(body).hexdigest()
+    assert body_binding(key, body) != hmac.new(key.encode(), body, hashlib.sha256).hexdigest()
+    # NEGATIVE CONTROL: a lower work factor gives a different value, so the iteration count is really pinned.
+    assert body_binding(key, body) != hashlib.pbkdf2_hmac("sha256", body, _BODY_BINDING_SALT + key.encode(),
+                                                          1).hex()
+
+
+def test_body_binding_refuses_a_blank_key():
+    import pytest
+    from vigil_core.hopauth import body_binding
+    with pytest.raises(ValueError):
+        body_binding("", b"{}")

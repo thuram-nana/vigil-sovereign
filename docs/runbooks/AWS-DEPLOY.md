@@ -106,6 +106,11 @@ vigil restore ./restore-check --base-dir ./restore-base --crucible-root ./restor
 ```
 (Use `vigil restore`, not `sigil restore` — restore already re-verifies the RESTORED dirs; a trailing
 `sigil verify` would check the live host instead. For an explicit re-check add `vigil verify --base-dir ./restore-base`.)
+`--crucible-root` takes either the CRUCIBLE root (the dir holding `framework/v2` and `targets/`, what
+`$CRUCIBLE_ROOT` names) or its `framework/v2`; a fresh dir is laid out exactly like the engine's: `targets/` (every
+engagement + its evidence) at the root, and the proof db, runs, MLS learning memory (every `tenants/<t>` shard),
+entitlement trust root, DestructionAuthority (kill-switches) and authority root under `framework/v2/`. The
+crypto-shred evidence keystore (`framework/v2/.evidence-keys`) is never in a backup (W16-8).
 
 ### 2c. nginx for the public origin
 
@@ -141,6 +146,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now vigil-finding-drain.timer vigil-settle-drain.timer vigil-alerts.timer
 systemctl --user list-timers 'vigil-*'                  # confirm next run
 vigil alerts --once --require-push                       # a fresh drain heartbeat ⇒ no alarm
+vigil alerts --test-delivery                             # push ONE labelled test alert: proves alarms REACH you
 # NOTE: `vigil alerts` proves LIVENESS (the drain ran), not DELIVERY. Confirm the pipeline end-to-end by
 # driving a real completion/finding through and checking it crosses (the tenant surface updates / the lease
 # settles) — a drain pointed at the wrong directory would run "healthy" yet move nothing.
@@ -148,8 +154,10 @@ vigil alerts --once --require-push                       # a fresh drain heartbe
 
 A drain crash loses nothing (slice 1: the finding drain reclaims its own in-flight work + de-duplicates;
 settle is idempotent per `(slug,nonce)`), and the dead-man alarms if a timer stops firing — so the pipeline
-both runs and recovers without a human. (The remaining drains — `billing-drain`, `monitoring-drain`,
-`ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` — follow the same pattern.)
+both runs and recovers without a human. The money-IN `billing-drain` ships its own opt-in
+`vigil-billing-drain.timer` — enable it only once the payment-processor secrets are provisioned (GO-LIVE §9).
+(The remaining drains — `monitoring-drain`, `ops-sweep`, and the offense-plane `launch-drain`/`webhook-drain` —
+follow the same pattern.)
 
 > **Persisted queue root (#75).** The drains enqueue each `SecurityJob` under the canonical root
 > **`<base_dir>/jobs`** (the default when `--queue-root` is omitted) — it lives UNDER `--base-dir`, so the

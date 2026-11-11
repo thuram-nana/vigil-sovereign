@@ -23,6 +23,13 @@ from typing import Any, Callable, Optional
 
 from .model import SecurityJob
 
+#: pause/resume PR-4 — the denial code the customer-launch gate returns for a REVERSIBLE paused-lease refusal
+#: (as opposed to a TERMINAL ``"no_lease"``). ``JobRunner.run_one`` keys the delivery RELEASE on it so a launch
+#: paused after it was enqueued RE-DRIVES on resume instead of stranding its paid lease. One source of truth,
+#: shared by the gate (producer) and the runner (consumer); the pause substrate is default-OFF, so this code is
+#: never produced until pause recording ships.
+LEASE_PAUSED_DENIAL = "lease_paused"
+
 
 @dataclass(frozen=True)
 class GateOutcome:
@@ -189,6 +196,25 @@ def build_repo_gate(
     return _gate
 
 
+def _lease_refusal_is_pause(slug: str, host: str, tenant: Optional[str], *,
+                           base_dir: Any = None, now: Any = None) -> bool:
+    """pause/resume PR-4 — True iff the credit-launch lease for ``slug`` verifies + binds (owner-pin / slug /
+    host / tenant / window / NOT settled) but is REVERSIBLY PAUSED — the one lease-refusal class that must
+    RE-DRIVE on resume rather than strand. Reuses the PR-3 ``read_verified_launch_nonce`` (which skips ONLY the
+    pause conjunct) + ``is_lease_paused``. FATAL-2: both imports are function-local. FAIL-SAFE toward TERMINAL
+    (returns False) on ANY error — the money-dangerous misclassification is a false POSITIVE (a terminal
+    refusal marked re-driveable would re-enqueue forever), which this direction cannot produce."""
+    try:
+        from framework.v2.launch_lease import read_verified_launch_nonce
+        nonce = read_verified_launch_nonce(slug, host, tenant, base_dir=base_dir, now=now)
+        if not nonce:
+            return False
+        from vigil_integration.live.credit_lease_pause import is_lease_paused
+        return bool(is_lease_paused(base_dir, slug, nonce))
+    except Exception:  # noqa: BLE001 — classify-failure ⇒ TERMINAL ("no_lease"), the safe direction here
+        return False
+
+
 def build_customer_launch_gate(
     trust_root: Any = None,
     *,
@@ -256,6 +282,16 @@ def build_customer_launch_gate(
         ok, reason = verify_customer_launch_lease(job.slug, host, (job.tenant_id or None),
                                                   base_dir=base_dir, now=now, consume=False)
         if not ok:
+            # pause/resume PR-4: distinguish a REVERSIBLE paused-lease refusal (the launch must RE-DRIVE on
+            # resume, never strand its paid reservation) from a TERMINAL one (forged / settled / expired /
+            # wrong-host / absent). A paused lease verifies+binds EXCEPT for the recorded pause, so the PR-3
+            # non-consuming nonce read (owner-pin + bind + window + settled; pause SKIPPED) yields a nonce and
+            # is_lease_paused confirms it. FAIL-SAFE toward TERMINAL: any classification error ⇒ "no_lease" (a
+            # missed pause merely keeps today's behaviour; it NEVER marks a genuinely terminal refusal
+            # re-driveable, which would re-enqueue forever).
+            if _lease_refusal_is_pause(job.slug, host, (job.tenant_id or None), base_dir=base_dir, now=now):
+                return GateOutcome(False, f"credit-launch lease paused (reversible — resume re-admits): {reason}",
+                                   LEASE_PAUSED_DENIAL)
             return GateOutcome(False, f"credit-launch lease refused: {reason}", "no_lease")
         # (4) authority scope + window + kill-switch over the EXACT-host target. ``now`` is the POSIX-float
         # lease convention (what verify_customer_launch_lease takes); authorize_action wants a datetime, so

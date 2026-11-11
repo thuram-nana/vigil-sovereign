@@ -39,3 +39,10 @@
 # vigil_core is independently installable and these are ITS declared floors.
 cryptography>=50
 pydantic>=2.10,<3
+
+# --- security floors on TRANSITIVE dependencies (not used directly; pinned here so the lock cannot sit on an
+# --- advisory release just because a parent's range allows it). Each line names its advisory. ---
+# opentelemetry-api arrives via mcp. GHSA-xcq7-p3pf-p88h / CVE-2026-114603: TraceState.from_header ReDoS
+# (O(N^2) on an inbound W3C `tracestate` header), fixed in 1.45.1. Not reachable in VIGIL today (nothing calls
+# propagate.extract / TraceState.from_header), but a known-vulnerable release is not left in a shipped lock.
+opentelemetry-api>=1.45.1

@@ -77,7 +77,26 @@ class FlutterwaveEgressError(RuntimeError):
     """A fail-closed outbound-egress refusal (a non-https / off-allowlist URL, a transport failure, a malformed
     transaction id, an oversize or non-JSON response). Its message NEVER contains the secret (the secret rides
     only the ``Authorization`` header, never the URL or a message), so a quarantine ``.reason`` sidecar or a
-    dropped-to-type refusal cannot leak it."""
+    dropped-to-type refusal cannot leak it.
+
+    ``transient`` (NET-2b) is True ONLY on an instance raised for a failure a later retry may cure — a transport
+    fault (timeout / DNS / TLS / connection reset) or an HTTP 408 / 425 / 429 / 5xx. Every OTHER refusal (the
+    https / allowlist guard, a missing secret, a malformed txid, a 4xx, an oversize or non-JSON body) keeps the
+    class default False: a retry cannot cure it. It is a per-INSTANCE mark (the type name and message are
+    unchanged), so a reader that ignores it sees exactly the pre-NET-2b exception."""
+
+    transient: bool = False
+
+
+# HTTP statuses a later retry may cure (request timeout, too-early, rate limit) — plus every 5xx (below).
+_TRANSIENT_HTTP = frozenset({408, 425, 429})
+
+
+def _transient(message: str) -> FlutterwaveEgressError:
+    """A ``FlutterwaveEgressError`` marked retry-curable (same type, same message — see ``transient``)."""
+    exc = FlutterwaveEgressError(message)
+    exc.transient = True
+    return exc
 
 
 def _api_base() -> str:
@@ -124,10 +143,14 @@ def _request_json(method: str, url: str, *, secret: str, json_body: "Optional[Ma
             raw = r.read(_MAX_RESPONSE_BYTES + 1)
     except FlutterwaveEgressError:
         raise
-    except urllib.error.HTTPError as exc:                        # a non-2xx — transient from our side, fail-closed
-        raise FlutterwaveEgressError(f"Flutterwave {method} returned HTTP {exc.code}") from None
+    except urllib.error.HTTPError as exc:                        # a non-2xx — fail-closed; retry-curable only
+        msg = f"Flutterwave {method} returned HTTP {exc.code}"  # for 408/425/429/5xx (NET-2b ``transient``)
+        code = exc.code if isinstance(exc.code, int) else 0      # a non-int code is never retry-curable
+        if code in _TRANSIENT_HTTP or 500 <= code <= 599:
+            raise _transient(msg) from None
+        raise FlutterwaveEgressError(msg) from None
     except Exception as exc:  # noqa: BLE001 — timeout / TLS / connection-reset / DNS → transient, fail-closed
-        raise FlutterwaveEgressError(f"Flutterwave {method} transport failure ({type(exc).__name__})") from None
+        raise _transient(f"Flutterwave {method} transport failure ({type(exc).__name__})") from None
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise FlutterwaveEgressError("Flutterwave response exceeded the response-size cap")
     try:

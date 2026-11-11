@@ -86,6 +86,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -131,6 +132,81 @@ _STORE_SQLITE_REL = _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
 # A real SQLite database file begins with this fixed 16-byte header; a file that does not is copied raw.
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# #70c — WHERE THE ENGINE ACTUALLY KEEPS EACH UNIT. The CRUCIBLE engine has TWO roots
+# (``framework.v2.common.paths``): the CRUCIBLE ROOT (``crucible_root()``, the dir holding ``framework/v2`` and the
+# ``targets/`` engagement tree; ``$CRUCIBLE_ROOT``) and the V2 ROOT (``v2_root()`` = ``<crucible_root>/framework/v2``,
+# holding ``.blackboard`` / ``.console/runs`` / ``.memory`` / ``.entitlement`` / ``.authority`` / ``.authority-root``
+# / ``.evidence-keys``). The archive's unit NAMES (below) are a frozen on-disk format and mix the two spellings —
+# ``.blackboard/…`` and ``.console/runs`` are v2-relative, ``targets`` is crucible-relative, ``framework/v2/.…`` is
+# crucible-relative — so EVERY disk access goes through ``_CrucibleLayout.disk(unit)``, never ``croot / unit``.
+# Before this, the default ``vigil backup`` (root = ``…/framework/v2``) looked for ``framework/v2/targets`` and
+# ``framework/v2/framework/v2/.entitlement`` and silently captured NO engagement, NO evidence and NO trust state;
+# with ``$CRUCIBLE_ROOT`` set it missed the proof db and the runs instead. KEEP IN SYNC with ``common/paths.py``.
+_V2_REL = "framework/v2"
+_TENANT_SUBDIR = "tenants"                     # paths._TENANT_SUBDIR (D2 per-tenant shards)
+_SQLITE_DB_NAME = "store.sqlite"
+# The per-tenant-sharded SQLite state dirs under the v2 root: the append-only event-spine PROOF db
+# (``paths.blackboard_dir``) and the MLS learning MEMORY (``paths.memory_dir`` — written by engagements, NOT
+# derivable from the spine, so losing it on a host loss loses everything the engine has learned). Each db —
+# the unsharded one and every ``tenants/<t>/`` shard — is its own FILE unit, snapshotted consistently.
+_SQLITE_DB_STATE_DIRS = (".blackboard", ".memory")
+_SAFE_SHARD = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+class _CrucibleLayout:
+    """Resolve an operator-supplied crucible root to the engine's TWO real roots.
+
+    Accepts either spelling — the crucible root (contains ``framework/v2``; what ``$CRUCIBLE_ROOT`` names) or the
+    v2 root itself (``…/framework/v2``; what ``vigil``'s auto-discovery returns). Anything else (a fresh, empty
+    restore destination) is taken as a crucible root with the engine's canonical layout under it. It NEVER guesses
+    an unrelated ancestor: only a path literally ending ``framework/v2`` resolves its crucible root two levels up."""
+
+    def __init__(self, root: "str | os.PathLike") -> None:
+        r = Path(root)
+        if (r / "framework" / "v2").is_dir():
+            self.crucible_root, self.v2_root = r, r / "framework" / "v2"
+        elif r.name == "v2" and r.parent.name == "framework":
+            self.crucible_root, self.v2_root = r.parent.parent, r
+        else:
+            self.crucible_root, self.v2_root = r, r / "framework" / "v2"
+
+    def disk(self, unit_rel: str) -> Path:
+        """The on-disk path of archive unit ``unit_rel`` (a crucible-prefix-stripped rel)."""
+        if unit_rel == "targets" or unit_rel.startswith("targets/"):
+            return self.crucible_root / unit_rel
+        if unit_rel.startswith(_V2_REL + "/"):
+            return self.v2_root / unit_rel[len(_V2_REL) + 1:]
+        return self.v2_root / unit_rel
+
+
+def _sqlite_db_unit_rels(v2_like: Path) -> list[str]:
+    """The SQLite db units present under a v2-root-shaped tree ``v2_like`` (the live v2 root, or a staged archive
+    tree whose ``.blackboard``/``.memory`` are v2-relative): ``<dir>/store.sqlite`` and every safe-named
+    ``<dir>/tenants/<t>/store.sqlite``, as archive unit rels. Symlinks are never followed or packaged."""
+    rels: list[str] = []
+    for d in _SQLITE_DB_STATE_DIRS:
+        top = v2_like / d / _SQLITE_DB_NAME
+        if top.is_file() and not top.is_symlink():
+            rels.append(f"{d}/{_SQLITE_DB_NAME}")
+        shards = v2_like / d / _TENANT_SUBDIR
+        if shards.is_dir() and not shards.is_symlink():
+            for t in sorted(shards.iterdir()):
+                db = t / _SQLITE_DB_NAME
+                if (_SAFE_SHARD.match(t.name) and t.is_dir() and not t.is_symlink() and db.is_file()
+                        and not db.is_symlink()):
+                    rels.append(f"{d}/{_TENANT_SUBDIR}/{t.name}/{_SQLITE_DB_NAME}")
+    return rels
+
+
+def _is_sqlite_db_rel(rel: str) -> bool:
+    """Is packaged rel ``rel`` one of the SQLite db FILE units (snapshotted, not raw-copied)?"""
+    if not rel.startswith(_CRUCIBLE_PREFIX):
+        return False
+    parts = rel[len(_CRUCIBLE_PREFIX):].split("/")
+    if parts[-1] != _SQLITE_DB_NAME or parts[0] not in _SQLITE_DB_STATE_DIRS:
+        return False
+    return len(parts) == 2 or (len(parts) == 4 and parts[1] == _TENANT_SUBDIR and bool(_SAFE_SHARD.match(parts[2])))
+
 # The persisted SecurityJob queue defaults UNDER base_dir (``<base_dir>/jobs`` — see ``cli._default_queue_root``,
 # #75), so this backup captures the LIVE queue (``queue/ running/ leases/ delivery/ fingerprint/`` — exactly what
 # is needed to re-drive an in-flight paid job after a host loss, and to preserve exactly-once: the ``delivery/``
@@ -145,7 +221,8 @@ _log = logging.getLogger(__name__)
 
 
 def _read_sqlite_consistent(src: Path) -> bytes:
-    """Return the bytes of ``.blackboard/store.sqlite`` as a CONSISTENT point-in-time snapshot.
+    """Return the bytes of a SQLite db unit (``.blackboard`` / ``.memory`` ``store.sqlite``, any tenant shard) as a
+    CONSISTENT point-in-time snapshot.
 
     A live CRUCIBLE writer may be mid-transaction when the backup runs; a naive ``read_bytes`` of the db file
     can capture a TORN mix of pages (half of an in-flight write) that fails ``PRAGMA integrity_check`` on
@@ -615,7 +692,10 @@ def _atomic_swap_into_place(staged: Path, dest: Path) -> None:
 # captured units so live, un-captured data under ``crucible_root`` (the CRUCIBLE code, config, other
 # ``.console``/``.blackboard`` state) is NEVER destroyed — even under ``--force``. KEEP IN SYNC with
 # ``_iter_crucible_files``: each unit is the minimal path that contains exactly its captured file(s) and no
-# un-captured sibling (so the swap can never reach a sibling).
+# un-captured sibling (so the swap can never reach a sibling). These are ARCHIVE unit names; every disk access
+# resolves them through ``_CrucibleLayout.disk`` (#70c). The SQLite db FILE units (the proof db + MLS memory,
+# unsharded and every ``tenants/<t>`` shard) are enumerated by ``_sqlite_db_unit_rels``; this constant names the
+# historical unsharded proof db only.
 _CRUCIBLE_STORE_UNIT = ".blackboard/store.sqlite"     # a FILE unit
 _CRUCIBLE_RUNS_UNIT = ".console/runs"                 # a whole SUBTREE unit
 # W7-2: the ENGAGEMENT tree — ``targets/<slug>/`` charters, threat models, notes, AND the per-action HTTP
@@ -655,7 +735,7 @@ def _evidence_keys_dir(croot: Path | None = None) -> Path:
     """The W16-8 crypto-shred EVIDENCE KEYSTORE for this crucible root — the per-engagement DEKs that seal
     credential-bearing evidence. Resolved WITHOUT importing ``framework`` (FATAL-2: this module must never
     load the offense engine at import), mirroring ``framework.v2.common.paths.evidence_keys_dir`` EXACTLY —
-    KEEP IN SYNC: ``$CRUCIBLE_EVIDENCE_KEYS_DIR`` override, else ``<croot>/framework/v2/.evidence-keys``.
+    KEEP IN SYNC: ``$CRUCIBLE_EVIDENCE_KEYS_DIR`` override, else ``<v2_root>/.evidence-keys``.
     ``croot`` may be ``None`` ONLY when the override is set (which is returned before ``croot`` is touched).
 
     This directory is NEVER packaged into the backup. W16-8 erasure destroys a DEK so the ciphertext left
@@ -667,7 +747,7 @@ def _evidence_keys_dir(croot: Path | None = None) -> Path:
         return Path(override).expanduser()
     if croot is None:
         raise OffenseBackupError("evidence keystore dir needs a crucible_root when no override is set")
-    return croot / "framework" / "v2" / ".evidence-keys"
+    return _CrucibleLayout(croot).v2_root / ".evidence-keys"        # paths.evidence_keys_dir (#70c layout)
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -714,20 +794,14 @@ def _crucible_units_present(croot: Path) -> list[str]:
     """The captured crucible units that ALREADY exist under ``croot`` (the proof state a restore would
     overwrite). The force-gate keys off THIS, not off the whole root being non-empty — ``crucible_root`` is
     ALWAYS non-empty (it holds the CRUCIBLE code), so a whole-dir non-empty check would force ``--force`` for
-    every restore and then silently destroy that code. Only these units are ever touched."""
-    present: list[str] = []
-    if (croot / _CRUCIBLE_STORE_UNIT).exists():
-        present.append(_CRUCIBLE_STORE_UNIT)
-    if _dir_is_nonempty(croot / _CRUCIBLE_RUNS_UNIT):
-        present.append(_CRUCIBLE_RUNS_UNIT)
-    if _dir_is_nonempty(croot / _CRUCIBLE_TARGETS_UNIT):
-        present.append(_CRUCIBLE_TARGETS_UNIT)
-    if _dir_is_nonempty(croot / _CRUCIBLE_ENTITLEMENT_UNIT):
-        present.append(_CRUCIBLE_ENTITLEMENT_UNIT)
-    if _dir_is_nonempty(croot / _CRUCIBLE_AUTHORITY_UNIT):
-        present.append(_CRUCIBLE_AUTHORITY_UNIT)
-    if _dir_is_nonempty(croot / _CRUCIBLE_AUTHORITY_ROOT_UNIT):
-        present.append(_CRUCIBLE_AUTHORITY_ROOT_UNIT)
+    every restore and then silently destroy that code. Only these units are ever touched. Every unit is looked
+    up where the engine KEEPS it (``_CrucibleLayout``), whichever root spelling the operator passed."""
+    layout = _CrucibleLayout(croot)
+    present: list[str] = list(_sqlite_db_unit_rels(layout.v2_root))
+    for unit in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_ENTITLEMENT_UNIT,
+                 _CRUCIBLE_AUTHORITY_UNIT, _CRUCIBLE_AUTHORITY_ROOT_UNIT):
+        if _dir_is_nonempty(layout.disk(unit)):
+            present.append(unit)
     return present
 
 
@@ -742,16 +816,18 @@ def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
     bounds ``--force``'s blast radius to the captured units, not to "no un-captured data anywhere". The units
     are swapped sequentially (a crash leaves each unit complete-old-or-complete-new, never torn), matching the
     base-then-crucible sequential-swap limit."""
-    staged_db = staged_croot / _CRUCIBLE_STORE_UNIT
-    if staged_db.is_file():
-        _atomic_swap_unit(staged_db, dest_croot / _CRUCIBLE_STORE_UNIT)
+    layout = _CrucibleLayout(dest_croot)
+    # the staged tree is ARCHIVE-shaped (unit rels verbatim), so its db units are found v2-relative under it
+    for rel in _sqlite_db_unit_rels(staged_croot):
+        dest_db = layout.disk(rel)
+        _atomic_swap_unit(staged_croot / rel, dest_db)
         for side in _STORE_SQLITE_SIDECARS:               # drop the replaced db's orphaned sidecars
-            _drop_path(dest_croot / ".blackboard" / side)
+            _drop_path(dest_db.parent / side)
     for subtree in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_ENTITLEMENT_UNIT,
                     _CRUCIBLE_AUTHORITY_UNIT, _CRUCIBLE_AUTHORITY_ROOT_UNIT):
         staged_unit = staged_croot / subtree
         if staged_unit.is_dir():
-            _atomic_swap_unit(staged_unit, dest_croot / subtree)
+            _atomic_swap_unit(staged_unit, layout.disk(subtree))
 
 
 def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
@@ -812,19 +888,21 @@ def _iter_crucible_files(croot: Path):
     only bites a keystore that ``CRUCIBLE_EVIDENCE_KEYS_DIR`` relocated under a captured tree; it is enforced
     unconditionally regardless.)"""
     keys_dir = _evidence_keys_dir(croot)
-    bb = croot / ".blackboard" / "store.sqlite"
-    if bb.is_file() and not bb.is_symlink() and not _under(bb, keys_dir):
-        yield bb, _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
+    layout = _CrucibleLayout(croot)
+    for rel in _sqlite_db_unit_rels(layout.v2_root):      # the proof db + the MLS memory, every tenant shard
+        db = layout.disk(rel)
+        if not _under(db, keys_dir):
+            yield db, _CRUCIBLE_PREFIX + rel
     # The DestructionAuthority is always in-tree. The entitlement TRUST ROOT is captured ONLY at its DEFAULT
     # in-tree location: a ``CRUCIBLE_ENTITLEMENT_DIR`` override deliberately keeps it off the code tree (a
     # separate secure / read-only / HSM-fronted mount), so it is an EXPLICIT documented exclusion — re-provisioned
     # from that mount (or a re-run of entitlement provisioning) on the new host, never carried in this backup.
-    subtrees = [croot / ".console" / "runs", croot / _CRUCIBLE_TARGETS_UNIT, croot / _CRUCIBLE_AUTHORITY_UNIT]
+    units = [_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_AUTHORITY_UNIT]
     if os.environ.get("CRUCIBLE_ENTITLEMENT_DIR"):
         _log.info("CRUCIBLE_ENTITLEMENT_DIR is set — the entitlement trust root is held off the crucible tree "
                   "and is EXCLUDED from this backup by design; re-provision it from that mount on the new host")
     else:
-        subtrees.append(croot / _CRUCIBLE_ENTITLEMENT_UNIT)
+        units.append(_CRUCIBLE_ENTITLEMENT_UNIT)
     # The governance AUTHORITY trust root (Phase 0.1) is captured the same way — and excluded the same way when
     # ``VIGIL_AUTHORITY_ROOT_DIR`` holds it off the code tree. Dropping it on restore leaves the ``.authority``
     # documents unverifiable and remote engage fails CLOSED, so it is a TRUST-STATE unit, not optional.
@@ -832,9 +910,10 @@ def _iter_crucible_files(croot: Path):
         _log.info("VIGIL_AUTHORITY_ROOT_DIR is set — the authority trust root is held off the crucible tree "
                   "and is EXCLUDED from this backup by design; re-provision it from that mount on the new host")
     else:
-        subtrees.append(croot / _CRUCIBLE_AUTHORITY_ROOT_UNIT)
-    for subtree in subtrees:
-        if not subtree.is_dir():
+        units.append(_CRUCIBLE_AUTHORITY_ROOT_UNIT)
+    for unit in units:
+        subtree = layout.disk(unit)
+        if not subtree.is_dir() or subtree.is_symlink():
             continue
         for p in sorted(subtree.rglob("*")):
             if p.is_symlink() or not p.is_file():
@@ -843,7 +922,7 @@ def _iter_crucible_files(croot: Path):
                 continue
             if _under(p, keys_dir):                       # never package a crypto-shred DEK (W16-8)
                 continue
-            yield p, _CRUCIBLE_PREFIX + p.relative_to(croot).as_posix()
+            yield p, _CRUCIBLE_PREFIX + unit + "/" + p.relative_to(subtree).as_posix()
 
 
 def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None) -> dict:
@@ -879,10 +958,10 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
                 f"refusing to package crypto-shred evidence key(s) into the backup: {leaked} — the DEK must "
                 f"never travel to the same place as the ciphertext it seals (W16-8)")
     for f, rel in sources:
-        # ``.blackboard/store.sqlite`` is captured as a CONSISTENT snapshot (online backup API); every other
+        # every SQLite db unit (the proof db + MLS memory, all shards) is a CONSISTENT snapshot; every other
         # file is an opaque raw byte copy. The snapshot bytes are what gets hashed + packaged, so the pre-write
         # hash check and the restored file agree.
-        raw = _read_sqlite_consistent(f) if rel == _STORE_SQLITE_REL else f.read_bytes()
+        raw = _read_sqlite_consistent(f) if _is_sqlite_db_rel(rel) else f.read_bytes()
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
 

@@ -19,7 +19,9 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState
+from .fold_read import UNCACHED as _UNCACHED, cached_unsigned_read
 
 # Default per-model prices in USD per 1,000,000 tokens, as (input, output). DATA, not policy — override
 # or extend via ~/.sigil/prices.json or the SIGIL_MODEL_PRICES env (JSON), both merged OVER these. Keyed
@@ -168,6 +170,52 @@ def _as_float(v: object) -> float:
     return 0.0
 
 
+_TAKEN = ("auto", "queued")
+_DAY_LEN = len("YYYY-MM-DD")
+
+
+class _BudgetView:
+    """The cached agent-spend meter (Front C S0d): `usage[(actor, ts[:10])]` = [actions, interrupts, tokens,
+    cost_usd], summed over exactly the records `spent` counts, in spine order (so the float cost sum is the same
+    sequence of additions). `ts.startswith(day_iso)` == `ts[:10] == day_iso` for a 10-char `day_iso`, the only
+    shape the cache answers. A record `spent` could only crash on (a non-str ts, a non-dict payload — a
+    hand-tampered line) poisons the view, so every read falls back to the unchanged scan."""
+
+    __slots__ = ("usage", "poisoned")
+
+    def __init__(self) -> None:
+        self.usage: dict = {}
+        self.poisoned = False
+
+
+def _budget_step(view: _BudgetView, r, _ctx) -> None:
+    if r.source != "agent":
+        return
+    ts = r.ts or ""
+    p = r.payload
+    if not isinstance(ts, str) or not isinstance(p, dict):
+        view.poisoned = True
+        return
+    if p.get("decision") not in _TAKEN:
+        return
+    try:
+        a = view.usage.get((r.actor, ts[:_DAY_LEN]))
+    except TypeError:
+        return                                # an unhashable actor never equals the str agent `spent` asks for
+    if a is None:
+        a = view.usage[(r.actor, ts[:_DAY_LEN])] = [0, 0, 0, 0.0]
+    a[0] += 1
+    if r.kind == "event":
+        a[1] += 1
+    u = p.get("usage")
+    if isinstance(u, dict):
+        a[2] += _as_int(u.get("input_tokens")) + _as_int(u.get("output_tokens"))
+        a[3] += _as_float(u.get("cost_usd"))
+
+
+_BUDGET_FOLD = FoldCache("governor.budget", step=_budget_step)
+
+
 class BudgetLedger:
     def __init__(self, store, caps: Optional[BudgetCaps] = None):
         self.store = store
@@ -187,6 +235,13 @@ class BudgetLedger:
         Under the empty (Slice-C) snapshot base_seq==0 => since_seq=-1 => the current full genesis scan, and
         the ZERO seed is the current init => BYTE-IDENTICAL to today's behavior. (A caller passing a PAST
         day_iso — e.g. report() — may under-count post-prune: the accepted live-meter semantic.)"""
+        if isinstance(agent, str) and isinstance(day_iso, str) and len(day_iso) == _DAY_LEN:
+            hit = cached_unsigned_read(_BUDGET_FOLD, self.store, seed=lambda st: (_BudgetView(), st.base_seq - 1),
+                                       reader=lambda v: v.usage.get((agent, day_iso)))
+            if hit is not _UNCACHED:
+                if hit is None:
+                    return Spend(actions=0, interrupts=0, tokens=0, cost_usd=0.0)
+                return Spend(actions=hit[0], interrupts=hit[1], tokens=hit[2], cost_usd=hit[3])
         st = SnapshotState.load(self.store)
         # Retention invariant (Slice D/E prune): the current UTC day stays live, so no pruned record bears
         # today's date; over_budget() only ever calls spent() with the CURRENT day, so this windowed live

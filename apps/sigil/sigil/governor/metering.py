@@ -58,6 +58,8 @@ from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 PLAN_GRANT_SIGNAL = "governor.plan_grant"
 PLAN_DEBIT_SIGNAL = "governor.plan_debit"
@@ -120,6 +122,73 @@ class PlanTranche:
         return now is None or now < self.period_end
 
 
+def _apply_plan_record(r, resolver, granted: dict, debited: dict, seen: set) -> "Optional[tuple[dict, bool]]":
+    """Fold ONE record into (granted, debited, seen) — THE plan-ledger fold body, shared by the full `_fold` and
+    the verified fold cache (Front C S0c). Returns (payload, counted) iff it is a VERIFIED plan grant/debit —
+    `counted` False for an idempotent replay — else None. The cache indexes tranches from counted records and
+    `debited_entry` from every verified debit."""
+    p = r.payload
+    if not isinstance(p, dict):
+        return None
+    sig = p.get("signal")
+    if sig != PLAN_GRANT_SIGNAL and sig != PLAN_DEBIT_SIGNAL:
+        return None
+    oid = p.get("org_id")
+    eid = p.get("entry_id")
+    if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+        return None
+    core = _PLAN_GRANT_CORE if sig == PLAN_GRANT_SIGNAL else _PLAN_DEBIT_CORE
+    if not verify_signed(p, core, resolver.at(r.seq)):
+        return None                               # fail-closed: unsigned/forged/wrong-epoch record
+    key = (sig, oid, eid)
+    if key in seen:
+        return p, False                           # idempotent: this entry already counted (replay)
+    seen.add(key)
+    tkey = (oid, _as_period(p.get("period_end")))
+    amount = _as_credits(p.get("credits"))
+    if sig == PLAN_GRANT_SIGNAL:
+        granted[tkey] = granted.get(tkey, 0) + amount
+    else:
+        debited[tkey] = debited.get(tkey, 0) + amount
+    return p, True
+
+
+class _PlanView:
+    """The cached plan-ledger fold: exactly the full fold's (granted, debited, seen), plus `periods`
+    (org_id -> its tranche period_ends) and `first_debit` ((org_id, entry_id) -> the (credits, period_end) of
+    the FIRST verified plan debit in the folded window — exactly what `debited_entry`'s scan returns)."""
+
+    __slots__ = ("granted", "debited", "seen", "periods", "first_debit")
+
+    def __init__(self, granted: dict, debited: dict, seen: set) -> None:
+        self.granted, self.debited, self.seen = granted, debited, seen
+        self.periods: "dict[str, set]" = {}
+        self.first_debit: dict = {}
+        for (oid, pe) in list(granted) + list(debited):
+            self.periods.setdefault(oid, set()).add(pe)
+
+    def tranches(self, org_id: str) -> "list[PlanTranche]":
+        return [PlanTranche(org_id=org_id, period_end=float(pe), granted=self.granted.get((org_id, pe), 0),
+                            debited=self.debited.get((org_id, pe), 0))
+                for pe in sorted(self.periods.get(org_id, ()))]
+
+
+def _plan_step(view: _PlanView, r, resolver) -> None:
+    out = _apply_plan_record(r, resolver, view.granted, view.debited, view.seen)
+    if out is None:
+        return
+    p, counted = out
+    oid = p["org_id"]
+    if counted:                                   # only a counted record creates a tranche key
+        view.periods.setdefault(oid, set()).add(_as_period(p.get("period_end")))
+    if p.get("signal") == PLAN_DEBIT_SIGNAL:
+        view.first_debit.setdefault((oid, p["entry_id"]),
+                                    (_as_credits(p.get("credits")), _as_period(p.get("period_end"))))
+
+
+_PLAN_FOLD = FoldCache("governor.plan_credit", step=_plan_step)
+
+
 class PlanCreditLedger:
     """Owner-signed per-tenant, per-period plan-credit ledger on the spine. Construction mirrors WalletRegistry:
     the owner signing key + trusted pubkey default to the persisted owner identity; tests inject explicit keys."""
@@ -176,6 +245,9 @@ class PlanCreditLedger:
         reservation is settled well within its lease window, so its debit record is never pruned."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return None
+        hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)))
+        if hit is not _UNCACHED:
+            return hit
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         for r in self.store.iter_records():
             p = r.payload
@@ -188,6 +260,24 @@ class PlanCreditLedger:
         return None
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
+        """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
+        the trusted pubkey differs from the snapshot's (byte-identical under the empty snapshot)."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, set()), -1
+        return (dict(snap.plan_granted_map()), dict(snap.plan_debited_map()),
+                set(snap.plan_seen_set())), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental plan-ledger fold (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold` / scan)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _PlanView(*st), since
+
+        return cached_read(_PLAN_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
+
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (granted, debited, seen) keyed per `(org_id, period_end)`, where `seen` holds the
         consumed `(signal, org_id, entry_id)` idempotency keys. Each signed record is authenticated under the
@@ -198,46 +288,18 @@ class PlanCreditLedger:
         BYPASSES the snapshot and full-scans from genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            granted: dict[Any, int] = {}
-            debited: dict[Any, int] = {}
-            seen: set = set()
-            since = -1
-        else:
-            granted = dict(snap.plan_granted_map())
-            debited = dict(snap.plan_debited_map())
-            seen = set(snap.plan_seen_set())
-            since = snap.base_seq - 1
+        (granted, debited, seen), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            p = r.payload
-            if not isinstance(p, dict):
-                continue
-            sig = p.get("signal")
-            if sig != PLAN_GRANT_SIGNAL and sig != PLAN_DEBIT_SIGNAL:
-                continue
-            oid = p.get("org_id")
-            eid = p.get("entry_id")
-            if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
-                continue
-            core = _PLAN_GRANT_CORE if sig == PLAN_GRANT_SIGNAL else _PLAN_DEBIT_CORE
-            if not verify_signed(p, core, resolver.at(r.seq)):
-                continue                                  # fail-closed: unsigned/forged/wrong-epoch record
-            key = (sig, oid, eid)
-            if key in seen:
-                continue                                  # idempotent: this entry already counted (replay)
-            seen.add(key)
-            tkey = (oid, _as_period(p.get("period_end")))
-            amount = _as_credits(p.get("credits"))
-            if sig == PLAN_GRANT_SIGNAL:
-                granted[tkey] = granted.get(tkey, 0) + amount
-            else:
-                debited[tkey] = debited.get(tkey, 0) + amount
+            _apply_plan_record(r, resolver, granted, debited, seen)
         return granted, debited, seen
 
     def tranches(self, org_id: str) -> list[PlanTranche]:
         """Every plan tranche for `org_id` (whatever its expiry), in period_end order. Fail-closed on empty id."""
         if not isinstance(org_id, str) or not org_id:
             return []
+        hit = self._cached(lambda v: v.tranches(org_id))
+        if hit is not _UNCACHED:
+            return hit
         granted, debited, _ = self._fold()
         keys = sorted({k for k in set(granted) | set(debited) if k[0] == org_id}, key=lambda k: k[1])
         return [PlanTranche(org_id=org_id, period_end=float(pe), granted=granted.get((org_id, pe), 0),
@@ -258,8 +320,11 @@ class PlanCreditLedger:
         established the period is current/unexpired). Fail-closed to 0 on an empty id."""
         if not isinstance(org_id, str) or not org_id:
             return 0
-        granted, debited, _ = self._fold()
         key = (org_id, _as_period(period_end))
+        hit = self._cached(lambda v: max(0, v.granted.get(key, 0) - v.debited.get(key, 0)))
+        if hit is not _UNCACHED:
+            return hit
+        granted, debited, _ = self._fold()
         return max(0, granted.get(key, 0) - debited.get(key, 0))
 
 

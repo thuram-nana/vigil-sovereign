@@ -874,6 +874,152 @@ class Provisioner:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
 
+    # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
+    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    _CHECKOUT_MAX = 10
+    _CHECKOUT_WINDOW_S = 600.0
+
+    def _checkout_rate_ok(self, keys, now: float) -> bool:
+        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
+        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
+        win = self.__dict__.setdefault("_checkout_attempts", {})
+        cutoff = now - self._CHECKOUT_WINDOW_S
+        for k in keys:
+            win[k] = [t for t in win.get(k, []) if t > cutoff]
+        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+            return False
+        for k in keys:
+            win[k].append(now)
+        return True
+
+    def _checkout_provider(self):
+        """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
+        processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
+        verif-hash secret and the processor key are read from the environment and never logged or returned."""
+        import os as _os
+        secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
+        if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
+            return None
+        from ..governor import flutterwave_egress as fe
+        from ..governor.billing import FlutterwaveBillingProvider
+        return FlutterwaveBillingProvider(secret, fe.make_transaction_verifier(),
+                                          checkout_creator=fe.make_checkout_creator())
+
+    @staticmethod
+    def _checkout_offered() -> "tuple[dict, dict]":
+        """The ONE definition of what a customer may buy through hosted checkout: ``(offered, entitlements)``
+        where ``offered`` is ``{price_id: (amount_minor, currency)}`` from the OWNER catalog. Shared by
+        ``billing_checkout`` (which refuses anything outside it) and the ``billing_offers`` read (which lists
+        exactly it), so the UI can never show a buy button that checkout would refuse. Top-ups always; credit
+        SUBSCRIPTION plans only with the extra plan flag; NEVER the AEGIS monitoring plans (the billing drain
+        does not wire the monitoring line, so one would be charged for nothing)."""
+        from .. import config
+        from ..governor import catalog
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP
+        ents = catalog.entitlements()
+        sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
+        monitoring = catalog.monitoring_price_ids()
+        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
+                   if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        return offered, ents
+
+    def _org_has_live_plan(self, org_id: str, t: float) -> bool:
+        """True iff the org already holds a credit plan that is active or past_due and not yet expired — the
+        CHK-1b double-billing guard (checkout refuses a second plan; the offers read reports it so the UI does not
+        offer one)."""
+        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
+        cur = SubscriptionRegistry(self.store).subscription(org_id)
+        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+
+    def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                now: "Optional[float]" = None) -> dict:
+        """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
+        like checkout: the checkout flag (default-OFF), then ``admit_customer(manage_billing)`` for the SESSION org
+        (a role that cannot spend money is not shown a price list it cannot use). Lists precisely the shared
+        ``_checkout_offered`` set (owner catalog prices — never a client-supplied amount) and whether the org
+        already holds a live plan (so the UI offers top-ups only, matching checkout's second-plan refusal). Reads
+        only: mints nothing, touches no owner key."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+
+        def project(_store, org_id: str) -> dict:
+            from ..governor import catalog
+            offered, _ents = self._checkout_offered()
+            items = [p for p in catalog.plans() if p.get("price_id") in offered]
+            return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
+                    "plans_enabled": bool(config.customer_plan_checkout_enabled())}
+        return self._customer_read(requester, requester_org_id, "manage_billing", project)
+
+    def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
+                         mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """Front B CHK-1 — open a HOSTED CHECKOUT so a customer can pay for a catalog item (top-up / plan).
+
+        Gated on ``customer_checkout_enabled()`` (default-OFF → unknown-action 404), then ADMIT-FIRST:
+        ``admit_customer(manage_billing)`` binds the requester to THEIR org (``create_checkout`` binds the org into
+        the tx_ref but explicitly does NOT authorize — this is the edge it delegates to; an ``operator`` who runs
+        tests cannot spend money, a billing ``org_admin`` can, billing-authz != testing-authz), then a fresh
+        step-up and a per-org / per-requester rate limit. MONEY DOCTRINE: the customer names only a catalog
+        ``price_id``; the AMOUNT is the owner catalog's, an unknown price is refused, and NOTHING is credited here —
+        credit comes ONLY from the verified inbound webhook drain. TOP-UPS ONLY (red-pen HIGH): a subscription plan
+        sold through this ONE-TIME payment would carry no ``payment_plan``, so the inbound mapper would treat it as a
+        top-up of a non-top-up price and mint NOTHING — the customer charged, granted nothing. Plans need the
+        recurring payment-plan flow (a separate slice), so only ``topup_purchased`` entries are offered. Fail-closed: flag off, not admitted, no step-up, processor not
+        provisioned, an invalid return URL, or any provider refusal raises ``ProvisionDenied``."""
+        from .. import config
+        if not config.customer_checkout_enabled():
+            raise ProvisionDenied("customer checkout is not enabled")
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_billing"):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage billing for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
+                raise ProvisionDenied("too many checkout attempts — try again later")
+        try:
+            return_url = config.customer_billing_return_url()
+        except ValueError as exc:
+            raise ProvisionDenied(str(exc)) from None
+        provider = self._checkout_provider()
+        if provider is None:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
+            raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, UnsupportedCapability
+        # The ONE shared offered set (top-ups; plans only with the plan flag; never monitoring) — the
+        # billing_offers read lists exactly this, so the UI and checkout cannot disagree.
+        offered, ents = self._checkout_offered()
+        is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
+        if is_plan and str(price_id) in offered:
+            # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
+            # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
+            # org already holds a credit plan that is active or past_due and not yet expired.
+            if self._org_has_live_plan(requester_org_id, t):
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan")
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
+        # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
+        # opaque ids, never emails) — the account's OWN registered address, never a body field.
+        acct = self.customers.customer(requester) if self.customers is not None else None
+        email = getattr(acct, "email", None) or None
+        try:
+            sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
+                                            customer_email=email, redirect_url=return_url,
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
+        except (UnsupportedCapability, ValueError) as exc:
+            self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                        target=str(price_id or ""), outcome="refused")
+            raise ProvisionDenied(f"checkout refused: {exc}") from None
+        self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
+                    outcome="created", critical=True)
+        return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
+                "amount_minor": sess.amount_minor, "currency": sess.currency}
+
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
@@ -960,6 +1106,57 @@ class Provisioner:
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
+
+    def launch_pause(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                     mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — PAUSE a customer launch (reversible operator halt). Gated on
+        ``customer_pause_resume_enabled()`` (default-OFF → the action is a 404 unknown-action), then
+        ``admit_customer(run_engagement)`` + tenant-bind (the lease's org MUST match the session org) + a fresh
+        step-up, exactly like ``launch_cancel``/``launch_start``. Records a ``(slug, nonce)`` pause marker via
+        ``LaunchGate.pause_launch`` — pausing moves NO money; the money-safety (held, re-admitted on resume) is
+        the already-merged PR-1..PR-4a plumbing. Valid at ANY lifecycle stage (reserved / started / running):
+        a paused lease is refused at the arm + enqueue chokepoints and held until resume."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_pause", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+        r = LaunchGate(self.store).pause_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch pause refused"))
+        self._audit("launch_pause", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="paused", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
+
+    def launch_resume(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
+                      mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """pause/resume PR-4b — RESUME a paused customer launch: clear the ``(slug, nonce)`` pause marker so the
+        SAME lease re-arms and the held delivery re-admits (never re-burning the single-use floor). Same gates as
+        ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
+        launch is a harmless no-op."""
+        from .. import config
+        if not config.customer_pause_resume_enabled():
+            raise ProvisionDenied("customer pause/resume is not enabled")
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_resume", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            self._require_stepup(mfa_at, now=t)
+        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch resume refused"))
+        self._audit("launch_resume", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="resumed", critical=True)
+        return {"slug": r.get("slug"), "nonce": r.get("nonce")}
 
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
     def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
