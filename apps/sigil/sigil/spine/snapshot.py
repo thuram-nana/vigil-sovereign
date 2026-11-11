@@ -454,8 +454,8 @@ def seed_anchor_ok(store, snap: "SnapshotState", trusted_pubkey: Optional[str]) 
     so this never consults the key history there."""
     if trusted_pubkey == snap.trusted_pubkey:
         return True
-    if snap.snapshot_seq < 0 or not trusted_pubkey or not snap.trusted_pubkey:
-        return False
+    if not trusted_pubkey or not snap.trusted_pubkey:
+        return False                                        # the empty (never-pruned) identity carries no anchor
     from ..governor import key_history as _kh
     return _kh.key_resolver(store, current=trusted_pubkey).at(snap.snapshot_seq) == snap.trusted_pubkey
 

@@ -212,27 +212,57 @@ def test_a_crash_after_the_head_commit_before_the_manifest_rebase_still_carries(
     assert s2.first_live_seq() == K and KillSwitch(s2).is_engaged()
 
 
-def test_a_prune_committed_while_a_sign_is_in_flight_is_never_overwritten(home, monkeypatch):
-    """Race: checkpoint() read the un-pruned spine, then a prune committed its pruned head before our write. The
-    plain head we computed must NOT replace the pruned head (that re-creates the empty-seed fail-open)."""
+@pytest.mark.parametrize("force", [False, True])
+def test_a_prune_committed_while_a_sign_is_in_flight_is_never_overwritten(home, monkeypatch, force):
+    """Race: the prune appended its snapshot record, checkpoint() then read the (still un-pruned) spine and decided
+    on a plain head of the SAME absolute length, and the prune's head commit landed before our write. The plain
+    head must NOT replace the pruned head (that re-creates the empty-seed fail-open) — with or without `force`,
+    which skips the length guard."""
     s = SpineStore(str(home / "spine.jsonl"))
     s.migrate()
     KillSwitch(s).engage()
     _fill_to_k(s)
     _grow(s, 25)
     _cp.checkpoint(s)
+    payload = prune.snapshot_payload(s, K)
+    prune.archive_copy(s, K, payload)
+    snap_seq = prune._append_snapshot_idempotent(s, payload)
     real = _cp.standing_pruned_head
 
     def racing(store, **kw):
         out = real(store, **kw)                                  # decided: un-pruned -> plain head
-        prune.commit_prune(SpineStore(str(home / "spine.jsonl")), K, confirm=True)
+        _cp.sign_pruned_head(store, base_seq=K, base_prev_hash=payload["base_prev_hash"],
+                             cumulative_merkle_root=payload["cumulative_merkle_root"], snapshot_seq=snap_seq)
         return out
     monkeypatch.setattr(_cp, "standing_pruned_head", racing)
-    h = _cp.checkpoint(s)
-    assert h.base_seq == K and _head().base_seq == K
+    _cp.checkpoint(s, force=force)
     monkeypatch.setattr(_cp, "standing_pruned_head", real)
+    assert _head().base_seq == K and _head().snapshot_seq == snap_seq
+    s.finish_prune()
     s2 = SpineStore(str(home / "spine.jsonl"))
     assert KillSwitch(s2).is_engaged() and SnapshotState.load(s2).base_seq == K
+
+
+@pytest.mark.parametrize("where", ["not-a-snapshot", "outside-window"])
+def test_an_owner_signed_head_with_a_bad_snapshot_pointer_is_never_carried(home, where):
+    """Defence in depth: even an OWNER-SIGNED pruned head (it verifies) is not carried forward when the snapshot
+    seq it names is not a snapshot record of its boundary, or lies outside its signed window."""
+    s, rep = _pruned(home)
+    h = _head()
+    bad = K + 1 if where == "not-a-snapshot" else h.last_seq + 5
+    assert s.get(K + 1).kind != "snapshot"
+    priv, _ = _cp._owner_keys()
+    live = [e for e in s.entries() if e.seq >= K]
+    forged = _cp._sign_v2_head(priv, live, base_seq=K, base_prev_hash=h.base_prev_hash,
+                               cumulative_merkle_root=h.cumulative_merkle_root, snapshot_seq=bad,
+                               prev_head_hash=_fl.load_floor().head_sig_hash)
+    _cp.HEAD_PATH.write_text(forged.model_dump_json())
+    if where == "not-a-snapshot":
+        assert _cp.verify_checkpoint(s)[0]                       # it really is a valid owner-signed head
+    with pytest.raises(_cp.CheckpointRefused, match="snapshot"):
+        _cp.checkpoint(s)
+    with pytest.raises(SnapshotError):
+        SnapshotState.load(s)
 
 
 def test_key_rotation_after_a_prune_carries_the_boundary_under_the_new_key(home):
@@ -401,9 +431,8 @@ def test_cli_warden_anchor_set_refuses_before_appending(home, monkeypatch):
     _no_head(home)
     n = s.next_seq
     monkeypatch.setattr(cli, "_verify_ed25519", lambda *a: True)
-    assert _cli(monkeypatch, s, ["warden-anchor-set", "--count", "1", "--head-hash", "ab" * 32,
-                                 "--pubkey", "k", "--sig", "s"]) == 2
-    assert s.next_seq == n
+    assert _cli(monkeypatch, s, ["warden-anchor-set", "1", "ab" * 32, "k", "s"]) == 2
+    assert s.next_seq == n and not _cp.HEAD_PATH.exists()
 
 
 def test_consolidate_sign_refuses_before_promoting(home):
