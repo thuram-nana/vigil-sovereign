@@ -24,7 +24,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, cast
 
 from .reuse import assert_no_offense
 
@@ -66,13 +66,11 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     return pairs, unreadable
 
 
-def _completion_block(spool: Optional[Path], pair: tuple) -> "Callable[[], Optional[str]]":
+def _completion_block(spool: Path, pair: tuple) -> "Callable[[], Optional[str]]":
     """The sweep's refund precondition, re-read from the spool when called: ``completion_pending`` if a
-    completion for ``pair`` is waiting / quarantined, ``completion_unknown`` if the spool cannot be fully read
-    (or none was given), else None (the refund may proceed)."""
+    completion for ``pair`` is waiting / quarantined, ``completion_unknown`` if the spool cannot be fully read,
+    else None (the refund may proceed)."""
     def _check() -> Optional[str]:
-        if spool is None:
-            return "completion_unknown"
         pending, unreadable = _pending_completions(spool)
         if pair in pending:
             return "completion_pending"
@@ -127,7 +125,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         # the settle-drain's charge takes), right before it decides — a run whose completion exists by then is
         # never refunded here.
         r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
-                               refuse_if=_completion_block(spool, (doc.engagement_slug, str(doc.nonce))))
+                               refuse_if=_completion_block(cast(Path, spool),   # apply => a spool (checked above)
+                                                           (doc.engagement_slug, str(doc.nonce))))
         if r.get("refused"):
             rows.append({**row, "status": str(r["refused"])})
         elif not r.get("ok"):

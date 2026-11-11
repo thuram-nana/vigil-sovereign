@@ -8,9 +8,10 @@ the cockpit's ``launch_cancel`` (both a full refund) run in THREE processes. Two
 move money". It flocks a lockfile beside the spine (``<stem>.settle.lock``), so every process settling against
 the same money ledger (the spine) is serialized, whatever seam directory each one resolves. It is a separate
 file from the spine's own append lock on purpose: a settle appends to the spine INSIDE this section, and a second
-flock on the spine's lockfile from a new fd would self-deadlock. Re-entrant per thread (the flock is taken once,
-at the outermost entry). FAIL-CLOSED: a lockfile that cannot be opened or locked raises, so the settle moves
-nothing. Lock order: callers hold the per-process ``spine_lock`` FIRST, then this; nothing takes them reversed.
+flock on the spine's lockfile from a new fd would self-deadlock. Each entry flocks its OWN fd, so it excludes
+other threads as well as other processes — and is NOT re-entrant (never nest it). FAIL-CLOSED: a lockfile that
+cannot be opened or locked raises, so the settle moves nothing. Lock order: callers hold the per-process
+``spine_lock`` FIRST, then this; nothing takes them reversed.
 
 ``scan_settlement(...)`` — what the SPINE says about one lease's settlement. A lease is settled on the spine when
 it carries an owner-signed ``governor.launch_settled`` record for it (the DECISION, written first by every
@@ -31,7 +32,6 @@ SOVEREIGN PLANE ONLY (FATAL-2): framework-free, ``assert_no_offense()`` at impor
 from __future__ import annotations
 
 import os
-import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,19 +63,6 @@ SETTLE_PLAN_PREFIX = "settle-plan:"
 # the cross-process settle lock
 # ---------------------------------------------------------------------------------------------------------------
 
-class _SettleLock:
-    __slots__ = ("rlock", "depth", "fd")
-
-    def __init__(self) -> None:
-        self.rlock = threading.RLock()
-        self.depth = 0
-        self.fd: Optional[int] = None
-
-
-_LOCKS_GUARD = threading.Lock()
-_LOCKS: "dict[str, _SettleLock]" = {}
-
-
 def settle_lock_path(store) -> Path:
     """``<spine dir>/<stem>.settle.lock`` for ``store`` (namespaced by the spine data file's stem, like the
     spine's own ``<stem>.lock``; a ``*.lock`` is a transient both backup legs skip)."""
@@ -89,31 +76,13 @@ def settle_lock_path(store) -> Path:
 @contextmanager
 def settle_lock(store) -> Iterator[None]:
     """Hold the cross-process settle critical section for ``store``'s spine (see the module docstring)."""
-    lockp = settle_lock_path(store)
-    key = str(lockp.resolve())
-    with _LOCKS_GUARD:
-        lk = _LOCKS.get(key)
-        if lk is None:
-            lk = _LOCKS[key] = _SettleLock()
-    with lk.rlock:
-        if lk.depth == 0:
-            fd = os.open(str(lockp), os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-            except BaseException:
-                os.close(fd)
-                raise
-            lk.fd = fd
-        lk.depth += 1
-        try:
-            yield
-        finally:
-            lk.depth -= 1
-            if lk.depth == 0:
-                held, lk.fd = lk.fd, None
-                if held is not None:
-                    os.close(held)                   # closing the only fd releases the flock
+    fd = os.open(str(settle_lock_path(store)), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)                                 # closing the fd releases the flock
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -179,7 +148,7 @@ def scan_settlement(store, trusted_pubkey: Optional[str], *, org_id: str, slug: 
             core, tag = _SETTLED_CORE, None
         elif sig in wanted:
             eid, core, tag = wanted[sig]
-            if p.get("entry_id") != eid or tag in ev.landed:
+            if p.get("entry_id") != eid:
                 continue
         else:
             continue

@@ -117,16 +117,20 @@ def _settle(store, r, consumed, now=NOW + 60, **kw):
 def test_flag_off_a_settle_appends_exactly_the_records_it_always_did():
     s = _store()
     _seat(s)
-    done, cancel = _reserve(s, nonce="n1"), _reserve(s, nonce="n2")
-    tip = s.next_seq - 1
-    out = _settle(s, done, 30)
-    assert out == {"ok": True, "action": "launch_settled", "org_id": ORG, "slug": done["slug"], "refunded": 0,
-                   "refunded_plan": 0, "refunded_wallet": 0, "net_spend": 30}
-    assert _signals(s, tip) == []                                    # a completed settle: nothing on the spine
+    cancel, done = _reserve(s, nonce="n1"), _reserve(s, nonce="n2")
     tip = s.next_seq - 1
     assert _settle(s, cancel, 0)["refunded_wallet"] == 30
     assert _signals(s, tip) == [CREDIT_GRANT_SIGNAL]                 # a cancel: exactly its refund grant
+    tip = s.next_seq - 1
+    out = _settle(s, done, 30)                                       # (another lease's refund is not ITS evidence)
+    assert out == {"ok": True, "action": "launch_settled", "org_id": ORG, "slug": done["slug"], "refunded": 0,
+                   "refunded_plan": 0, "refunded_wallet": 0, "net_spend": 30}
+    assert _signals(s, tip) == []                                    # a completed settle: nothing on the spine
     assert LAUNCH_SETTLED_SIGNAL not in _signals(s)
+    marker = settlements_root(_base()) / f"{done['slug']}.json"
+    ino = marker.stat().st_ino
+    assert _settle(s, done, 0)["action"] == "launch_already_settled"
+    assert marker.stat().st_ino == ino                               # an already-settled re-settle rewrites nothing
 
 
 # ---- flag ON: every settle records its decision; a lost / stale seam cannot re-open the refund -----------------
@@ -187,7 +191,9 @@ def test_refunded_lease_resettled_after_seam_loss_reports_already_settled_and_wr
     assert _signals(s, tip) == [] and _avail(s) == 100               # no second (deduped) grant record
 
 
-def test_postpaid_settle_after_seam_loss_does_not_reverse_a_consumed_draw():
+@pytest.mark.parametrize("flag", ["", "1"])
+def test_postpaid_settle_after_seam_loss_does_not_reverse_a_consumed_draw(flag, monkeypatch):
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", flag)
     s = _store()
     _seat(s, credits=0, postpaid=(500, 30))
     r = _reserve(s, units=100, nonce="pp1")
@@ -226,15 +232,38 @@ def test_the_spine_lookup_is_bound_to_org_slug_and_nonce():
     kp = ensure_owner_keypair()
     record_launch_settled(s, kp, org_id="org_b", slug="cust_x", nonce="n1", consumed=5, issued_at=NOW)
     seq = record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", consumed=5, issued_at=NOW)
+    record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", consumed=0, issued_at=NOW)
     pub = kp.public_key_b64
-    assert scan_settlement(s, pub, org_id=ORG, slug="cust_x", nonce="n1").record_seq == seq
+    ev = scan_settlement(s, pub, org_id=ORG, slug="cust_x", nonce="n1")
+    assert (ev.record_seq, ev.consumed, ev.through) == (seq, 5, s.next_seq - 1)     # the FIRST decision wins
     assert not scan_settlement(s, pub, org_id=ORG, slug="cust_x", nonce="n2").settled
     assert not scan_settlement(s, pub, org_id=ORG, slug="cust_y", nonce="n1").settled
 
 
 # ---- crash recovery: a recorded decision is finished by the next settle, at the RECORDED consumption -----------
+def test_a_crash_before_the_postpaid_settle_credit_is_finished_exactly_once(record_on, monkeypatch):
+    from sigil.governor import postpaid as pp
+    s = _store()
+    _seat(s, credits=0, postpaid=(500, 30))
+    r = _reserve(s, units=100, nonce="pp2")
+    real = pp.PostpaidArrearsLedger.settle
+    monkeypatch.setattr(pp.PostpaidArrearsLedger, "settle",
+                        lambda *a, **k: (_ for _ in ()).throw(SystemExit("killed before the settle credit")))
+    with pytest.raises(SystemExit):
+        _settle(s, r, 40)                                            # consumed 40 of 100
+    monkeypatch.setattr(pp.PostpaidArrearsLedger, "settle", real)
+    assert PostpaidArrearsLedger(s).accrued(ORG) == 100
+    again = _settle(s, r, 0, now=NOW + 90)                           # a cancel: the RECORDED 40 decides
+    assert again["action"] == "launch_already_settled" and again["refunded"] == 60, again
+    assert PostpaidArrearsLedger(s).accrued(ORG) == 40
+    tip = s.next_seq - 1
+    assert _settle(s, r, 0, now=NOW + 99)["refunded"] == 0 and _signals(s, tip) == []
+
+
 def test_a_crash_before_the_refund_grant_is_finished_exactly_once_by_a_retry(record_on, monkeypatch):
     from sigil.governor import wallet as wallet_mod
+    from sigil.governor.cost_ledger import COST_SETTLE_SIGNAL
+    monkeypatch.setenv("VIGIL_COST_LEDGER_WRITE", "1")                # the advisory cost settle is finished too
     s = _store()
     _seat(s)
     r = _reserve(s)
@@ -250,7 +279,7 @@ def test_a_crash_before_the_refund_grant_is_finished_exactly_once_by_a_retry(rec
     assert _avail(s) == 70 and is_lease_settled(_base(), r["slug"], r["nonce"])
     again = _settle(s, r, 30, now=NOW + 90)              # e.g. a late 'completed' — the RECORDED cancel decides
     assert again["action"] == "launch_already_settled" and again["refunded_wallet"] == 30, again
-    assert _avail(s) == 100
+    assert _avail(s) == 100 and _signals(s).count(COST_SETTLE_SIGNAL) == 1
     tip = s.next_seq - 1
     assert _settle(s, r, 0, now=NOW + 99)["refunded"] == 0 and _signals(s, tip) == []   # never paid twice
 
@@ -452,7 +481,7 @@ def test_launch_cancel_rechecks_started_inside_the_settle(monkeypatch):
         return real(self, **kw)
 
     monkeypatch.setattr(lg.LaunchGate, "settle_launch", _start_lands_then_settle)
-    with pytest.raises(ProvisionDenied, match="started"):
+    with pytest.raises(ProvisionDenied, match="has been started and must settle"):
         build_provisioner(s).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
     assert _avail(s) == 70 and read_credit_lease(_base(), r["slug"]) is not None
     assert not is_lease_settled(_base(), r["slug"], r["nonce"])

@@ -525,8 +525,8 @@ class LaunchGate:
                         f"{type(e).__name__}"}
             if fresh:
                 decided, moved = consumed, move(consumed, set())
-            elif ev.record_seq is not None and ev.consumed is not None:
-                decided = min(ev.consumed, reserved)
+            elif ev.consumed is not None:
+                decided = ev.consumed                        # the RECORDED decision (its split re-checks the clamp)
                 moved = move(decided, ev.landed)             # finish a decision a crash interrupted
             else:
                 decided, moved = consumed, {"refunded": 0, "refunded_plan": 0, "refunded_wallet": 0}

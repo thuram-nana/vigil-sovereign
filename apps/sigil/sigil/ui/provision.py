@@ -1045,6 +1045,7 @@ class Provisioner:
             _cdoc = SignedCreditLaunchLease.model_validate(signed_lease).document
         except Exception as e:  # noqa: BLE001 — a malformed lease is a clean refusal
             raise ProvisionDenied("launch cancel requires the signed launch lease from reserve_launch") from e
+
         def _started() -> Optional[str]:
             try:
                 from .target_authorization import _base_dir
@@ -1056,21 +1057,15 @@ class Provisioner:
                 return "started"
             return None
 
-        def _refuse_started():
-            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
-                        target=str(_cdoc.engagement_slug), outcome="refused_started")
-            return ProvisionDenied(
-                "this launch has been started and must settle through its completion; it cannot be cancelled")
-
-        if _started():
-            raise _refuse_started()
-        # ...and RE-CHECKED inside the settle's cross-process critical section (``refuse_if``), which
-        # ``publish_lease`` (launch_start) also holds: a start landing after the check above can no longer be
-        # followed by this full refund.
+        # Checked INSIDE the settle's cross-process critical section (``refuse_if``), which ``publish_lease``
+        # (launch_start) also holds — so a start can never land between this check and the full refund.
         r = LaunchGate(self.store).settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
                                                  expect_org_id=requester_org_id, refuse_if=_started)
         if r.get("refused"):
-            raise _refuse_started()
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(_cdoc.engagement_slug), outcome="refused_started")
+            raise ProvisionDenied(
+                "this launch has been started and must settle through its completion; it cannot be cancelled")
         if not r.get("ok"):
             raise ProvisionDenied(str(r.get("error") or "launch cancel refused"))
         self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
