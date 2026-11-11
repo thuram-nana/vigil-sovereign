@@ -92,3 +92,35 @@ def test_sandbox_flag_shaped_command_is_fail_closed(tmp_path, capsys):
     # it as the option and then errors on the missing positional (SystemExit), so nothing runs.
     with pytest.raises(SystemExit):
         _run(["sandbox", "--approve", "--base-dir", str(tmp_path)], capsys)
+
+
+@pytest.mark.parametrize("operator_present", [True, False])
+@pytest.mark.parametrize("command", ["--approve", "--workspace=/", "--", "pytest -q"])
+def test_console_run_tests_argv_parses_to_exactly_its_command(tmp_path, monkeypatch, command, operator_present):
+    """CQ-1, both halves joined: the argv the console's run-tests action ACTUALLY builds, parsed by THIS verb's
+    REAL parser. A command text that looks like one of the sandbox's own options (an LLM may propose it from
+    repo content) arrives verbatim as THE command, and the workspace / base dir / approval leg stay exactly what
+    the action set — the command text never chooses them."""
+    from types import SimpleNamespace
+
+    from framework.v2.console import actions
+    from vigil_integration.cli import build_parser
+
+    monkeypatch.setenv("VIGIL_LIVE_DIR", str(tmp_path / "live"))
+    wd = tmp_path / "clone"
+    wd.mkdir()
+    monkeypatch.setattr(actions, "_confined_clone_path", lambda cid, p: str(wd))
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "vigil")
+    monkeypatch.setattr(actions, "_chat_killswitch_tripped", lambda cid: False)
+    seen = {}
+
+    def _launch(argv, **kw):                      # the `vigil sandbox` subprocess: capture its argv, never exec
+        seen["argv"] = argv
+        return SimpleNamespace(stdout='{"ran": false, "outcome": "queue"}', stderr="", returncode=2)
+
+    monkeypatch.setattr(actions.subprocess, "run", _launch)
+    actions.run_codebase_tests("chat", str(wd), command, operator_present=operator_present)
+    assert seen["argv"][:2] == ["vigil", "sandbox"]
+    a = build_parser().parse_args(seen["argv"][1:])
+    assert a.command == [command]
+    assert (a.workspace, a.base_dir, a.approve) == (str(wd), actions._live_base(), operator_present)

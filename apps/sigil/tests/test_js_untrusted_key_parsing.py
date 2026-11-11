@@ -62,3 +62,40 @@ def test_cvss_parse_vector_keys_only_by_its_own_metric_ids():
     assert got["out"][0] == {"AV": "N", "AC": "L", "PR": "N", "UI": "N", "S": "U", "C": "H", "I": "H", "A": "H"}
     assert got["out"][1] == {"AV": "L"}                                # only real ids with allowed values
     assert got["clean"] is True
+
+
+# Just enough DOM for the calculator's own init (buildGroups -> fromUrl -> render); the page script runs UNMODIFIED.
+_CVSS_PAGE = r"""
+const fs = require("fs"), vm = require("vm");
+const [path, href] = process.argv.slice(1);
+function el() {
+  return { style: {}, dataset: {}, attrs: {}, on: {}, children: [], textContent: "", value: "",
+           appendChild(c) { this.children.push(c); return c; },
+           setAttribute(k, v) { this.attrs[k] = String(v); },
+           addEventListener(t, f) { this.on[t] = f; } };
+}
+const byId = {};
+globalThis.document = { getElementById(id) { return byId[id] || (byId[id] = el()); }, createElement: el };
+globalThis.window = { location: { href }, history: { replaceState() {} } };
+const writes = [];
+Object.defineProperty(Object.prototype, "ZZ", {
+  configurable: true, get() { return ["N"]; }, set(v) { writes.push(v); } });
+vm.runInThisContext(fs.readFileSync(path, "utf8"), { filename: path });
+process.stdout.write(JSON.stringify({ vector: byId["cvss-vector-str"].value, writes }));
+"""
+
+
+def test_cvss_page_never_writes_a_url_chosen_key_that_the_prototype_chain_resolves():
+    """The attacker's path: a shared link's ``?vector=`` -> ``fromUrl()`` -> ``parseVector()``, in the shipped page.
+
+    In a pristine realm upper-casing alone keeps every ``Object.prototype`` name out (each has a lower-case
+    letter), so this only differs when the prototype chain carries an upper-case name — e.g. planted by another
+    script on the page. A guard that LOOKS UP the crafted id (``VALID[id]``) is then satisfied through the chain
+    and assigns the crafted key, which reaches an inherited setter with a value from the URL. The write must be
+    keyed by the calculator's own ORDER list, so a crafted id is never assigned, whatever the chain carries."""
+    href = "https://vigil.example/tools/cvss-calculator/?vector=CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L/ZZ:N"
+    r = subprocess.run(["node", "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["vector"] == "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L"   # the URL's real metrics were applied
+    assert got["writes"] == []                                             # the crafted id was never assigned
