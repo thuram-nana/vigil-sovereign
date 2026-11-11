@@ -308,6 +308,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
         sovereign verifies it (role == action; principal + method + path + ts inside the HMAC). The hop key
         is this edge's ONLY credential — it holds no owner key. A dead provisioner is a 502, never a crash."""
+        if not self.server.hop_key:
+            # No hop key: nothing this edge could stamp would verify (and `body_binding` raises on a blank key —
+            # a POST surfaced that as a 400, a GET dropped the connection). Refuse before any hop, with the same
+            # 403 the cockpit gives an unkeyed hop, so every verb gets one clean, fail-closed answer.
+            return 403, {"error": "provision denied (hop)"}
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")

@@ -663,7 +663,8 @@ class FlutterwaveBillingProvider(BillingProvider):
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
-                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> CheckoutSession:
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
+                        session_minutes: "Optional[int]" = None) -> CheckoutSession:
         """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
 
         MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
@@ -713,6 +714,14 @@ class FlutterwaveBillingProvider(BillingProvider):
             if not pp or len(pp) > 128 or any(ord(c) < 0x21 or ord(c) == 0x7f for c in pp):
                 raise ValueError("payment_plan must be a non-empty printable id")
             payload["payment_plan"] = pp
+        if session_minutes is not None:
+            # Audit E1b: bound how long the hosted payment page can be paid — once the session elapses the processor
+            # closes it and fails any uncompleted transaction — so the provisioner's pending plan-checkout record,
+            # which outlives this session, can never lapse while its link could still bill. Ceiling: 1440 minutes.
+            sm = session_minutes
+            if isinstance(sm, bool) or not isinstance(sm, int) or not 1 <= sm <= 1440:
+                raise ValueError("session_minutes must be an int in [1, 1440]")
+            payload["configurations"] = {"session_duration": sm}
         if customer_email:
             payload["customer"] = {"email": str(customer_email)}
         try:

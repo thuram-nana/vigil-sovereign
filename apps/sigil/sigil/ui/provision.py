@@ -229,7 +229,7 @@ class Provisioner:
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
-               tx_ref: str = "") -> None:
+               tx_ref: str = "", expires_at: float = 0.0) -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -245,6 +245,8 @@ class Provisioner:
             "reason": str(reason)[:160]}
         if tx_ref:
             payload["tx_ref"] = str(tx_ref)[:128]   # the processor reference this audit row is about (checkout)
+        if expires_at:
+            payload["expires_at"] = float(expires_at)   # a created PLAN checkout's pending window (E1b backstop)
         if attestation:
             # The customer's inline "I am authorized to test this asset" affirmation, recorded on the
             # owner-signed append-only spine as the tamper-evident legal attestation (control of a host is not
@@ -941,6 +943,23 @@ class Provisioner:
         cur = SubscriptionRegistry(self.store).subscription(org_id)
         return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
 
+    def _spine_live_plan_checkout(self, org_id: str, t: float) -> str:
+        """Audit E1b backstop — the tx_ref of a PLAN checkout that the spine audit shows CREATED for ``org_id`` and
+        whose pending window (the row's ``expires_at``, the pending record's) is still open at ``t``; else "". The
+        pending record is a SIGIL_HOME file a local writer could delete; this row is on the tamper-evident spine,
+        so a deleted record still refuses the second plan (fail-closed). A spine read fault raises (caller refuses).
+        A full scan, but only on a plan checkout (rare, and rate-limited)."""
+        for r in self.store.iter_records():
+            pl = r.payload
+            if not (isinstance(pl, dict) and pl.get("signal") == "provision.audit"
+                    and pl.get("action") == "billing_checkout" and pl.get("outcome") == "created"
+                    and pl.get("org_id") == str(org_id)[:64]):
+                continue
+            ea = pl.get("expires_at")
+            if isinstance(ea, (int, float)) and not isinstance(ea, bool) and t < float(ea):
+                return str(pl.get("tx_ref") or "?")
+        return ""
+
     def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
                                 now: "Optional[float]" = None) -> dict:
         """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
@@ -958,8 +977,13 @@ class Provisioner:
             from ..governor import catalog
             offered, _ents = self._checkout_offered()
             items = [p for p in catalog.plans() if p.get("price_id") in offered]
+            plans_on = bool(config.customer_plan_checkout_enabled())
+            # E1b: a plan checkout already in progress (paid or not, not yet drained) refuses a second plan, so the
+            # UI must not offer one either. Fail-closed: an unwired / untrusted pending record reads as pending.
+            pending = plans_on and (self.pending_checkouts is None
+                                    or self.pending_checkouts.pending(org_id, now=t))
             return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
-                    "plans_enabled": bool(config.customer_plan_checkout_enabled())}
+                    "plans_enabled": plans_on, "plan_checkout_pending": bool(pending)}
         return self._customer_read(requester, requester_org_id, "manage_billing", project)
 
     def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
@@ -1018,6 +1042,7 @@ class Provisioner:
         email = getattr(acct, "email", None) or None
         nonce: "Optional[str]" = None
         pending_ref = pending_note = ""
+        pending_until = 0.0
         if is_plan and str(price_id) in offered:
             # Audit E1b: `_org_has_live_plan` sees only DRAINED plans, so a paid plan whose webhook has not drained
             # yet (a drain tick, or NET-2b parking) left room for a second processor subscription. Claim the org's
@@ -1035,16 +1060,33 @@ class Provisioner:
                     raise PendingCheckoutRefused("plan checkout is unavailable right now (contact support)",
                                                  code="refused_pending_unwired",
                                                  detail="no pending plan-checkout ledger is wired")
-                pending_note = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref,
-                                                            now=t).get("replaced", "")
+                claimed = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref, now=t)
+                pending_note, pending_until = claimed.get("replaced", ""), float(claimed["record"]["expires_at"])
+                # the deletion-proof backstop: a CREATED plan checkout still inside its window on the spine audit
+                # refuses even if its pending record file is gone (a deleted record must not reopen the window).
+                try:
+                    live = self._spine_live_plan_checkout(requester_org_id, t)
+                except Exception as exc:  # noqa: BLE001 — a spine read fault is fail-CLOSED, never "no checkout"
+                    live, why = "?", f"the spine audit could not be read ({type(exc).__name__})"
+                else:
+                    why = f"pending record missing but the spine audit shows a live plan checkout {live}"
+                if live:
+                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    raise PendingCheckoutRefused(
+                        "a plan checkout for this workspace is already in progress — complete it, or wait for it to "
+                        "expire (contact support)", code="refused_pending_spine", detail=why[:160])
             except PendingCheckoutRefused as exc:
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                             target=str(price_id), outcome=exc.code, reason=exc.detail, tx_ref=pending_ref)
                 raise ProvisionDenied(str(exc)) from None
+        from .pending_checkout import PLAN_LINK_SESSION_MIN
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
                                             customer_email=email, redirect_url=return_url, nonce=nonce,
-                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None),
+                                            # E1b: a plan link must stop being payable before its pending record
+                                            # lapses (top-ups pass None: their payload is unchanged)
+                                            session_minutes=(PLAN_LINK_SESSION_MIN if pending_ref else None))
         except (UnsupportedCapability, ValueError) as exc:
             if pending_ref and self.pending_checkouts is not None:
                 # the processor refused: the customer never received a link, so free the claim for a retry
@@ -1053,7 +1095,8 @@ class Provisioner:
                         target=str(price_id or ""), outcome="refused", tx_ref=pending_ref)
             raise ProvisionDenied(f"checkout refused: {exc}") from None
         self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
-                    outcome="created", reason=pending_note, critical=True, tx_ref=sess.tx_ref)
+                    outcome="created", reason=pending_note, critical=True, tx_ref=sess.tx_ref,
+                    expires_at=pending_until)
         return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
                 "amount_minor": sess.amount_minor, "currency": sess.currency}
 

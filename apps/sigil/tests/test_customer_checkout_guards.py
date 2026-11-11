@@ -7,7 +7,11 @@
 (b) The second-plan guard read only DRAINED subscriptions, so several plan checkouts could be created (and paid)
     before the first plan's webhook drained. An owner-signed, expiring, cross-process-exclusive PENDING
     plan-checkout record now refuses a second plan checkout for the org until the plan drains (then the drained
-    subscription refuses it) or the record expires. Top-ups are unaffected.
+    subscription refuses it) or the record expires — and it cannot expire while its link can still bill: a plan
+    checkout asks the processor for a bounded payment session that the record's TTL outlives, plus the drain lag.
+    Deleting the record does not reopen the window (the created plan checkout is on the spine audit), and the
+    checkout audit names the tx_ref. Top-ups are unaffected (their processor payload is unchanged).
+(c) (the edge's blank-hop-key refusal lives in test_custui.py; the limiter primitive in test_login_ratelimit.py.)
 """
 from __future__ import annotations
 
@@ -139,88 +143,6 @@ def test_the_factory_wires_the_durable_checkout_limiter(tmp_path, monkeypatch):
     assert lim.base_lock_s >= Provisioner._CHECKOUT_WINDOW_S
 
 
-# --- the limiter's guard-and-count primitive ------------------------------------------------------------------
-
-def _limiter(d, **kw):
-    from sigil.ui.login_ratelimit import LoginRateLimiter
-    return LoginRateLimiter(d, **{"max_fails": 3, "window_s": 100.0, "base_lock_s": 100.0, **kw})
-
-
-def test_admit_counts_every_attempt_and_refuses_past_the_ceiling(tmp_path):
-    lim = _limiter(tmp_path / "l")
-    assert [lim.admit("a", "b", now=10.0) for _ in range(3)] == [None, None, None]
-    assert lim.admit("a", "b", now=11.0) == pytest.approx(99.0)        # locked until 10 + 100
-    assert lim.admit("a", now=12.0) is not None and lim.admit("b", now=12.0) is not None
-    assert lim.admit("c", now=12.0) is None                            # an unrelated key is unaffected
-    assert lim.admit("a", "b", now=111.0) is None                      # the lockout lapses
-
-
-def test_admit_fails_closed_when_the_attempt_cannot_be_recorded(tmp_path, monkeypatch):
-    from sigil.ui import login_ratelimit
-    lim = _limiter(tmp_path / "l")
-    monkeypatch.setattr(login_ratelimit.LoginRateLimiter, "_write_atomic", lambda self, m, r: False)
-    assert lim.admit("a", now=1.0) == lim.base_lock_s
-
-
-def test_admit_fails_closed_without_a_key_or_a_lock(tmp_path, monkeypatch):
-    from sigil.ui import login_ratelimit
-    lim = _limiter(tmp_path / "l")
-    assert lim.admit(now=1.0) == lim.base_lock_s and lim.admit("", now=1.0) == lim.base_lock_s
-
-    class _NoLock:
-        LOCK_EX = 2
-
-        @staticmethod
-        def flock(fd, op):
-            raise OSError("no lock")
-    monkeypatch.setattr(login_ratelimit, "fcntl", _NoLock)
-    assert lim.admit("a", now=1.0) == lim.base_lock_s
-
-
-@pytest.mark.parametrize("content", ["{not json", "[]"])
-def test_admit_refuses_on_a_corrupt_marker_and_does_not_reset_it(tmp_path, content):
-    lim = _limiter(tmp_path / "l")
-    assert lim.admit("a", "b", now=1.0) is None
-    lim._marker("b").write_text(content, encoding="utf-8")
-    assert lim.admit("a", "b", now=2.0) == lim.base_lock_s
-    assert lim._marker("b").read_text(encoding="utf-8") == content      # never trusted, never silently reset
-    assert json.loads(lim._marker("a").read_text(encoding="utf-8"))["fails"] == [1.0]   # nothing recorded
-
-
-def test_admit_refuses_when_the_directory_bound_is_full(tmp_path):
-    lim = _limiter(tmp_path / "l", max_keys=1)
-    assert lim.admit("a", now=1.0) is None
-    assert lim.admit("b", now=2.0) == lim.base_lock_s                  # cannot record a new key → refuse
-
-
-def test_the_sweep_never_reaps_the_admit_lock_file(tmp_path):
-    lim = _limiter(tmp_path / "l")
-    assert lim.admit("a", now=1.0) is None
-    lim.record_failure("z", now=10_000.0)                               # a sweep long after "a" went cold
-    assert (tmp_path / "l" / ".admit.lock").exists()
-
-
-_WORKER = r"""
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("lrl", sys.argv[1])
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-lim = m.LoginRateLimiter(sys.argv[2], max_fails=10, window_s=1e6, base_lock_s=1e6)
-sys.stdout.write("".join("1" if lim.admit("org", "user", now=1000.0) is None else "0" for _ in range(6)))
-"""
-
-
-def test_admit_is_exact_across_concurrent_processes(tmp_path):
-    """8 PROCESSES x 6 attempts on one marker dir: exactly max_fails (10) are admitted — the flock serializes the
-    read-check-write across processes (no lost update lets two processes admit on the same count)."""
-    from sigil.ui import login_ratelimit
-    d = Path(tempfile.mkdtemp(dir=tmp_path))
-    procs = [subprocess.Popen([sys.executable, "-I", "-c", _WORKER, login_ratelimit.__file__, str(d)],
-                              stdout=subprocess.PIPE, text=True) for _ in range(8)]
-    out = "".join(p.communicate(timeout=60)[0] for p in procs)
-    assert all(p.returncode == 0 for p in procs)
-    assert len(out) == 48 and out.count("1") == 10, out
-
-
 # --- (b) the pending plan-checkout record ---------------------------------------------------------------------
 
 _PLAN = "vigil_pro_monthly"
@@ -309,15 +231,39 @@ def test_an_abandoned_plan_checkout_unblocks_after_the_ttl(monkeypatch):
     assert DEFAULT_TTL_S >= 3 * 915                           # well above the ~15 min NET-2b parking window
 
 
-def test_the_ttl_is_comfortably_above_the_net2b_parking_window():
+def test_the_record_outlives_the_payable_link_plus_the_drain_lag():
+    """The record may only lapse once the link cannot bill: TTL >= the processor session the plan checkout asks
+    for + the 60 s drain timer + the full NET-2b parking window (computed from its live defaults)."""
     from vigil_integration.live import net_recovery
 
-    from sigil.ui.pending_checkout import DEFAULT_TTL_S
-    total, d = 0.0, net_recovery.DEFAULT_BASE_S
-    for _ in range(8):
-        total += min(d, net_recovery.DEFAULT_CAP_S)
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S, DRAIN_LAG_S, PLAN_LINK_SESSION_MIN
+    parking, d = 0.0, net_recovery.DEFAULT_BASE_S
+    for _ in range(net_recovery.DEFAULT_MAX_ATTEMPTS):
+        parking += min(d, net_recovery.DEFAULT_CAP_S)
         d *= 2
-    assert DEFAULT_TTL_S >= 3 * (total + 60.0)                # + the 60 s drain timer
+    assert DRAIN_LAG_S >= parking + 60.0
+    assert DEFAULT_TTL_S >= PLAN_LINK_SESSION_MIN * 60.0 + DRAIN_LAG_S
+    assert 1 <= PLAN_LINK_SESSION_MIN <= 1440                  # the processor's session ceiling
+
+
+def test_a_plan_checkout_bounds_its_payment_session_and_a_topup_payload_is_unchanged(monkeypatch):
+    from sigil.ui.pending_checkout import PLAN_LINK_SESSION_MIN
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.billing_checkout(admin, org, _TOPUP, now=5000.0)
+    p.billing_checkout(admin, org, _PLAN, now=5001.0)
+    assert sorted(posted[0]) == ["amount", "currency", "customer", "meta", "tx_ref"]   # the top-up: as on main
+    assert posted[1]["configurations"] == {"session_duration": PLAN_LINK_SESSION_MIN}
+    assert posted[1]["payment_plan"] == _PLAN
+
+
+@pytest.mark.parametrize("bad", [0, 1441, True, "30", 30.0])
+def test_create_checkout_refuses_an_out_of_range_session(bad):
+    from sigil.governor import catalog
+    with pytest.raises(ValueError, match="session_minutes"):
+        _real_provider([]).create_checkout("org_x", _TOPUP, expected=catalog.expected_amounts(), session_minutes=bad)
 
 
 def test_topups_never_claim_and_another_org_is_independent(monkeypatch):
@@ -346,6 +292,66 @@ def test_the_checkout_audit_records_the_tx_ref(monkeypatch):
     assert [a["tx_ref"] for a in created] == [r1["tx_ref"], r2["tx_ref"]]
     rec = json.loads(next(Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64)).read_text(encoding="utf-8"))
     assert rec["tx_ref"] == r1["tx_ref"] == posted[0]["tx_ref"]           # the pending record names THE checkout
+    assert created[0]["expires_at"] == rec["expires_at"]                 # the plan row carries its pending window
+    assert "expires_at" not in created[1]                                # a top-up row does not
+
+
+def test_a_deleted_pending_record_does_not_reopen_the_second_plan_window(monkeypatch):
+    """The record is a SIGIL_HOME file; deleting it must fail CLOSED: the created plan checkout is on the
+    tamper-evident spine audit with its window, which refuses until the window ends (then a new plan is allowed)."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _record_path(p).unlink()                                  # someone with SIGIL_HOME write access deletes it
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="already in progress"):
+        p.billing_checkout(admin, org, _PLAN, now=5001.0)
+    assert len(posted) == 1
+    assert seen[-1]["outcome"] == "refused_pending_spine" and first in seen[-1]["reason"]
+    assert not any(Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64))   # the refused attempt left no claim
+    p.billing_checkout(admin, org, _TOPUP, now=5002.0)                   # top-ups are unaffected
+    p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S)     # the first window ended
+    assert [x.get("payment_plan") for x in posted] == [_PLAN, None, _PLAN]
+
+
+def test_a_spine_read_fault_refuses_the_plan_and_frees_the_claim(monkeypatch):
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+
+    def broken(org_id, t):
+        raise OSError("segment unreadable")                   # e.g. a manifest-referenced segment is missing
+    p._spine_live_plan_checkout = broken
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="already in progress"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    assert posted == [] and seen[-1]["outcome"] == "refused_pending_spine" and "OSError" in seen[-1]["reason"]
+    del p._spine_live_plan_checkout
+    p.billing_checkout(admin, org, _PLAN, now=5001.0)                    # no claim was left behind: retry works
+    assert len(posted) == 1
+
+
+def test_the_offers_read_reports_a_plan_checkout_in_progress(monkeypatch):
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    _plans_on(monkeypatch)
+    p, admin, _t, org, other, _w = _provisioner()
+    p.orgs.grant_membership(other, admin, "org_admin", issued_at=5.0)
+    p._checkout_provider = lambda: _real_provider([])
+    assert p.customer_billing_offers(admin, org, now=4999.0)["plan_checkout_pending"] is False
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    assert p.customer_billing_offers(admin, org, now=5001.0)["plan_checkout_pending"] is True
+    assert p.customer_billing_offers(admin, other, now=5001.0)["plan_checkout_pending"] is False
+    assert p.customer_billing_offers(admin, org, now=5000.0 + DEFAULT_TTL_S)["plan_checkout_pending"] is False
+    _record_path(p).write_text("{corrupt", encoding="utf-8")
+    assert p.customer_billing_offers(admin, org, now=5001.0)["plan_checkout_pending"] is True   # fail-closed
+    monkeypatch.delenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED")
+    assert p.customer_billing_offers(admin, org, now=5001.0)["plan_checkout_pending"] is False  # no plans offered
 
 
 def _record_path(p):

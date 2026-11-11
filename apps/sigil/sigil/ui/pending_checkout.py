@@ -17,15 +17,24 @@ gap. Pinned properties:
     operator-readable reason (fail-closed): it is never trusted. Such a record is only reaped once its FILE is
     older than the TTL (no live checkout's window can still depend on it, and whoever could alter its mtime could
     delete it outright) — so an owner-key rotation or a disk fault cannot lock an org out for ever either.
-  * EXPIRING — ``expires_at = created_at + ttl_s`` (default ``DEFAULT_TTL_S`` = 1 h, ~4x the NET-2b window plus the
-    60 s drain timer), so an ABANDONED checkout does not lock the org out of buying a plan for ever. An expired,
-    verified record is replaced by the next claim.
+  * EXPIRING, but never before the link it guards is dead — ``expires_at = created_at + ttl_s``. A plan checkout
+    asks the processor for a hosted-payment SESSION of ``PLAN_LINK_SESSION_MIN`` minutes (after which the processor
+    closes the payment page and fails any uncompleted transaction), so the link cannot be paid after that; the
+    default ``DEFAULT_TTL_S`` covers that session PLUS ``DRAIN_LAG_S`` (a payment completed in the session's last
+    second still has to clear the 60 s drain timer and up to ~15 min of NET-2b parking before its plan is drained
+    and ``_org_has_live_plan`` takes over). So an ABANDONED checkout does not lock the org out of buying a plan
+    for ever, and a record can only lapse once its link can no longer bill. An expired, verified record is
+    replaced by the next claim.
   * EXCLUSIVE across processes — the read-decide-write runs under an exclusive ``flock`` on ``<dir>/.claim.lock``,
     and a new record is published with ``os.link`` (an atomic exclusive create of a fully-written file), so two
     racing POSTs — in one cockpit process or several — can never both claim.
   * CLOCK SKEW — the decision is "live iff now < expires_at" on the owner-signed window; a record whose
     ``created_at`` lies in the future (the clock moved backwards) stays live (refuses) and says so in the reason.
   * TOP-UPS are never claimed: only the plan branch of ``billing_checkout`` calls this.
+  * DELETION fails closed: the file lives under SIGIL_HOME, so a local writer could delete it — but the provisioner
+    also writes each CREATED plan checkout (its tx_ref and this record's ``expires_at``) to the tamper-evident spine
+    audit and refuses a new plan checkout while such a row is still within its window, so deleting the file does
+    not reopen the second-plan window (see ``Provisioner._spine_live_plan_checkout``).
 
 ``release`` drops a record only if it is still THIS checkout's (same tx_ref) — used when the processor refused the
 checkout, so a customer who never received a link can retry at once. Fail-closed throughout: no owner key, no
@@ -55,7 +64,12 @@ from ..governor.authn import signed_payload, verify_signed  # noqa: E402
 
 SIGNAL = "provision.pending_plan_checkout"
 _CORE = ("signal", "org_id", "price_id", "tx_ref", "created_at", "expires_at")
-DEFAULT_TTL_S = 3600.0
+# The hosted-payment session a PLAN checkout asks the processor for (minutes; the processor's ceiling is 1440).
+PLAN_LINK_SESSION_MIN = 30
+# The worst-case lag from a payment completed at the session's last second to its plan being DRAINED: the 60 s
+# drain timer + NET-2b parking (5 s doubling to a 300 s cap over 8 attempts, ~915 s), with ample margin.
+DRAIN_LAG_S = 30 * 60.0
+DEFAULT_TTL_S = PLAN_LINK_SESSION_MIN * 60.0 + DRAIN_LAG_S
 _LOCK_NAME = ".claim.lock"
 _MAX_BYTES = 8192
 
@@ -149,7 +163,7 @@ class PendingPlanCheckouts:
         except OSError as exc:
             raise PendingCheckoutRefused(
                 "plan checkout is unavailable right now (contact support)", code="refused_pending_io",
-                detail=f"pending plan-checkout lock unavailable ({type(exc).__name__}) in {self.dir}") from None
+                detail=f"pending plan-checkout lock unavailable ({type(exc).__name__})") from None
         try:
             rec, problem = self._read(marker, org_id)
             replaced = ""
@@ -160,14 +174,14 @@ class PendingPlanCheckouts:
                     stale = False
                 if stale:
                     os.unlink(marker)                  # an untrusted record older than any live window: reap it
-                    replaced = f"reaped stale pending record {marker.name} ({problem})"
+                    replaced = f"reaped stale pending record {marker.name[:16]}... ({problem})"
                     problem = ""
             if problem:
-                raise PendingCheckoutRefused(
+                raise PendingCheckoutRefused(   # (the detail fits the 160-char audit reason; org_id is its own field)
                     "plan checkout is unavailable for this workspace (contact support)",
                     code="refused_pending_invalid",
-                    detail=f"pending plan-checkout record {marker.name} for {org_id} is {problem}: inspect and "
-                           f"remove it to unblock (never trusted)")
+                    detail=f"pending record {marker.name[:16]}... is {problem} (never trusted); inspect and remove it "
+                           f"to unblock")
             if rec is not None:
                 ea, ca = float(rec["expires_at"]), float(rec["created_at"])
                 if t < ea:
@@ -177,7 +191,7 @@ class PendingPlanCheckouts:
                         f"{max(1, int((ea - t + 59) // 60))} min for it to expire, before starting another (a "
                         f"second subscription is refused rather than billed)",
                         code="refused_pending_plan",
-                        detail=f"pending plan checkout {rec.get('tx_ref')} until {ea:.0f}{skew}")
+                        detail=f"pending plan checkout until {ea:.0f}{skew}: {rec.get('tx_ref')}")
                 os.unlink(marker)                      # a VERIFIED, EXPIRED record: the abandoned checkout lapses
             core = {"signal": SIGNAL, "org_id": org_id, "price_id": price_id, "tx_ref": tx_ref,
                     "created_at": t, "expires_at": t + self.ttl_s}
@@ -200,9 +214,16 @@ class PendingPlanCheckouts:
         except OSError as exc:
             raise PendingCheckoutRefused(
                 "plan checkout is unavailable right now (contact support)", code="refused_pending_io",
-                detail=f"pending plan-checkout record for {org_id} could not be written ({type(exc).__name__})") from None
+                detail=f"pending plan-checkout record could not be written ({type(exc).__name__})") from None
         finally:
             os.close(fd)
+
+    def pending(self, org_id: str, *, now: float) -> bool:
+        """Read-only: True iff a plan checkout for the org is in progress — a verified record still inside its window,
+        OR a record that cannot be trusted (fail-closed: ``claim`` would refuse it too). For the offers read, so the
+        UI does not offer a plan that checkout would refuse. Takes no lock (a stale answer is only a UI hint)."""
+        rec, problem = self._read(self._marker(str(org_id)), str(org_id))
+        return bool(problem) or (rec is not None and float(now) < float(rec["expires_at"]))
 
     def release(self, org_id: str, tx_ref: str) -> bool:
         """Drop the org's pending record iff it is still THIS checkout's (verified, same ``tx_ref``). Best-effort:

@@ -245,7 +245,9 @@
       // Absent while checkout is off (404) and hidden for a role that cannot spend money (403): no buy section.
       try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { return; }
       if (here() !== "#/billing") return;
-      var offers = ((d && d.offers) || []).filter(function (o) { return !(d.has_active_plan && o.kind !== TOPUP); });
+      // a live plan, or a plan checkout still in progress (not yet drained): checkout refuses a second plan.
+      var noPlan = !!(d && (d.has_active_plan || d.plan_checkout_pending));
+      var offers = ((d && d.offers) || []).filter(function (o) { return !(noPlan && o.kind !== TOPUP); });
       if (!offers.length) return;
       var rows = offers.map(function (o) {
         var btn = h("button.btn", { type: "button", text: "Buy " + money(o.amount_minor, o.currency) });
@@ -255,7 +257,9 @@
       });
       var note = d.has_active_plan
         ? "Your workspace already has a plan, so top-ups are shown. Changing plans is not self-serve yet."
-        : "You pay on the payment processor's secure page. Credits appear here once the payment is verified.";
+        : d.plan_checkout_pending
+          ? "A plan checkout for your workspace is in progress, so top-ups are shown until it is confirmed or expires."
+          : "You pay on the payment processor's secure page. Credits appear here once the payment is verified.";
       VUI.mount(holder, VUI.card("Buy credits", null, [h("p.cust-muted", { text: note })].concat(rows)));
     })();
     return holder;

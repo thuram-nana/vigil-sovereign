@@ -322,6 +322,32 @@ def test_dead_provisioner_is_502(tmp_path, monkeypatch):
         edge.shutdown()
 
 
+def test_an_edge_without_a_hop_key_refuses_every_verb_cleanly(tmp_path, monkeypatch):
+    """Audit E1c: an edge with a BLANK hop key used to surface `body_binding`'s ValueError — a 400 on POST and, on
+    GET (no catch-all there), a traceback and a DROPPED connection. Both verbs now get the cockpit's own clean 403
+    over a connection that answers, and nothing is stamped or sent."""
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "nokey@acme.com"})[1]["dev_token"]
+        assert _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "N"})[0] == 200
+        jar = next(h for h in op.handlers if hasattr(h, "cookiejar")).cookiejar
+        cookie = "; ".join(f"{c.name}={c.value}" for c in jar)
+        edge.hop_key = ""                                         # the edge lost its hop key
+        assert _post(op, ep, "/api/customer/login", {"email": "nokey@acme.com", "password": "customer-pw-1"}) \
+            == (403, {"error": "provision denied (hop)"})
+        conn = http.client.HTTPConnection("127.0.0.1", ep, timeout=5)
+        try:
+            conn.request("GET", "/api/customer/billing", headers={"Cookie": cookie})
+            r = conn.getresponse()                                # (main: RemoteDisconnected)
+            assert (r.status, json.loads(r.read())) == (403, {"error": "provision denied (hop)"})
+        finally:
+            conn.close()
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 def test_serve_customer_cli_fails_closed_on_a_public_bind():
     """The `sigil serve-customer` CLI must REFUSE a public/unspecified bind (exit 2) — the customer edge
     sets a session cookie, so it may never face the internet directly; it binds loopback/private behind a
