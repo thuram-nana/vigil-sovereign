@@ -1411,6 +1411,21 @@ class SpineStore:
                 continue
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
 
+    def _segments_present(self, segs) -> bool:
+        """True iff every one of `segs` (manifest entries) has its file on disk: one directory listing of the
+        segments dir, not a `stat` per segment (a warm read of a large spine stays cheap)."""
+        d = self._layout.segments_dir
+        try:
+            with os.scandir(d) as it:
+                names = {e.name for e in it}
+        except OSError:
+            return False
+        for sg in segs:
+            p = self._layout.seg_path(sg)
+            if (p.name not in names) if p.parent == d else not p.exists():
+                return False
+        return True
+
     def tail_after(self, seq: int, entry_hash: str, *, max_bytes: int = 4 << 20):
         """Front C S0d — the fold cache's FRESH-STORE fast path. Read-only; never touches the seq index.
 
@@ -1429,8 +1444,9 @@ class SpineStore:
           * False — the record at `seq` is provably NOT the anchor (a different hash, or the spine now ends
             before `seq`: a rollback, rewrite or reset);
           * None — undecidable within `max_bytes` of the tail (a large delta, a gap at `seq`, a non-monotonic
-            tail, a rotation since the anchor that left more than one segment behind it): the caller takes the
-            indexed path."""
+            tail, a rotation since the anchor that left more than one segment behind it), or a segment the manifest
+            names is missing (one `stat` per segment): the caller takes the indexed path, which re-resolves a
+            superseded manifest and raises on a lost segment as the full fold does."""
         if seq < 0:
             return None
         m = read_manifest(self._layout)
@@ -1443,6 +1459,13 @@ class SpineStore:
             target = self._layout.seg_path(act)
             sealed = m.sealed_in_order()
             prev = sealed[-1] if sealed else None
+            # Every segment the manifest names must still be there. A MISSING one (a lost or deleted file, a
+            # partial restore — or a seal + compaction that superseded this manifest while we read it) is
+            # undecidable here: the indexed path re-resolves a superseded manifest, and RAISES on a genuinely
+            # missing segment exactly as the full fold does (invariant 15) — never "an empty active, so the anchor
+            # is the tip", and never a warm answer over a spine the full fold refuses to read.
+            if not self._segments_present([act, *sealed]):
+                return None
         try:
             size = target.stat().st_size if target.exists() else 0
         except OSError:

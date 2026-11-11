@@ -9,7 +9,8 @@ those into the cache key, builds the per-entry owner-key resolver with its scan 
 only for its seed — so no registry can forget one of them (`spine/fold_cache.py` holds the trust model).
 
 `UNCACHED` means "no cached answer": the flag is off, the registry's view declared it cannot answer
-(`view.poisoned`), or — for a `live_window` fold, whose full path is a plain scan that never loads the snapshot —
+(`view.poisoned`), the rebuild's read was not contiguous (`FoldDiscontinuity`: a torn read of a record still being
+written, a stale seq index), or — for a `live_window` fold, whose full path is a plain scan that never loads the snapshot —
 the snapshot could not be loaded (the full path would still answer, so the cache declines rather than raise). The
 caller then runs its unchanged full fold.
 
@@ -23,7 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from ..config import fold_cache_enabled
 from ..reuse import assert_no_offense
-from ..spine.fold_cache import FoldCache
+from ..spine.fold_cache import FoldCache, FoldDiscontinuity
 from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .identity import genesis_owner_pubkey
@@ -102,7 +103,10 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
     _maybe_audit(cache, store, key, build)
-    return cache.read(store, key, build=build, reader=guarded)
+    try:
+        return cache.read(store, key, build=build, reader=guarded)
+    except FoldDiscontinuity:
+        return UNCACHED                                # a torn / non-contiguous read: never cached; full fold answers
 
 
 def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tuple[Any, int]"],
@@ -125,4 +129,7 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
     _maybe_audit(cache, store, (snap,), build)
-    return cache.read(store, (snap,), build=build, reader=guarded)
+    try:
+        return cache.read(store, (snap,), build=build, reader=guarded)
+    except FoldDiscontinuity:
+        return UNCACHED
