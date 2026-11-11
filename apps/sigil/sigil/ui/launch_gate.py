@@ -105,6 +105,54 @@ class LaunchGate:
         from .target_authorization import _base_dir
         return _base_dir()
 
+    def _claim_settlement(self, oid: str, s: str, non: str, consumed: int, now_ts: float) -> Optional[dict]:
+        """Decide whether THIS settle call owns the settlement of lease ``(s, non)``. Returns None when it does
+        (the settlement is durably recorded on the spine AND the seam, the lease revoked — the caller may now
+        move money), else the response to return: ``launch_already_settled`` (moving NO money) or a
+        fail-closed error (nothing moved). Called under ``self._lock``.
+
+        A lease is settled iff an owner-signed ``governor.launch_settled`` record is on the SPINE or the seam
+        settlement marker is present (a pre-spine-record settle). The spine record is what makes this survive a
+        lost / restored-out-of-step seam (the seam is not part of the sovereign backup, and is not derivable
+        from the spine otherwise): without it, a completed (refund 0) run whose marker was lost could be fully
+        refunded by a later launch_cancel. The FIRST verified record by spine seq is the decision, so two
+        settles racing in different processes (each appends its own record) agree on one winner; the loser
+        moves no money. A found-but-unmarked settlement re-asserts the seam revocation (marker + nonce-matched
+        tombstone) so the keyless arm and publish_lease refuse the lease again."""
+        from ..governor.launch_settlement import first_launch_settlement, record_launch_settled
+        already = {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
+                   "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
+        try:
+            from vigil_integration.live.credit_lease_broker import (
+                is_lease_settled, record_lease_settlement, tombstone_credit_lease,
+            )
+            base = self._seam_base()
+            kp = self.owner_key
+            if kp is None:                           # settle_launch already refuses without it; fail closed
+                raise ValueError("no owner key")
+            pub = kp.public_key_b64
+
+            def _revoke() -> None:
+                record_lease_settlement(base, s, non)
+                tombstone_credit_lease(base, s, non)   # nonce-matched: never clobber a newer re-lease
+
+            on_seam = is_lease_settled(base, s, non)
+            if on_seam or first_launch_settlement(self.store, pub, org_id=oid, slug=s, nonce=non) is not None:
+                if not on_seam:
+                    _revoke()                        # the seam lost its marker: re-revoke, move no money
+                return already
+            # Seam revocation FIRST (as before this record existed: a seam failure records nothing, so a retry
+            # can still settle), then the spine decision, then — only for the first recorder — the money.
+            _revoke()
+            mine = record_launch_settled(self.store, kp, org_id=oid, slug=s, nonce=non,
+                                         consumed=consumed, issued_at=now_ts)
+            if first_launch_settlement(self.store, pub, org_id=oid, slug=s, nonce=non) != mine:
+                return already                       # a concurrent settle recorded first: it decides the money
+        except Exception as e:  # noqa: BLE001 — a record/revocation failure refuses the settle (no money moved)
+            return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
+                    f"{type(e).__name__}"}
+        return None
+
     @staticmethod
     def _as_dt(now: Any) -> datetime:
         t = now() if callable(now) else now
@@ -336,7 +384,9 @@ class LaunchGate:
         (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds).
 
         MONEY-DOCTRINE CLOSE-OUT (K4-1): settling/cancelling refunds the credits AND makes the lease
-        non-runnable. settle records a ``(slug, nonce)`` settlement marker and tombstones the seam copy
+        non-runnable. settle records an owner-signed ``governor.launch_settled`` record on the SPINE (so the
+        settlement survives a lost seam; see ``_claim_settlement``) and a ``(slug, nonce)`` seam settlement
+        marker, and tombstones the seam copy
         (below, nonce-matched so a newer re-lease is never clobbered); ``publish_lease`` refuses a lease whose
         reservation is already settled; and the keyless arm re-checks settlement in
         ``verify_customer_launch_lease`` before it burns the single-use floor — so a settled lease is no
@@ -386,18 +436,9 @@ class LaunchGate:
         # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
         if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
             with self._lock:
-                try:
-                    from vigil_integration.live.credit_lease_broker import (
-                        is_lease_settled, record_lease_settlement, tombstone_credit_lease,
-                    )
-                    if is_lease_settled(self._seam_base(), s, non):
-                        return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
-                                "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
-                    record_lease_settlement(self._seam_base(), s, non)
-                    tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
-                except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no reversal yet)
-                    return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
-                            f"{type(e).__name__}"}
+                claimed = self._claim_settlement(oid, s, non, consumed, now_ts)   # spine record + seam marker
+                if claimed is not None:
+                    return claimed                  # already settled (by anyone, any process) / fail-closed error
                 # ALWAYS record the settlement — even a FULL-consumption settle whose refund is 0. The record's
                 # presence clears the reserve from the arrears IN-FLIGHT set (`in_flight_reserved`), so PP-2 bills
                 # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
@@ -438,27 +479,15 @@ class LaunchGate:
             # matters and is fail-CLOSED: if we cannot DURABLY record the revocation we do NOT refund, so a lease
             # is never left refunded-but-still-runnable (the documented gap this slice closes). Idempotent: a
             # re-settle re-marks the same nonce + finds no bundle, and the refund grants dedupe on entry_id.
-            try:
-                from vigil_integration.live.credit_lease_broker import (
-                    is_lease_settled, record_lease_settlement, tombstone_credit_lease,
-                )
-                # IDEMPOTENCY (K4-5 red-pen HIGH): a settle is a no-op for an already-settled (slug, nonce),
-                # REGARDLESS of this call's consumed value. The refund-grant entry-id dedup alone does NOT
-                # protect a refund=0 (COMPLETED) first-settle — it writes NO grant, so a LATER launch_cancel
-                # (consumed=0 => refund=reserved) would be the FIRST writer of settle-wallet:{s}:{non} and
-                # FULLY REFUND a charged, completed run (a free run / net-spend != consumption). The settlement
-                # MARKER is written by EVERY settle (incl. refund=0), so guard on it here, atomically under the
-                # lock, so settle_launch is truly idempotent per (slug, nonce) independent of the amount. NOTE:
-                # launch_cancel's gate and the settle-drain's gate must share the settlement root — both default
-                # to _base_dir(), so they align in the default deployment.
-                if is_lease_settled(self._seam_base(), s, non):
-                    return {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
-                            "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
-                record_lease_settlement(self._seam_base(), s, non)
-                tombstone_credit_lease(self._seam_base(), s, non)   # nonce-matched: never clobber a newer re-lease
-            except Exception as e:  # noqa: BLE001 — a seam-revocation failure refuses the settle (no refund yet)
-                return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
-                        f"{type(e).__name__}"}
+            # IDEMPOTENCY (K4-5 red-pen HIGH): a settle is a no-op for an already-settled (slug, nonce),
+            # REGARDLESS of this call's consumed value. The refund-grant entry-id dedup alone does NOT protect a
+            # refund=0 (COMPLETED) first-settle — it writes NO grant, so a LATER launch_cancel (consumed=0 =>
+            # refund=reserved) would be the FIRST writer of settle-wallet:{s}:{non} and FULLY REFUND a charged,
+            # completed run (a free run / net-spend != consumption). Every settle (incl. refund=0) records the
+            # settlement on the SPINE and the seam before any money moves; see _claim_settlement.
+            claimed = self._claim_settlement(oid, s, non, consumed, now_ts)
+            if claimed is not None:
+                return claimed                      # already settled (by anyone, any process) / fail-closed error
             if plan_refund > 0 and plan_pe is not None:
                 self.meter.plan.grant(oid, plan_refund, period_end=plan_pe,
                                       entry_id=f"settle-plan:{s}:{non}", issued_at=now_ts)
@@ -502,7 +531,11 @@ class LaunchGate:
             from vigil_integration.live.credit_lease_broker import is_lease_settled, write_credit_lease
             # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
             # bearer capability is resurrected on the seam.
-            if is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
+            from ..governor.launch_settlement import first_launch_settlement
+            # ...and the spine settlement record, so a lost/out-of-step seam marker cannot resurrect it either.
+            if is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce) or first_launch_settlement(
+                    self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
+                    nonce=doc.nonce) is not None:
                 return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
                         "re-published"}
             write_credit_lease(self._seam_base(), doc.engagement_slug, signed, owner_root)

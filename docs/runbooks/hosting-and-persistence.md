@@ -40,7 +40,14 @@ the spine** — never the source of truth.
   Qdrant/graph/CVE, the customer session/token ledgers. **This is the one directory that must be on
   durable, backed‑up storage.**
 - `VIGIL_BASE_DIR` (default `.vigil-live`) — published owner‑signed artifacts + the cross‑plane seam
-  (credit leases, monitoring authorities). Durable, but rebuildable from the spine.
+  (credit leases, settlement + pause markers, monitoring authorities, the completion spool, the offense
+  engine's own keys). Durable, and **not** rebuildable from the spine: it is captured only by the OFFENSE
+  leg of `vigil backup`, and only when that leg's `--base-dir` (`VIGIL_BASE_DIR` in
+  `~/.config/vigil/backup.env`) is this directory — the sovereign `sigil backup` deliberately excludes it,
+  and `vigil doctor` notes a mismatch. Losing it strands any published-but-unsettled lease's reserved
+  credits. Settle idempotency does not depend on it alone: every settle also writes an owner‑signed
+  `governor.launch_settled` record to the spine, so a lost or out‑of‑step settlement marker cannot re‑open
+  a refund of a settled launch.
 
 ---
 
