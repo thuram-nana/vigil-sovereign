@@ -1,146 +1,437 @@
-# VIGIL — HANDOFF (concrete, end-to-end) — 2026-11-09
+# VIGIL — HANDOFF (complete, end-to-end) — 2026-11-11
 
-> Supersedes the prior HANDOFF-SESSION.md. Written for a **fresh agent (or human) to take over cleanly**.
-> Continuation session: `session_01ECVf2R5rvPTWpcXSTvghmG` (prior: `session_01KWuLkRRktuxFkoybzaDd9s`). `main` is at **`26a38b6`** (all green) — **pause/resume PR-3 (#1036) + PR-4a (#1041) + PR-4b (#1043) + PR-5 (#1045) merged this session**.
-> **USAGE-LIMIT HANDOFF:** this session is approaching its usage limit. The **entire pause/resume chain (PR-1..PR-5) is COMPLETE** — the feature is fully built behind its default-OFF flag (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`); enabling it + at-scale verification are owner acts. **The next agent's top item is Front A — #73 (network recovery + deploy maturity) and #70 (backups-everywhere + evidence-DEK, KMS-owner-blocked)** (§3), then Front B, then the 1M tenant-sharding long pole (§3 Front C). Sub-agents / red-pen Workflows DID run this session. Direct tools + GitHub PR tools all work. **Also done this session: #69 (money production-gate/alerting) re-grounded → DONE/closeable (§3/§4).**
+> Supersedes the 2026-11-09 handoff. Written so a **fresh agent or human can take over cold**: what is on
+> `main`, what every shipped slice does and where it lives, every flag and who may flip it, the exact remaining
+> program in order, how to work in this repo without tripping its guards, and the definition of done.
+>
+> **`main` is at `e836b962` (#1070; plus the commit that lands this handoff), all required checks green.** Since the 2026-11-09 handoff 25 PRs have
+> merged (#1046–#1070; this handoff written by session `session_01Uzcz55Eva4w7NRFfoQPArA`): Front A is
+> complete except the owner-blocked KMS escrow; Front B's pay round-trip is built (default-OFF); the 1M-user design
+> was **authorised by the owner** and its first three build slices (S0a–S0c, the verified fold cache over
+> customers, orgs/memberships and the money folds) are merged default-OFF. **The next agent's first item is Front C
+> S0d (§4.3), then S1→S4, then Gate 5 (§5).**
 
 ---
 
-## 0. OPERATING DISCIPLINE (read first — this is "how")
+## 0. HOW TO WORK HERE (read first)
 
-**Repo / planes.** Two-plane monorepo at `/home/user/vigil-sovereign`:
-- **Sovereign plane** — `apps/sigil` + `packages/core/vigil_core`, framework-free, owner Ed25519 trust root; the **Provisioner** (`apps/sigil/sigil/ui/provision.py`, reached only over the loopback hop) is the ONLY owner-key holder.
-- **Offense plane** — `engine/crucible` (CRUCIBLE), keyless, only *verifies* owner signatures.
-- **FATAL-2 boundary:** `assert_no_offense()` at import; `uiproxy.py` stays stdlib-only; framework imports in sovereign code stay lazy. `integration/tests/test_two_env_boundary.py::_PROBE` enforces it — register every new `live`/edge module there.
+### 0.1 Repo and planes
+Two-plane monorepo at `/home/user/vigil-sovereign`:
+- **Sovereign plane** — `apps/sigil` (SIGIL) + `packages/core/vigil_core`. Framework-free; the owner's Ed25519 key
+  is the trust root. The **Provisioner** (`apps/sigil/sigil/ui/provision.py`, reached only over the loopback hop
+  from the customer edge `ui/custui.py`) is the ONLY owner-key holder.
+- **Offense plane** — `engine/crucible` (CRUCIBLE, `framework.v2.*`). Keyless: it only *verifies* owner signatures.
+- **Integration glue** — `integration/vigil_integration` (doctor, backup, drains, jobs, uiproxy, live/*).
+- **FATAL-2 boundary** — `assert_no_offense()` at import on the sovereign side; `uiproxy.py` stays stdlib-only;
+  any framework import from sovereign/integration code stays lazy. `integration/tests/test_two_env_boundary.py`
+  (`_PROBE`) enforces it — register every new `live`/edge module there.
 
-**Per-slice discipline (NON-NEGOTIABLE, applied to every PR this session):**
-`build → mutation-verify (break each guard → its named test REDS → restore → green) → heaviest adversarial red-pen (Workflow: disjoint lenses → perspective-diverse 3-skeptic verify, survives iff ≥2 confirm) → fold CONFIRMED findings (each fix mutation-verified) → PR → merge only on CI green + mergeable clean`. One slice per PR, each **default-OFF + fail-closed**, off fresh `origin/main`.
-**A red-pen "confirmed" is a CLAIM to verify against ground truth yourself, not an order** — this session caught a real HIGH in C1b *and* refuted its over-claims; it folded a real fail-closed hole in pause PR-1 and *documented* (not folded) a non-reachable RMW race.
+### 0.2 Per-slice discipline (non-negotiable; every PR this session followed it)
+`build → mutation-verify (break each guard → its named test goes RED → restore → green) → adversarial red-pen
+(trace a realistic failure path for every claim; a "finding" is a claim to verify, not an order) → fold the
+confirmed findings (each fix mutation-verified) → PR → merge only on CI green + mergeable clean`.
+- One slice per PR, built off fresh `origin/main`, **default-OFF + fail-closed, byte-identical when off**.
+- Fix security findings **at the source; never suppress** (owner: "Why are you trying to suppress, cant we fix
+  it end to end"). Inline `# codeql[...]` comments are not honoured by this repo's analysis anyway.
+- An *equivalent mutant* (a code change no test can observe) means the code is dead or the test is missing:
+  either delete the code or add the test — this session did both (S0a removed two redundant guards; S0b added
+  two missing tests).
 
-**Test legs** (always `SIGIL_HOME=$(mktemp -d)`, venv `/home/user/vigil-sovereign/.venv-sovereign/bin/python`):
-- Sovereign: `PYTHONPATH="apps/sigil:packages/core/vigil_core"`
-- Integration superset: `PYTHONPATH="apps/sigil:integration:engine/crucible:gateway:packages/core/vigil_core:."`
-- Gates: `ruff check <files>`; `bash tools/governance/mypy_ratchet.sh` (ceiling 15 — new modules must be type-clean and NOT appear in the error list).
+### 0.3 Owner's NEVER-CROSS lines (verbatim intent — never do these)
+1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION` or the multi-shard production flag.
+2. Do **not** inject or commit a real Flutterwave secret (`VIGIL_FLW_SECRET_KEY` is read from env at call time;
+   tests use dummies).
+3. Do **not** ratify money numbers — margins, $/token, catalog prices, **scale targets**.
+4. Do **not** dismiss a security alert. An A14 (supply-chain) red is *handled*, never ignored; the
+   GitHub-release-CDN 504 is "transient" only once a clean re-run confirms it.
+5. `main` is PR-only — **never `git push origin main`**.
+Merge authorization (owner, standing): merge once **all required checks are green and the change is tested**.
 
-**Worktree pattern** (branches are often held by agent worktrees; use detached worktrees):
+### 0.4 Merge mechanics (what actually works)
+- Live branch protection: **strict = true** (a PR must be up to date with `main`), signed commits required,
+  no force pushes. Strict ⇒ **the merge queue is serial**: each PR must be re-based on the previous merge.
+- CI wall time ≈ **40 min per PR**; the long pole is `integration two-env boundary (P5)` (~16–37 min), then
+  `CRUCIBLE core on vigil_core` (~21 min).
+- This session merged with `merge_method="merge"` and `expectedHeadSha` (GitHub signs the merge commit, so
+  signed-commit protection is satisfied). Squash also works.
+- **Required checks (14)** — canonical list `.github/required-status-checks.txt`: A14 supply-chain gate · CRUCIBLE
+  core on vigil_core · CRUCIBLE eval + benchmark corpus · formal (TLA+, F1) · gateway egress gate (P6) ·
+  integration two-env boundary (P5) · livefire smoke · loopback engagement · SIGIL governor gates (P7) · SIGIL
+  lint (ruff + mypy) · strix Claude-runtime (P8) · the briefing explains every agent and capability · vigil_core
+  · WARDEN Rust kernel (A10). **Advisory** (reported, not required): CodeQL Python, **CodeQL JavaScript** (new,
+  CQ-1), gitleaks, semgrep+bandit, pre-commit, perf regression, lint-config, scheduled supply-chain scan.
+- A `mergeable_state` of `clean` means every required check passed; `unstable` means something (often an
+  advisory or still-running job) is not green — read the check runs before deciding.
+
+### 0.5 Branch / worktree pattern in this cloud environment
+- The session branch is pre-assigned (this session: `claude/cool-meitner-v9fq6d`). **Force-push is denied.**
+  Per slice: `git fetch origin main && git merge --ff-only origin/main && git cherry-pick <slice-commit>` →
+  re-test → `git push -u origin <branch>` → open the PR (`mcp__github__create_pull_request`, base `main`).
+- Build slices in **detached worktrees** in the scratchpad so several can be built while one is in CI:
+  `git worktree add --detach <scratch>/wt-<slice> origin/main` (stack dependent slices: `worktree add <dir>
+  <parent-commit>`; after the parent is amended, `git rebase --onto <new-parent> <old-parent>`).
+- Subscribe to each PR (`subscribe_pr_activity`) and keep one `send_later` safety-net check-in (~50 min).
+
+### 0.6 Test legs (exact)
+Always a fresh `SIGIL_HOME=$(mktemp -d)`; venv `/home/user/vigil-sovereign/.venv-sovereign/bin/python`
+(no `pytest-xdist` there — run serially; `apps/sigil/pyproject.toml` already adds `-q`, so adding `-q` again
+suppresses the final tally line: omit it). Use **absolute** PYTHONPATH entries (subprocess CLIs break otherwise).
+```bash
+R=/home/user/vigil-sovereign
+# sovereign (apps/sigil/tests, ~5 min, ~2,940 tests)
+PYTHONPATH=$R/apps/sigil:$R/integration:$R/packages/core/vigil_core SIGIL_HOME=$(mktemp -d) \
+  $R/.venv-sovereign/bin/python -m pytest -p no:cacheprovider apps/sigil/tests
+# integration — SOVEREIGN leg (what P5 runs first): gateway on the path, the engine NOT on it
+PYTHONPATH=$R/apps/sigil:$R/integration:$R/packages/core/vigil_core:$R/gateway \
+  SIGIL_HOME=$(mktemp -d) $R/.venv-sovereign/bin/python -m pytest -p no:cacheprovider integration/tests -k <area>
+# integration — OFFENSE-leg files (importorskip("framework")): add $R/engine/crucible, and run ONLY those files
+#   (the run-list in ci.yml). Never put the engine on the path for sovereign-leg files: e.g.
+#   test_uiproxy_billing_webhook.py then trips the FATAL-2 guard ("SIGIL sovereignty violation") — a false red.
+# gates
+$R/.venv-sovereign/bin/python -m ruff check apps/sigil/sigil <new test files>
+PATH=$R/.venv-sovereign/bin:$PATH bash tools/governance/mypy_ratchet.sh   # ceiling 15; do NOT set MYPYPATH
 ```
-WT=/tmp/claude-0/.../scratchpad/wt-<slice>; git -C /home/user/vigil-sovereign fetch origin main
-git -C /home/user/vigil-sovereign worktree add --detach "$WT" origin/main
-# edit/commit on detached HEAD, then:
-git push origin HEAD:refs/heads/claude/<branch>     # fully-qualified refname is required from a detached HEAD
-git worktree remove --force "$WT"                    # after merge
-```
-Open PRs with `mcp__github__create_pull_request` (base `main`). **Do NOT `git push origin main`** (PR-only).
+Run `docs/tests` (~2.5 min) and `integration/tests/test_ci_*.py` (<1 s) before every push that touches docs,
+workflows or test layout.
 
-**NEVER-CROSS (owner's standing constraints):**
-1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION` (customer prod execution stays flag-held).
-2. Do **not** inject/commit any real Flutterwave secret (`VIGIL_FLW_SECRET_KEY` is read from env at call time; tests use dummies).
-3. Do **not** ratify money-doctrine numbers (margins, $/token, catalog prices) — owner-set.
-4. Do **not** dismiss security alerts (an A14/supply-chain red is handled, not ignored; the CDN-504 transient is confirmed-transient by a clean re-run, never waved through).
-Everything new ships **default-OFF + fail-closed**, byte-identical when off.
+### 0.7 Guards and gotchas that WILL bite (learned this session)
+- **Offense-leg listing guard.** A new integration test containing `importorskip("framework…")` SKIPS in the
+  sovereign leg, so `test_ci_framework_tests_run_in_offense_leg` REDs P5 unless the file is listed in the
+  offense leg's run-list in `.github/workflows/ci.yml` (next to its siblings). #1062 hit this; it cost one CI round.
+- **Pre-commit end-of-file-fixer.** A file written with `write_text(s + "\n")` over content already ending in
+  `\n` fails the advisory pre-commit job. Check `tail -c1` before pushing.
+- **`SpineStore()` default path is bound at import.** A test that constructs a server/CLI with the default store
+  reads whatever an earlier test wrote. Monkeypatch the module's `SpineStore` onto a private path.
+- **`framework.v2.common.paths.crucible_root` is `lru_cache`d.** Call `paths._reset_cache()` after changing
+  `CRUCIBLE_ROOT`, or restore assertions silently read the source tree.
+- **Sandbox-only failure:** `integration/tests/test_services_doctor.py::test_doctor_notes_unreachable_local_
+  backend_but_does_not_flip_ok` fails in this container on `main` too — docker is installed but its daemon is
+  down, so doctor adds a "docker … daemon is not answering" note that the test's `"not answering"` substring
+  matches. Green in CI. (Robust fix, if wanted: match the LLM-backend note text.)
+- **Snapshot-seeded folds:** never key a cache on `(base_seq, snapshot_seq)` alone — the neutered-control tests
+  (`test_snapshot_fold_{wallet,metering,subscription}.py`) swap the seed under the same boundary. S0 keys on the
+  loaded `SnapshotState` **by value** (see §4.2).
+- **Monitoring subscription plans** must be catalog plan ids (`aegis_observe_1h|5h`, `aegis_respond_1h|5h`).
+- **A lock bump must also regenerate the committed offense SBOM.** After changing
+  `engine/crucible/framework/v2/requirements.lock.txt`, run `cd engine/crucible && python3 -m
+  framework.v2.tools.gen_sbom` (stdlib) — A14 step "committed OFFENSE sbom.json matches the lock" fails otherwise
+  (DEPS-1 #1066 hit this). Before pushing any lock change, run `bin/verify-supply-chain.sh` for all three locks
+  (offense from `engine/crucible`; sovereign / otel with `REQ_IN` + `REQ_LOCK` set) with pip-tools 7.6.1 +
+  cyclonedx-bom 7.3.1 on PATH. To find WHICH A14 step failed, read the job's step conclusions
+  (`actions_get get_workflow_job`) — the big Trivy CVE table at the end of the log is the ADVISORY Strix-sandbox
+  SBOM scan, not the gate.
+- **Hash locks:** regenerate only with pip-tools 7.6.1 under Python 3.13 from each lock's canonical CWD
+  (`docs/SUPPLY-CHAIN.md` "Regenerating a lock"); use `--upgrade-package <pkg>` to move one pin; the
+  shared-pin guard requires cryptography / pydantic / pydantic-core to agree across the sovereign and engine locks.
 
-**Attribution (binding) — every commit & PR:**
-- Commit message ends with:
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
-  `Claude-Session: https://claude.ai/code/session_01KWuLkRRktuxFkoybzaDd9s`
-- PR body ends with: `🤖 Generated with [Claude Code](https://claude.com/claude-code)` + blank line + `https://claude.ai/code/session_01KWuLkRRktuxFkoybzaDd9s`
-- **No model identifier anywhere else** in a pushed artifact (code/comments/PR title).
-
-**Merge authorization (owner, standing):** "on every PR once all checks are fully green and tested you can merge." GitHub ops via `mcp__github__*`. Squash-merge (repo convention).
-
----
-
-## 1. CURRENT STATE — merged to `main` (`a21b866`)
-
-Recent merges (newest first): `26a38b6` pause/resume **PR-5 #1045** (doctor surfaces paused launches as an expected held state — chain complete) · `04c5403` pause/resume **PR-4b #1043** (customer pause/resume actions + UI + flag, default-OFF) · `3e6c29b` pause/resume **PR-4a #1041** (pause money-safe at the enqueue gate + arm precondition) · `a21b866` pause/resume **PR-3 #1036** (in-flight cooperative halt) · `f882dfdb` pause/resume **PR-2 #1034** · `6567fff2` pause/resume **PR-1 #1033** · `93ee42cc` **C1b #1032** (group-commit coalescing) · `2be9bbd5` **JOBQ-75 #1031** (durable job queue in backup) · `a3cb1b03` NTF-3 #1030 · … (#1024–#1029 production-readiness).
-
-**Recent slices (each red-penned + mutation-verified; #1031–1034 + C1b by the prior session, #1036 by this one):**
-- **#1031 JOBQ-75** — the paid SecurityJob queue now defaults under `base_dir` so backup captures it (host loss no longer strands in-flight paid jobs); 41-agent red-pen 0 survivors; folded 2 LOWs (restore owner-only perms + fingerprint-survival test).
-- **#1032 C1b** — 1M-scale concurrent-append coalescing on the signed spine (default-OFF). Red-pen caught a **real HIGH** (locked-vault seal share-fate → content appends routed DIRECT) + a serialization-mismatch poison-isolation bug (pre-flight now `canonical_json`) + an attribution false-green test; all folded + mutation-verified.
-- **#1033 pause/resume PR-1** — `integration/vigil_integration/live/credit_lease_pause.py`: a reversible, nonce-scoped, **fail-CLOSED** pause marker (sibling of the settlement marker). Red-pen caught a real fail-closed hole (`is_file()` outside the try raises on EACCES on the keyless plane) → folded; RMW-race documented as the caller-serialization contract.
-- **#1034 pause/resume PR-2** — adds `is_lease_paused` to the ONE shared verify chokepoint `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease`, refusing a paused lease on both consume paths **without burning the single-use floor** (resume re-arms the same lease). **INERT/default-OFF** (nothing calls `record_lease_pause` yet). ⚠️ Its red-pen **verify phase did not run** (weekly limit) — I verified the 2 surfaced HIGHs myself: **not reachable** at PR-2 (no pause-marker writer), but they are **HARD PR-4 constraints** (see §2).
-- **#1036 pause/resume PR-3** — in-flight COOPERATIVE HALT (default-OFF/INERT). A customer launch already RUNNING when its lease is paused stops traffic at the next gated action (`http_executor` `halt_check`, a kill-switch sibling) and the engine RAISES a re-driveable `EngagementPaused` after the traffic phase (`engage.py` post-scan, outside the PhaseLedger swallow-wrappers). The worker (`engage_worker`) classifies it BY TYPE before the FAILED-settle path: NO settle (no premature refund/tombstone), rolls back its attempt slot (gated on a real slot mint — `_mark_attempt` now returns `(attempt, slot_created)`), records a resume-required marker so the re-drive resumes WITHOUT re-burning the floor. New: `launch_lease.read_verified_launch_nonce` (+ a `check_pause=False` path so the halt-binding nonce is readable while paused). 13 tests + **8/8 mutation-verify**; **3-lens red-pen** (money / termination / boundary) found **0 reachable HIGH/MED in PR-3 scope**, 1 LOW folded. The surviving HIGH (strand) + MED (worker self-defense) are **PR-4** work, written out in §2.
-- **#1041 pause/resume PR-4a** — the two HARD money constraints from the PR-3 red-pen, both default-OFF/inert. HARD #1 (strand): `authorize.build_customer_launch_gate` now returns `LEASE_PAUSED_DENIAL` (not `no_lease`) for a reversible paused-lease refusal (PR-3 nonce read + `is_lease_paused`, fail-safe toward terminal), and `runner.run_one` RELEASES the delivery on it → a paused-but-queued launch is HELD by the seam poller and re-admitted on resume, never stranded. HARD #2 (arm-window): `engage_worker` treats a non-`EngagementPaused` failure whose lease is NOW paused as reversible — NO FAILED settle, slot rolled back, and NO resume-required (the precondition refused BEFORE `_advance_floor`, floor NOT burned → recording it would be a FREE RUN; mutation-verified MB2). 14 tests + 5/5 mutation-verify; FATAL-2 green; manual red-pen (verified the poller-holds-paused dependency + fail-safe directions + the free-run caution). The A14 red on this PR was a confirmed GitHub-release-CDN 504 transient, cleared by a clean re-run.
-- **#1043 pause/resume PR-4b** — the customer pause/resume ACTIONS that take the feature OFF inert (default-OFF flag `VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`). `config.customer_pause_resume_enabled()`; `LaunchGate.pause_launch`/`resume_launch` (owner-pinned verify + tenant-bind, then `record_lease_pause`/`clear_lease_pause` UNDER the spine lock = the PR-1 RMW serialization; pause moves NO money; a settled lease is refused); `provision.launch_pause`/`launch_resume` (flag + `admit_customer(run_engagement)` + step-up + audit, mirroring `launch_cancel`); `ui/server.py` hop dispatch + `ui/custui.py` `/api/customer/launch/pause|resume` routes (session-bound, flag-gated). 8 acceptance tests + 4/4 mutation-verify; 210+ regression; FATAL-2 + ruff + mypy clean. The sovereign producer records/clears the EXACT `is_lease_paused` marker PR-4a's offense plumbing acts on (the two planes can't co-load, so the composition is the proof). Pause/resume is now feature-complete behind the flag — only PR-5 (doctor) remains.
-- **#1045 pause/resume PR-5** — doctor/observability reconciliation; **the pause/resume chain is now COMPLETE (PR-1..PR-5)**. `credit_lease_pause.paused_launches(base_dir)` (read-only, total, fail-safe enumeration of currently-paused `(slug,[nonces])`); `doctor.collect()` reports `report["paused_launches"]` + an ADVISORY note when any are paused — it NEVER flips `ok` (a positively-recorded hold is expected, not a failure) and is NOT an alarm suppressor (a genuinely stuck lease has no pause marker; the #69 money-drain gate is untouched). Default-OFF: no markers ⇒ byte-identical. 4 tests + 2/2 mutation-verify; #69-gate + FATAL-2 + ruff green. Runs in the P5 leg directly (no `framework` import).
-
----
-
-## 2. PAUSE/RESUME — ✅ COMPLETE (PR-1..PR-5); kept here as the chain reference. Next work is Front A (§3).
-
-Lifecycle chokepoints (grounded): reserve → `provision.launch_reserve` → `LaunchGate.reserve_launch` (mints owner-signed `CreditLaunchLease`); start → `provision.launch_start` → `LaunchGate.publish_lease` → seam `credit_lease_broker.write_credit_lease`; drain → `launch_drain.LaunchSeamDrain` → `jobs/launch_trigger.LaunchTrigger` (`verify_customer_launch_lease(consume=False)`) enqueues a `SecurityJob` keyed on `launch_delivery_id(slug,nonce)`; run → `jobs/runner.JobRunner.run_one` → `jobs/authorize.build_customer_launch_gate` (consume=False) → `jobs/engage_worker` → `engage.run_engagement` → `engage._engage_launch_lease_precondition` (`verify_customer_launch_lease(consume = not resume)` — the ONE authoritative floor-burn); settle → `inbound/completion_spool.CompletionSpoolWatcher.drain` → `LaunchGate.settle_launch` (refund `reserved−consumed` + settlement marker + tombstone). Worker crash-resume already exists (`engage_worker._mark_attempt`, `resume=attempt>1`, `_MAX_ARM_ATTEMPTS=3`) and re-validates WITHOUT re-burning the floor — REUSE it.
-
-**PR-3 — in-flight cooperative halt — ✅ DONE (#1036, default-OFF).** Files: `http_executor.py` (`halt_check` field + `_authority_gate` branch), `engage.py` (`EngagementPaused`, `_engage_lease_nonce`/`_lease_is_paused`, halt_check wiring, the post-scan raise), `launch_lease.py` (`read_verified_launch_nonce`, `_verify_and_bind_lease(..., check_pause=False)`), `engage_worker.py` (`_release_attempt`/`_record_resume_required`/`_resume_required`/`_is_engagement_paused`, `_mark_attempt`→`(attempt, slot_created)`). Tests: `engine/.../tests/test_engage_pause_halt.py`, `integration/tests/test_engage_worker_pause_redrive.py` (the latter is REGISTERED in the offense-leg run-list of `.github/workflows/ci.yml` — framework-dependent integration tests MUST be, or the `test_ci_framework_tests_run_in_offense_leg` guard REDs; they skip cleanly on a single plane). NOTE: the original "~engage.py:1441" anchor was the arsenal-only closure (default-OFF); the real per-action kill-switch lives in the executor, so the halt rides the executor gate + an authoritative post-scan raise.
-
-**PR-4a — pause money-safe at the enqueue gate + arm precondition — ✅ DONE (#1041, default-OFF).** Both HARD money constraints are closed. HARD #1 (strand): a paused lease at PICKUP → `build_customer_launch_gate` returns the reversible `LEASE_PAUSED_DENIAL` (via `_lease_refusal_is_pause` = the PR-3 nonce read + `is_lease_paused`, fail-safe toward terminal) → `jobs/runner.py` `run_one` RELEASES the delivery on that code → the seam poller HOLDS the paused lease (its own `verify(consume=False)` refuses to re-produce) and re-admits on resume — no strand, no churn. HARD #2 (gate→arm window): `engage_worker` (`_lease_currently_paused` + the except branch after `_is_engagement_paused`) treats a non-`EngagementPaused` failure whose lease is NOW paused as reversible — skips the FAILED settle, rolls back the slot, records **NO** resume-required (floor not burned → re-arm must consume; recording it = free run, mutation-verified MB2). Files: `jobs/authorize.py` (`LEASE_PAUSED_DENIAL`, `_lease_refusal_is_pause`), `jobs/runner.py`, `jobs/engage_worker.py`. Tests: `integration/tests/test_launch_pause_redrive_gate.py` (registered in the CI offense leg) + the HARD #2 cases in `test_engage_worker_pause_redrive.py`.
-
-**PR-4b — customer pause/resume actions + UI + flag — ✅ DONE (#1043, default-OFF).** Pause/resume is now feature-complete behind `config.customer_pause_resume_enabled()` (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`). Files: `apps/sigil/sigil/config.py`, `ui/launch_gate.py` (`pause_launch`/`resume_launch` + `_verify_lease_for_pause` — owner-pinned verify + tenant-bind, record/clear UNDER `self._lock`, settled-refused, idempotent), `ui/provision.py` (`launch_pause`/`launch_resume` — flag + `admit_customer(run_engagement)` + step-up + audit), `ui/server.py` (hop dispatch), `ui/custui.py` (`/api/customer/launch/pause|resume` routes). Decision taken (confirm with owner): pause/resume is a **customer** action, not owner-only `manage_launch`. Test: `apps/sigil/tests/test_launch_pause_resume_actions.py` (runs in CI via the P7 wholesale `apps/sigil/tests/` run).
-
-**PR-5 — doctor/observability reconciliation — the LAST slice of the pause/resume chain — ✅ DONE (#1045, read-only).** Files: `integration/vigil_integration/live/credit_lease_pause.py` (`paused_launches(base_dir)` — read-only, total, fail-safe; scans `pauses_root/*.json`, returns `(stem, holds)` for non-empty), `integration/vigil_integration/doctor.py` (probe before `return report`: `report["paused_launches"]={count,holds,slugs}` + an advisory `_note(...)` — never `_issue`, never flips `ok`; a paused `(slug,nonce)` reads as an expected held-reservation, not a stuck-lease/unsettled-drain alarm, while a genuinely stuck lease still alarms). Test: `integration/tests/test_doctor_paused_launch.py` (registered in the CI offense leg).
-- `doctor.py` is the **highest-contention file** across the remaining program — serialize edits (see §3); Front A/B/C all touch it.
-- **Enduring by-design posture (LOW, do not "fix" naively):** a paused-then-CANCELED lease leaves a lingering pause marker (moot — the lease is tombstoned/non-runnable; `settle_launch`/`launch_cancel` do not clear it), so doctor must not mistake it for a live held-reservation; `_engage_lease_nonce` fails OPEN to no-halt-binding on a transient glitch (deliberate — failing closed would halt healthy PAID runs; the pause is cooperative + re-appliable + kill-switch-backstopped); a pause cleared mid-scan still charges full flat-per-run for a degraded scan; a long-paused lease outliving `not_after` is recovered only by the manual `ops-sweep reservations --apply` (default-OFF).
+### 0.8 Attribution (binding)
+End every commit and PR body with the attribution lines your own session's system reminder specifies (commit:
+`Co-Authored-By:` + `Claude-Session:` trailers; PR: the "Generated with Claude Code" line + the session URL).
+**No model identifier anywhere else** in a pushed artifact (code, comments, PR titles, docs). Every GitHub comment
+ends with the session's attribution footer.
 
 ---
 
-## 3. REMAINING PROGRAM (full forward plan, de-conflicted)
+## 1. STATE OF `main` — merged since the 2026-11-09 handoff (`26a38b6`)
 
-### Front A — production hardening (mostly done)
-- **Pause/resume** ✅ COMPLETE — PR-1..PR-5 all merged (feature-complete behind the default-OFF `VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED` flag; doctor reconciliation landed in PR-5). The whole chain is the §2 reference. Nothing left here.
-- **Network recovery + deploy maturity (#73, "Item B")** — scope reconstructed from real code (the label taxonomy is program-internal; files are real). There is NO central retry helper; the house pattern is *degrade/fail-safe, never fail-open* — add bounded reconnect ONLY where a transient drop should auto-recover.
-  - NET-2: `integration/vigil_integration/live/net_recovery.py` (bounded backoff, injectable clock) adopted by `otel_export.py` reachability + the drain `watch()` loops; default-OFF, never widens the egress floor.
-  - NET-4: degraded-mode surfacing + a `doctor.py` network-recovery posture line (advisory, never gates a launch).
-  - DEP-2: readiness-gated bring-up (`infra/systemd/vigil-bringup.service` gated on `vigil doctor`+readyz; `sovereign_deploy/acceptance.py`) — gating ≠ enabling prod execution.
-  - DEP-3: upgrade/rollback + down-migration **drill** automation (mirror `vigil-backup-drill.timer`; exercises `spine/upgrade.py`).
-- **#70 backups-everywhere tail** — the job queue is now covered (#1031); remaining is G2/G3/G4 coverage of the rest + the **evidence-DEK KMS escrow** whose *live* path is **owner-blocked** (needs a real AWS KMS key).
-- **#69 money production-gate / alerting** — ✅ **RE-GROUNDED → DONE/closeable** (this session). The money-OUT "nothing-lost" pipeline is gated + alerted + tested: `vigil doctor` goes RED on an unhealthy watched money drain (`doctor.py` `_MONEY_DRAIN_UNITS` = settle-drain + finding-drain; `test_doctor_money_drain_gate.py` 4/4 green), a quarantined drain never reads HEALTHY (MONEY-4, `test_drain_quarantine_alarm.py` 8/8 green), dead-man + alert-delivery dead-man + NTF tenant notifications (#1030/#1016), billing-spool crash-reclaim (#1022). One Front-B item (NOT a #69 blocker, split out below): there is NO `vigil-billing-drain` systemd timer — the money-IN billing-webhook drain runs via CLI, so a stall DELAYS credit grants (recoverable), it does not LOSE money (correctly outside #69's money-OUT scope).
-
-### Front C — 1,000,000 users (the long pole)
-- Group-commit (C1a + C1b) **DONE**.
-- **Tenant sharding — DESIGN NOT COMPLETE.** The design Workflow (`wf_395eee7a-e41`) ran 8 architecture-grounding agents + 2 of 3 candidate designs, then the **weekly limit** killed the 6 critics + the synthesis. **Resume it after the limit resets:**
-  `Workflow({scriptPath:'/root/.claude/.../workflows/scripts/design-tenant-sharding-wf_395eee7a-e41.js', resumeFromRunId:'wf_395eee7a-e41'})` (cached agents replay free; only the failed critics+synthesis re-run). Journal (10 results) at `…/subagents/workflows/wf_395eee7a-e41/journal.jsonl`.
-  The 3 candidate angles: (A) self-contained cells/shard-per-node; (B) global routing + an owner-signed shard-assignment record; (C) minimal-diff consistent-hash pre-sharding (reuse the per-org/per-slug dirs + the `CRUCIBLE_TENANT` worker hint, shard the worker fleet + job queue + tenant dirs first). The 6 invariants every design must preserve are in the script's `INVARIANTS` const (signed spine never forks, isolation only stronger, FATAL-2, money exactly-once + EC-5 pool, default-OFF/fail-closed, online reversible migration). **Report the synthesized design + slice plan to the owner before building** (core-touching).
-- **Build dimensions the design must slice (knowable NOW, pre-design — so the work is not a black box):** the exact slice list comes from the resumed design, but every candidate must cover these, and they are the unit of PR-by-PR delivery:
-  1. **Shard key + assignment** — a deterministic `org_id → shard_id` map. In design B/C an **owner-signed `ShardAssignment` spine record** (mirror `MonitoringAuthority`/lease records: new domain tag in `vigil_core/spine_domains.py`, sign in the Provisioner, verify keyless at the routing edge). Default-OFF: one shard = today's single-node behavior, byte-identical.
-  2. **Routing layer** — `uiproxy.py` + the custui/provision edges resolve a request's org to its shard and forward there (keyless, stdlib-only; verify the signed assignment against the pinned owner root). A wrong/missing assignment fails **closed**.
-  3. **Worker-fleet sharding** — the `jobs/{queue,runner,launch_trigger,engage_worker}` fleet already carries the `CRUCIBLE_TENANT` hint + `authorize_job._reconcile_tenant` cross-tenant refusal; extend so each worker process owns a shard's queue + tenant dirs only, and an org-A job in an org-B shard still refuses (the isolation invariant must get *stronger*, never weaker, under sharding).
-  4. **Per-shard signed spine** — each shard keeps its OWN hash-chained spine (the global spine must never fork: §INVARIANT-1). The owner trust root is shared/pinned; shard spines are independent chains, never merged.
-  5. **Money at scale** — the **EC-5 global pool meter + graduated kill-switch is cross-shard**: it must aggregate reservations/spend across shards (a per-shard local meter would let the global cap be breached N×). Reserve/settle stays exactly-once per `(slug,nonce)` within a shard; the pool read is global. This is the sharpest money hazard — red-pen it hardest.
-  6. **Online reversible migration** (§INVARIANT-6) — move a tenant's dirs + open leases + credential rows between shards with **no spine fork, no isolation drop, no double-charge, no lost in-flight paid job**, reversible mid-flight. Likely a drain-pause-copy-verify-cutover-resume cycle reusing the pause/resume substrate (another reason pause/resume PR-3/4/5 lands first).
-  7. **Global tenant registry / coordinator** — a lookup from org → shard that the routing layer and `vigil doctor` consult; owner-signed source of truth; fail-closed.
-- **Scale-acceptance gate (the explicit "1M is done" bar — build this as the closing slice, mirror K4-6's flag-hold):** a load harness driving **N tenants × M concurrent engagements** to owner-set target numbers (throughput, p99 latency, spine-append contention), proving under load: (a) no signed-spine fork across shards; (b) cross-tenant isolation holds **during a live shard migration**; (c) the EC-5 global cap is never breached cross-shard; (d) no in-flight paid job is stranded by a migration or a node loss; (e) exactly-once survives the fleet. Production multi-shard stays **flag-held** until this is green (owner flips it, like `VIGIL_CUSTOMER_PROD_EXECUTION`). Owner sets the target numbers (money/capacity doctrine — not the agent's to invent).
-
-### Front B — fully hostable / pay round-trip + go-live (round-trip built, flag-held)
-- Customer-app **checkout UI** + `…/billing/return` page; **`sigil serve-customer` CLI** + marketing-domain reverse-proxy vhost (follow `apps/sigil/deploy/reverse-proxy/vigil.nginx.conf`); **NTF enablement tail** (enable `vigil-alerts.timer` + `--test-delivery`); optional **CVE catalog NVD/EPSS enrichment** (operator-run, rate-limited; KEV already gives a browsable catalog).
-- **money-IN drain automation (from the #69 re-grounding):** there is a `billing_spool` drain (`apps/sigil/sigil/inbound/billing_spool.py`, "vigil billing-drain" CLI) but NO `vigil-billing-drain.service`/`.timer` — unlike `vigil-settle-drain`/`vigil-finding-drain`. For a hands-off money-IN pipeline, add the systemd unit+timer (mirror the settle/finding drain units in `infra/systemd/`) so inbound billing webhooks are drained automatically. A stall only DELAYS credit grants (recoverable), so this is go-live polish, not a money-loss gate.
-
-### Owner-only (held — NOT the agent's to do)
-Provision the real **Flutterwave secret**; flip **`VIGIL_CUSTOMER_PROD_EXECUTION`**; **ratify money numbers**; **DNS/TLS cutover** for `vigilguard.net`; the **AWS KMS key** for evidence-DEK + KEK.
-
-### Housekeeping
-7 open **Dependabot** PRs (incl. a MAJOR `huggingface-hub` 1→2 and a `python 3.13→3.15` base-image bump) — riskier, left untriaged; triage individually, don't bulk-merge. Merged-PR branches (`claude/pauseresume-pr1/pr2`, `claude/jobq75-…`, etc.) can be deleted. Reference design detail: the Wave-3 grounding agent's full file-anchored plan is in this session's transcript.
+| PR | Merge | What landed |
+|---|---|---|
+| #1046 | `dabf5113` | docs(handoff): pause/resume chain complete; next is Front A |
+| #1047 | `8e471a8c` | **NET-2a** — bounded half-open recovery for the OTLP sink latch (default-OFF) |
+| #1048 | `fc48c7d5` | **NET-2b (OTLP)** — opt-in loopback OTLP endpoint for `vigil engage` + egress-pin hardening |
+| #1049 | `fba03b88` | **NET-4** — `vigil doctor` surfaces network-recovery / telemetry posture (advisory) |
+| #1050 | `4779aa10` | `learn_drain.watch()` survives a single-drain failure (sibling-drain parity) |
+| #1051 | `172a14de` | **DEP-2** — `vigil ready` bring-up readiness gate + opt-in `vigil-ready.service` |
+| #1052 | `420961a1` | **DEP-3** — on-box upgrade/rollback drill against a copy of the REAL spine (opt-in) |
+| #1053 | `0e9f3086` | **#70** — every `SIGIL_HOME` entry the product references has a capture-or-exclude backup decision |
+| #1054 | `5a36492b` | **#70b** — doctor flags when the money seam is not inside the offense backup (advisory) |
+| #1055 | `ceb399db` | **Front B** — money-IN billing drain automated (`vigil-billing-drain.{service,timer}`, opt-in) |
+| #1056 | `7a019ea5` | **CHK-1/CHK-1b** — customer hosted checkout (top-ups + subscription plans), default-OFF, catalog-priced |
+| #1057 | `feae64c5` | Supply chain — sovereign lock's `opentelemetry-api` past GHSA-xcq7-p3pf-p88h |
+| #1058 | `f43c1f8c` | Supply chain — opt-in hash lock for the OpenTelemetry SDK + OTLP/HTTP exporter |
+| #1059 | `7361a6cd` | **CHK-2** — buy credits in the customer app + the billing-return page (default-OFF) |
+| #1060 | `254aa828` | **NET-2b (billing)** — the billing drain auto-retries a transient processor failure (bounded, default-OFF) |
+| #1061 | `de5b7783` | **CQ-1** — real CodeQL findings fixed at the source; CodeQL JavaScript in CI; triage recorded |
+| #1062 | `69baaa9e` | **#70c** — the offense backup captures the CRUCIBLE tree where the engine actually keeps it |
+| #1063 | `be22428a` | **MONEY-5** — `vigil doctor` goes RED on a failed money-IN billing drain |
+| #1064 | `1a9b96b5` | **HOP-1** — the customer edge outwaits each action's own outbound worst case |
+| #1065 | `45a7bac3` | **NTF-4** — `vigil alerts --test-delivery` proves alarms reach a human |
+| #1066 | `5ae40822` | **DEPS-1** — the Dependabot minor/patch bumps through the hash-lock tooling (+ regenerated offense SBOM) |
+| #1067 | `6bc3fb8b` | **FRONT-C design** — `docs/decisions/FRONT-C-1M-SCALE-DESIGN.md` (owner-authorised 2026-11-10; S4 targets open) |
+| #1068 | `6ebe6aa8` | **S0a** — verified incremental fold cache for the customer registry (default-OFF) |
+| #1069 | `3ae2ac61` | **S0b** — orgs + memberships (every `admit_customer`) on the fold cache; shared `governor/fold_read.py` |
+| #1070 | `e836b962` | **S0c** — the money folds (wallet, plan credits incl. settle-path `debited_entry`, subscriptions) on the fold cache |
 
 ---
 
-## 4. DEFINITION OF 100% — the closing gates (what "done" means)
+## 2. WHAT SHIPPED — by front, with anchors
 
-The system is NOT 100% until every line below is true. Items marked **[agent]** are the next agent's to build/verify; **[owner]** are deliberate owner acts the agent must never do.
+### Front A — production hardening ✅ (only the owner-blocked KMS escrow remains)
+- **Pause/resume (PR-1..PR-5, #1033–#1045)** — complete behind `VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`. Chain
+  reference: lifecycle reserve → `provision.launch_reserve` → `LaunchGate.reserve_launch`; start →
+  `LaunchGate.publish_lease` → `credit_lease_broker.write_credit_lease`; drain → `launch_drain.LaunchSeamDrain`
+  → `jobs/launch_trigger`; run → `jobs/runner.run_one` → `jobs/authorize.build_customer_launch_gate` →
+  `jobs/engage_worker` → `engage.run_engagement` (the ONE floor-burn: `_engage_launch_lease_precondition`);
+  settle → `inbound/completion_spool` → `LaunchGate.settle_launch`. Pause markers:
+  `live/credit_lease_pause.py`; verify chokepoint: `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease`.
+- **Network recovery (#73 "Item B")** — `integration/vigil_integration/live/net_recovery.py` (bounded backoff,
+  injectable clock) behind `VIGIL_NET_RECOVERY_ENABLED`: OTLP sink half-open recovery (NET-2a), opt-in loopback
+  OTLP endpoint `VIGIL_OTLP_ENDPOINT` (NET-2b), the billing drain's bounded retry of a transient processor
+  failure instead of quarantining a paid webhook (#1060), doctor posture lines (NET-4, advisory, never gates).
+- **Deploy maturity** — `vigil ready` + `infra/systemd/vigil-ready.service` (DEP-2; readiness ≠ enabling prod
+  execution); the upgrade/rollback drill against a COPY of the real spine (`infra/systemd/vigil-upgrade-drill.
+  {service,timer}`, `VIGIL_UPGRADE_DRILL_ENABLED`; DEP-3, exercises `spine/upgrade.py`).
+- **Backups everywhere (#70)** — `integration/vigil_integration/backup.py`:
+  - #1053: every `SIGIL_HOME` entry has an explicit capture-or-exclude decision (a guard test enumerates them);
+  - #1054: doctor advises when the money seam (`VIGIL_BASE_DIR` credit leases / settlements / pauses) is not
+    inside the offense backup;
+  - **#1062 (#70c):** `_CrucibleLayout` resolves BOTH engine roots (crucible root holds `targets/`; v2 root
+    `<crucible_root>/framework/v2` holds `.blackboard`, `.console/runs`, `.memory`, `.entitlement`,
+    `.authority`, `.authority-root`, `.evidence-keys`) for either spelling of `--crucible-root` / `$CRUCIBLE_ROOT`.
+    Before it, the default backup silently captured no engagement, evidence, entitlement root or kill-switches.
+    Every SQLite DB unit (proof DB, memory, each safe `tenants/<t>` shard) is an online-backup snapshot; symlinked
+    or unsafe shards are never packaged. Test: `integration/tests/test_backup_engine_layout.py` (21; offense leg).
+  - **Remaining:** evidence-DEK **KMS escrow** — stubbed; the live path needs a real AWS KMS key (**owner**).
+- **Money gate (#69)** — DONE: doctor goes RED on an unhealthy money-OUT drain (settle / finding) and, with
+  MONEY-5, on a failed money-IN **billing** drain (customer-impact message + re-queue steps; only when
+  `VIGIL_BILLING_DRAIN_ENABLED`). `doctor.py::_MONEY_DRAIN_UNITS`.
 
-1. ✅ **DONE** Pause/resume chain: **PR-1 + PR-2 + PR-3 (#1036) + PR-4a (#1041) + PR-4b (#1043) + PR-5 (#1045) all merged** — the feature is complete behind its default-OFF `VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED` flag, with doctor reconciliation landed. §2. (Owner still turns the flag on in prod — that is gate 6's posture, not agent work.)
-2. **[agent]** Front A tail: #73 (network recovery + deploy maturity) and #70 (backups-everywhere + evidence-DEK **live path owner-blocked on a real KMS key**) merged; **#69 (money-gate/alerting) re-grounded → DONE/closeable this session** (one Front-B billing-drain-timer item split out, §3). §3.
-3. **[agent]** Front B surface closed: checkout UI + billing-return page, `sigil serve-customer` CLI, marketing-domain vhost, NTF enablement tail. §3.
-4. **[agent]** **1M scaling** — tenant-sharding design resumed + synthesized + owner-approved, then built slice-by-slice across the 7 build dimensions (§3 Front C), then the **scale-acceptance gate green** (N tenants × M concurrent; no spine fork; isolation-under-migration; EC-5 global cap cross-shard; no stranded paid job; exactly-once). This is the largest remaining body of work and the real distance to "1,000,000 users."
-5. **[agent]** A final **personal hands-on end-to-end + at-scale verification** (the #25 analog, now including load): drive signup → pay → authorize → run → oracle-confirmed FACT → settle, AND the scale harness, adversarially. Report honestly WITH EVIDENCE; do not trust per-slice red-pens alone.
-6. **[owner]** The held flips, none of which the agent performs: provision the real **Flutterwave secret**; flip **`VIGIL_CUSTOMER_PROD_EXECUTION`**; flip the **multi-shard production flag** (after gate 4); **ratify the money numbers** (margins, $/token, catalog prices, and the scale target numbers); **DNS/TLS cutover** for `vigilguard.net`; the **AWS KMS key** for evidence-DEK + KEK.
+### Front B — hostable / pay round-trip ✅ built, flag-held
+- **Money-IN drain** — `apps/sigil/sigil/inbound/billing_spool.py` (`vigil billing-drain`) + systemd
+  `vigil-billing-drain.{service,timer}` (#1055, `VIGIL_BILLING_DRAIN_ENABLED`).
+- **Hosted checkout** (#1056) — `provision.billing_checkout`; Flutterwave hosted payment
+  (`VIGIL_FLW_SECRET_KEY`, `VIGIL_FLW_API_BASE`), amounts always from the **owner catalog**
+  (`governor/catalog.py`), never a client field; credit is granted **only** by the verified inbound webhook drain.
+  Flags: `VIGIL_CUSTOMER_CHECKOUT_ENABLED` (top-ups), `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` (subscription plans;
+  enable only after a sandbox renewal proves attribution), `VIGIL_BILLING_PLAN_ALARM` (quarantine an
+  unaccountable paid plan charge — keep ON while any sold plan can still renew).
+- **Customer app** (#1059) — buy-credits UI + `/billing/return` page (`ui/customer_app/`, display-only: it never
+  credits), `VIGIL_CUSTOMER_BILLING_RETURN_URL`.
+- **Edge hop budget (HOP-1)** — `ui/custui.py::_SLOW_HOP_TIMEOUTS_S` (`billing_checkout` 45 s, `oidc_finish` 45 s,
+  `target_verify` 20 s, `signup_request`/`recover_request` 60 s; default 10 s) so the edge never reports failure
+  for an action the cockpit completed (a retry used to create a second checkout / re-send email / burn an OIDC code).
+- **Alert delivery proof (NTF-4)** — `vigil alerts --test-delivery` (`unit_alerts.cmd_test_delivery`): one
+  labelled `info` alarm through exactly the configured destinations; exit 0 delivered / 1 any failed / 2 none
+  configured; a success refreshes the delivery dead-man, a failure never fakes one.
+- **Money doctrine (unchanged, binding):** the catalog decides price; credit comes only from the verified webhook
+  drain; the return page is display-only; custom credit amounts are **not** supported (owner decision pending:
+  rate, min, max, rounding).
 
-Honest status line: the **customer-SaaS product, money loop, offense breadth, production-hardening, and AWS/deploy substrate are built and merged**; the **distance to 100% is dominated by item 4 (tenant sharding → scale-acceptance)**, which is designed-but-not-built, plus the finite Front A/B tails (items 1–3) and the owner-only flips (item 6). Everything built ships default-OFF + fail-closed, so `main` is always in a safe, shippable-at-single-node state.
+### Supply chain / security
+- #1057 / #1058 — OTel lock fixes (sovereign `opentelemetry-api` advisory; opt-in `infra/supply-chain/otel.lock.txt`).
+- **CQ-1 (#1061)** — fixed at source: `tempfile.mktemp` → private 0700 dir (`perception/capture.py::private_
+  capture_path`, platform android/macos/windows); `</script\b[^>]*>` end-tag in the AEGIS XSS oracle + DOM-XSS
+  scanner; explicit TLS 1.2 floor on the phone-approval bridge; `--` before the operator command in console
+  run-tests → `vigil sandbox`; quote-escaping `esc()` in the bridge PWA; key allowlists in `vigil-ui` `hashQuery`
+  and the CVSS tool. New advisory **CodeQL JavaScript** job. Triage record: `docs/audit/CODEQL-TRIAGE.md`
+  (fixed / by-design with dismissal rationale / fixtures needing the owner's scope decision / not yet triaged).
+- **DEPS-1** — the Dependabot minor/patch bumps done through the hash locks (cryptography 50.0.2, mcp 2.3.0,
+  onnxruntime 1.31.1, pydantic 2.14.3, qdrant-client 1.20.0, tokenizers 0.23.3; engine `pytest-httpserver>=1.2.0`);
+  two latent order-dependent tests made hermetic.
+
+### Front C — 1M users (design authorised; S0a–S0c merged) — see §4.
 
 ---
 
-## 5. KEY ANCHORS (quick map)
-- Signed spine: `apps/sigil/sigil/spine/store.py` (`append`/`append_many`/`_write_record_locked`, `spine_lock`), `vigil_core/canonical.py` + `chain.py`.
-- Money seam: `integration/vigil_integration/live/credit_lease_broker.py` (leases/settlements/**pauses**), `governor/{wallet,metering}.py`, EC-4 cost ledger, EC-5 pool.
-- Launch verify chokepoint: `engine/crucible/framework/v2/launch_lease.py::_verify_and_bind_lease` (now contains the pause re-check).
-- Jobs: `integration/vigil_integration/jobs/{queue,runner,authorize,launch_trigger,engage_worker}.py`.
-- Isolation: `admit_customer`, `_derive_tenant_id`/`_TENANT_RE`, owner-signed `OrgRegistry`.
-- Router: `integration/vigil_integration/uiproxy.py` (keyless, stdlib-only).
-- Doctor/durability: `doctor.py`, `spine/{snapshot,prune,upgrade}.py`, `integration/vigil_integration/backup.py`.
+## 3. FLAG INVENTORY (everything new is default-OFF)
+
+| Flag | Enables | Who flips |
+|---|---|---|
+| `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
+| multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
+| `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0a–S0c reads: customers, orgs/memberships, wallet, plan credits, subscriptions) | owner (production); tests set it |
+| `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (needs `VIGIL_FLW_SECRET_KEY` + `VIGIL_BILLING_WEBHOOK_SECRET`) | owner |
+| `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` | subscription-plan checkout (needs the base flag) | owner, after a sandbox renewal |
+| `VIGIL_BILLING_PLAN_ALARM` | quarantine an unaccountable paid plan charge | owner (keep ON while plans can renew) |
+| `VIGIL_BILLING_DRAIN_ENABLED` | the money-IN drain unit is watched by the dead-man + doctor | owner / operator |
+| `VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED` | customer pause/resume of a launch | owner |
+| `VIGIL_CUSTOMER_MONITORING_ENABLED` | AEGIS-SaaS monitoring-authority routes | owner |
+| `VIGIL_NET_RECOVERY_ENABLED` | bounded reconnect/retry (OTLP sink, billing drain transient retry) | operator |
+| `VIGIL_OTLP_ENDPOINT` / `VIGIL_WITH_OTEL` | loopback OTLP export (opt-in telemetry) | operator |
+| `VIGIL_UPGRADE_DRILL_ENABLED` | the on-box upgrade/rollback drill | operator |
+| `SIGIL_OIDC_ENABLED`, customer OIDC/passkey flags | operator / customer federated login | owner |
+
+Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
+`SIGIL_CUSTOMER_SESSION_KEY`, `SIGIL_ANTHROPIC_API_KEY`.
+
+---
+
+## 4. FRONT C — 1,000,000 USERS
+
+### 4.1 Decisions (`docs/decisions/FRONT-C-1M-SCALE-DESIGN.md` §7)
+✅ ONE sovereign spine (no per-cell sovereign spines — they would split the EC-5 pool and make money moves
+distributed transactions). ✅ The S0 trust model (cache of the signed spine, chain-anchored, never
+authoritative, full-fold fallback on any doubt). ✅ S0 first. ⏳ **Scale targets for S4 — owner, still open**
+(users, concurrent engagements, p99 login/page latency, appends/s at peak). Do not invent them.
+
+**Measured wall:** every customer request re-folded the signed spine from genesis and re-verified every grant's
+Ed25519 signature — ~148–200 µs per record ⇒ ~2.5–3 min per login lookup at 1M customers; `admit_customer` = 2
+full folds; the launch gate's `CreditMeter.available` = 3 more. Signed append ≈ 1.1 ms (~900/s/process before
+group commit).
+
+### 4.2 S0 — the verified fold cache (S0a–S0c MERGED, default-OFF)
+**Files:** `apps/sigil/sigil/spine/fold_cache.py` (generic substrate) · `apps/sigil/sigil/governor/fold_read.py`
+(the ONE registry read path) · `key_history.key_resolver_with_horizon` · per registry: a shared one-record step
+used by BOTH the full fold and the cache, a seed method, a view, and `_cached(reader)`.
+
+**How it works.** `FoldCache.read(store, key, build=, reader=)` keeps ONE entry per (fold, resolved spine path):
+the folded state + the `(seq, entry_hash)` of the last record folded (the **chain anchor**). On each read:
+1. the anchor record is re-read; missing or a different `entry_hash` (restore, rollback, rewrite, reset) ⇒
+   discard + rebuild from the spine (`entry_hash` links `prev_hash`, so an equal anchor ⇒ an equal prefix for any
+   chain `verify()` accepts);
+2. records after the anchor are folded with the registry's own step; an **owner-key-history** record ⇒ rebuild
+   (rotation can change validity windows retroactively — fork / broken chain deny all);
+3. a rebuild whose resolver (built by `key_resolver_with_horizon`) did not see a history record it then folds —
+   a concurrent rotation — answers but is **not cached**;
+4. any fault while extending ⇒ discard + rebuild; a fault in the rebuild raises exactly as the full fold would;
+5. `reader(state)` runs under the entry lock (thread-safe; never a half-extended view).
+**Key** (`fold_read.cached_read`): `(trusted_pubkey, genesis_owner_pubkey(), SnapshotState-by-value)` — the
+snapshot's boundary moves the live window and its rows ARE the seed (1.8 µs to compare the empty no-prune
+identity). A registry view can set `poisoned` (e.g. an owner-signed non-str username no code mints) ⇒ every read
+falls back to the full fold.
+
+| Slice | Registry reads now cached | Warm read | Full fold (OFF) | Tests / mutants |
+|---|---|---|---|---|
+| S0a | `CustomerRegistry.customer / by_email (email index) / customers / set_password` | ~120–135 µs flat 500→30k | 85 ms → 4.45 s | 28 / 22 of 22 |
+| S0b | `OrgRegistry.orgs / org / memberships / membership_role` ⇒ `admit_customer` (one entry for both folds) | ~121 µs | 76 ms → 1.5 s (250→5k orgs) | 15 / 18 of 18 |
+| S0c | `WalletRegistry`, `PlanCreditLedger` (incl. settle-path `debited_entry`), `SubscriptionRegistry` (one cache per line) ⇒ `CreditMeter.available` | ~355–385 µs | 100 ms → 1.46 s (200→3k tenants) | 11 / 16 of 16 |
+Each slice: full `apps/sigil` suite green with the flag ON and OFF; tests compare the cached public API with the
+same API flag-OFF after every randomized op, and fail if a cached read silently fell back.
+
+**Residuals (documented, not hidden):**
+- **Cold build O(N) once per process** (~2.5 min at 1M) — removing it needs a persisted signed index, which the
+  approved trust model excludes; until then a 1M deploy **warms the cache at start** (S0d item).
+- **Gzip-sealed anchor** — after an operator `compact`, until the next append, each read decompresses the sealed
+  segment holding the anchor (31 ms measured at the 12k-record cap vs 0.3 ms). Fix: verify a sealed anchor
+  against the manifest's boundary hash (S0d item).
+- **Chain-breaking in-place edits before the anchor are not re-read** — that is `SpineStore.verify()`'s job; S0d
+  adds a cached-vs-full compare to `sigil verify` / `vigil doctor`.
+- **Memory:** one folded state per registry per process — S4 sizes it against the owner's targets.
+- **`SnapshotState.load` is itself O(snapshot) per read once a prune exists** (today the prune cutover is unwired,
+  so it returns the cheap empty identity). When prune goes live, memoize the loaded snapshot on the signed head.
+
+### 4.3 S0d — next build slice (exact)
+Follow the S0a–S0c pattern exactly (shared step → seed → view → `_cached` via `fold_read.cached_read`; equivalence
+test comparing the cached public API with flag-OFF after every randomized op; O(new) signature-count test; seeded
+prune + pubkey bypass + same-boundary different-seed; flag-OFF-never-consulted; mutation-verify each index).
+Remaining full folds (all call `_kh.key_resolver` + `SnapshotState.load`, all `iter_records`):
+- money/billing: `governor/invoices.py`, `governor/cost_ledger.py` (EC-4/EC-5 — the global pool read on the
+  launch path: red-pen hardest), `governor/postpaid.py`, `ui/margin.py` reads;
+- identity/authz: `governor/accounts.py` (operator bearer resolve — every operator request),
+  `governor/customer_credentials.py` (TOTP / passkeys — on login), `governor/promotion.py`, `governor/capability.py`,
+  `governor/eval_capability_grant.py`, `governor/eval_offense_attestation.py`;
+- AEGIS: `governor/monitoring_authority.py`, `governor/asset_ownership.py`;
+- also scan-only reads: `metering.debited_entry` is done; check `ui/assessments.py`, `ui/server.py` direct scans.
+Then the S0 closing items: (a) `sigil verify` / `vigil doctor` **rebuild-and-compare** every cached fold against
+its full fold (report, never auto-heal); (b) **warm-up at process start** (cockpit + provisioner), off the request
+path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HANDOFF` + design doc status.
+⚠️ `doctor.py` is the highest-contention file — serialize edits.
+
+### 4.4 S1 → S4
+- **S1 — append-rate instrumentation (read-only).** Count appends/s by signal under production-shaped load. Only
+  if the measured peak approaches ~900/s/process: tune group commit (C1a/C1b exist), then consider batch-signing
+  (an invariant-touching change → its own owner review). Signed append path: `spine/store.py` (`append`,
+  `append_many`, `_write_record_locked`, `spine_lock`).
+- **S2a — `ShardAssignment{org_id → shard_id, epoch}`**: an owner-signed spine record (new domain tag in
+  `packages/core/vigil_core/vigil_core/spine_domains.py`, signed in the Provisioner, verified keyless at the routing
+  edge — mirror the lease / monitoring-authority records). Default: one shard = today, byte-identical.
+- **S2b — routing**: the launch path reads the assignment (through the S0 cache) and publishes the lease to that
+  shard's seam; missing/mismatched assignment ⇒ fail CLOSED. Edges: `integration/vigil_integration/uiproxy.py`
+  (keyless, stdlib-only), `ui/custui.py`, `ui/provision.py`.
+- **S2c — per-shard job queue + credit-lease seam**: each shard = worker processes on one host, one
+  `CRUCIBLE_ROOT` per tenant (D2: `engine/crucible/framework/v2/common/tenant.py`, `assert_tenant_fleet_isolated`);
+  `jobs/{queue,runner,launch_trigger,engage_worker}.py` under the shard's base dir; an org-A job on a shard that
+  does not own org A is refused by `jobs/authorize._reconcile_tenant` (isolation only gets stronger).
+- **S3 — online tenant migration**: reuse pause/resume — pause → drain (no new reservations; running jobs settle) →
+  copy the tenant root + verify → append `ShardAssignment` epoch+1 → resume on the new shard. Reversible until the
+  epoch bump; exactly-once by the `(slug, nonce)` settle idempotency; the sovereign spine is untouched. Ship with a
+  **kill-mid-migration** test.
+- **S4 — scale-acceptance gate (closing slice)**: harness driving N tenants × M concurrent engagements **to the
+  owner's targets**, proving: no sovereign-spine fork; isolation during a live migration; EC-5 cap never breached;
+  no paid job stranded by migration or node loss; exactly-once across the fleet. Production multi-shard stays
+  flag-held until green; the **owner** flips it. The harness can be built before the targets exist; it cannot pass
+  or fail without them.
+
+---
+
+## 5. REMAINING PROGRAM (agent), in order
+1. **Front C S0d** (§4.3), then **S1, S2a–c, S3, S4** (§4.4). Ask the owner for the S4 targets when S4 starts.
+2. **Gate 5 — hands-on end-to-end** (personal, adversarial, with evidence; do not rely on per-slice red-pens):
+   signup (`custui` → `provision.signup_request` / verify email) → buy credits (`billing_checkout` → Flutterwave
+   **sandbox**, never a live secret) → webhook → `vigil billing-drain` credits the wallet → prove domain ownership
+   (`target_verify`) → reserve + start a launch (`launch_reserve` / `launch_start`) → the job runs
+   (`jobs/runner` → `engage_worker` → `engage`) → an oracle-confirmed FACT → settle (`completion_spool` →
+   `LaunchGate.settle_launch`, refund `reserved − consumed`) → `vigil doctor` / `vigil ready` clean. Repeat with
+   `VIGIL_FOLD_CACHE_ENABLED=1` and compare. Then the scale harness (S4) at the owner's targets.
+3. **CodeQL second pass** (`docs/audit/CODEQL-TRIAGE.md` "Not yet triaged"): `py/path-injection` ×139 in the
+   operator console / engine (`console/actions.py` 36, `sessions.py` 13, `oob_collaborator.py` 12,
+   `vigil_core/highwater.py` 11, …; the 12 internet-facing sovereign sites are already verified guarded);
+   `py/redos` ×3 + `py/polynomial-redos` ×7 on oracle regexes (keep the committed eval baselines byte-identical);
+   `py/log-injection` ×7, `py/http-response-splitting` ×6 (medium).
+4. **Dependabot** — after DEPS-1: rebase + merge the GitHub Actions bumps (#959, #960, #1038, #1039) if green;
+   **#962** huggingface-hub 1.x → 2.2.0 as its own PR with a live `snapshot_download` check; recommend the owner
+   close #1040 (superseded by DEPS-1), #963 / #964 (setuptools floors — the hash-locked backend decides), #988
+   (Python 3.15 image — conflicts with the W1-7 locked-runtime pin).
+5. **Housekeeping** — delete merged `claude/*` branches; remove scratch worktrees; keep this file current.
+
+## 6. OWNER-ONLY (never the agent's)
+- Provision the **live Flutterwave secret** and the webhook secret; DNS/TLS cutover (`vigilguard.net`, the
+  marketing vhost).
+- Flip `VIGIL_CUSTOMER_PROD_EXECUTION`; flip the multi-shard production flag after S4; decide
+  `VIGIL_FOLD_CACHE_ENABLED` in production.
+- **Money numbers:** margins, $/token, catalog prices, custom credit amounts (rate / min / max / rounding — not
+  supported today), and the **S4 scale targets**.
+- The **AWS KMS key** for evidence-DEK escrow + KEK (#70 tail).
+- CodeQL: scope out the deliberately vulnerable benchmark fixtures (proposed `paths-ignore` lines in
+  `docs/audit/CODEQL-TRIAGE.md`) and dismiss the by-design alerts with the recorded rationale.
+- Close the superseded/declined Dependabot PRs (or tell the agent to).
+
+## 7. DEFINITION OF 100% — the closing gates
+1. ✅ Pause/resume chain (PR-1..PR-5) — complete behind its flag.
+2. ✅ Front A — #73 network recovery + deploy maturity, #70 backups everywhere (incl. #70c), #69 money gate (+
+   MONEY-5). **Open:** evidence-DEK KMS escrow live path — **owner-blocked** on a real KMS key.
+3. ✅ Front B surface — billing drain unit, hosted checkout, buy-credits UI + return page, hop budget, alert
+   delivery proof; `sigil serve-customer` (`apps/sigil/sigil/cli.py::cmd_serve_customer`) and the customer /
+   public vhosts (`apps/sigil/deploy/reverse-proxy/vigil-{customer,public}.{nginx.conf,Caddyfile}`,
+   `apps/sigil/deploy/REMOTE-HOSTING.md`) exist — going live needs the owner's DNS/TLS.
+4. ⏳ **1M scaling** — design ✅ authorised; S0a–S0c ✅ merged; **S0d, S1, S2a–c, S3, S4 to build**; S4 needs the
+   owner's targets. This is the main remaining distance.
+5. ⏳ **Gate 5** — the personal hands-on end-to-end + at-scale verification, with evidence (§5 item 2).
+6. **[owner]** the held flips and numbers (§6).
+
+Honest status: the customer-SaaS product, the money loop (in and out), offense breadth, production hardening,
+backups and the deploy substrate are **built and merged**; everything new is default-OFF and fail-closed, so
+`main` is always safe and shippable at single-node. The distance to "1,000,000 users" is Front C S0d → S4 plus
+Gate 5 and the owner's flips.
+
+## 8. KEY ANCHORS (quick map)
+- **Signed spine:** `apps/sigil/sigil/spine/store.py` (`append`, `append_many`, `iter_records(since_seq)` seeks
+  O(returned), `get(seq)` O(1) via the segment index, `change_token()`, `rotate`/`compact`), `spine/snapshot.py`
+  (`SnapshotState.load`, `build`), `spine/prune.py`, `spine/upgrade.py`, `vigil_core/{canonical,chain}.py`.
+- **Fold cache:** `spine/fold_cache.py`, `governor/fold_read.py`, `governor/key_history.py`
+  (`key_resolver`, `key_resolver_with_horizon`, `rotate`, `re_genesis`).
+- **Registries:** `governor/{customers,orgs,wallet,metering,subscription,monitoring_subscription,invoices,
+  cost_ledger,postpaid,accounts,customer_credentials,catalog}.py`.
+- **Money seam:** `integration/vigil_integration/live/{credit_lease_broker,credit_lease_pause}.py`,
+  `ui/launch_gate.py` (reserve / publish / settle / pause), `inbound/{billing_spool,completion_spool}.py`.
+- **Customer edge:** `ui/custui.py` (routes, `_SLOW_HOP_TIMEOUTS_S`) → loopback hop → `ui/server.py` dispatch →
+  `ui/provision.py` (the only owner-key holder); customer app `ui/customer_app/`.
+- **Jobs / offense:** `integration/vigil_integration/jobs/{queue,runner,authorize,launch_trigger,engage_worker}.py`;
+  `engine/crucible/framework/v2/{launch_lease,engage}.py`, `common/{paths,tenant}.py`.
+- **Hosting:** `sigil serve-customer` (`apps/sigil/sigil/cli.py`), `apps/sigil/deploy/{REMOTE-HOSTING.md,
+  customer.env.example,systemd/sigil-public.service,reverse-proxy/*}`.
+- **Ops:** `integration/vigil_integration/{doctor,backup,unit_alerts,cli}.py`; `infra/systemd/*`;
+  `docs/runbooks/AWS-DEPLOY.md`; `docs/CLI-REFERENCE.md`; `docs/SUPPLY-CHAIN.md`; `docs/audit/CODEQL-TRIAGE.md`.
+- **CI:** `.github/workflows/ci.yml` (offense-leg run-list!), `.github/workflows/security-scan.yml` (CodeQL Python
+  + JavaScript), `.github/required-status-checks.txt`, `tools/governance/mypy_ratchet.sh`.
+
+## 9. RE-CREATING THE SESSION-LOCAL TOOLING (the scratchpad does not survive)
+- **CodeQL CLI 2.27.4** (matches CI): download the `codeql-bundle-linux64` release for 2.27.4, then
+  `codeql database create db-py --language=python --source-root .` (same for `javascript`) and
+  `codeql database analyze db-py codeql/python-queries:codeql-suites/python-security-extended.qls --format=sarif-latest
+  --output=py.sarif`; filter results with the workflow's `paths-ignore` to match CI scope.
+- **pip-tools 7.6.1** in a throwaway venv for lock regeneration (§0.7).
+- **Fold benchmark** (reproduces §4.1/§4.2 numbers): create N customers with `CustomerRegistry(store,
+  owner_key=k, trusted_pubkey=k.public_key_b64).create(f"user{i}@example.com", issued_at=100.0+i)`, then time
+  `by_email` with `VIGIL_FOLD_CACHE_ENABLED` unset vs `=1` (call it once first: the first point read builds the
+  store's offset index).
