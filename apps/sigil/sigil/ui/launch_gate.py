@@ -541,7 +541,14 @@ class LaunchGate:
         the record is done UNDER ``self._lock`` (the spine lock = the PR-1 caller-serialization the non-atomic
         pause-marker read-modify-write requires). Pausing moves NO money (no credit/amount/signature touched).
         A SETTLED/canceled lease is refused (it is no longer a runnable launch, so there is nothing to pause).
-        Idempotent: re-pausing the same (slug, nonce) re-writes the same marker."""
+        Idempotent: re-pausing the same (slug, nonce) re-writes the same marker.
+
+        An EXPIRED lease is deliberately NOT refused (the validity window is not checked here): the same marker
+        is the in-flight HALT, and a run that armed inside the window keeps sending traffic after ``not_after``
+        (the window is checked at the arm, not per action). The sovereign plane cannot know whether such a run is
+        in flight, so refusing the pause would take away the customer's only stop control for it — a pause must
+        always be able to HALT. On a lease that is expired and idle the marker is inert (the keyless verify
+        refuses the window before it ever consults the pause); :meth:`resume_launch` is where expiry is refused."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
@@ -557,16 +564,32 @@ class LaunchGate:
             return {"ok": False, "error": f"could not record the launch pause (fail-closed): {type(e).__name__}"}
         return {"ok": True, "action": "launch_paused", "org_id": oid, "slug": s, "nonce": non}
 
-    def resume_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+    def resume_launch(self, *, signed_lease: Any, expect_org_id: Optional[str] = None,
+                      now: Any = None) -> dict:
         """pause/resume PR-4b (producer) — CLEAR the ``(slug, nonce)`` pause marker so the SAME lease re-arms
         (PR-2 re-check passes; PR-3/PR-4a re-admit the held delivery). Same owner-pinned verify + tenant-bind as
         :meth:`pause_launch`; the clear is UNDER ``self._lock``. Clearing is always safe + idempotent (a clear of
         an absent/already-cleared pause is a no-op), so — unlike pause — it does not refuse a settled lease (a
-        settled lease simply has no pause to clear and will not run regardless)."""
+        settled lease simply has no pause to clear and will not run regardless).
+
+        An EXPIRED lease (``now >= not_after`` — the same half-open window the keyless verify enforces) is
+        REFUSED and NOTHING is cleared. It can no longer be re-admitted (the seam poller, the pickup gate and the
+        arm all refuse the window), so answering ``launch_resumed`` would report a launch as running again that
+        never will; and leaving the marker in place keeps any run still in flight from before the expiry halted,
+        instead of un-halting it on a request we are refusing. ``now`` is a datetime / POSIX timestamp (``None``
+        ⇒ the current time); an unreadable ``now`` or lease window refuses (fail-closed)."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
         s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
+        try:
+            now_ts = (datetime.now(timezone.utc) if now is None else self._as_dt(now)).timestamp()
+            unexpired = now_ts < doc.not_after.timestamp()     # POSITIVELY inside the window (a NaN clock is not)
+        except (TypeError, ValueError, OSError, OverflowError, AttributeError):
+            return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
+        if not unexpired:
+            return {"ok": False, "error": "this lease has expired and can no longer run, so it cannot be "
+                    "resumed (nothing was changed)"}
         try:
             from vigil_integration.live.credit_lease_pause import clear_lease_pause
             with self._lock:

@@ -1139,7 +1139,8 @@ class Provisioner:
         """pause/resume PR-4b — RESUME a paused customer launch: clear the ``(slug, nonce)`` pause marker so the
         SAME lease re-arms and the held delivery re-admits (never re-burning the single-use floor). Same gates as
         ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
-        launch is a harmless no-op."""
+        launch is a harmless no-op. An EXPIRED lease is refused (it can no longer run, so it is never reported
+        resumed) and its pause is left in place."""
         from .. import config
         if not config.customer_pause_resume_enabled():
             raise ProvisionDenied("customer pause/resume is not enabled")
@@ -1151,7 +1152,8 @@ class Provisioner:
                 self._audit("launch_resume", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
             self._require_stepup(mfa_at, now=t)
-        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        r = LaunchGate(self.store).resume_launch(signed_lease=signed_lease, expect_org_id=requester_org_id,
+                                                 now=t)
         if not r.get("ok"):
             raise ProvisionDenied(str(r.get("error") or "launch resume refused"))
         self._audit("launch_resume", requester=requester, org_id=requester_org_id,
