@@ -38,8 +38,20 @@ importance:
     phase that only ``started`` / ``failed`` (crashed before completing) is likewise never
     skipped — it is retried (and it keeps the real sink, so its events are emitted once).
   * **State, never a finding.** The ledger records phase STATE only (``started`` /
-    ``completed`` / ``skipped`` / ``failed`` + a run-status timestamp). It never mints a
-    finding, never promotes a lead to a fact, and feeds no deterministic / oracle math.
+    ``completed`` / ``skipped`` / ``failed`` / ``halted`` + a run-status timestamp). It never
+    mints a finding, never promotes a lead to a fact, and feeds no deterministic / oracle math.
+  * **A paused scan is never a completed scan.** A scan that a reversible PAUSE cut short is
+    recorded ``halted`` (:meth:`PhaseLedger.halt`), never ``completed``, and is not snapshotted:
+    ``completed`` stays the ONLY status that lets a resume skip a phase, so the resumed run
+    RE-RUNS the scan and delivers the whole assessment instead of reloading a truncated one.
+  * **Resume state is bound to its launch (customer launches).** The ledger file and the scan
+    snapshot are keyed per SLUG, and a customer slug is reused by every launch of the same
+    (org, host). :meth:`PhaseLedger.bind_launch` therefore scopes a customer run's resume state
+    to ONE launch: its records carry a digest of the launch identity, only records carrying
+    that digest count as "completed by a prior run", and the snapshot is reloaded only when its
+    bytes hash to the digest THIS launch recorded when it wrote it. A resume can then never
+    skip its scan on the strength of an EARLIER launch's ledger, nor reload an earlier launch's
+    report. An UNBOUND ledger (every operator / greenfield run) is byte-identical to before.
 
 The ledger lives at ``paths.phase_ledger_path(slug)`` (``<base>/<slug>.phases.jsonl``); the
 scan snapshot at ``paths.phase_report_path(slug)``. Under an ephemeral / ZDR session both
@@ -49,11 +61,12 @@ ephemeral run deliberately forgoes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 from .common import logging as _v2log
 from .common import paths as _paths
@@ -115,6 +128,22 @@ ORDERED_PHASES: tuple[str, ...] = (
 # purely which phase WORK may be skipped; suppressing a re-emit is not skipping the phase.
 RESUMABLE_PHASES: frozenset[str] = frozenset({P_SCAN, P_REASONING})
 
+# The ledger status of the record that binds the scan SNAPSHOT to the launch that wrote it (launch-bound
+# ledgers only). It is deliberately NOT ``completed``: it never makes a phase skippable, it only carries the
+# sha256 of the snapshot bytes so a resume can prove the report on disk is its OWN launch's.
+_S_SNAPSHOT = "snapshot"
+
+# Domain separator for the launch tag, so the digest written to the ledger can never collide with (or be
+# confused for) any other hash of the same launch identity elsewhere in the system.
+_LAUNCH_TAG_DOMAIN = b"vigil.phase-ledger.launch.v1\x00"
+
+
+def _launch_tag(launch: str) -> str:
+    """The value a launch-bound ledger writes into its records: a domain-separated sha256 of the launch
+    identity (the owner-signed lease nonce). Only this digest ever reaches the ledger file — the raw identity
+    is never written to disk or emitted."""
+    return hashlib.sha256(_LAUNCH_TAG_DOMAIN + launch.encode("utf-8")).hexdigest()
+
 
 class PhaseLedger:
     """Append-only, fail-open phase checkpoint for one engagement.
@@ -130,6 +159,10 @@ class PhaseLedger:
         self._resume = bool(resume)
         self._sink = sink
         self._completed_prior: set[str] = set()
+        # Launch binding (see :meth:`bind_launch`). Unbound by default, which is the per-slug behaviour every
+        # operator / greenfield run has always had.
+        self._launch_bound = False
+        self._launch: str | None = None
         self._path: Path | None = None
         self._report_path: Path | None = None
         try:
@@ -143,20 +176,53 @@ class PhaseLedger:
         if self._resume:
             self._completed_prior = self._load_completed()
 
+    # ------------------------------------------------------------------ launch binding
+
+    def bind_launch(self, launch: str | None) -> None:
+        """Bind this ledger's RESUME STATE to ONE launch. Called once per run by a CUSTOMER launch, before
+        any resumable phase is decided; operator / greenfield runs never call it and stay unbound.
+
+        The ledger file and the scan snapshot are keyed per slug, and a customer slug is reused by every
+        launch of the same (org, host), so without a binding a resumed launch would treat an EARLIER launch's
+        ``completed`` records — and its snapshotted report — as its own. Once bound:
+
+          * every record this run appends carries the launch tag (a digest of ``launch``, never the raw value);
+          * only records carrying THIS launch's tag count as completed by a prior run (:meth:`should_run`,
+            :meth:`completed_prior`), so an earlier launch's history can never skip this launch's scan;
+          * the snapshot is reloaded only when its bytes hash to the digest THIS launch recorded when it
+            persisted it (:meth:`load_report`), so an earlier launch's report is never reloaded.
+
+        ``launch=None`` means "a customer launch whose identity could not be read": the ledger is bound to
+        NOTHING, so a resume reuses no prior state at all and re-runs the scan. That is the ledger's one
+        fail-safe direction — more work, never a skipped-but-not-done phase. TOTAL: never raises (an
+        identity that cannot be digested is treated as unknown)."""
+        self._launch_bound = True
+        try:
+            self._launch = _launch_tag(launch) if launch else None
+        except Exception:
+            self._launch = None   # an unusable identity is an UNKNOWN launch: reuse nothing
+        if self._resume:
+            self._completed_prior = self._load_completed()
+
+    def _owns(self, rec: dict[str, Any]) -> bool:
+        """Whether a prior ledger record belongs to the state this ledger may resume from. Unbound: every
+        record (the per-slug behaviour). Bound: only a record carrying THIS launch's tag — an untagged
+        record, another launch's record, or any record at all when the launch identity is unknown is not ours."""
+        if not self._launch_bound:
+            return True
+        return self._launch is not None and rec.get("launch") == self._launch
+
     # ------------------------------------------------------------------ resume state
 
-    def _load_completed(self) -> set[str]:
-        """The set of phases a PRIOR run recorded as ``completed``. A missing ledger, an
-        unreadable file, or a torn/partial last line (a crash mid-write) all degrade to
-        "nothing known completed" — never a raise, so a corrupt checkpoint can only ever
-        cause MORE work (a re-run), never a skipped-but-not-done phase."""
-        done: set[str] = set()
+    def _records(self) -> Iterator[dict[str, Any]]:
+        """Every well-formed record in the ledger file, in append order. A missing ledger, an unreadable
+        file, or a torn/partial line (a crash mid-write) is skipped, never raised."""
         try:
             if self._path is None or not self._path.is_file():
-                return done
+                return
             text = self._path.read_text(encoding="utf-8")
         except Exception:
-            return done
+            return
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -165,15 +231,45 @@ class PhaseLedger:
                 rec = json.loads(line)
             except Exception:
                 continue   # a partial/corrupt line never breaks resume
-            if isinstance(rec, dict) and rec.get("status") == "completed":
+            if isinstance(rec, dict):
+                yield rec
+
+    def _load_completed(self) -> set[str]:
+        """The set of phases a PRIOR run recorded as ``completed`` — restricted, on a launch-bound ledger,
+        to the records of THIS launch (:meth:`_owns`). A missing ledger, an unreadable file, or a
+        torn/partial last line (a crash mid-write) all degrade to "nothing known completed" — never a
+        raise, so a corrupt checkpoint can only ever cause MORE work (a re-run), never a
+        skipped-but-not-done phase."""
+        done: set[str] = set()
+        for rec in self._records():
+            if rec.get("status") == "completed" and self._owns(rec):
                 ph = rec.get("phase")
                 if isinstance(ph, str):
                     done.add(ph)
         return done
 
+    def _snapshot_digest(self) -> str | None:
+        """The sha256 THIS launch recorded for the scan snapshot it last persisted, or None when it recorded
+        none (it never snapshotted, the record was lost, or the launch identity is unknown). Launch-bound
+        ledgers only."""
+        digest: str | None = None
+        for rec in self._records():
+            if rec.get("phase") == P_SCAN and rec.get("status") == _S_SNAPSHOT and self._owns(rec):
+                val = rec.get("sha256")
+                digest = val if isinstance(val, str) and val else None
+        return digest
+
     def completed_prior(self) -> set[str]:
         """A copy of the phases a prior run completed (empty unless resuming)."""
         return set(self._completed_prior)
+
+    def prior_halts(self, phase: str) -> int:
+        """How many times ``phase`` was recorded ``halted`` (a reversible PAUSE cut it short) — on a launch-bound
+        ledger, counted over THIS launch's records only (:meth:`_owns`), so another launch's pauses never count
+        against this one. Read fresh from the file each call. Fail-open like every ledger read: a missing or
+        unreadable ledger counts 0 (the caller then allows the scan — more work, never a lost launch)."""
+        return sum(1 for rec in self._records()
+                   if rec.get("phase") == phase and rec.get("status") == "halted" and self._owns(rec))
 
     def should_run(self, phase: str) -> bool:
         """True unless this phase may be SOUNDLY skipped on ``--resume``.
@@ -195,11 +291,14 @@ class PhaseLedger:
 
     # ------------------------------------------------------------------ append (fail-open)
 
-    def _append(self, phase: str, status: str, **extra: Any) -> None:
-        """Append one status record. TOTAL: any IO failure is swallowed — a ledger write can
-        never perturb the engagement. Written owner-only (0600) from creation (no
-        world-readable window), matching the framework's at-rest hygiene."""
+    def _write(self, phase: str, status: str, **extra: Any) -> None:
+        """Append one record to the ledger file (no spine emit). TOTAL: any IO failure is swallowed — a
+        ledger write can never perturb the engagement. Written owner-only (0600) from creation (no
+        world-readable window), matching the framework's at-rest hygiene. A launch-bound ledger tags the
+        record with its launch; an unbound ledger writes exactly the record it always has."""
         rec = {"phase": phase, "status": status, "ts": int(time.time()), **extra}
+        if self._launch is not None:
+            rec["launch"] = self._launch
         try:
             if self._path is not None:
                 _paths.secure_dir(self._path.parent)
@@ -212,6 +311,10 @@ class PhaseLedger:
             # checkpoint is a fail-open the operator should be able to see (a crash afterwards would
             # re-run this phase rather than skip it). Log-only; changes no control flow and no verdict.
             _log.warning("phase_ledger.append_failed", phase=phase, status=status, error=str(exc))
+
+    def _append(self, phase: str, status: str, **extra: Any) -> None:
+        """Append one status record and mirror the transition onto the spine. TOTAL (see :meth:`_write`)."""
+        self._write(phase, status, **extra)
         self._emit(phase, status)
 
     def _emit(self, phase: str, status: str) -> None:
@@ -242,6 +345,12 @@ class PhaseLedger:
         """Record + emit ``phase_failed`` — a phase whose body raised. NOT completed, so a
         resume RETRIES it."""
         self._append(phase, "failed")
+
+    def halt(self, phase: str) -> None:
+        """Record + emit ``phase_halted`` — a phase a reversible PAUSE cut short. It is neither a
+        failure (nothing went wrong) nor a completion (its work is not whole): NOT completed, so a
+        resume RE-RUNS it rather than treating its partial output as the phase's result."""
+        self._append(phase, "halted")
 
     # ------------------------------------------------------------------ functional wrapper
 
@@ -285,21 +394,39 @@ class PhaseLedger:
         """Snapshot the authoritative :class:`ScanReport` (pydantic JSON) so a resumed run can
         SKIP the traffic-sending scan and reload it. Owner-only on disk (it can hold finding
         evidence). Best-effort: a snapshot failure just means the scan re-runs on resume — it
-        never sinks the engagement."""
+        never sinks the engagement.
+
+        A launch-bound ledger also records the sha256 of the bytes it wrote, tagged with its launch,
+        AFTER the write succeeded. That record is what lets :meth:`load_report` prove the snapshot on
+        disk is this launch's own; if either write is lost the resume simply re-runs the scan."""
         try:
             if self._report_path is None or report is None:
                 return
-            _paths.secure_write(self._report_path, report.model_dump_json())
+            payload = report.model_dump_json()
+            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            _paths.secure_write(self._report_path, payload)
         except Exception:
-            pass
+            return
+        if self._launch is not None:
+            self._write(P_SCAN, _S_SNAPSHOT, sha256=digest)
 
     def load_report(self) -> Any | None:
         """Reload the persisted ScanReport, or None if absent / unreadable / corrupt. A None
-        return makes the caller fall back to re-running the scan (fail-open)."""
+        return makes the caller fall back to re-running the scan (fail-open).
+
+        On a launch-bound ledger the snapshot is returned ONLY when its bytes hash to the digest THIS
+        launch recorded for it (:meth:`_snapshot_digest`): the snapshot path is per slug, so the file may
+        hold an earlier launch's report, and that must never be reloaded as this launch's result."""
         try:
             if self._report_path is None or not self._report_path.is_file():
                 return None
             from .scanner.campaign import ScanReport
+            if self._launch_bound:
+                raw = self._report_path.read_bytes()
+                want = self._snapshot_digest()
+                if want is None or hashlib.sha256(raw).hexdigest() != want:
+                    return None
+                return ScanReport.model_validate_json(raw)
             return ScanReport.model_validate_json(
                 self._report_path.read_text(encoding="utf-8"))
         except Exception:
