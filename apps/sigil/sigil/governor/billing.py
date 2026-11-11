@@ -627,6 +627,15 @@ class FlutterwaveBillingProvider(BillingProvider):
         tx_ref = verified.get("tx_ref")
         if status == "successful":
             amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
+            if not ccy:
+                # A verified SUCCESSFUL charge must name its currency. Without one, BillingSigner.apply's underpay /
+                # wrong-currency cross-check is skipped (it keys on event.currency) and the catalog entitlement would
+                # mint on the price_id alone. Flutterwave populates the currency on every real charge, so its absence
+                # is a malformed verify object: mint nothing (fail-closed); an armed plan alarm makes it loud.
+                if self._alarm_unaccounted_plans and verified.get("payment_plan"):
+                    raise UnaccountedPayment(f"verified successful payment_plan charge {event_id} has no currency "
+                                             f"— paid but UN-MINTED; reconcile by hand")
+                return None
             if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
                 return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                                     price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,

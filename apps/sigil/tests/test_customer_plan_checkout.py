@@ -231,6 +231,19 @@ def test_an_underpaid_or_wrong_currency_plan_renewal_alarms(amount, currency):
     assert _deliver(prov_off, signer_off, 7501, 6000.0) is None
 
 
+def test_a_paid_plan_charge_without_a_currency_alarms_and_never_mints():
+    """No currency means no mint: the signer's wrong-currency cross-check cannot run without one."""
+    charge = _charge(7701, "vigil:org_x:n1", 7000.0)
+    del charge["currency"]
+    table = {"7701": charge}
+    prov, _signer, _subs = _inbound(table, alarm=True)
+    with pytest.raises(UnaccountedPayment, match="has no currency"):
+        prov._reverify_and_map({"event": "charge.completed", "data": {"id": 7701}})
+    prov_off, signer_off, subs_off = _inbound(table, alarm=False)
+    assert _deliver(prov_off, signer_off, 7701, 7000.0) is None
+    assert subs_off.subscription("org_x") is None
+
+
 def test_an_unparseable_timestamp_on_a_paid_plan_charge_alarms():
     table = {"7601": _charge(7601, "vigil:org_x:n1", "not-a-date")}
     prov, _signer, _subs = _inbound(table, alarm=True)
