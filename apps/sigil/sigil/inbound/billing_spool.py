@@ -56,6 +56,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -79,6 +81,30 @@ _MAX_DECODED_BODY = 192 * 1024              # decoded-body cap: the proxy caps t
 
 class BillingSpoolError(RuntimeError):
     """A fail-closed refusal while draining one billing-webhook envelope (nothing was spined)."""
+
+
+def _single_drainer(drain):
+    """ONE drainer per spool, across PROCESSES. A pass starts by reclaiming ``working/`` (crash recovery), which
+    is only sound when no OTHER live drainer owns those claims: a second drainer would otherwise take a file the
+    first is mid-verify on, re-verify it a second time, and — if the two outcomes differ — leave a credited
+    payment standing in ``rejected/`` as a false "paid, not credited" alarm. So the whole pass runs under a
+    non-blocking exclusive ``flock`` on the ``working/`` directory itself (the thing it protects; no lock file is
+    added to the spool tree). A pass that finds the lock held touches NOTHING and reports ``busy`` (the holder is
+    draining this very spool). The kernel drops the lock when the holder exits or is killed, so a crash never
+    wedges the spool. Fail-closed: a lock that cannot be opened or taken for any other reason raises — no lock,
+    no drain."""
+    @functools.wraps(drain)
+    def locked(self):
+        fd = os.open(str(self.working), os.O_RDONLY)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {"minted": 0, "noop": 0, "rejected": 0, "deduped": 0, "seqs": [], "busy": True}
+            return drain(self)
+        finally:
+            os.close(fd)                                 # closing the descriptor releases the lock
+    return locked
 
 
 class BillingSpoolWatcher:
@@ -330,6 +356,7 @@ class BillingSpoolWatcher:
             return f"rejected (transient {type(exc).__name__}; NET-2b deferral failed: {oexc}): {exc}"
         return "deferred"
 
+    @_single_drainer
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {minted, noop, rejected, deduped, seqs}.
 

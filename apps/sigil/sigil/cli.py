@@ -1354,6 +1354,47 @@ def _billing_checkout_creator():
     return fe.make_checkout_creator()
 
 
+def _resolve_billing_spool(arg: "str | None") -> str:
+    """The ONE place the money-IN drain decides WHICH spool it drains, so it cannot run "healthy" on a directory
+    the proxy never writes to (a paid webhook spooled, never credited, the unit exiting 0).
+
+    The writer is the proxy's ``/webhooks/billing`` route, which spools into ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the
+    runbook value: ``$SIGIL_HOME/billing-spool``). With no explicit spool (``--spool`` / ``VIGIL_BILLING_SPOOL``)
+    the drain therefore DERIVES it: the writer's own variable when it is visible here, else
+    ``$SIGIL_HOME/billing-spool`` — it follows a moved ``SIGIL_HOME`` instead of a fixed ``~/.sigil`` default.
+    An explicit spool still wins, but is REFUSED (exit 2 -> the unit is FAILED and the dead-man alarms) when it
+    contradicts what this process can see: it differs from the writer's variable, or it is the legacy fixed
+    default ``~/.sigil/billing-spool`` while ``SIGIL_HOME`` points elsewhere and nothing confirms the choice."""
+    import os
+    from pathlib import Path
+
+    from .config import _resolve_home
+
+    def _same(x: str, y: "str | Path") -> bool:
+        return os.path.realpath(x) == os.path.realpath(str(y))
+
+    intake = os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", "").strip()
+    explicit = (arg or os.environ.get("VIGIL_BILLING_SPOOL", "") or "").strip()
+    home_default = _resolve_home() / "billing-spool"
+    spool = explicit or intake or str(home_default)
+    _require_expanded_path(spool, "--spool", required=True)
+    if explicit and intake and not _same(explicit, intake):
+        print(f"billing-drain: the spool to drain ({explicit}) is NOT the spool the proxy writes paid webhooks to "
+              f"(VIGIL_BILLING_WEBHOOK_SPOOL={intake}) — refusing (fail-closed: draining the wrong directory "
+              f"credits nobody while exiting 0). Drop --spool / VIGIL_BILLING_SPOOL, or make them agree.",
+              file=sys.stderr)
+        sys.exit(2)
+    if (explicit and not intake and _same(explicit, Path.home() / ".sigil" / "billing-spool")
+            and not _same(explicit, home_default)):
+        print(f"billing-drain: the spool to drain ({explicit}) is the fixed ~/.sigil default, but SIGIL_HOME is "
+              f"{_resolve_home()} (the runbook spool is {home_default}) — refusing (fail-closed: draining the "
+              f"wrong directory credits nobody while exiting 0). Drop --spool / VIGIL_BILLING_SPOOL so the spool "
+              f"follows SIGIL_HOME, or set VIGIL_BILLING_WEBHOOK_SPOOL to the directory the proxy really uses.",
+              file=sys.stderr)
+        sys.exit(2)
+    return spool
+
+
 def cmd_billing_drain(a) -> None:
     """Drain / watch the inbound BILLING-webhook spool (SaaS Slice C) through ``BillingSigner.ingest``:
     ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
@@ -1368,7 +1409,7 @@ def cmd_billing_drain(a) -> None:
     # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
     # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
     # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
-    _require_expanded_path(a.spool, "--spool", required=True)
+    spool = _resolve_billing_spool(getattr(a, "spool", ""))
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1400,18 +1441,22 @@ def cmd_billing_drain(a) -> None:
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
                            plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
                            expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
-    watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
+    watcher = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash=secret)
     del secret
     if getattr(a, "billing_cmd", "drain") == "watch":
-        print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
+        print(f"  watching {spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
         try:
             watcher.watch(interval=a.interval)
         except KeyboardInterrupt:
             pass
     else:
         r = watcher.drain()
-        print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
-              f"{r['deduped']} deduped")
+        if r.get("busy"):                        # single-drainer lock held elsewhere: this pass touched nothing
+            print(f"  skipped: another billing drainer holds the lock on {spool} — this pass touched nothing "
+                  f"(the holder is draining it; run the timer OR `watch`, never both)")
+        else:
+            print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
+                  f"{r['deduped']} deduped")
         parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
         if parked:
             print(f"  awaiting retry: {parked} billing webhook(s) parked in {watcher.retry} after a transient "
@@ -2796,7 +2841,9 @@ def main(argv=None) -> None:
                               "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
                               "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
     pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
-    pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
+    pbd.add_argument("--spool", default="",
+                     help="the billing spool directory (its incoming/ is drained). Default: $VIGIL_BILLING_SPOOL, "
+                          "else the proxy's $VIGIL_BILLING_WEBHOOK_SPOOL, else $SIGIL_HOME/billing-spool")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.set_defaults(fn=cmd_billing_drain)
     ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "

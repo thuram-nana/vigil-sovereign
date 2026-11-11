@@ -12,6 +12,8 @@
 #     and into the service env)
 #   → seed .vigil-live/service.env (what the vigil-command unit loads)
 #   → run the `vigil doctor` PRODUCTION GATE — abort if ANY control is UNMET
+#     (one exception: red on a money-IN alarm ONLY still starts the UI, so payment
+#     intake is never held down by it — then aborts before everything after it)
 #   → start the UI (vigil-command.service) + docker bring-up (vigil-bringup.service)
 #   → wait for /readyz on :8770
 #   → bring up the MERIDIAN range on :19010 (+ :19011)
@@ -554,6 +556,13 @@ phase_doctor_gate(){
   "$VIGIL" doctor 2>/dev/null | sed 's/^/    /' || true
   if [ "$rc" = 0 ]; then
     ok "vigil doctor exit 0 — all required controls MET under VIGIL_POSTURE=production"
+  elif doctor_red_is_money_in_only "$json"; then
+    # A money-IN alarm (a paid webhook not yet credited) is the ONE red that must not hold payment INTAKE down:
+    # the proxy's /webhooks/billing only accepts + durably spools, and a webhook it is not up to accept is lost.
+    # So start the UI — and nothing after it (main() stops before the range + the acceptance run).
+    MONEY_IN_ALARM_ONLY=1
+    warn "vigil doctor is RED on a money-IN alarm ONLY (a paid webhook is not credited yet — see the issue above)."
+    warn "Starting the UI so payment intake is not held down; every later phase is REFUSED until it is cleared."
   else
     # surface the unmet controls precisely from the JSON gate block.
     local unmet
@@ -569,6 +578,21 @@ PY
 )"
     die "vigil doctor REFUSES: UNMET controls -> ${unmet}. Fix each above (e.g. seal the vault with tpm2-tools; seed the backup runs) and re-run. The script will not start the UI on a red gate."
   fi
+}
+
+# True (exit 0) ONLY when the doctor report is red on money-IN alarms and NOTHING else: every hard issue is one
+# the report itself lists under `money_in_alarms`. Anything unparseable, an empty issue list, or any other issue
+# is "not money-in-only" — the gate then refuses exactly as before (fail-closed).
+doctor_red_is_money_in_only(){
+  "$OFFPY" - "$1" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.loads(sys.argv[1]); issues=d["issues"]; safe=d.get("money_in_alarms") or []
+    ok=isinstance(issues,list) and bool(issues) and all(i in safe for i in issues)
+except Exception:
+    ok=False
+sys.exit(0 if ok else 1)
+PY
 }
 
 # =============================================================================
@@ -747,6 +771,9 @@ main(){
   phase_service_env
   phase_doctor_gate
   phase_ui
+  if [ "${MONEY_IN_ALARM_ONLY:-0}" = 1 ]; then
+    die "the UI is UP (payment intake restored), but vigil doctor is RED on a money-IN alarm: a customer PAID and is NOT credited yet. Clear it (see the vigil doctor issue above), then re-run — the range and the acceptance run are REFUSED on a red gate, and this bring-up is NOT proven green."
+  fi
   phase_meridian
   phase_acceptance
   phase_summary

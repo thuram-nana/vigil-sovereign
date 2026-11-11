@@ -180,3 +180,95 @@ def test_net2b_off_the_cli_output_is_unchanged(home, capsys, monkeypatch):
     _spool_charge(spool, 9911)
     cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
     assert capsys.readouterr().out == "  drained: 1 minted, 0 noop, 0 rejected, 0 deduped\n"
+
+
+# ---- which spool is drained: ONE resolver, so the drain cannot run "healthy" on a directory nobody writes to ----
+
+@pytest.fixture()
+def armed(home, monkeypatch):
+    """A fully configured drain (enabled, secret, a verifier that re-verifies a top-up), a PRIVATE spine, a HOME
+    whose ~/.sigil is NOT this test's SIGIL_HOME (the GO-LIVE "moved SIGIL_HOME" deployment), and no spool var."""
+    pid, credits = _topup()
+    monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SPOOL", raising=False)
+    monkeypatch.delenv("VIGIL_BILLING_SPOOL", raising=False)
+    monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: _verifier(pid))
+    own = Path(home) / "resolver-spine.jsonl"
+    monkeypatch.setattr(cli, "SpineStore", lambda: SpineStore(own))
+    user_home = Path(tempfile.mkdtemp())
+    monkeypatch.setenv("HOME", str(user_home))
+    return SimpleNamespace(sigil_home=Path(home), user_home=user_home, credits=credits,
+                           available=lambda: WalletRegistry(SpineStore(own)).available("acme"))
+
+
+def test_with_no_spool_named_the_drain_follows_a_moved_sigil_home(armed, capsys):
+    """The shipped unit names no spool. The proxy spooled a paid webhook under the MOVED home; the drain must find
+    it there — not report a clean pass over an empty ~/.sigil/billing-spool."""
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    cli.main(["billing-drain", "drain"])
+    assert "1 minted" in capsys.readouterr().out and armed.available() == armed.credits
+    assert not (armed.user_home / ".sigil").exists()                # the fixed default was never even created
+
+
+def test_with_no_spool_named_the_drain_uses_the_proxys_own_spool_variable(armed, capsys, monkeypatch):
+    elsewhere = Path(tempfile.mkdtemp()) / "intake"
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(elsewhere))
+    _spool_charge(elsewhere, 9911)
+    cli.main(["billing-drain"])
+    assert "1 minted" in capsys.readouterr().out and armed.available() == armed.credits
+    assert not (armed.sigil_home / "billing-spool").exists()
+
+
+def test_the_env_override_still_names_the_spool(armed, capsys, monkeypatch):
+    """An existing ~/.config/vigil/billing-drain.env that sets VIGIL_BILLING_SPOOL keeps working with the new
+    unit (which no longer passes --spool)."""
+    custom = Path(tempfile.mkdtemp()) / "custom-spool"
+    monkeypatch.setenv("VIGIL_BILLING_SPOOL", str(custom))
+    _spool_charge(custom, 9911)
+    _spool_charge(armed.sigil_home / "billing-spool", 7777)
+    cli.main(["billing-drain", "drain"])
+    assert "1 minted" in capsys.readouterr().out
+    assert (armed.sigil_home / "billing-spool" / "incoming" / "7777.json").exists()   # not the derived one
+
+
+def test_a_spool_that_contradicts_the_proxys_spool_is_refused_not_drained(armed, capsys, monkeypatch):
+    intake, other = Path(tempfile.mkdtemp()) / "intake", Path(tempfile.mkdtemp()) / "other"
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(intake))
+    _spool_charge(other, 9911)
+    code, text = _run(["billing-drain", "--spool", str(other)], capsys)
+    assert code == 2 and "NOT the spool the proxy writes paid webhooks to" in text and _SECRET not in text
+    assert (other / "incoming" / "9911.json").exists() and not (other / "working").exists()   # nothing touched
+    # the same directory spelled differently is NOT a contradiction
+    (intake / "incoming").mkdir(parents=True)
+    alias = intake.parent / "alias"
+    alias.symlink_to(intake)
+    cli.main(["billing-drain", "--spool", str(alias)])
+    assert "drained: 0 minted" in capsys.readouterr().out
+
+
+def test_the_fixed_home_default_is_refused_when_sigil_home_is_elsewhere(armed, capsys, monkeypatch):
+    """An installed OLDER unit still passes its fixed default (--spool ~/.sigil/billing-spool). With SIGIL_HOME
+    moved that directory is one the proxy never writes to: the pass must FAIL (the dead-man alarms), not exit 0."""
+    legacy = armed.user_home / ".sigil" / "billing-spool"
+    code, text = _run(["billing-drain", "drain", "--spool", str(legacy)], capsys)
+    assert code == 2 and "fixed ~/.sigil default, but SIGIL_HOME is" in text
+    assert str(armed.sigil_home / "billing-spool") in text and not legacy.exists()
+    # … unless the operator confirms the proxy really spools there
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(legacy))
+    cli.main(["billing-drain", "drain", "--spool", str(legacy)])
+    assert "drained: 0 minted" in capsys.readouterr().out
+
+
+def test_the_fixed_home_default_is_fine_when_sigil_home_was_never_moved(armed, capsys, monkeypatch):
+    monkeypatch.setenv("SIGIL_HOME", str(armed.user_home / ".sigil"))
+    legacy = armed.user_home / ".sigil" / "billing-spool"
+    _spool_charge(legacy, 9911)
+    cli.main(["billing-drain", "drain", "--spool", str(legacy)])
+    assert "1 minted" in capsys.readouterr().out
+
+
+def test_a_derived_spool_is_still_refused_when_it_is_not_an_absolute_expanded_path(armed, capsys, monkeypatch):
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", "%h/.sigil/billing-spool")
+    code, text = _run(["billing-drain"], capsys)
+    assert code == 2 and "--spool must be an ABSOLUTE" in text

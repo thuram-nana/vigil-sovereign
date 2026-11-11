@@ -58,7 +58,12 @@ message + remediation.
    (`infra/systemd/vigil-command.service:67`, `vigil-bringup.service:49`). Nothing
    in the tree writes this file; the script is the writer (0600, atomic).
 4. **Production gate — `vigil doctor`** — run **before** starting the UI so a red
-   control aborts with the exact unmet list. `vigil doctor --json` exposes
+   control aborts with the exact unmet list. One exception: when the report is red
+   on a **money-IN alarm only** (`.money_in_alarms` — a paid webhook not credited
+   yet), the UI is still started, because the proxy's `/webhooks/billing` only
+   accepts and durably spools and must not be held down by that alarm; the script
+   then aborts non-zero **before** the range and the acceptance run.
+   `vigil doctor --json` exposes
    `.production_gate.unmet[].control` (`_cmd_doctor` `integration/vigil_integration/cli.py:3187`;
    exit `0 if report.ok else 1`). The UI unit also self-gates at ExecStart
    (`_enforce_production_gate("up")` `cli.py:3012`) — defense in depth.

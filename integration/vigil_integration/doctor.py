@@ -1134,8 +1134,11 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # MONEY-5: the money-IN billing drain (#1055) joins them. A FAILED billing drain means a paid webhook is standing
 # in rejected/ (the processor never redelivers): a customer PAID and has NOT been credited until an operator acts —
 # an operator-visible money failure, so RED, not an advisory note. Like the others it is OPTIONAL (watched only
-# once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected; and `vigil ready`
-# only REPORTS (nothing Requires= it), so a RED here never holds the proxy that accepts new payments down.
+# once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected. It must never hold
+# payment INTAKE down (accepting + durably spooling a webhook is always safe; refusing one loses it): `vigil up`
+# gates on the production posture only, `vigil ready` only REPORTS, and the one scripted bring-up that gates on
+# this report (tools/oneshot-bringup) reads `money_in_alarms` below to tell this alarm from every other RED — it
+# still starts the proxy, and still refuses everything after it (the range, the acceptance run).
 _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service")
 _BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
 
@@ -1601,10 +1604,14 @@ def collect(repo_root) -> dict:
                 if st.unit in _MONEY_DRAIN_UNITS and st.unit == _BILLING_DRAIN_UNIT:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"failed/stalled billing drain means paid webhooks are quarantined or not being "
-                           f"drained: a customer PAID and has NOT been credited. Read each `.reason` in the billing "
-                           f"spool's rejected/ (default ~/.sigil/billing-spool), fix the cause, move the envelope "
-                           f"back to incoming/, and run `sigil billing-drain drain --spool <spool>` (or restart "
-                           f"the unit) — re-ingest is idempotent, a payment is credited once.")
+                           f"drained: a customer PAID and has NOT been credited. In the billing spool (the proxy's "
+                           f"VIGIL_BILLING_WEBHOOK_SPOOL, else {_display_path(_sigil_home() / 'billing-spool')}) "
+                           f"read each `.reason` in rejected/, fix the cause and move the envelope back to "
+                           f"incoming/; then `systemctl --user start vigil-billing-drain.service` (and re-enable "
+                           f"its timer if it stopped) — only the unit's own run clears this alarm, re-ingest is "
+                           f"idempotent, a payment is credited once. Keep the proxy UP meanwhile: new payments "
+                           f"keep spooling safely.")
+                    report.setdefault("money_in_alarms", []).append(report["issues"][-1])
                 elif st.unit in _MONEY_DRAIN_UNITS:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"stalled/failed settle drain means completed paid runs are not being "
