@@ -1,0 +1,394 @@
+{
+  "id": "W11-3b",
+  "issue": 484,
+  "note": "The NAMED-MUTANT corpus for the money/gate files the scheduled mutmut/cosmic-ray kill-suite cannot reach (critical-set.json mutation=false: the sovereign-leg apps/sigil files cannot load beside framework, and the engine gates are outside the vigil_core-scoped runner). Each mutant is ONE exact old->new source replacement that breaks ONE named guard, plus the test node(s) that must kill it. tools/mutation/named_mutants.py runs ONE plane per process tree (planes.*.pythonpath is rebuilt from scratch and absolute; the sovereign plane never holds engine/crucible, the offense plane never holds apps/sigil), checks the union of each file's named tests is GREEN on the unmutated source, then applies each mutant, runs only its named tests (-x), and always restores the original bytes and mtime. KILLED means pytest exited 1; exit 0 is SURVIVED; anything else (collection/usage error, timeout, a mutant that does not compile) is ERROR, never a kill. Run: python tools/mutation/named_mutants.py --plane sovereign|offense [--file <path>] [--mutant <id>]. Wired into .github/workflows/mutation-fuzz.yml (job \"named-mutant corpus\", scheduled, red on any survivor). Every file here must be a python entry of critical-set.json flagged \"named_mutants\": true (and vice versa), and every mutant must still apply exactly once, compile and name a real test in its own plane: integration/tests/test_mutation_critical_set.py enforces this on every PR, so a refactor that moves a guard's text must update its mutant in the same PR. A mutant that SURVIVES is a missing test (or dead code): add the test, never weaken the mutant.",
+  "planes": {
+    "sovereign": {
+      "cwd": ".",
+      "pythonpath": [
+        "apps/sigil",
+        "integration",
+        "packages/core/vigil_core"
+      ],
+      "forbidden_pythonpath": [
+        "engine/crucible"
+      ],
+      "source_roots": [
+        "apps/sigil/sigil/",
+        "integration/vigil_integration/",
+        "packages/core/vigil_core/vigil_core/"
+      ],
+      "test_roots": [
+        "apps/sigil/tests/",
+        "integration/tests/",
+        "packages/core/vigil_core/tests/"
+      ]
+    },
+    "offense": {
+      "cwd": "engine/crucible",
+      "pythonpath": [
+        "engine/crucible",
+        "packages/core/vigil_core"
+      ],
+      "forbidden_pythonpath": [
+        "apps/sigil"
+      ],
+      "source_roots": [
+        "engine/crucible/framework/"
+      ],
+      "test_roots": [
+        "engine/crucible/framework/"
+      ]
+    }
+  },
+  "files": [
+    {
+      "path": "apps/sigil/sigil/governor/cost_pool.py",
+      "plane": "sovereign",
+      "mutants": [
+        {
+          "id": "cost_pool.default_off_folds",
+          "guard": "DEFAULT-OFF: an unbounded pool short-circuits to NORMAL without folding the ledger",
+          "old": "return PoolPosture.NORMAL                      # default-off short-circuit — NO fold",
+          "new": "pass                                           # MUTANT: default-off short-circuit removed",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_default_off_unbounded_short_circuits_without_folding"
+          ]
+        },
+        {
+          "id": "cost_pool.zero_budget_arms",
+          "guard": "a 0 budget is UNBOUNDED (default-off), never an armed zero-capacity pool",
+          "old": "self._budget_tokens = b if (b is not None and b >= 1) else None",
+          "new": "self._budget_tokens = b if (b is not None and b >= 0) else None",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_budget_none_zero_or_junk_is_unbounded"
+          ]
+        },
+        {
+          "id": "cost_pool.measure_error_fails_open",
+          "guard": "FAIL-CLOSED: an armed pool whose meter raises postures REFUSE_NEW, never NORMAL",
+          "old": "return PoolPosture.REFUSE_NEW\n        return self._posture_for(used, self._budget_tokens)",
+          "new": "return PoolPosture.NORMAL\n        return self._posture_for(used, self._budget_tokens)",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_fail_closed_refuse_new_on_armed_read_error"
+          ]
+        },
+        {
+          "id": "cost_pool.refuse_band_strict",
+          "guard": "the REFUSE_NEW band is inclusive (>=): reaching 0.95 refuses",
+          "old": "if frac >= self._bands.refuse_at:",
+          "new": "if frac > self._bands.refuse_at:",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_band_boundary_is_inclusive_ge_not_strict_gt"
+          ]
+        },
+        {
+          "id": "cost_pool.hard_stop_band_strict",
+          "guard": "the HARD_STOP band is inclusive (>=): a full pool hard-stops",
+          "old": "if frac >= self._bands.hard_stop_at:",
+          "new": "if frac > self._bands.hard_stop_at:",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_band_boundary_is_inclusive_ge_not_strict_gt"
+          ]
+        },
+        {
+          "id": "cost_pool.degrade_full_admit",
+          "guard": "DEGRADE admits a SMALLER envelope (request * degrade_factor)",
+          "old": "admitted = int(req * self._bands.degrade_factor)",
+          "new": "admitted = int(req)",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_admit_envelope_is_monotone_non_increasing_and_bounded"
+          ]
+        },
+        {
+          "id": "cost_pool.degrade_floor_zero",
+          "guard": "a DEGRADE admit is floored at 1 (never a zero-unit lease)",
+          "old": "admitted = 1                               # FLOOR >= 1",
+          "new": "admitted = 0                               # FLOOR >= 1",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_admit_degrade_floors_at_one_and_never_exceeds_request"
+          ]
+        },
+        {
+          "id": "cost_pool.refuse_new_admits",
+          "guard": "REFUSE_NEW admits 0 new draw",
+          "old": "return (0, p, \"global cost pool REFUSE_NEW: refusing new draw while over capacity\")",
+          "new": "return (req, p, \"global cost pool REFUSE_NEW: refusing new draw while over capacity\")",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_admit_refuse_and_hard_stop_admit_zero"
+          ]
+        },
+        {
+          "id": "cost_pool.gate_ignores_refuse_new",
+          "guard": "the launch-gate conjunct refuses at REFUSE_NEW, not only at HARD_STOP",
+          "old": "if p is PoolPosture.REFUSE_NEW or p is PoolPosture.HARD_STOP:",
+          "new": "if p is PoolPosture.HARD_STOP:",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_launch_gate_pool_refuses_new_when_armed_and_over_threshold"
+          ]
+        }
+      ]
+    },
+    {
+      "path": "apps/sigil/sigil/ui/launch_gate.py",
+      "plane": "sovereign",
+      "mutants": [
+        {
+          "id": "launch_gate.units_floor_zero",
+          "guard": "a reservation is in [1, MAX_UNITS]: a 0-unit launch is refused",
+          "old": "if not (1 <= u <= _MAX_UNITS):",
+          "new": "if not (0 <= u <= _MAX_UNITS):",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_bad_units_refused"
+          ]
+        },
+        {
+          "id": "launch_gate.prepaid_credit_conjunct",
+          "guard": "conjunct 4: a prepaid launch needs available >= units",
+          "old": "elif self.meter.available(oid, now_ts) < u:",
+          "new": "elif False:",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_insufficient_credits_refused"
+          ]
+        },
+        {
+          "id": "launch_gate.postpaid_over_limit",
+          "guard": "PP-1: a postpaid draw may not exceed the owner-signed credit line",
+          "old": "if acc + u > acct.credit_limit:",
+          "new": "if False:",
+          "tests": [
+            "apps/sigil/tests/test_postpaid_gate.py::test_postpaid_over_limit_refused_nothing_accrued"
+          ]
+        },
+        {
+          "id": "launch_gate.postpaid_dunning",
+          "guard": "PP-3: an OVERDUE postpaid line refuses NEW launches",
+          "old": "if postpaid_is_overdue(self.invoices, self.postpaid, oid, now_ts):",
+          "new": "if False:",
+          "tests": [
+            "apps/sigil/tests/test_postpaid_gate.py::test_postpaid_overdue_line_refuses_new_launch_until_paid"
+          ]
+        },
+        {
+          "id": "launch_gate.pool_conjunct",
+          "guard": "EC-5: an armed, over-threshold global cost pool refuses a NEW launch",
+          "old": "            if pool_refusal is not None:\n                return pool_refusal",
+          "new": "            if False:\n                return pool_refusal",
+          "tests": [
+            "apps/sigil/tests/test_cost_pool.py::test_launch_gate_pool_refuses_new_when_armed_and_over_threshold"
+          ]
+        },
+        {
+          "id": "launch_gate.reserve_delta_invariant",
+          "guard": "a prepaid reserve must drop availability by exactly units (a reused nonce mints nothing)",
+          "old": "                if before - self.meter.available(oid, now_ts) < u:",
+          "new": "                if False:",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_nonce_reuse_does_not_mint_a_free_lease"
+          ]
+        },
+        {
+          "id": "launch_gate.settle_unpinned",
+          "guard": "settle verifies the lease under the PINNED owner key (a forged lease refunds nothing)",
+          "old": "        if not ok:\n            return {\"ok\": False, \"error\": f\"lease does not verify under the owner key: {reason}\"}\n        doc = signed.document\n        oid, s, non, reserved",
+          "new": "        if False:\n            return {\"ok\": False, \"error\": f\"lease does not verify under the owner key: {reason}\"}\n        doc = signed.document\n        oid, s, non, reserved",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_settle_rejects_a_forged_lease_no_free_credits"
+          ]
+        },
+        {
+          "id": "launch_gate.settle_tenant_binding",
+          "guard": "settle is tenant-bound: a customer cannot settle another org's lease",
+          "old": "        if expect_org_id is not None and oid != expect_org_id:\n            return {\"ok\": False, \"error\": \"this lease belongs to a different org\"}\n        try:\n            consumed = int(consumed_units)",
+          "new": "        if False:\n            return {\"ok\": False, \"error\": \"this lease belongs to a different org\"}\n        try:\n            consumed = int(consumed_units)",
+          "tests": [
+            "apps/sigil/tests/test_custui.py::test_launch_cancel_relays_and_is_tenant_bound"
+          ]
+        },
+        {
+          "id": "launch_gate.settle_no_clamp",
+          "guard": "consumed is clamped to the owner-signed reservation (no over-claw)",
+          "old": "consumed = min(consumed, reserved)                 # can never claw back more than the signed reservation",
+          "new": "consumed = consumed                                # MUTANT: clamp removed",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_settle_clamps_consumed_to_reserved"
+          ]
+        },
+        {
+          "id": "launch_gate.settle_not_idempotent",
+          "guard": "settle is a no-op for an already-settled (slug, nonce), regardless of consumed",
+          "old": "align in the default deployment.\n                if is_lease_settled(self._seam_base(), s, non):",
+          "new": "align in the default deployment.\n                if False:",
+          "tests": [
+            "apps/sigil/tests/test_k45_loopback_e2e.py::test_completed_then_launch_cancel_cannot_double_refund"
+          ]
+        },
+        {
+          "id": "launch_gate.postpaid_zero_refund_unrecorded",
+          "guard": "a postpaid settle ALWAYS records the settle marker, even at refund 0 (else billed $0)",
+          "old": "                self.arrears.settle(oid, refund, entry_id=f\"{SETTLE_ENTRY_PREFIX}{s}:{non}\", issued_at=now_ts)",
+          "new": "                if refund > 0: self.arrears.settle(oid, refund, entry_id=f\"{SETTLE_ENTRY_PREFIX}{s}:{non}\", issued_at=now_ts)",
+          "tests": [
+            "apps/sigil/tests/test_postpaid_gate.py::test_postpaid_full_consumption_settle_is_recorded_and_billable"
+          ]
+        },
+        {
+          "id": "launch_gate.authority_scope_any",
+          "guard": "the engagement authority must scope EXACTLY this host",
+          "old": "if list(doc.scope) != [host]:",
+          "new": "if False:",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_owner_signed_authority_with_a_wider_scope_refused"
+          ]
+        },
+        {
+          "id": "launch_gate.authority_window_any",
+          "guard": "the engagement authority window must cover now",
+          "old": "return doc.not_before <= now_dt < doc.not_after",
+          "new": "return True",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_owner_signed_authority_must_be_current"
+          ]
+        }
+      ]
+    },
+    {
+      "path": "engine/crucible/framework/v2/kernel/routing.py",
+      "plane": "offense",
+      "mutants": [
+        {
+          "id": "routing.enabled_by_default",
+          "guard": "DEFAULT-OFF: routing is disabled unless CRUCIBLE_MODEL_ROUTING is truthy",
+          "old": "in (\"1\", \"true\", \"yes\", \"on\")",
+          "new": "in (\"\", \"1\", \"true\", \"yes\", \"on\")",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_routing_disabled_by_default"
+          ]
+        },
+        {
+          "id": "routing.disabled_still_routes",
+          "guard": "routing disabled returns the backend's own model for every tier",
+          "old": "    if not routing_enabled():\n        return default_model",
+          "new": "    if False:\n        return default_model",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_disabled_resolves_default_for_every_tier"
+          ]
+        },
+        {
+          "id": "routing.unknown_tier_honoured",
+          "guard": "an unknown tier name resolves to the capable default",
+          "old": "    if t not in TIERS:\n        return default_model",
+          "new": "    if False:\n        return default_model",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_unknown_tier_resolves_to_default"
+          ]
+        },
+        {
+          "id": "routing.unmapped_tier_not_capable",
+          "guard": "FAIL-TOWARD-CAPABLE: a known but unmapped tier resolves to the capable default",
+          "old": "return override or default_model",
+          "new": "return override",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_enabled_unmapped_tier_fails_toward_capable"
+          ]
+        },
+        {
+          "id": "routing.critique_downgraded",
+          "guard": "the finding gate (self-critique) defaults to the capable deep tier",
+          "old": "\"self-critique\": \"deep\",",
+          "new": "\"self-critique\": \"standard\",",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_finding_critical_bindings_are_deep"
+          ]
+        },
+        {
+          "id": "routing.unknown_binding_cheap",
+          "guard": "an unknown binding falls back to the capable tier, never cheap",
+          "old": "_DEFAULT_TIER = \"deep\"",
+          "new": "_DEFAULT_TIER = \"cheap\"",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_routing.py::test_unknown_binding_falls_back_to_capable"
+          ]
+        }
+      ]
+    },
+    {
+      "path": "engine/crucible/framework/v2/kernel/response_cache.py",
+      "plane": "offense",
+      "mutants": [
+        {
+          "id": "response_cache.single_shot_gate",
+          "guard": "a samples>1 self-consistency call is never cached",
+          "old": "return (int(getattr(prompt, \"samples\", 1)) == 1",
+          "new": "return (int(getattr(prompt, \"samples\", 1)) >= 1",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_determinism_gate_excludes_nondeterministic"
+          ]
+        },
+        {
+          "id": "response_cache.temperature_gate",
+          "guard": "only temperature == 0.0 is cacheable",
+          "old": "and float(getattr(prompt, \"temperature\", 0.2)) == 0.0",
+          "new": "and float(getattr(prompt, \"temperature\", 0.2)) >= 0.0",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_determinism_gate_excludes_nondeterministic"
+          ]
+        },
+        {
+          "id": "response_cache.current_model_cacheable",
+          "guard": "a current-gen model is never cached (not determinism-guaranteed)",
+          "old": "and not is_current_model(str(model or \"\")))",
+          "new": "and True)",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_determinism_gate_excludes_current_model"
+          ]
+        },
+        {
+          "id": "response_cache.key_drops_org",
+          "guard": "the tenant org_id is in the cache key (cross-tenant isolation)",
+          "old": "\"org\": org_id or \"__shared__\",",
+          "new": "\"org\": \"__shared__\",",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_cross_org_logical_isolation"
+          ]
+        },
+        {
+          "id": "response_cache.key_drops_engagement",
+          "guard": "the engagement slug is in the cache key (cross-engagement isolation)",
+          "old": "\"eng\": slug or \"__none__\",",
+          "new": "\"eng\": \"__none__\",",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_cross_engagement_isolation"
+          ]
+        },
+        {
+          "id": "response_cache.ttl_ignored",
+          "guard": "a TTL-expired row is a MISS",
+          "old": "if (time.time() - float(created_at)) > _ttl_s():",
+          "new": "if False:",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_ttl_expiry_is_a_miss"
+          ]
+        },
+        {
+          "id": "response_cache.hit_skips_reparse",
+          "guard": "a HIT re-parses the stored raw against the LIVE schema (unparseable -> MISS)",
+          "old": "parsed = parse_json_response(str(raw), prompt.schema)",
+          "new": "parsed = prompt.schema.model_construct()",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_unparseable_cached_value_is_a_miss"
+          ]
+        },
+        {
+          "id": "response_cache.lookup_ignores_kill_switch",
+          "guard": "the CRUCIBLE_CACHE_DISABLE kill-switch disables lookup",
+          "old": "    if l2_disabled():\n        return None\n    conn = _connect()",
+          "new": "    if False:\n        return None\n    conn = _connect()",
+          "tests": [
+            "engine/crucible/framework/v2/kernel/tests/test_ec1b_response_cache.py::test_kill_switch_disables_lookup_and_store"
+          ]
+        }
+      ]
+    }
+  ]
+}
