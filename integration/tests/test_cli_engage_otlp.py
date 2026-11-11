@@ -129,6 +129,29 @@ def test_a_refusal_never_echoes_credentials(monkeypatch, tmp_path, capsys):
     assert "s3cr3t" not in err and "admin" not in err and "***@" in err
 
 
+@pytest.mark.parametrize("ep", [
+    "http://127.0.0.1:4318/v1/traces?user=ops@corp.example&token=SECRET",   # `@` in the query: the refusal used
+    "http://127.0.0.1:4318/v1/traces?api_key=abc@SECRET",                   # to print what followed it
+    "http://127.0.0.1:4318/v1/traces#a@SECRET",
+    "https://admin:SEC/RET@collector.corp:4318",                            # a password with an unencoded `/`
+    "https://admin:98765/RET@collector.corp:4318",                          # ...whose head looks like a port
+])
+def test_a_refusal_never_echoes_a_secret_after_an_at_sign(monkeypatch, tmp_path, capsys, ep):
+    rc, cap = _run(monkeypatch, tmp_path, ["--otlp-endpoint", ep])
+    err = capsys.readouterr().err
+    assert rc == 0 and cap["otlp_endpoint"] is None                          # refused (the pin allows no `@`)...
+    assert "refusing non-loopback OTLP endpoint" in err
+    assert "SECRET" not in err and "RET" not in err and "corp.example" not in err
+    assert "admin" not in err and "98765" not in err
+
+
+def test_the_env_endpoint_is_redacted_the_same_way(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(ENV, "http://127.0.0.1:4318/v1/traces?user=ops@corp.example&token=SECRET")
+    rc, cap = _run(monkeypatch, tmp_path)
+    err = capsys.readouterr().err
+    assert rc == 0 and cap["otlp_endpoint"] is None and "SECRET" not in err and "corp.example" not in err
+
+
 @pytest.mark.parametrize("off", ["off", "OFF", "none", "0"])
 def test_explicit_off_beats_the_ambient_env(monkeypatch, tmp_path, capsys, off):
     monkeypatch.setenv(ENV, "http://127.0.0.1:4318")

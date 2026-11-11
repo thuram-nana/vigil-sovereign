@@ -45,7 +45,10 @@ Once that bound is spent the envelope is QUARANTINED exactly as before (and the 
 stays down still reaches an operator. Nothing is minted on a deferred pass, and a re-admitted envelope re-enters
 the SAME claim / sha256-dedup / ``event_id``-idempotent path, so a retry can never double-credit. Fail-safe: an
 unreadable ledger, a bad clock, or a failed move resolves toward quarantine (today's behaviour), never an unbounded
-retry; and every pass re-admits ``retry/`` whatever the flag, so turning it OFF strands nothing. OFF and with no
+retry; and every pass re-admits ``retry/`` whatever the flag, so turning it OFF strands nothing. The bound is per
+PAYMENT: the ledger is keyed by file name and belongs to the PARKED envelope, so a same-named twin delivered while
+the original waits (the proxy dedups a redelivery only against ``incoming/``) is quarantined + alarmed WITHOUT
+touching that ledger — a redelivery can never hand the parked payment a fresh budget. OFF and with no
 ``retry/`` directory the drain is byte-identical to before. A verifier that instead swallowed a transient error into None would let the
 drain treat a real payment as a final no-op and bury it — which is why the contract is RAISE-on-transient. The
 backstop for any residual gap is periodic RECONCILIATION (sweep recent tx_refs against the provider and mint any
@@ -64,7 +67,7 @@ import os
 import stat
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ..reuse import assert_no_offense
 
@@ -280,32 +283,52 @@ class BillingSpoolWatcher:
         try:
             obj = json.loads(self._read_regular(sp))
             n = obj["attempts"]
-        except (OSError, ValueError, KeyError, TypeError):
+        except Exception:  # noqa: BLE001 — ANY fault (a deeply nested ledger raises RecursionError) => untrusted
             return None
         if isinstance(n, bool) or not isinstance(n, int) or n < 0:
             return None
         return n
 
+    def _is_parked(self, name: str) -> bool:
+        """Whether an envelope called ``name`` is waiting in ``retry/`` right now."""
+        parked = self.retry / name
+        return parked.exists() or parked.is_symlink()
+
     def _clear_state(self, name: str) -> None:
-        """Drop ``name``'s retry ledger once the envelope is final (archived, deduped or quarantined)."""
+        """Drop ``name``'s retry ledger once the envelope it BELONGS to is final (archived, deduped or
+        quarantined). The ledger is keyed by file name, and while an envelope of that name is parked in
+        ``retry/`` it is THAT envelope's budget: finalising a same-named TWIN (the proxy dedups a redelivery only
+        against ``incoming/``, so one can arrive while the original is parked) must leave it alone — otherwise
+        every twin would hand the parked payment a fresh budget and the bound would be per DELIVERY, not per
+        payment. The parked envelope's own final pass (it has left ``retry/`` by then) still clears it."""
+        if self._is_parked(name):
+            return
         self._safe_unlink(self._state_path(name))
 
     def _readmit_retries(self, *, recovery_on: bool) -> None:
         """Move every DUE envelope in ``retry/`` back to ``incoming/`` (flag OFF: every one, so turning the flag
-        off strands nothing). A ledger that is unreadable or whose time cannot be compared re-admits NOW — the
-        bound is enforced at the next failure, where an untrusted ledger counts as spent. A remaining wait LONGER
-        than the schedule's cap (a wall clock stepped backwards, or a tampered ``next_at``) is impossible by
-        construction and also re-admits NOW, so no paid webhook can sit parked — healthy, un-alarmed — for longer
-        than one capped delay. A collision with a same-named file already in ``incoming/`` waits a pass (never
-        overwrites a pending webhook)."""
+        off strands nothing). A ledger that is unreadable, a clock that RAISES, or a time that cannot be compared
+        re-admits NOW — the bound is enforced at the next failure, where an untrusted ledger counts as spent (and
+        an envelope the clock cannot stamp is quarantined by its ingest). A remaining wait LONGER than the
+        schedule's cap (a wall clock stepped backwards, or a tampered ``next_at``) is impossible by construction
+        and also re-admits NOW, so no paid webhook can sit parked — healthy, un-alarmed — for longer than one
+        capped delay. A collision with a same-named file already in ``incoming/`` waits a pass (never overwrites
+        a pending webhook)."""
         if not self.retry.is_dir():
             return
         try:
             parked = sorted(self.retry.glob("*.json"))
         except OSError:
             return
-        now = self._now()                                # a bool / NaN / non-number clock fails the window test
-        cap = None                                       # below (or raises into the except) => re-admit NOW
+        now: Any = None
+        try:
+            now = self._now()
+        except Exception:  # noqa: BLE001 — a clock that RAISES proves nothing "not yet due" => re-admit NOW
+            pass
+        # A bool / NaN / non-number ``now`` (the None of a raising clock included) fails the window test below, or
+        # makes ``float(now)`` raise into that test's own except (an int too large for a float raises OverflowError)
+        # — either way the envelope is re-admitted NOW.
+        cap = None
         if recovery_on:
             try:
                 from vigil_integration.live.net_recovery import BoundedBackoff
@@ -321,7 +344,7 @@ class BillingSpoolWatcher:
                     if (isinstance(due_at, (int, float)) and not isinstance(due_at, bool)
                             and 0.0 < float(due_at) - float(now) <= cap):
                         continue                         # not yet due (and a plausible wait) — leave it parked
-                except (OSError, ValueError, KeyError, TypeError):
+                except Exception:  # noqa: BLE001 — ANY fault (OverflowError, RecursionError included) proves nothing
                     pass                                 # untrusted ledger -> re-admit now (bound enforced later)
             dest = self.incoming / f.name
             if dest.exists() or dest.is_symlink():
@@ -343,6 +366,11 @@ class BillingSpoolWatcher:
         quarantine REASON (the bound is spent, or the deferral itself could not be made safely)."""
         from vigil_integration.live.net_recovery import BoundedBackoff
         name = claimed.name
+        # Never clobber a DIFFERENT parked webhook of the same name (quarantine = recoverable). Checked BEFORE the
+        # ledger is read: while an envelope is parked the ledger is ITS budget, not this twin's to be judged by.
+        if self._is_parked(name):
+            return (f"rejected (transient {type(exc).__name__}; a same-named envelope is already awaiting a "
+                    f"NET-2b retry — not overwritten): {exc}")
         attempts = self._read_attempts(name)
         policy = BoundedBackoff()
         if attempts is None:
@@ -352,15 +380,18 @@ class BillingSpoolWatcher:
         if policy.exhausted:
             return (f"rejected (transient {type(exc).__name__} persisted through {attempts} bounded NET-2b "
                     f"retries): {exc}")
-        now = self._now()
-        if isinstance(now, bool) or not isinstance(now, (int, float)) or now != now or now in (float("inf"),
-                                                                                              float("-inf")):
+        # ``_defer`` runs INSIDE drain()'s catch-all handler, so nothing here may raise: a clock that RAISES, or
+        # returns an int too large for a float (``float`` raises OverflowError), quarantines like any other
+        # unreadable clock — it never escapes drain() and leaves the envelope to be re-verified on every pass.
+        try:
+            now = self._now()
+            t = float("nan") if isinstance(now, bool) or not isinstance(now, (int, float)) else float(now)
+        except Exception:  # noqa: BLE001
+            t = float("nan")
+        if t != t or t in (float("inf"), float("-inf")):
             return f"rejected (transient {type(exc).__name__}; clock unreadable — not retried): {exc}"
         parked = self.retry / name
-        if parked.exists() or parked.is_symlink():          # never clobber a DIFFERENT parked webhook of the
-            return (f"rejected (transient {type(exc).__name__}; a same-named envelope is already awaiting a "
-                    f"NET-2b retry — not overwritten): {exc}")          # same name (quarantine = recoverable)
-        state = {"attempts": attempts + 1, "next_at": float(now) + policy.next_delay(),
+        state = {"attempts": attempts + 1, "next_at": t + policy.next_delay(),
                  "last_error": f"{type(exc).__name__}: {exc}"[:500]}
         try:
             self.retry.mkdir(parents=True, exist_ok=True)
