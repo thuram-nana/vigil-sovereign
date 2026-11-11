@@ -1255,6 +1255,8 @@ def cmd_settle_drain(a) -> None:
         r = watcher.drain()
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
+        if "expired_settled" in r:              # E8, only while VIGIL_PAUSED_EXPIRY_SETTLE is on
+            print(f"  expired paused launches: {r['expired_settled']} settled, {r['expired_unsettled']} still held")
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:

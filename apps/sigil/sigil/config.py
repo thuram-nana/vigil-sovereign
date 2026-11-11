@@ -434,6 +434,17 @@ def settle_spine_record_enabled() -> bool:
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def paused_expiry_settle_enabled() -> bool:
+    """E8 — True iff a PAUSED customer launch whose lease window closed (more than the settle grace ago) is
+    settled by the settle-drain (`paused_expiry_settle.py`; a full refund until the metered settle lands), and a
+    customer resume of an EXPIRED paused lease first records the expiry hold that keeps it due
+    (`live/credit_lease_expiry.py`). OFF by default (`VIGIL_PAUSED_EXPIRY_SETTLE` unset / non-affirmative): such a
+    launch stays held exactly as before — it moves money and changes what a customer sees, so the owner turns it
+    on — and `vigil doctor` reports it as a hard issue either way. Set it identically for the cockpit and the
+    settle drain."""
+    return (os.environ.get("VIGIL_PAUSED_EXPIRY_SETTLE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail

@@ -270,6 +270,31 @@ class CompletionSpoolWatcher:
                 self._safe_unlink(f)
 
     def drain(self) -> dict:
+        """One settle pass: :meth:`_drain_completions`, then — only while ``config.paused_expiry_settle_enabled()``
+        (E8, default OFF; off ⇒ byte-identical) — :meth:`_settle_expired_pauses`, whose counts are added as
+        ``expired_settled`` / ``expired_unsettled``. Completions go FIRST, so a run that finished is charged before
+        an expired paused launch of the same lease could be considered."""
+        out = self._drain_completions()
+        from .. import config
+        if config.paused_expiry_settle_enabled():
+            out.update(self._settle_expired_pauses())
+        return out
+
+    def _settle_expired_pauses(self) -> dict:
+        """E8: settle every PAUSED launch in this drain's scope whose lease window closed more than the settle grace
+        ago and that nothing settled (``paused_expiry_settle``), re-checking THIS drain's completion spool inside
+        each settle's critical section. A launch it could not settle is reported on stderr and stays held (``vigil
+        doctor`` keeps reporting it); the next pass retries."""
+        from ..paused_expiry_settle import settle_expired_paused_launches
+        rows = settle_expired_paused_launches(self._gate, now=self._now(), completion_spool=self.spool,
+                                              scope=self.scope)
+        held = [r for r in rows if r["status"] not in ("settled", "already_settled")]
+        for r in held:
+            _sys.stderr.write(f"vigil settle-drain: expired paused launch {r['slug']} not settled: {r['status']}"
+                              f"{' (' + r['error'] + ')' if r.get('error') else ''}\n")
+        return {"expired_settled": sum(1 for r in rows if r["status"] == "settled"), "expired_unsettled": len(held)}
+
+    def _drain_completions(self) -> dict:
         """Process every file in ``incoming/`` once. Returns ``{settled, noop, rejected, deduped}``. Begins with
         a crash-recovery sweep of ``working/`` (finding K) and a per-drain RE-VERIFY of the delegation against
         the current clock (finding B: an expired delegation settles NOTHING and leaves ``incoming/`` untouched

@@ -664,7 +664,9 @@ class LaunchGate:
         cannot make an expired lease runnable: the seam poller, the pickup gate and the arm all refuse the window,
         so a launch that has not started still never starts. ``now`` is a datetime / POSIX timestamp (``None`` ⇒
         the current time); an unreadable ``now`` or lease window refuses and clears nothing (fail-closed),
-        because the reply could not say which of the two cases applies."""
+        because the reply could not say which of the two cases applies. With ``VIGIL_PAUSED_EXPIRY_SETTLE`` on, the
+        expired case first records the launch's expiry hold (:meth:`_clear_expired_pause`), so the settle-drain
+        still settles it once the grace has passed and nothing else did."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
@@ -676,9 +678,13 @@ class LaunchGate:
         except (TypeError, ValueError, OSError, OverflowError, AttributeError):
             return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
         try:
+            from .. import config
             from vigil_integration.live.credit_lease_pause import clear_lease_pause
-            with self._lock:
-                clear_lease_pause(self._seam_base(), s, non)
+            if expired and config.paused_expiry_settle_enabled():
+                self._clear_expired_pause(s, non, now_ts)
+            else:
+                with self._lock:
+                    clear_lease_pause(self._seam_base(), s, non)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
             return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
         out = {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}
@@ -686,3 +692,19 @@ class LaunchGate:
             out["expired"] = True
             out["detail"] = _RESUMED_EXPIRED_DETAIL
         return out
+
+    def _clear_expired_pause(self, s: str, non: str, now_ts: float) -> None:
+        """E8 (``config.paused_expiry_settle_enabled()``): lift the pause of an EXPIRED lease without erasing the
+        evidence that the launch was held when its window closed. If ``(s, non)`` is positively paused, first record
+        its expiry hold (stamped ``now_ts``), then clear the pause — both inside the settle critical section the
+        settle-drain's expiry settle re-checks under, so a resume either lands before that settle (restarting the
+        grace, so a run this resume lets finish settles through its completion) or after it. A failure raises, so
+        the caller lifts nothing (the pause, itself evidence for the settle, stays)."""
+        from ..governor.launch_settlement import settle_lock
+        from vigil_integration.live.credit_lease_expiry import record_expiry_hold
+        from vigil_integration.live.credit_lease_pause import clear_lease_pause, paused_launches
+        base = self._seam_base()
+        with self._lock, settle_lock(self.store):
+            if non in dict(paused_launches(base)).get(s, []):
+                record_expiry_hold(base, s, non, resumed_at=now_ts)
+            clear_lease_pause(base, s, non)
