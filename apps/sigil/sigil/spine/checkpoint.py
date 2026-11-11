@@ -106,23 +106,145 @@ def _read_head_on_disk() -> SignedChainHead | None:
         return None
 
 
+class CheckpointRefused(RuntimeError):
+    """`checkpoint()` refuses to sign: the live window starts above seq 0 (a hard prune dropped [0..K)) but
+    no verifying owner-signed PRUNED head stands to carry the prune boundary forward. Signing a plain head
+    there would anchor the retained window as if it were the whole spine and every snapshot-seeded fold
+    would read the EMPTY seed (kill switch released, wallets 0) — so this fails closed instead."""
+
+
+_REFUSE_HOWTO = ("Restore the spine directory (segments, manifest AND head.json) together from the latest "
+                 "backup taken at or after the prune — `sigil sign` cannot re-create the owner-signed prune "
+                 "boundary, and nothing should be signed until a verifying pruned head stands.")
+
+
+def _head_is_pruned(head: SignedChainHead) -> bool:
+    return head.base_seq > 0 or head.snapshot_seq >= 0
+
+
+def _verify_standing_pruned(store: SpineStore, head: SignedChainHead, entries: list,
+                            *, use_floor: bool) -> tuple[bool, str]:
+    """Does the on-disk PRUNED `head` verify, so its boundary may be carried forward? The owner signature is
+    checked under the current trust root, or — after a `sigil key rotate` (which re-signs right after
+    appending the rotation) — under the owner key the cross-signed succession says was valid at the head's
+    own `last_seq` (the same "key valid at that seq" rule every grant fold uses). `use_floor=False` is the
+    `sigil floor reset` path: the floor is being deliberately re-seeded, so a stale-floor rejection must not
+    block re-anchoring a legitimately restored post-prune spine — the signature and window shape still must
+    hold. The snapshot record the head names must sit in its signed window and match its boundary."""
+    if not (head.base_seq <= head.snapshot_seq <= head.last_seq):
+        return False, f"snapshot seq {head.snapshot_seq} is outside the signed window"
+    rec = store.get(head.snapshot_seq)
+    if rec is None or rec.kind != "snapshot" or not isinstance(rec.payload, dict) \
+            or rec.payload.get("base_seq") != head.base_seq:
+        return False, f"snapshot record {head.snapshot_seq} is absent or does not match the head's boundary"
+    try:
+        floor = load_floor() if use_floor else None
+    except Exception as e:  # noqa: BLE001 — a present-but-corrupt floor never certifies a carry-forward
+        return False, f"durable floor unreadable: {e}"
+    try:
+        tr = trust_root(store)
+        ok, why = classify_head(head, entries, tr, floor=floor)
+        if ok:
+            return ok, why
+        from ..governor import key_history as _kh
+        current = tr.authorizers[0].public_key_b64 if tr.authorizers else None
+        at = _kh.key_resolver(store, current=current).at(head.last_seq)
+        if at and at != current:
+            tr_at = TrustRoot(threshold=1, authorizers=[
+                AuthorizerKey(key_id=OWNER_KEY_ID, name="owner", public_key_b64=at)])
+            return classify_head(head, entries, tr_at, floor=floor)
+        return ok, why
+    except Exception as e:  # noqa: BLE001 — malformed signature/key material never certifies (as verify_checkpoint)
+        return False, f"head signature/key material is malformed: {e}"
+
+
+def standing_pruned_head(store: SpineStore, *, use_floor: bool = True,
+                         entries: list | None = None) -> SignedChainHead | None:
+    """The verifying owner-signed PRUNED head whose boundary every new head must carry forward, or None for
+    a spine that holds its full history from genesis. RAISES `CheckpointRefused` when the live window starts
+    above seq 0 but no verifying pruned head stands (head.json missing / unparseable / a plain head / a
+    pruned head that does not verify). A non-verifying pruned head over a spine that still starts at seq 0
+    (e.g. a pre-prune backup restored) returns None: that spine is complete from genesis, so a plain head
+    over it loses nothing — exactly today's behaviour. Callers that mutate the spine before re-signing (key
+    rotation) call this FIRST, so a refusal leaves the spine untouched."""
+    first = store.first_live_seq()
+    disk = _read_head_on_disk()
+    if disk is not None and _head_is_pruned(disk):
+        ok, why = _verify_standing_pruned(store, disk, store.entries() if entries is None else entries,
+                                          use_floor=use_floor)
+        if ok:
+            return disk
+        if first is not None and first > 0:
+            raise CheckpointRefused(f"refusing to sign: the live spine starts at seq {first} (records below it "
+                                    f"were pruned) and the standing pruned head does not verify ({why}). "
+                                    f"{_REFUSE_HOWTO}")
+        return None
+    if first is not None and first > 0:
+        state = "no signed head is present" if disk is None and not HEAD_PATH.exists() else (
+            "head.json is unreadable" if disk is None else "the signed head declares no prune")
+        raise CheckpointRefused(f"refusing to sign: the live spine starts at seq {first} (records below it were "
+                                f"pruned) but {state}. {_REFUSE_HOWTO}")
+    return None
+
+
+def _sign_v2_head(priv: str, live: list, *, base_seq: int, base_prev_hash: str, cumulative_merkle_root: str,
+                  snapshot_seq: int, prev_head_hash: str) -> SignedChainHead:
+    """Owner-sign a v2 (pruned) head over the retained live window `live` (records with seq >= base_seq)."""
+    from vigil_core.chain import _head_payload     # defined in vigil_core (the reuse.* shims are runtime-only)
+
+    from ..reuse import Signature, evidence_signing_bytes, sign
+    head = SignedChainHead(
+        schema_version=2, engagement_slug=SCOPE, last_seq=live[-1].seq,
+        entry_count=base_seq + len(live), head_hash=live[-1].entry_hash,
+        base_seq=base_seq, base_prev_hash=base_prev_hash, base_count=base_seq,
+        cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
+        prev_head_hash=prev_head_hash)
+    msg = evidence_signing_bytes(_head_payload(head))
+    return head.model_copy(update={"signatures": [Signature(key_id=OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
+
+
 def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> SignedChainHead:
     """Sign the spine head + advance the durable anti-rollback floor as one critical section under a single
     `floor_lock` (best-effort on non-POSIX / an unwritable home — see floor_lock), so two racing
     checkpoint() callers do not leave head.json and floor.json inconsistent, and neither the head nor the
     floor is rolled BACKWARDS by a stale concurrent signer. `force=True` (the `sigil floor reset` path)
     re-anchors a deliberately SHORTER spine — it skips the monotonic head guard; the caller then
-    force-lowers the floor."""
+    force-lowers the floor.
+
+    PRUNE-AWARE: after a hard prune the new head RE-SIGNS the standing owner-signed prune boundary
+    (base_seq, base_prev_hash, cumulative Merkle root, snapshot seq) over the grown live window, so every
+    snapshot-seeded fold keeps its seed. When the live window starts above seq 0 but no verifying pruned head
+    stands, it RAISES `CheckpointRefused` and writes nothing (see `standing_pruned_head`). A spine that was
+    never pruned signs exactly as before (a v1 head over every record)."""
     store = store or SpineStore()
     priv, pub = _owner_keys()
     owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)   # G2: sign the durable floor too
-    head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
+    entries = store.entries()
+    seen = _read_head_on_disk()                             # the head our decision is based on (race guard)
+    standing = standing_pruned_head(store, use_floor=not force, entries=entries)
+    if standing is None:
+        head = sign_head(entries, engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
     with floor_lock():                                      # serialize head+floor commit across all callers
+        if standing is not None:
+            # meta-chain parent = the floor's recorded head, read UNDER the lock (as advance_floor re-reads it)
+            try:
+                prior_floor = load_floor()
+            except Exception:  # noqa: BLE001 — a corrupt floor: sign unlinked; verify then fails closed on it
+                prior_floor = None
+            live = [e for e in entries if e.seq >= standing.base_seq]
+            head = _sign_v2_head(priv, live, base_seq=standing.base_seq, base_prev_hash=standing.base_prev_hash,
+                                 cumulative_merkle_root=standing.cumulative_merkle_root,
+                                 snapshot_seq=standing.snapshot_seq,
+                                 prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
+        disk = _read_head_on_disk()
+        if disk is not None and disk != seen and disk.base_seq > head.base_seq:
+            # A prune committed after we read the spine: never overwrite its pruned head with a head that
+            # does not carry the boundary (that is exactly the empty-seed fail-open). The newer head stands.
+            return disk
         if not force:
             # MONOTONIC HEAD GUARD: never roll head.json back to a shorter head — a concurrent checkpoint()
             # that already committed a LONGER head (and advanced the floor to it) would otherwise be undone
             # on disk, and the (higher) floor would then spurious-TAMPER the shorter head we wrote.
-            disk = _read_head_on_disk()
             if disk is not None and disk.entry_count > head.entry_count:
                 return disk                                 # our sign is stale; the newer head stands
         _atomic_write_text(HEAD_PATH, head.model_dump_json())   # FIX 3: never leave a torn head on a crash
@@ -156,9 +278,6 @@ def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
     set to the durable floor's recorded head hash so `advance_floor`'s v2 meta-chain guard accepts this head
     as the parent's child. Raises if the retained window does not actually start at base_seq/base_prev_hash
     (a caller bug — never silently sign a mismatched anchor), or if a LONGER head already stands (rollback)."""
-    from vigil_core.chain import _head_payload     # defined in vigil_core (the reuse.* shims are runtime-only)
-
-    from ..reuse import Signature, evidence_signing_bytes, sign
     priv, pub = _owner_keys()
     owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)
     live = [e for e in store.entries() if e.seq >= base_seq]
@@ -167,14 +286,9 @@ def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
             f"pruned head anchor mismatch: retained window must start at seq {base_seq} linking from "
             f"{base_prev_hash[:12]}… (got {'<empty>' if not live else f'{live[0].seq}/{live[0].prev_hash[:12]}…'})")
     prior_floor = load_floor()
-    head = SignedChainHead(
-        schema_version=2, engagement_slug=SCOPE, last_seq=live[-1].seq,
-        entry_count=base_seq + len(live), head_hash=live[-1].entry_hash,
-        base_seq=base_seq, base_prev_hash=base_prev_hash, base_count=base_seq,
-        cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
-        prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
-    msg = evidence_signing_bytes(_head_payload(head))
-    head = head.model_copy(update={"signatures": [Signature(key_id=OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
+    head = _sign_v2_head(priv, live, base_seq=base_seq, base_prev_hash=base_prev_hash,
+                         cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
+                         prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
     with floor_lock():                                     # head + floor commit as one critical section
         disk = _read_head_on_disk()
         if disk is not None and disk.entry_count > head.entry_count:

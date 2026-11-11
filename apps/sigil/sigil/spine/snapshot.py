@@ -429,9 +429,35 @@ class SnapshotState(BaseModel):
         if not isinstance(folded, dict):
             raise SnapshotError(f"snapshot record {snapshot_seq} carries no folded_state")
         st = cls.from_folded(folded)                        # W5-3: refuse a snapshot newer than we understand
-        if st.base_seq != base_seq or st.snapshot_seq != snapshot_seq:
+        # The prune computes the folded state BEFORE it appends the snapshot record, so it cannot know the
+        # record's own seq and persists `snapshot_seq=-1` (`prune.snapshot_payload`); the SIGNED head is what
+        # names that seq. So the persisted value is accepted only as -1 (the prune's placeholder) or the
+        # head's seq, and the returned state carries the head's seq. The boundary itself must agree EXACTLY
+        # (the record's own payload base_seq and its folded base_seq) — a snapshot folded for a different
+        # prefix is never a seed for this window. The record is authentic because the verified head anchors
+        # the live window it sits in (`_verified_prune_boundary` bounds base_seq <= snapshot_seq <= last_seq).
+        if (st.base_seq != base_seq or rec.payload.get("base_seq") != base_seq
+                or st.snapshot_seq not in (-1, snapshot_seq)):
             raise SnapshotError(f"snapshot record {snapshot_seq} base/seq disagree with the signed head")
-        return st
+        return st if st.snapshot_seq == snapshot_seq else st.model_copy(update={"snapshot_seq": snapshot_seq})
+
+
+def seed_anchor_ok(store, snap: "SnapshotState", trusted_pubkey: Optional[str]) -> bool:
+    """May a fold that trusts `trusted_pubkey` start from `snap`'s folded rows? True when the snapshot was folded
+    under that same anchor. After a hard prune it is ALSO true when the owner key has since ROTATED: the
+    cross-signed succession walked from the pinned genesis to `trusted_pubkey` says the snapshot's anchor was
+    the owner key valid at the snapshot's own seq — the same "key valid at that seq" rule every grant fold
+    applies. Without this, the first `sigil key rotate` after a prune made every registry bypass its seed and
+    fold only the retained window (the pruned kill-switch latch, balances and grants silently gone). Any
+    other mismatch keeps the existing bypass (fold from the start of the live window under the reader's own
+    anchor). For a never-pruned spine a mismatch changes nothing (the bypass already re-scans from genesis),
+    so this never consults the key history there."""
+    if trusted_pubkey == snap.trusted_pubkey:
+        return True
+    if snap.snapshot_seq < 0 or not trusted_pubkey or not snap.trusted_pubkey:
+        return False
+    from ..governor import key_history as _kh
+    return _kh.key_resolver(store, current=trusted_pubkey).at(snap.snapshot_seq) == snap.trusted_pubkey
 
 
 class SnapshotError(Exception):
@@ -450,6 +476,7 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
     or a parsed no-prune head; a PRESENT-but-unparseable head also fails closed (never masquerades as
     no-prune, which would scan a truncated post-prune window with empty seeds)."""
     if not HEAD_PATH.exists():
+        _refuse_unanchored_pruned_window(store, "no signed head is present")
         return 0, -1                                        # genuinely no head -> genesis, nothing pruned
     try:
         head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
@@ -457,6 +484,7 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
         raise SnapshotError(f"head present but unparseable — refusing to treat as no-prune (would scan a "
                             f"truncated window with empty seeds): {e}") from e
     if head.snapshot_seq < 0:
+        _refuse_unanchored_pruned_window(store, "the signed head declares no prune")
         return 0, -1                                        # parsed, no prune declared -> empty identity
     # A prune IS declared: the boundary is only trustworthy under the owner signature. Reuse the full
     # verifier (owner Ed25519 over head_hash+base_seq+snapshot_seq, monotonic floor). Fail closed on any
@@ -465,7 +493,27 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
     ok, msg = verify_checkpoint(store)
     if not ok:
         raise SnapshotError(f"pruned head does not verify ({msg}) — refusing to trust its snapshot boundary")
+    if not (head.base_seq <= head.snapshot_seq <= head.last_seq):
+        # the snapshot record must sit inside the window the owner signature anchors, or nothing vouches for
+        # its bytes (a record appended after the head is not covered by the head's hash chain).
+        raise SnapshotError(f"pruned head names snapshot seq {head.snapshot_seq} outside its signed window "
+                            f"[{head.base_seq}..{head.last_seq}] — refusing to trust it")
     return head.base_seq, head.snapshot_seq
+
+
+def _refuse_unanchored_pruned_window(store, why: str) -> None:
+    """Fail CLOSED when the live window starts ABOVE seq 0 (records below it were pruned) but no verifying
+    pruned head stands — `why` says which. Returning the empty seed there would silently drop every pruned
+    grant, balance and latch (a kill switch would read released, wallets 0, no error). O(1): one line of the
+    first live segment (`SpineStore.first_live_seq`), so the never-pruned read path stays cheap."""
+    first_live = getattr(store, "first_live_seq", None)
+    first = first_live() if first_live is not None else None
+    if first is not None and first > 0:
+        raise SnapshotError(
+            f"the live spine starts at seq {first} (records [0..{first}) were pruned) but {why} — refusing "
+            f"to read the pruned window with empty seeds. Restore the spine directory (segments, manifest AND "
+            f"head.json) together from the latest backup taken at or after the prune; do NOT run `sigil sign`, "
+            f"which cannot re-create the owner-signed prune boundary.")
 
 
 # ======================================================================================================

@@ -38,7 +38,7 @@ from ..governor import key_history as _kh
 from ..governor.authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from ..governor.identity import owner_pubkey
 from ..reuse import sha256_hex, sign
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_anchor_ok
 from ..spine.store import SpineStore
 
 CAP_SIGNAL = "mesh.host_capability"
@@ -86,7 +86,7 @@ def capability_map(store: SpineStore, trusted_pubkey: Optional[str] = None) -> d
     # base_seq==0 => since_seq=-1 (a full genesis scan) + empty seed => BYTE-IDENTICAL to the old scan.
     # Pubkey-dependent fold: if the caller's trust anchor != the one the snapshot was folded under, the
     # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
-    if tp == st.trusted_pubkey:
+    if seed_anchor_ok(store, st, tp):
         latest, since = dict(st.capability_map), st.base_seq - 1
         # PER-HOST_ID advertisement high-water, seeded from the SAME snapshot under the SAME pubkey
         # condition — otherwise the first hard prune would reset it and make every pruned advertisement
@@ -142,7 +142,7 @@ def authorized_devices(store: SpineStore, trusted_pubkey: Optional[str] = None) 
     # (Slice C): base_seq==0 => since_seq=-1 (a full genesis scan) + empty seed => BYTE-IDENTICAL to the old
     # scan. Pubkey-dependent fold: if the caller's trust anchor != the one the snapshot was folded under, the
     # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
-    if tp == st.trusted_pubkey:
+    if seed_anchor_ok(store, st, tp):
         state, since = dict(st.mesh_dev_state), st.base_seq - 1   # COPY the cached sub-state; never mutate it
         # PER-DEVICE-PUBKEY authorization high-water, seeded from the SAME snapshot under the SAME pubkey
         # condition — otherwise the first hard prune would reset it and make every pruned authorization

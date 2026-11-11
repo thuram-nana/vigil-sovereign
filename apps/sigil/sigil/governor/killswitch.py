@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.fold_cache import FoldCache
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_anchor_ok
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
@@ -135,7 +135,7 @@ class KillSwitch:
     def _seed(self, st) -> "tuple[_Latch, int]":
         """(latch, since): the latch seeded from the folded snapshot prefix, or the genesis start when the trusted
         anchor differs from the snapshot's (see `_scan_engaged`)."""
-        if self.trusted_pubkey != st.trusted_pubkey:
+        if not seed_anchor_ok(self.store, st, self.trusted_pubkey):
             return _Latch(False, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
         return _Latch(st.killswitch_engaged,      # seed from the folded prefix (scalar bool; no mutation)
                       NO_HIGHWATER if st.killswitch_issued_hw is None    # None ⇒ no release honored in the

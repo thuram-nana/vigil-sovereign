@@ -43,7 +43,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.snapshot import SnapshotState, seed_anchor_ok  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 from .ledger_view import PairedLedgerView  # noqa: E402
@@ -229,7 +229,7 @@ class CostEnvelopeLedger:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((reserved, settled, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_anchor_ok(self.store, snap, self.trusted_pubkey):
             # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
             # mirroring wallet._fold. Unreachable with a real prune today (SnapshotState.load fails closed on any
             # real prune), so this branch is only taken under the empty snapshot, where genesis-scan == the fold.
@@ -274,7 +274,7 @@ class CostEnvelopeLedger:
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}     # in-flight suffix -> reserved tokens (first-mint-wins, idempotent)
         settled: set[str] = set()         # suffixes whose settle record has landed
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_anchor_ok(self.store, snap, self.trusted_pubkey):
             seen: set = set()             # anchor mismatch (rotated/empty key) => genesis scan, mirror _fold
             since = -1
         else:
@@ -400,7 +400,7 @@ class CostEnvelopeLedger:
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[tuple[str, str], int] = {}   # (org_id, suffix) -> reserved tokens of an in-flight reserve
         settled_suffixes: set[tuple[str, str]] = set()   # (org_id, suffix) whose settle record has landed
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_anchor_ok(self.store, snap, self.trusted_pubkey):
             # Anchor mismatch (rotated/empty key) ⇒ bypass the snapshot and genesis-scan, mirroring _fold/_in_flight.
             committed = 0
             seen: set = set()

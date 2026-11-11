@@ -12,7 +12,7 @@ from .ingest.docs import ingest_docs
 from .ingest.transcript import ingest_transcript
 from .mesh import authorize_device, authorized_devices, revoke_device
 from .reuse import sha256_hex
-from .spine.checkpoint import checkpoint, verify_checkpoint
+from .spine.checkpoint import CheckpointRefused, checkpoint, standing_pruned_head, verify_checkpoint
 from .spine.store import SpineStore
 from .vectors.index import VectorIndex
 
@@ -275,6 +275,7 @@ def cmd_warden_anchor_set(a) -> None:
         print("REJECTED: warden-anchor-set signature invalid (only the WARDEN key may anchor)", file=sys.stderr)
         sys.exit(2)
     store = SpineStore()
+    standing_pruned_head(store)   # refuse BEFORE appending if the head could not be re-signed (pruned spine)
     store.append(kind="warden_checkpoint", source="warden", actor="warden",
                  payload={"count": int(a.count), "head_hash": a.head_hash, "pubkey": a.pubkey})
     checkpoint(store)  # re-sign the spine head so the anchor sits under the spine's signature (anti-truncation)
@@ -1679,6 +1680,7 @@ def cmd_key(a) -> None:
                   "and re-anchors the head. Pre-rotation heads/grants keep verifying. Re-run with --yes.",
                   file=sys.stderr)
             sys.exit(2)
+        standing_pruned_head(store)   # refuse BEFORE rotating if the head could not be re-signed after it
         try:
             new_kp, seq = kh.rotate(store, issued_at=time.time())
         except (ValueError, kh.SuccessionError) as e:
@@ -1697,6 +1699,14 @@ def cmd_key(a) -> None:
                   "verifiable continuity of ALL pre-re-genesis history (every prior head, grant and "
                   "succession record stops being authenticated by the new root). Use ONLY for an actual key "
                   "COMPROMISE. Re-run with --yes --i-understand-continuity-is-abandoned.", file=sys.stderr)
+            sys.exit(2)
+        first = store.first_live_seq()
+        if first is not None and first > 0:
+            # the standing prune boundary is owner-signed under the key history re-genesis abandons, so the new
+            # root could not re-sign it: refuse before minting anything (fail closed, the spine is untouched).
+            print(f"refusing: this spine was hard-pruned (the live window starts at seq {first}); `sigil key "
+                  f"re-genesis` cannot carry the owner-signed prune boundary to a new root and is not supported "
+                  f"on a pruned spine. Nothing was changed.", file=sys.stderr)
             sys.exit(2)
         new_kp, seq = kh.re_genesis(store, issued_at=time.time())
         checkpoint(store)
@@ -3001,7 +3011,11 @@ def main(argv=None) -> None:
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
     _assert_store_operable_or_exit(a.cmd)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except CheckpointRefused as e:          # a pruned spine with no verifying pruned head: never sign over it
+        print(f"!! {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 # Commands that DIAGNOSE or FIX a degraded store must run even when a migration is needed — otherwise the

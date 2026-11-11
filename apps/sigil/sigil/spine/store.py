@@ -1593,6 +1593,43 @@ class SpineStore:
     def count(self) -> int:
         return sum(1 for _ in self.iter_records())
 
+    def first_live_seq(self) -> "int | None":
+        """The seq of the FIRST record in the live window (0 for a never-pruned spine, the prune boundary K
+        after a hard prune), or None for an empty spine. O(1) and never decompresses: a plaintext first
+        segment (or a legacy single-file spine) has its first line read — the REAL first record; a gzip-sealed
+        first segment answers from the manifest's `first_seq` (the same unsigned-but-cross-checked linkage
+        metadata the reader trusts for layout; `verify()` re-checks it against the chain). This feeds the
+        fail-closed "pruned window with no verifying pruned head" checks on the read path
+        (`SnapshotState.load`) and the sign path (`checkpoint`), so it must never scan the chain."""
+        m = read_manifest(self._layout)
+        if m is None:
+            p = self._read_target()
+            first = self._first_seq_of_plain(p) if p.exists() else None
+            return first
+        segs = m.ordered()
+        if not segs:
+            return None
+        seg = segs[0]
+        if seg.codec == "none":
+            first = self._first_seq_of_plain(self._layout.seg_path(seg))
+            if first is not None:
+                return first
+        return seg.first_seq if (seg.codec != "none" or seg.first_seq > 0) else None
+
+    @staticmethod
+    def _first_seq_of_plain(p: Path) -> "int | None":
+        try:
+            with open(p, encoding="utf-8") as f:
+                for raw in f:
+                    if raw.strip():
+                        try:
+                            return int(json.loads(raw)["seq"])
+                        except (ValueError, KeyError, TypeError):
+                            continue                 # a torn line: same tolerance as iter_records
+        except FileNotFoundError:
+            return None
+        return None
+
     # --- integrity ----------------------------------------------------------------
     def entries(self) -> list[ChainEntry]:
         return [
