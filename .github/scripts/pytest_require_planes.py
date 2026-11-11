@@ -22,7 +22,7 @@ What it catches:
     only the reason text). Module level → a collection error; inside a test or fixture → a failure.
     The failure message names the plane, so even if an ``xfail`` mark reclassifies the failure as a green
     ``xfailed``, the reason pass below still sees it and fails the run.
-  * ANY other skip whose reason names a required plane — the canonical import errors
+  * ANY other skip (not an xfail) whose reason names a required plane — the canonical import errors
     (``could not import '<plane>…'``, ``No module named '<plane>…'``) and, for the unambiguous plane
     identifiers (``vigil_gateway``, ``vigil_integration``, ``vigil_core``, ``strix`` …), any mention of
     the identifier; for ``framework``, which is also an English word, only the dotted module form
@@ -49,6 +49,8 @@ import pytest
 ENV = "VIGIL_REQUIRE_PLANES"
 
 _ORIGINAL_IMPORTORSKIP = pytest.importorskip
+# Every failure the wrapper raises carries this, so it can be told apart from any other failure.
+_MARKER = "would SKIP, but this leg requires"
 
 
 def required_planes(environ=None) -> frozenset[str]:
@@ -93,7 +95,7 @@ def _make_importorskip(planes: frozenset[str]):
         except pytest.skip.Exception as skipped:
             plane = str(modname).split(".", 1)[0]
             detail = _real_import_error(str(modname), str(skipped))
-            msg = (f"importorskip({modname!r}) would SKIP, but this leg requires the {plane!r} plane "
+            msg = (f"importorskip({modname!r}) {_MARKER} the {plane!r} plane "
                    f"({ENV}) — a required plane that cannot be imported is a failure here, not a skip. "
                    f"Underlying error: {detail} (skip reason: {skipped})")
             pytest.fail(msg, pytrace=False)
@@ -109,6 +111,13 @@ class _RequirePlanes:
 
     def _note(self, report) -> None:
         if not report.skipped or self.pattern is None:
+            return
+        if hasattr(report, "wasxfail"):
+            # An xfailed test is reported as skipped, with the whole failure traceback as its "reason". Only a
+            # failure the wrapper itself raised counts: a deliberate strict-xfail placeholder whose traceback
+            # merely MENTIONS a plane (`from framework.v2.<not built yet> import …`) is not a missing plane.
+            if _MARKER in str(report.longrepr):
+                self.offenders.append((report.nodeid, f"xfail swallowed: {_MARKER} (see the test's traceback)"))
             return
         longrepr = report.longrepr
         reason = longrepr[2] if isinstance(longrepr, tuple) and len(longrepr) == 3 else str(longrepr)

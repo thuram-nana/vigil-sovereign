@@ -178,3 +178,17 @@ def test_an_english_word_plane_matches_only_its_module_forms(tmp_path):
     assert rc == 1, out
     assert "test_dotted" in out.split("skipped for a REQUIRED plane", 1)[1]
     assert "test_english" not in out.split("skipped for a REQUIRED plane", 1)[1]
+
+
+def test_a_deliberate_strict_xfail_that_mentions_a_plane_is_not_flagged(tmp_path):
+    """A strict-xfail placeholder for an unbuilt harness fails on `from <plane>.<missing> import …`: that is an
+    expected failure, not a missing plane, even though its traceback names the plane."""
+    body = f"""
+        import pytest
+        @pytest.mark.xfail(strict=True, reason="harness not built yet")
+        def test_placeholder():
+            from {_PLANE}.not_built_yet import harness  # noqa: F401
+    """
+    rc, out = _run(tmp_path, body, require=_PLANE)
+    assert rc == 0, out
+    assert "1 xfailed" in out and "skipped for a REQUIRED plane" not in out
