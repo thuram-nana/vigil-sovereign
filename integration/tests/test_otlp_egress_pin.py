@@ -101,6 +101,13 @@ def test_every_accepted_endpoint_is_loopback_under_urllib3_too(ep):
     ("http://127.0.0.1:4318&token=SECRET", "http://***"),
     ("http://127.0.0.1:4318;token=SECRET/v1/traces", "http://***/…"),
     ("http://127.0.0.1:SECRET", "http://***"),
+    # ...and each character class of that shape is pinned on its own: the host run admits no `& ; =`, the port is
+    # digits only (and not merely at most 5 characters), the IPv6 literal is hex digits, `:` and `.` only.
+    ("http://127.0.0.1&token=SECRET", "http://***"),
+    ("http://127.0.0.1;k=SECRET/v1/traces", "http://***/…"),
+    ("http://127.0.0.1:TOKEN", "http://***"),
+    ("http://localhost:KEY99/v1/traces", "http://***/…"),
+    ("http://[SECRET]:4318", "http://***"),
 ])
 def test_redaction_keeps_only_scheme_host_port(raw, shown):
     assert redact_endpoint(raw) == shown
@@ -159,6 +166,20 @@ def test_redaction_never_echoes_any_run_of_the_path_query_fragment_or_userinfo()
 def test_redaction_neutralises_line_forging():
     shown = redact_endpoint("http://a\n  OK vault: ACTIVE\x1b[0m")
     assert "\n" not in shown and "\x1b" not in shown
+
+
+def test_a_probe_failure_is_named_by_its_kind_never_by_its_message():
+    """The preflight's detail used to append ``str(exc)`` — for ``BadStatusLine`` the first line the PEER sent,
+    which a listener that reflects the request line fills with the endpoint's path."""
+    import errno
+    import http.client
+    import ssl
+    assert oe._failure_kind(http.client.BadStatusLine("POST /ingest/SECRET/v1/traces HTTP/1.1\r\n")) == "BadStatusLine"
+    assert oe._failure_kind(ConnectionRefusedError(errno.ECONNREFUSED, "refused")) == \
+        "ConnectionRefusedError (ECONNREFUSED)"
+    assert oe._failure_kind(OSError(errno.EHOSTUNREACH, "SECRET")) == "OSError (EHOSTUNREACH)"
+    assert oe._failure_kind(ssl.SSLError(1, "SECRET")) == "SSLError"     # an OpenSSL code: not a POSIX errno
+    assert oe._failure_kind(TimeoutError("SECRET")) == "TimeoutError"
 
 
 def test_probe_refusal_detail_never_echoes_credentials():
@@ -291,3 +312,113 @@ def test_sink_log_lines_never_echo_query_secrets(caplog):
     with caplog.at_level(logging.WARNING):
         sink(new_span("op", spine_hash="h", seq=1))  # latches → logs the endpoint
     assert caplog.records and not any("SECRET" in r.getMessage() for r in caplog.records)   # ...but never logged
+
+
+# --- the exporter stack's OWN log lines (red-pen secret-leak fold) ----------------------------------------------
+# Every line VIGIL writes shows the endpoint redacted, but the real exporter — and urllib3 under it — log export
+# failures with text they build from the RAW url (``Max retries exceeded with url: /v1/traces?api_key=…``,
+# ``Failed to parse: '127.0.0.1:4318&token=…' is not a valid host or port``, the DEBUG request line). With no
+# logging configured, ``logging.lastResort`` prints WARNING and above to stderr. The sink now scrubs those loggers
+# before it builds the exporter. These lines are the pinned library's own format strings; the half that runs the
+# real library is in test_live_otel_export.py (the leg that installs the OTel lock).
+
+def _library_lines(ep):
+    """(logger, format, args) as the pinned exporter stack logs a failed / retried / sent export of ``ep``."""
+    url = oe._traces_url(ep)
+    try:
+        import requests                                    # requests re-quotes the url: what the library prints
+        url = requests.Request("POST", url).prepare().url
+    except Exception:  # noqa: BLE001 — unpreparable (it fails client-side): the library prints the raw text
+        pass
+    sp = urlsplit(url)
+    target = sp.path + (f"?{sp.query}" if sp.query else "")
+    exp = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+    return [
+        (exp, "Transient error %s encountered while exporting %s batch, retrying in %.2fs.",
+         (ConnectionError(f"HTTPConnectionPool(host='127.0.0.1', port=4318): Max retries exceeded with url: {target} "
+                          f"(Caused by NewConnectionError('Connection refused'))"), "spans", 1.0)),
+        (exp, "Failed to export %s batch code: %s, reason: %s",
+         ("spans", None, ValueError(f"Failed to parse: '{sp.netloc}' is not a valid host or port"))),
+        ("opentelemetry.exporter.otlp.common.http", "Failed to export %s batch code: %s, reason: %s",
+         ("spans", 400, f"Invalid URL {url!r}")),
+        ("urllib3.connectionpool", '%s://%s:%s "%s %s %s" %s %s',
+         ("http", "127.0.0.1", 4318, "POST", target, "HTTP/1.1", 200, 0)),
+        ("urllib3.connection", "Failed to parse headers (url=%s): %s", (url, "[MissingHeaderBodySeparatorDefect()]")),
+        ("urllib3.util.retry", "Incremented Retry for (url='%s'): %r", (target, "Retry(total=0)")),
+    ]
+
+
+@pytest.fixture()
+def fresh_scrub(monkeypatch):
+    """The scrub registers every endpoint a real exporter is built for; give each test only its own."""
+    monkeypatch.setattr(oe._LOG_SCRUB, "_state", (None, {}))
+    _fake_exporter_module(monkeypatch, {})
+
+
+@pytest.mark.parametrize("ep", [
+    "http://127.0.0.1:4318/v1/traces?api_key=SECRET",
+    "http://127.0.0.1:4318/tenant/SECRET/v1/traces",
+    "http://127.0.0.1:4318/v1/traces;token=SECRET",
+    "http://localhost:4318?api_key=SECRET",
+    "http://127.0.0.1:4318/v1/traces?api_key=%53ECRET",     # requests decodes %53 -> S: the WIRE text is "SECRET"
+    "http://127.0.0.1:4318/v1/traces?api_key=SECRET#SECRET",  # the request target drops the fragment, a url keeps it
+    "http://127.0.0.1:4318&token=SECRET",                    # the pin accepts it; the library cannot parse it
+    "http://127.0.0.1:4318;token=SECRET",
+])
+def test_the_exporter_stacks_own_log_lines_never_carry_the_endpoint(fresh_scrub, caplog, ep):
+    assert endpoint_is_loopback(ep) is True                  # a legal endpoint: the real exporter IS built for it
+    OTLPSink(ep)
+    lines = _library_lines(ep)
+    with caplog.at_level(logging.DEBUG):
+        for name, fmt, args in lines:
+            logging.getLogger(name).warning(fmt, *args)
+    assert [r.name for r in caplog.records] == [name for name, _f, _a in lines]   # every line still logged
+    assert not any("SECRET" in line for line in _logged(caplog)) and "SECRET" not in caplog.text
+    assert any("/…" in r.getMessage() or "***" in r.getMessage() for r in caplog.records)
+
+
+def test_the_scrub_leaves_every_other_log_line_alone(fresh_scrub, caplog):
+    for ep in ("http://127.0.0.1:4318/v1/traces?api_key=SECRET", "http://127.0.0.1:4318?", "http://127.0.0.1:4318/#",
+               LOOPBACK):
+        OTLPSink(ep)                                         # a bare "/", "?" or "#" registers nothing to replace
+    args = ("https", "api.flutterwave.com", 443, "GET", "/v3/transactions/9911/verify?x=1#y", "HTTP/1.1", 200, 17)
+    with caplog.at_level(logging.DEBUG, logger="urllib3.connectionpool"):
+        logging.getLogger("urllib3.connectionpool").debug('%s://%s:%s "%s %s %s" %s %s', *args)
+    (rec,) = caplog.records
+    assert rec.args == args                                  # untouched: not even re-formatted
+    assert rec.getMessage() == ('https://api.flutterwave.com:443 "GET /v3/transactions/9911/verify?x=1#y HTTP/1.1" '
+                                '200 17')
+
+
+def test_a_traceback_on_an_exporter_line_is_scrubbed_too(fresh_scrub, caplog):
+    OTLPSink("http://127.0.0.1:4318/v1/traces?api_key=SECRET")
+    with caplog.at_level(logging.WARNING):
+        try:
+            raise ConnectionError("Max retries exceeded with url: /v1/traces?api_key=SECRET")
+        except ConnectionError:
+            logging.getLogger("urllib3.connection").warning("Failed to parse headers (url=%s): %s",
+                                                            "http://127.0.0.1:4318/…", "defects", exc_info=True)
+    assert "ConnectionError: Max retries exceeded with url: /…" in caplog.text and "SECRET" not in caplog.text
+
+
+def test_an_exporter_line_that_cannot_be_checked_is_withheld_not_printed(fresh_scrub, caplog):
+    """A record whose message cannot even be formatted would reach logging's error path, which prints its raw args
+    (the url) to stderr. Fail-closed: it is replaced by a fixed line."""
+    OTLPSink(LOOPBACK)
+    one_arg_short = "Transient error %s %s"
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger(oe._EXPORTER_LOGGERS[0]).warning(one_arg_short,
+                                                           "http://127.0.0.1:4318/v1/traces?api_key=SECRET")
+    (rec,) = caplog.records
+    assert rec.getMessage() == oe._WITHHELD and rec.args is None
+
+
+def test_no_log_scrub_means_no_exporter(monkeypatch):
+    captured: dict = {}
+    _fake_exporter_module(monkeypatch, captured)
+
+    def boom(endpoint):
+        raise RuntimeError("cannot attach the scrub")
+    monkeypatch.setattr(oe, "_scrub_exporter_logs", boom)
+    sink = OTLPSink(LOOPBACK)
+    assert sink.armed is False and captured == {}            # fail closed: an unscrubbed exporter is never built
