@@ -272,3 +272,85 @@ def test_a_derived_spool_is_still_refused_when_it_is_not_an_absolute_expanded_pa
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", "%h/.sigil/billing-spool")
     code, text = _run(["billing-drain"], capsys)
     assert code == 2 and "--spool must be an ABSOLUTE" in text
+
+
+def test_a_drain_that_cannot_see_the_moved_sigil_home_refuses_instead_of_draining_an_empty_spool(tmp_path):
+    """The operator moved SIGIL_HOME for the cockpit and the proxy (GO-LIVE §2) but not into the drain's env file.
+    With no spool named the drain then derives ~/.sigil/billing-spool — a directory the proxy never writes to — and
+    used to exit 0 on it forever while the paid webhook waited under the moved home. A REAL interpreter (the
+    owner-key paths are bound at import, from the environment the unit gives the process)."""
+    import subprocess
+    import sys
+    user_home, moved = tmp_path / "user", tmp_path / "mnt" / ".sigil"
+    user_home.mkdir()
+    _spool_charge(moved / "billing-spool", 9911)
+    env = {k: v for k, v in os.environ.items() if k not in ("SIGIL_HOME", "VIGIL_BILLING_SPOOL",
+                                                             "VIGIL_BILLING_WEBHOOK_SPOOL", "CREDENTIALS_DIRECTORY")}
+    env.update(HOME=str(user_home), VIGIL_BILLING_DRAIN_ENABLED="1", VIGIL_BILLING_WEBHOOK_SECRET=_SECRET,
+               VIGIL_FLW_SECRET_KEY="dummy-flw-key", PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    r = subprocess.run([sys.executable, "-c", "from sigil.cli import main; main(['billing-drain', 'drain'])"],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "holds no owner identity" in r.stderr and "billing-drain.env" in r.stderr and "drained:" not in r.stdout
+    assert _SECRET not in r.stdout + r.stderr and "dummy-flw-key" not in r.stdout + r.stderr
+    assert not (user_home / ".sigil" / "billing-spool").exists()                 # the wrong spool was never made
+    assert (moved / "billing-spool" / "incoming" / "9911.json").exists()
+
+
+# ---- secrets from systemd credentials (LoadCredential= / LoadCredentialEncrypted=), never unit-wide env ----
+
+def _creds(tmp_path, **values) -> Path:
+    d = tmp_path / "creds"
+    d.mkdir()
+    for name, value in values.items():
+        (d / name).write_text(value, encoding="utf-8")
+    return d
+
+
+def test_the_webhook_secret_can_come_from_a_systemd_credential(armed, capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "")               # not in the unit-wide environment
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(_creds(tmp_path, VIGIL_BILLING_WEBHOOK_SECRET=_SECRET + "\n")))
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    cli.main(["billing-drain", "drain"])
+    out = capsys.readouterr()
+    assert "1 minted" in out.out and armed.available() == armed.credits and _SECRET not in out.out + out.err
+
+
+def test_a_credential_is_authoritative_over_a_stale_env_file_value(armed, capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "a-stale-env-file-value")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(_creds(tmp_path, VIGIL_BILLING_WEBHOOK_SECRET=_SECRET)))
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    cli.main(["billing-drain", "drain"])
+    assert "1 minted" in capsys.readouterr().out and armed.available() == armed.credits
+
+
+def test_the_processor_key_can_come_from_a_systemd_credential(monkeypatch, tmp_path):
+    from sigil.governor import flutterwave_egress as fe
+    monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(_creds(tmp_path, VIGIL_FLW_SECRET_KEY="dummy-flw-key")))
+    assert not fe.flutterwave_secret_configured()
+    cli._load_billing_credentials()
+    assert fe.flutterwave_secret_configured()
+    assert callable(cli._billing_transaction_verifier())                 # the drain's verifier gate now passes
+
+
+@pytest.mark.parametrize("plant", ["empty", "dir", "symlink", "oversized"])
+def test_a_credential_that_is_not_a_usable_file_refuses_the_drain(armed, capsys, monkeypatch, tmp_path, plant):
+    d = tmp_path / "creds"
+    d.mkdir()
+    p = d / "VIGIL_BILLING_WEBHOOK_SECRET"
+    if plant == "empty":
+        p.write_text("\n", encoding="utf-8")
+    elif plant == "dir":
+        p.mkdir()
+    elif plant == "symlink":
+        (tmp_path / "real").write_text(_SECRET, encoding="utf-8")
+        p.symlink_to(tmp_path / "real")
+    else:
+        p.write_text("x" * (cli._CREDENTIAL_MAX_BYTES + 1), encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", _SECRET)        # the env fallback is NOT silently used
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(d))
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    code, text = _run(["billing-drain", "drain"], capsys)
+    assert code == 2 and "credential VIGIL_BILLING_WEBHOOK_SECRET" in text and _SECRET not in text
+    assert (armed.sigil_home / "billing-spool" / "incoming" / "9911.json").exists() and armed.available() == 0

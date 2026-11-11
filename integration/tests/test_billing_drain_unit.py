@@ -10,6 +10,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[2]
 _SYS = _REPO / "infra" / "systemd"
 _UNIT, _TIMER, _ENV = (_SYS / "vigil-billing-drain.service", _SYS / "vigil-billing-drain.timer",
@@ -47,35 +49,66 @@ def test_a_hung_pass_is_bounded():
     d = _directives(_UNIT)
     limit = [ln for ln in d if ln.startswith("TimeoutStartSec=")]
     assert len(limit) == 1 and 60 < int(limit[0].split("=", 1)[1]) <= 900, limit
+    # … and long enough that a pass which first waits out another drainer's pass (the CLI's lock wait) still has
+    # room for several bounded (15 s) processor re-verifies before systemd kills it
+    cli_src = (_REPO / "apps" / "sigil" / "sigil" / "cli.py").read_text(encoding="utf-8")
+    wait = float(re.search(r"^_BILLING_LOCK_WAIT_S = ([0-9.]+)", cli_src, re.M).group(1))
+    egress = (_REPO / "apps" / "sigil" / "sigil" / "governor" / "flutterwave_egress.py").read_text(encoding="utf-8")
+    per_call = float(re.search(r"^_DEFAULT_TIMEOUT_S = ([0-9.]+)", egress, re.M).group(1))
+    assert int(limit[0].split("=", 1)[1]) >= wait + 4 * per_call
+
+
+def _run_exec_stop_post(tmp_path, program: str, **extra_env) -> None:
+    """RUN the unit's real ExecStopPost command line, its specifiers and `$$` escapes expanded the way systemd
+    expands them, with the offense venv's `vigil` replaced by `program`."""
+    post = [ln.split("=", 1)[1] for ln in _directives(_UNIT) if ln.startswith("ExecStopPost=")]
+    assert len(post) == 1
+    fake_home = tmp_path / "h"
+    exe = fake_home / "vigil" / ".venv-offense" / "bin" / "vigil"
+    exe.parent.mkdir(parents=True)
+    exe.write_text(program)
+    exe.chmod(0o755)
+    line = post[0].replace("%h", str(fake_home)).replace("%n", "vigil-billing-drain.service").replace("$$", "$")
+    env = dict(os.environ, HOME=str(fake_home), VIGIL_ALERT_STATE_DIR=str(tmp_path / "hb"), **extra_env)
+    subprocess.run(shlex.split(line), env=env, check=True, timeout=60)
 
 
 def test_the_heartbeat_hook_never_sees_the_payment_secrets(tmp_path):
     """The EnvironmentFile is unit-wide, so every Exec line inherits it — including the ExecStopPost heartbeat,
-    which runs the OTHER venv's `vigil`. RUN the unit's real ExecStopPost command (specifiers expanded the way
-    systemd would, `vigil` replaced by a recorder) with both secrets in the environment: the hook must not see
-    them, and must still see what it needs."""
-    post = [ln.split("=", 1)[1] for ln in _directives(_UNIT) if ln.startswith("ExecStopPost=")]
-    assert len(post) == 1
+    which runs the OTHER venv's `vigil`. It gets an ALLOW-listed environment: not the two payment secrets, not
+    any other secret an operator put in the env file, and still exactly what the hook reads."""
     seen = tmp_path / "seen.env"
-    fake_home = tmp_path / "h"
-    recorder = fake_home / "vigil" / ".venv-offense" / "bin" / "vigil"
-    recorder.parent.mkdir(parents=True)
-    recorder.write_text(f'#!/bin/sh\necho "argv=$*" > {shlex.quote(str(seen))}\nenv >> {shlex.quote(str(seen))}\n')
-    recorder.chmod(0o755)
-    argv = shlex.split(post[0].replace("%h", str(fake_home)).replace("%n", "vigil-billing-drain.service"))
-    env = dict(os.environ, VIGIL_BILLING_WEBHOOK_SECRET="dummy-webhook-hash", VIGIL_FLW_SECRET_KEY="dummy-flw-key",
-               SERVICE_RESULT="success", VIGIL_ALERT_STATE_DIR=str(tmp_path / "hb"))
-    subprocess.run(argv, env=env, check=True, timeout=30)
+    _run_exec_stop_post(tmp_path, f'#!/bin/sh\necho "argv=$*" > {shlex.quote(str(seen))}\nenv >> {shlex.quote(str(seen))}\n',
+                        VIGIL_BILLING_WEBHOOK_SECRET="dummy-webhook-hash", VIGIL_FLW_SECRET_KEY="dummy-flw-key",
+                        SOME_OPERATOR_TOKEN="dummy-operator-token", SERVICE_RESULT="success")
     got = seen.read_text()
     assert "argv=unit-heartbeat vigil-billing-drain.service" in got
-    assert "SERVICE_RESULT=success" in got and "VIGIL_ALERT_STATE_DIR=" in got     # what the hook reads survives
-    assert "VIGIL_BILLING_WEBHOOK_SECRET" not in got and "VIGIL_FLW_SECRET_KEY" not in got
-    assert "dummy-webhook-hash" not in got and "dummy-flw-key" not in got
+    names = {ln.split("=", 1)[0] for ln in got.splitlines()[1:] if "=" in ln}
+    assert {"SERVICE_RESULT", "VIGIL_ALERT_STATE_DIR", "HOME"} <= names
+    assert names <= {"SERVICE_RESULT", "VIGIL_ALERT_STATE_DIR", "HOME", "PWD", "SHLVL", "_"}, names
+    assert "SERVICE_RESULT=success" in got
+    for secret in ("dummy-webhook-hash", "dummy-flw-key", "dummy-operator-token"):
+        assert secret not in got
+
+
+@pytest.mark.parametrize("result,ok", [("exit-code", False), ("timeout", False), ("success", True)])
+def test_the_allow_listed_heartbeat_still_records_the_result(tmp_path, result, ok):
+    """The REAL `vigil unit-heartbeat` under the hook's allow-listed environment: a failed pass is recorded as
+    FAILED (the dead-man's input), a successful one as ok — nothing it needs was dropped."""
+    import json
+    import sys
+    paths = [str(_REPO / "integration"), str(_REPO / "packages" / "core" / "vigil_core")]
+    program = (f"#!{sys.executable}\nimport sys\nsys.path[:0] = {paths!r}\n"
+               f"from vigil_integration.cli import main\nsys.exit(main(sys.argv[1:]))\n")
+    beat = tmp_path / "hb" / "vigil-billing-drain.service.hb.json"
+    _run_exec_stop_post(tmp_path, program, SERVICE_RESULT=result, VIGIL_FLW_SECRET_KEY="dummy-flw-key")
+    rec = json.loads(beat.read_text())
+    assert rec["ok"] is ok and rec["result"] == result
 
 
 def test_heartbeat_and_hardening():
     d = _directives(_UNIT)
-    assert any(ln.startswith("ExecStopPost=") and "unit-heartbeat %n" in ln for ln in d)
+    assert any(ln.startswith("ExecStopPost=") and "unit-heartbeat" in ln and ln.endswith(" %n") for ln in d)
     assert "ReadWritePaths=%h/.sigil" in d and "ProtectSystem=strict" in d and "NoNewPrivileges=yes" in d
     assert "PrivateNetwork=yes" not in d       # the MANDATORY processor re-verify is an HTTPS call
 

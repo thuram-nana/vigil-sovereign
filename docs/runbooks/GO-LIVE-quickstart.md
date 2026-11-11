@@ -163,8 +163,11 @@ sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
 To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
 dead-man monitored). It names no spool: the drain derives this same `$SIGIL_HOME/billing-spool` — or the
 proxy's `VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into `~/.config/vigil/billing-drain.env` — so **put your
-moved `SIGIL_HOME` in that env file too** (§2); a spool that contradicts them is refused, not drained "healthy".
-Run the timer **or** `watch`, never both — a per-spool lock makes a second drainer skip its pass untouched. See `infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave
+moved `SIGIL_HOME` in that env file too** (§2); a drain that cannot see it, or a spool that contradicts them, is
+refused (the unit goes FAILED), never drained "healthy". Run the timer **or** `watch`, never both — a per-spool lock
+serialises them, and a pass that cannot get it within 120 s fails loudly. For the two secrets, prefer systemd
+credentials (`LoadCredential=` in a drop-in, which the drain reads itself) over the env file; see
+`infra/systemd/vigil-billing-drain.service`. Point your Flutterwave
 webhook at the operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.
 

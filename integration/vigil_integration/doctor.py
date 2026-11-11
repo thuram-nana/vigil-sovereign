@@ -1137,10 +1137,24 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected. It must never hold
 # payment INTAKE down (accepting + durably spooling a webhook is always safe; refusing one loses it): `vigil up`
 # gates on the production posture only, `vigil ready` only REPORTS, and the one scripted bring-up that gates on
-# this report (tools/oneshot-bringup) reads `money_in_alarms` below to tell this alarm from every other RED — it
-# still starts the proxy, and still refuses everything after it (the range, the acceptance run).
+# this report (tools/oneshot-bringup) reads `intake_safe_issues` (_INTAKE_SAFE below) to tell this alarm from
+# every other RED — it still starts the proxy, and still refuses everything after it (the range, the acceptance
+# run).
 _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service")
 _BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
+
+# INTAKE-SAFE hard issues: the REDs under which starting the UI (`vigil-command`: the proxy that accepts + durably
+# spools /webhooks/billing, AND the cockpit whose launch path reserves paid runs) is still SAFE, so a scripted
+# bring-up must not hold payment intake down on them (a webhook the proxy is not up to accept is lost). Each is
+# listed in the report's `intake_safe_issues`; every other hard issue (a posture control, a spine-integrity
+# violation, a build-integrity tamper, a money-OUT/results drain, …) still refuses the UI. Two kinds qualify:
+#   * the money-IN billing drain alarm (MONEY-5) — the remedy needs the proxy UP (new payments keep spooling);
+#   * a fold-cache MISMATCH (Front C S0d) — EVIDENCE of a cache defect in the process that audited, not live
+#     state: that process already DROPPED the entry, every later read (the launch reservation included) is a fresh
+#     rebuild from the spine, and a newly started `vigil-command` begins with no cached fold at all. A fold that
+#     RAISES fails its read, so the launch path refuses (it never reserves on a state it could not fold). A
+#     tampered spine is the integrity check's RED, which stays a refusal.
+_INTAKE_SAFE = "intake_safe_issues"
 
 
 # ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
@@ -1604,14 +1618,18 @@ def collect(repo_root) -> dict:
                 if st.unit in _MONEY_DRAIN_UNITS and st.unit == _BILLING_DRAIN_UNIT:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"failed/stalled billing drain means paid webhooks are quarantined or not being "
-                           f"drained: a customer PAID and has NOT been credited. In the billing spool (the proxy's "
-                           f"VIGIL_BILLING_WEBHOOK_SPOOL, else {_display_path(_sigil_home() / 'billing-spool')}) "
-                           f"read each `.reason` in rejected/, fix the cause and move the envelope back to "
-                           f"incoming/; then `systemctl --user start vigil-billing-drain.service` (and re-enable "
-                           f"its timer if it stopped) — only the unit's own run clears this alarm, re-ingest is "
+                           f"drained: a customer PAID and has NOT been credited. `journalctl --user -u "
+                           f"vigil-billing-drain -e` says why. A QUARANTINE names its rejected/ directory (in the "
+                           f"billing spool: the proxy's VIGIL_BILLING_WEBHOOK_SPOOL, else "
+                           f"{_display_path(_sigil_home() / 'billing-spool')}): read each `.reason`, fix the cause, "
+                           f"move the envelope back to incoming/ and delete its `.reason`. A REFUSAL names its cause "
+                           f"(the spool or SIGIL_HOME the drain sees, a missing secret, a stuck second drainer). "
+                           f"Only the unit's own run clears this alarm: its next timer pass (within 60 s) or "
+                           f"`systemctl --user start vigil-billing-drain.service`; a STALE drain's timer is not "
+                           f"firing — `systemctl --user enable --now vigil-billing-drain.timer`. Re-ingest is "
                            f"idempotent, a payment is credited once. Keep the proxy UP meanwhile: new payments "
                            f"keep spooling safely.")
-                    report.setdefault("money_in_alarms", []).append(report["issues"][-1])
+                    report.setdefault(_INTAKE_SAFE, []).append(report["issues"][-1])
                 elif st.unit in _MONEY_DRAIN_UNITS:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"stalled/failed settle drain means completed paid runs are not being "
@@ -1681,6 +1699,7 @@ def collect(repo_root) -> dict:
         report["fold_cache_audit"] = _fc
         for _m in _fc_issues:
             _issue(_m)
+            report.setdefault(_INTAKE_SAFE, []).append(report["issues"][-1])   # evidence, not live state
         for _m in _fc_notes:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report

@@ -17,6 +17,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +28,8 @@ _SCHEMA = "vigil.webhook.billing.v1"
 
 # One drain pass in a fresh interpreter. argv: spool spine mode gate. mode "hold" parks the re-verify until
 # <gate>/release exists (announcing itself with <gate>/in-verify); "fail" makes the re-verify raise (a processor
-# blip); "ok" re-verifies at once. Prints the drain result as one JSON line.
+# blip); "ok" re-verifies at once; "watch" runs the `watch` loop (re-verify parked like "hold") for ONE pass.
+# Prints the drain result as one JSON line.
 _DRAINER = r"""
 import json, sys, time
 from pathlib import Path
@@ -45,7 +47,7 @@ ensure_owner_keypair()
 def verify(txid):
     if mode == "fail":
         raise RuntimeError("processor 503")
-    if mode == "hold":
+    if mode in ("hold", "watch"):
         (gate / "in-verify").write_text("x")
         while not (gate / "release").exists():
             time.sleep(0.02)
@@ -56,7 +58,15 @@ s = SpineStore(spine)
 signer = BillingSigner(FlutterwaveBillingProvider("dummy-hash", verify), wallet=WalletRegistry(s),
                        subscriptions=SubscriptionRegistry(s), plan=PlanCreditLedger(s),
                        catalog={"p": Entitlement(kind=EVENT_TOPUP, credits=200)})
-out = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash="dummy-hash").drain()
+watcher = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash="dummy-hash")
+if mode == "watch":
+    class _OnePass:                       # the `watch` loop's stop: stop after its first pass
+        def wait(self, interval):
+            return True
+    watcher.watch(interval=0.01, stop=_OnePass())
+    out = {"watched": True}
+else:
+    out = watcher.drain()
 print(json.dumps({"result": out, "available": WalletRegistry(SpineStore(spine)).available("acme")}), flush=True)
 """
 
@@ -104,8 +114,8 @@ def _wait_for(path: Path, proc: subprocess.Popen) -> None:
 
 
 def _tree(spool: Path) -> dict:
-    return {d: sorted(p.name for p in (spool / d).iterdir()) for d in ("incoming", "working", "processed",
-                                                                        "rejected")}
+    return {d: sorted(p.name for p in (spool / d).iterdir() if p.name != ".drain.lock")
+            for d in ("incoming", "working", "processed", "rejected")}
 
 
 def test_a_second_drainer_process_touches_nothing_and_the_payment_is_credited_once(rig):
@@ -141,10 +151,92 @@ def test_a_killed_holder_releases_the_lock_and_the_next_pass_recovers_its_claim(
     assert _tree(rig.spool)["working"] == []
 
 
-def test_the_cli_pass_that_finds_the_lock_held_says_so_and_exits_clean(tmp_path, monkeypatch, capsys):
-    """The vigil-billing-drain unit's ExecStart while another drainer holds the spool: exit 0 (no false alarm),
-    an honest line instead of a "drained: 0" that reads as an empty spool, and the webhook left exactly where it
-    was."""
+def test_a_watch_pass_holds_the_same_lock(rig):
+    """`sigil billing-drain watch` drains through the same locked pass: while ITS pass is mid-verify, a timer pass
+    touches nothing."""
+    watcher = rig.start("watch")
+    _wait_for(rig.gate / "in-verify", watcher)
+    before = _tree(rig.spool)
+    assert before["working"] == ["4242.json"]
+    second = _finish(rig.start("fail"))
+    assert second["result"]["busy"] is True and _tree(rig.spool) == before
+    (rig.gate / "release").write_text("x")
+    assert _finish(watcher)["available"] == 200
+    assert _tree(rig.spool)["working"] == [] and _tree(rig.spool)["rejected"] == []
+
+
+def _hold_lock(spool: Path) -> int:
+    """Take the drain lock the way another drainer process would (a separate open file description)."""
+    (spool / "working").mkdir(parents=True, exist_ok=True)
+    fd = os.open(spool / "working" / ".drain.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _watcher(tmp_path, spool: Path):
+    from sigil.governor.billing import BillingSigner, FlutterwaveBillingProvider
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.governor.metering import PlanCreditLedger
+    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.governor.wallet import WalletRegistry
+    from sigil.inbound.billing_spool import BillingSpoolWatcher
+    from sigil.spine.store import SpineStore
+    ensure_owner_keypair()
+    s = SpineStore(tmp_path / "w-spine.jsonl")
+    signer = BillingSigner(FlutterwaveBillingProvider("dummy-hash", lambda txid: None), wallet=WalletRegistry(s),
+                           subscriptions=SubscriptionRegistry(s), plan=PlanCreditLedger(s), catalog={})
+    return BillingSpoolWatcher(signer, spool_dir=spool, verif_hash="dummy-hash")
+
+
+def test_the_lock_is_a_regular_file_not_the_working_directory(tmp_path):
+    """A lock on the working/ DIRECTORY fd is refused by a network filesystem (flock is emulated with a byte-range
+    lock there, which needs a writable regular file). The drain locks a regular file opened read-write; holding
+    that file excludes a pass, and a lock on the directory itself does NOT stand in for it."""
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path, spool)
+    (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
+    dfd = os.open(spool / "working", os.O_RDONLY)
+    try:
+        fcntl.flock(dfd, fcntl.LOCK_EX)                     # an old-style directory lock is not THE lock
+        assert "busy" not in w.drain() and (spool / "working" / ".drain.lock").is_file()
+    finally:
+        os.close(dfd)
+    (spool / "incoming" / "2.json").write_text("{}", encoding="utf-8")
+    fd = _hold_lock(spool)
+    try:
+        assert w.drain()["busy"] is True and (spool / "incoming" / "2.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_a_planted_non_regular_lock_refuses_the_pass_and_touches_nothing(tmp_path):
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path, spool)
+    (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("", encoding="utf-8")
+    (spool / "working" / ".drain.lock").symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        w.drain()
+    (spool / "working" / ".drain.lock").unlink()
+    os.mkfifo(spool / "working" / ".drain.lock")
+    with pytest.raises(OSError, match="not a regular file"):
+        w.drain()
+    assert (spool / "incoming" / "1.json").exists() and not list((spool / "rejected").iterdir())
+
+
+def test_a_pass_waits_out_another_drainers_pass_then_drains(tmp_path):
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path, spool)
+    (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
+    fd = _hold_lock(spool)
+    threading.Timer(0.3, os.close, args=(fd,)).start()     # the other drainer's pass ends
+    r = w.drain(wait_s=30)
+    assert "busy" not in r and r["rejected"] == 1         # it ran (and quarantined the junk file)
+
+
+@pytest.fixture()
+def cli_rig(tmp_path, monkeypatch):
     from sigil import cli, config
     from sigil.governor.identity import ensure_owner_keypair
     from sigil.spine.store import SpineStore
@@ -155,21 +247,40 @@ def test_the_cli_pass_that_finds_the_lock_held_says_so_and_exits_clean(tmp_path,
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "dummy-hash")
     monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SPOOL", raising=False)
     monkeypatch.delenv("VIGIL_BILLING_SPOOL", raising=False)
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
     monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: (lambda txid: None))
+    monkeypatch.setattr(cli, "_BILLING_LOCK_WAIT_S", 0.3)
     ensure_owner_keypair()
     spool = tmp_path / "spool"
     (spool / "incoming").mkdir(parents=True)
     (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
-    (spool / "working").mkdir()
-    fd = os.open(spool / "working", os.O_RDONLY)
+    return SimpleNamespace(cli=cli, spool=spool,
+                           run=lambda: cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool),
+                                                                             interval=0.1)))
+
+
+def test_the_cli_pass_that_cannot_get_the_lock_fails_loudly_and_touches_nothing(cli_rig, capsys):
+    """The vigil-billing-drain unit's ExecStart while another drainer holds the spool past the wait: a wedged
+    holder must not hide behind a clean exit (the dead-man would read the unit HEALTHY while nothing drains)."""
+    fd = _hold_lock(cli_rig.spool)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)                       # "another drainer" (a separate open file description)
-        cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
-        out = capsys.readouterr().out
-        assert "skipped: another billing drainer holds the lock" in out and "drained:" not in out
-        assert (spool / "incoming" / "1.json").exists() and not list((spool / "rejected").iterdir())
+        with pytest.raises(SystemExit) as ei:
+            cli_rig.run()
+        cap = capsys.readouterr()
+        assert ei.value.code == 1 and "has held the lock" in cap.err and "drained:" not in cap.out
+        assert (cli_rig.spool / "incoming" / "1.json").exists() and not list((cli_rig.spool / "rejected").iterdir())
     finally:
         os.close(fd)
     with pytest.raises(SystemExit):                          # lock free again: the pass runs (and quarantines the
-        cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))   # junk file)
+        cli_rig.run()                                        # junk file)
     assert "drained: 0 minted, 0 noop, 1 rejected" in capsys.readouterr().out
+
+
+def test_the_cli_pass_waits_for_a_short_overlap_and_then_drains(cli_rig, capsys, monkeypatch):
+    monkeypatch.setattr(cli_rig.cli, "_BILLING_LOCK_WAIT_S", 30.0)
+    fd = _hold_lock(cli_rig.spool)
+    threading.Timer(0.3, os.close, args=(fd,)).start()
+    with pytest.raises(SystemExit):                          # it drained (the junk file is quarantined -> exit 1)
+        cli_rig.run()
+    cap = capsys.readouterr()
+    assert "drained: 0 minted, 0 noop, 1 rejected" in cap.out and "has held the lock" not in cap.err

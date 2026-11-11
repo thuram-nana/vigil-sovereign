@@ -83,24 +83,41 @@ class BillingSpoolError(RuntimeError):
     """A fail-closed refusal while draining one billing-webhook envelope (nothing was spined)."""
 
 
+_LOCK_NAME = ".drain.lock"                  # the single-drainer lock: a regular file in working/ (never a *.json)
+_BUSY = {"minted": 0, "noop": 0, "rejected": 0, "deduped": 0, "seqs": [], "busy": True}
+
+
 def _single_drainer(drain):
     """ONE drainer per spool, across PROCESSES. A pass starts by reclaiming ``working/`` (crash recovery), which
     is only sound when no OTHER live drainer owns those claims: a second drainer would otherwise take a file the
     first is mid-verify on, re-verify it a second time, and — if the two outcomes differ — leave a credited
-    payment standing in ``rejected/`` as a false "paid, not credited" alarm. So the whole pass runs under a
-    non-blocking exclusive ``flock`` on the ``working/`` directory itself (the thing it protects; no lock file is
-    added to the spool tree). A pass that finds the lock held touches NOTHING and reports ``busy`` (the holder is
-    draining this very spool). The kernel drops the lock when the holder exits or is killed, so a crash never
-    wedges the spool. Fail-closed: a lock that cannot be opened or taken for any other reason raises — no lock,
-    no drain."""
+    payment standing in ``rejected/`` as a false "paid, not credited" alarm. So the WHOLE pass (the reclaim, the
+    NET-2b re-admit of ``retry/``, every claim) runs under an exclusive ``flock`` on ``working/.drain.lock``;
+    ``watch`` takes it per pass because it drains through this same method. The lock lives in ``working/`` (the
+    thing it protects; the reclaim and every sweep touch only ``*.json``, and the spool root keeps its shape) and
+    is a REGULAR file opened read-write, not the ``working/`` directory itself: a network filesystem emulates
+    ``flock`` with a byte-range lock, which needs a writable regular file (NFSv4 keeps no open state for a
+    directory at all), so a directory lock would refuse every pass there. A pass that cannot take the lock within
+    ``wait_s`` seconds (default 0: try once) touches NOTHING and reports ``busy``. The kernel drops the lock when
+    the holder exits or is killed, so a crash never wedges the spool. Fail-closed: a lock that cannot be opened (a
+    symlink or a non-regular file planted at that name included) or taken for any reason but contention RAISES —
+    no lock, no drain."""
     @functools.wraps(drain)
-    def locked(self):
-        fd = os.open(str(self.working), os.O_RDONLY)
+    def locked(self, *, wait_s: float = 0.0):
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(str(self.working / _LOCK_NAME), flags, 0o600)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return {"minted": 0, "noop": 0, "rejected": 0, "deduped": 0, "seqs": [], "busy": True}
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"{self.working / _LOCK_NAME} is not a regular file — refusing to drain")
+            deadline = time.monotonic() + max(0.0, float(wait_s))
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return dict(_BUSY, seqs=[])
+                    time.sleep(0.05)
             return drain(self)
         finally:
             os.close(fd)                                 # closing the descriptor releases the lock

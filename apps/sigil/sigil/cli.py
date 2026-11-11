@@ -1395,6 +1395,53 @@ def _resolve_billing_spool(arg: "str | None") -> str:
     return spool
 
 
+# The secrets the drain process itself needs, which it can also read from systemd credentials
+# (`LoadCredential=` / `LoadCredentialEncrypted=<NAME>:<file>` -> $CREDENTIALS_DIRECTORY/<NAME>). A credential
+# never enters the unit-wide environment, so no other Exec line of the unit (the heartbeat hook) ever holds it.
+_BILLING_CREDENTIALS = ("VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_FLW_SECRET_KEY")
+_CREDENTIAL_MAX_BYTES = 64 * 1024
+# How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
+# handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
+_BILLING_LOCK_WAIT_S = 120.0
+
+
+def _load_billing_credentials() -> None:
+    """Load the drain's secrets from ``$CREDENTIALS_DIRECTORY`` into THIS process's environment (where the drain and
+    its egress read them at call time). A credential present there is authoritative over the env-file fallback.
+    Fail-closed: a credential that exists but is not a bounded, readable regular UTF-8 file refuses the drain
+    (exit 2) rather than silently falling back. Nothing is printed but the credential's NAME."""
+    import os
+    import stat as _stat
+    cdir = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()
+    if not cdir:
+        return
+    for name in _BILLING_CREDENTIALS:
+        path = os.path.join(cdir, name)
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"billing-drain: credential {name} cannot be opened ({type(exc).__name__}) — refusing "
+                  f"(fail-closed)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            st = os.fstat(fd)
+            raw = os.read(fd, _CREDENTIAL_MAX_BYTES + 1) if _stat.S_ISREG(st.st_mode) else None
+        finally:
+            os.close(fd)
+        try:
+            value = raw.decode("utf-8").rstrip("\r\n") if raw is not None and len(raw) <= _CREDENTIAL_MAX_BYTES \
+                else ""
+        except UnicodeDecodeError:
+            value = ""
+        if not value or "\0" in value:
+            print(f"billing-drain: credential {name} is not a non-empty, bounded UTF-8 regular file — refusing "
+                  f"(fail-closed)", file=sys.stderr)
+            sys.exit(2)
+        os.environ[name] = value
+
+
 def cmd_billing_drain(a) -> None:
     """Drain / watch the inbound BILLING-webhook spool (SaaS Slice C) through ``BillingSigner.ingest``:
     ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
@@ -1410,6 +1457,7 @@ def cmd_billing_drain(a) -> None:
     # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
     # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
     spool = _resolve_billing_spool(getattr(a, "spool", ""))
+    _load_billing_credentials()
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1418,6 +1466,17 @@ def cmd_billing_drain(a) -> None:
     if not callable(verifier):
         print("billing-drain: no server-side transaction verifier is configured — refusing (fail-closed; a "
               "verif-hash alone never grants value)", file=sys.stderr)
+        sys.exit(2)
+    from .config import _resolve_home
+    from .governor.identity import owner_pubkey
+    if not owner_pubkey():
+        # The drain mints OWNER-signed credit onto the spine under SIGIL_HOME. A home with no owner identity is
+        # not the cockpit's — typically SIGIL_HOME was moved (GO-LIVE §2) but not into this unit's env file, so
+        # the derived spool is an empty ~/.sigil directory the proxy never writes to. Draining it would exit 0
+        # forever while paid webhooks wait (the dead-man reading it HEALTHY), and nothing there could be minted.
+        print(f"billing-drain: SIGIL_HOME ({_resolve_home()}) holds no owner identity, so it is not the cockpit's "
+              f"home — refusing (fail-closed: draining {spool} would credit nobody while exiting 0). If you moved "
+              f"SIGIL_HOME, set it in this drain's env (~/.config/vigil/billing-drain.env).", file=sys.stderr)
         sys.exit(2)
 
     from .governor import catalog
@@ -1450,13 +1509,16 @@ def cmd_billing_drain(a) -> None:
         except KeyboardInterrupt:
             pass
     else:
-        r = watcher.drain()
-        if r.get("busy"):                        # single-drainer lock held elsewhere: this pass touched nothing
-            print(f"  skipped: another billing drainer holds the lock on {spool} — this pass touched nothing "
-                  f"(the holder is draining it; run the timer OR `watch`, never both)")
-        else:
-            print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
-                  f"{r['deduped']} deduped")
+        r = watcher.drain(wait_s=_BILLING_LOCK_WAIT_S)   # waits out another drainer's pass (single-drainer lock)
+        if r.get("busy"):
+            # Still held after the wait: a stuck drainer (or a second one that never lets go). This pass touched
+            # nothing — and must NOT read as a healthy pass, or a wedged holder would hide behind exit 0 forever.
+            print(f"billing-drain: another billing drainer has held the lock on {spool} for over "
+                  f"{int(_BILLING_LOCK_WAIT_S)} s — this pass touched nothing. Find the stuck drainer (run the "
+                  f"timer OR `watch`, never both).", file=sys.stderr)
+            sys.exit(1)
+        print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
         parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
         if parked:
             print(f"  awaiting retry: {parked} billing webhook(s) parked in {watcher.retry} after a transient "
