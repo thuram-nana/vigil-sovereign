@@ -65,6 +65,19 @@ def _owner_keys() -> tuple[str, str]:
     return priv, _PUB.read_text(encoding="utf-8").strip()
 
 
+def _owner_pub_for_verify() -> str:
+    """The owner PUBLIC key for a VERIFY path. Never reads (or unseals) the private key and never mints a
+    keypair while ``owner.pub`` is present — a box whose owner key is kept OFF-box (only the public key
+    local), or a scoped copy that deliberately carries no private key (the upgrade drill), must verify
+    against the existing key, not silently re-key the trust root. Only a home with NO public key at all
+    falls back to ``_owner_keys()`` (the pre-existing first-use generate)."""
+    try:
+        pub = _PUB.read_text(encoding="utf-8").strip()
+    except OSError:
+        pub = ""
+    return pub or _owner_keys()[1]
+
+
 def trust_root(store: SpineStore | None = None) -> TrustRoot:
     """The 1-of-1 head trust root, W9-1 SUCCESSION-AWARE. The anchor is the CURRENT owner key AS VALIDATED
     by walking the cross-signed succession chain from the pinned genesis — not the raw on-disk `owner.pub`.
@@ -73,7 +86,7 @@ def trust_root(store: SpineStore | None = None) -> TrustRoot:
     become trusted (its signer is not the succession tip). With no rotation, the tip == the on-disk key, so
     this is byte-identical to the pre-W9-1 single-key root. A forked/ambiguous succession falls back to the
     on-disk current key (the grant folds independently fail closed on a fork)."""
-    _, pub = _owner_keys()                                     # current on-disk key (also ensures one exists)
+    pub = _owner_pub_for_verify()                              # current on-disk PUBLIC key (never mints over one)
     from ..governor import key_history as _kh
     st = store or SpineStore()
     # The genesis pin lives beside the owner key (`_PUB.parent`), so a test that monkeypatches this module's

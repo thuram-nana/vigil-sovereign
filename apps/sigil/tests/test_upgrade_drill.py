@@ -27,13 +27,21 @@ def _real_spine(tmp_path, n=8, migrate=False):
     return path
 
 
+def _step_drill(tmp_path, path):
+    """Run the drill STEPS in-process on a scratch-home snapshot (so a test can monkeypatch them); the
+    end-to-end run_upgrade_drill runs them in the isolated child."""
+    home = tmp_path / "work" / "home"
+    assert ud._snapshot(path.parent, path.name, home) is not None
+    return ud.drill_copy(home / "spine" / path.name, tmp_path / "work")
+
+
 @pytest.mark.parametrize("migrate", [False, True])
 def test_healthy_real_spine_passes_and_the_source_is_untouched(tmp_path, migrate):
     path = _real_spine(tmp_path, migrate=migrate)
     before = ud._tree_digest(path.parent)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
     assert v["status"] == ud.PASS and v["ok"] is True, v
-    assert v["source_unchanged"] is True and ud._tree_digest(path.parent) == before
+    assert v["source_changed_during_drill"] is False and ud._tree_digest(path.parent) == before
     steps = {s["step"]: s for s in v["steps"]}
     assert steps["negative_control"]["detected"] is True
     assert steps["rollback"]["ok"] is True and steps["rollback"]["intact"] is True
@@ -62,34 +70,51 @@ def test_an_upgrade_that_changes_the_record_set_fails(tmp_path, monkeypatch):
         SpineStore(str(store.path)).append(kind="event", source="rogue", actor="x", payload={"extra": 1})
         return rep                                                           # "ok" — but not the same data
     monkeypatch.setattr(ud, "upgrade", lossy_upgrade)
-    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    v = _step_drill(tmp_path, path)
     assert v["status"] == ud.FAIL and "upgraded copy is not intact" in v["detail"]
 
 
 def test_a_negative_control_that_does_not_bite_fails(tmp_path, monkeypatch):
     path = _real_spine(tmp_path)
     monkeypatch.setattr(ud, "corrupt_one_record", lambda d, verify=None: False)
-    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    v = _step_drill(tmp_path, path)
     assert v["status"] == ud.FAIL and "negative control" in v["detail"]
 
 
 def test_a_rollback_that_does_not_restore_fails(tmp_path, monkeypatch):
     path = _real_spine(tmp_path)
     monkeypatch.setattr(ud, "restore_from_backup", lambda d, b: None)       # rollback is a no-op
-    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    v = _step_drill(tmp_path, path)
     assert v["status"] == ud.FAIL and "rollback" in v["detail"]
 
 
-def test_a_drill_that_touches_the_real_spine_fails(tmp_path, monkeypatch):
+def test_a_source_changed_during_the_drill_still_gets_a_verdict(tmp_path, monkeypatch):
+    """A busy box: the real spine changes AFTER the consistent snapshot. The drill verified the snapshot, so it
+    still gets a verdict (not a weekly INCONCLUSIVE); the change is reported, never hidden."""
     path = _real_spine(tmp_path)
-    real_upgrade = ud.upgrade
+    real = ud._run_isolated
 
-    def leaky_upgrade(store, **kw):
-        (path.parent / "stray.jsonl").write_text("{}\n")                    # a write into the REAL home
-        return real_upgrade(store, **kw)
-    monkeypatch.setattr(ud, "upgrade", leaky_upgrade)
+    def busy(data, work):
+        SpineStore(str(path)).append(kind="event", source="live", actor="w", payload={"live": 1})
+        return real(data, work)
+    monkeypatch.setattr(ud, "_run_isolated", busy)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
-    assert v["status"] == ud.INCONCLUSIVE and v["ok"] is False and v["source_unchanged"] is False   # never green
+    assert v["status"] == ud.PASS and v["source_changed_during_drill"] is True, v
+    assert "concurrent writes" in v["detail"] and v["count"] == 8           # the SNAPSHOT's records
+
+
+def test_a_drill_that_changes_the_real_owner_keys_fails(tmp_path, monkeypatch):
+    path = _real_spine(tmp_path)
+    real = ud._run_isolated
+
+    def minting(data, work):
+        kd = path.parent / "keys"
+        kd.mkdir(exist_ok=True)
+        (kd / "owner.pub").write_text("a-freshly-minted-key")            # the defect class: a mint into the REAL home
+        return real(data, work)
+    monkeypatch.setattr(ud, "_run_isolated", minting)
+    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    assert v["status"] == ud.FAIL and "owner key material" in v["detail"], v
 
 
 def test_an_unexpected_error_is_a_failed_drill_not_a_crash(tmp_path, monkeypatch):
@@ -98,8 +123,17 @@ def test_an_unexpected_error_is_a_failed_drill_not_a_crash(tmp_path, monkeypatch
     def boom(*a, **k):
         raise RuntimeError("disk vanished")
     monkeypatch.setattr(ud, "upgrade", boom)
+    v = _step_drill(tmp_path, path)
+    assert v["status"] == ud.FAIL and "RuntimeError" in v["detail"]
+
+
+def test_a_crashed_isolated_child_is_a_failed_drill(tmp_path, monkeypatch):
+    import subprocess
+    path = _real_spine(tmp_path)
+    monkeypatch.setattr(ud.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="Traceback: boom"))
     v = ud.run_upgrade_drill(path, tmp_path / "work")
-    assert v["status"] == ud.FAIL and "RuntimeError" in v["detail"] and v["source_unchanged"] is True
+    assert v["status"] == ud.FAIL and "isolated drill process failed" in v["detail"] and "boom" in v["detail"]
 
 
 def test_corrupt_one_record_reaches_sealed_gz_segments(tmp_path):
@@ -141,7 +175,8 @@ def test_an_archive_dir_is_neither_copied_nor_the_corruption_target(tmp_path):
     arch = _archive_a_segment(path)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
     assert v["status"] == ud.PASS, v                     # the negative control still bites the LIVE data
-    assert not (tmp_path / "work" / "spine" / "archive").exists()       # pruned history is never copied
+    assert (tmp_path / "work" / "home" / "spine").is_dir()
+    assert not (tmp_path / "work" / "home" / "spine" / "archive").exists()   # pruned history is never copied
     assert (arch / "seg-000000.jsonl").exists()                         # and the real archive is untouched
 
 
@@ -179,6 +214,7 @@ def test_an_inconsistent_snapshot_is_inconclusive_not_a_fail(tmp_path, monkeypat
     path = _real_spine(tmp_path)
     digests = iter(str(i) for i in range(100))            # every digest differs ⇒ a writer never lets it settle
     monkeypatch.setattr(ud, "_tree_digest", lambda root: next(digests))
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
     assert v["status"] == ud.INCONCLUSIVE and "consistent snapshot" in v["detail"]
 
@@ -216,8 +252,8 @@ def test_a_concurrent_writer_never_yields_a_false_accusation(tmp_path):
     finally:
         stop.set()
         t.join(5)
-    assert v["status"] in (ud.PASS, ud.INCONCLUSIVE), v      # never FAIL-blames the drill for a live writer
-    assert "investigate immediately" not in v["detail"]
+    assert v["status"] == ud.PASS, v                  # a busy box still gets a verdict on a consistent snapshot
+    assert "investigate" not in v["detail"]
 
 
 def test_pass_message_is_honest_about_an_already_migrated_spine(tmp_path):
@@ -231,3 +267,196 @@ def test_main_exit_code_for_inconclusive(tmp_path, monkeypatch, capsys):
     path = _real_spine(tmp_path)
     monkeypatch.setattr(ud, "run_upgrade_drill", lambda s, w: {"status": ud.INCONCLUSIVE, "detail": "x", "steps": []})
     assert ud.main(["--spine", str(path), "--work-dir", str(tmp_path)]) == 4
+
+
+# --- audit E4: the drill never holds the owner key and never writes outside its work dir -----------------
+
+_MAKE_HOME = """
+import sys
+from sigil import config
+from sigil.spine import checkpoint as cp, prune
+from sigil.spine.store import SpineStore
+s = SpineStore(config.SPINE_PATH)
+s.migrate()
+seq = 0
+for _seg in range(4):
+    for _i in range(5):
+        s.append(kind="event", source="t", actor="u", payload={"i": seq}); seq += 1
+    s.rotate()
+for _i in range(3):
+    s.append(kind="event", source="t", actor="u", payload={"i": seq}); seq += 1
+cp.checkpoint(s)
+if sys.argv[1] == "prune":
+    prune.commit_prune(s, 10, confirm=True)
+"""
+
+
+def _env(home):
+    import os
+    import sys
+    from pathlib import Path
+
+    import sigil
+    env = dict(os.environ)
+    env["SIGIL_HOME"] = str(home)
+    root = str(Path(sigil.__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = os.pathsep.join([root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    return env, sys.executable
+
+
+def _signed_home(tmp_path, *, pruned: bool):
+    """A REAL sovereign home (its own SIGIL_HOME, built in a child process): a segmented spine with an
+    owner-signed head + floor + owner keypair under ``home/spine/keys`` — optionally cold-archive PRUNED."""
+    import subprocess
+    home = tmp_path / "realhome"
+    home.mkdir()
+    env, py = _env(home)
+    subprocess.run([py, "-c", _MAKE_HOME, "prune" if pruned else "keep"], env=env, check=True)
+    assert (home / "spine" / "keys" / "owner.priv").is_file() and (home / "spine" / "head.json").is_file()
+    return home
+
+
+def _whole_tree(root):
+    """Every path under ``root`` with its bytes digest + mode — a full monitor (owner.priv included)."""
+    import hashlib
+    out = {}
+    for p in sorted(root.rglob("*")):
+        st = p.lstat()
+        out[str(p.relative_to(root))] = (hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "dir",
+                                         st.st_mode, st.st_size)
+    return out
+
+
+def _assert_no_owner_key_under(work, priv_text):
+    import gzip
+    import io
+    import tarfile
+    needle = priv_text.strip().encode()
+    for p in work.rglob("*"):
+        assert not p.name.endswith(".priv"), f"an owner private key file is in the drill work dir: {p}"
+        if not p.is_file():
+            continue
+        raw = p.read_bytes()
+        assert needle not in raw, f"owner private key BYTES found in {p}"
+        if p.name.endswith(".gz"):
+            body = gzip.decompress(raw)
+            assert needle not in body, f"owner private key bytes inside compressed {p}"
+            if p.name.endswith(".tar.gz"):
+                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+                    for m in tar.getmembers():
+                        assert not m.name.endswith(".priv"), f"{m.name} packed into the drill tarball {p}"
+                        f = tar.extractfile(m) if m.isfile() else None
+                        if f is not None:
+                            member = f.read()
+                            assert needle not in member and needle not in (
+                                gzip.decompress(member) if m.name.endswith(".gz") else b"")
+
+
+@pytest.mark.parametrize("pruned", [False, True])
+def test_the_owner_private_key_is_never_copied_into_the_drill(tmp_path, pruned):
+    home = _signed_home(tmp_path, pruned=pruned)
+    priv = (home / "spine" / "keys" / "owner.priv").read_text()
+    work = tmp_path / "work"
+    v = ud.run_upgrade_drill(home / "spine" / "spine.jsonl", work)
+    assert v["status"] == ud.PASS, v
+    assert list(work.rglob("*.tar.gz")), "the upgrade's backup tarball is under the work dir (and was scanned)"
+    assert (work / "home" / "spine" / "keys" / "owner.pub").is_file()        # the PUBLIC key IS carried
+    _assert_no_owner_key_under(work, priv)
+
+
+def test_the_owner_private_key_is_not_in_the_work_dir_after_a_failed_drill(tmp_path, monkeypatch):
+    home = _signed_home(tmp_path, pruned=False)
+    priv = (home / "spine" / "keys" / "owner.priv").read_text()
+    monkeypatch.setattr(ud, "restore_from_backup", lambda d, b: None)        # fail AFTER the backup tarball
+    v = _step_drill(tmp_path, home / "spine" / "spine.jsonl")
+    assert v["status"] == ud.FAIL and "rollback" in v["detail"]
+    assert list((tmp_path / "work").rglob("*.tar.gz"))
+    _assert_no_owner_key_under(tmp_path / "work", priv)
+
+
+@pytest.mark.parametrize("key_offline", [False, True])
+def test_a_drill_of_a_pruned_spine_writes_nothing_outside_its_work_dir(tmp_path, key_offline):
+    """The audit repro: verifying a PRUNED copy consults a signed head + the owner key. It must use the COPY's
+    head and PUBLIC key — never the process's global KEYS_DIR, never mint a keypair (the old path minted a new
+    owner keypair into the real home when the private key was kept off-box)."""
+    import sigil.config as cfg
+    home = _signed_home(tmp_path, pruned=True)
+    if key_offline:
+        (home / "spine" / "keys" / "owner.priv").unlink()                   # the owner keeps the key OFF-box
+    real_before = _whole_tree(home)
+    proc_home_before = _whole_tree(cfg.SIGIL_HOME) if cfg.SIGIL_HOME.exists() else {}
+    v = ud.run_upgrade_drill(home / "spine" / "spine.jsonl", tmp_path / "work")
+    assert v["status"] == ud.PASS, v
+    assert _whole_tree(home) == real_before, "the drill changed the REAL home"
+    assert (_whole_tree(cfg.SIGIL_HOME) if cfg.SIGIL_HOME.exists() else {}) == proc_home_before, \
+        "the drill wrote into this process's own SIGIL_HOME (global KEYS_DIR/HEAD_PATH)"
+    assert not list((tmp_path / "work").rglob("*.priv")), "the drill minted a keypair"
+
+
+def test_the_manual_cli_drill_on_its_own_pruned_home_never_mints_a_key(tmp_path):
+    """Exactly the manual operator run: ``SIGIL_HOME=<real> python -m sigil.spine.upgrade_drill`` with the owner
+    private key kept off-box — PASS, and the real keys dir is byte-identical afterwards."""
+    import subprocess
+    home = _signed_home(tmp_path, pruned=True)
+    (home / "spine" / "keys" / "owner.priv").unlink()
+    before = _whole_tree(home)
+    env, py = _env(home)
+    work = tmp_path / "w"
+    work.mkdir()
+    r = subprocess.run([py, "-m", "sigil.spine.upgrade_drill", "--work-dir", str(work), "--json"],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["status"] == ud.PASS
+    assert _whole_tree(home) == before and not (home / "spine" / "keys" / "owner.priv").exists()
+
+
+def test_verify_never_mints_over_an_existing_owner_public_key(tmp_path):
+    """The lowest layer of the mint: ``trust_root`` (every verify) read the PRIVATE key and generated a new
+    keypair when it was absent — re-keying the trust root over the existing owner.pub. It now reads only the
+    public key."""
+    import subprocess
+    home = _signed_home(tmp_path, pruned=False)
+    (home / "spine" / "keys" / "owner.priv").unlink()
+    pub = (home / "spine" / "keys" / "owner.pub").read_bytes()
+    env, py = _env(home)
+    code = ("from sigil.spine.checkpoint import verify_checkpoint\n"
+            "from sigil.spine.store import SpineStore\nfrom sigil import config\n"
+            "print(verify_checkpoint(SpineStore(config.SPINE_PATH))[0])")
+    r = subprocess.run([py, "-c", code], env=env, capture_output=True, text=True)
+    assert r.stdout.strip() == "True", r.stdout + r.stderr
+    assert not (home / "spine" / "keys" / "owner.priv").exists()
+    assert (home / "spine" / "keys" / "owner.pub").read_bytes() == pub
+
+
+def test_a_private_key_in_the_work_dir_fails_the_drill(tmp_path, monkeypatch):
+    path = _real_spine(tmp_path)
+    real = ud._run_isolated
+
+    def leaky(data, work):
+        res = real(data, work)
+        (work / "owner.priv").write_text("leaked")
+        return res
+    monkeypatch.setattr(ud, "_run_isolated", leaky)
+    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    assert v["status"] == ud.FAIL and "secret key material" in v["detail"], v
+
+
+def test_the_drill_steps_refuse_a_copy_holding_a_private_key(tmp_path):
+    path = _real_spine(tmp_path)
+    home = tmp_path / "work" / "home"
+    assert ud._snapshot(path.parent, path.name, home) is not None
+    (home / "spine" / "keys").mkdir()
+    (home / "spine" / "keys" / "owner.priv").write_text("x")
+    v = ud.drill_copy(home / "spine" / path.name, tmp_path / "work")
+    assert v["status"] == ud.FAIL and "secret key material" in v["detail"]
+    assert not any(st["step"] == "upgrade" for st in v["steps"])
+
+
+def test_the_isolated_child_refuses_unless_scoped_to_its_copy(tmp_path, capsys):
+    path = _real_spine(tmp_path)
+    home = tmp_path / "work" / "home"
+    assert ud._snapshot(path.parent, path.name, home) is not None
+    assert ud.main([ud._CHILD_FLAG, str(home / "spine" / path.name), "--work-dir", str(tmp_path / "work")]) == 0
+    res = json.loads(capsys.readouterr().out)
+    assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"]
+    assert not list((tmp_path / "work").rglob("*.tar.gz"))                 # refused before any step ran
