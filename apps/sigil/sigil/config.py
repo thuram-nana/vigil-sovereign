@@ -175,6 +175,7 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+CHECKOUT_RATELIMIT_DIR = _customer / "checkout_ratelimit"   # the per-org/per-requester checkout limiter's markers
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)

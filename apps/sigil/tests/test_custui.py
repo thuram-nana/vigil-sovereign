@@ -91,7 +91,7 @@ def _stack(tmp_path, monkeypatch):
     # the passkey sign-count floor, else their persistent markers leak stale state across test runs (a stale
     # (username,step) or a stale sign-count floor would spuriously refuse a fresh enroll/login).
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
-                 "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR"):
+                 "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR", "CHECKOUT_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     path = tempfile.mktemp(suffix=".jsonl")
     SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})

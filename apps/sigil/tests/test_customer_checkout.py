@@ -53,6 +53,9 @@ def _provisioner():
         s, customers=custs, orgs=orgs, wallet=wallet,
         email_tokens=EmailTokenLedger(tempfile.mkdtemp(), ttl_s=1e4),
         rate_limiter=LoginRateLimiter(tempfile.mkdtemp(), max_fails=50, window_s=1e4, base_lock_s=50.0),
+        checkout_limiter=LoginRateLimiter(tempfile.mkdtemp(), max_fails=Provisioner._CHECKOUT_MAX,
+                                          window_s=Provisioner._CHECKOUT_WINDOW_S,
+                                          base_lock_s=Provisioner._CHECKOUT_WINDOW_S),
         email_sender=NullEmailSender(), trial_credits=100, now_fn=lambda: float(next(clock)))
     admin, tester, org, other = ("cust_admin000000000000001", "cust_tester00000000000001", "org_chk1", "org_other")
     custs.create("admin@acme.com", issued_at=1.0, password="password-xyz", username=admin)

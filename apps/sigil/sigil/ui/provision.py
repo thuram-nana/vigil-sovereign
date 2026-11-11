@@ -162,7 +162,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
-                 trial_credits: int = _DEFAULT_TRIAL_CREDITS,
+                 checkout_limiter=None, trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -194,6 +194,11 @@ class Provisioner:
         # (so there is no "checked-but-never-incremented" dead gate — the review's finding); when injected,
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
         self.member_limiter = member_limiter
+        # The DURABLE per-org / per-requester checkout-creation limiter (a LoginRateLimiter, guard-and-count via
+        # `admit`). The HTTP transport builds a fresh Provisioner per request, so the limit MUST live on disk,
+        # not on this instance. None ⇒ checkout is REFUSED (fail-closed: an unwired limiter can never mean
+        # "unlimited" outbound processor calls). The factory wires `_CHECKOUT_MAX` per `_CHECKOUT_WINDOW_S`.
+        self.checkout_limiter = checkout_limiter
         self.email_sender = email_sender
         self.trial_credits = int(trial_credits)
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -875,23 +880,20 @@ class Provisioner:
         return out
 
     # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
-    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
-    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER: at most
+    # `_CHECKOUT_MAX` attempts per `_CHECKOUT_WINDOW_S`, then a lockout of (at least) one window. The state is the
+    # injected filesystem `checkout_limiter` (durable across requests, restarts and processes — the transport
+    # builds a fresh Provisioner per request, so instance state would limit nothing).
     _CHECKOUT_MAX = 10
     _CHECKOUT_WINDOW_S = 600.0
 
-    def _checkout_rate_ok(self, keys, now: float) -> bool:
-        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
-        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
-        win = self.__dict__.setdefault("_checkout_attempts", {})
-        cutoff = now - self._CHECKOUT_WINDOW_S
-        for k in keys:
-            win[k] = [t for t in win.get(k, []) if t > cutoff]
-        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+    def _checkout_rate_ok(self, requester: str, org_id: str, now: float) -> bool:
+        """Guard-AND-COUNT one checkout attempt against the per-org AND per-requester keys. True iff admitted
+        (and durably recorded). FAIL-CLOSED: no limiter wired, or limiter state that cannot be locked / read /
+        written, refuses."""
+        if self.checkout_limiter is None:
             return False
-        for k in keys:
-            win[k].append(now)
-        return True
+        return self.checkout_limiter.admit(f"checkout:org:{org_id}", f"checkout:user:{requester}", now=now) is None
 
     def _checkout_provider(self):
         """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
@@ -978,7 +980,7 @@ class Provisioner:
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage billing for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
-            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+            if not self._checkout_rate_ok(requester, requester_org_id, t):
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
                 raise ProvisionDenied("too many checkout attempts — try again later")
         try:
@@ -1624,6 +1626,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
+        # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
+        checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
+                                          window_s=Provisioner._CHECKOUT_WINDOW_S,
+                                          base_lock_s=Provisioner._CHECKOUT_WINDOW_S,
+                                          max_lock_s=6 * Provisioner._CHECKOUT_WINDOW_S),
         # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
         # (config.ownership_fetcher() returns None otherwise ⇒ target_verify fail-closed). No surprise egress.
         target_fetcher=config.ownership_fetcher(),
