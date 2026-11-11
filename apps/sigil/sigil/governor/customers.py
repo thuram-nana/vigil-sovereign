@@ -48,9 +48,9 @@ from .accounts import DECOY_PASSWORD_HASH, hash_password, verify_password  # noq
 from ..spine.snapshot import SnapshotState  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
-from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey  # noqa: E402
-from ..config import fold_cache_enabled  # noqa: E402
+from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SIGNAL = "governor.customer"
 
@@ -132,7 +132,6 @@ class CustomerPrincipal:
 
 
 _SKIP = object()          # `_apply_record`: the record did not touch any username
-_UNCACHED = object()      # `CustomerRegistry._cached`: no cached answer — run the full fold
 
 
 def _apply_record(r, resolver, state: dict, custs: dict, issued: dict):
@@ -305,27 +304,14 @@ class CustomerRegistry:
         return {u: c for u, c in custs.items() if state.get(u) == "active"}
 
     def _cached(self, reader):
-        """`reader(view)` over the verified incremental fold (`spine/fold_cache.py`) when
-        `VIGIL_FOLD_CACHE_ENABLED` is on and the fold is cacheable, else `_UNCACHED` (the caller then runs the
-        full `_fold`). The cache key binds every input the full fold depends on beyond the records themselves:
-        the trusted pubkey, the genesis pin (the resolver's root once a rotation exists) and the loaded
-        SNAPSHOT itself, compared by value — its boundary moves the live window and its rows ARE the seed, so
-        a different seed under the same boundary also rebuilds (1.8 us to compare the empty no-prune identity;
-        O(seed) when a prune exists, the same order as `SnapshotState.load` itself)."""
-        if not fold_cache_enabled():
-            return _UNCACHED
-        snap = SnapshotState.load(self.store)          # raises exactly as `_fold` would on a bad prune head
-        key = (self.trusted_pubkey, genesis_owner_pubkey(), snap)
-
-        def build():
-            resolver, horizon = _kh.key_resolver_with_horizon(self.store, current=self.trusted_pubkey)
+        """`reader(view)` over the verified incremental fold (`fold_read.cached_read`, flag-gated), else
+        `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
             state, custs, issued, since = self._seed(snap)
-            return _CustomerView(state, custs, issued), resolver, since, horizon
+            return _CustomerView(state, custs, issued), since
 
-        def guarded(view: "_CustomerView"):
-            return _UNCACHED if view.poisoned else reader(view)
-
-        return _CUSTOMER_FOLD.read(self.store, key, build=build, reader=guarded)
+        return cached_read(_CUSTOMER_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
 
     def customer(self, username: str) -> Optional[CustomerAccount]:
         """The current active `CustomerAccount` for `username`, or None (fail-closed — revoked/unknown
