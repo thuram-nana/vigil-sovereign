@@ -197,12 +197,14 @@ def test_admit_counts_every_attempt_and_refuses_past_the_ceiling(tmp_path):
     assert lim.admit("a", "b", now=111.0) is None                      # the lockout lapses
 
 
-def test_admit_records_nothing_when_one_key_is_locked(tmp_path):
+@pytest.mark.parametrize("locked", ["org", "user"])
+def test_admit_records_nothing_when_any_key_is_locked(tmp_path, locked):
     lim = _alim(tmp_path / "l")
     for _ in range(3):
-        assert lim.admit("org", now=1.0) is None                       # "org" is now locked
+        assert lim.admit(locked, now=1.0) is None                      # that key is now locked
+    other = "user" if locked == "org" else "org"
     assert lim.admit("org", "user", now=2.0) is not None
-    assert not lim._marker("user").exists()                            # the refused attempt counted nowhere
+    assert not lim._marker(other).exists()                             # the refused attempt counted nowhere
 
 
 def test_admit_fails_closed_when_the_attempt_cannot_be_recorded(tmp_path, monkeypatch):

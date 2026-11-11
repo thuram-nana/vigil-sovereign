@@ -244,6 +244,23 @@ def test_an_abandoned_plan_checkout_unblocks_after_the_ttl(monkeypatch):
     assert DEFAULT_TTL_S >= 3 * 915                           # well above the ~15 min NET-2b parking window
 
 
+def test_an_in_flight_plan_checkout_refuses_a_second_before_its_link_exists(monkeypatch):
+    """The record is claimed BEFORE the outbound call, so a second request arriving while the first is still talking
+    to the processor (no link, no "created" audit row yet) is refused by the record itself."""
+    from sigil.governor.billing import checkout_tx_ref
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.pending_checkouts.claim(org, _PLAN, checkout_tx_ref(org, "inflight"), now=5000.0)   # request 1, mid-call
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="already in progress"):
+        p.billing_checkout(admin, org, _PLAN, now=5001.0)
+    assert posted == [] and seen[-1]["outcome"] == "refused_pending_plan"
+    assert seen[-1]["reason"].endswith(checkout_tx_ref(org, "inflight"))
+
+
 def test_the_record_outlives_the_payable_link_plus_the_drain_lag():
     """The record may only lapse once the link cannot bill: TTL >= the processor session the plan checkout asks
     for + the 60 s drain timer + the full NET-2b parking window (computed from its live defaults)."""
@@ -270,6 +287,16 @@ def test_a_plan_checkout_bounds_its_payment_session_and_a_topup_payload_is_uncha
     assert sorted(posted[0]) == ["amount", "currency", "customer", "meta", "tx_ref"]   # the top-up: as on main
     assert posted[1]["configurations"] == {"session_duration": PLAN_LINK_SESSION_MIN}
     assert posted[1]["payment_plan"] == _PLAN
+
+
+def test_checkout_tx_ref_is_the_tx_ref_create_checkout_sets_and_validates_like_it():
+    from sigil.governor.billing import checkout_tx_ref
+    from sigil.governor import catalog
+    sess = _real_provider([]).create_checkout(" org_a ", _TOPUP, expected=catalog.expected_amounts(), nonce="n1")
+    assert checkout_tx_ref(" org_a ", "n1") == sess.tx_ref == "vigil:org_a:n1"
+    for org, nonce in (("../x", "n1"), ("org_a", "a:b"), ("org_a", "")):
+        with pytest.raises(ValueError):
+            checkout_tx_ref(org, nonce)
 
 
 @pytest.mark.parametrize("bad", [0, 1441, True, "30", 30.0])
@@ -516,7 +543,7 @@ real_read = led._read
 
 def slow_read(*a):
     out = real_read(*a)
-    time.sleep(0.05)                                 # widen the read-decide-write window (test instrumentation)
+    time.sleep(0.03 * int(sys.argv[2][1:]))          # STAGGER the read-decide-write windows (test instrumentation)
     return out
 led._read = slow_read
 try:
@@ -556,6 +583,25 @@ def test_racing_claims_over_an_expired_record_admit_exactly_one(tmp_path):
     assert sorted(_race(tmp_path / "pc", k, 1000.0 + DEFAULT_TTL_S + 1)) == ["0"] * 7 + ["1"]
 
 
+def test_a_claim_fails_closed_when_the_lock_cannot_be_taken(tmp_path, monkeypatch):
+    from sigil.reuse import generate_keypair
+    from sigil.ui import pending_checkout as pc
+
+    class _NoLock:
+        LOCK_EX = 2
+
+        @staticmethod
+        def flock(fd, op):
+            raise OSError("flock not supported here")
+    k = generate_keypair()
+    led = pc.PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64)
+    led.dir.mkdir()                                           # a usable directory: ONLY the lock is missing
+    monkeypatch.setattr(pc, "fcntl", _NoLock)
+    with pytest.raises(pc.PendingCheckoutRefused) as ei:
+        led.claim("org_a", _PLAN, "vigil:org_a:n", now=100.0)
+    assert ei.value.code == "refused_pending_io" and not led._marker("org_a").exists()
+
+
 def test_a_claim_never_overwrites_a_record_it_did_not_read(tmp_path, monkeypatch):
     """Publishing is an exclusive create (os.link), so a record that appears between the read and the write (a
     writer that does not honour the lock) is never clobbered: the claim fails closed instead."""
@@ -570,6 +616,21 @@ def test_a_claim_never_overwrites_a_record_it_did_not_read(tmp_path, monkeypatch
         led.claim("org_a", _PLAN, "vigil:org_a:second", now=101.0)
     assert ei.value.code == "refused_pending_io"
     assert led._marker("org_a").read_bytes() == before
+
+
+def test_a_symlinked_record_is_never_followed(tmp_path):
+    """A marker that is a symlink (even to a genuine record) is not trusted: opened O_NOFOLLOW, it refuses."""
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import PendingCheckoutRefused, PendingPlanCheckouts
+    k = generate_keypair()
+    led = PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64)
+    led.claim("org_a", _PLAN, "vigil:org_a:n", now=100.0)
+    real = tmp_path / "elsewhere.json"
+    led._marker("org_a").rename(real)
+    led._marker("org_a").symlink_to(real)
+    with pytest.raises(PendingCheckoutRefused) as ei:
+        led.claim("org_a", _PLAN, "vigil:org_a:m", now=1e9)       # the genuine record behind it has expired
+    assert ei.value.code == "refused_pending_invalid" and "unreadable" in ei.value.detail
 
 
 @pytest.mark.parametrize("window", [("x", 200.0), (200.0, None), (200.0, 200.0), (300.0, 200.0)])

@@ -694,10 +694,7 @@ class FlutterwaveBillingProvider(BillingProvider):
         amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
         if amount_minor <= 0 or not currency:
             raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
-        n = nonce or secrets.token_urlsafe(18)
-        if not isinstance(n, str) or ":" in n or not n:
-            raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
-        tx_ref = checkout_tx_ref(org, n)
+        tx_ref = checkout_tx_ref(org, nonce or secrets.token_urlsafe(18))   # validates the nonce (fail-closed)
         payload: "dict[str, Any]" = {
             "tx_ref": tx_ref,
             "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)

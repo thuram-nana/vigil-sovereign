@@ -1051,10 +1051,7 @@ class Provisioner:
             from ..governor.billing import checkout_tx_ref
             from .pending_checkout import PendingCheckoutRefused
             nonce = secrets.token_urlsafe(18)
-            try:
-                pending_ref = checkout_tx_ref(requester_org_id, nonce)
-            except ValueError as exc:
-                raise ProvisionDenied(f"checkout refused: {exc}") from None
+            pending_ref = checkout_tx_ref(requester_org_id, nonce)   # the admitted org: validated like create_checkout
             try:
                 if self.pending_checkouts is None:
                     raise PendingCheckoutRefused("plan checkout is unavailable right now (contact support)",
@@ -1088,7 +1085,7 @@ class Provisioner:
                                             # lapses (top-ups pass None: their payload is unchanged)
                                             session_minutes=(PLAN_LINK_SESSION_MIN if pending_ref else None))
         except (UnsupportedCapability, ValueError) as exc:
-            if pending_ref and self.pending_checkouts is not None:
+            if pending_ref:
                 # the processor refused: the customer never received a link, so free the claim for a retry
                 self.pending_checkouts.release(requester_org_id, pending_ref)
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
