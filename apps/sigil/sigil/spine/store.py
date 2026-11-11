@@ -1411,6 +1411,85 @@ class SpineStore:
                 continue
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
 
+    def tail_after(self, seq: int, entry_hash: str, *, max_bytes: int = 4 << 20):
+        """Front C S0d — the fold cache's FRESH-STORE fast path. Read-only; never touches the seq index.
+
+        The verified fold cache keeps one folded state per spine across the per-request `SpineStore` objects the
+        cockpit builds, and on each read must (1) prove its anchor — the record at `seq` still has `entry_hash` —
+        and (2) fold the records appended since. Through `get()` / `iter_records(since_seq=…)` both build this
+        object's seq index first: O(the active segment + every sealed segment's sidecar) on a fresh store, i.e.
+        per request. This answers both from the END of the ACTIVE segment instead:
+
+          * a list — exactly the records `iter_records(since_seq=seq)` yields (parsed the same way: blank and
+            malformed lines skipped, an unterminated final line kept if it parses, strictly increasing seqs),
+            PROVIDED the record at `seq` was found in that tail with `entry_hash`, or `seq` is the last record of
+            the segment just before the active one and the manifest's `boundary_hash` for it (== its
+            `entry_hash`, which `verify()` checks) is `entry_hash` — so an anchor in a sealed / gzip segment is
+            proven without decompressing it. `[]`: `seq` is the tip;
+          * False — the record at `seq` is provably NOT the anchor (a different hash, or the spine now ends
+            before `seq`: a rollback, rewrite or reset);
+          * None — undecidable within `max_bytes` of the tail (a large delta, a gap at `seq`, a non-monotonic
+            tail, a rotation since the anchor that left more than one segment behind it): the caller takes the
+            indexed path."""
+        if seq < 0:
+            return None
+        m = read_manifest(self._layout)
+        if m is None:
+            target, prev = self._read_target(), None
+        else:
+            act = m.active()
+            if act is None:
+                return None
+            target = self._layout.seg_path(act)
+            sealed = m.sealed_in_order()
+            prev = sealed[-1] if sealed else None
+        try:
+            size = target.stat().st_size if target.exists() else 0
+        except OSError:
+            return None
+        window = min(size, 1 << 16)
+        while True:
+            start = size - window
+            after: list[SpineRecord] = []                 # the records after `seq`, newest first
+            if size:
+                with target.open("rb") as f:
+                    f.seek(start)
+                    buf = f.read(window)
+                lines = buf.split(b"\n")
+                if start > 0:
+                    lines = lines[1:]                     # the first piece may be a partial line
+                last = None
+                for raw in reversed(lines):               # newest first: stop at the anchor (O(new records))
+                    if not raw.strip():
+                        continue
+                    try:
+                        rec = SpineRecord.from_dict(json.loads(raw))
+                    except (ValueError, KeyError, TypeError):
+                        continue                          # skipped exactly as iter_records skips it
+                    if last is not None and rec.seq >= last:
+                        return None                       # non-monotonic tail: leave it to the indexed path
+                    last = rec.seq
+                    if rec.seq > seq:
+                        after.append(rec)
+                        continue
+                    if rec.seq == seq:
+                        return after[::-1] if rec.entry_hash == entry_hash else False
+                    # the newest record at or below `seq` is BELOW it: the anchor's own line is gone
+                    return None if after else False      # a gap at `seq` / the spine now ends before it
+                if start > 0:                             # every record read is after `seq`: read further back
+                    if window >= max_bytes:
+                        return None
+                    window = min(size, window * 4)
+                    continue
+            # Every record of the active segment is after `seq` (or it is empty): the anchor can only be the
+            # previous segment's last record, whose entry_hash the manifest carries as its boundary_hash.
+            recs = after[::-1]
+            if prev is None:
+                return False if not recs else None        # an empty spine cannot hold the anchor
+            if prev.last_seq != seq or prev.boundary_hash is None or (recs and recs[0].seq != seq + 1):
+                return None
+            return recs if prev.boundary_hash == entry_hash else False
+
     def get(self, seq: int) -> SpineRecord | None:
         """A single record by seq via the segment-aware index (resolves the OWNING segment + offset),
         byte-identical to a full scan. O(1) for a plaintext segment; for a gzip-sealed segment the offset is

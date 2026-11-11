@@ -4,12 +4,25 @@
 > `main`, what every shipped slice does and where it lives, every flag and who may flip it, the exact remaining
 > program in order, how to work in this repo without tripping its guards, and the definition of done.
 >
-> **`main` is at `e836b962` (#1070; plus the commit that lands this handoff), all required checks green.** Since the 2026-11-09 handoff 25 PRs have
-> merged (#1046–#1070; this handoff written by session `session_01Uzcz55Eva4w7NRFfoQPArA`): Front A is
+> **`main` is at `397e97c5` (#1075); #1076 (S0d-3 + this handoff) is in CI and merges on green.** Since the
+> 2026-11-09 handoff 30 PRs have merged (#1046–#1075; this handoff written by session
+> `session_01Uzcz55Eva4w7NRFfoQPArA`): Front A is
 > complete except the owner-blocked KMS escrow; Front B's pay round-trip is built (default-OFF); the 1M-user design
 > was **authorised by the owner** and its first three build slices (S0a–S0c, the verified fold cache over
 > customers, orgs/memberships and the money folds) are merged default-OFF. **The next agent's first item is Front C
 > S0d (§4.3), then S1→S4, then Gate 5 (§5).**
+>
+> **Update (same session, 2026-11-11): Front C S0 is COMPLETE** — S0d merged as #1072, #1073, #1074, #1075
+> and the S0d-3 PR (#1076, which carries this update). Every request-path fold is on the verified cache; per-request
+> stores pay O(new records) via the tail fast path; the cache is warmed at boot and audited against the spine
+> (`sigil verify`, `vigil doctor`).
+>
+> **HANDOVER (2026-11-11, end of session): read §10 FIRST.** The owner opened a new program the same day —
+> **pricing, metered billing on ONE VIGIL API key, and Red-Pen as a customer product** — and decided or delegated
+> every number. Its design and its first two slices are **built but not on `main`**: they are parked on branch
+> **`claude/cool-meitner-v9fq6d-pricing`** (commits `814e4cb4` = M1, done; `7285da34` = M1c-1, work in progress).
+> **Order for the next agent:** (1) merge #1076 when green; (2) ship M1 as its own PR; (3) finish + ship M1c-1;
+> (4) continue the pricing slices in §10.6; Front C S1→S4 (§4.4) and Gate 5 (§5) remain after/alongside.
 
 ---
 
@@ -161,6 +174,15 @@ ends with the session's attribution footer.
 | #1068 | `6ebe6aa8` | **S0a** — verified incremental fold cache for the customer registry (default-OFF) |
 | #1069 | `3ae2ac61` | **S0b** — orgs + memberships (every `admit_customer`) on the fold cache; shared `governor/fold_read.py` |
 | #1070 | `e836b962` | **S0c** — the money folds (wallet, plan credits incl. settle-path `debited_entry`, subscriptions) on the fold cache |
+| #1071 | `8049bae6` | docs(handoff): complete end-to-end handoff after the 2026-11-10/11 queue |
+| #1072 | `2f8dc3a4` | **S0d-1** — operator accounts + customer credentials (passkeys, TOTP, Google links) on the fold cache |
+| #1073 | `bd68bbe1` | **S0d-2a** — invoices, the EC-4/EC-5 cost ledger (O(1) global pool position), postpaid line + arrears |
+| #1074 | `8269b1ab` | **S0d-2b** — promotion, the agent budget meter, asset ownership, monitoring authority |
+| #1075 | `397e97c5` | **S0d-2c** — kill switch + capability gate (append-proof), customer assessments, margin settles, `challenge()` |
+| #1076 | (this PR) | **S0d-3** — fresh-store tail fast path, rebuild-and-compare audit, boot warm-up, `sigil verify` / `vigil doctor`; this handoff |
+
+**Not on `main` (parked on `claude/cool-meitner-v9fq6d-pricing`, no PR yet):** `814e4cb4` PRICING M1 and
+`7285da34` PRICING M1c-1 (WIP) — §10.
 
 ---
 
@@ -229,7 +251,7 @@ ends with the session's attribution footer.
   onnxruntime 1.31.1, pydantic 2.14.3, qdrant-client 1.20.0, tokenizers 0.23.3; engine `pytest-httpserver>=1.2.0`);
   two latent order-dependent tests made hermetic.
 
-### Front C — 1M users (design authorised; S0a–S0c merged) — see §4.
+### Front C — 1M users (design authorised; S0 = S0a–S0d merged, default-OFF) — see §4.
 
 ---
 
@@ -239,7 +261,8 @@ ends with the session's attribution footer.
 |---|---|---|
 | `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
 | multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
-| `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0a–S0c reads: customers, orgs/memberships, wallet, plan credits, subscriptions) | owner (production); tests set it |
+| `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0: every request-path registry read — §4.2) + the cockpit's boot warm-up / audit thread | owner (production); tests set it |
+| `VIGIL_FOLD_CACHE_AUDIT_S` | seconds between the cockpit's rebuild-and-compare audits (default 21600; 0 = warm-up only) | operator |
 | `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (needs `VIGIL_FLW_SECRET_KEY` + `VIGIL_BILLING_WEBHOOK_SECRET`) | owner |
 | `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` | subscription-plan checkout (needs the base flag) | owner, after a sandbox renewal |
 | `VIGIL_BILLING_PLAN_ALARM` | quarantine an unaccountable paid plan charge | owner (keep ON while plans can renew) |
@@ -250,6 +273,15 @@ ends with the session's attribution footer.
 | `VIGIL_OTLP_ENDPOINT` / `VIGIL_WITH_OTEL` | loopback OTLP export (opt-in telemetry) | operator |
 | `VIGIL_UPGRADE_DRILL_ENABLED` | the on-box upgrade/rollback drill | operator |
 | `SIGIL_OIDC_ENABLED`, customer OIDC/passkey flags | operator / customer federated login | owner |
+
+**Pricing / metering flags — on the pricing branch only until M1 / M1c-1 merge (§10):**
+
+| Flag | Enables | Who flips |
+|---|---|---|
+| `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost × K (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
+| `VIGIL_MODEL_GATEWAY_ENABLED` / `VIGIL_MODEL_GATEWAY_PORT` (8742) | the cockpit starts the sovereign model gateway (loopback) | owner / operator |
+| `VIGIL_BILLING_MARKUP_K` (6) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
+| `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
 Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
 `SIGIL_CUSTOMER_SESSION_KEY`, `SIGIL_ANTHROPIC_API_KEY`.
@@ -269,7 +301,7 @@ Ed25519 signature — ~148–200 µs per record ⇒ ~2.5–3 min per login looku
 full folds; the launch gate's `CreditMeter.available` = 3 more. Signed append ≈ 1.1 ms (~900/s/process before
 group commit).
 
-### 4.2 S0 — the verified fold cache (S0a–S0c MERGED, default-OFF)
+### 4.2 S0 — the verified fold cache (S0a–S0d MERGED, default-OFF)
 **Files:** `apps/sigil/sigil/spine/fold_cache.py` (generic substrate) · `apps/sigil/sigil/governor/fold_read.py`
 (the ONE registry read path) · `key_history.key_resolver_with_horizon` · per registry: a shared one-record step
 used by BOTH the full fold and the cache, a seed method, a view, and `_cached(reader)`.
@@ -295,22 +327,33 @@ falls back to the full fold.
 | S0a | `CustomerRegistry.customer / by_email (email index) / customers / set_password` | ~120–135 µs flat 500→30k | 85 ms → 4.45 s | 28 / 22 of 22 |
 | S0b | `OrgRegistry.orgs / org / memberships / membership_role` ⇒ `admit_customer` (one entry for both folds) | ~121 µs | 76 ms → 1.5 s (250→5k orgs) | 15 / 18 of 18 |
 | S0c | `WalletRegistry`, `PlanCreditLedger` (incl. settle-path `debited_entry`), `SubscriptionRegistry` (one cache per line) ⇒ `CreditMeter.available` | ~355–385 µs | 100 ms → 1.46 s (200→3k tenants) | 11 / 16 of 16 |
+| S0d-1 (#1072) | `AccountsRegistry` (every operator request: `resolve`), `CustomerCredentialRegistry` (passkey / TOTP / Google login; by user / credential id / (iss, sub) pairs) | ~120–140 µs | resolve 231 ms, passkey 2.86 s (20k) | 13 / 22 of 22 |
+| S0d-2a (#1073) | `InvoiceRegistry`, `CostEnvelopeLedger` (`PairedLedgerView`: O(1) `global_position`), `PostpaidRegistry` + `PostpaidArrearsLedger` | 130 µs pool; ~0.6 ms launch reads | 4.6 s pool; 15.7 s (20k tenants) | 10 / 31 of 31 |
+| S0d-2b (#1074) | `PromotionPolicy`, `BudgetLedger.spent` (unsigned, per-(agent, day)), `AssetOwnershipRegistry` (proofs; `KeyedGrantView`), `MonitoringAuthorityRegistry` | ~0.6–0.7 ms launch path | 3.2 s (5k tenants) | 11 / 22 of 22 |
+| S0d-2c (#1075) | `KillSwitch` + `CapabilityGate` (no longer re-scanned on every append), assessments (per-slug index), margin settles, `challenge()` (`live_window`) | ~1.1 ms governed action incl. its append | 526 ms (5k tenants) | 13 / 15 of 16 (+1 equivalent) |
+| S0d-3 | `SpineStore.tail_after` (fresh store per request: anchor + delta from the active tail; sealed anchor via the manifest boundary hash), `FoldCache.audit` via `fold_read.auditing`, `governor/fold_warm.py`, `sigil verify [--folds]`, `vigil doctor` | 0.21–0.42 ms (fresh store) | 14.8 → 69.6 ms per request before | 20 + 6 / 19 of 19 |
 Each slice: full `apps/sigil` suite green with the flag ON and OFF; tests compare the cached public API with the
 same API flag-OFF after every randomized op, and fail if a cached read silently fell back.
 
 **Residuals (documented, not hidden):**
 - **Cold build O(N) once per process** (~2.5 min at 1M) — removing it needs a persisted signed index, which the
-  approved trust model excludes; until then a 1M deploy **warms the cache at start** (S0d item).
-- **Gzip-sealed anchor** — after an operator `compact`, until the next append, each read decompresses the sealed
-  segment holding the anchor (31 ms measured at the 12k-record cap vs 0.3 ms). Fix: verify a sealed anchor
-  against the manifest's boundary hash (S0d item).
-- **Chain-breaking in-place edits before the anchor are not re-read** — that is `SpineStore.verify()`'s job; S0d
-  adds a cached-vs-full compare to `sigil verify` / `vigil doctor`.
+  approved trust model excludes. S0d-3 runs it at boot in the cockpit (`fold_warm.start_background`), off the
+  request path.
+- ~~Gzip-sealed anchor~~ — fixed in S0d-3 (proven from the manifest boundary hash: 29.6 ms → 0.12 ms).
+- **Chain-breaking in-place edits before the anchor are not re-read by a read** — `SpineStore.verify()` and the
+  S0d-3 audit (`sigil verify`, the cockpit's periodic audit → `vigil doctor` HARD issue) catch them.
+- **The fast path trusts the manifest's `boundary_hash`** for a sealed anchor; a tamper that rewrites a sealed
+  segment but leaves the manifest is caught by `verify()` / the audit, not by the read.
+- **Audit cost** — one cold build per fold, in the background, every `VIGIL_FOLD_CACHE_AUDIT_S` (default 6 h).
+- **Two trust roots in one process** thrash a fold (one entry per fold and spine); production uses one.
+- **Kept on their scans by design:** the sovereign `OffenseGate` and the eval capability-grant / offense-
+  attestation folds (owner ceremonies, documented "never cached"), `budget.report` (CLI), `revoke_all`, the eval
+  `_publish` scans, the cockpit HUD's one-time tip scan.
 - **Memory:** one folded state per registry per process — S4 sizes it against the owner's targets.
 - **`SnapshotState.load` is itself O(snapshot) per read once a prune exists** (today the prune cutover is unwired,
   so it returns the cheap empty identity). When prune goes live, memoize the loaded snapshot on the signed head.
 
-### 4.3 S0d — next build slice (exact)
+### 4.3 S0d — DONE (kept for the record of what it covered)
 Follow the S0a–S0c pattern exactly (shared step → seed → view → `_cached` via `fold_read.cached_read`; equivalence
 test comparing the cached public API with flag-OFF after every randomized op; O(new) signature-count test; seeded
 prune + pubkey bypass + same-boundary different-seed; flag-OFF-never-consulted; mutation-verify each index).
@@ -355,7 +398,9 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
 ---
 
 ## 5. REMAINING PROGRAM (agent), in order
-1. **Front C S0d** (§4.3), then **S1, S2a–c, S3, S4** (§4.4). Ask the owner for the S4 targets when S4 starts.
+0. **The pricing / metering / Red-Pen program (§10)** — the owner's latest direction. Merge #1076, then M1, then
+   M1c-1, then §10.6 in order.
+1. **Front C S1, S2a–c, S3, S4** (§4.4) — S0 is complete. Ask the owner for the S4 targets when S4 starts.
 2. **Gate 5 — hands-on end-to-end** (personal, adversarial, with evidence; do not rely on per-slice red-pens):
    signup (`custui` → `provision.signup_request` / verify email) → buy credits (`billing_checkout` → Flutterwave
    **sandbox**, never a live secret) → webhook → `vigil billing-drain` credits the wallet → prove domain ownership
@@ -379,8 +424,15 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
   marketing vhost).
 - Flip `VIGIL_CUSTOMER_PROD_EXECUTION`; flip the multi-shard production flag after S4; decide
   `VIGIL_FOLD_CACHE_ENABLED` in production.
-- **Money numbers:** margins, $/token, catalog prices, custom credit amounts (rate / min / max / rounding — not
-  supported today), and the **S4 scale targets**.
+- **Money numbers:** the owner SET and DELEGATED the pricing numbers on 2026-11-11 (§10.2–§10.3); the agent
+  builds them as env-overridable defaults. Still the owner's: any number NOT in
+  `docs/decisions/PRICING-RED-PEN-DESIGN.md`, the **S4 scale targets**, and turning `VIGIL_METERED_BILLING` on.
+- **Pricing go-live (§10):** the Anthropic API key in the sovereign secret store (`SIGIL_ANTHROPIC_API_KEY`), a
+  dedicated Anthropic **workspace** for customer traffic with a monthly spend limit, Anthropic auto-reload with a
+  cap, an Anthropic **admin key** for the daily reconciliation (O1), the calibration spend approval (M5),
+  confirming the Flutterwave fee schedule (the design assumes ≤ 4.8%; `flutterwave.com` was unreachable from the
+  sandbox), registering the customer-facing GitHub App (Red-Pen), and the sub-processor disclosure (Anthropic,
+  GDPR Art. 28) in the privacy policy.
 - The **AWS KMS key** for evidence-DEK escrow + KEK (#70 tail).
 - CodeQL: scope out the deliberately vulnerable benchmark fixtures (proposed `paths-ignore` lines in
   `docs/audit/CODEQL-TRIAGE.md`) and dismiss the by-design alerts with the recorded rationale.
@@ -394,14 +446,14 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
    delivery proof; `sigil serve-customer` (`apps/sigil/sigil/cli.py::cmd_serve_customer`) and the customer /
    public vhosts (`apps/sigil/deploy/reverse-proxy/vigil-{customer,public}.{nginx.conf,Caddyfile}`,
    `apps/sigil/deploy/REMOTE-HOSTING.md`) exist — going live needs the owner's DNS/TLS.
-4. ⏳ **1M scaling** — design ✅ authorised; S0a–S0c ✅ merged; **S0d, S1, S2a–c, S3, S4 to build**; S4 needs the
-   owner's targets. This is the main remaining distance.
+4. ⏳ **1M scaling** — design ✅ authorised; S0 (S0a–S0d) ✅ merged; **S1, S2a–c, S3, S4 to build**; S4 needs
+   the owner's targets. This is the main remaining distance.
 5. ⏳ **Gate 5** — the personal hands-on end-to-end + at-scale verification, with evidence (§5 item 2).
 6. **[owner]** the held flips and numbers (§6).
 
 Honest status: the customer-SaaS product, the money loop (in and out), offense breadth, production hardening,
 backups and the deploy substrate are **built and merged**; everything new is default-OFF and fail-closed, so
-`main` is always safe and shippable at single-node. The distance to "1,000,000 users" is Front C S0d → S4 plus
+`main` is always safe and shippable at single-node. The distance to "1,000,000 users" is Front C S1 → S4 plus
 Gate 5 and the owner's flips.
 
 ## 8. KEY ANCHORS (quick map)
@@ -435,3 +487,224 @@ Gate 5 and the owner's flips.
   owner_key=k, trusted_pubkey=k.public_key_b64).create(f"user{i}@example.com", issued_at=100.0+i)`, then time
   `by_email` with `VIGIL_FOLD_CACHE_ENABLED` unset vs `=1` (call it once first: the first point read builds the
   store's offset index).
+
+---
+
+## 10. PRICING, METERING & RED-PEN — the owner's 2026-11-11 program (IN FLIGHT — start here)
+
+### 10.1 Where the work is
+| What | Where | State |
+|---|---|---|
+| Design + every decision, risk and source | `docs/decisions/PRICING-RED-PEN-DESIGN.md` — **inside commit `814e4cb4`** (lands on `main` with M1) | final for M1; its §4.5 prices are pre-calibration estimates |
+| **M1** — metering core + sovereign model gateway | `814e4cb4` on `claude/cool-meitner-v9fq6d-pricing` | done: tests green, **39/39 mutants**, ruff + mypy ratchet clean, docs/tests 443 ✓; **no PR yet** |
+| **M1c-1** — sovereign wiring (WIP) | `7285da34` on the same branch | tests green (299 across the touched suites), ruff clean; **mutation + red-pen NOT done** |
+| M1c-2 … A1 | — | not started (§10.6) |
+
+The parking branch = `1bee12cc` (S0d-3, #1076) + `814e4cb4` + `7285da34`. It is a **parking branch: never open a PR
+from it and never merge it**. Ship each commit as its own PR from your session branch:
+```bash
+git fetch origin main claude/cool-meitner-v9fq6d-pricing
+git merge --ff-only origin/main            # after #1076 has merged
+git cherry-pick 814e4cb4                    # M1; re-test (§10.8), push, PR, merge on green
+# later, once M1c-1 is finished (§10.5): cherry-pick 7285da34 (+ your fix-ups) the same way
+```
+Delete the parking branch once both commits are on `main`.
+
+### 10.2 The owner's decisions (2026-11-11; verbatim intent)
+- **Credits:** 100 credits per $1 (1 credit = $0.01 at list). **Minimum purchase $5.** Six packs **$5 / $10 / $16 /
+  $25 / $50 / $100 → 500 / 1,000 / 1,600 / 2,500 / 5,000 / 10,000 credits, no volume bonus.** Custom amounts =
+  whole dollars × 100 with a maximum. Unused credits are kept and never expire.
+- **One model only: Claude Opus 4.8 (`claude-opus-4-8`).** Depth → effort: **Quick = high, Deep = xhigh ("extra"),
+  Max = max.** **"Ultracode"** (a Claude Code setting that orchestrates multi-agent dynamic workflows) **is the Max
+  tier** — used for fixing code AND for deep work on live systems.
+- **Customer-facing name: "VIGIL"** (the owner changed it from "VIGIL Agent"). Never name the model to a customer.
+- **One VIGIL Anthropic API key.** VIGIL buys the tokens; every tenant's runs draw on that key; **each tenant sees only
+  their own bill**, in credits.
+- **Tenants must get the work they paid for, and VIGIL must make good money.**
+- **Not everyone tests code**: some customers test live deployed systems, some code, some both. **Not everyone wants
+  fixes**: some only want to know their vulnerabilities — Fix is opt-in.
+- **Red-Pen** — the owner's "reopen" = this repo's red-pen reviewer (`engine/crucible/.claude/agents/red-pen.md` +
+  the dual-review merge bar) — becomes a customer product for PRs and whole systems, finding more vulnerabilities
+  and (optionally) fixing them.
+- Launch with PAYG credits + per-host AEGIS subscriptions + quoted enterprise contracts; discounted credit
+  subscriptions only after costs are measured.
+- **Delegation:** "I will leave you to carry out research and answer all the other questions for me; remember we need
+  perfection." Every number below is the agent's researched answer, built as an env-overridable default.
+
+### 10.3 The numbers (design §4) — all env-overridable
+`charge_credits = min(reservation, max(FLOOR, ceil(cost_usd × K × 100)))`, where `cost_usd` comes ONLY from the
+sovereign gateway's meter.
+
+| Setting | Value | Why / env |
+|---|---|---|
+| Markup K | **6** → AI = 16.7% of revenue → **≥ 73% gross margin** after ≤ 4.8% card fees + ~5% infra | `VIGIL_BILLING_MARKUP_K` (≥ 1, ≤ 100) |
+| Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
+| Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
+| Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |
+| Outcomes | completed = metered; **canceled = metered** (today a cancel is a full refund — a run cancelled at 95% is free); budget reached = metered (= reservation) + findings delivered + "continue" (resume); **failed on VIGIL's side = 0 + one auto-retry** | `completion_spool._consumed_for` |
+| Default budgets (pre-calibration) | Quick **450** (so the $5 pack always buys one), Deep 5,000, Max 20,000, Red-Pen · PR 300 per PR + a monthly cap per repo, Fix 2,000 per finding, Retest 200 per finding | M3 / M5 |
+| Fairness | free **preflight** before any reservation; **10% report reserve** (stop testing at 90%, write the report); continue = resume, never restart; only proven findings; an honest coverage map | design §3 (M2 / M4) |
+| Account protection | tenant concurrency **4**, global **32**, daily ceiling (unset = none) + an Anthropic workspace spend limit (owner) + daily Admin-API reconciliation | `VIGIL_GATEWAY_*` (§3) |
+| Rough prices | Quick ~$4.50 cap, Deep ~$47, Max ~$180 (assumed run sizes — calibration M5 replaces them) | design §4.5 |
+
+**Two pre-existing defects the program replaces** (do not enable money paths until they are gone):
+`vigil_core/credit_lease.ENVELOPE_TOKENS_PER_CREDIT = 100_000` (sells 1M tokens for $0.10 vs ~$2 cost) and
+`vendor/strix/strix/report/anthropic_pricing.py` (matches `claude-opus-4-8` to the Opus 4 row $15/$75 = 3× the real
+price, so Strix budget caps stop a run at a third of what was paid for).
+
+### 10.4 What M1 built (`814e4cb4`) — the architecture
+**Why a gateway.** The settle signal deliberately carries NO amount (`vigil_core/engagement_completion.py`): the
+keyless offense plane must never set a charge. So metering is sovereign: every model request of a customer run goes
+through **`apps/sigil/sigil/model_gateway.py`**, a loopback Anthropic Messages API reverse proxy that holds the ONE
+provider key. The offense plane only ever holds a per-run **model grant**.
+
+- **`packages/core/vigil_core/vigil_core/model_metering.py`** — `Usage` (input, output, cache read, 5-min / 1-h
+  cache writes, web searches); `usage_from_api` (JSON body) and `StreamMeter` (SSE: `message_delta` counts are
+  CUMULATIVE — replace, never add); `PriceRow` / `DEFAULT_PRICES` / `price_table(env)`; `cost_nano_usd` (an
+  unpriced model RAISES); `billing_markup` (exact `Fraction`); `run_floor_credits`; `credits_for_cost(cost, markup,
+  floor, cap)`; `usd_cap_nano_for_credits(credits, markup)` (the most spend whose charge fits the reservation);
+  `format_usd`. Integer nano-USD everywhere; every malformed input raises `MeteringError` (fail closed).
+- **`packages/core/vigil_core/vigil_core/model_grant.py`** — owner-signed `ModelGrant{grant_id (128-bit), org_id,
+  engagement_slug, nonce, model, effort ∈ {high, xhigh, max}, cap_nano_usd, not_after, issued_at}`; token
+  `vmg1.<b64url canonical JSON>.<b64url Ed25519 sig>` over the NEW domain tag `model-grant`
+  (`spine_domains.DOMAIN_TAGS`); `decode_token` is total (bad prefix / base64 / length / signature / schema /
+  non-canonical body → `(None, reason)`); `meter_id(slug, nonce)` = 32 hex of sha256 — ONE meter per launch, so a
+  re-minted grant cannot reset a run's budget and one tenant's spend cannot land on another launch.
+- **`apps/sigil/sigil/model_gateway.py`**
+  - Endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens` (forwarded, unmetered, model-pinned only),
+    `GET /v1/vigil/budget` (the run's cap / spent / pending / remaining / fraction_used / closed — for the engine's
+    90% wrap-up and the live meter; an expired grant may still read it). Anything else → 404. Query strings
+    (Claude Code's `?beta=true`) are forwarded.
+  - Auth: the grant in `x-api-key` or `Authorization: Bearer`; bad → 401 `authentication_error`; expired or an
+    unpriced model → 403 `permission_error`. The provider key is added upstream; the client's token never leaves.
+  - Pinning: the grant's model only (else 400); `output_config.effort` = the grant's effort (so `max` reaches the
+    API even from Strix, whose effort Literal stops at `xhigh`); thinking = `{"type": "adaptive"}` (dropped under a
+    forced `tool_choice`, which the API refuses with thinking); `temperature` / `top_p` / `top_k` dropped (Opus 4.8
+    rejects them); `speed` + `inference_geo` stripped, `fast-mode*` betas dropped, `service_tier` forced to
+    `standard_only`; the code-execution tool refused (container billing is not priced).
+  - Budget: before forwarding, the worst-case output cost (`max_tokens × output price`) is RESERVED against the cap
+    and `max_tokens` lowered to fit; < 1,024 affordable output tokens → 403 "budget is reached"; concurrent
+    requests cannot jointly pass the cap. Each request's reservation is a `_Ticket` settled exactly once (commit or
+    release). **Overshoot bound:** the input cost of the last in-flight request(s) — VIGIL's cost; settle clamps.
+  - Metering: JSON `usage`, or the stream's events (keeps reading the upstream after the client disconnects, so
+    billed tokens are metered; meters what arrived if the upstream dies mid-stream). An unreadable 200 is charged
+    its reservation, never free.
+  - Meter files: `$SIGIL_HOME/model_meter/<meter_id>.jsonl` (0600; lines `{n, ts, kind: usage|close, org_id,
+    model, request_id, usage, cost_nano, prev, h}`, `h = sha256(prev + canonical(line))`); every append is
+    `fcntl`-locked and chains onto the LAST LINE ON DISK; `close()` (from any process) appends a close line and
+    creates `<meter_id>.closed`, which the gateway checks before admitting each request; `verify()` re-reads and
+    checks the chain (edit / drop / reorder → `ValueError`). One gateway process meters a given launch.
+  - Account protection: per-tenant (org_id) and global `BoundedSemaphore`s, wait `concurrency_wait_s` (30 s) then
+    429 `rate_limit_error` + `retry-after: 5`; daily ceiling (spend of the UTC day + all pending reservations) →
+    529 `overloaded_error` (a VIGIL-side failure: never billed); the day's spend is re-seeded after a restart from
+    meter files modified that day.
+  - Upstream errors are relayed with `retry-after` / `request-id` / `x-should-retry`; unreachable → 502
+    `api_error`; any internal error → 500 `api_error`, nothing forwarded. Loopback bind only. Request lines are
+    never logged.
+  - Relationship to `vigil_core.ai_gateway`: that chokepoint covers VIGIL's OWN model calls (classify / redact /
+    audit); this gateway carries the customer-run agent traffic (Strix, Claude Code), which never went through
+    `ai_gateway`, and passes bodies unredacted (an agent's prompts are its working state).
+- Tests: `packages/core/vigil_core/tests/test_model_metering.py` (21), `test_model_grant.py` (15),
+  `apps/sigil/tests/test_model_gateway.py` (34, against a fake Anthropic upstream: JSON, SSE, disconnect, errors,
+  concurrency, ceiling, restart, tamper). Each file's docstring lists its "Mutation-verify targets".
+
+### 10.5 M1c-1 (`7285da34`, WIP) — what it does, what is left
+**Done (all behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF, byte-identical off):**
+- `sigil/config.py`: `MODEL_METER_DIR`, `metered_billing_enabled`, `model_gateway_enabled/_port/_url`, `run_model`.
+- `model_gateway.config_from_env` + `start_from_env` (once per process + port; never raises; a misconfiguration is
+  logged and the cockpit carries on — runs then fail closed); `ui/server.py::serve` starts it beside the fold warm-up.
+- `ui/launch_gate.py::publish_lease` → `_publish_model_grant`: mints the owner-signed grant from the VERIFIED lease
+  (cap = `usd_cap_nano_for_credits(units, K)`, effort = `run_tier.effort_for(run_tier_for_units(units))`, expiry =
+  the lease's) and writes it BEFORE the lease; a pricing config the core refuses refuses the publish (no lease, no
+  grant); a failed lease write removes the grant.
+- `integration/vigil_integration/live/model_grant_broker.py`: `<base>/model-grants/<slug>.json` (0600 in 0700,
+  atomic, nonce-bound via `expect_nonce`, loopback-URL-only, never follows a symlink, never prints the token).
+- `inbound/completion_spool.py::_consumed_for`: metered → close the meter, then completed / canceled = metered
+  (clamped), failed = 0; a broken meter / bad pricing refuses the settle (the spool retries); `_retire_model_grant`
+  removes the grant after settle.
+- `vigil_core/run_tier.effort_for` (quick → high, deep → xhigh; unknown → high, never an escalation).
+- `backup.py`: `model_meter` captured (money data) — `test_backup_recovery_functional.py` restores it functionally
+  (`GrantMeter.verify` totals) and proves a dropped meter loses the charge.
+- `integration/vigil_integration/doctor.py::_metering_report` — HARD issues: metered without the gateway, gateway
+  without a provider key, gateway not answering while metered, a pricing value the core refuses; notes: no daily
+  ceiling, gateway down while billing is flat. Nothing rendered when neither flag is set.
+- Tests: `apps/sigil/tests/test_metered_billing.py` (12), `integration/tests/test_model_grant_broker.py`,
+  `integration/tests/test_doctor_metering.py`, `test_run_tier.py` (+1).
+
+**Left before its PR:**
+1. **Mutation pass** — the intended mutants are listed in `test_metered_billing.py`'s docstring (mint with metering
+   off; cap = units instead of usd_cap; publish the lease when the grant fails; charge a failed run; leave the meter
+   open; drop the clamp; settle on a corrupt meter) — add the doctor / broker / backup / start_from_env ones.
+2. **Red-pen** the money path (who can make a grant, what a stolen grant can do, settle idempotency vs. the closed
+   meter, the restore of an unsettled meter).
+3. Re-test on top of M1 + main, then PR. State these interim limits in the PR:
+   - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
+     pre-metering placeholders), i.e. metered caps of ~$0.005 / ~$0.033 — runs would stop at once.
+   - The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
+   - The gateway must be enabled with metered billing (doctor HARD issue otherwise).
+
+### 10.6 Remaining slices, in order (design §9)
+| Slice | What, with anchors |
+|---|---|
+| **M1c-2 — offense wiring** | (1) `integration/vigil_integration/jobs/engage_worker.py`: read `model_grant_broker.read_model_grant(base, slug, expect_nonce=nonce)`; metered + no grant ⇒ refuse the run (fail closed); scope the run's env the way `_model_routing_scope` does (the worker runs one job at a time): `ANTHROPIC_BASE_URL` = gateway, `ANTHROPIC_API_KEY` = token for in-process engine calls; `LLM_API_BASE` / `LLM_API_KEY` / `STRIX_LLM=anthropic/claude-opus-4-8` for Strix children; restore after. (2) `engine/crucible/framework/v2/kernel/backends/anthropic.py::_client_obj` caches its client and `common/live_keys.refresh_live_anthropic_key()` HOT-RELOADS the persisted key into the env — in metered mode that would replace the token: give an explicit grant env (e.g. `VIGIL_MODEL_GRANT`) precedence and key the cache on it; same for `live/think_claude.py::_resolve_key` / `_build_live_client` (pass `base_url`). (3) **EC-2a model routing must be OFF when metered** (it routes "quick" bindings to cheaper models, which the gateway refuses): `vigil_core/run_tier.routing_enabled_for` + `engage_worker._model_routing_scope`. (4) Fix `vendor/strix/strix/report/anthropic_pricing.py`: rows for `claude-opus-4-5`…`4-8` at $5 / $25 / $0.50 / $6.25. (5) A wire test that `output_config.effort` reaches the API as the grant's effort. (6) Doctor note: in metered mode the offense plane must hold no provider key. |
+| **M3 — catalog** | the six packs + custom top-ups ($5–$500 with the §10.3 limits) in `governor/catalog.py` (+ the checkout path `provision.billing_checkout`, amounts always from the catalog); re-budget the launch products (Quick 450 / Deep 5,000 / **Max 20,000** at effort max); an explicit, owner-signed run tier in the lease; retire `ENVELOPE_TOKENS_PER_CREDIT` from the money path. |
+| **M2 — engine** | the 90% report-reserve wrap-up (poll `GET /v1/vigil/budget`); continue = resume (Strix `--resume`); runtime caps from the grant as a second line (Strix `max_budget_usd`, Claude Code `--max-budget-usd` — counts subagents, but is a client-side estimate); `max` through Strix. |
+| **M4 — customer UX** | the "VIGIL" naming sweep + a test that no model id ever reaches a customer-rendered payload (today `ui/settings.py` and `engine/crucible/framework/v2/console/chat.py` list "Claude Opus 4.8" labels — owner/operator surfaces, keep them there); target / depth / outcome choice; preflight; estimate + budget + live meter; the tenant statement (credits only). |
+| **M5 — calibration** | run each tier N times (loopback range + CRUCIBLE corpus), record the gateway meters, publish p10/p50/p90 as estimates and p90 as default budgets. **Needs the owner's API key + a spend approval.** |
+| **L1 — live Max** | one rate limit + connection cap per ENGAGEMENT at the scope-gated egress proxy (`gateway/vigil_gateway`), however many agents run (default 10 req/s, 8 connections; charter-tunable); Max agents on VIGIL's governed tools only (no raw shell / network); run-level hard stops (5xx storm / latency → throttle → pause; prior compromise → incident response); stable egress IP + VIGIL User-Agent; kill switch. |
+| **R1 — Red-Pen engine** | design §7.2: map → attack (≈12 lenses) → refute-each with a sandbox REPRODUCTION (fails twice on the reviewed commit) → certify via `oracle_adapter.confirm_and_certify(..., provenance="reproduced")` (FACT) → everything else stays a LEAD. Runs as Claude Code dynamic workflows headless through the Agent SDK, on the gateway (`ANTHROPIC_BASE_URL`), inside the S5 sandbox, no network but the gateway, no secrets. |
+| **R2 — Red-Pen · PR** | through the existing PR bot (`jobs/pr_bot.py`: diff scan → oracle-verified findings → gated `post_review_comment` → gated fix-PR leg), PR-head checkout `live/pr_checkout.py`; comments marked 🔴 Critical/High (blocking) / 🟠 Medium / 🟡 Low with the reproduction command + evidence ref + a **Fix this** action; LEADs only in the dashboard. |
+| **R3 — Red-Pen · System** | the whole repository, on demand or scheduled. |
+| **R4 — VIGIL Fix + Retest** | opt-in only: Claude Code `--effort max --settings '{"ultracode": true}'` in the sandbox clone (`live/codefix_runner.py` is the existing remediation runner; its OPEN-PR leg is disabled until LAP-3); re-review (reproduction passes, full suite passes, a Quick Red-Pen of the patch finds no new FACT) → the gated fix PR with the customer's approval; "remediated" only when the reproduction / oracle goes silent. Retest = re-run the proof of each finding the customer says they fixed. Live targets: remediation guidance + Retest + AEGIS virtual patch, never code changes. |
+| **R5 — UI** | Red-Pen, Fix, Retest in the customer app. |
+| **O1 — owner money view** | per-tenant revenue / gateway AI cost / margin (the EC-6 margin view in `ui/margin.py` still uses the placeholder per-token rate); the daily reconciliation against Anthropic's Usage & Cost Admin API (owner's admin key). |
+| **A1 — auto top-up** | off by default; trigger balance + pack + monthly cap; tokenised card; never above the cap; a receipt per charge. |
+
+### 10.7 Research facts the design rests on (verify before relying; sources in the design doc §10)
+- **Claude Opus 4.8** `claude-opus-4-8`: $5 / $25 per MTok; cache read ~0.1×, 5-min write 1.25×, 1-h write 2×; Batch
+  50% (not for interactive runs); fast mode is a research preview **removed 2026-11-30**; effort `low…max`; adaptive
+  thinking must be explicit (`budget_tokens` → 400); sampling parameters rejected; 1M context, 128K output.
+- **Opus 5 / 5.5**: same price / 20% cheaper and stronger, but with **elevated cybersecurity safeguards** that can
+  refuse security work — the reason to stay on 4.8 until an eval (refusal rate + finding yield on the CRUCIBLE
+  corpus) says otherwise.
+- **Ultracode** (Claude Code): a SETTING, not an effort level — Claude orchestrates dynamic workflows. `--effort
+  ultracode` = ultracode at **xhigh**; for Max use `--effort max --settings '{"ultracode": true}'` (Claude Code ≥
+  v2.1.284 keeps ultracode on at levels other than xhigh). The `ultracode` keyword in a `-p` prompt does NOT start a
+  workflow. Headless runs need the `Workflow` tool allowed by a permission rule. Workflow limits: 16 concurrent agents
+  by default (`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS`), 1,000 agents per run, `workflowSizeGuideline`.
+- **Claude Code CLI**: `--max-budget-usd` counts subagent spend but is a client-side estimate and can be overshot
+  (the gateway is the binding cap); `ANTHROPIC_BASE_URL` points it at the gateway — also set the default and
+  small/fast model env vars to `claude-opus-4-8` (the gateway refuses other models) and
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+- **Agent SDK terms**: a product for customers must use **API-key auth** (no claude.ai login / subscription limits);
+  keep VIGIL's own branding — never "Claude Code" (or "ultracode") to customers.
+- **Anthropic credit tiers**: Tier 1 caps a single credit purchase at $500 and advances on cumulative purchases.
+- **Flutterwave** (third-party reports, unconfirmed): local cards ~1.4–2.9%, international ~3.8–4.8%.
+- **Market**: AI code review ~$18–30 / dev / month (Codacy, CodeRabbit, Snyk Team $25); AI pentests $4,000–8,000 per
+  test (XBOW, historical) — why PR Red-Pen defaults to Quick with a per-PR cap.
+
+### 10.8 Re-testing and the mutation runner (the scratchpad does not survive)
+```bash
+R=/home/user/vigil-sovereign
+cd $R/packages/core/vigil_core && PYTHONPATH=$R/packages/core/vigil_core $R/.venv-sovereign/bin/python -m pytest \
+  -p no:cacheprovider tests                                  # 623 + the M1 files
+cd $R && PYTHONPATH=$R/apps/sigil:$R/integration:$R/packages/core/vigil_core:$R/gateway SIGIL_HOME=$(mktemp -d) \
+  $R/.venv-sovereign/bin/python -m pytest -p no:cacheprovider apps/sigil/tests/test_model_gateway.py \
+  apps/sigil/tests/test_metered_billing.py apps/sigil/tests/test_completion_spool.py apps/sigil/tests/test_launch_gate.py \
+  apps/sigil/tests/test_backup*.py integration/tests/test_model_grant_broker.py integration/tests/test_doctor*.py \
+  integration/tests/test_two_env_boundary.py integration/tests/test_production_invariants.py
+PATH=$R/.venv-sovereign/bin:$PATH bash tools/governance/mypy_ratchet.sh       # ceiling 15
+$R/.venv-sovereign/bin/python -m pytest -p no:cacheprovider docs/tests       # ~2.5 min
+```
+The gateway tests pin their clock to noon UTC today (the daily-ceiling restart seed reads meter-file mtimes).
+**Mutation runner** (re-create it, ~40 lines): for each `(file, [(old, new), ...], test-file)` — assert each `old`
+occurs once, write the mutant, run `pytest -x -q -p no:cacheprovider <test-file>`, record RED iff the exit code is
+non-zero, ALWAYS restore the original. M1's 39 mutants (all RED) covered: forward the client token; skip the effort
+pin; stop reading on client disconnect; drop pending from admission; no release on error; ignore the close sentinel;
+chain onto a cached hash; keep `speed` / the fast-mode beta / sampling; allow code execution; no `standard_only`; no
+model check; no expiry check; an unreadable 200 runs free; `max_tokens` not lowered; replay ignores the chain; keep
+thinking under a forced tool; a ticket settles twice; no tenant slot; no account slot; no daily ceiling; the ceiling
+ignores the day's spend; a restart does not seed the day; the budget read ignores pending; org not recorded;
+stream deltas added; 1-h writes priced at 5-min; credits floor-divided; no reservation clamp; markup below 1;
+an unknown model at zero; a price rounded; web search unpriced; no domain on grants; skip the signature; skip the
+canonical check; any effort; a meter id that ignores the nonce.

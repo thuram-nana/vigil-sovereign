@@ -17,7 +17,9 @@ FATAL-2: sovereign-side. No framework/strix import.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+import contextlib
+import contextvars
+from typing import Any, Callable, Iterator, Optional
 
 from ..config import fold_cache_enabled
 from ..reuse import assert_no_offense
@@ -28,9 +30,39 @@ from .identity import genesis_owner_pubkey
 
 assert_no_offense()
 
-__all__ = ["UNCACHED", "cached_read", "cached_unsigned_read"]
+__all__ = ["UNCACHED", "audit_with", "auditing", "cached_read", "cached_unsigned_read"]
 
 UNCACHED = object()
+
+# S0d rebuild-and-compare: while set, every cached read also audits its cache once (results keyed by fold name).
+_AUDIT: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar("fold_cache_audit", default=None)
+
+
+@contextlib.contextmanager
+def auditing() -> "Iterator[dict]":
+    """Within this block every cached read first AUDITS its fold cache — rebuilds it from the spine with the read's
+    own fresh build (same key) and compares (`FoldCache.audit`) — once per fold, then reads as usual. Yields the
+    results, keyed by fold name. Through the registries' own read path, so no entry keeps a build (a request's
+    store / registry) alive between reads."""
+    results: dict = {}
+    token = _AUDIT.set(results)
+    try:
+        yield results
+    finally:
+        _AUDIT.reset(token)
+
+
+def audit_with(fn: Callable[[], Any]) -> "list[dict]":
+    """Run `fn` (cached reads) under `auditing()`; the audit results in fold-name order."""
+    with auditing() as results:
+        fn()
+    return [results[k] for k in sorted(results)]
+
+
+def _maybe_audit(cache: FoldCache, store, key: tuple, build) -> None:
+    results = _AUDIT.get()
+    if results is not None and cache.name not in results:
+        results[cache.name] = cache.audit(store, key, build=build)
 
 
 def _snapshot(store, live_window: bool):
@@ -69,6 +101,7 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
     def guarded(view):
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
+    _maybe_audit(cache, store, key, build)
     return cache.read(store, key, build=build, reader=guarded)
 
 
@@ -91,4 +124,5 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
     def guarded(view):
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
+    _maybe_audit(cache, store, (snap,), build)
     return cache.read(store, (snap,), build=build, reader=guarded)

@@ -152,6 +152,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
                                  "re-derived, never recovery state",
     "vigil-tool-state.tsv": "the offense tool install-state table bootstrap re-derives (`--state-path`) — "
                             "installer bookkeeping, no trust or memory state",
+    "fold_cache_audit.json": "the cockpit's last fold-cache rebuild-and-compare report (Front C S0d) — a "
+                             "re-derived verdict over the (captured) spine, rewritten every audit interval; "
+                             "no trust or memory state",
     # #70 — the two SaaS money/delivery dirs the shipped units default under SIGIL_HOME. Both DELIBERATELY
     # excluded from THIS (sovereign) leg; the decision is recorded here so the coverage gate stays honest.
     "credit-lease": "the CROSS-PLANE launch seam = the shared VIGIL_BASE_DIR both planes agree on (leases, "

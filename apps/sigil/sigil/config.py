@@ -514,6 +514,26 @@ def fold_cache_enabled() -> bool:
     return (os.environ.get("VIGIL_FOLD_CACHE_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+# Front C S0d: the cockpit's background fold-cache AUDIT report (`governor/fold_warm.py`), read by `vigil doctor`
+# (stdlib mirror: `$SIGIL_HOME/fold_cache_audit.json`) and printed by `sigil verify`.
+FOLD_AUDIT_PATH = SIGIL_HOME / "fold_cache_audit.json"
+
+
+def fold_cache_audit_interval() -> float:
+    """Seconds between the cockpit's background rebuild-and-compare audits of the fold caches
+    (`VIGIL_FOLD_CACHE_AUDIT_S`, default 21600 = 6 h). 0 (or negative / unparseable-as-positive) disables the
+    PERIODIC audit; the start-up warm-up still runs. Only consulted when `fold_cache_enabled()`. A rebuild costs
+    what a cold start costs (O(spine) per fold), hence the long default."""
+    raw = (os.environ.get("VIGIL_FOLD_CACHE_AUDIT_S") or "").strip()
+    if not raw:
+        return 21600.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 21600.0
+    return v if v > 0 and v == v and v != float("inf") else 0.0
+
+
 def oidc_settings() -> dict:
     """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
     override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
