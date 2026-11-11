@@ -34,3 +34,8 @@ pytest-cov
 coverage
 ruff==0.15.12
 mypy
+# jsonschema validates the published proof-carrying-finding schemas against REAL exported bundles
+# (docs/proof-carrying-finding/tests). Those tests ran in no CI job until the P5 offense leg listed
+# them; they import jsonschema directly, and the offense leg's runtime lock does not carry it. Held at
+# the version the sovereign lock already resolves (there: transitively, via mcp), so the two agree.
+jsonschema==4.26.0
