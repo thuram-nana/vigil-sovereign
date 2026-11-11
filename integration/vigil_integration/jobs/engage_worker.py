@@ -332,6 +332,14 @@ def make_engage_worker(
         runner = run if run is not None else _default_run_engagement
         kwargs = dict(_LOW_IMPACT_PROFILE if profile_kwargs is None else profile_kwargs)
         kwargs.pop("resume", None)                                 # resume is a worker concern, never a profile key
+        kwargs.pop("launch_nonce", None)                           # ...and so is the launch identity
+        # Bind the run to THIS job's launch. The seam holds ONE lease per slug and a customer slug is reused by
+        # every launch of the same (org, host), so the lease on the seam can be a LATER launch's: the engine then
+        # refuses before its arm (so this job never burns that launch's single-use floor) and binds its pause
+        # halt + resume state to this nonce, never to whichever lease is on the seam. No nonce ⇒ not passed
+        # (the engine keeps its seam read, as before).
+        if nonce:
+            kwargs["launch_nonce"] = nonce
         # EC-7 — tiered Quick/Deep run profile (default-OFF ⇒ byte-identical). When the owner has enabled
         # tiered products, DERIVE the run tier from the launch's OWNER-SIGNED units_reserved (the SAME
         # verified+bound lease EC-3 reads for its token ceiling — authoritative, never the tamperable

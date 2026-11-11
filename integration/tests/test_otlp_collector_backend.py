@@ -108,6 +108,7 @@ def test_unreachable_backend_surfaces_a_visible_error_not_a_silent_drop(caplog):
     # (1) the failure is RETURNED, visibly, with a human-readable reason a diagnostic can print.
     assert probe.reachable is False and bool(probe) is False
     assert "UNREACHABLE" in probe.detail and dead in probe.detail
+    assert probe.detail.endswith("is UNREACHABLE: ConnectionRefusedError (ECONNREFUSED)")   # by kind, not message
     # (2) and it is LOGGED at WARNING — the opposite of a silent ``dropped++``. THIS is acceptance (c).
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "an unreachable OTLP backend must be VISIBLE (a WARNING), not a silent drop"
@@ -116,9 +117,10 @@ def test_unreachable_backend_surfaces_a_visible_error_not_a_silent_drop(caplog):
 
 def test_probe_is_total_never_raises_on_hostile_input():
     # totality: the preflight degrades every bad input to a visible reachable=False, never a crash.
-    for bad in (None, "", "not a url", 12345, "ftp://127.0.0.1:4318", object()):
-        probe = probe_collector(bad, timeout=0.5)
-        assert probe.reachable is False
+    for bad in (None, "", "not a url", 12345, "ftp://127.0.0.1:4318", object(),
+                "http://127.0.0.1:43l8", "http://127.0.0.1:99999", "http://127.0.0.1:4318&token=SECRET"):
+        probe = probe_collector(bad, timeout=0.5)     # (the last three pass the pin: only their port is malformed)
+        assert probe.reachable is False and "SECRET" not in probe.detail
 
 
 def test_probe_refuses_a_non_loopback_endpoint_visibly(caplog):
