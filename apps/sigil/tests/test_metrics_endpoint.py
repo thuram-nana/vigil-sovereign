@@ -105,6 +105,7 @@ def test_refusals_total_is_monotonic_across_scrapes_despite_the_windowed_dashboa
                  payload={"decision": "denied", "governor": "kill-switch"})
 
     srv = build_ui(token=TOKEN, port=0, spine_path=path)
+    srv.metrics_projection_ttl_s = 0.0      # re-fold on every scrape: this pins the FEED, not the rate bound
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     time.sleep(0.05)
     port = srv.server_address[1]
@@ -135,3 +136,158 @@ def test_refusals_total_is_monotonic_across_scrapes_despite_the_windowed_dashboa
         assert r3 == 2.0, f"a fresh DENY must increment the counter, got {r3}"
     finally:
         srv.shutdown()
+
+
+# --- the domain projection is rate-bounded: an anonymous scraper cannot make the server re-fold the spine ---
+# `/metrics` is unauthenticated, and the refusals counter is a fold over the WHOLE spine (dashboard.snapshot).
+# The fold runs at most once per `metrics_projection_ttl_s`, counted from the END of the previous fold, never
+# two at once; a scrape in between serves the last value. These pin each half of that bound.
+
+
+class _Clock:
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _deny(store) -> None:
+    store.append(kind="refusal", source="agent", actor="operator",
+                 payload={"decision": "denied", "governor": "kill-switch"})
+
+
+def _counting_server(monkeypatch, *, ttl: float = 15.0, fold=None):
+    """A served cockpit over a spine holding one DENY, with a fake clock and a counted `dashboard.snapshot`
+    (`fold(store)` replaces it when given; the real fold otherwise)."""
+    import sigil.dashboard as dash
+
+    path = tempfile.mktemp(suffix=".jsonl")
+    store = SpineStore(path)
+    _deny(store)
+    calls: list = []
+    real = dash.snapshot
+
+    def counted(st, *a, **k):
+        calls.append(1)
+        return (fold or real)(st, *a, **k)
+
+    monkeypatch.setattr(dash, "snapshot", counted)
+    srv = build_ui(token=TOKEN, port=0, spine_path=path)
+    srv.metrics_projection_ttl_s = ttl
+    clock = _Clock()
+    srv.metrics_clock = clock
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    return srv, srv.server_address[1], store, calls, clock
+
+
+def test_a_burst_of_anonymous_scrapes_folds_the_spine_once(monkeypatch):
+    srv, port, _store, calls, _clock = _counting_server(monkeypatch)
+    try:
+        for _ in range(25):
+            status, _, body = _get(port, "/metrics", host="kube-probe/1.0")
+            assert status == 200 and body.rstrip().endswith("# EOF")
+            assert _series_value(body, "vigil_refusals_total") == 1.0
+        assert len(calls) == 1, f"{len(calls)} spine folds for 25 scrapes inside one TTL"
+    finally:
+        srv.shutdown()
+
+
+def test_a_new_deny_shows_once_the_ttl_has_elapsed_and_not_before(monkeypatch):
+    srv, port, store, calls, clock = _counting_server(monkeypatch, ttl=15.0)
+    try:
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 1.0
+        _deny(store)
+        clock.t += 14.999
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 1.0   # still the last value
+        assert len(calls) == 1
+        clock.t += 0.001                                       # exactly one TTL after the last fold ended
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 2.0
+        assert len(calls) == 2
+        _deny(store)
+        clock.t += 15.0                                        # and the bound keeps applying after that
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 3.0
+        assert len(calls) == 3
+    finally:
+        srv.shutdown()
+
+
+def test_the_ttl_is_counted_from_the_end_of_a_slow_fold(monkeypatch):
+    """A fold that takes longer than the TTL must not be re-run by the very next scrape (back-to-back folds
+    would keep the server folding the spine for as long as someone scrapes)."""
+    import sigil.dashboard as dash
+    real = dash.snapshot
+    holder: dict = {}
+
+    def slow(st, *a, **k):
+        holder["clock"].t += 100.0                             # the fold takes 100 s on the fake clock
+        return real(st, *a, **k)
+
+    srv, port, _store, calls, clock = _counting_server(monkeypatch, ttl=15.0, fold=slow)
+    holder["clock"] = clock
+    try:
+        _get(port, "/metrics")
+        clock.t += 1.0                                         # 101 s after the fold STARTED, 1 s after it ended
+        _get(port, "/metrics")
+        assert len(calls) == 1, "the TTL was counted from the start of the fold"
+    finally:
+        srv.shutdown()
+
+
+def test_a_failing_fold_is_not_retried_per_request(monkeypatch):
+    def broken(st, *a, **k):
+        raise RuntimeError("unreadable spine")
+
+    srv, port, _store, calls, clock = _counting_server(monkeypatch, fold=broken)
+    try:
+        for _ in range(10):
+            status, _, body = _get(port, "/metrics")
+            assert status == 200 and "vigil_requests_total" in body   # RED/process still render
+        assert len(calls) == 1, f"a failing fold was retried {len(calls)} times inside one TTL"
+        clock.t += 15.0
+        _get(port, "/metrics")
+        assert len(calls) == 2, "a failed fold must still be retried once the TTL has elapsed"
+    finally:
+        srv.shutdown()
+
+
+def test_a_scrape_during_a_running_fold_neither_waits_nor_starts_a_second(monkeypatch):
+    import sigil.dashboard as dash
+    real = dash.snapshot
+    entered, release = threading.Event(), threading.Event()
+
+    def blocking(st, *a, **k):
+        entered.set()
+        assert release.wait(10), "test fold never released"
+        return real(st, *a, **k)
+
+    srv, port, _store, calls, clock = _counting_server(monkeypatch, ttl=0.0, fold=blocking)
+    first: dict = {}
+    t = threading.Thread(target=lambda: first.setdefault("r", _get(port, "/metrics")), daemon=True)
+    try:
+        t.start()
+        assert entered.wait(5), "the first scrape never started its fold"
+        t0 = time.monotonic()
+        status, _, body = _get(port, "/metrics")               # TTL 0: only the running fold can stop it
+        assert status == 200 and body.rstrip().endswith("# EOF")
+        assert time.monotonic() - t0 < 2.0, "a scrape waited on another scrape's fold"
+        assert len(calls) == 1, "a second fold started while one was running"
+        release.set()
+        t.join(10)
+        assert first["r"][0] == 200
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 1.0   # lock released
+        assert len(calls) == 2
+    finally:
+        release.set()
+        srv.shutdown()
+
+
+def test_the_bound_is_on_by_default():
+    srv = build_ui(token=TOKEN, port=0, spine_path=_spine())
+    try:
+        from sigil.ui.server import METRICS_PROJECTION_TTL_S
+        assert srv.metrics_projection_ttl_s == METRICS_PROJECTION_TTL_S > 0
+        assert srv.metrics_clock is time.monotonic
+    finally:
+        srv.server_close()

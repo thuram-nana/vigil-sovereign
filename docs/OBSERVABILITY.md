@@ -222,6 +222,14 @@ only; a public serve goes behind the operator's TLS reverse proxy, which is wher
 is applied. The body carries no token, path, or backend address. Registered as claim `W6-3` in
 `docs/claims/registry.json` ([W0-3] #398); see `docs/decisions/W6-3-openmetrics-exposition.md`.
 
+**Projection rate bound (sovereign plane).** The sovereign `vigil_refusals_total` is a fold over the whole
+signed spine, and the route is unauthenticated, so a scrape does not re-fold it on demand: the fold runs at
+most once every `METRICS_PROJECTION_TTL_S` (15 s, `apps/sigil/sigil/ui/server.py`) per server, counted from
+the END of the previous fold, and never two at once. A scrape in between (or during a running fold) is served
+immediately with the last projected value, so the counter may lag the spine by up to 15 s plus one fold, and
+never goes down. A fold that fails also waits out the interval. RED, process and `vigil_gate_denials_total`
+are live on every scrape.
+
 **Artifacts.** Example alert rules (`infra/observability/vigil-alerts.yml`) and a Grafana dashboard
 (`infra/observability/vigil-dashboard.json`) ship with the product — a starting point for [W8-1] #467
 alerting.
