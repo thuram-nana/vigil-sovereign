@@ -166,6 +166,6 @@ def start_background(store_factory: Callable[[], Any], *, name: str = "cockpit")
     stop = threading.Event()
     worker = threading.Thread(target=_run, args=(store_factory, config.fold_cache_audit_interval(), stop),
                               name=f"fold-cache-{name}", daemon=True)
-    stop.thread = worker                          # type: ignore[attr-defined]  (tests join it after stop.set())
+    stop.thread = worker                          # type: ignore[attr-defined]  # tests join it after stop.set()
     worker.start()
     return stop
