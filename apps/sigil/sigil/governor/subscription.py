@@ -54,6 +54,8 @@ from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # 
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
 SUBSCRIPTION_SIGNAL = "governor.subscription"
 
@@ -120,6 +122,86 @@ class Subscription:
         if self.status != STATUS_ACTIVE:
             return False
         return now is None or now < self.period_end
+
+
+_SKIP = object()          # `_apply_sub_record`: the record did not touch any org
+
+
+def _apply_sub_record(rec, resolver, signal: str, status: dict, issued: dict, row: dict):
+    """Fold ONE record of the `signal` line into (status, issued, row) — THE subscription fold body, shared by
+    the full `_fold` and the verified fold cache (Front C S0c). Returns the org_id it touched, or `_SKIP`."""
+    p = rec.payload
+    if not isinstance(p, dict) or p.get("signal") != signal:
+        return _SKIP
+    oid = p.get("org_id")
+    if not isinstance(oid, str) or not oid:
+        return _SKIP
+    st = p.get("status")
+    if st in _DOWN_STATES:
+        # SAFE (access-reducing) direction. A FIXED 0.0 issued_at is the owner-manual latch: honored ON
+        # SIGHT (never fail-open). A POSITIVE issued_at is a WEBHOOK-driven down-state (H4) carrying the
+        # provider event's `created`: applied only if FRESHER than the last honored activation, so a
+        # stale / out-of-order / replayed failed-charge webhook cannot re-suspend a recovered tenant
+        # (the fold does NOT advance `issued` here — that stays the active high-water it compares to).
+        dat = as_issued_at(p.get("issued_at"))
+        if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
+            status[oid] = st
+        return oid
+    if st == STATUS_ACTIVE:
+        if not verify_signed(p, _SUB_CORE, resolver.at(rec.seq)):
+            return _SKIP                              # fail-closed: unsigned/forged/wrong-epoch
+        at = as_issued_at(p.get("issued_at"))
+        if at <= issued.get(oid, NO_HIGHWATER):
+            return _SKIP                              # REPLAY / stale re-append of an honored active
+        issued[oid] = at
+        status[oid] = STATUS_ACTIVE
+        row[oid] = [str(p.get("plan_id") or ""), float(as_issued_at(p.get("period_start"))),
+                    float(as_issued_at(p.get("period_end"))), _as_allotment(p.get("allotment"))]
+        return oid
+    return _SKIP
+
+
+def _subscription_of(oid, stt, r) -> "Subscription":
+    return Subscription(org_id=str(oid), plan_id=str(r[0]), period_start=float(r[1]),
+                        period_end=float(r[2]), allotment=int(r[3]), status=str(stt))
+
+
+class _SubView:
+    """The cached subscription fold of ONE signal line: the full fold's (status, issued, row) plus `out` —
+    exactly `_fold()`'s result, kept in step per touched org."""
+
+    __slots__ = ("signal", "status", "issued", "row", "out")
+
+    def __init__(self, signal: str, status: dict, issued: dict, row: dict) -> None:
+        self.signal, self.status, self.issued, self.row = signal, status, issued, row
+        self.out: dict = {}
+        for oid in list(status):
+            self.sync(oid)
+
+    def sync(self, oid) -> None:
+        stt = self.status.get(oid)
+        r = self.row.get(oid)
+        if stt is None or r is None:          # a bare safe-direction record never subscribed: ABSENT
+            self.out.pop(oid, None)
+        else:
+            self.out[oid] = _subscription_of(oid, stt, r)
+
+
+def _sub_step(view: _SubView, rec, resolver) -> None:
+    oid = _apply_sub_record(rec, resolver, view.signal, view.status, view.issued, view.row)
+    if oid is not _SKIP:
+        view.sync(oid)
+
+
+_SUB_FOLDS: "dict[str, FoldCache]" = {}
+
+
+def _sub_fold(signal: str) -> FoldCache:
+    """One cache per subscription LINE (the credit plan, and `MonitoringSubscriptionRegistry`'s own signal)."""
+    c = _SUB_FOLDS.get(signal)
+    if c is None:
+        c = _SUB_FOLDS.setdefault(signal, FoldCache(f"governor.subscription:{signal}", step=_sub_step))
+    return c
 
 
 class SubscriptionRegistry:
@@ -195,43 +277,9 @@ class SubscriptionRegistry:
         and full-scans from genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            status: dict[Any, str] = {}
-            issued: dict[Any, float] = {}
-            row: dict[Any, list] = {}
-            since = -1
-        else:
-            status = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state")}
-            issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued")}
-            row = {r[0]: [r[1], r[2], r[3], r[4]] for r in getattr(snap, f"{self._SNAP}_row")}  # oid -> [plan,ps,pe,allot]
-            since = snap.base_seq - 1
+        (status, issued, row), since = self._seed(snap)
         for rec in self.store.iter_records(since_seq=since):
-            p = rec.payload
-            if not isinstance(p, dict) or p.get("signal") != self.SIGNAL:
-                continue
-            oid = p.get("org_id")
-            if not isinstance(oid, str) or not oid:
-                continue
-            st = p.get("status")
-            if st in _DOWN_STATES:
-                # SAFE (access-reducing) direction. A FIXED 0.0 issued_at is the owner-manual latch: honored ON
-                # SIGHT (never fail-open). A POSITIVE issued_at is a WEBHOOK-driven down-state (H4) carrying the
-                # provider event's `created`: applied only if FRESHER than the last honored activation, so a
-                # stale / out-of-order / replayed failed-charge webhook cannot re-suspend a recovered tenant
-                # (the fold does NOT advance `issued` here — that stays the active high-water it compares to).
-                dat = as_issued_at(p.get("issued_at"))
-                if dat <= 0.0 or dat > issued.get(oid, NO_HIGHWATER):
-                    status[oid] = st
-            elif st == STATUS_ACTIVE:
-                if not verify_signed(p, _SUB_CORE, resolver.at(rec.seq)):
-                    continue                                  # fail-closed: unsigned/forged/wrong-epoch
-                at = as_issued_at(p.get("issued_at"))
-                if at <= issued.get(oid, NO_HIGHWATER):
-                    continue                                  # REPLAY / stale re-append of an honored active
-                issued[oid] = at
-                status[oid] = STATUS_ACTIVE
-                row[oid] = [str(p.get("plan_id") or ""), float(as_issued_at(p.get("period_start"))),
-                            float(as_issued_at(p.get("period_end"))), _as_allotment(p.get("allotment"))]
+            _apply_sub_record(rec, resolver, self.SIGNAL, status, issued, row)
         out: dict[Any, Subscription] = {}
         for oid, stt in status.items():
             r = row.get(oid)
@@ -242,15 +290,37 @@ class SubscriptionRegistry:
                 # orgs/accounts (which drop non-active reads). `row` is set ONLY by the active branch, so a
                 # plan canceled/past_due AFTER subscribing keeps its row and is still returned (dunning view).
                 continue
-            out[oid] = Subscription(org_id=str(oid), plan_id=str(r[0]), period_start=float(r[1]),
-                                    period_end=float(r[2]), allotment=int(r[3]), status=str(stt))
+            out[oid] = _subscription_of(oid, stt, r)
         return out
+
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((status, issued, row), since): the HARD-PRUNE SEED of this line from `snap`, or the empty genesis
+        start when the trusted pubkey differs from the snapshot's."""
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            return ({}, {}, {}), -1
+        status = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state")}
+        issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued")}
+        row = {r[0]: [r[1], r[2], r[3], r[4]] for r in getattr(snap, f"{self._SNAP}_row")}  # oid -> [plan,ps,pe,allot]
+        return (status, issued, row), snap.base_seq - 1
+
+    def _cached(self, reader):
+        """`reader(view)` over the verified incremental fold of THIS line (`fold_read.cached_read`, flag-gated),
+        else `_UNCACHED` (the caller then runs the full `_fold`)."""
+        def seed(snap):
+            st, since = self._seed(snap)
+            return _SubView(self.SIGNAL, *st), since
+
+        return cached_read(_sub_fold(self.SIGNAL), self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
+                           reader=reader)
 
     def subscription(self, org_id: str) -> Optional[Subscription]:
         """The current folded Subscription for `org_id` whatever its status (None if the tenant never
         subscribed). Fail-closed on an empty/invalid id."""
         if not isinstance(org_id, str) or not org_id:
             return None
+        hit = self._cached(lambda v: v.out.get(org_id))
+        if hit is not _UNCACHED:
+            return hit
         return self._fold().get(org_id)
 
     def active_subscription(self, org_id: str, now: Optional[float] = None) -> Optional[Subscription]:
@@ -268,5 +338,8 @@ class SubscriptionRegistry:
 
     def subscriptions(self) -> list[Subscription]:
         """Every tenant's current subscription, in org_id order (the billing roster)."""
+        hit = self._cached(lambda v: [v.out[o] for o in sorted(v.out)])
+        if hit is not _UNCACHED:
+            return hit
         fold = self._fold()
         return [fold[o] for o in sorted(fold)]
