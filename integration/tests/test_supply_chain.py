@@ -152,9 +152,30 @@ def _load_native_locks():
     return mod
 
 
+_PLANE_FILES = ("envs/sovereign.txt", "envs/offense.txt")
+_EDITABLE_MEMBER = re.compile(r"^-e\s+(\S+)")
+
+
+def _plane_member_pyprojects() -> list[str]:
+    """The pyproject of every ``-e <path>`` member of every plane file — the single source of membership
+    envs/build_envs.sh builds from (its ``members_of``), each with ``--no-build-isolation`` against the
+    build-backends lock — as repo-relative paths, in file order, de-duplicated."""
+    out: list[str] = []
+    for plane in _PLANE_FILES:
+        for line in (REPO_ROOT / plane).read_text(encoding="utf-8").splitlines():
+            m = _EDITABLE_MEMBER.match(line)
+            if m:
+                rel = m.group(1).removeprefix("./").rstrip("/") + "/pyproject.toml"
+                if rel not in out:
+                    out.append(rel)
+    return out
+
+
 def _pyproject_build_requirements() -> dict[str, list[str]]:
     """Every ``[build-system].requires`` entry declared across the repo's first-party pyprojects, as
-    {relpath: [requirement strings]} exactly as written (version specifiers kept). Loaded with tomllib."""
+    {relpath: [requirement strings]} exactly as written (version specifiers kept). Loaded with tomllib.
+    The members are the known first-party packages PLUS every plane-file member, so a member added to
+    envs/<plane>.txt is scanned without anyone editing this list."""
     import tomllib
 
     out: dict[str, list[str]] = {}
@@ -166,7 +187,7 @@ def _pyproject_build_requirements() -> dict[str, list[str]]:
         "apps/sigil/pyproject.toml",
         "vendor/strix/pyproject.toml",
     )
-    for rel in members:
+    for rel in dict.fromkeys(members + tuple(_plane_member_pyprojects())):
         p = REPO_ROOT / rel
         if not p.is_file():
             continue
@@ -2118,10 +2139,12 @@ def build_backend_floor_problems(declared: dict[str, list[str]], locked: dict[st
     backend does not satisfy, plus how many declared entries were compared (anti-vacuous count).
 
     Being pinned is not enough: build_envs.sh pre-installs exactly the locked version and then builds
-    ``--no-build-isolation``, so a pyproject floor ABOVE the lock (``setuptools>=84.2.1`` against a locked
-    ``setuptools==84.0.0``) makes that member unbuildable from the lock. Markers are not evaluated — every
-    entry must be satisfiable by the one locked closure, whatever interpreter runs this test. A backend
-    missing from the lock is the coverage test's failure, not this one's."""
+    ``--no-build-isolation``, and in that mode neither uv nor pip checks ``[build-system].requires``. So a
+    pyproject floor ABOVE the lock (``setuptools>=84.2.1`` against a locked ``setuptools==84.0.0``) is
+    silently ignored and the member is built with an older backend than it declares; this is the guard.
+    Markers are not evaluated — every entry must be satisfiable by the one locked closure, whatever
+    interpreter runs this test. A backend missing from the lock is the coverage test's failure; this
+    helper only skips it (the caller's anti-vacuous count then fails too)."""
     from packaging.requirements import Requirement
     from packaging.version import Version
 
@@ -2156,6 +2179,18 @@ def test_build_backends_lock_satisfies_every_declared_floor() -> None:
     assert compared == sum(len(r) for r in declared.values()) and compared >= 4, (
         f"compared only {compared} declared build requirements — the floor check is not reaching them"
     )
+
+
+def test_build_requirement_scan_covers_every_plane_member() -> None:
+    """Both build-backend checks above read ``_pyproject_build_requirements``; it must include every member
+    build_envs.sh builds — the ``-e`` lines of envs/<plane>.txt — or a member's floor (or an unlocked
+    backend) is never compared. ``range`` is named explicitly: it joined a plane after the hard-coded
+    list was written, and was the member the scan missed."""
+    members = _plane_member_pyprojects()
+    assert "range/pyproject.toml" in members and "apps/sigil/pyproject.toml" in members, members
+    scanned = _pyproject_build_requirements()
+    missing = [rel for rel in members if rel not in scanned]
+    assert not missing, f"plane members whose [build-system].requires is never scanned: {missing}"
 
 
 def test_build_backend_floor_check_is_not_a_no_op() -> None:
