@@ -52,6 +52,10 @@ def _ids(text: str, source: str = "<t>") -> set[str]:
     (f"export {_MK} = '{_KD}'", "setting-value"),
     (f"| `{_MK}` ({_KD}) | pricing |", "setting-value"),
     (f"{_TM}=0.{_D}", "setting-value"),
+    (f"| {_MK} | {_KD} |", "setting-value"),                  # a Markdown table row
+    (f"| `{_TM}` | `0.{_D}` |", "setting-value"),
+    (f"{_MK}, {_KD}", "setting-value"),
+    (f"{_MK} := .{_D}", "setting-value"),
     (f'{_DEF} = "{_KD}"', "default-value"),
     (f"{_DEF}: str = '{_KD}'", "default-value"),
     (f'{_DEF}_K = Fraction("{_KD}")', "default-value"),
@@ -76,7 +80,7 @@ def test_each_pattern_catches_a_decoy(text: str, pid: str) -> None:
     f"`{_MK}` (≥ 1, ≤ 100)",                                 # a bound, not a value
     "the K4 hold and the K6 gate stay as they are",          # slice ids
     "SPLIT_K = 6",                                           # an unrelated algorithm constant
-    "K = 6" + " " * 60 + "then the margin",                  # K far away from the wording
+    "K" + " = " + "6" + " " * 60 + "then the margin",        # K far away from the wording
     "$5, $10, $16, $25, $50 and $100 packs; $25 per seat; 100 credits per $1",  # customer prices
     f"{_MK} is owner-set in the private deploy environment; no value is recorded here",
 ])

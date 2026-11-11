@@ -37,8 +37,9 @@ from pathlib import Path
 # (pattern id, compiled pattern). Each is a VALUE carried next to markup or margin wording.
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # A markup or target-margin setting assigned a number, in any env/config/code spelling:
-    # VIGIL_BILLING_MARKUP_K=..., MARKUP_K = "...", VIGIL_BILLING_TARGET_MARGIN: ..., (...)
-    ("setting-value", re.compile(r"\w*(?:MARKUP_K|TARGET_MARGIN)[`\"']?\s*[=:(]\s*[`\"']?\d")),
+    # VIGIL_BILLING_MARKUP_K=..., MARKUP_K = "...", VIGIL_BILLING_TARGET_MARGIN: ..., (...), a table cell
+    # "| NAME | <n> |", a call argument "NAME, <n>"
+    ("setting-value", re.compile(r"\w*(?:MARKUP_K|TARGET_MARGIN)[`\"']?\s*(?::=|[=:(|,])\s*[`\"'(]*\s*[-+]?\.?\d")),
     # A code default for the markup or the margin, optionally annotated or wrapped:
     # DEFAULT_MARKUP = "...", DEFAULT_MARKUP: str = ..., DEFAULT_TARGET_MARGIN = Fraction("...")
     ("default-value", re.compile(
