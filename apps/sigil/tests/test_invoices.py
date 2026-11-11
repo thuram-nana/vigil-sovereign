@@ -216,3 +216,22 @@ def test_has_purchased_credits_reads_the_same_through_the_fold_cache(monkeypatch
     cached.record("initech", invoice_id="tu_2", kind="topup", price_id="t", amount_minor=500, currency="USD",
                   credits=100, issued_at=_issue())
     assert cached.has_purchased_credits("initech") is True                # the cache picks up a new line
+
+
+def test_a_str_subclass_cannot_widen_the_tenant_match(monkeypatch):
+    class Sly(str):
+        __slots__ = ()
+
+        def __eq__(self, other):                    # matches every tenant on a naive `==` filter
+            return True
+
+        __hash__ = str.__hash__
+
+    s = _store()
+    r = _reg(s)
+    r.record("acme", invoice_id="tu_1", kind="topup", price_id="t", amount_minor=500, currency="USD",
+             credits=500, issued_at=_issue())
+    assert r.invoices(Sly("zzz")) == [] and r.has_purchased_credits(Sly("zzz")) is False
+    assert r.has_purchased_credits(Sly("acme")) is True                    # a well-behaved value still works
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    assert _reg(s).has_purchased_credits(Sly("zzz")) is False
