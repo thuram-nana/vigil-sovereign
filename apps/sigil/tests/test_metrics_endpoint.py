@@ -252,35 +252,89 @@ def test_a_failing_fold_is_not_retried_per_request(monkeypatch):
         srv.shutdown()
 
 
-def test_a_scrape_during_a_running_fold_neither_waits_nor_starts_a_second(monkeypatch):
+def _gated_fold():
     import sigil.dashboard as dash
     real = dash.snapshot
+    gate = {"on": False}
     entered, release = threading.Event(), threading.Event()
 
-    def blocking(st, *a, **k):
-        entered.set()
-        assert release.wait(10), "test fold never released"
+    def fold(st, *a, **k):
+        if gate["on"]:
+            entered.set()
+            assert release.wait(10), "test fold never released"
         return real(st, *a, **k)
 
-    srv, port, _store, calls, clock = _counting_server(monkeypatch, ttl=0.0, fold=blocking)
+    return fold, gate, entered, release
+
+
+def test_a_scrape_during_a_running_fold_neither_waits_nor_starts_a_second(monkeypatch):
+    fold, gate, entered, release = _gated_fold()
+    srv, port, store, calls, clock = _counting_server(monkeypatch, ttl=0.0, fold=fold)
     first: dict = {}
     t = threading.Thread(target=lambda: first.setdefault("r", _get(port, "/metrics")), daemon=True)
     try:
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 1.0   # the first fold
+        _deny(store)
+        gate["on"] = True
         t.start()
-        assert entered.wait(5), "the first scrape never started its fold"
+        assert entered.wait(5), "the next scrape never started its fold"
         t0 = time.monotonic()
         status, _, body = _get(port, "/metrics")               # TTL 0: only the running fold can stop it
         assert status == 200 and body.rstrip().endswith("# EOF")
         assert time.monotonic() - t0 < 2.0, "a scrape waited on another scrape's fold"
-        assert len(calls) == 1, "a second fold started while one was running"
+        assert _series_value(body, "vigil_refusals_total") == 1.0, "the last projected value is served"
+        assert len(calls) == 2, "a second fold started while one was running"
         release.set()
         t.join(10)
-        assert first["r"][0] == 200
-        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 1.0   # lock released
-        assert len(calls) == 2
+        assert first["r"][0] == 200 and _series_value(first["r"][2], "vigil_refusals_total") == 2.0
+        gate["on"] = False
+        assert _series_value(_get(port, "/metrics")[2], "vigil_refusals_total") == 2.0   # lock released
+        assert len(calls) == 3
     finally:
         release.set()
         srv.shutdown()
+
+
+def test_a_fresh_servers_first_scrapes_wait_for_the_first_fold_and_never_report_zero(monkeypatch):
+    """Before ANY fold has finished there is no last value to serve: a concurrent scrape waits for the one running
+    fold (it never starts its own) and reports the spine's real count — never 0, which a scraper would read as a
+    counter reset followed by a spike of phantom refusals."""
+    fold, gate, entered, release = _gated_fold()
+    gate["on"] = True
+    srv, port, _store, calls, _clock = _counting_server(monkeypatch, ttl=15.0, fold=fold)
+    out: list = []
+    threads = [threading.Thread(target=lambda: out.append(_get(port, "/metrics")), daemon=True) for _ in range(3)]
+    try:
+        threads[0].start()
+        assert entered.wait(5)
+        for th in threads[1:]:
+            th.start()
+        time.sleep(0.2)
+        assert out == [], "a scrape answered before the first fold finished"
+        release.set()
+        for th in threads:
+            th.join(10)
+        assert [_series_value(b, "vigil_refusals_total") for _s, _c, b in out] == [1.0, 1.0, 1.0]
+        assert len(calls) == 1, "the waiting scrapes started folds of their own"
+    finally:
+        release.set()
+        srv.shutdown()
+
+
+def test_two_servers_in_one_process_each_render_their_own_spine(monkeypatch):
+    """The OpenMetrics registry is process-wide; each server serves ITS last projected value, not whichever server
+    folded last."""
+    a, pa, sa, _ca, _ = _counting_server(monkeypatch, ttl=15.0)
+    b, pb, sb, _cb, _ = _counting_server(monkeypatch, ttl=15.0)
+    try:
+        _deny(sb)
+        _deny(sb)
+        assert _series_value(_get(pa, "/metrics")[2], "vigil_refusals_total") == 1.0
+        assert _series_value(_get(pb, "/metrics")[2], "vigil_refusals_total") == 3.0
+        assert _series_value(_get(pa, "/metrics")[2], "vigil_refusals_total") == 1.0   # inside a's TTL
+    finally:
+        a.shutdown()
+        b.shutdown()
 
 
 def test_the_bound_is_on_by_default():
