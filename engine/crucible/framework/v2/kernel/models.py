@@ -319,11 +319,26 @@ class CallTrace(BaseModel):
 
     backend: str
     is_dryrun: bool
+    # EC-2a model-tier routing provenance: the concrete model this call actually used. Default ""
+    # => backward compatible with every persisted trace and every caller that does not set it (the
+    # dry-run stub, older backends). Records which model each reasoning step ran on so routing is
+    # observable and the margin dashboard (EC-6) can attribute cost per model. Provenance only — the
+    # provider/model is NEVER a trust anchor.
+    model: str = ""
     cognitive_doc: str = Field(description="v1 source-of-truth doc cited.")
     cognitive_sections: list[str] = Field(
         default_factory=list, description="Anchors of doc sections used."
     )
     tokens_in: int = 0
     tokens_out: int = 0
+    # EC-1a prompt-caching provenance. Default 0 => backward compatible with every existing
+    # caller and every persisted trace. tokens_in already folds these in (so the budget ledger
+    # is unchanged); these two fields record HOW the input broke down for the margin dashboard.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    # EC-1b L2 response cache: True when this result was served from the deterministic local response
+    # cache (no provider call). Default False => backward compatible. Honest provenance — a cached
+    # reasoning step is visibly cached in its persisted trace; tokens_in/out are 0 on a cache hit.
+    cached: bool = False
     latency_ms: float = 0.0
     timestamp: str = ""

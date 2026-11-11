@@ -684,9 +684,9 @@
     },
     {
       "file": "tools/backup/transport.py",
-      "snippet": "neither is a stub",
+      "snippet": "none is a stub",
       "kind": "non-debt",
-      "note": "Explicitly asserts both backup backends are REAL (the opposite of a stub)."
+      "note": "Explicitly asserts all THREE backup backends (local/rsync/s3) are REAL (the opposite of a stub)."
     },
     {
       "file": "tools/ha/require_networkpolicy.py",
@@ -745,6 +745,19 @@
       "snippet": "auto-void was not wired this slice",
       "kind": "non-debt",
       "note": "Deliberate design decision, not debt (M-11 EvalCapabilityGrant FIX C2/F): the `sigil eval-grant status` budget_note states honestly that a durable spine-anchored covered-action AUTO-VOID was DROPPED this slice (the resettable http_executor process counter is deliberately NOT used, as it would be a trivial reset-to-arm fail-open). max_covered_actions stays signed+PoP-bound and attributable, and the grant's REAL durable ceiling is fully enforced by the four void_conditions listed alongside it (owner revoke + offense-gate/engagement close + per-engagement kill-switch + signed engagement scope + the covering attestation not_after). A capability consciously scoped out with its security ceiling complete by other means, not deferred/unfinished code."
+    },
+    {
+      "file": "apps/sigil/sigil/ui/assessments.py",
+      "snippet": "does not yet carry a signed",
+      "kind": "debt",
+      "limit_id": "LIMIT-evidence-empty-engagement-slug",
+      "note": "The customer assessment API (Slice K) surfaces FINDINGS only; a detection FACT is withheld because its certificate carries no signed engagement_slug (it cannot be per-engagement-confined — symmetric with finding_receiver.ingest_detection), the same unsigned/empty engagement_slug root the evidence single_engagement limit tracks. Detections return once the detection cert declares a signed slug."
+    },
+    {
+      "file": "packages/core/vigil_core/vigil_core/credit_lease.py",
+      "snippet": "not wired into the live launch-gate money path yet",
+      "kind": "non-debt",
+      "note": "Deliberate design decision, not debt (EC-4 per-tenant token-cost envelope ledger): the cost ledger ships as a DEFAULT-OFF primitive BY DESIGN, per the money doctrine that money-doctrine numbers — here ENVELOPE_TOKENS_PER_CREDIT, the credit->token conversion E — stay behind default-OFF placeholders until explicit owner ratification, so no unratified money number can drive production spend. The primitive itself is complete, owner-signed, mutation-verified and prune-durable (governor/cost_ledger.py + the v9 snapshot fold + the two spine/prune.py tripwires); it is simply not yet consulted by the live gate. Wiring it into the live launch-gate money path (reserve on reserve_launch, settle from the ACTUAL recorded tokens on settle_launch) + the EC-5 global pool meter + the keyless engine's actual-token delivery is the planned EC-4b increment, not unfinished/deferred debt."
     }
   ]
 }

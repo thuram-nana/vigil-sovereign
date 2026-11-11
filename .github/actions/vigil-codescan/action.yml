@@ -1,0 +1,75 @@
+name: "VIGIL code security scan"
+description: >-
+  Diff-scoped, oracle-grounded static security review for a pull request. Runs VIGIL's deterministic
+  code analysis (DAA) over the PR's changed files and annotates them with FACT/LEAD-typed findings — a
+  finding is a FACT only when VIGIL's single-region static oracle re-derives the property, a LEAD
+  otherwise (never claimed oracle-verified). The scan runs ONLY after VIGIL's hard authorization gate
+  allows it, so a repo with no provisioned EngagementAuthority is refused, not scanned.
+author: "VIGIL"
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  queue-root:
+    description: "Durable SecurityJob queue root (a workspace-local path is fine for a one-shot CI run)."
+    required: false
+    default: ".vigil-queue"
+  base-dir:
+    description: "Engagement base dir holding the signed <slug>.spine."
+    required: false
+    default: ".vigil-live"
+  fail-on:
+    description: >-
+      Fail the check (exit 1) when an ORACLE-CONFIRMED FACT is at or above this severity
+      (critical | high | medium | low). Leads never break the build. Empty = never fail on findings.
+    required: false
+    default: ""
+  max-files:
+    description: "Maximum number of files the analyzers scan."
+    required: false
+    default: "5000"
+  python-version:
+    description: "Python version used to run VIGIL."
+    required: false
+    default: "3.13"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Prepare VIGIL (offense plane)
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip >/dev/null
+        # The action is vendored in the VIGIL repo; github.action_path is
+        # <repo>/.github/actions/vigil-codescan, so the repo root is three levels up. Put VIGIL's
+        # offense + core source on PYTHONPATH so `framework` and `vigil_integration` import.
+        VIGIL_ROOT="$(cd "${{ github.action_path }}/../../.." && pwd)"
+        # Install VIGIL's third-party runtime deps (pydantic, cryptography, …). Without this a clean
+        # setup-python runner has no pydantic, and `vigil ci-scan` dies at import (load_authority_root ->
+        # framework.v2.authority.store -> `from pydantic import ValidationError`) with EVERY check red.
+        # The pinned lock covers both framework and vigil_core (same pydantic/cryptography pins).
+        python -m pip install -r "$VIGIL_ROOT/engine/crucible/framework/v2/requirements.lock.txt"
+        {
+          echo "PYTHONPATH=$VIGIL_ROOT/engine/crucible:$VIGIL_ROOT/integration:$VIGIL_ROOT/packages/core/vigil_core:$VIGIL_ROOT/apps/sigil${PYTHONPATH:+:$PYTHONPATH}"
+        } >> "$GITHUB_ENV"
+    - name: VIGIL ci-scan
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Resolve the PR base/head COMMITS from the event payload (not the branch names) so the
+        # three-dot diff has the merge-base; requires actions/checkout with fetch-depth: 0.
+        BASE_SHA="$(jq -r '.pull_request.base.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+        HEAD_SHA="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+        python -m vigil_integration.cli ci-scan \
+          --queue-root "${{ inputs.queue-root }}" \
+          --base-dir "${{ inputs.base-dir }}" \
+          --max-files "${{ inputs.max-files }}" \
+          --fail-on "${{ inputs.fail-on }}" \
+          ${BASE_SHA:+--base-ref "$BASE_SHA"} \
+          ${HEAD_SHA:+--head-ref "$HEAD_SHA"}

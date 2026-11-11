@@ -162,6 +162,16 @@ def test_traversal_slug_is_sanitized_not_reflected():
     assert r["ok"] is True and r["slug"] == "etc" and "/" not in r["slug"] and ".." not in r["slug"], r
 
 
+def test_operator_target_cannot_use_the_reserved_cust_slug():
+    """K4-0: the ``cust_`` prefix is RESERVED for customer self-serve authorities (issued_by
+    ``customer:<org>``, billing-backed + lease-gated). An operator ``add_target`` naming a ``cust_`` slug is
+    refused, so an operator authority can never carry a ``cust_`` slug and masquerade as a customer engagement
+    to the offense arm's structural lease gate (``customer_engagement_requires_lease``)."""
+    from sigil.ui import target_authorization as ta
+    r = ta.add_target("apme.cm", slug="cust_evil")
+    assert r["ok"] is False and "reserved" in r["error"].lower(), r
+
+
 # --- tamper on the seam is caught by verification (the offense side's guarantee) ------------------
 def test_tampering_the_seam_bundle_scope_fails_verification():
     from sigil.ui import target_authorization as ta

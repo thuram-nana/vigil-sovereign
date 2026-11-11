@@ -84,12 +84,23 @@ class _EchoHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.flush()
                 time.sleep(0.25)
             return
+        # a backend that SETS a cookie scoped to its OWN path space (Path=/), so the proxy's mount-remount
+        # of the relayed Set-Cookie Path can be asserted end-to-end (the customer edge sets Path=/).
+        if urlsplit(self.path).path == "/setcookie":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", "2")
+            self.send_header("Set-Cookie", "vigil_customer_session=abc; Path=/; HttpOnly; SameSite=Strict")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
-        # echo the exact path the upstream saw + the method + the forwarded Host, so the test can
-        # assert the prefix-stripping and header faithfulness.
+        # echo the exact path the upstream saw + the method + the forwarded Host + the forwarded Cookie, so
+        # the test can assert prefix-stripping, header faithfulness, and the plane-boundary cookie partition.
         payload = (f"UP={self.server.tag}\nPATH={self.path}\nMETHOD={self.command}\n"
-                   f"HOST={self.headers.get('Host', '')}\nBODY={body.decode('utf-8', 'replace')}\n")
+                   f"HOST={self.headers.get('Host', '')}\nCOOKIE={self.headers.get('Cookie', '')}\n"
+                   f"BODY={body.decode('utf-8', 'replace')}\n")
         raw = payload.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -127,10 +138,12 @@ def proxy(tmp_path, monkeypatch):
     a, sov_port = _start_echo("cockpit")
     b, con_port = _start_echo("console")
     c, api_port = _start_echo("api")
+    d, cust_port = _start_echo("customer")      # E1 — the keyless customer edge stand-in
     # repoint the proxy's fixed backend ports at our ephemeral upstreams.
     monkeypatch.setattr(uiproxy, "SOVEREIGN_PORT", sov_port)
     monkeypatch.setattr(uiproxy, "CONSOLE_PORT", con_port)
     monkeypatch.setattr(uiproxy, "API_PORT", api_port)
+    monkeypatch.setattr(uiproxy, "CUSTOMER_PORT", cust_port)
 
     # assemble a serve dir from a minimal source bundle (placeholders present, to prove substitution).
     src = tmp_path / "src"
@@ -156,7 +169,7 @@ def proxy(tmp_path, monkeypatch):
     finally:
         httpd.shutdown()
         httpd.server_close()
-        for s in (a, b, c):
+        for s in (a, b, c, d):
             s.shutdown()
             s.server_close()
 
@@ -223,6 +236,109 @@ def test_forwarded_host_is_unchanged(proxy):
     # the proxy forwards the client's Host to the upstream (its anti-rebind allowlist matches on it).
     _st, body = _get(base + "/offense/api/status")
     assert "HOST=127.0.0.1:" in body
+
+
+# ==================================================================================================
+# E1 — the keyless customer plane (/customer → custui): self-authenticating + isolated
+# ==================================================================================================
+def _raw(url: str, *, cookie: "str | None" = None, token: str = ""):
+    """A raw request returning (status, headers, body) so the cookie partition + Set-Cookie remount are
+    assertable. NO operator token by default — the customer plane must not require one."""
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-SIGIL-Token", token)
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
+            return r.status, r.headers, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read().decode("utf-8", "replace")
+
+
+def test_customer_prefix_is_forwarded_to_the_edge_without_operator_auth(proxy):
+    # The keyless edge self-authenticates (its own cookie + CSRF gate), so the proxy must forward
+    # /customer/* WITHOUT the operator whoami gate — else the whole customer plane would 401 behind
+    # `vigil up` (the "built but unreachable" defect this test pins against).
+    base, _serve = proxy
+    st, _h, body = _raw(base + "/customer/api/customer/whoami", token="")   # NO operator token
+    assert st == 200
+    assert "UP=customer" in body
+    assert "PATH=/api/customer/whoami" in body                             # the /customer prefix is stripped
+    # NEGATIVE CONTROL: the customer unauth-forward is SCOPED to /customer — an unauthenticated OPERATOR
+    # request must still be refused (401), proving the 1b branch did not widen the operator surface.
+    st_op, _h2, _b2 = _raw(base + "/sovereign/x", token="")
+    assert st_op == 401, f"unauthenticated operator forward must still 401, got {st_op}"
+
+
+def test_customer_cookie_is_isolated_from_the_operator_planes_both_directions(proxy):
+    base, _serve = proxy
+    both = "vigil_customer_session=CUST; sigil_session=OP"
+    # → the customer edge sees ONLY the customer cookie (the operator cookie is stripped at the boundary).
+    _st, _h, cbody = _raw(base + "/customer/api/customer/whoami", cookie=both, token="")
+    assert "COOKIE=vigil_customer_session=CUST" in cbody
+    assert "sigil_session" not in cbody
+    # → the operator (sovereign) plane NEVER receives the customer cookie; the operator cookie is kept.
+    _st, _h, sbody = _raw(base + "/sovereign/x", cookie=both, token=OWNER_TOKEN)
+    assert "sigil_session=OP" in sbody
+    assert "vigil_customer_session" not in sbody
+
+
+def test_customer_set_cookie_path_is_remounted_to_the_customer_mount(proxy):
+    # the edge scopes its session cookie to its OWN path space (Path=/); through the proxy the browser talks
+    # to /customer/*, so the relayed Set-Cookie Path must be remounted to /customer/ (same mechanism the
+    # OIDC session cookie uses on the sovereign plane).
+    base, _serve = proxy
+    _st, headers, _b = _raw(base + "/customer/setcookie", token="")
+    setc = headers.get("Set-Cookie", "")
+    assert "vigil_customer_session=abc" in setc
+    assert "Path=/customer/" in setc
+
+
+def test_route_customer_prefix_is_stripped_and_guarded_on_the_backend():
+    b = uiproxy._default_backends()
+    assert "customer" in b                                         # the default spawn-local trio + customer
+    assert uiproxy.route("/customer/api/customer/login", b) == (*b["customer"], "/api/customer/login")
+    assert uiproxy.route("/customer", b) == (*b["customer"], "/")
+    # a legacy 3-key backends dict (no customer, e.g. --proxy-only) must serve static/404, never KeyError.
+    legacy = {"sovereign": ("127.0.0.1", 1), "console": ("127.0.0.1", 2), "api": ("127.0.0.1", 3)}
+    assert uiproxy.route("/customer/api/customer/login", legacy) is None
+
+
+def test_bare_customer_mount_301s_to_trailing_slash(proxy):
+    """Slice J2: a BARE /customer (no trailing slash) GET 301s -> /customer/ so the SPA's RELATIVE asset/API
+    refs resolve against the mount (a bare path would resolve them against /). route() still maps both
+    /customer and /customer/ to the edge's "/" (unchanged, pure mapper) — the canonicalizing redirect is
+    emitted by the handler BEFORE route(), GET/HEAD only, and only when the customer edge is present."""
+    base, _serve = proxy
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):  # do not follow — assert the 301 itself
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(urllib.request.Request(base + "/customer"), timeout=5) as r:
+            code, loc = r.status, r.headers.get("Location")
+    except urllib.error.HTTPError as e:
+        code, loc = e.code, e.headers.get("Location")
+    assert code == 301, code
+    assert loc == "/customer/", loc
+    # /customer/ (WITH slash) is NOT redirected — it forwards to the edge (echo stand-in), prefix stripped.
+    st, _h, body = _raw(base + "/customer/")
+    assert st == 200 and "UP=customer" in body, (st, body[:60])
+    # a bare-mount POST is NOT redirected (a 301 would downgrade the method) — it forwards to the edge.
+    assert "UP=customer" in _post(base + "/customer", b"{}", token="")
+
+
+def test_partition_cookie_header_splits_on_the_plane_boundary():
+    raw = "vigil_customer_session=abc; sigil_session=xyz; other=1"
+    assert uiproxy._partition_cookie_header(raw, to_customer=True) == "vigil_customer_session=abc"
+    op = uiproxy._partition_cookie_header(raw, to_customer=False)
+    assert "sigil_session=xyz" in op and "other=1" in op and "vigil_customer_session" not in op
+    # robust to a cookie VALUE that itself contains '=' (base64 padding): the name is before the FIRST '='.
+    assert uiproxy._partition_cookie_header("vigil_customer_session=a=b==",
+                                            to_customer=True) == "vigil_customer_session=a=b=="
 
 
 # ==================================================================================================
@@ -365,8 +481,13 @@ def test_child_env_never_leaks_owner_signing_key(monkeypatch):
     # ambient env `_child_env` starts from, so the key is hard-excluded at the source.
     monkeypatch.setenv("VIGIL_DESTRUCTION_OWNER_KEY", "ed25519-owner-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-legit-offense-key")
+    # E1: the edge→provisioner hop key is ALSO hard-excluded — it reaches the cockpit + the customer edge
+    # only via an explicit extra_env under --with-saas, never ambient inheritance, and NEVER the offense
+    # children (a keyless offense process must not hold a sovereign provisioning secret).
+    monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", "edge-provision-hop-secret")
     env = uiproxy._child_env()
     assert "VIGIL_DESTRUCTION_OWNER_KEY" not in env
+    assert "VIGIL_PROVISION_HOP_KEY" not in env
     assert env.get("ANTHROPIC_API_KEY") == "sk-legit-offense-key"   # a legitimate key is not over-stripped
 
 
@@ -530,6 +651,39 @@ def test_spawn_injects_extra_env(tmp_path, monkeypatch):
     out = log.read_text(encoding="utf-8")
     assert "M=claude-opus-5" in out            # injected var reached the child
     assert "K=none" in out                     # a var we did NOT inject is absent (no accidental leak)
+
+
+def test_spawn_capture_injects_extra_env(tmp_path, monkeypatch):
+    # E1: the cockpit receives the per-run VIGIL_PROVISION_HOP_KEY via _spawn_capture's extra_env (never
+    # ambient inheritance — it is hard-excluded). Prove the injected var reaches the child and an
+    # un-injected one does not, mirroring _spawn's contract.
+    monkeypatch.delenv("VIGIL_PROVISION_HOP_KEY", raising=False)   # must come from extra_env, not ambient
+    log = tmp_path / "cockpit.log"
+    argv = [_sys.executable, "-c",
+            "import os;print('HK='+os.environ.get('VIGIL_PROVISION_HOP_KEY','none'))"]
+    proc, _q = uiproxy._spawn_capture(argv, log, extra_env={"VIGIL_PROVISION_HOP_KEY": "per-run-hop"})
+    proc.wait(timeout=10)
+    out = log.read_text(encoding="utf-8")
+    assert "HK=per-run-hop" in out
+
+
+def test_saas_child_specs_wire_the_customer_edge_and_public_site(tmp_path):
+    specs = uiproxy._saas_child_specs(sigil_bin="/venv/bin/sigil", authority="app.example.com",
+                                      origin="https://app.example.com", provision_hop_key="HOPKEY",
+                                      logs=tmp_path)
+    by_name = {name: (argv, env) for name, argv, _log, env in specs}
+    # the customer edge: serve-customer, loopback :8734, the proxy Host/Origin on its allowlist, hop key in env
+    cargv, cenv = by_name["customer-edge"]
+    assert cargv[:4] == ["/venv/bin/sigil", "serve-customer", "--host", "127.0.0.1"]
+    assert "--port" in cargv and "8734" in cargv
+    assert cargv[cargv.index("--allow-host") + 1] == "app.example.com"
+    assert cargv[cargv.index("--allow-origin") + 1] == "https://app.example.com"
+    assert cenv == {"VIGIL_PROVISION_HOP_KEY": "HOPKEY"}        # the hop key rides env, never argv
+    assert "HOPKEY" not in " ".join(cargv)                      # never on the (world-readable) command line
+    # the public site: serve-public, loopback :8735, NO allowlist + NO env (keyless + cookieless)
+    pargv, penv = by_name["public-site"]
+    assert pargv[:4] == ["/venv/bin/sigil", "serve-public", "--host", "127.0.0.1"]
+    assert "8735" in pargv and "--allow-host" not in pargv and penv == {}
 
 
 def test_console_vigil_bin_is_the_offense_sibling(tmp_path):

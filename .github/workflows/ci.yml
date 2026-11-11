@@ -310,6 +310,11 @@ jobs:
           # pinned CI toolchain lock; vigil_core editable --no-deps. pytest-httpserver ships in the
           # runtime lock. See the vigil_core step above / docs/SUPPLY-CHAIN.md §2 for the rationale.
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          # The OPT-IN OpenTelemetry SDK + OTLP/HTTP exporter, from its own hash lock, LAYERED on the runtime
+          # lock as `VIGIL_WITH_OTEL=1 envs/build_envs.sh` does (every pin it shares with env-offense is identical —
+          # asserted offline in test_supply_chain.py). Without it test_live_otel_export.py importorskip-SKIPPED on every
+          # run; the "OTLP export proof MUST have actually executed" step below now fails this job on a skip.
+          pip install --require-hashes -r infra/supply-chain/otel.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           # NO best-effort `pip install -e apps/sigil` here, and that is the whole point of this slice.
@@ -528,9 +533,18 @@ jobs:
               integration/tests/test_jobs_securityjob_slice1.py \
               integration/tests/test_webhook_drain.py \
               integration/tests/test_reconciliation.py \
+              integration/tests/test_launch_trigger.py \
+              integration/tests/test_launch_drain.py \
+              integration/tests/test_engage_runner.py \
+              integration/tests/test_engage_worker_pause_redrive.py \
+              integration/tests/test_launch_pause_redrive_gate.py \
+              integration/tests/test_ci_runner.py \
+              integration/tests/test_findings_crossing.py \
+              integration/tests/test_aegis_saas_acceptance.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \
+              integration/tests/test_pr_bot_print_fix_authorization.py \
               integration/tests/test_general_reexecutable.py \
               integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \
@@ -663,11 +677,13 @@ jobs:
               integration/tests/test_backup_roundtrip.py \
               integration/tests/test_backup_staged_restore.py \
               integration/tests/test_backup_sqlite_snapshot.py \
+              integration/tests/test_backup_engine_layout.py \
               integration/tests/test_backup_push_transport.py \
               integration/tests/test_backup_recovery_drill.py \
               integration/tests/test_backup_targets_recovery.py \
               integration/tests/test_backup_dr_objectives.py \
               integration/tests/test_backup_dr_drill_coverage.py \
+              integration/tests/test_backup_covers_job_queue.py \
               integration/tests/test_livefire_harness_per_action_approval.py \
               integration/tests/test_panic.py \
               integration/tests/test_sovereign_bridge_offense.py \
@@ -707,6 +723,12 @@ jobs:
         # failure. --strict-markers/-p no:cacheprovider hygiene lives on the pytest run that produced the
         # report; this step is the assertion that it actually executed.
         run: python .github/scripts/assert_boundary_proof_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
+      - name: the live OTLP export proof MUST have actually executed (a skipped proof fails this required job)
+        # test_live_otel_export.py importorskips the OpenTelemetry SDK. The otel hash lock installed above is
+        # what makes it RUN; this reads the same JUnit report and FAILS unless the named export proofs (a real
+        # span through the real exporter to a loopback endpoint; ReadableSpan export; secret-free wire form; the
+        # composite emit-only/loopback/secret-free/deterministic invariant) executed and were not skipped.
+        run: python .github/scripts/assert_otel_export_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
       - name: WS4 handover-wrapper wiring is exercised (the acceptance entrypoint cannot silently rot)
         # Coverage for the WS4 production handover gate: the bootstrap production step and the
         # `vigil deploy-acceptance` verb both invoke `python -m vigil_integration.sovereign_deploy.acceptance`.

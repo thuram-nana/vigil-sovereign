@@ -22,14 +22,27 @@ _owner_vault: Optional[Vault] = None
 _owner_vault_lock = threading.Lock()
 
 
+def _configured_kek_backend():
+    """Build the KEK custody backend the operator selected (``sigil.config.kek_backend()``). Default
+    (``tpm``) returns None so the Vault uses its byte-identical TPM backend; ``kms`` returns a
+    :class:`KmsKekBackend` bound to ``VIGIL_KMS_KEY_ID`` + region (fail-closed if either is unset —
+    a KMS backend with no key must never silently fall back to plaintext/TPM)."""
+    from .. import config
+    if config.kek_backend() == "kms":
+        from vigil_core.kek_backends import KmsKekBackend
+        return KmsKekBackend(key_id=config.kms_key_id(), region=config.aws_region())
+    return None
+
+
 def owner_vault() -> Vault:
     """The process-wide vault for the sovereign trust root (sealed-KEK blobs under SIGIL_HOME/vault).
-    All owner-key I/O (governor.identity + spine.checkpoint) routes through this one instance."""
+    All owner-key I/O (governor.identity + spine.checkpoint) routes through this one instance. Its KEK
+    custody backend is chosen once from config — TPM-sealed by default, AWS-KMS-wrapped in the cloud."""
     global _owner_vault
     with _owner_vault_lock:
         if _owner_vault is None:
             from ..config import SIGIL_HOME
-            _owner_vault = Vault(SIGIL_HOME / "vault")
+            _owner_vault = Vault(SIGIL_HOME / "vault", backend=_configured_kek_backend())
         return _owner_vault
 
 

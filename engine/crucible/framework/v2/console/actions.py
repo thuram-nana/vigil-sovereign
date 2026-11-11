@@ -2366,9 +2366,13 @@ def run_codebase_tests(chat_id: str, path: str, command: str = "pytest -q",
     if not vigil:
         return {"ok": False, "error": "no `vigil` entrypoint to run the gated sandbox"}
     cmd = str(command or "").strip() or "pytest -q"
-    argv = [vigil, "sandbox", cmd, "--workspace", wd, "--base-dir", _live_base()]
+    argv = [vigil, "sandbox", "--workspace", wd, "--base-dir", _live_base()]
     if operator_present:                                      # the A3 human-approval leg (operator clicked)
         argv.append("--approve")
+    # `--` then the command LAST: the command text is purely positional, so a command that begins with `-`
+    # (e.g. one an LLM proposed from repo content: `--approve`, `--workspace=/`) can never be parsed as one of
+    # the sandbox's own options — the same end-of-options guard the terminal action already uses.
+    argv += ["--", cmd]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=1800)  # noqa: S603
     except Exception as e:  # noqa: BLE001

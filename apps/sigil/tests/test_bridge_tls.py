@@ -139,6 +139,7 @@ def test_loopback_tls_handshake_serves_a_real_https_envelope():
                            trusted_pubkey=owner.public_key_b64)
         certfile, keyfile, _ = ensure_bridge_cert("127.0.0.1")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(certfile, keyfile)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)   # exactly what serve() does
         port = srv.server_address[1]
@@ -177,3 +178,14 @@ if __name__ == "__main__":
             print(f"  ERROR {fn.__name__}: {e}")
             traceback.print_exc()
     print(f"{passed}/{len(fns)} Phase-9 W1-D (owner-pinned self-signed bridge TLS) guarantees hold")
+
+
+def test_serve_pins_the_tls_floor_explicitly():
+    """CQ-1 (CodeQL py/insecure-protocol): the phone-approval channel refuses TLS 1.0/1.1 by an EXPLICIT floor on
+    the server context serve() builds — never by trusting the interpreter / OpenSSL build default."""
+    import inspect
+
+    from sigil.bridge import server
+    src = inspect.getsource(server.serve)
+    i = src.index("ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)")
+    assert "ctx.minimum_version = ssl.TLSVersion.TLSv1_2" in src[i:src.index("wrap_socket", i)]

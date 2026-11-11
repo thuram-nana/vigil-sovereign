@@ -27,6 +27,14 @@ GOVERNANCE_KEYPAIR_CONTEXT = b"vigil/offense-governance.key"
 # Default persisted governance keypair filename under the offense engagement base_dir.
 DEFAULT_GOVERNANCE_KEY_FILE = "offense-governance.key"
 
+# The key_id LABEL for the offense-governance signer in a TrustRoot authorizer / a signers tuple. The
+# ``KeyPair`` itself carries no key_id, so both the sovereign side that owner-DELEGATES to this key
+# (``AuthorizerKey(key_id=...)``) and the keyless side that SIGNS with it (``signers=[(key_id, priv)]``) must
+# agree on one label — this is it. MUST equal ``wiring.DEFAULT_KEY_ID`` (the label ``provision_authority``
+# already stamps on ``prov.signers``), kept here because ``wiring`` is too heavy to import from the sovereign
+# plane (it pulls the executor → vigil_gateway) while this module is vigil_core-only and both planes import it.
+GOVERNANCE_KEY_ID = "root0"
+
 
 def load_or_create_governance_keypair(*, path: str, vault: object = None) -> KeyPair:
     """Load the persisted stable offense-governance keypair, or generate + persist one (``0600``) on first

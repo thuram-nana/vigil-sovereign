@@ -19,8 +19,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
-from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
+from ..config import (SCOPE, SPINE_GROUP_COMMIT_COALESCE, SPINE_PATH, SPINE_SEG_MAX_BYTES,
+                      SPINE_SEG_MAX_RECORDS)
+from ..reuse import ChainEntry, append_entry, build_chain, canonical_json, digest_payload, verify_chain
 from vigil_core.models import _GENESIS_PREV       # defined in vigil_core (the reuse.* shims are runtime-only)
 from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
@@ -72,6 +73,13 @@ _crash_hook: "Any" = None
 # Default look-back window (in records) for opt-in content de-duplication on append. Bounded so dedup is
 # O(window) per append, never O(spine); a caller may override per-append via `dedup_window`.
 _DEDUP_WINDOW = 256
+
+# SCALE-C1b (commit-coalescing group commit). The max number of INDEPENDENT concurrent appends one
+# group-commit leader coalesces into a SINGLE append_many() batch (one fsync). Large enough to amortize the
+# fsync hard under 1M-scale load, bounded so one group can never buffer an unbounded write. Latecomers
+# beyond the cap simply form the NEXT group, led by the next head after notify_all — so the cap bounds a
+# group's size without ever dropping an append.
+_GROUP_COMMIT_MAX = 1024
 
 
 def _maybe_crash(name: str) -> None:
@@ -176,6 +184,21 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
         window *= 4
 
 
+class _Waiter:
+    """One queued append awaiting a group commit (SCALE-C1b). Guarded ENTIRELY by the owning store's
+    `_commit_cv`: `spec` is set at construction (immutable thereafter); `seq`/`error`/`done` are written only
+    by the elected leader under `_commit_cv` and read by this waiter's own thread only once it observes
+    `done` True (the happens-before the Condition provides). A leader is also a `_Waiter` (its own append is
+    in the batch), so the leader's result is published to itself through exactly this struct."""
+    __slots__ = ("spec", "seq", "error", "done")
+
+    def __init__(self, spec: "dict[str, Any]") -> None:
+        self.spec: "dict[str, Any]" = spec
+        self.seq: "int | None" = None
+        self.error: "BaseException | None" = None
+        self.done: bool = False
+
+
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH, *,
                  seg_max_bytes: int | None = None, seg_max_records: int | None = None) -> None:
@@ -216,6 +239,17 @@ class SpineStore:
         # `_UNSET` until first use; then the 32-byte DEK, or None when the vault is not provisioned
         # (opt-in passthrough → plaintext, byte-identical to today).
         self._dek_cache: Any = _UNSET
+        # SCALE-C1b (commit-coalescing group commit, DEFAULT-OFF). A commit-coalescing FRONT-END that sits IN
+        # FRONT OF spine_lock: independent concurrent append() calls are gathered into one group whose actual
+        # write is delegated to the UNCHANGED append_many() on a single LEADER thread — one fsync per group.
+        # These three fields are guarded ENTIRELY by `_commit_cv`, a SEPARATE, NON-reentrant lock that is
+        # NEVER spine_lock (the leader still takes spine_lock + flock FRESH inside append_many, on its own
+        # thread, holding neither this cv nor spine_lock while it writes). Flag OFF ⇒ the queue is never
+        # touched and append() is byte-identical to today.
+        self._group_commit_coalesce: bool = bool(SPINE_GROUP_COMMIT_COALESCE)
+        self._commit_cv = threading.Condition(threading.Lock())
+        self._commit_queue: "list[_Waiter]" = []
+        self._leader_inflight: bool = False
 
     # --- payload field encryption (G1 slice-4) ------------------------------------
     def _spine_dek(self, *, create: bool) -> "bytes | None":
@@ -982,18 +1016,50 @@ class SpineStore:
         return changed
 
     # --- write --------------------------------------------------------------------
-    def append(
-        self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
-        parent_id: int | None = None, supersedes_id: int | None = None,
-        ts: str | None = None, schema_version: int = SCHEMA_VERSION,
-        dedup: bool = False, dedup_window: int | None = None,
-    ) -> int:
-        # W5-1 write-path enforcement (layer 1 of the sovereign mirror of the offense blackboard's
-        # Python `if kind not in ALL_EVENT_KINDS` + SQL `CHECK(kind IN (...))`). BOTH checks fail CLOSED —
-        # a record with an out-of-vocabulary kind or an unknown schema version is REFUSED before any lock
-        # is taken or byte written, so nothing junk ever reaches the immutable chain. Enforced here, at the
-        # ONE write path, an unfiltered future caller (e.g. an LLM-emitted `cand.kind`) cannot inject an
-        # arbitrary kind onto the spine. layer 2 = `verify()` re-checks `kind` on read (see below).
+    def _write_record_locked(
+        self, f, pred: "ChainEntry | None", *, kind: str, source: str, actor: str,
+        payload: dict[str, Any], parent_id: int | None, supersedes_id: int | None,
+        ts: str | None, schema_version: int,
+    ) -> "tuple[ChainEntry, int]":
+        """Seal + chain + WRITE one record onto the already-open active-segment file ``f`` at EOF — but do NOT
+        flush or fsync (the caller owns the durability barrier). Returns ``(chain entry, bytes written)``.
+
+        MUST hold the spine lock + flock, and ``f`` MUST already be positioned at the true chain tip (the
+        caller truncates any torn tail first). ``pred`` is the predecessor chain entry (None ⇒ seed the
+        genesis chain at seq 0). ``entry.seq == (pred.seq + 1 if pred else 0)`` by construction, and the
+        content fields are AEAD-sealed under the spine DEK bound to that seq exactly as the single-record path
+        always did. This is the SHARED write core of ``append`` (one record → one fsync) and ``append_many``
+        (N records → one fsync); factoring it out is what lets group commit (SCALE-C1) amortize the fsync
+        across a batch WITHOUT duplicating — or drifting from — the seal/chain/record math."""
+        seq = pred.seq + 1 if pred is not None else 0
+        # G1 slice-4: seal the CONTENT FIELDS at rest under the spine DEK; metadata stays plaintext so keyless
+        # folds work. The DEK is loaded ONLY when the record carries a content field (a pure-metadata/signal
+        # append is never blocked by a locked vault). cert_digest is over the STORED form, so a keyless
+        # verifier still verifies the chain.
+        dek = self._spine_dek(create=True) if envelope.has_content(payload) else None
+        stored_payload = envelope.seal_payload(dek, payload, scope=SCOPE, seq=seq)
+        content = {
+            "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
+            "payload": stored_payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
+        }
+        cert_digest = digest_payload(content)  # over the STORED (content fields sealed) payload
+        entry = (append_entry([pred], cert_digest) if pred is not None
+                 else build_chain([cert_digest])[0])
+        # schema_version sits OUTSIDE content (like seq/ts/chain fields), so it is not part of cert_digest —
+        # that keeps the change additive and legacy records' chain byte-identical (W5-1).
+        record = {
+            "seq": entry.seq, **content, "ts": ts or now_iso(),
+            "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
+            "schema_version": schema_version,
+        }
+        line_bytes = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        f.write(line_bytes)
+        return entry, len(line_bytes)
+
+    def _validate_kind_schema(self, kind: object, schema_version: object) -> None:
+        """Fail CLOSED on an out-of-vocabulary kind or unknown schema version BEFORE any lock/byte (W5-1).
+        Accepts ``object`` so a batch spec's untyped ``dict.get("kind")`` (``Any | None``) is validated the same
+        fail-closed way as append()'s typed ``str`` — a non-str / None / unknown value is simply not in KINDS."""
         if kind not in KINDS:
             raise SpineError(
                 f"refusing to append record with unknown kind {kind!r} (not in the enforced KINDS "
@@ -1002,6 +1068,230 @@ class SpineStore:
             raise SpineError(
                 f"refusing to append record with unknown schema_version {schema_version!r} "
                 f"(known: {sorted(KNOWN_SCHEMA_VERSIONS)}) — upgrade sigil before writing this version")
+
+    # --- SCALE-C1b: concurrent-append coalescing (leader/follower group commit, DEFAULT-OFF) ------------
+    def _holds_spine_lock(self) -> bool:
+        """True iff THIS thread already holds the re-entrant spine lock for this store (an OUTER
+        check-then-append transaction such as envelope.consume's TOCTOU replay gate, ui.provision, or
+        ui.launch_gate). Such a caller MUST take the DIRECT append path: if it instead delegated to the
+        coalescing front-end it could be elected a FOLLOWER behind a LEADER on another thread, and that
+        leader's append_many() would block forever trying to acquire the spine_lock THIS thread holds (a
+        deadlock). The probe fails SAFE — any error means we could not PROVE the lock is unheld, so we return
+        True and the caller goes direct (which is always correct, never a deadlock)."""
+        try:
+            # `_is_owned()` is a same-thread re-entrancy probe on the RLock (False when unheld, True after a
+            # same-thread acquire). It exists on the runtime lock object but not in threading.RLock's stub, so
+            # the attr-defined ignore is a typeshed gap, not a runtime risk (exercised by the C1b tests).
+            return bool(spine_lock(self.path)._is_owned())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — cannot prove the lock is unheld ⇒ treat as held ⇒ direct path
+            return True
+
+    def _finalize_batch(self, batch: "list[_Waiter]", seqs: "list[int] | None",
+                        err: "BaseException | None") -> None:
+        """MUST hold `_commit_cv`. Publish the group-commit outcome to every waiter in `batch`. On SUCCESS,
+        map each append_many seq (contiguous, in list order) to its waiter. On FAILURE (append_many RAISED
+        and rolled back ATOMICALLY — NOTHING was acked), set the SAME error on EVERY waiter so they all raise
+        and may safely retry (at-least-once; append_many's atomic rollback means no partial prefix is left to
+        duplicate). Either way each waiter is marked `done` so its thread stops waiting."""
+        if err is None:
+            assert seqs is not None and len(seqs) == len(batch)
+            for b, sq in zip(batch, seqs):
+                b.seq = sq
+                b.error = None
+                b.done = True
+        else:
+            for b in batch:
+                b.error = err
+                b.done = True
+
+    def _append_coalesced(self, spec: "dict[str, Any]") -> int:
+        """Commit-coalescing front-end for an INDEPENDENT concurrent append() (SCALE-C1b). Enqueue this
+        append, elect ONE leader per group, and have that leader write the whole group via the UNCHANGED
+        append_many() on its own thread — spine_lock + flock + ONE fsync, acquired FRESH inside append_many,
+        contiguous seqs, rotation. Because the real write IS append_many, C1b inherits the full signed-spine
+        contract (chain-order / at-least-once / atomic rollback / fail-closed / durable-before-ack) VERBATIM
+        and adds only thread coordination. Returns the assigned seq, or raises the batch's error.
+
+        Followers are signaled ONLY after append_many() returns — i.e. after its single fsync — so every
+        coalesced ack is durable-before-ack. Latecomers that arrive during the write queue at the tail and are
+        led by the next head after notify_all. Only the queue head, and only while no leader is in flight,
+        ever leads, so there is never a second concurrent leader."""
+        # (a) Pre-flight the payload on THIS caller's own thread, BEFORE enqueue: a payload the real write
+        # would REJECT must fail ONLY its owner (raised right here), so the batch the leader hands to
+        # append_many is all-writable. Otherwise one poison payload would trip append_many's ATOMIC rollback
+        # and fail the ENTIRE group — a poison append must never take its innocent co-batched neighbours down
+        # with it. Use canonical_json, NOT plain json.dumps: the write path serializes the payload through
+        # canonical_json(sort_keys=True) — seal_payload canonical_json's each content field, and
+        # digest_payload canonical_json's the content — so a payload plain json.dumps ACCEPTS but
+        # canonical_json REJECTS (e.g. a nested dict with mixed str/int keys that sort_keys cannot order) would
+        # pass a plain pre-flight, enter the batch, then raise inside the leader's append_many and poison its
+        # neighbours. Mirroring the write's serializer keeps isolation EXACT (rejects iff the write would) and
+        # strictly supersets the plain-json non-serializable check.
+        canonical_json(spec["payload"])
+        w = _Waiter(spec)
+        with self._commit_cv:
+            self._commit_queue.append(w)
+            while not w.done:                                 # re-check under the lock — guards spurious wakeups
+                if (not self._leader_inflight and self._commit_queue
+                        and self._commit_queue[0] is w):
+                    # --- elected LEADER for this group ---
+                    # Set the single-leader gate and DETACH the batch from the queue up front, so the NEXT
+                    # head is exposed but held OFF by `_leader_inflight` until we clear it (that gate is what
+                    # keeps a second leader from running concurrently); latecomers append past it at the tail.
+                    self._leader_inflight = True
+                    batch = self._commit_queue[:_GROUP_COMMIT_MAX]
+                    del self._commit_queue[:len(batch)]
+                    self._commit_cv.release()                 # write holding NEITHER _commit_cv NOR spine_lock
+                    seqs: "list[int] | None" = None
+                    err: "BaseException | None" = None
+                    try:
+                        seqs = self.append_many([b.spec for b in batch])   # fresh spine_lock+flock, ONE fsync
+                    except BaseException as exc:  # noqa: BLE001 — fan the failure out to EVERY batch waiter
+                        err = exc
+                    finally:
+                        # Re-acquire and finalize. append_many has already returned — post-fsync on success,
+                        # or rolled-back-atomically on error — so signaling here is strictly DURABLE-BEFORE-ACK
+                        # (and ack-NOTHING-on-error). The notify_all wakes this group's followers AND the next
+                        # head, which leads the remaining queue + any latecomers.
+                        self._commit_cv.acquire()
+                        self._finalize_batch(batch, seqs, err)
+                        self._leader_inflight = False
+                        self._commit_cv.notify_all()
+                    # loop re-checks `while not w.done`: our own waiter is in the batch → done → exit below
+                else:
+                    self._commit_cv.wait()                    # follower / gated next head: park until signaled
+        if w.error is not None:
+            raise w.error                                     # re-raise for THIS caller (leader or follower)
+        assert w.seq is not None                              # done with no error ⇒ a seq was assigned
+        return w.seq
+
+    def append_many(self, specs: "list[dict[str, Any]]") -> "list[int]":
+        """Append N records under ONE lock acquisition + ONE fsync — group commit (SCALE-C1).
+
+        The per-record ``fsync`` under the write lock is the spine's write-throughput bottleneck, so a caller
+        that has several records to write (a snapshot fold, a checkpoint, a drain batch, a group-commit
+        leader draining queued concurrent appends) amortizes that single durability barrier across the whole
+        batch instead of paying it per record.
+
+        Each spec is ``{kind, source, actor, payload, parent_id?, supersedes_id?, ts?, schema_version?}`` —
+        the same fields as :meth:`append` EXCEPT ``dedup`` (a batch is not content-deduped; a caller needing
+        dedup uses :meth:`append`). Records are chained in LIST ORDER (record i+1's ``prev_hash`` = record i's
+        ``entry_hash``) and share the ONE fsync, after which every record in the batch is durable. Returns the
+        assigned seqs, in order. An empty ``specs`` writes nothing and returns ``[]``.
+
+        CRASH SEMANTICS — the SAME at-least-once contract as :meth:`append`, at batch granularity. A crash
+        between the writes and the fsync may leave a PREFIX of the batch durable-but-unacked; ``append_many``
+        does not return, so the caller retries, and — exactly as for a single append that crashed after fsync
+        but before its ack — a caller needing exactly-once relies on content-addressed dedup / processed
+        markers (the drains already do). The chain is NEVER corrupted: unacked durable records are valid chain
+        records and the next write continues from the true tip (the torn-tail truncation only removes a
+        partially-written final line, never a committed one).
+
+        ATOMIC-OR-NOTHING on the IN-PROCESS error path (distinct from a crash): if a spec fails WHILE the
+        batch is being written — a missing required field (rejected up front, before any lock/byte) or a
+        payload only ``json.dumps`` discovers is non-serializable (caught mid-write) — the partial prefix
+        already written is rolled back to the pre-batch chain tip before the error propagates. So a caller
+        that catches the error and retries can never silently DUPLICATE the already-written records
+        (``append_many`` has no content dedup). This mirrors ``append()``, which writes its one record
+        all-or-nothing."""
+        if not specs:
+            return []
+        for i, s in enumerate(specs):
+            # Reject a malformed spec BEFORE any lock/byte: a spec missing a required field would otherwise
+            # raise a KeyError PARTWAY THROUGH the write loop below, after earlier records were already
+            # written — a durable partial prefix on the signed chain. Fail closed here with a clear message.
+            missing = [k for k in ("kind", "source", "actor", "payload") if k not in s]
+            if missing:
+                raise SpineError(
+                    f"append_many spec[{i}] is missing required field(s) {missing} — each spec needs "
+                    f"kind/source/actor/payload; refusing to write a partial batch")
+            self._validate_kind_schema(s.get("kind"), s.get("schema_version", SCHEMA_VERSION))
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                self._refresh_active_under_lock()
+                active = self._active
+                entries: "list[ChainEntry]" = []
+                placed: "list[tuple[int, int]]" = []       # (offset, nbytes) per record, for the index update
+                with active.open("a+b") as f:
+                    clean_end, last = _last_valid_boundary(active)
+                    pre_size = os.fstat(f.fileno()).st_size
+                    if pre_size > clean_end:
+                        f.truncate(clean_end)
+                        _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before "
+                                     "append_many (%s)", pre_size - clean_end, active)
+                    pred = last if last is not None else self._seam_tip_for_active()
+                    off = clean_end
+                    try:
+                        for s in specs:
+                            entry, n = self._write_record_locked(
+                                f, pred, kind=s["kind"], source=s["source"], actor=s["actor"],
+                                payload=s["payload"], parent_id=s.get("parent_id"),
+                                supersedes_id=s.get("supersedes_id"), ts=s.get("ts"),
+                                schema_version=s.get("schema_version", SCHEMA_VERSION))
+                            entries.append(entry)
+                            placed.append((off, n))
+                            off += n
+                            pred = entry
+                    except BaseException:
+                        # ATOMIC-OR-NOTHING (signed ledger): a spec that fails mid-batch — e.g. a payload only
+                        # json.dumps finds non-serializable, or any seal/write error — leaves records 0..i-1
+                        # already written to the open file. Roll them back to the pre-batch tip so the batch is
+                        # all-or-nothing like append(): flush pushes any buffered bytes to the OS, then truncate
+                        # to clean_end drops the whole partial prefix. append_many has NO dedup, so a leftover
+                        # prefix would be silently DUPLICATED by a caller that retries after catching the error.
+                        # No in-memory index/seq/last state was published yet (that happens only after the fsync
+                        # below), so truncating the bytes fully restores the chain tip.
+                        f.flush()
+                        f.truncate(clean_end)
+                        raise
+                    f.flush()
+                    os.fsync(f.fileno())                   # ONE durability barrier for the whole batch
+                    _maybe_crash("append_after_fsync")     # crash-fuzz: batch durable, not yet acked/sealed
+                    with self._index_lock:
+                        active_str = str(active)
+                        for entry, (o, n) in zip(entries, placed):
+                            if self._seg_scanned.get(active_str) == o:
+                                self._offsets[entry.seq] = (active_str, o)
+                                if entry.seq > self._max_seq:
+                                    self._max_seq = entry.seq
+                                self._seg_scanned[active_str] = o + n
+                self._last = entries[-1]
+                self._maybe_rotate_locked()
+        return [e.seq for e in entries]
+
+    def append(
+        self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
+        parent_id: int | None = None, supersedes_id: int | None = None,
+        ts: str | None = None, schema_version: int = SCHEMA_VERSION,
+        dedup: bool = False, dedup_window: int | None = None,
+    ) -> int:
+        # W5-1 write-path enforcement: a record with an out-of-vocabulary kind or an unknown schema version is
+        # REFUSED before any lock is taken or byte written (fail CLOSED), so nothing junk reaches the immutable
+        # chain; layer 2 = verify() re-checks kind on read. Shared with append_many via _validate_kind_schema,
+        # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path.
+        self._validate_kind_schema(kind, schema_version)
+        # SCALE-C1b: COMMIT-COALESCING FRONT-END (default-OFF). Before taking spine_lock, route INDEPENDENT
+        # concurrent appends into one group that a single leader thread writes via the UNCHANGED append_many()
+        # (one fsync per group — the 1M-scale concurrent-append throughput lift). Take the DIRECT path (today's
+        # UNCHANGED code below) whenever ANY of: the flag is OFF; dedup was requested (append_many has no
+        # dedup look-back); the payload CARRIES CONTENT TO SEAL (has_content); or THIS thread already HOLDS
+        # spine_lock (a re-entrant check-then-append txn such as envelope.consume's replay gate — it MUST NOT
+        # delegate to a leader on another thread, which would then deadlock acquiring the spine_lock this
+        # thread holds). A CONTENT append goes DIRECT because its seal needs the spine DEK: on a LOCKED vault
+        # _spine_dek raises VaultLocked INSIDE the leader's append_many, and the leader-exception fan-out would
+        # then fail EVERY co-batched waiter — blocking an innocent pure-metadata/signal append (e.g. a
+        # kill-switch panic) that the direct path guarantees is "never blocked by a locked vault". Routing
+        # content direct keeps that fail-safe: a content seal failure stays isolated to its own caller, exactly
+        # as today, while only never-encrypting metadata/signal appends coalesce. The _is_owned() probe fails
+        # SAFE: if it cannot prove the lock is UNHELD it returns held, so an unprovable case goes direct, never
+        # risking the deadlock. The direct-path body below is UNCHANGED.
+        if (self._group_commit_coalesce and not dedup and not envelope.has_content(payload)
+                and not self._holds_spine_lock()):
+            return self._append_coalesced({
+                "kind": kind, "source": source, "actor": actor, "payload": payload,
+                "parent_id": parent_id, "supersedes_id": supersedes_id,
+                "ts": ts, "schema_version": schema_version,
+            })
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
         # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
         # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
@@ -1035,42 +1325,16 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
                                      pre_size - clean_end, active)
-                    # Derive the predecessor + seq BEFORE sealing (the field AEAD binds seq) — the SAME chain
-                    # math as append_entry/build_chain, computed one step earlier so seq is known.
-                    if last is not None:
-                        pred, seq = last, last.seq + 1
-                    else:
-                        # active is EMPTY: seed from the prior sealed segment's boundary if this is a rotated
-                        # (non-genesis) segment, else start the genesis chain at seq 0. Never build_chain a
-                        # non-genesis segment from GENESIS (that would fork the chain at seq 0 — invariant 13).
-                        seam = self._seam_tip_for_active()
-                        pred, seq = (seam, seam.seq + 1) if seam is not None else (None, 0)
-                    # G1 slice-4: seal the CONTENT FIELDS at rest under the spine DEK — metadata (incl.
-                    # signal/decision/usage/promotion_key) stays PLAINTEXT so keyless folds work. The DEK is
-                    # loaded ONLY when the record actually carries a content field, so a pure-metadata /
-                    # signal append is never blocked by a locked vault. `cert_digest` is then over the STORED
-                    # form (metadata + ciphertext), so a keyless verifier still verifies the chain.
-                    dek = self._spine_dek(create=True) if envelope.has_content(payload) else None
-                    stored_payload = envelope.seal_payload(dek, payload, scope=SCOPE, seq=seq)
-                    content = {
-                        "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
-                        "payload": stored_payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
-                    }
-                    cert_digest = digest_payload(content)  # over the STORED (content fields sealed) payload
-                    entry = (append_entry([pred], cert_digest) if pred is not None
-                             else build_chain([cert_digest])[0])
-                    # entry.seq == seq by construction (append_entry([pred]).seq == pred.seq+1; genesis == 0).
-                    # `schema_version` sits OUTSIDE `content` (like `seq`/`ts`/the chain fields), so it is not
-                    # part of `cert_digest` — that is what keeps the change additive and legacy records' chain
-                    # byte-identical (W5-1). Stamped on every new record; `KNOWN_SCHEMA_VERSIONS`-validated above.
-                    record = {
-                        "seq": entry.seq, **content, "ts": ts or now_iso(),
-                        "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
-                        "schema_version": schema_version,
-                    }
-                    line = json.dumps(record, ensure_ascii=False) + "\n"
+                    # Derive the predecessor BEFORE writing (the SAME chain math as append_entry/build_chain);
+                    # _write_record_locked derives seq = pred.seq+1 (genesis 0), seals the content fields under
+                    # the spine DEK bound to that seq, and writes the line (no fsync). active EMPTY ⇒ seed from
+                    # the prior sealed segment's boundary (a rotated segment) else the genesis chain — never
+                    # build_chain a non-genesis segment from GENESIS (that would fork at seq 0 — invariant 13).
+                    pred = last if last is not None else self._seam_tip_for_active()
+                    entry, nbytes = self._write_record_locked(
+                        f, pred, kind=kind, source=source, actor=actor, payload=payload,
+                        parent_id=parent_id, supersedes_id=supersedes_id, ts=ts, schema_version=schema_version)
                     offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
-                    f.write(line.encode("utf-8"))
                     f.flush()
                     os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
                     _maybe_crash("append_after_fsync")      # crash-fuzz: record durable, not yet acked/sealed
@@ -1085,7 +1349,7 @@ class SpineStore:
                             self._offsets[entry.seq] = (active_str, offset)
                             if entry.seq > self._max_seq:
                                 self._max_seq = entry.seq
-                            self._seg_scanned[active_str] = offset + len(line.encode("utf-8"))
+                            self._seg_scanned[active_str] = offset + nbytes
                 self._last = entry
                 # write-then-rotate: the record is durable (fsync'd) above BEFORE any seal, so a panic
                 # append is never blocked by rotation for more than the bounded seal-swap (D1). No-op unless
@@ -1146,6 +1410,85 @@ class SpineStore:
                 _log.debug("spine: a segment moved during read (compaction); re-resolving from seq %d", yielded_upto)
                 continue
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
+
+    def tail_after(self, seq: int, entry_hash: str, *, max_bytes: int = 4 << 20):
+        """Front C S0d — the fold cache's FRESH-STORE fast path. Read-only; never touches the seq index.
+
+        The verified fold cache keeps one folded state per spine across the per-request `SpineStore` objects the
+        cockpit builds, and on each read must (1) prove its anchor — the record at `seq` still has `entry_hash` —
+        and (2) fold the records appended since. Through `get()` / `iter_records(since_seq=…)` both build this
+        object's seq index first: O(the active segment + every sealed segment's sidecar) on a fresh store, i.e.
+        per request. This answers both from the END of the ACTIVE segment instead:
+
+          * a list — exactly the records `iter_records(since_seq=seq)` yields (parsed the same way: blank and
+            malformed lines skipped, an unterminated final line kept if it parses, strictly increasing seqs),
+            PROVIDED the record at `seq` was found in that tail with `entry_hash`, or `seq` is the last record of
+            the segment just before the active one and the manifest's `boundary_hash` for it (== its
+            `entry_hash`, which `verify()` checks) is `entry_hash` — so an anchor in a sealed / gzip segment is
+            proven without decompressing it. `[]`: `seq` is the tip;
+          * False — the record at `seq` is provably NOT the anchor (a different hash, or the spine now ends
+            before `seq`: a rollback, rewrite or reset);
+          * None — undecidable within `max_bytes` of the tail (a large delta, a gap at `seq`, a non-monotonic
+            tail, a rotation since the anchor that left more than one segment behind it): the caller takes the
+            indexed path."""
+        if seq < 0:
+            return None
+        m = read_manifest(self._layout)
+        if m is None:
+            target, prev = self._read_target(), None
+        else:
+            act = m.active()
+            if act is None:
+                return None
+            target = self._layout.seg_path(act)
+            sealed = m.sealed_in_order()
+            prev = sealed[-1] if sealed else None
+        try:
+            size = target.stat().st_size if target.exists() else 0
+        except OSError:
+            return None
+        window = min(size, 1 << 16)
+        while True:
+            start = size - window
+            after: list[SpineRecord] = []                 # the records after `seq`, newest first
+            if size:
+                with target.open("rb") as f:
+                    f.seek(start)
+                    buf = f.read(window)
+                lines = buf.split(b"\n")
+                if start > 0:
+                    lines = lines[1:]                     # the first piece may be a partial line
+                last = None
+                for raw in reversed(lines):               # newest first: stop at the anchor (O(new records))
+                    if not raw.strip():
+                        continue
+                    try:
+                        rec = SpineRecord.from_dict(json.loads(raw))
+                    except (ValueError, KeyError, TypeError):
+                        continue                          # skipped exactly as iter_records skips it
+                    if last is not None and rec.seq >= last:
+                        return None                       # non-monotonic tail: leave it to the indexed path
+                    last = rec.seq
+                    if rec.seq > seq:
+                        after.append(rec)
+                        continue
+                    if rec.seq == seq:
+                        return after[::-1] if rec.entry_hash == entry_hash else False
+                    # the newest record at or below `seq` is BELOW it: the anchor's own line is gone
+                    return None if after else False      # a gap at `seq` / the spine now ends before it
+                if start > 0:                             # every record read is after `seq`: read further back
+                    if window >= max_bytes:
+                        return None
+                    window = min(size, window * 4)
+                    continue
+            # Every record of the active segment is after `seq` (or it is empty): the anchor can only be the
+            # previous segment's last record, whose entry_hash the manifest carries as its boundary_hash.
+            recs = after[::-1]
+            if prev is None:
+                return False if not recs else None        # an empty spine cannot hold the anchor
+            if prev.last_seq != seq or prev.boundary_hash is None or (recs and recs[0].seq != seq + 1):
+                return None
+            return recs if prev.boundary_hash == entry_hash else False
 
     def get(self, seq: int) -> SpineRecord | None:
         """A single record by seq via the segment-aware index (resolves the OWNING segment + offset),

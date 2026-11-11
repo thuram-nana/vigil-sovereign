@@ -307,14 +307,14 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 192,
+    "routes": 200,
     "routes_by_status": {
       "ORPHAN": 0,
-      "headless": 27,
+      "headless": 28,
       "pending": 0,
-      "ui-driven": 165
+      "ui-driven": 172
     },
-    "ui_calls": 159
+    "ui_calls": 166
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -367,6 +367,22 @@
     },
     {
       "kind": "exact",
+      "method": "GET",
+      "path": "/api/assessments",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/assessments/findings",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
       "method": "POST",
       "path": "/api/backup",
       "plane": "sovereign",
@@ -385,6 +401,46 @@
       "kind": "exact",
       "method": "GET",
       "path": "/api/backup/list",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/invoices",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/margin",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/orgs",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/overview",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/plans",
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
@@ -668,6 +724,14 @@
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
+    },
+    {
+      "kind": "prefix",
+      "method": "POST",
+      "path": "/api/provision/",
+      "plane": "sovereign",
+      "reason": "customer provisioner backend \u2014 keyless custui edge + hop only (no app.js UI)",
+      "status": "headless"
     },
     {
       "kind": "prefix",
@@ -2529,6 +2593,16 @@
       "plane": "sovereign"
     },
     {
+      "method": "GET",
+      "path": "/api/assessments",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/assessments/findings",
+      "plane": "sovereign"
+    },
+    {
       "method": "POST",
       "path": "/api/backup",
       "plane": "sovereign"
@@ -2541,6 +2615,31 @@
     {
       "method": "GET",
       "path": "/api/backup/list",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/invoices",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/margin",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/orgs",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/overview",
+      "plane": "sovereign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/billing/plans",
       "plane": "sovereign"
     },
     {

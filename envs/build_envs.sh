@@ -48,6 +48,26 @@ STRIX_LOCK="infra/supply-chain/strix.lock"   # vendor/strix's hash-pinned live-s
 # Installed FIRST, then members build with --no-build-isolation so the backend comes from these exact
 # pins instead of a fresh index fetch. See docs/SUPPLY-CHAIN.md §2 and this file's build() below.
 BUILD_BACKENDS_LOCK="infra/supply-chain/build-backends.lock.txt"
+# OPT-IN telemetry-export extras (opentelemetry-sdk + the OTLP/HTTP exporter `vigil engage --otlp-endpoint`
+# uses). NOT a runtime lock — telemetry export is default-OFF — so it is installed ONLY when VIGIL_WITH_OTEL=1,
+# into env-offense (where `vigil` runs), LAYERED after strix + the framework lock. Every pin it shares with
+# env-offense is identical (otel.in is constrained by both runtime locks; test_supply_chain.py asserts it against
+# strix overlaid by the framework lock), so it adds packages and never moves one. See infra/supply-chain/otel.in.
+OTEL_LOCK="infra/supply-chain/otel.lock.txt"
+
+with_otel() {  # VIGIL_WITH_OTEL affirmative? (1/true/yes/on, any case). Anything else — incl. unset — is OFF.
+  case "${VIGIL_WITH_OTEL:-}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# A value that is neither clearly ON nor clearly OFF (e.g. `y`, `2`) is OFF — but say so, rather than silently
+# building without the exporter the operator probably meant to ask for.
+case "${VIGIL_WITH_OTEL:-}" in
+  ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) ;;
+  *) with_otel || echo "    [warn] VIGIL_WITH_OTEL=${VIGIL_WITH_OTEL} is not 1/true/yes/on — the OpenTelemetry" \
+                       "exporter layer will NOT be installed." >&2 ;;
+esac
 
 venv_pip() {  # venv_pip <venv> <pip-args...>  — uv when present, else the venv's pip
   local venv="$1"; shift
@@ -144,6 +164,22 @@ build() {  # name  lock  reqs-file
     framework_locked=1
   else
     lock_missing_or_die "$lock" "the env-$name framework lock"       # production: exits here
+  fi
+
+  # 2b. OPT-IN telemetry-export extras (env-offense only, VIGIL_WITH_OTEL=1), hash-locked and LAYERED after the
+  #     framework lock so the framework pins stay authoritative. Opting in with the lock ABSENT is FATAL in every
+  #     posture: the operator asked for it explicitly, and an unlocked `pip install opentelemetry-*` is exactly
+  #     the fresh-resolution hole this lock closes. Default (unset) installs NOTHING here — byte-identical env.
+  if [ "$name" = "offense" ] && with_otel; then
+    if [ -f "$OTEL_LOCK" ]; then
+      echo "    telemetry-export extras (OPT-IN, reproducible, hash-locked): $OTEL_LOCK"
+      venv_pip "$venv" --require-hashes -r "$OTEL_LOCK"      # refuses ANY unpinned/unhashed package
+    else
+      echo "    [FATAL] VIGIL_WITH_OTEL=${VIGIL_WITH_OTEL} but $OTEL_LOCK is missing — refusing to install the" \
+           "OpenTelemetry exporter UNLOCKED. Regenerate it (see infra/supply-chain/otel.in) or unset" \
+           "VIGIL_WITH_OTEL." >&2
+      exit 1
+    fi
   fi
 
   # 3. First-party members. Their runtime deps are already satisfied by the framework lock -> --no-deps

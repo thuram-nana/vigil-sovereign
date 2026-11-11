@@ -104,6 +104,7 @@ named so the briefing is not silent about half the system.
 | `intruder` | The request-fuzzing / payload-iteration surface (a Burp-Intruder analogue). |
 | `kernel` | The low-level engine backends and paths (`crucible kernel`). |
 | `knowledge` | The knowledge-base content and assets the engine reads. |
+| `knowledge_base` | The per-org knowledge-base corpus — a read/index/query view over on-disk engagement artifacts (`<slug>.report.json`, finding docs, reports), scoped to the active tenant and keyed `(tenant_id, slug)`. |
 | `knowledge_engine` | The knowledge / grants engine (`crucible knowledge`). |
 | `mcp` | The MCP server exposing engine tools over the Model Context Protocol (`crucible mcp`). |
 | `memory` | The semantic memory store — embeddings + recall (`crucible memory`). |
@@ -167,7 +168,8 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil down` | CONTAIN a running `vigil up`: stop + disable the systemd unit, then kill the backends + proxy. |
 | `vigil services` | Docker bring-up: create the egress gateway + qdrant/neo4j/otel services if none exist (idempotent). |
 | `vigil doctor` | Read-only readiness report: prerequisites (binaries, both venvs, writable dirs), UI ports, docker services. |
-| `vigil alerts` | Heartbeat-staleness alarms for every HA / scheduled unit (backup, off-host push, drill, HA sync, integrity, posture, reprove). |
+| `vigil ready` | Bring-up readiness gate (DEP-2): wait, bounded by `--wait`, until the proxy's `/readyz` answers 200 and `vigil doctor` is ok; exit 0 ready / 1 not ready. Read-only — it enables nothing. Driven at boot by the opt-in `vigil-ready.service`. |
+| `vigil alerts` | Heartbeat-staleness alarms for every HA / scheduled unit (backup, off-host push, drill, HA sync, integrity, posture, reprove). `--test-delivery` pushes one labelled test alert through the configured destinations to prove alarms reach you (exit 0 all delivered, 1 any failed, 2 none configured). |
 | `vigil unit-heartbeat` | Record that a scheduled unit ran (a systemd `ExecStopPost` hook the alerts monitor reads). |
 | `vigil telemetry` | Live assurance/metrics collector over the signed spine (G2): fact/lead/refusal/tool snapshots. |
 | `vigil panic` | EMERGENCY HARD-STOP: trip every engagement's kill-switch, then mask + stop the command unit and every cadence sidecar. |
@@ -178,6 +180,8 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil knowledge` | Operator-gated sync of the living `knowledge/` folder to git (regenerate + secret-scan + commit). |
 | `vigil learn-drain` | Drain the sovereign→offense learn-grant spool (the K2b→K3 deep-learn bridge; fail-closed). |
 | `vigil webhook-drain` | Drain the inbound GitHub-webhook spool into the SecurityJob queue (enqueue-only; the authorized runner executes). Fail-closed, idempotent by delivery_id. |
+| `vigil ci-scan` | The W4 GitHub-Action runner: normalize a CI run into one `SecurityJob(source="ci")`, ENQUEUE it, and drain it through the ONE authorized runner (a repo with no verified `EngagementAuthority` is REFUSED, not scanned). Diff-scoped codescan over the local checkout tree (no clone, no api.github.com); each finding emits a FACT/LEAD-typed GitHub annotation (`::error` for an oracle-confirmed FACT, `::warning` for a LEAD) + a job summary. Exit 1 on a FAILED job or (with `--fail-on <sev>`) a FACT at/above that severity. |
+| `vigil launch-drain` | Poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per currently-valid published owner-signed lease (K4-5c; the sibling of `webhook-drain`). Each lease passes the keyless `verify_customer_launch_lease(consume=False)` pre-check (owner-pin + bind + K4-1 settlement re-check, floor NOT burned); the job is enqueued, NEVER executed here — execution is solely the authorized runner's (`JobRunner.run_one`). Idempotent by the queue's content-addressed delivery_id; imports no framework at module scope (the two-env boundary holds). |
 | `vigil reconcile` | Safety-net poller: per connected repo, list PRs changed since a checkpoint and enqueue a SecurityJob for each (enqueue-only; durable-before-cursor; deliberately slow). |
 | `vigil pr-bot` | Drain the SecurityJob queue through the authorized runner: diff-scan each queued PR and (with `--comment`) post gated review comments for oracle-verified findings. The authorization gate is the sole executor; requires a GitHub token. |
 | `vigil sandbox` | Run an arbitrary command inside a network-isolated, workspace-confined bwrap sandbox (A3 → queued for approval). |

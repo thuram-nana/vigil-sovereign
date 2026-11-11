@@ -79,6 +79,31 @@
         {"file": "framework/v2/common/paths.py", "symbol": "authority_root_dir"},
         {"file": "framework/v2/common/paths.py", "symbol": "killswitch_path"}
       ]
+    },
+    {
+      "id": "l2-response-cache",
+      "data": "L2 deterministic LLM response cache (EC-1b)",
+      "location": "`framework/v2/.cache/l2/store.sqlite` (per-process tenant shard: `_tenant_shard(v2_root()/'.cache')`)",
+      "credentials": "No raw target capture — stores the LLM's advisory raw response to a gateway-redacted (best-effort masked) prompt; the prompt text itself is **not** stored, only a `sha256` of it in the lookup key, so prompts are not recoverable from the DB",
+      "at_rest": "plaintext raw response, owner-only 0600 (`_connect` secures the DB under the tenant shard); **disabled** entirely for a ZDR / `--ephemeral` session, so a zero-retention run writes nothing",
+      "mutable": "filesystem (not append-only); idempotent per key (`INSERT OR REPLACE`)",
+      "erasure": "out of scope for evidence crypto-shred — a pure accelerant that recomputes identically; TTL-bounded (`CRUCIBLE_L2_TTL_S`, default 7d) with expired rows evicted on each write, and the kill-switch (`CRUCIBLE_CACHE_DISABLE` / `CRUCIBLE_L2_DISABLED`) disables both lookup and store",
+      "sinks": [".cache"],
+      "symbols": [
+        {"file": "framework/v2/common/paths.py", "symbol": "cache_dir"},
+        {"file": "framework/v2/common/paths.py", "symbol": "cache_l2_db"},
+        {"file": "framework/v2/kernel/response_cache.py", "symbol": "store"},
+        {"file": "framework/v2/kernel/response_cache.py", "symbol": "lookup"},
+        {"file": "framework/v2/kernel/response_cache.py", "symbol": "_connect"}
+      ],
+      "env_overrides": [
+        {"file": "framework/v2/kernel/response_cache.py", "name": "CRUCIBLE_CACHE_DISABLE"},
+        {"file": "framework/v2/kernel/response_cache.py", "name": "CRUCIBLE_L2_DISABLED"},
+        {"file": "framework/v2/kernel/response_cache.py", "name": "CRUCIBLE_L2_TTL_S"}
+      ],
+      "literals": [
+        {"file": "framework/v2/common/paths.py", "text": ".cache"}
+      ]
     }
   ],
   "out_of_scope": [

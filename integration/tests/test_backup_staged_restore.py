@@ -57,7 +57,7 @@ def _make_crucible_backup(tmp_path):
     """A backup carrying BOTH crucible units: the proof-db (``.blackboard/store.sqlite``) and a runs file
     (``.console/runs/r1/report.json``). Returns (dest, base)."""
     base = tmp_path / "src-base"
-    croot = tmp_path / "src-crucible"
+    croot = tmp_path / "src-crucible" / "framework" / "v2"        # the engine's REAL v2 root (#70c)
     _seed_offense_home(base)
     (croot / ".blackboard").mkdir(parents=True)
     (croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00NEW-DB")
@@ -73,7 +73,7 @@ def test_restore_refused_when_a_captured_crucible_unit_exists_without_force(tmp_
     unit already exists at the destination — not merely because the crucible root is non-empty."""
     dest, _base = _make_crucible_backup(tmp_path)
     new_base = tmp_path / "nb"
-    new_croot = tmp_path / "nc"
+    new_croot = tmp_path / "nc" / "framework" / "v2"
     (new_croot / ".blackboard").mkdir(parents=True)
     (new_croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00OLD-DB")   # a captured unit
     with pytest.raises(OffenseBackupError, match="live CRUCIBLE proof state"):
@@ -89,7 +89,7 @@ def test_force_crucible_restore_preserves_uncaptured_code(tmp_path):
     unit itself is replaced wholesale; that is the DR-snapshot semantic and is asserted separately below.)"""
     dest, _base = _make_crucible_backup(tmp_path)
     new_base = tmp_path / "nb"
-    new_croot = tmp_path / "nc"
+    new_croot = tmp_path / "nc" / "framework" / "v2"
     # the destination crucible root holds LIVE, never-backed-up data (framework code + config) alongside OLD
     # captured units that SHOULD be replaced.
     (new_croot / ".blackboard").mkdir(parents=True)

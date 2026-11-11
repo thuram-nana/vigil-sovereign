@@ -1,0 +1,80 @@
+# SIGIL public site (pubui) — systemd USER service
+# =============================================================================
+# Runs `sigil serve-public`, the KEYLESS, COOKIELESS public marketing/tools/trust/
+# blog/CVE site. It holds no key, sets no cookie, and serves static assets + a
+# read-only CVE JSON (GET/HEAD only). Bind + port come from the env file so the
+# unit is generic; both default to loopback:8735 when unset.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │  THE PUBLIC SITE NEVER BINDS A PUBLIC INTERFACE.                           │
+# │                                                                            │
+# │  VIGIL_PUBLIC_BIND must be loopback (default 127.0.0.1) or a PRIVATE       │
+# │  WireGuard/Tailscale IP. `sigil serve-public` fails closed (exit 2) on a   │
+# │  public / 0.0.0.0 / unspecified bind. To reach the site by a real domain,  │
+# │  run a reverse proxy (deploy/reverse-proxy/vigil-public.*) that terminates │
+# │  TLS and forwards to this private bind. There is no cookie or session here │
+# │  so there is no host-allowlist to configure — the site is a separate,      │
+# │  key-free, cookie-free origin from the cockpit and the customer app.       │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# The /cve browser reads the local catalog at $SIGIL_HOME/cve/catalog.db. Populate
+# it first (the one standing outbound path, never at page-request time):
+#   sigil cve ingest            # CISA-KEV exploited set
+#   sigil cve ingest --epss     # + FIRST EPSS exploitation probability (optional)
+# Until ingested, /cve shows an empty catalog ("populated": false) — the rest of
+# the site serves regardless.
+#
+# INSTALL (user-level, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/sigil-public.service ~/.config/systemd/user/
+#   # optional overrides (VIGIL_PUBLIC_BIND / VIGIL_PUBLIC_PORT / SIGIL_HOME):
+#   #   printf 'VIGIL_PUBLIC_BIND=127.0.0.1\nVIGIL_PUBLIC_PORT=8735\n' > ~/.sigil/public.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-public
+#   # keep it running after logout (optional): loginctl enable-linger "$USER"
+#
+# Logs → the journal:  journalctl --user -u sigil-public -f
+
+[Unit]
+Description=SIGIL public site (pubui)
+Documentation=file:%h/sigil/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Bind + port + SIGIL_HOME come from the env file (the leading '-' means a missing file does not fail the
+# unit; the site defaults to loopback:8735). No hop key, no allowlist, no cookie — the public plane is keyless.
+EnvironmentFile=-%h/.sigil/public.env
+Environment=SIGIL_LOG_LEVEL=INFO
+Environment=VIGIL_PUBLIC_BIND=127.0.0.1
+Environment=VIGIL_PUBLIC_PORT=8735
+
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil serve-public --host ${VIGIL_PUBLIC_BIND} --port ${VIGIL_PUBLIC_PORT}
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil serve-public --host ${VIGIL_PUBLIC_BIND} --port ${VIGIL_PUBLIC_PORT}
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (least privilege; the public site only reads) ----------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE — deliberately NOT set:
+#   PrivateNetwork=yes → hides a WireGuard interface used for a private bind.
+#   ProtectHome=yes    → hides ~/.sigil/cve/catalog.db (the read-only CVE catalog).
+
+[Install]
+WantedBy=default.target

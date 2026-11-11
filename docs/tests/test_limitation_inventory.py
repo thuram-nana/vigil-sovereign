@@ -61,7 +61,7 @@ RVC_IDS = {
 }
 
 # Directories whose sources are NOT scanned for markers (vendored trees; git internals).
-_SCAN_EXCLUDE = ("vendor", "node_modules", ".git", ".venv-offense", ".venv-sovereign")
+_SCAN_EXCLUDE = ("vendor", "node_modules", ".git", ".venv", ".venv-offense", ".venv-sovereign")
 
 
 # --------------------------------------------------------------------------------------------------

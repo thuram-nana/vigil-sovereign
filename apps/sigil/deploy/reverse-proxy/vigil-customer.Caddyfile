@@ -1,0 +1,54 @@
+# VIGIL CUSTOMER APP — Caddy reverse proxy for the keyless tenant edge (custui), automatic HTTPS
+# ========================================================================================================
+# `sigil serve-customer` serves the self-serve CUSTOMER app (`custui`) over loopback:
+#
+#     browser ─▶ Caddy (customer TLS edge) ─▶ custui  127.0.0.1:8734
+#                  signup/login · billing · invoices · authorized-asset ownership proof · assessment findings
+#
+# The custui listener is NOT public: it binds loopback (or a private/tunnel IP) and FAILS CLOSED on a public
+# bind. This Caddy site is the ONLY thing on a public port — it terminates TLS and forwards over loopback.
+#
+# SEPARATE ORIGIN from the operator cockpit (vigil.Caddyfile → `vigil up` :8770) and the public marketing
+# site (vigil-public.Caddyfile → pubui :8735) — the tenant app on its own hostname is the strongest cookie +
+# CSRF isolation:
+#
+#     vigilguard.net         → vigil-public.Caddyfile → pubui   127.0.0.1:8735  (public marketing)
+#     console.vigilguard.net → vigil.Caddyfile         → vigil up 127.0.0.1:8770 (operator cockpit; private)
+#     app.vigilguard.net     → THIS file               → custui  127.0.0.1:8734  (tenant app)
+#
+# UNLIKE the public site, custui SETS A SESSION COOKIE and enforces an anti-CSRF / anti-rebind gate (exact
+# Host + Origin/Referer allowlist) on every POST. So custui's allowlist MUST contain this public host +
+# origin, or the app fails closed. Start the edge with (or set in the env file):
+#     sigil serve-customer --host 127.0.0.1 --port 8734 \
+#       --allow-host app.vigilguard.net --allow-origin https://app.vigilguard.net
+# (equivalently $VIGIL_CUSTOMER_ALLOWED_HOSTS / $VIGIL_CUSTOMER_ALLOWED_ORIGINS — see
+#  deploy/systemd/sigil-customer.service + deploy/customer.env.example). The edge also needs
+# $VIGIL_PROVISION_HOP_KEY to reach the sovereign provisioner over loopback (empty ⇒ signup/login fail
+# CLOSED). The edge holds NO owner key.
+#
+# In PRODUCTION the SPA is served at this origin's ROOT ("/"), so its relative asset/API refs resolve
+# directly — the /customer same-origin mount (+ its trailing-slash 301) is a DEV-only convenience on the
+# `vigil up` proxy, not used here. custui sets its own strict CSP/nosniff/referrer/framing headers on every
+# response; this edge only adds HSTS. Hash-routed + fetch/JSON only (no SSE), so no flush_interval override.
+
+app.vigilguard.net {
+	encode zstd gzip
+
+	# Forward Host + Origin/Referer UNCHANGED (never rewrite) so the edge's anti-rebind + CSRF gates match,
+	# and the real client IP for its best-effort per-IP limiter. Caddy's reverse_proxy preserves Host and the
+	# request headers by default; these are explicit for clarity + the X-Forwarded-For hop.
+	reverse_proxy 127.0.0.1:8734 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Belt-and-braces: only serve the one host this tenant origin is for.
+	@badhost not host app.vigilguard.net
+	respond @badhost 421
+
+	header {
+		# custui sets its own CSP/nosniff/referrer/framing headers; add HSTS at the edge and drop the banner.
+		# No includeSubDomains: this tenant origin owns only itself; sibling origins manage their own HSTS.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

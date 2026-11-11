@@ -921,6 +921,90 @@ def cmd_serve(a) -> None:
           allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
+def cmd_serve_public(a) -> None:
+    """Start the keyless/cookieless PUBLIC site (`pubui`, :8735) — marketing, tools, trust, blog, and the
+    read-only CVE browser. Serves only static files + a read-only /api/cve over the local catalog; holds no
+    key, sets no cookie, makes no outbound request at request time. Binds a bind_ok address (loopback default;
+    a PRIVATE address behind a reverse proxy for a public domain) — FAIL-CLOSED (exit 2) on a public bind."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+    host = a.host or _os.environ.get("VIGIL_PUBLIC_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the public site binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the marketing vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    from .ui.pubui import serve_public
+    serve_public(host=host, port=a.port)
+
+
+def cmd_serve_customer(a) -> None:
+    """Start the keyless CUSTOMER edge (`custui`, :8734) — the self-serve tenant app's self-authenticating
+    front door. Holds NO owner key: it owns the `vigil_customer_session` cookie + its own session ledger and
+    reaches the sovereign provisioner only over loopback + the `VIGIL_PROVISION_HOP_KEY` hop (empty ⇒ every
+    provisioning route fails CLOSED). Binds a bind_ok address (loopback default; a PRIVATE address behind a
+    reverse proxy for a customer domain) — FAIL-CLOSED (exit 2) on a public bind. Because it sets a session
+    cookie, serving a real domain needs that Host/Origin on its anti-rebind allowlist (`--allow-host`/
+    `--allow-origin`, also `$VIGIL_CUSTOMER_ALLOWED_HOSTS`/`$VIGIL_CUSTOMER_ALLOWED_ORIGINS`). Mirrors
+    `cmd_serve` / `cmd_serve_public`."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+
+    def _multi(flag_vals, env_name):
+        # union of a repeatable flag and a comma-separated env var; blanks dropped (same as cmd_serve)
+        out: list[str] = list(flag_vals or [])
+        out += [s.strip() for s in _os.environ.get(env_name, "").split(",") if s.strip()]
+        return tuple(dict.fromkeys(out))   # de-dup, order-preserving
+
+    host = a.host or _os.environ.get("VIGIL_CUSTOMER_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the customer edge binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the customer vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    allowed_hosts = _multi(a.allow_host, "VIGIL_CUSTOMER_ALLOWED_HOSTS")
+    allowed_origins = _multi(a.allow_origin, "VIGIL_CUSTOMER_ALLOWED_ORIGINS")
+    from .ui.custui import serve_customer
+    serve_customer(host=host, port=a.port, extra_hosts=allowed_hosts, extra_origins=allowed_origins)
+
+
+def cmd_cve(a) -> None:
+    """Build/inspect the PUBLIC CVE catalog that the public site's /cve browser reads.
+
+    `ingest` pulls the public advisory feeds into the catalog (CISA-KEV bulk by default — the fast, complete
+    exploited-in-the-wild set; add --epss for probability overlay, and --nvd-enrich N to enrich the N newest
+    KEV entries with CVSS from NVD, paced for NVD's unauthenticated rate limit). This is the one standing
+    outbound path the public catalog needs; it never runs at page-request time."""
+    from . import config
+    from .cve.catalog import CveCatalogStore
+    store = CveCatalogStore(str(config.CVE_CATALOG_PATH))
+    if a.action == "stats":
+        import json as _json
+        print(_json.dumps(store.stats(), indent=2))
+        return
+    # action == "ingest"
+    from .cve import ingest as _ing
+    print(f"  ingesting public CVE feeds → {config.CVE_CATALOG_PATH}")
+    n = _ing.ingest_kev(store)
+    print(f"  CISA-KEV: {n} records merged (total {store.count()})")
+    if getattr(a, "epss", False):
+        try:
+            e = _ing.ingest_epss_bulk(store)
+            print(f"  EPSS: {e} records overlaid")
+        except Exception as exc:  # noqa: BLE001 — a feed hiccup is not fatal to the rest
+            print(f"  EPSS: skipped ({exc})", file=sys.stderr)
+    if getattr(a, "nvd_enrich", 0):
+        ids = [r["id"] for r in store.query(per_page=int(a.nvd_enrich), order="published_desc")["items"]]
+        try:
+            c = _ing.enrich_nvd(store, ids, limit=int(a.nvd_enrich))
+            print(f"  NVD enrich: {c} of {len(ids)} enriched with CVSS")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  NVD enrich: skipped ({exc})", file=sys.stderr)
+    print(f"  done — catalog holds {store.count()} CVEs ({store.stats().get('kev', 0)} known-exploited)")
+
+
 def cmd_bridge_serve(a) -> None:
     """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
     (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
@@ -949,7 +1033,44 @@ def cmd_verify(a) -> None:
     # to the pre-hardening behavior), so bootstrap/ingest flows are unaffected.
     head_present = config.HEAD_PATH.exists()
     print((("head  OK: " if hok else ("head  FAIL: " if head_present else "head  --: ")) + hmsg))
-    sys.exit(0 if (ok and (hok or not head_present)) else 2)
+    folds_ok = _verify_fold_caches(getattr(a, "folds", False))
+    sys.exit(0 if (ok and (hok or not head_present) and folds_ok) else 2)
+
+
+def _verify_fold_caches(rebuild: bool) -> bool:
+    """Front C S0d — the fold-cache line(s) of `sigil verify`. Always: the cockpit's last background audit
+    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify. With `--folds` (and the
+    cache on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns
+    False iff a mismatch was found."""
+    from . import config
+    ok = True
+    try:
+        rep = json.loads(config.FOLD_AUDIT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        rep = None
+    except (OSError, ValueError) as exc:
+        print(f"folds --: unreadable audit report {config.FOLD_AUDIT_PATH}: {exc}")
+        rep = None
+    if isinstance(rep, dict):
+        bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        ok = not bad
+        print(("folds OK: " if ok else "folds FAIL: ") + f"cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) "
+              + (f"— {len(bad)} MISMATCH: " + ", ".join(f"{f.get('fold')} at seq {f.get('seq')} ({f.get('difference')})"
+                                                      for f in bad) if bad else "— every cached fold equals a rebuild"))
+    if rebuild:
+        if not config.fold_cache_enabled():
+            print("folds --: --folds needs VIGIL_FOLD_CACHE_ENABLED (the fold cache is off)")
+            return ok
+        from .governor import fold_warm
+        store = SpineStore()
+        fold_warm.warm_all(store)
+        now = fold_warm.audit(store)
+        bad = [f for f in now["folds"] if f.get("status") == "MISMATCH"]
+        n = sum(1 for f in now["folds"] if f.get("status") == "match")
+        print(("folds OK: " if not bad else "folds FAIL: ") + f"rebuilt {n} cached folds in this process"
+              + (" — MISMATCH: " + ", ".join(f"{f['fold']} ({f.get('difference')})" for f in bad) if bad else ""))
+        ok = ok and not bad
+    return ok
 
 
 def cmd_status(a) -> None:
@@ -1002,6 +1123,33 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
+def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
+    """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
+    Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
+    NOT expand a ``%`` specifier inside an ``EnvironmentFile`` *value* (only inside a unit-file directive such as
+    ``Environment=``), and a ``${VAR}`` substitution in ``ExecStart`` is not re-scanned for specifiers — so a
+    shipped ``%h/...`` default in an env file would otherwise reach the drain as the LITERAL string, silently
+    resolve to the wrong directory under ``WorkingDirectory``, and make the drain read/settle NOTHING while
+    exiting 0 (a silent no-op the staleness dead-man reads as HEALTHY, never alarming — and the money settle path
+    can even archive a real completion unsettled → permanent loss). Fail CLOSED: exit non-zero so systemd records
+    the oneshot FAILED and the dead-man raises a failure alarm. An empty value is allowed only when ``required``
+    is False (the caller then falls back to its own default)."""
+    from pathlib import Path
+    v = (value or "").strip()
+    if not v:
+        if required:
+            print(f"{flag} is required and must be an absolute, already-expanded path (got {value!r}). "
+                  f"Refusing to drain.", file=sys.stderr)
+            sys.exit(2)
+        return
+    if "%" in v or not Path(v).is_absolute():
+        print(f"{flag} must be an ABSOLUTE, already-expanded path (got {value!r}). A systemd %h/%S specifier is "
+              f"NOT expanded inside an EnvironmentFile value — set an absolute path, or leave it unset so the "
+              f"unit's Environment= default (which DOES expand %h) stands. Refusing to drain so the dead-man "
+              f"alarms rather than silently processing the wrong directory.", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_inbound(a) -> None:
     """Drain / watch the offense→sovereign inert-finding spool onto the owner-signed spine (P5b).
 
@@ -1013,6 +1161,11 @@ def cmd_inbound(a) -> None:
 
     from .governor.identity import owner_pubkey as _owner_pubkey
     from .inbound import SpoolWatcher
+
+    # Validate the spool FIRST (before any work): fail CLOSED on a spool that still carries an un-expanded %h
+    # (the "EnvironmentFile %h does not expand" misconfig). Otherwise the drain reads the WRONG empty directory
+    # and reports success while real findings sit uncrossed — a silent non-delivery the dead-man cannot see.
+    _require_expanded_path(a.spool, "--spool", required=True)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1047,6 +1200,401 @@ def cmd_inbound(a) -> None:
     else:
         r = watcher.drain()
         print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} inbound finding/detection envelope(s) quarantined in {watcher.rejected} — an "
+                  f"oracle-confirmed result may be lost to its tenant. Investigate + clear the quarantine; this "
+                  f"unit stays FAILED (the dead-man alarms) until rejected/ is empty.", file=sys.stderr)
+            sys.exit(1)
+
+
+def cmd_settle_drain(a) -> None:
+    """Drain / watch the engagement-completion SETTLE spool (K4-5b): a keyless governance-signed completion →
+    ``settle_launch`` (owner-keyed; the keyless worker cannot mint a refund). Owner-tied + fail-closed: each
+    completion verifies under an owner-signed OFFENSE_GOVERNANCE delegation (RE-VERIFIED against the live clock
+    each drain, so a lapsed delegation stops settling), binds the published lease's nonce + tenant (the lease's
+    own (org,host) must hash to the delegated cust_ slug), and settles credits to consumption (completed ⇒ the
+    full reserved units; canceled/failed ⇒ full refund). A forged / out-of-scope / nonce- or tenant-mismatched
+    completion is quarantined — nothing settled. There is NO network ingest endpoint — the seam is a directory
+    drained by this local command. The settle WRITE shares --base-dir with the lease READ."""
+    from pathlib import Path
+
+    from .governor.identity import owner_pubkey as _owner_pubkey
+    from .inbound.completion_spool import CompletionSpoolWatcher
+
+    # Validate the MONEY paths FIRST (before any work). Fail CLOSED on an un-expanded %h: a literal-%h --spool
+    # silently drains the wrong empty dir, and a literal-%h --base-dir makes read_credit_lease find no lease →
+    # every completion becomes a "safe no-op" that is still ARCHIVED to the dedup ledger (completion_spool.drain),
+    # so a completed run is never charged / a cancel never refunded and a later corrected drain dedup-skips it →
+    # PERMANENT loss. Refuse before the watcher is built (nothing is claimed/archived) so systemd records FAILED
+    # and the dead-man alarms.
+    _require_expanded_path(a.spool, "--spool", required=True)
+    _require_expanded_path(a.base_dir, "--base-dir", required=False)
+
+    owner = _owner_pubkey()
+    if not owner:
+        print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_core.delegation import DelegationCert
+        deleg = DelegationCert.model_validate_json(Path(a.delegation).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"could not load the offense-governance delegation: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
+                                     delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
+    if getattr(a, "settle_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → settle_launch (scope={a.scope}); Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} engagement-completion settle(s) quarantined in {watcher.rejected} — a completed "
+                  f"customer run may be UNSETTLED (never charged, or never refunded). Investigate + clear the "
+                  f"quarantine; this unit stays FAILED (the dead-man alarms) until rejected/ is empty.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+
+def cmd_ops_sweep(a) -> None:
+    """Read-only-by-default operator sweeps. ``reservations``: abandoned (unsettled past not_after + TTL) credit
+    reservations -> report; ``--apply`` full-refunds them via the existing owner-keyed ``settle_launch`` path
+    (exactly-once per (slug, nonce)) and additionally requires VIGIL_OPS_SWEEP_APPLY_ENABLED=1 (default OFF).
+    ``reconcile`` (PP-4): per enterprise-postpaid org, report invoiced-vs-paid against real (net-settled)
+    consumption, flagging uninvoiced-consumption / outstanding / overdue -> report only (retire abandoned
+    reserves via ``reservations --apply``). ``tx-refs``: dangling Flutterwave checkouts (no webhook drained) -> report only."""
+    import os
+    import time as _time
+
+    from . import ops_sweeps
+
+    now = float(a.now) if a.now is not None else _time.time()
+    if a.sweep_cmd == "reservations":
+        if a.apply and os.environ.get("VIGIL_OPS_SWEEP_APPLY_ENABLED") != "1":
+            print("--apply refused: set VIGIL_OPS_SWEEP_APPLY_ENABLED=1 to allow refunds (default OFF)",
+                  file=sys.stderr)
+            sys.exit(2)
+        if a.apply and not a.completion_spool:
+            print("--apply requires --completion-spool (a pending completion must be charged, not refunded)",
+                  file=sys.stderr)
+            sys.exit(2)
+        from .ui.launch_gate import LaunchGate
+        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or None))
+        if gate.owner_key is None:
+            print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+            sys.exit(2)
+        out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
+                                                       completion_spool=(a.completion_spool or None))
+    elif a.sweep_cmd == "reconcile":
+        # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
+        # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed
+        # `reservations --apply` path (settle_launch auto-detects a postpaid lease), so reconcile
+        # mints/settles nothing and takes no --apply of its own.
+        if a.apply:
+            print("reconcile is report-only; to retire abandoned reserves use `ops-sweep reservations --apply`",
+                  file=sys.stderr)
+            sys.exit(2)
+        from .governor.identity import owner_keypair
+        from .governor.invoices import InvoiceRegistry
+        from .governor.postpaid import PostpaidArrearsLedger, PostpaidRegistry
+        store = SpineStore()
+        owner = owner_keypair()
+        if owner is None:
+            # Fail-closed like the `reservations` branch: without the owner key the signed folds verify
+            # nothing and the sweep would print an empty "all-clear" over a spine it cannot read — a
+            # false reconciled signal for an audit tool. Refuse instead.
+            print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+            sys.exit(2)
+        reg = PostpaidRegistry(store, owner_key=owner)
+        arr = PostpaidArrearsLedger(store, owner_key=owner)
+        inv = InvoiceRegistry(store, owner_key=owner)
+        out = ops_sweeps.sweep_postpaid_reconciliation(reg, arr, inv, now=now)
+    else:
+        if a.apply:
+            print("tx-refs is report-only; --apply is not supported", file=sys.stderr)
+            sys.exit(2)
+        if not a.checkouts or not a.spool:
+            print("tx-refs requires --checkouts and --spool", file=sys.stderr)
+            sys.exit(2)
+        out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(a.checkouts), spool_dir=a.spool,
+                                                now=now, ttl_s=a.ttl)
+    print(json.dumps(out, indent=2, sort_keys=True))
+
+
+def _billing_transaction_verifier():
+    """The server-side Flutterwave ``/v3/transactions/{id}/verify`` caller the billing drain MUST use (Slice A1).
+    Wired DEFAULT-OFF on the provider secret key: with ``VIGIL_FLW_SECRET_KEY`` set this returns the real stdlib
+    verifier (host-allowlisted egress, secret read AT CALL TIME); unset it returns None and ``billing-drain``
+    refuses to run (fail-closed — a verif-hash alone never grants value). The single seam the drain plugs into."""
+    from .governor import flutterwave_egress as fe
+    if not fe.flutterwave_secret_configured():
+        return None
+    return fe.make_transaction_verifier()
+
+
+def _billing_checkout_creator():
+    """The outbound Flutterwave ``/v3/payments`` hosted-checkout poster injected at
+    ``FlutterwaveBillingProvider(checkout_creator=…)`` (Slice A1). Wired DEFAULT-OFF on the provider secret key:
+    with ``VIGIL_FLW_SECRET_KEY`` set this returns the real stdlib poster (host-allowlisted egress, secret read
+    AT CALL TIME, the OWNER-CATALOG-priced body posted verbatim); unset it returns None so ``create_checkout``
+    keeps raising ``UnsupportedCapability`` (never a simulated checkout). The single seam the checkout path
+    plugs into."""
+    from .governor import flutterwave_egress as fe
+    if not fe.flutterwave_secret_configured():
+        return None
+    return fe.make_checkout_creator()
+
+
+def cmd_billing_drain(a) -> None:
+    """Drain / watch the inbound BILLING-webhook spool (SaaS Slice C) through ``BillingSigner.ingest``:
+    ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
+    CATALOG decides the entitlement -> one owner-signed mint. Default-OFF (``VIGIL_BILLING_DRAIN_ENABLED=1``)
+    and fail-closed: the verif-hash secret comes ONLY from ``VIGIL_BILLING_WEBHOOK_SECRET`` (never argv, never
+    printed) and the drain refuses to run without a server-side transaction verifier."""
+    import os
+
+    if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
+        print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
+        sys.exit(2)
+    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
+    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
+    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    _require_expanded_path(a.spool, "--spool", required=True)
+    secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
+    if not secret:
+        print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
+        sys.exit(2)
+    verifier = _billing_transaction_verifier()
+    if not callable(verifier):
+        print("billing-drain: no server-side transaction verifier is configured — refusing (fail-closed; a "
+              "verif-hash alone never grants value)", file=sys.stderr)
+        sys.exit(2)
+
+    from .governor import catalog
+    from .governor.billing import BillingSigner, FlutterwaveBillingProvider
+    from .governor.invoices import InvoiceRegistry
+    from .governor.metering import PlanCreditLedger
+    from .governor.subscription import SubscriptionRegistry
+    from .governor.wallet import WalletRegistry
+    from .inbound.billing_spool import BillingSpoolWatcher
+
+    store = SpineStore()
+    # The checkout_creator is the OUTBOUND hosted-checkout poster (Slice A1); it is INERT on this inbound drain
+    # path (the drain never calls create_checkout) but is wired at the one construction site so the capability is
+    # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
+    from .config import billing_plan_alarm_enabled
+    alarm = billing_plan_alarm_enabled()         # CHK-1b: an unaccountable paid plan charge ALARMS (quarantine)
+    signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier,
+                                                      checkout_creator=_billing_checkout_creator(),
+                                                      alarm_unaccounted_plans=alarm),
+                           alarm_unaccounted_plans=alarm,
+                           wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
+                           plan=PlanCreditLedger(store), catalog=catalog.entitlements(),
+                           expected=catalog.expected_amounts(), invoices=InvoiceRegistry(store))
+    watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
+    del secret
+    if getattr(a, "billing_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
+              f"{r['deduped']} deduped")
+        parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
+        if parked:
+            print(f"  awaiting retry: {parked} billing webhook(s) parked in {watcher.retry} after a transient "
+                  f"processor failure ({r['deferred']} new this pass) — nothing minted for them yet; each is "
+                  f"re-verified on a bounded schedule and quarantined + alarmed if the failure persists")
+        from .inbound import quarantined_count
+        q = quarantined_count(watcher.rejected)
+        if q:
+            print(f"  ALARM: {q} billing webhook(s) quarantined in {watcher.rejected} — a paid charge may be "
+                  f"UN-MINTED (the customer paid, no credit granted). Investigate + clear the quarantine; this "
+                  f"unit stays FAILED (the dead-man alarms) until rejected/ is empty.", file=sys.stderr)
+            sys.exit(1)
+
+
+def cmd_postpaid(a) -> None:
+    """Owner control of the enterprise POSTPAID credit line (PP-1): set | disable | status.
+
+    `set <org> <credit_limit> <net_terms_days>` opens (or raises) a tenant's owner-signed credit line
+    (enabled); `disable <org>` closes it (the safe direction — honored on sight); `status [<org>]` reports the
+    arrears roster (limit, terms, and the currently-drawn balance). An OWNER action — paying never grants a
+    line, and the launch gate admits a postpaid tenant's run against the line (accruing arrears) instead of
+    requiring prepaid credits."""
+    import time
+    from .governor.identity import owner_keypair
+    from .governor.postpaid import (PostpaidArrearsLedger, PostpaidRegistry, invoice_postpaid_arrears,
+                                    paid_postpaid_total, pay_postpaid_invoice, postpaid_invoice_period_end,
+                                    postpaid_outstanding)
+    store = SpineStore()
+    owner = owner_keypair()
+    reg = PostpaidRegistry(store, owner_key=owner)
+    arr = PostpaidArrearsLedger(store, owner_key=owner)
+    cmd = a.postpaid_cmd
+    if cmd == "set":
+        if a.org is None or a.limit is None or a.net_terms is None:
+            print("postpaid set: <org> <credit_limit> <net_terms_days> are required", file=sys.stderr)
+            sys.exit(2)
+        try:
+            reg.set_account(a.org, int(a.limit), int(a.net_terms), issued_at=time.time())
+        except (ValueError, TypeError) as e:
+            print(f"postpaid set: refused ({type(e).__name__}: {e})", file=sys.stderr)
+            sys.exit(2)
+        acct = reg.account(a.org)
+        print(f"  postpaid ENABLED for {acct.org_id}: limit {acct.credit_limit} credits, "
+              f"net {acct.net_terms_days}d")
+    elif cmd == "disable":
+        if a.org is None:
+            print("postpaid disable: <org> is required", file=sys.stderr)
+            sys.exit(2)
+        reg.disable(a.org)
+        print(f"  postpaid DISABLED for {a.org} (the line is closed; a fresh `set` re-opens it)")
+    elif cmd == "invoice":
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
+        now = time.time() if a.now is None else float(a.now)
+        # HIGH (red-pen): default the period key to the STABLE UTC-month boundary, never raw wall-clock — so two
+        # billing runs in one month share the invoice_id and the owner-signed invoice fold dedups them to ONE
+        # (a wall-clock `pe` gave each run a distinct id -> a double-bill). An explicit --period-end still wins.
+        pe = postpaid_invoice_period_end(now) if a.period_end is None else float(a.period_end)
+        targets = [a.org] if a.org else [x.org_id for x in reg.accounts() if x.is_enabled()]
+        minted = [oid for oid in targets
+                  if invoice_postpaid_arrears(reg, arr, inv, oid, period_end=pe, issued_at=now) is not None]
+        suffix = f": {', '.join(minted)}" if minted else ""
+        print(f"  {len(minted)} postpaid arrears invoice(s) minted (of {len(targets)} account(s)){suffix}")
+    elif cmd == "pay":
+        # PP-2b (mock-first): record a receipt that settles ONE named postpaid invoice in full, reducing the
+        # tenant's OUTSTANDING balance. The amount comes from the owner-signed invoice itself (money doctrine),
+        # so the operator names WHICH invoice (the 2nd positional), never how much. The real payment-provider
+        # webhook path is a prod-gated follow-up.
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
+        inv_id = a.limit                              # the 2nd positional doubles as <invoice_id> for `pay`
+        if a.org is None or not inv_id:
+            print("postpaid pay: <org> <invoice_id> are required", file=sys.stderr)
+            sys.exit(2)
+        seq = pay_postpaid_invoice(inv, a.org, inv_id, issued_at=time.time())
+        if seq is None:
+            print(f"  nothing paid: no open postpaid invoice {inv_id!r} for {a.org} (unknown, non-postpaid, "
+                  f"or already paid)")
+        else:
+            print(f"  payment recorded for {a.org} invoice {inv_id} (seq {seq}); "
+                  f"outstanding now {postpaid_outstanding(inv, a.org)}")
+    else:  # status
+        from .governor.invoices import InvoiceRegistry
+        inv = InvoiceRegistry(store, owner_key=owner)
+        rows = [reg.account(a.org)] if a.org else reg.accounts()
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            print(f"  {a.org}: not postpaid" if a.org else "  no postpaid accounts")
+            return
+        for acct in rows:
+            state = "enabled" if acct.is_enabled() else "disabled"
+            print(f"  {acct.org_id}: {state}, limit {acct.credit_limit}, net {acct.net_terms_days}d, "
+                  f"drawn {arr.accrued(acct.org_id)}, outstanding {postpaid_outstanding(inv, acct.org_id)} "
+                  f"(paid {paid_postpaid_total(inv, acct.org_id)})")
+
+
+def _monitoring_flag_or_exit(verb: str) -> None:
+    from . import config
+    if not config.customer_monitoring_enabled():
+        print(f"{verb}: AEGIS-SaaS monitoring is OFF (set VIGIL_CUSTOMER_MONITORING_ENABLED=1)", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_monitoring_secret(a) -> None:
+    """Provision (or rotate) the per-(org, host) AEGIS-SaaS monitoring REPORT secret (AE-6), and optionally export
+    it (0600, atomic) to an operator-chosen file — e.g. the tenant gateway's --monitoring-secret-file mount.
+    Output is FIXED text only: neither the secret nor its on-disk location is ever printed, and errors name only
+    the exception type. Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED."""
+    from . import config
+    from .governor.monitoring_secrets import export_report_secret, provision_report_secret
+    _monitoring_flag_or_exit("monitoring-secret")
+    base = a.secrets_dir or config.monitoring_secrets_dir()
+    if not a.export_only:
+        try:
+            provision_report_secret(a.org, a.host, base, rotate=a.rotate)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: provisioning refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret provisioned for the requested tenant/host")
+    if a.export_to:
+        try:
+            export_report_secret(a.org, a.host, base, a.export_to, overwrite=a.overwrite)
+        except (OSError, ValueError) as e:
+            print(f"monitoring-secret: export refused ({type(e).__name__})", file=sys.stderr)
+            sys.exit(2)
+        print("  report secret exported (0600) to the requested destination")
+    elif a.export_only:
+        print("monitoring-secret: --export-only requires --export-to", file=sys.stderr)
+        sys.exit(2)
+
+
+def _reconcile_once(store) -> list:
+    """One monitoring-billing sweep: retire (revoke + unpublish) every grant whose org's monitoring plan no longer
+    pays for it at now (lapsed / canceled / past_due / tier / slots). Keyless — the safe direction only."""
+    import time as _time
+
+    from .governor.monitoring_subscription import reconcile_monitoring
+    retired = reconcile_monitoring(store, now=_time.time())
+    for oid, host in retired:
+        print(f"  retired monitoring grant {host} (org {oid}): monitoring plan no longer covers it")
+    return retired
+
+
+def cmd_monitoring_reconcile(a) -> None:
+    """Sweep: apply the monitoring plan to every org's grants (catches a period lapse with no webhook).
+    Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key."""
+    _monitoring_flag_or_exit("monitoring-reconcile")
+    r = _reconcile_once(SpineStore())
+    print(f"  reconciled: {len(r)} grant(s) retired")
+
+
+def cmd_monitoring_drain(a) -> None:
+    """Drain / watch the AEGIS-SaaS monitoring-report spool (AE-4b/AE-6), mirroring settle-drain: each sealed
+    report must verify under its (org, host) report secret, be fresh, and re-bind to an ACTIVE monitoring
+    authority, else it is quarantined. No network ingest endpoint. Default-OFF behind
+    VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key (the registry is read verify-only)."""
+    import time as _time
+
+    from . import config
+    from .governor.monitoring_authority import MonitoringAuthorityRegistry
+    from .governor.monitoring_secrets import resolver
+    from .inbound.monitoring_spool import MonitoringSpoolWatcher
+    _monitoring_flag_or_exit("monitoring-drain")
+    store = SpineStore()
+    watcher = MonitoringSpoolWatcher(store, spool_dir=a.spool,
+                                     secret_for=resolver(a.secrets_dir or config.monitoring_secrets_dir()),
+                                     authority=MonitoringAuthorityRegistry(store, owner_key=None))
+
+    def _once() -> None:
+        r = watcher.drain()
+        print(f"  drained: {r['recorded']} recorded, {r['rejected']} rejected, {r['deduped']} deduped")
+
+    if getattr(a, "monitoring_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming -> monitoring events; Ctrl-C to stop")
+        try:
+            while True:
+                _reconcile_once(store)               # billing standing bounds monitoring continuously
+                _once()
+                _time.sleep(a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        _once()
 
 
 def cmd_knowledge(a) -> None:
@@ -1597,20 +2145,28 @@ def cmd_vault(a) -> None:
 
     from vigil_core.kek import KekError
 
+    from . import config
     from .platform.vault import owner_vault
     v = owner_vault()
+    backend = config.kek_backend()
     if getattr(a, "vault_cmd", "status") == "provision":
         if v.enabled():
-            print("vault already provisioned (a TPM-sealed KEK is present) — nothing to do.")
+            print(f"vault already provisioned ({v.status()}) — nothing to do.")
             return
         try:
             v.provision()
         except KekError as e:
-            print(f"!! could not provision the TPM-sealed KEK: {e}")
-            print("   one-time setup on this machine:")
-            print("     sudo apt install tpm2-tools && sudo usermod -aG tss $USER   (then log out/in)")
+            print(f"!! could not provision the KEK (backend={backend}): {e}")
+            if backend == "kms":
+                print("   AWS-KMS backend one-time setup:")
+                print("     - export VIGIL_KMS_KEY_ID=<CMK id/arn/alias> and VIGIL_AWS_REGION=<region>")
+                print("     - the host's `aws` CLI must reach KMS with an instance role / credentials")
+                print("       granting kms:Encrypt + kms:Decrypt on that key (docs/runbooks/AWS-DEPLOY.md)")
+            else:
+                print("   TPM backend one-time setup on this machine:")
+                print("     sudo apt install tpm2-tools && sudo usermod -aG tss $USER   (then log out/in)")
             _sys.exit(1)
-        print("vault provisioned — a fresh KEK is now TPM-sealed to this machine.")
+        print(f"vault provisioned — {v.status()}.")
         print("Trust-root keys + secrets seal at rest transparently on their next read/write.")
     else:
         print(f"vault: {v.status()}")
@@ -2177,7 +2733,11 @@ def main(argv=None) -> None:
     pbud = sub.add_parser("budget", help="per-agent action/interrupt/token/cost budget usage for a UTC day (read-only)")
     pbud.add_argument("--day", help="UTC date YYYY-MM-DD (default: today)")
     pbud.set_defaults(fn=cmd_budget)
-    sub.add_parser("verify").set_defaults(fn=cmd_verify)
+    pv = sub.add_parser("verify")
+    pv.add_argument("--folds", action="store_true",
+                    help="also warm every verified fold cache in this process and rebuild-and-compare it against the "
+                         "spine (Front C S0d; needs VIGIL_FOLD_CACHE_ENABLED)")
+    pv.set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")
@@ -2198,6 +2758,89 @@ def main(argv=None) -> None:
     pinb.add_argument("--scope", default="*", help="engagement scope to confine ingest to (default: * = any)")
     pinb.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pinb.set_defaults(fn=cmd_inbound)
+    psd = sub.add_parser("settle-drain",
+                         help="drain/watch the engagement-completion SETTLE spool onto settle_launch "
+                              "(owner-keyed, fail-closed; completed⇒charge, canceled/failed⇒refund; no "
+                              "network endpoint). The K4-5 settle-on-completion seam.")
+    psd.add_argument("settle_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    psd.add_argument("--spool", required=True, help="the settle spool directory (its incoming/ is drained)")
+    psd.add_argument("--delegation", required=True,
+                     help="owner-signed OFFENSE_GOVERNANCE delegation JSON scoped to the cust_ engagement slug")
+    psd.add_argument("--scope", required=True,
+                     help="the cust_ engagement slug this drain is confined to (must match the delegation scope; "
+                          "* only if the delegation itself is wildcard-scoped)")
+    psd.add_argument("--base-dir", default="",
+                     help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
+                          "(default: $VIGIL_BASE_DIR)")
+    psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    psd.set_defaults(fn=cmd_settle_drain)
+    pos = sub.add_parser("ops-sweep",
+                         help="read-only operator sweeps: abandoned credit reservations (--apply full-refunds "
+                              "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / postpaid reconcile "
+                              "(invoiced-vs-paid vs real consumption; report only) / dangling Flutterwave "
+                              "tx_refs (report only)")
+    pos.add_argument("sweep_cmd", choices=["reservations", "reconcile", "tx-refs"])
+    pos.add_argument("--ttl", type=float, default=86400.0,
+                     help="grace seconds past lease not_after / checkout start before an item is flagged")
+    pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")
+    pos.add_argument("--base-dir", default="", help="(reservations) the credit-lease seam root")
+    pos.add_argument("--completion-spool", default="",
+                     help="(reservations) the settle-drain completion spool; leases with a pending completion "
+                          "are never refunded (required with --apply)")
+    pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
+    pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
+    pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
+    pos.set_defaults(fn=cmd_ops_sweep)
+    pbd = sub.add_parser("billing-drain",
+                         help="drain/watch the inbound Flutterwave billing-webhook spool → server-side "
+                              "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
+                              "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
+    pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
+    pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pbd.set_defaults(fn=cmd_billing_drain)
+    ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "
+                                          "owner-signed account mode an enterprise tenant draws against in "
+                                          "arrears (paying never grants a line)")
+    ppp.add_argument("postpaid_cmd", choices=["set", "disable", "status", "invoice", "pay"])
+    ppp.add_argument("org", nargs="?", default=None,
+                     help="tenant org_id (== tenant_id); omit for `invoice` to sweep ALL enabled postpaid accounts")
+    ppp.add_argument("limit", nargs="?", default=None,
+                     help="(set) credit_limit, in credits (non-negative int); (pay) the <invoice_id> to settle")
+    ppp.add_argument("net_terms", nargs="?", default=None, help="(set) net terms, in days [0, 366]")
+    ppp.add_argument("--period-end", dest="period_end", type=float, default=None,
+                     help="(invoice) the arrears billing-period end (POSIX); default = now")
+    ppp.add_argument("--now", type=float, default=None,
+                     help="(invoice) issued_at override (POSIX); default = now")
+    ppp.set_defaults(fn=cmd_postpaid)
+    pmd = sub.add_parser("monitoring-drain",
+                         help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "
+                              "(per-(org,host) MAC + freshness + active authority; fail-closed; default-OFF)")
+    pmd.add_argument("monitoring_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pmd.add_argument("--spool", required=True, help="the monitoring spool directory (its incoming/ is drained)")
+    pmd.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pmd.set_defaults(fn=cmd_monitoring_drain)
+    pmr = sub.add_parser("monitoring-reconcile",
+                         help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
+                              "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")
+    pmr.set_defaults(fn=cmd_monitoring_reconcile)
+    pms = sub.add_parser("monitoring-secret",
+                         help="provision/rotate the per-(org,host) AEGIS-SaaS monitoring report secret and "
+                              "optionally export it 0600 to a chosen file (prints neither the secret nor its "
+                              "location; default-OFF)")
+    pms.add_argument("--org", required=True, help="tenant org_id")
+    pms.add_argument("--host", required=True, help="the protected host (bare DNS name)")
+    pms.add_argument("--rotate", action="store_true", help="replace an existing secret")
+    pms.add_argument("--secrets-dir", default="",
+                     help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
+    pms.add_argument("--export-to", default="",
+                     help="copy the secret (0600, atomic) to this file, e.g. the tenant gateway's secret mount")
+    pms.add_argument("--export-only", action="store_true",
+                     help="export an already-provisioned secret without provisioning/rotating")
+    pms.add_argument("--overwrite", action="store_true", help="allow --export-to to replace an existing file")
+    pms.set_defaults(fn=cmd_monitoring_secret)
     pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
                                            "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
     pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
@@ -2286,6 +2929,30 @@ def main(argv=None) -> None:
     psv.add_argument("--revoke-token", action="store_true",
                      help="delete the persistent bootstrap token and exit (next start mints a fresh one)")
     psv.set_defaults(fn=cmd_serve)
+    psp = sub.add_parser("serve-public", help="start the keyless public site (marketing/tools/trust/blog/CVE; "
+                                              "loopback default; reverse proxy for a public domain)")
+    psp.add_argument("--port", type=int, default=None, help="bind port (default 8735; $VIGIL_PUBLIC_PORT)")
+    psp.add_argument("--host", default=None, help="bind address ($VIGIL_PUBLIC_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psp.set_defaults(fn=cmd_serve_public)
+    psc = sub.add_parser("serve-customer", help="start the keyless customer edge (self-serve tenant app; "
+                                                "loopback default; reverse proxy for a customer domain)")
+    psc.add_argument("--port", type=int, default=None, help="bind port (default 8734; $VIGIL_CUSTOMER_PORT)")
+    psc.add_argument("--host", default=None, help="bind address ($VIGIL_CUSTOMER_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psc.add_argument("--allow-host", action="append", default=[],
+                     help="reverse-proxy Host to accept, e.g. app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_HOSTS, comma-separated). Anti-DNS-rebinding allowlist")
+    psc.add_argument("--allow-origin", action="append", default=[],
+                     help="reverse-proxy Origin to accept, e.g. https://app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_ORIGINS, comma-separated)")
+    psc.set_defaults(fn=cmd_serve_customer)
+    pcve = sub.add_parser("cve", help="build/inspect the public CVE catalog the /cve browser reads")
+    pcve.add_argument("action", choices=["ingest", "stats"])
+    pcve.add_argument("--epss", action="store_true", help="(ingest) overlay FIRST EPSS exploitation probability")
+    pcve.add_argument("--nvd-enrich", type=int, default=0, metavar="N",
+                      help="(ingest) enrich the N newest entries with CVSS from NVD (paced for its rate limit)")
+    pcve.set_defaults(fn=cmd_cve)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)

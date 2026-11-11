@@ -82,10 +82,20 @@ _MAX_BODY = 16 * 1024 * 1024   # cap a forwarded request body (UI actions are ti
 SOVEREIGN_PORT = 8733     # sigil serve      (the sovereign cockpit)
 CONSOLE_PORT = 8787       # crucible console (offense read + SSE plane)
 API_PORT = 8799           # crucible api     (offense gated /api/v1 action plane)
+CUSTOMER_PORT = 8734      # sigil serve-customer (the keyless customer edge, custui; E1)
+PUBLIC_PORT = 8735        # sigil serve-public   (the keyless public marketing/tools/CVE site, pubui)
 
 # federated mount bases written into index.html (what app.js prepends to every fetch)
 SOVEREIGN_BASE = "/sovereign"
 OFFENSE_BASE = "/offense"
+# The customer plane (E1): a SEPARATE mount for the keyless, self-authenticating customer edge (custui).
+# Unlike the operator planes, custui is NOT gated by the proxy's per-user (operator) whoami — it carries its
+# OWN session cookie (`vigil_customer_session`) + its own Origin/Host CSRF gate + admit_customer. So the
+# whole `/customer/*` branch is a self-contained, self-authenticating origin that the proxy forwards WITHOUT
+# the operator auth gate (see `_forward_request`); cookie isolation across the boundary is enforced in
+# `_forward_request_headers`. In production this plane is a SEPARATE origin (its own vhost); the same-origin
+# `/customer` path is the dev default.
+CUSTOMER_BASE = "/customer"
 
 # ---- proxy-local plane control (answered BY THE PROXY, never forwarded) ---------------------------
 # A backend that is DOWN cannot answer a request to start itself. The proxy is the process that already
@@ -123,6 +133,13 @@ _PLANE_START_GRACE_S = 45.0
 _TOKEN_HEADER = "X-SIGIL-Token"
 _TOKEN_QUERY = "token"
 _CSRF_HEADER = "X-Requested-With"
+# The customer edge's session-cookie NAME (E1). Duplicated here as a stable protocol constant — the proxy
+# must NOT import the sovereign `sigil.ui.custui.CUSTOMER_COOKIE` (FATAL-2: a single interpreter never
+# co-loads the two trust domains; `test_uiproxy_is_pure_stdlib` + `test_two_env_boundary` guard it). It is
+# used ONLY to PARTITION the Cookie header across the plane boundary (never to authenticate — the edge is the
+# authority on its own cookie): the customer cookie is the only one forwarded to the edge, and it is the one
+# cookie never forwarded to the operator (sovereign/offense) backends.
+_CUSTOMER_COOKIE = "vigil_customer_session"
 
 # ==================================================================================================
 # PER-USER AUTHENTICATION at the proxy boundary (Claim 6). See docs/CLAIM-6-RBAC.md.
@@ -191,6 +208,17 @@ _GH_WEBHOOK_SECRET_ENV = "VIGIL_GH_WEBHOOK_SECRET"      # the HMAC secret (off-s
 _GH_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.github.v1"  # the inert-envelope schema tag the drain validates
 _GH_WEBHOOK_MAX_ENVELOPE = 256 * 1024                   # == inert_finding.MAX_ENVELOPE_BYTES (the spool validator cap)
 _GH_WEBHOOK_MAX_BODY = 5 * 1024 * 1024                  # pre-auth body cap for the webhook route (GitHub payloads are small)
+# SaaS Slice C — the INBOUND Flutterwave BILLING webhook adapter (OFF by default, enabled by pointing the spool
+# env at a directory). Flutterwave authenticates a webhook by echoing the configured Secret Hash verbatim in the
+# `verif-hash` header (PLAINTEXT equality). This route constant-time-compares it as a cheap ANTI-FLOOD pre-filter
+# and SPOOLS one inert event; it NEVER mints/forwards/spawns and — crucially — stores ONLY the raw body, NEVER
+# the verif-hash itself (which equals the secret). The AUTHORITATIVE money check (server-side transaction
+# re-verify + owner-signed mint) is the SOVEREIGN drain's (sigil.inbound.billing_spool), never this proxy's.
+_BILLING_WEBHOOK_SPOOL_ENV = "VIGIL_BILLING_WEBHOOK_SPOOL"    # set to a spool dir to ENABLE /webhooks/billing
+_BILLING_WEBHOOK_SECRET_ENV = "VIGIL_BILLING_WEBHOOK_SECRET"  # the verif-hash secret (off-spine; empty ⇒ fail closed)
+_BILLING_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.billing.v1"
+_BILLING_WEBHOOK_MAX_BODY = 128 * 1024                  # pre-auth body cap (Flutterwave payloads are a few KB); its
+#                                                         base64 envelope stays under _GH_WEBHOOK_MAX_ENVELOPE (256K)
 _WEBHOOK_READ_TIMEOUT_S = 20.0                          # bound the pre-auth body read so a slow/incomplete body can't pin a thread
 _GH_ZERO_SHA = "0" * 40                                 # GitHub's null SHA — a branch delete / no-commit push (nothing to scan)
 # Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
@@ -226,6 +254,27 @@ def _remount_setcookie_path(setcookie: str, mount: str) -> str:
                 parts[i] = f"{key}={mount}{path_val}"   # `key` keeps the backend's leading space + casing
             break
     return ";".join(parts)
+
+
+def _partition_cookie_header(raw: str, *, to_customer: bool) -> str:
+    """Partition a browser ``Cookie`` header across the plane boundary before it is forwarded to a backend.
+
+    The customer edge authenticates by the ``vigil_customer_session`` cookie; the operator planes never do.
+    So on the customer branch (``to_customer=True``) forward ONLY that cookie (an operator cookie must not
+    reach the edge), and on the operator branches forward everything EXCEPT it (a customer session must not
+    ride an operator request). This is the same-origin hardening behind the production separate-origin split:
+    neither plane's cookie is ever handed to the other backend. Robust to a value that itself contains ``=``
+    (the NAME is everything before the FIRST ``=``). Returns ``""`` when nothing remains (header omitted)."""
+    kept: list[str] = []
+    for seg in raw.split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        name = seg.split("=", 1)[0].strip()
+        is_customer_cookie = (name == _CUSTOMER_COOKIE)
+        if is_customer_cookie == to_customer:            # keep customer cookie iff → customer; else the rest
+            kept.append(seg)
+    return "; ".join(kept)
 # Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
 # polling. It is NO LONGER a revocation-lag window (W9-3): the edge REVOCATION SET (`_RevocationSet`) is
 # consulted on EVERY decision BEFORE the cache is trusted, so a revoke takes effect on the very next
@@ -758,12 +807,17 @@ def _default_backends() -> dict:
     time so a test that monkeypatches SOVEREIGN_PORT/CONSOLE_PORT/API_PORT still repoints routing + auth."""
     return {"sovereign": ("127.0.0.1", SOVEREIGN_PORT),
             "console": ("127.0.0.1", CONSOLE_PORT),
-            "api": ("127.0.0.1", API_PORT)}
+            "api": ("127.0.0.1", API_PORT),
+            "customer": ("127.0.0.1", CUSTOMER_PORT)}
 
 
 def _remote_backends(sovereign_addr: str, offense_console_addr: str, offense_api_addr: str) -> dict:
     """Resolve the three configurable federation targets for ``--proxy-only``. Each EMPTY flag falls back
     to the loopback default (a co-located backend); a non-empty flag is parsed host:port (fail-closed)."""
+    # NOTE: no "customer" key here. The keyless customer edge is a spawn-local `vigil up` plane
+    # (see `_default_backends`); the `--proxy-only` HA/k8s profile federates only the sovereign/offense
+    # backends and does NOT serve `/customer` yet (that awaits a `--customer-addr` flag). route()'s
+    # `"customer" in b` guard makes `/customer` fall through to static/404 here rather than 502 a dead edge.
     return {"sovereign": _split_hostport(sovereign_addr, "127.0.0.1", SOVEREIGN_PORT),
             "console": _split_hostport(offense_console_addr, "127.0.0.1", CONSOLE_PORT),
             "api": _split_hostport(offense_api_addr, "127.0.0.1", API_PORT)}
@@ -963,6 +1017,12 @@ def route(path: str, backends: "Optional[dict]" = None) -> Optional[tuple[str, i
     if path == OFFENSE_BASE or path.startswith(OFFENSE_BASE + "/"):
         rest = path[len(OFFENSE_BASE):] or "/"       # → / or /api/status, /api/events, ...
         host, port = b["console"]
+        return (host, port, rest)
+    # E1 customer plane — guarded on the backend being present so a legacy 3-key `backends` dict (or a test
+    # that injects one) simply serves static/404 for `/customer` rather than KeyError-ing.
+    if "customer" in b and (path == CUSTOMER_BASE or path.startswith(CUSTOMER_BASE + "/")):
+        rest = path[len(CUSTOMER_BASE):] or "/"      # → / or /api/customer/login, /api/customer/whoami, ...
+        host, port = b["customer"]
         return (host, port, rest)
     return None
 
@@ -1301,7 +1361,8 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None,
-                 hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None):
+                 hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None,
+                 webhook_billing_spool_dir: "Optional[str]" = None):
         self.serve_dir = serve_dir
         # W8-6: the proxy→backend hop's TLS client context, or None (a plaintext hop — the loopback /
         # non-production default). Resolved by `make_proxy_server` via `resolve_hop_tls`, which ALSO refuses
@@ -1346,6 +1407,11 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # routes/forwards/spawns. None ⇒ the route is simply absent (falls through to a 404). The webhook
         # SECRET is resolved per-request from the env, never stored here (off-spine).
         self.webhook_spool_dir = str(webhook_spool_dir) if webhook_spool_dir else None
+        # SaaS Slice C: when set (VIGIL_BILLING_WEBHOOK_SPOOL), the proxy mounts an INBOUND Flutterwave billing
+        # webhook route in the probe-safe band that verif-hash-authenticates + SPOOLS one inert body-only event —
+        # it never routes/forwards/spawns/mints. None ⇒ the route is absent (falls through to a 404). The secret
+        # is resolved per-request from the env (VIGIL_BILLING_WEBHOOK_SECRET), never stored here.
+        self.webhook_billing_spool_dir = str(webhook_billing_spool_dir) if webhook_billing_spool_dir else None
         # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
         # SSE / polling do not stampede it. Built here so every request handler shares one cache.
         self.auth_cache = _PrincipalCache()
@@ -1454,6 +1520,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if split.path == "/webhooks/github" and getattr(self.server, "webhook_spool_dir", None):
                 self._webhooks_github()
                 return
+            # SaaS Slice C: INBOUND Flutterwave billing webhook — probe-safe, mounted ONLY when the billing spool
+            # dir is configured; verif-hash-authenticates + SPOOLS one inert body-only event, never mints/forwards.
+            if split.path == "/webhooks/billing" and getattr(self.server, "webhook_billing_spool_dir", None):
+                self._webhooks_billing()
+                return
             # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
             # a request to start itself, and the interface is still being served here while it is down.
@@ -1461,6 +1532,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_control(split.path, split.query)
                 return
             target = route(split.path, getattr(self.server, "backends", None))
+            # Slice J2: canonicalize the BARE customer mount to a trailing slash. The customer SPA uses
+            # RELATIVE asset + API refs so it works under /customer/ (dev) and / (the separate prod origin);
+            # a bare /customer with no slash would resolve those relatives against / (e.g. /app.js), which the
+            # proxy does not route to the edge. Gate on route() having RESOLVED the customer edge (target is
+            # not None ⇒ the customer backend exists, via the configured dict OR route()'s default) so a
+            # legacy proxy with no edge still 404s rather than redirecting; GET/HEAD only (a bare-mount POST is
+            # nonsensical and a 301 would downgrade it). route() itself is unchanged — the redirect lives here
+            # because only this layer knows the public mount prefix.
+            if split.path == CUSTOMER_BASE and self.command in ("GET", "HEAD") and target is not None:
+                self.send_response(301)
+                self.send_header("Location", CUSTOMER_BASE + "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if target is None:
                 self._serve_static(split.path)
                 return
@@ -1547,6 +1632,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path in _UNAUTH_FORWARD:
             self._proxy(host, port, self._with_query(upstream_path, split.query))
             return
+        # 1b) customer plane — the keyless custui edge SELF-AUTHENTICATES (its own `vigil_customer_session`
+        #     cookie + an Origin/Host CSRF gate + admit_customer). The OPERATOR whoami gate does NOT apply:
+        #     the proxy forwards the whole `/customer/*` branch and the edge is the authority on its own
+        #     session. This is a SEPARATE, whole-prefix unauth-forward — deliberately NOT a member of
+        #     `_UNAUTH_FORWARD`, which stays byte-identical to the sovereign BOOTSTRAP_PATHS for its
+        #     cross-check. `route()` has already resolved `target` to the CUSTOMER backend for this prefix, so
+        #     no operator route is reachable through it; cookie isolation across the boundary is enforced in
+        #     `_forward_request_headers` (keyed on the mount).
+        if path == CUSTOMER_BASE or path.startswith(CUSTOMER_BASE + "/"):
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
         # 2) authenticate, fail-closed. Keep the caller's OWN bearer for W9-3 SSE re-auth (an open stream
         #    re-checks THIS credential against the live authority, not the substituted console token).
         bearer = self._request_bearer(split.query)
@@ -1580,6 +1676,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return SOVEREIGN_BASE
         if p == OFFENSE_BASE or p.startswith(OFFENSE_BASE + "/"):
             return OFFENSE_BASE
+        if p == CUSTOMER_BASE or p.startswith(CUSTOMER_BASE + "/"):
+            return CUSTOMER_BASE               # remount the edge's `Set-Cookie Path=/` into `/customer/…`
         return ""
 
     def _sub_token_query(self, query: str) -> str:
@@ -2007,6 +2105,89 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             os.close(fd)
         os.replace(tmp, final)
 
+    def _webhooks_billing(self):
+        """INBOUND Flutterwave BILLING webhook — authenticate the ``verif-hash`` header and SPOOL ONE inert
+        event, nothing more. Like ``_webhooks_github`` it lives in the PROBE-SAFE band (a provider POST carries
+        no session bearer and an unrelated Origin); Flutterwave's ``verif-hash`` is PLAINTEXT secret equality,
+        compared constant-time here as an ANTI-FLOOD pre-filter. The handler NEVER routes / forwards / spawns /
+        mints — its only side effect is writing a signed-at-rest-free, INERT JSON envelope carrying ONLY the raw
+        body (base64), NEVER the verif-hash (which equals the secret). The AUTHORITATIVE money check — the
+        server-side transaction re-verify + the owner-signed mint — is the SOVEREIGN drain's
+        (``sigil.inbound.billing_spool``). Fail-closed: wrong method, oversized / slow body, unset secret, or a
+        mismatched / absent verif-hash all refuse; only a pre-authenticated delivery spools (and even then
+        mints nothing until the drain independently re-verifies the transaction)."""
+        try:
+            self.connection.settimeout(_WEBHOOK_READ_TIMEOUT_S)
+        except OSError:
+            pass
+        if self.command != "POST":
+            self._plane_json({"ok": False, "error": "method not allowed (POST only)"}, status=405)
+            return
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        self.close_connection = True
+        if clen > _BILLING_WEBHOOK_MAX_BODY:
+            self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
+            return
+        try:
+            raw = self.rfile.read(clen) if clen > 0 else b""
+        except (TimeoutError, OSError):
+            self._plane_json({"ok": False, "error": "request body read timed out"}, status=408, drained=True)
+            return
+        # Resolve the verif-hash secret OFF-SPINE from the env. Empty ⇒ fail closed (route enabled, no secret).
+        secret = os.environ.get(_BILLING_WEBHOOK_SECRET_ENV, "")
+        if not secret:
+            self._plane_json({"ok": False, "error": "webhook secret not configured"}, status=503, drained=True)
+            return
+        # Flutterwave verif-hash = PLAINTEXT secret equality, compared constant-time. compare_digest raises
+        # TypeError on a non-ASCII str, so a crafted header fails CLOSED (False), never a 500.
+        presented = self.headers.get("verif-hash") or ""
+        try:
+            authentic = hmac.compare_digest(secret, presented)
+        except TypeError:
+            authentic = False
+        if not authentic:
+            self._plane_json({"ok": False, "error": "invalid or missing verif-hash"}, status=401, drained=True)
+            return
+        # Pre-authenticated. Spool ONE inert envelope carrying ONLY the raw body (base64) — NEVER the verif-hash.
+        envelope = {"schema": _BILLING_WEBHOOK_ENVELOPE_SCHEMA,
+                    "body_b64": base64.b64encode(raw).decode("ascii")}
+        try:
+            self._spool_billing_event(json.dumps(envelope, ensure_ascii=True, sort_keys=True))
+        except OSError:   # a spool write failure is retryable (the provider redelivers) — 503, do NOT 202
+            self._plane_json({"ok": False, "error": "spool write failed"}, status=503, drained=True)
+            return
+        self._plane_json({"ok": True, "spooled": True}, status=202, drained=True)
+
+    def _spool_billing_event(self, envelope: str) -> None:
+        """Write one inert billing envelope to ``<billing-spool>/incoming/<sha256(bytes)[:32]>.json`` atomically
+        (0600 file in a 0700 dir; O_EXCL temp + fsync + os.replace), matching the drain reader's on-disk
+        contract. stdlib-only (the pure-stdlib boundary forbids importing the sibling spool writer).
+        Content-addressed ⇒ re-spooling an identical envelope is idempotent. Raises OSError on any write
+        failure (the caller turns that into a 503 so the provider redelivers)."""
+        data = envelope.encode("utf-8")
+        if len(data) > _GH_WEBHOOK_MAX_ENVELOPE:
+            raise OSError("billing webhook envelope exceeds the spool size cap")
+        incoming = Path(self.server.webhook_billing_spool_dir) / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(incoming, 0o700)
+        except OSError:
+            pass
+        final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
+        if final.exists():
+            return   # content-addressed idempotency — the identical envelope is already spooled
+        tmp = incoming / (".tmp-" + secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+
     def _plane_text(self, text: str, content_type: str, status: int = 200, *, drained: bool = False):
         """Send a plain-text body (e.g. the OpenMetrics exposition) with the probe headers, no-store, and a
         drained request body — the same posture as `_plane_json`, so /metrics leaks no keep-alive smuggling
@@ -2103,8 +2284,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
+            # Cookie is never copied verbatim — it is partitioned across the plane boundary below.
             if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
-                    or _is_vigil_identity_header(key)):
+                    or lk == "cookie" or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
         # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
@@ -2114,6 +2296,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # an nginx sitting IN FRONT of the proxy that gzips the proxy's ALREADY-redacted output is safe (it
         # compresses redacted bytes). Set for BOTH planes and the login bootstrap alike.
         out["Accept-Encoding"] = "identity"
+        # Cookie isolation across the plane boundary (E1): partition the browser Cookie header so the
+        # `vigil_customer_session` cookie reaches ONLY the customer edge and NEVER an operator backend, and
+        # every operator cookie reaches ONLY the operator planes and NEVER the edge. `_relay_mount()` names
+        # this request's branch; "" (non-plane / static-forward) is operator-side (drops the customer cookie).
+        # An empty partition omits the header entirely.
+        raw_cookie = self.headers.get("Cookie", "")
+        if raw_cookie:
+            filtered = _partition_cookie_header(raw_cookie, to_customer=(self._relay_mount() == CUSTOMER_BASE))
+            if filtered:
+                out["Cookie"] = filtered
         if offense_principal is not None:
             # Present the offense CONSOLE's OWN credential (never the user's bearer): the console gates on
             # VIGIL_CONSOLE_TOKEN, the browser must never hold it, and only an already-authenticated request
@@ -2379,7 +2571,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
                       allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                       plane_control: "Optional[PlaneControl]" = None,
                       backends: "Optional[dict]" = None,
-                      webhook_spool_dir: "Optional[str]" = None) -> _ProxyServer:
+                      webhook_spool_dir: "Optional[str]" = None,
+                      webhook_billing_spool_dir: "Optional[str]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
     reachable from the open internet.
@@ -2420,7 +2613,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
                         plane_control=plane_control, backends=backends, hop_tls=hop_tls,
-                        webhook_spool_dir=webhook_spool_dir)
+                        webhook_spool_dir=webhook_spool_dir,
+                        webhook_billing_spool_dir=webhook_billing_spool_dir)
 
 
 # ==================================================================================================
@@ -2436,7 +2630,12 @@ _PIDS_NAME = "pids"
 # parent `vigil up` shell would otherwise reach offense console/API/Strix children and let one self-authorize a
 # destructive PR. Strip it here at the source. The owner key is only ever used by the operator's OWN shell
 # for `vigil authorize-destruction`, never by a spawned child.
-_CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY"})
+# Secrets that must NEVER be inherited by a spawned child from the ambient `vigil up` env — they reach a
+# child ONLY via an explicit, intentional extra_env. The owner signing key (A4). And the edge→provisioner
+# hop key (E1): a per-run provisioning secret that reaches the sovereign cockpit + the customer edge via
+# extra_env under `--with-saas`, and MUST NOT leak into the keyless OFFENSE children (least-privilege: the
+# offense plane is the attack surface and has no business holding a sovereign provisioning secret).
+_CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "VIGIL_PROVISION_HOP_KEY"})
 
 
 def _child_env() -> dict:
@@ -2770,12 +2969,18 @@ def _console_vigil_bin(crucible_bin: Path) -> "Optional[str]":
     return str(cand) if cand.exists() else None
 
 
-def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
+def _spawn_capture(argv: list[str], log_path: Path,
+                   *, extra_env: Optional[dict] = None) -> tuple[subprocess.Popen, "Queue[str]"]:
     """Spawn a child whose stdout we both TEE to a SIZE-BOUNDED, rotating log file (W6-5) and scan (for the
     cockpit token). Returns the process and a queue of its stdout lines. The rotating capture is shared
-    with ``_spawn`` via ``_pump_child_output``; ``on_line`` tees each line onto the token queue."""
+    with ``_spawn`` via ``_pump_child_output``; ``on_line`` tees each line onto the token queue.
+    ``extra_env`` augments the clean child env exactly as in ``_spawn`` (E1: the cockpit receives the
+    per-run provisioning hop key this way under ``--with-saas``, never via ambient inheritance)."""
+    env = _child_env()
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=_child_env(), text=True, bufsize=1, errors="replace")
+                            env=env, text=True, bufsize=1, errors="replace")
     q: "Queue[str]" = Queue()
     _pump_child_output(proc, log_path, on_line=q.put)
     return proc, q
@@ -3162,7 +3367,8 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=None, backends=backends,
-                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up --proxy-only: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         return 2
@@ -3220,11 +3426,37 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
     return 0
 
 
+def _saas_child_specs(*, sigil_bin, authority: str, origin: str, provision_hop_key: str,
+                      logs: Path) -> "list[tuple[str, list[str], Path, dict]]":
+    """The opt-in SaaS planes `vigil up --with-saas` also spawns, as (name, argv, log_path, extra_env)
+    tuples — pure, so the wiring is unit-testable without standing up the whole run_up path:
+
+      * customer-edge (custui, :8734) — the backend of the proxy's `/customer` mount. Keyless: it holds NO
+        owner key. It receives the per-run VIGIL_PROVISION_HOP_KEY in its ENV (never argv/log) so it can
+        reach the sovereign provisioner, plus the proxy's Host/Origin for its anti-DNS-rebind allowlist
+        (it sets a session cookie, so it gates Origin/Host like the operator planes do).
+      * public-site (pubui, :8735) — the keyless, cookieless marketing/tools/trust/CVE site. No env and no
+        allowlist: it sets no cookie and holds no key, so there is no session to protect with one.
+
+    The cockpit receives the SAME hop key separately (via its own extra_env) so the provisioner routes
+    verify; the offense children never receive it (`_CHILD_ENV_HARD_EXCLUDE` + no extra_env)."""
+    return [
+        ("customer-edge",
+         [str(sigil_bin), "serve-customer", "--host", "127.0.0.1", "--port", str(CUSTOMER_PORT),
+          "--allow-host", authority, "--allow-origin", origin],
+         logs / "customer-edge.log", {"VIGIL_PROVISION_HOP_KEY": provision_hop_key}),
+        ("public-site",
+         [str(sigil_bin), "serve-public", "--host", "127.0.0.1", "--port", str(PUBLIC_PORT)],
+         logs / "public-site.log", {}),
+    ]
+
+
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
            insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
            with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600,
            with_voice: bool = False, with_gesture: bool = False,
            with_telemetry: bool = False, telemetry_interval: int = 15,
+           with_saas: bool = False,
            proxy_only: bool = False, sovereign_addr: str = "",
            offense_console_addr: str = "", offense_api_addr: str = "") -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
@@ -3288,6 +3520,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                ("127.0.0.1", SOVEREIGN_PORT, "the sovereign cockpit"),
                ("127.0.0.1", CONSOLE_PORT, "the offense console"),
                ("127.0.0.1", API_PORT, "the offense api")]
+    if with_saas:   # E1 — the opt-in customer edge (:8734) + public site (:8735) need free ports too
+        _wanted += [("127.0.0.1", CUSTOMER_PORT, "the customer edge"),
+                    ("127.0.0.1", PUBLIC_PORT, "the public site")]
     _busy = [(h, p, what) for h, p, what in _wanted if not _port_free(h, p)]
     if _busy:
         for h, p, what in _busy:
@@ -3316,10 +3551,18 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
         return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env=extra_env)
 
+    # E1 — mint the edge→provisioner hop secret ONCE per `vigil up --with-saas`, BEFORE the cockpit spawn
+    # so the cockpit's /api/provision/* routes verify under it. Handed ONLY to the cockpit (here) and the
+    # customer edge (its spawn) via env — never argv/log, never to the offense children. Empty without
+    # --with-saas (the provisioner routes then fail closed: no SaaS, no customer provisioning).
+    provision_hop_key = secrets.token_urlsafe(32) if with_saas else ""
+
     # 1) cockpit — capture its printed session token.
     cockpit_argv = [str(sigil_bin), "serve", "--host", "127.0.0.1", "--port", str(SOVEREIGN_PORT),
                     "--allow-host", authority, "--allow-origin", origin]
-    cockpit, cockpit_q = _spawn_capture(cockpit_argv, logs / "sovereign-cockpit.log")
+    cockpit, cockpit_q = _spawn_capture(
+        cockpit_argv, logs / "sovereign-cockpit.log",
+        extra_env=({"VIGIL_PROVISION_HOP_KEY": provision_hop_key} if with_saas else None))
     procs.append(("sovereign-cockpit", cockpit))
     token = _await_token(cockpit_q, cockpit)
     if not token:
@@ -3437,6 +3680,22 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                   f"be starting slowly or failed to bind (see {logs}). The UI will still come up, but "
                   "/offense/* may return 502 until it is ready.", file=sys.stderr)
 
+    # 3a') OPTIONAL SaaS planes (E1) — the keyless customer edge (the backend of the proxy's /customer
+    # mount) + the keyless public site. OFF by default; `--with-saas` opts in. The customer edge receives
+    # the per-run provisioning hop key (env only) + the proxy Host/Origin for its anti-rebind allowlist;
+    # the public site is fully keyless. Fire-and-forget + tracked (reaped by Ctrl-C / `vigil down`), the
+    # same discipline as the feed/telemetry sidecars. A backend that fails to spawn cleans up + aborts.
+    if with_saas:
+        for _name, _argv, _log, _extra in _saas_child_specs(
+                sigil_bin=sigil_bin, authority=authority, origin=origin,
+                provision_hop_key=provision_hop_key, logs=logs):
+            if _track(_name, _argv, _log, extra_env=_extra):
+                return 1
+        for _pname, _pport in (("customer edge", CUSTOMER_PORT), ("public site", PUBLIC_PORT)):
+            if not _wait_listening("127.0.0.1", _pport, time.monotonic() + 6.0):
+                print(f"vigil up: WARNING — the {_pname} (127.0.0.1:{_pport}) is not up yet (see {logs}). "
+                      "The UI still comes up; /customer may 502 until the edge binds.", file=sys.stderr)
+
     # 3b) OPTIONAL recurring vuln-intel feed sidecar. OFF by default — a recurring LIVE egress pull is a
     # conscious act, so it needs --with-feed AND an explicit --feed-slug (the persisted store the Knowledge
     # screen reads). Every tick honours that slug's kill-switch, so STOP halts it. Shares VIGIL_LIVE_DIR with
@@ -3524,7 +3783,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=plane_control,
-                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()

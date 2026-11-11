@@ -29,9 +29,11 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
+from .fold_read import UNCACHED as _UNCACHED, cached_read
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.capability"
@@ -53,6 +55,41 @@ _CORE = ("signal", "capability", "state", "issued_at")
 # read error must not poison the cache into serving a stale disabled/enabled verdict).
 _CAP_CACHE: dict[tuple[str, Optional[str], str], tuple[tuple, bool]] = {}
 _CACHE_GUARD = threading.Lock()
+
+
+class _Latch:
+    """One capability's latch: `enabled` + its enable anti-replay high-water `max_issued`."""
+
+    __slots__ = ("enabled", "max_issued")
+
+    def __init__(self, enabled: bool, max_issued: float) -> None:
+        self.enabled, self.max_issued = enabled, max_issued
+
+
+def _apply_capability_record(r, resolver, capability: str, latch: _Latch) -> None:
+    """Fold ONE spine record into `capability`'s `latch` — THE capability fold body, shared by the authoritative
+    per-capability scan and the verified fold cache (Front C S0d) so the two can never diverge."""
+    p = r.payload
+    if p.get("signal") != SIGNAL or p.get("capability") != capability:
+        return
+    state = p.get("state")
+    if state == "disabled":
+        latch.enabled = False                   # honor ANY disable — disabling is fail-safe
+    elif state == "enabled" and verify_signed(p, _CORE, resolver.at(r.seq)):
+        issued = as_issued_at(p.get("issued_at"))
+        if issued <= latch.max_issued:
+            return                              # REPLAY / stale re-append of an already-honored enable
+        latch.max_issued = issued               # consume it so its own replay is refused hereafter
+        latch.enabled = True                    # only an OWNER-SIGNED, FRESH enable re-enables
+
+
+def _capabilities_step(latches: dict, r, resolver) -> None:
+    """The cache step: every capability's latch in one pass (each record names at most one capability)."""
+    for capability, latch in latches.items():
+        _apply_capability_record(r, resolver, capability, latch)
+
+
+_CAPABILITY_FOLD = FoldCache("governor.capability", step=_capabilities_step)
 
 
 class CapabilityGate:
@@ -101,6 +138,13 @@ class CapabilityGate:
         direction), and the error path is never cached."""
         self._check(capability)
         try:
+            hit = cached_read(_CAPABILITY_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
+                              seed=self._seed_all, reader=lambda latches: latches[capability].enabled)
+        except Exception:  # noqa: BLE001 — a hostile/corrupt spine must never crash the caller; fail-closed
+            return False
+        if hit is not _UNCACHED:
+            return hit                          # Front C S0d: O(new records) even while the spine is appended to
+        try:
             token = self.store.change_token()
         except Exception:  # noqa: BLE001 — cannot even read the store ⇒ fail-closed toward disabled
             return False
@@ -124,6 +168,22 @@ class CapabilityGate:
         """{capability: "enabled"|"disabled"} for the read plane / status output."""
         return {c: ("enabled" if self.is_enabled(c) else "disabled") for c in sorted(CAPABILITIES)}
 
+    def _seed(self, st, capability: str) -> "tuple[_Latch, int]":
+        """(latch, since) for `capability`: seeded from the folded snapshot prefix (default ENABLED; a missing
+        high-water row means no enable was honored for it in the pruned prefix), or the genesis start when the
+        trusted anchor differs from the snapshot's (see `_scan_enabled`)."""
+        if self.trusted_pubkey != st.trusted_pubkey:
+            return _Latch(True, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
+        return (_Latch(st.capability_latch_map().get(capability, True),
+                       st.capability_issued_map().get(capability, NO_HIGHWATER)), st.base_seq - 1)
+
+    def _seed_all(self, st) -> "tuple[dict, int]":
+        since = -1
+        latches = {}
+        for c in sorted(CAPABILITIES):
+            latches[c], since = self._seed(st, c)
+        return latches, since
+
     def _scan_enabled(self, capability: str) -> bool:
         """The AUTHORITATIVE scan: default ENABLED; honor ANY disable (fail-safe); re-enable only on an
         OWNER-SIGNED enable that verifies (fail-closed). Hard-prune fold (mirrors the kill-switch): seed from
@@ -137,28 +197,9 @@ class CapabilityGate:
         make every enable in the pruned prefix replayable again."""
         st = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
-        if self.trusted_pubkey != st.trusted_pubkey:
-            enabled = True                          # pubkey mismatch: folded latch invalid → genesis rescan
-            since_seq = -1
-            max_issued = NO_HIGHWATER               # ...and so is the folded high-water — restart it too
-        else:
-            enabled = st.capability_latch_map().get(capability, True)   # seed from the folded prefix (default on)
-            since_seq = st.base_seq - 1
-            # PER-CAPABILITY high-water: a missing row means no enable was honored for this capability in
-            # the pruned prefix. Never a shared/global one — an enable(voice) must not refuse a legitimate
-            # later enable(gesture) that carries a smaller issued_at.
-            max_issued = st.capability_issued_map().get(capability, NO_HIGHWATER)
+        # PER-CAPABILITY high-water: never a shared/global one — an enable(voice) must not refuse a legitimate
+        # later enable(gesture) that carries a smaller issued_at.
+        latch, since_seq = self._seed(st, capability)
         for r in self.store.iter_records(since_seq=since_seq):
-            p = r.payload
-            if p.get("signal") != SIGNAL or p.get("capability") != capability:
-                continue
-            state = p.get("state")
-            if state == "disabled":
-                enabled = False                     # honor ANY disable — disabling is fail-safe
-            elif state == "enabled" and verify_signed(p, _CORE, resolver.at(r.seq)):
-                issued = as_issued_at(p.get("issued_at"))
-                if issued <= max_issued:
-                    continue                        # REPLAY / stale re-append of an already-honored enable
-                max_issued = issued                 # consume it so its own replay is refused hereafter
-                enabled = True                      # only an OWNER-SIGNED, FRESH enable re-enables
-        return enabled
+            _apply_capability_record(r, resolver, capability, latch)
+        return latch.enabled

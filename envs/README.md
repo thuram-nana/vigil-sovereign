@@ -14,6 +14,11 @@ Build both (prefers `uv`, falls back to venv+pip):
 bash envs/build_envs.sh        # creates .venv-sovereign and .venv-offense, then verifies the boundary
 ```
 
+Telemetry export (`vigil engage --otlp-endpoint`) needs the OpenTelemetry SDK + OTLP exporter, which is
+**opt-in** and not in either runtime lock. `VIGIL_WITH_OTEL=1 bash envs/build_envs.sh` layers its own hash
+lock (`infra/supply-chain/otel.lock.txt`) into env-offense under `--require-hashes`; without the flag nothing
+changes. See `docs/SUPPLY-CHAIN.md` § "The OpenTelemetry exporter".
+
 Third-party deps install from the committed **hash locks** under `pip --require-hashes` (see
 `docs/SUPPLY-CHAIN.md`): the framework closure from each plane's lock, and `vendor/strix`'s heavy
 live-scan extras from a dedicated `infra/supply-chain/strix.lock` (exported from `vendor/strix/uv.lock`;

@@ -212,10 +212,23 @@ class LearnGrantWatcher:
         except OSError:
             pass
 
-    def watch(self, *, interval: float = 2.0, sleep: Callable[[float], None] = None) -> None:
-        """Drain in a loop forever (Ctrl-C / SIGTERM to stop). ``sleep`` is injectable for tests."""
+    def watch(self, *, interval: float = 2.0, sleep: Optional[Callable[[float], None]] = None) -> None:
+        """Drain in a loop forever (Ctrl-C / SIGTERM to stop). ``sleep`` is injectable for tests.
+
+        A single bad drain NEVER kills the daemon (#73 / NET hardening — the one drain loop that lacked the
+        guard its siblings ``launch_drain`` / ``webhook_drain`` / ``spool_watcher`` / ``billing_spool`` /
+        ``completion_spool`` already have): an unexpected error OUTSIDE ``drain()``'s per-file handling (a
+        transient spool-dir / IO fault) is reported to stderr and the loop continues, instead of the watcher
+        dying silently and stranding every later learn-grant in ``incoming/``. Only ``Exception`` is caught —
+        ``KeyboardInterrupt`` / ``SystemExit`` still stop the daemon. Nothing is learned on a failed round
+        (``drain()``'s own fail-closed handling is unchanged)."""
+        import sys as _sys
         import time
         _sleep = sleep or time.sleep
         while True:
-            self.drain()
+            try:
+                self.drain()
+            except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
+                _sys.stderr.write("vigil learn-drain: WARNING drain error (continuing): "
+                                  f"{type(exc).__name__}: {exc}\n")
             _sleep(interval)

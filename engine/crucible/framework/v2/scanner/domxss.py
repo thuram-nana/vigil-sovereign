@@ -92,7 +92,9 @@ def analyze_js(js: str) -> list[DomXssCandidate]:
 def analyze_html(html: str) -> list[DomXssCandidate]:
     """Extract inline scripts + ``javascript:`` URLs from HTML and analyze them."""
     out: list[DomXssCandidate] = []
-    for m in re.finditer(r"<script\b[^>]*>(.*?)</script>", html, re.DOTALL | re.IGNORECASE):
+    # `</script\b[^>]*>`: a browser also ends the element at `</script >` / `</script\n x>` — a bare
+    # `</script>` would skip (never analyze) an inline script closed that way (CodeQL py/bad-tag-filter).
+    for m in re.finditer(r"<script\b[^>]*>(.*?)</script\b[^>]*>", html, re.DOTALL | re.IGNORECASE):
         out.extend(analyze_js(m.group(1)))
     for m in re.finditer(r"javascript:([^\"'>]+)", html, re.IGNORECASE):
         out.extend(analyze_js(m.group(1)))

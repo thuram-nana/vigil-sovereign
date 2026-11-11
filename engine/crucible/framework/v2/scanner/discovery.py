@@ -96,13 +96,24 @@ class JsFindings(BaseModel):
 
 class ApiOperation(BaseModel):
     """One operation lifted from an OpenAPI/Swagger document — a method+path pair
-    plus the declared parameter names, ready to render into fuzzable requests."""
+    plus the declared parameter names, ready to render into fuzzable requests.
+
+    W1 (spec-typed deep fuzzing): beyond the names, it also carries the resolved
+    ``application/json`` requestBody *schema* (body methods) and each declared
+    parameter's OpenAPI *type*. These let :func:`scanner.insertion.request_from_api_operation`
+    render a TYPED, NESTED baseline body (so the insertion engine's JSON decomposer
+    fuzzes every nested leaf, not just a flat ``{name:"1"}``) and spec-typed query/
+    path fills. ``request_schema`` is ``$ref``-resolved and cycle/depth/node-bounded
+    at parse time, so it is self-contained and safe to walk. Both default empty, so
+    an operation with no body/typed params is byte-identical to the old behaviour."""
 
     model_config = ConfigDict(extra="forbid")
 
     method: str
     path: str
     params: list[str] = Field(default_factory=list)
+    request_schema: dict[str, Any] | None = None
+    param_types: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -447,36 +458,164 @@ def parse_openapi(doc: dict | str) -> list[ApiOperation]:
     """Walk an OpenAPI 3 / Swagger 2 document's ``paths`` into a flat list of
     :class:`ApiOperation`s (method + path + declared parameter names). Path-level
     ``parameters`` are merged into every operation under that path. Accepts a
-    parsed dict or a JSON string; unparseable input yields an empty list."""
+    parsed dict or a JSON string; unparseable input yields an empty list.
+
+    W1 — spec-typed deep fuzzing: it now ALSO lifts, per operation, (a) the
+    ``application/json`` requestBody *schema* for body methods — OAS3
+    ``requestBody.content`` or a Swagger-2 ``in: body`` parameter — ``$ref``-resolved
+    against the document and cycle/depth/node-bounded so the stored schema is
+    self-contained and safe to walk; and (b) each declared parameter's OpenAPI
+    *type* (OAS3 ``schema.type`` or Swagger-2 ``type``). ``params`` (names) is
+    unchanged, so every existing caller sees exactly what it did before."""
     data = _as_obj(doc)
     paths = data.get("paths") if isinstance(data, dict) else None
     if not isinstance(paths, dict):
         return []
     out: list[ApiOperation] = []
+    doc_budget = [_MAX_DOC_NODES]                        # ONE ceiling shared across ALL operations (OOM guard)
     for path, item in paths.items():
         if not isinstance(item, dict):
             continue
-        shared = _param_names(item.get("parameters"))
         for method, op in item.items():
             if method.lower() not in _HTTP_METHODS:
                 continue
-            params = list(shared)
-            if isinstance(op, dict):
-                for name in _param_names(op.get("parameters")):
-                    if name not in params:
+            params: list[str] = []
+            types: dict[str, str] = {}
+            body_schema: Any = None
+            body_name: "str | None" = None               # a Swagger-2 in:body name kept for the fallback below
+            # path-level parameters apply to every operation; operation-level override/extend them.
+            for src in (item.get("parameters"), op.get("parameters") if isinstance(op, dict) else None):
+                for name, ptype, is_body, sch in _iter_params(src):
+                    if is_body:
+                        if body_schema is None and isinstance(sch, dict):
+                            body_schema = sch            # Swagger-2 `in: body`
+                            if isinstance(name, str) and name:
+                                body_name = name
+                    elif name and name not in params:
                         params.append(name)
-            out.append(ApiOperation(method=method.upper(), path=str(path), params=params))
+                        if ptype:
+                            types[name] = ptype
+            if isinstance(op, dict):                     # OAS3 requestBody (takes precedence if present)
+                rb = op.get("requestBody")               # EACH step dict-guarded: a crafted non-dict at any level
+                content = rb.get("content") if isinstance(rb, dict) else None   # must not raise (whole-scan DoS)
+                appjson = content.get("application/json") if isinstance(content, dict) else None
+                jschema = appjson.get("schema") if isinstance(appjson, dict) else None
+                if isinstance(jschema, dict):
+                    body_schema = jschema
+                    body_name = None                     # an OAS3 requestBody has no flat-field fallback name
+            request_schema = None
+            if isinstance(body_schema, dict):
+                resolved = _deref(data, body_schema, (), 0, doc_budget)
+                if isinstance(resolved, dict) and resolved:
+                    request_schema = resolved
+            if request_schema is None and body_name and body_name not in params:
+                # a Swagger-2 in:body whose schema did not resolve (dangling/remote $ref, or {}) — keep the body
+                # param NAME as a flat field so its body insertion point is not silently lost (pre-W1 surface).
+                params.append(body_name)
+            out.append(ApiOperation(method=method.upper(), path=str(path), params=params,
+                                    request_schema=request_schema, param_types=types))
     return out
 
 
-def _param_names(params: Any) -> list[str]:
-    out: list[str] = []
-    if isinstance(params, list):
-        for p in params:
-            if isinstance(p, dict):
-                name = p.get("name")
-                if isinstance(name, str) and name and name not in out:
-                    out.append(name)
+def _iter_params(params: Any):
+    """Yield ``(name, type, is_body, schema)`` for each declared parameter. Handles OAS3
+    (``name`` + ``schema.type``) and Swagger-2 (``name`` + top-level ``type``, or ``in: body`` carrying a
+    ``schema``). Malformed entries are skipped. ``type`` is None when undeclared."""
+    if not isinstance(params, list):
+        return
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        if p.get("in") == "body":                        # Swagger-2 body parameter
+            sch = p.get("schema")
+            bname = p.get("name") if isinstance(p.get("name"), str) and p.get("name") else None
+            if isinstance(sch, dict):
+                yield (bname, None, True, sch)            # real Swagger-2: the body IS the schema (the name is
+                                                          # carried so parse_openapi can fall back to it as a flat
+                                                          # field if the schema does not resolve)
+            elif bname:
+                yield (bname, None, False, None)         # schema-less shorthand: the name IS a flat body field
+            continue
+        name = p.get("name")
+        if not (isinstance(name, str) and name):
+            continue
+        ptype = None
+        sch = p.get("schema")
+        if isinstance(sch, dict) and isinstance(sch.get("type"), str):
+            ptype = sch["type"]                          # OAS3
+        elif isinstance(p.get("type"), str):
+            ptype = p["type"]                            # Swagger-2
+        yield (name, ptype, False, None)
+
+
+# Bounds for $ref resolution so a hostile/cyclic/huge/wide spec can never blow the stack, the body, OR
+# aggregate parse memory: _MAX_SCHEMA_DEPTH caps recursion depth; _MAX_DOC_NODES is a DOCUMENT-WIDE ceiling on
+# total resolved nodes (shared across every operation AND every level's width — see parse_openapi/_deref), so
+# K operations that each $ref one wide shared schema cannot multiply into an OOM.
+_MAX_SCHEMA_DEPTH = 8
+_MAX_DOC_NODES = 20000
+# Spec-controlled DATA keywords dropped during resolution: their VALUES must never reach our baseline request
+# body (a hostile spec could plant a destructive/injection payload or an unbounded/deeply-nested blob there),
+# and the example builder only needs the STRUCTURE (type/properties/items/required/allOf/…) to synthesize a
+# benign, VIGIL-controlled typed example.
+_DATA_KEYWORDS = frozenset({"enum", "const", "default", "example", "examples"})
+
+
+def _ref_target(root: dict, ref: str) -> "dict | None":
+    """Resolve a LOCAL JSON-pointer ``$ref`` (``#/components/schemas/X`` OAS3, ``#/definitions/X``
+    Swagger-2) against ``root``. A remote/non-local/dangling ref returns None (fail-closed — we never
+    fetch, and an unresolved ref simply yields no typed body)."""
+    if not (isinstance(ref, str) and ref.startswith("#/")):
+        return None
+    node: Any = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")   # JSON-pointer unescape
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
+
+
+def _deref(root: dict, schema: Any, seen: "tuple[str, ...]", depth: int, budget: list) -> Any:
+    """Return a ``$ref``-free copy of ``schema`` (resolving local refs against ``root``). Cycle-safe (a ref
+    already on the current resolution path becomes ``{}``), depth- and node-bounded (past the cap →
+    ``{}``), pure (no I/O). The result is self-contained so the insertion builder needs no components map."""
+    if depth > _MAX_SCHEMA_DEPTH or budget[0] <= 0:
+        return {}
+    budget[0] -= 1
+    if not isinstance(schema, dict):
+        return schema
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        if ref in seen:                                  # cycle on the current path
+            return {}
+        target = _ref_target(root, ref)
+        return {} if target is None else _deref(root, target, (*seen, ref), depth + 1, budget)
+    out: dict = {}
+    for k, v in schema.items():
+        if budget[0] <= 0:
+            break                                        # WIDTH bound: stop materializing once the doc budget is spent
+        if k in _DATA_KEYWORDS:
+            continue                                     # drop spec data values (never enter the body; unbounded-safe)
+        if k == "properties" and isinstance(v, dict):
+            props: dict = {}
+            for pk, pv in v.items():
+                if budget[0] <= 0:
+                    break
+                props[pk] = _deref(root, pv, seen, depth + 1, budget)
+            out[k] = props
+        elif k in ("items", "additionalProperties") and isinstance(v, dict):
+            out[k] = _deref(root, v, seen, depth + 1, budget)
+        elif k in ("allOf", "anyOf", "oneOf") and isinstance(v, list):
+            branch: list = []
+            for s in v:
+                if budget[0] <= 0:
+                    break
+                branch.append(_deref(root, s, seen, depth + 1, budget))
+            out[k] = branch
+        else:
+            out[k] = v                                   # structural scalars: type, required, format, nullable, …
     return out
 
 
@@ -512,6 +651,125 @@ def parse_graphql_schema(introspection: dict | str) -> list[str]:
                     for fld in fields:
                         if isinstance(fld, dict):
                             add(fld.get("name"))
+    return out
+
+
+# W2 — structured GraphQL operation surface (roots + fields + typed args), for building typed field/argument
+# queries + mutations. Bounds guard a hostile/huge introspection document (same discipline as the OpenAPI side).
+_GQL_MAX_OPS = 500
+_GQL_MAX_ARGS = 50
+_GQL_UNWRAP_DEPTH = 10                                    # NON_NULL/LIST type-ref nesting is shallow in practice
+
+
+class GraphQLArg(BaseModel):
+    """One argument of a GraphQL root field: its name and the UNWRAPPED named type (NON_NULL/LIST peeled
+    away) — e.g. ``String``/``Int``/``Boolean``/``ID``/``Float`` or an input-object type name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    type_name: str = ""
+    is_list: bool = False
+
+
+class GraphQLOperation(BaseModel):
+    """One fuzzable GraphQL root operation — a Query or Mutation field with its typed arguments. ``kind`` is
+    ``"query"`` or ``"mutation"`` (a mutation is state-changing, so its probe is destructive-confirm-gated)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: str
+    args: list[GraphQLArg] = Field(default_factory=list)
+
+
+def _gql_unwrap_type(tref: Any) -> "tuple[str, bool]":
+    """Unwrap a GraphQL introspection type-ref (peeling NON_NULL/LIST ``ofType`` wrappers) to ``(named_type,
+    saw_list)``. Bounded nesting; ``("", …)`` when unresolvable. Pure."""
+    node = tref
+    saw_list = False
+    for _ in range(_GQL_UNWRAP_DEPTH):
+        if not isinstance(node, dict):
+            return "", saw_list
+        name = node.get("name")
+        if isinstance(name, str) and name:
+            return name, saw_list
+        if node.get("kind") == "LIST":
+            saw_list = True
+        node = node.get("ofType")
+    return "", saw_list
+
+
+def parse_graphql_operations(introspection: dict | str) -> list[GraphQLOperation]:
+    """Lift a GraphQL introspection result into the structured, fuzzable root operations: for the Query and
+    Mutation ROOT types, each root field with its name, its arguments (name + unwrapped scalar/input type),
+    and whether it is a mutation. Root types are taken from the declared ``queryType``/``mutationType`` plus
+    the conventional ``Query``/``Mutation`` names. Meta (``__``) fields are skipped; bounded (``_GQL_MAX_OPS``
+    / ``_GQL_MAX_ARGS``) and deterministic. ``parse_graphql_schema`` stays the flat name list for its callers."""
+    schema = _as_obj(introspection)
+    if not isinstance(schema, dict):
+        return []
+    if isinstance(schema.get("data"), dict):
+        schema = schema["data"]
+    if isinstance(schema.get("__schema"), dict):
+        schema = schema["__schema"]
+    if not isinstance(schema, dict):
+        return []
+    # Root-type classification is the ONLY destruction-safety signal the dispatch layer has
+    # (a mutation is state-changing, so the wiring must withhold it from auto-fuzzing), and the
+    # introspection response is UNTRUSTED target output — so classify FAIL-CLOSED. A type is a
+    # MUTATION root under ANY signal (the declared mutationType, or the conventional name
+    # "Mutation"), and mutation WINS every conflict: a hostile schema that declares the
+    # mutation-bearing type as its queryType can never relabel a mutation root into a fuzzable
+    # query. A type is a QUERY root only when a query signal names it AND no mutation signal does.
+    query_names: set[str] = {"Query"}
+    mutation_names: set[str] = {"Mutation"}
+    for decl, bucket in (("queryType", query_names), ("mutationType", mutation_names)):
+        node = schema.get(decl)
+        name = node.get("name") if isinstance(node, dict) else None
+        if isinstance(name, str) and name:
+            bucket.add(name)
+    types = schema.get("types")
+    out: list[GraphQLOperation] = []
+    if not isinstance(types, list):
+        return out
+    for t in types:
+        if not isinstance(t, dict):
+            continue
+        tname = t.get("name")
+        kind: str | None = None
+        if isinstance(tname, str):
+            if tname in mutation_names:      # mutation wins (fail-closed toward state-changing)
+                kind = "mutation"
+            elif tname in query_names:
+                kind = "query"
+        if kind is None:
+            continue
+        fields = t.get("fields")
+        if not isinstance(fields, list):
+            continue
+        for fld in fields:
+            if not isinstance(fld, dict):
+                continue
+            fname = fld.get("name")
+            if not (isinstance(fname, str) and fname and not fname.startswith("__")):
+                continue
+            args: list[GraphQLArg] = []
+            fargs = fld.get("args")
+            if isinstance(fargs, list):
+                for a in fargs:
+                    if len(args) >= _GQL_MAX_ARGS:
+                        break
+                    if not isinstance(a, dict):
+                        continue
+                    an = a.get("name")
+                    if not (isinstance(an, str) and an):
+                        continue
+                    tn, is_list = _gql_unwrap_type(a.get("type"))
+                    args.append(GraphQLArg(name=an, type_name=tn, is_list=is_list))
+            out.append(GraphQLOperation(name=fname, kind=kind, args=args))
+            if len(out) >= _GQL_MAX_OPS:                 # hostile-introspection bound
+                return out
     return out
 
 

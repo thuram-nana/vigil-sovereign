@@ -1,0 +1,24 @@
+/* CVSS calculator layout — on the design tokens. */
+.cvss { display: grid; grid-template-columns: 1fr 320px; gap: var(--sp-5); align-items: start; }
+@media (max-width: 860px) { .cvss { grid-template-columns: 1fr; } }
+
+.cvss__metrics { display: grid; gap: var(--sp-4); }
+.cvss__group { border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-3) var(--sp-4);
+  margin: 0; }
+.cvss__group legend { font-size: var(--fs-micro); letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--text-2); padding: 0 var(--sp-2); }
+.cvss__opts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); }
+.cvss__opt { font: inherit; font-size: var(--fs-sm); padding: 7px 14px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--bg-2); color: var(--text-1); cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s; }
+.cvss__opt:hover { color: var(--text-0); border-color: var(--text-2); }
+.cvss__opt[aria-pressed="true"] { background: var(--primary-bg); color: var(--primary-fg);
+  border-color: var(--primary-bg); }
+
+.cvss__out { position: sticky; top: calc(var(--topbar-h) + var(--sp-4)); }
+.cvss__score { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.cvss__score .n { font-size: 52px; font-weight: 750; line-height: 1; letter-spacing: -.03em; }
+.cvss__vector .l { font-size: var(--fs-micro); letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--text-2); display: block; margin-bottom: 6px; }
+.cvss__vinput { width: 100%; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-0);
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--r-1); padding: 9px 10px; }

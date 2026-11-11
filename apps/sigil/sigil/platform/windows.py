@@ -2,11 +2,10 @@
 Additive; returns None when `mss` is unavailable."""
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ..perception.capture import Frame, _ocr
+from ..perception.capture import Frame, _ocr, private_capture_path
 from .base import CapabilityDescriptor, host_id, probe_always_on, probe_gpu_vlm
 
 
@@ -22,7 +21,7 @@ class WindowsBackend:
     def capture_screen(self) -> Optional[Frame]:
         try:
             import mss
-            out = tempfile.mktemp(suffix=".png", prefix="sigil-screen-")
+            out = private_capture_path("sigil-screen-", ".png")
             with mss.mss() as sct:
                 sct.shot(output=out)
             if Path(out).exists() and Path(out).stat().st_size > 0:

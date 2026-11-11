@@ -79,6 +79,10 @@ KNOWN_ADVISORY: dict[str, str] = {
         "security-scan.yml — CodeQL SAST reports on every PR but does not block a merge while the "
         "rulesets are still bedding in; a single false positive must not freeze the merge queue."
     ),
+    "CodeQL JavaScript (advisory)": (
+        "security-scan.yml — the JavaScript twin of the CodeQL Python job (CQ-1): same SAST, same reason it "
+        "does not block a merge while the rulesets bed in; a single false positive must not freeze the queue."
+    ),
     "SAST — semgrep + bandit (advisory)": (
         "security-scan.yml — semgrep+bandit over the curated ruleset; advisory, but its policy and a "
         "planted-fixture NEGATIVE CONTROL are pinned by docs/tests/test_security_scan_policy.py, which "

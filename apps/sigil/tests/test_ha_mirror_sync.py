@@ -26,12 +26,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# mirror-sync.sh shells out to `rsync`; without it the integration test cannot run (a missing system
+# dependency, not a code defect). Skip the whole module rather than false-fail when rsync is absent.
+pytestmark = pytest.mark.skipif(shutil.which("rsync") is None,
+                                reason="tools/ha/mirror-sync.sh requires rsync, which is not installed here")
 from vigil_integration.transparency import Witness
 
 from sigil.reuse import build_chain, digest_payload, generate_keypair

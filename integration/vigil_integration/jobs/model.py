@@ -23,6 +23,18 @@ _MAX_STR = 512                       # bound every untrusted string field (an ad
 # NB: the DOT is deliberately EXCLUDED so a slug can never contain ``..`` (path-safety on the stores that
 # key off it); every non-[a-z0-9_-] run collapses to ``-``.
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
+# A VERBATIM-safe single path component for an explicit engagement_slug override (e.g. the ``cust_<24hex>``
+# a customer launch already carries): lowercase alnum + ``_``/``-`` only, bounded. The dot is excluded, so a
+# value matching this can never contain ``..`` or a separator — it is safe to use directly as a store key.
+_SAFE_SLUG_RE = re.compile(r"^[a-z0-9_-]{1,80}$")
+
+
+def _is_safe_slug(slug: Any) -> bool:
+    """True iff ``slug`` is a single safe path component (``cust_<hash>`` / ``repo-...`` both qualify). An
+    override that is not — separators, ``..``, control chars, empty, overlong — is refused, so it can never
+    traverse a path; the caller then falls back to the repo-derived slug (fail-safe)."""
+    s = str(slug or "")
+    return bool(_SAFE_SLUG_RE.fullmatch(s)) and ".." not in s
 #: Sources that CARRY a delivery id (the provider stamps one): they MUST supply it — it is the exactly-once
 #: idempotency key, and silently dropping it degrades replay-protection to at-least-once.
 _DELIVERY_REQUIRED_SOURCES: frozenset[str] = frozenset({"webhook", "ci"})
@@ -80,6 +92,11 @@ class SecurityJob:
     pr_number: "int | None" = None
     profile: str = "default"
     policy_version: str = "v1"
+    #: An explicit engagement slug the job ALREADY knows (a customer launch carries its owner-signed
+    #: ``cust_<hash>`` here). When set + path-safe it IS :attr:`slug` verbatim, so the queue's scheduler slug
+    #: and per-slug run-lease key the job to that exact engagement (the one the authority + lease are keyed
+    #: by). Empty for a repo scan (W4), which keeps the repo-derived slug — byte-identical to before.
+    engagement_slug: str = ""
     extra: dict = field(default_factory=dict)
 
     # -- derived identities ----------------------------------------------------------------------------
@@ -104,7 +121,18 @@ class SecurityJob:
         readable stem is non-``[a-z0-9_-]``-collapsed-to-``-`` (the DOT is excluded, so no ``..``) and
         bounded, then a ``sha256`` suffix of the FULL canonical repo makes it COLLISION-RESISTANT — two
         distinct repos (or two tenants' repos) never share a slug, so they never share a verified authority
-        or a per-slug run-lease. ``repo/`` and ``repo`` canonicalize identically (the same repo, one slug)."""
+        or a per-slug run-lease. ``repo/`` and ``repo`` canonicalize identically (the same repo, one slug).
+
+        When :attr:`engagement_slug` is set (a customer launch job already knows its owner-signed
+        ``cust_<hash>`` engagement slug — the per-``(org, host)`` slug the ``EngagementAuthority`` + the
+        ``CreditLaunchLease`` are keyed by), it is returned VERBATIM after a path-safety validation, so the
+        queue scheduler slug AND the per-slug run-lease key are that EXACT engagement slug (never a
+        repo-derived mangle that would miss the authority/lease). An override that is not a single safe path
+        component is IGNORED and the repo-derived slug is used — fail-safe: a bad override can never traverse
+        a path, and a job run under the wrong slug simply finds no verified authority and is refused."""
+        override = str(self.engagement_slug or "").strip()
+        if override and _is_safe_slug(override):
+            return override
         canon = _canon_repo(self.repo)
         stem = _SLUG_RE.sub("-", canon).strip("-")[:40]
         suffix = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
@@ -118,6 +146,7 @@ class SecurityJob:
             "tenant_id": self.tenant_id, "source": self.source, "delivery_id": self.delivery_id,
             "repo": self.repo, "commit": self.commit, "pr_number": self.pr_number,
             "profile": self.profile, "policy_version": self.policy_version,
+            "engagement_slug": self.engagement_slug,
             "extra": dict(self.extra or {}),
         }
 
@@ -142,13 +171,15 @@ class SecurityJob:
             pr_number=pr,
             profile=_clip(p.get("profile") or "default", 64),
             policy_version=_clip(p.get("policy_version") or "v1", 64),
+            engagement_slug=_clip(p.get("engagement_slug"), 80),
             extra=dict(extra) if isinstance(extra, dict) else {},
         )
 
     @classmethod
     def normalize(cls, *, source: str, repo: str, delivery_id: str = "", commit: str = "",
                   pr_number: "int | None" = None, tenant_id: str = "", profile: str = "default",
-                  policy_version: str = "v1", extra: "dict | None" = None) -> "SecurityJob":
+                  policy_version: str = "v1", engagement_slug: str = "",
+                  extra: "dict | None" = None) -> "SecurityJob":
         """Build a validated job from an adapter's raw inputs — the single construction path every
         ``TriggerSource`` uses, so provenance is bounded + the source is one of the known six."""
         src = _clip(source, 32)
@@ -165,6 +196,7 @@ class SecurityJob:
             tenant_id=_clip(tenant_id, 64), source=src, delivery_id=_clip(delivery_id),
             repo=_clip(repo), commit=_clip(commit, 128), pr_number=pr,
             profile=_clip(profile or "default", 64), policy_version=_clip(policy_version or "v1", 64),
+            engagement_slug=_clip(engagement_slug, 80),
             extra=dict(extra) if isinstance(extra, dict) else {})
 
 

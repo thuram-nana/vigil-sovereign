@@ -30,10 +30,12 @@
 
 /* ----------------------------------------------------------------------------- tiny DOM helpers */
 var $ = function (s) { return document.querySelector(s); };
+// HTML-escape for BOTH text and quoted-attribute context: esc() output is also placed inside `data-seq="…"`,
+// where an unescaped `"` would end the attribute and let the rest of the value become markup (CodeQL
+// js/incomplete-html-attribute-sanitization). `"` and `'` are escaped so either quote style is safe.
+var ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 var esc = function (s) {
-  return String(s == null ? "" : s).replace(/[&<>]/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
-  });
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ESC_MAP[c]; });
 };
 var enc = new TextEncoder();
 function banner(kind, html) {

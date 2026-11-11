@@ -421,6 +421,34 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> dict:
         return json.loads(_read_capped(r).decode("utf-8"))
 
 
+def host_allowlisted_transport(allowlist):
+    """Return `(http_post, jwks_fetcher)` that REFUSE any URL whose host is not in `allowlist` (and any
+    non-https scheme) BEFORE making the real stdlib call. The customer-OIDC provisioner injects these so the
+    token-exchange + JWKS egress is pinned to the configured IdP hosts (Google's): a `token_endpoint` /
+    `jwks_uri` steered off the allowlist — by misconfiguration or a hostile override — cannot turn the
+    key-holding provisioner into an SSRF proxy against an internal address. Fail-closed (`OidcError`); the
+    host match is exact + case-insensitive. Tests inject their own transport and never exercise this."""
+    allow = frozenset(h.strip().lower() for h in (allowlist or ()) if h and str(h).strip())
+
+    def _guard(url: str) -> None:
+        parts = urllib.parse.urlparse(url)
+        if parts.scheme.lower() != "https":
+            raise OidcError(f"refusing a non-https customer-OIDC egress (scheme {parts.scheme!r})")
+        host = (parts.hostname or "").lower()
+        if host not in allow:
+            raise OidcError(f"refusing customer-OIDC egress to non-allowlisted host {host!r}")
+
+    def _post(url: str, form: dict) -> dict:
+        _guard(url)
+        return _http_post_form(url, form)
+
+    def _fetch(url: str) -> dict:
+        _guard(url)
+        return _http_get_json(url)
+
+    return _post, _fetch
+
+
 def exchange_code(config: OidcConfig, code: str, *, code_verifier: str, http_post=None) -> dict:
     """Exchange an authorization `code` for tokens at the token endpoint (client_secret_post auth). Returns
     the token response dict; raises OidcError unless it carries a non-empty string `id_token`. `http_post`

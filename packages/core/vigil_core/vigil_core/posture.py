@@ -42,6 +42,16 @@ _FALSY = frozenset({"0", "off", "false", "no", "disabled"})
 GOVERNED_ENV = "VIGIL_GOVERNED"
 _TRUTHY = frozenset({"1", "on", "true", "yes", "enabled"})
 
+# The K4 production-target CUSTOMER-EXECUTION flag. A paying customer's self-serve engagement against a LIVE
+# (real production) target it verified runs ONLY when this is TRUTHY; default (unset / any non-truthy) is
+# DISABLED, so the full K4 acceptance matrix (security / tenant-isolation / authz / billing / operational)
+# must pass before an owner deliberately flips it. Loopback + TWIN + expressly-authorized STAGING engagements
+# do NOT consult it (they are the mock-first / staging verification rungs). Deliberately DECOUPLED from
+# VIGIL_POSTURE: production there is about the OPERATOR deployment's egress/auth lockdown, whereas this is
+# about whether CUSTOMERS may drive the offense engine at a live third-party asset — two independent facts,
+# never conflated. Fail-closed: only an explicit truthy opt-in enables it.
+CUSTOMER_PROD_EXECUTION_ENV = "VIGIL_CUSTOMER_PROD_EXECUTION"
+
 
 def _env(env: "Optional[Mapping[str, str]]") -> "Mapping[str, str]":
     return os.environ if env is None else env
@@ -68,6 +78,15 @@ def is_governed_posture(env: "Optional[Mapping[str, str]]" = None) -> bool:
     authorized external engagement can still run. Default (unset) is False, so it never silently changes
     an existing deployment's behaviour."""
     return _env(env).get(GOVERNED_ENV, "").strip().lower() in _TRUTHY
+
+
+def customer_prod_execution_enabled(env: "Optional[Mapping[str, str]]" = None) -> bool:
+    """True IFF production-target CUSTOMER execution is EXPLICITLY enabled (truthy
+    ``VIGIL_CUSTOMER_PROD_EXECUTION``). Default (unset / any non-truthy) is DISABLED ⇒ ``False`` — the K4
+    customer-launch gate + worker REFUSE a ``LIVE`` customer-target arm while this is False (loopback / TWIN /
+    expressly-authorized STAGING engagements do NOT consult it and proceed). Fail-closed: only an explicit
+    truthy opt-in flips it, a deliberate gated owner act after the K4 acceptance matrix is green."""
+    return _env(env).get(CUSTOMER_PROD_EXECUTION_ENV, "").strip().lower() in _TRUTHY
 
 
 def legacy_owner_token_disabled(env: "Optional[Mapping[str, str]]" = None) -> bool:

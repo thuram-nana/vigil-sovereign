@@ -121,20 +121,27 @@ class SecurityJobQueue:
         durable scheduler insert raises, so a transient failure never permanently loses a job or wedges a
         fingerprint — the caller may safely retry the same job."""
         created: "list[Path]" = []
-        if job.delivery_id:
-            delivery_marker = self._delivery_dir / _safe_key(job.delivery_id)
-            if not self._claim_marker(delivery_marker):
-                return EnqueueResult(enqueued=False, reason="duplicate_delivery")
-            created.append(delivery_marker)
-        fingerprint_marker = self._fingerprint_dir / job.fingerprint
-        if not self._claim_marker(fingerprint_marker):
-            # The delivery marker (if any) is intentionally KEPT: this delivery has been decided — coalesced
-            # into the in-flight same-work run — so a later replay of it must stay a no-op, not spawn a dup.
-            return EnqueueResult(enqueued=False, reason="duplicate_fingerprint")
-        created.append(fingerprint_marker)
+        # The marker CLAIMS are inside the rollback-guarded region too (K4-5 red-pen fold, LOW): if the
+        # fingerprint claim (or the scheduler insert) raises a NON-FileExistsError OSError (a disk error)
+        # AFTER the delivery marker was created, that delivery marker must be rolled back — else it is orphaned
+        # and a later retry of the same delivery coalesces as duplicate_delivery and NEVER re-enqueues (a lost
+        # job, breaking launch_drain's deferred-retry invariant). A duplicate `return` (a claim that cleanly
+        # reports 'already present') exits WITHOUT rollback, so the intentional keep-the-delivery-marker on
+        # duplicate_fingerprint is preserved.
         try:
+            if job.delivery_id:
+                delivery_marker = self._delivery_dir / _safe_key(job.delivery_id)
+                if not self._claim_marker(delivery_marker):
+                    return EnqueueResult(enqueued=False, reason="duplicate_delivery")
+                created.append(delivery_marker)
+            fingerprint_marker = self._fingerprint_dir / job.fingerprint
+            if not self._claim_marker(fingerprint_marker):
+                # The delivery marker (if any) is intentionally KEPT: this delivery has been decided — coalesced
+                # into the in-flight same-work run — so a later replay of it must stay a no-op, not spawn a dup.
+                return EnqueueResult(enqueued=False, reason="duplicate_fingerprint")
+            created.append(fingerprint_marker)
             ej = self._sched.enqueue(job.slug, params=job.to_params())
-        except Exception:                        # noqa: BLE001 — any insert failure must leave NO orphaned marker
+        except Exception:                        # noqa: BLE001 — ANY failure after a claim leaves NO orphaned marker
             self._rollback(created)
             raise
         return EnqueueResult(enqueued=True, reason="enqueued", job_id=ej.job_id, seq=ej.seq)

@@ -340,6 +340,7 @@ temp/
 framework/v2/.memory/
 framework/v2/.dryrun/
 framework/v2/.blackboard/
+framework/v2/.cache/
 framework/v2/.evidence-keys/
 # ^ W16-8 crypto-shred DEK keystore: per-engagement data-encryption keys held OUTSIDE
 #   the append-only spine so erasure can destroy them. NEVER commit these.

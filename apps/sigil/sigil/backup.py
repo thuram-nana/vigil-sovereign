@@ -91,7 +91,11 @@ _SECRETS_KV_CONTEXT = b"sigil/secrets.kv"
 # security.manifest.json were already covered; W7-2 adds the HA witness roster (the failover guard depends on
 # it), the governor budget caps, and the persisted env file. ``sigil.env`` can hold a signing secret (e.g.
 # VIGIL_DESTRUCTION_OWNER_KEY) so it is 0600 on restore (see :func:`_is_sensitive_rel`).
-_CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "budgets.json", "sigil.env")
+_CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "budgets.json", "sigil.env",
+                 # #70: the per-unit EnvironmentFiles the shipped sovereign systemd units read from SIGIL_HOME
+                 # (apps/sigil/deploy/systemd) — operator config a FUNCTIONAL recovery needs; may hold secrets,
+                 # so restored 0600 (see _is_sensitive_rel).
+                 "bridge.env", "cockpit.env", "customer.env", "public.env")
 # Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
 # the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
 # recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
@@ -113,6 +117,10 @@ CAPTURED_TOP_LEVEL = frozenset({
     "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
+    "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
+    "cockpit.env",
+    "customer.env",
+    "public.env",
 })
 # Deliberate exclusions, each with a reason the structural test surfaces. Keeping the REASONS in code is what
 # makes this a *documented* exclusion list (acceptance criterion), not a silent skip.
@@ -131,6 +139,38 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "inbox.json": "ENVOY in-flight message queue — operational scratch, not recovery state",
     "actor": "in-flight browser-actor step journals — operational scratch, off the trust root",
     "operator": "in-flight operator plan/journal pre-images — operational scratch, off the trust root",
+    "customer": "ephemeral customer-edge operational markers (cookie sessions + single-use email "
+                "verify/recover tokens + login/signup/member rate-limit lockouts) — the AUTHORITATIVE "
+                "customer accounts/orgs/memberships/wallet are owner-signed on the spine (captured); these "
+                "regenerate (re-login / re-request / limits reset), never recovery state",
+    "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
+           "public data, no trust or memory state",
+    "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
+            "envs/build_envs.sh) — code + third-party packages, no trust or memory state",
+    "checkpoint.witnessed.json": "the witnessed-checkpoint OUTPUT `sigil-checkpoint` re-emits every cadence "
+                                 "from the (captured) spine; the authoritative copies are the witnesses' — "
+                                 "re-derived, never recovery state",
+    "vigil-tool-state.tsv": "the offense tool install-state table bootstrap re-derives (`--state-path`) — "
+                            "installer bookkeeping, no trust or memory state",
+    "fold_cache_audit.json": "the cockpit's last fold-cache rebuild-and-compare report (Front C S0d) — a "
+                             "re-derived verdict over the (captured) spine, rewritten every audit interval; "
+                             "no trust or memory state",
+    # #70 — the two SaaS money/delivery dirs the shipped units default under SIGIL_HOME. Both DELIBERATELY
+    # excluded from THIS (sovereign) leg; the decision is recorded here so the coverage gate stays honest.
+    "credit-lease": "the CROSS-PLANE launch seam = the shared VIGIL_BASE_DIR both planes agree on (leases, "
+                    "settlement + pause markers, AND the offense engine's own keys / floor / job queue). It is "
+                    "the OFFENSE leg's to capture (`vigil backup --base-dir` = that dir); the sovereign process "
+                    "must never package it (FATAL-2: it would carry offense private keys), and two legs "
+                    "restoring the same tree from different instants would clobber newer settlement markers",
+    "billing-spool": "the money-IN billing-webhook spool at the GO-LIVE runbook path ($SIGIL_HOME/billing-spool, "
+                     "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
+                     "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "
+                     "reconcilable from the processor)",
+    "spool": "settle / finding / billing spools of PENDING signals. A capture that is not point-in-time "
+             "consistent with the spine can tear exactly-once (a settle landing between the spine read and the "
+             "spool read => a lost refund; the reverse => a double grant). Losing pending signals fails SAFE: "
+             "credits stay HELD (recover via `ops-sweep reservations`) and payments are re-deliverable / "
+             "reconcilable from the processor — a consistent money-state capture is a tracked design item",
 }
 EXCLUDED_TOP_LEVEL = frozenset(_EXCLUSION_REASONS)
 
@@ -177,7 +217,10 @@ def _is_sensitive_rel(rel: str) -> bool:
     and ANY packaged ``*.key`` file, PLUS ``sigil.env`` (the persisted config / legacy secret tier, which can
     hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY). The whole backup body is AEAD-sealed at rest
     regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
-    return rel.endswith(".key") or rel == "sigil.env"
+    if rel.endswith(".key") or rel == "sigil.env":
+        return True
+    # #70: the unit EnvironmentFiles (may hold secrets) are owner-only on restore too.
+    return "/" not in rel and rel.endswith(".env")
 
 
 def _spine_files(home: Path) -> list[tuple[Path, str]]:

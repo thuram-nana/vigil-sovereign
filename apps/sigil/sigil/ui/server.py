@@ -38,12 +38,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from vigil_core.hopauth import body_binding, verify_hop_assertion
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
 
 from ..bridge.daemon import bind_ok
-from ..config import SPINE_PATH, oidc_enabled
+from ..config import SPINE_PATH, margin_dashboard_enabled, oidc_enabled
 from ..reuse import verify_one
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
@@ -84,7 +85,8 @@ class UIServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
-                 extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None):
+                 extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None,
+                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -122,6 +124,11 @@ class UIServer(ThreadingHTTPServer):
         # enabled AND a callback is actually processed). Never touched when OIDC is off.
         self.oidc_http_post = oidc_http_post           # (url, form) -> dict  (token exchange)
         self.oidc_jwks_fetcher = oidc_jwks_fetcher     # (url) -> dict        (JWKS fetch)
+        # E2b — the SAME injectable hooks for the CUSTOMER Google-OIDC provider the provisioner builds per
+        # request (`_provision_post` -> build_provisioner). Both None (production) ⇒ the host-allowlisted
+        # egress; a test injects both (a fake IdP) so the edge OIDC round-trip never touches the network.
+        self.customer_oidc_http_post = customer_oidc_http_post
+        self.customer_oidc_jwks_fetcher = customer_oidc_jwks_fetcher
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -437,6 +444,93 @@ class Handler(BaseHTTPRequestHandler):
             if not role_can(principal.role, "manage_users"):
                 return self._deny(403, "owner only")
             return self._accounts()
+        if path == "/api/billing/overview":
+            # SaaS billing overview for ONE org (credits / wallet / subscription), tenant-scoped. Authorized via
+            # the Slice-A COMPOSED gate: the global owner/operator reads any tenant (keyholder never locked out),
+            # a per-org member reads ONLY an org they hold `view_billing` in, everyone else 403. A read-only
+            # projection — no mint path, no secret. (billing != testing: this surfaces money, never an authority.)
+            from . import billing as _billing
+            from ..governor.orgs import OrgRegistry
+            org = _billing.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_billing"):
+                return self._deny(403, "not authorized for this org's billing")
+            import time as _t
+            return self._json(_billing.billing_overview(store, org, now=_t.time()))
+        if path == "/api/billing/invoices":
+            # SaaS billing HISTORY (invoices) for ONE org, tenant-scoped (Slice H). SAME COMPOSED gate as the
+            # overview: the global owner/operator reads any tenant (keyholder never locked out), a per-org member
+            # reads ONLY an org they hold `view_invoices` in, everyone else 403. A read-only projection — no mint,
+            # no secret. THE IDOR class (the competitor's cross-tenant invoice read), defended by the admit gate
+            # resolving the authority for the requested org + the org-scoped fold (a line for another tenant is
+            # structurally never returned). billing != testing: this surfaces money history, never an authority.
+            from . import billing as _billing
+            from ..governor.orgs import OrgRegistry
+            org = _billing.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_invoices"):
+                return self._deny(403, "not authorized for this org's invoices")
+            return self._json(_billing.billing_invoices(store, org))
+        if path in ("/api/assessments", "/api/assessments/findings"):
+            # SaaS tenant-scoped ASSESSMENT RESULTS for ONE org (Slice K6): the oracle-confirmed findings the
+            # org's authorized assessments landed on the spine. SAME composed gate as billing but on
+            # `view_assessments` (operator-tier, NOT org_admin — assessment output is testing-domain, so a
+            # billing tenant-admin does not auto-see security findings). THE IDOR class: the org's engagement-
+            # slug set is derived SERVER-SIDE from its OWN ownership proofs, so a finding for another tenant is
+            # structurally never returned. Read-only; no mint, no secret, no offense import.
+            from . import assessments as _assess
+            from ..governor.orgs import OrgRegistry
+            org = _assess.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_assessments"):
+                return self._deny(403, "not authorized for this org's assessments")
+            import time as _t
+            if path == "/api/assessments":
+                return self._json(_assess.assessment_summary(store, org, now=_t.time()))
+            return self._json(_assess.assessment_findings(store, org, now=_t.time()))
+        if path == "/api/billing/orgs":
+            # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
+            # tenant is a global-owner action, distinct from the per-org overview above.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_org"):
+                return self._deny(403, "owner only")
+            from . import billing as _billing
+            return self._json({"orgs": _billing.org_list(self.server.store())})
+        if path == "/api/billing/margin" and margin_dashboard_enabled():
+            # EC-6 — the OPERATOR margin reconciliation (billed revenue vs EC-4 actual token cost -> margin per
+            # tenant + per period). OWNER-tier (`manage_billing`) — this is the operator's OWN cross-tenant
+            # cost/margin view, NOT a customer surface. The gate checks the caller's GLOBAL ACCOUNT role
+            # (`principal.role` from AccountsRegistry: viewer/analyst/operator/owner), where `manage_billing` is
+            # OWNER-ONLY — it does NOT consult a per-org membership role via admit(). (The per-org `org_admin`
+            # role DOES carry `manage_billing` in the RBAC table, but that is never a global `principal.role` on
+            # this operator route, and a customer has no global account role at all -> role_can is False.)
+            # Mirrors the `/api/billing/orgs` owner-only gate. A pure READ projection — mints nothing, surfaces
+            # no secret, and marks cost/margin 'not configured' (never fabricates a number) until the owner
+            # ratifies the catalog cost rate. Behind VIGIL_MARGIN_DASHBOARD_ENABLED (default OFF ⇒ this path
+            # falls through to the 404 exactly as an unknown route).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_billing"):
+                return self._deny(403, "owner only")
+            from . import margin as _margin
+            return self._json(_margin.margin_overview(self.server.store()))
+        if path == "/api/billing/plans":
+            # The owner-controlled PRICE->ENTITLEMENT catalog, projected for display (the pricing list). Any
+            # authenticated principal may read it (viewer+); it is global, carries NO tenant data and NO secret
+            # (the customer app serves a public pricing page from the same catalog). Not tenant-scoped.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "read"):
+                return self._deny(403, "forbidden")
+            from ..governor import catalog as _catalog
+            return self._json({"plans": _catalog.plans()})
         if path == "/api/ask":
             # /api/ask DISPATCHES a KERNEL subprocess → it gets the FULL action gate, not just token.
             return self._ask(self._query().get("q", [""])[0]) if self._action_ok() else self._deny(403, "denied")
@@ -1238,6 +1332,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._ceremonies_post(path)
         if path.startswith("/api/hostcmd/"):
             return self._hostcmd_post(path)
+        if path.startswith("/api/provision/"):
+            # Slice E1 — the keyless `custui` edge's ONLY door to the owner-signed customer provisioner,
+            # gated SOLELY by the edge→provisioner hop key (NOT operator RBAC, NOT browser Origin/CSRF).
+            return self._provision_post(path)
         if path != "/api/action":
             return self._deny(404, "not found")
         # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
@@ -1264,6 +1362,203 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, f"bad request: {e}")
         except Exception as e:  # noqa: BLE001 — ApprovalError etc. → 400, never 500-leak internals
             self._deny(400, f"action failed: {str(e)[:200]}")
+
+    def _provision_post(self, path: str):
+        """Slice E1 — the ONLY HTTP entry to the owner-signed customer provisioner. Gated SOLELY by the
+        edge→provisioner hop key (`VIGIL_PROVISION_HOP_KEY`), NEVER by operator RBAC or browser Origin/CSRF:
+        the keyless `custui` edge authenticates the customer session itself, then stamps a
+        `vigil_core.hopauth` assertion over (principal=authenticated-requester, role=action, POST, path, ts).
+        The sovereign side therefore trusts the requester CRYPTOGRAPHICALLY (Finding D — the requester is
+        HMAC-bound by the edge's hop key, never a free body field a caller could spoof).
+
+        FAIL-CLOSED at every branch: an unset/blank hop key (nothing to verify with), a stale/forged/
+        incomplete assertion, or an authenticated OPERATOR token WITHOUT a valid hop assertion all 403 — so
+        this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
+        proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
+        from .. import config as _config
+        from .provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited,
+                                ProvisionStepUpRequired, build_provisioner)
+        action = path[len("/api/provision/"):]
+        principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
+        ts = self.headers.get("X-VIGIL-Provision-Ts", "") or ""
+        sig = self.headers.get("X-VIGIL-Provision-Sig", "") or ""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            raw = self.rfile.read(length) if length else b""
+        except (ValueError, OSError) as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        # NH-1: bind the EXACT request body into the hop assertion (role == "<action>:<body_binding(raw)>"). The
+        # edge stamps over the bytes it sends; the cockpit recomputes over the bytes it received. So a
+        # captured assertion cannot be replayed within the freshness window with a SWAPPED body (different
+        # member_username/role/org) to mint an attacker-chosen owner-signed grant — the hash, role, and MAC
+        # all change. principal/method/path/ts stay bound as before; an empty/blank key ⇒ verify ⇒ 403, so
+        # the surface is unreachable to anyone but the hop-key-holding edge (never operator RBAC / CSRF).
+        # The binding is a KEYED, SLOW password-grade KDF (vigil_core.hopauth.body_binding) — the body can carry a
+        # password, and a password never touches a fast hash. A blank key binds nothing ⇒ verify refuses (403).
+        hop_key = _config.provision_hop_key()
+        bound_role = f"{action}:{body_binding(hop_key, raw)}" if hop_key else ""
+        if not verify_hop_assertion(hop_key, principal, bound_role, "POST", path, ts, sig):
+            return self._deny(403, "provision denied (hop)")
+        try:
+            body = json.loads(raw or b"{}")
+            if not isinstance(body, dict):
+                return self._deny(400, "bad request: body must be an object")
+        except ValueError as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens(),
+                              customer_oidc_http_post=self.server.customer_oidc_http_post,
+                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher)
+        try:
+            result = self._provision_dispatch(p, action, principal, body)
+        except ProvisionRateLimited as e:
+            return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
+        except ProvisionStepUpRequired as e:
+            # E3c — a fresh second factor is required; the SPA prompts for one and retries. 401 + a flag so the
+            # edge/SPA can distinguish this from an authority denial (403).
+            return self._json({"error": str(e)[:200], "step_up_required": True}, 401)
+        except ProvisionDenied as e:
+            return self._deny(403, f"denied: {str(e)[:200]}")
+        except ProvisionError as e:
+            return self._deny(400, f"provision failed: {str(e)[:200]}")
+        except (ValueError, KeyError) as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception:  # noqa: BLE001 — P3: a store/audit fault (Finding B's re-raise) → clean 5xx, never
+            return self._deny(500, "provision failed")   # a ThreadingHTTPServer handler crash (mirrors /api/action)
+        if result is None:
+            return self._deny(404, "unknown provision action")
+        return self._json(result)
+
+    def _provision_dispatch(self, p, action: str, requester: str, body: dict):
+        """Map a hop-verified provision action to its Provisioner method, over a CLOSED exact-match set
+        (unknown → None → 404). The REQUESTER for member management is the HMAC-bound hop principal — NEVER
+        a body field — so Finding D holds at the transport: a caller cannot name another admin's username to
+        borrow authority. The public actions (signup/login/recover) take no requester (the hop key alone
+        gates them; they are the unauthenticated bootstrap of a customer identity, rate-limited in-service)."""
+        ip = str(body.get("ip", ""))
+        if action == "signup_request":
+            return p.request_signup(str(body.get("email", "")), ip=ip)
+        if action == "signup_confirm":
+            return p.confirm_signup(str(body.get("token", "")), password=str(body.get("password", "")),
+                                    org_name=str(body.get("org_name", "")), ip=ip)
+        if action == "login":
+            return p.login(str(body.get("email", "")), str(body.get("password", "")), ip=ip)
+        if action == "recover_request":
+            return p.request_recover(str(body.get("email", "")), ip=ip)
+        if action == "recover_confirm":
+            return p.confirm_recover(str(body.get("token", "")), new_password=str(body.get("new_password", "")))
+        # E2b — Google-OIDC login finish: the secret-bearing token exchange + verify + auto-provision /
+        # anti-takeover, then {username, orgs}. A public bootstrap (no requester — the hop key alone gates it,
+        # like login/signup); the edge already verified the single-use state + sid-cookie browser binding.
+        if action == "oidc_finish":
+            return p.oidc_finish(code=str(body.get("code", "")), code_verifier=str(body.get("code_verifier", "")),
+                                 nonce=str(body.get("nonce", "")), ip=ip)
+        # E3b — customer MFA (TOTP). requester is the HMAC-bound hop principal (the session username), NEVER
+        # a body field: a customer enrolls/verifies MFA for THEIR OWN account only (account-level, not org).
+        if action == "mfa_enroll_totp":
+            return p.enroll_totp(requester, ip=ip)
+        if action == "mfa_verify":
+            return p.verify_mfa(requester, code=str(body.get("code", "")))
+        # E3b-2 — customer passkey (WebAuthn). enroll binds to the SESSION requester (account-level);
+        # login is a public bootstrap (no requester — the credential_id resolves the customer), like
+        # oidc_finish. The registration/assertion material rides the body (b64url strings + the int cose_alg).
+        if action == "passkey_enroll":
+            return p.enroll_passkey(requester, credential_id=str(body.get("credential_id", "")),
+                                    public_key_spki_b64=str(body.get("public_key_spki_b64", "")),
+                                    cose_alg=body.get("cose_alg"), uv=bool(body.get("uv")),
+                                    client_data_json=str(body.get("client_data_json", "")),
+                                    expected_challenge=str(body.get("challenge", "")))
+        if action == "passkey_login":
+            return p.passkey_login(credential_id=str(body.get("credential_id", "")),
+                                   authenticator_data=str(body.get("authenticator_data", "")),
+                                   client_data_json=str(body.get("client_data_json", "")),
+                                   signature=str(body.get("signature", "")),
+                                   expected_challenge=str(body.get("challenge", "")), ip=ip)
+        if action == "member_grant":
+            return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
+                                  str(body.get("role", "")), ip=ip, mfa_at=body.get("mfa_at"))
+        if action == "member_revoke":
+            return p.revoke_member(requester, str(body.get("org_id", "")),
+                                   str(body.get("member_username", "")), ip=ip, mfa_at=body.get("mfa_at"))
+        # Slice G0 — asset-ownership target registration. requester is the HMAC-bound hop principal (Finding
+        # D); org_id comes from the edge's SERVER-side session (never a free body field a customer chose);
+        # host/method are the customer's requested target. Gated in-service on admit_customer(run_engagement).
+        if action == "target_challenge":
+            return p.target_challenge(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+        if action == "target_verify":
+            return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                   str(body.get("method", "")), authorized=bool(body.get("authorized")),
+                                   ip=ip, mfa_at=body.get("mfa_at"))
+        # Slice G — offense-launch credit reservation. requester is the hop principal; org from the edge
+        # session; host (reserve) / lease (cancel) from the body. units are server-decided: EC-7b maps the
+        # optional product_id (a catalog identifier, NOT an amount) to the owner catalog's units, else default.
+        if action == "launch_reserve":
+            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                    product_id=str(body.get("product_id", "")), ip=ip,
+                                    mfa_at=body.get("mfa_at"))
+        if action == "launch_cancel":
+            return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                   mfa_at=body.get("mfa_at"))
+        if action == "launch_start":
+            return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                  mfa_at=body.get("mfa_at"))
+        # pause/resume PR-4b — reversible customer pause/resume of their own launch. Absent (unknown action ->
+        # 404) unless the flag is ON; requester is the hop principal, org from the edge SESSION, the signed lease
+        # from the body (sovereign re-verifies it owner-pinned + tenant-binds to the session org).
+        if action in ("launch_pause", "launch_resume"):
+            from .. import config as _config
+            if not _config.customer_pause_resume_enabled():
+                return None
+            if action == "launch_pause":
+                return p.launch_pause(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                      mfa_at=body.get("mfa_at"))
+            return p.launch_resume(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
+                                   mfa_at=body.get("mfa_at"))
+        # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
+        # requester is the hop principal, org from the edge SESSION (never a free body field).
+        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
+            from .. import config as _config
+            if not _config.customer_monitoring_enabled():
+                return None
+            if action == "monitor_authorize":
+                return p.monitor_authorize(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                           mode=str(body.get("mode", "observe")), window_s=body.get("window_s"),
+                                           ip=ip, mfa_at=body.get("mfa_at"))
+            if action == "monitor_revoke":
+                return p.monitor_revoke(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+            if action == "monitor_events":
+                return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
+            return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
+        # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
+        if action == "billing_checkout":
+            from .. import config as _config
+            if not _config.customer_checkout_enabled():
+                return None
+            return p.billing_checkout(requester, str(body.get("org_id", "")), str(body.get("price_id", "")),
+                                      ip=ip, mfa_at=body.get("mfa_at"))
+        # Front B CHK-2 — what the session org can buy (the billing page's buy buttons). Same flag + gate as
+        # checkout; absent (unknown action -> 404) while the flag is OFF.
+        if action == "billing_offers":
+            from .. import config as _config
+            if not _config.customer_checkout_enabled():
+                return None
+            return p.customer_billing_offers(requester, str(body.get("org_id", "")), ip=ip)
+        # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
+        if action == "billing_overview":
+            return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "billing_invoices":
+            return p.customer_invoices(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assessment_summary":
+            return p.customer_assessments(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assessment_findings":
+            return p.customer_assessment_findings(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "assets_overview":
+            return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "notifications":
+            return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        return None
 
     def _durability_post(self, path):
         """Wave 3 (durability) — OWNER-ONLY trust-root backup/restore, orchestrated in-process. The operator's
@@ -1470,16 +1765,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
                  allowed_hosts=(), allowed_origins=(), oidc_http_post=None,
-                 oidc_jwks_fetcher=None) -> UIServer:
+                 oidc_jwks_fetcher=None, customer_oidc_http_post=None,
+                 customer_oidc_jwks_fetcher=None) -> UIServer:
     """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
     ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
     ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist.
     ``oidc_http_post``/``oidc_jwks_fetcher`` are OPTIONAL injection hooks (default None → real urllib
-    egress) so a test can drive the OIDC callback against an in-process mock IdP with no network."""
+    egress) so a test can drive the OIDC callback against an in-process mock IdP with no network.
+    ``customer_oidc_http_post``/``customer_oidc_jwks_fetcher`` are the SAME hooks for the customer
+    Google-OIDC provider the provisioner builds per request (E2b — default None ⇒ the host-allowlisted egress)."""
     return UIServer((host, port), Handler, token=token,
                     spine_path=Path(spine_path) if spine_path else SPINE_PATH,
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,
-                    oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher)
+                    oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher,
+                    customer_oidc_http_post=customer_oidc_http_post,
+                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher)
 
 
 def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
@@ -1499,6 +1799,11 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
     if extras:
         print(f"  (reverse-proxy Host allowlist: {extras})")
+    # Front C S0d: with VIGIL_FOLD_CACHE_ENABLED, warm every verified fold cache in the background (off the
+    # request path) and re-audit them periodically against the spine. A no-op with the cache off.
+    from ..governor import fold_warm
+    if fold_warm.start_background(srv.store, name="cockpit") is not None:
+        print("  (fold cache: warming in the background; periodic audit → `vigil doctor`)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

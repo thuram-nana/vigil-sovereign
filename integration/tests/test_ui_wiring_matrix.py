@@ -109,6 +109,11 @@ INTENTIONALLY_HEADLESS = {
     (P_SOV, "/api/record/"): "programmatic per-record spine fetch /api/record/<seq> (documented no-UI)",
     # proxy plane-local owner edge: revoke an authenticated edge by hand; CLI/owner-only, never a button.
     (P_PLANE, "/__vigil/plane/auth/purge"): "owner edge-revoke, CLI/hand only (no UI by design)",
+    # Slice E1 — the customer PROVISIONER backend (closed dispatch, unknown action -> 404). It has NO
+    # operator-cockpit button BY DESIGN: it is reached only by the keyless `custui` customer edge over the
+    # loopback hop (VIGIL_PROVISION_HOP_KEY); the CUSTOMER drives signup/login/member-mgmt from the custui
+    # plane's own (future) SPA, never from app.js. Edge-only, hop-gated — no app.js affordance by design.
+    (P_SOV, "/api/provision/"): "customer provisioner backend — keyless custui edge + hop only (no app.js UI)",
 }
 
 # Whole planes that are headless by design (every route on them is exempt).
@@ -133,7 +138,15 @@ INTENTIONALLY_HEADLESS_VERBS = {
 # These are NOT headless: they are treated as UI-driven (post-merge). Tracked separately so the ledger
 # never mislabels an in-flight wiring as "intentionally no button".
 # ==================================================================================================
-PENDING_UI_WIRING = {}
+PENDING_UI_WIRING = {
+    # (empty) — the Slice-B/H/K6 billing + assessment read projections that were parked here are now GENUINELY
+    # wired by the Slice-J1 operator cockpit screens in packages/vigil-ui/app.js (renderBilling + loadBilling*
+    # call /api/billing/{plans,orgs,overview,invoices}; renderTenantAssess + loadTassess* call /api/assessments
+    # and /api/assessments/findings), so extract_ui_calls now detects them and route_status reports them
+    # ui-driven on their own callers — no longer "pending". Future in-flight wirings go here, then move out
+    # once their app.js caller lands, so the ledger never labels a wired route "pending" or an unwired one
+    # "intentionally no button".
+}
 PENDING_UI_WIRING_VERBS = {}
 
 

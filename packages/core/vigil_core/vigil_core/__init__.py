@@ -42,9 +42,29 @@ from .highwater import (
     read_highwater_dict, strict_highwater_enabled, verify_highwater_signature,
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
+from .credit_lease import (
+    ENVELOPE_TOKENS_PER_CREDIT,
+    CreditLaunchLease, SignedCreditLaunchLease, credit_lease_signing_bytes,
+    sign_credit_launch_lease, verify_credit_launch_lease,
+)
+from . import run_budget
+from .run_budget import RunBudgetExceeded
+from . import run_tier
 from .authority import (
     EngagementAuthority, SignedAuthority, TargetEnvironment, authority_signing_bytes,
     sign_engagement_authority, verify_engagement_authority,
+)
+from .monitoring_authority import (
+    MonitoringAuthority, MonitoringMode, SignedMonitoringAuthority, monitoring_authority_signing_bytes,
+    sign_monitoring_authority, verify_monitoring_authority,
+)
+from .engagement_completion import (
+    EngagementCompletion, EngagementOutcome, SignedEngagementCompletion,
+    engagement_completion_signing_bytes, sign_engagement_completion, verify_engagement_completion,
+)
+from .target_credentials import (
+    CredentialHeader, CredentialRole, SignedTargetCredentials, TargetCredentials, AccountCredential,
+    sign_target_credentials, target_credentials_signing_bytes, verify_target_credentials,
 )
 from .signed_build_manifest import (
     ALL_STATES as BUILD_INTEGRITY_STATES,
@@ -88,6 +108,17 @@ __all__ = [
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "EngagementAuthority", "SignedAuthority", "TargetEnvironment", "authority_signing_bytes",
     "sign_engagement_authority", "verify_engagement_authority",
+    "MonitoringAuthority", "MonitoringMode", "SignedMonitoringAuthority", "monitoring_authority_signing_bytes",
+    "sign_monitoring_authority", "verify_monitoring_authority",
+    "EngagementCompletion", "EngagementOutcome", "SignedEngagementCompletion",
+    "engagement_completion_signing_bytes", "sign_engagement_completion", "verify_engagement_completion",
+    "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",
+    "AccountCredential", "sign_target_credentials", "target_credentials_signing_bytes",
+    "verify_target_credentials",
+    "ENVELOPE_TOKENS_PER_CREDIT",
+    "CreditLaunchLease", "SignedCreditLaunchLease", "credit_lease_signing_bytes",
+    "sign_credit_launch_lease", "verify_credit_launch_lease",
+    "run_budget", "RunBudgetExceeded", "run_tier",
     "BUILD_INTEGRITY_STATES", "BUILD_MANIFEST_DOMAIN", "BUILD_MANIFEST_SCHEMA", "BuildArtifact",
     "BuildIntegrityResult", "BuildIntegrityState", "BuildManifestError", "BUILD_MANIFEST_FILENAME",
     "SignedBuildManifest", "BUILD_TRUST_ROOT_FILENAME", "build_manifest_from_specs",

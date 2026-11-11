@@ -190,6 +190,19 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.ready",
+      "name": "vigil ready",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "ready",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_ready"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
       "id": "cli.dossier",
       "name": "vigil dossier",
       "surface": "cli-native",
@@ -1376,6 +1389,56 @@
       },
       "check": "symbol-exists",
       "rationale": "Default-off: no grant published => the keyless offense verifier injects no acks => every authority-gate veto enforces byte-identically. When the owner+distinct-evaluator two-party ceremony arms a grant (sigil eval-grant arm, or the owner-only Settings ceremony), it pre-authorizes lifting ONLY the closed-enum opt-in vetoes (witness_quorum/blast_veto/containment_preview) for one engagement/target; the never-liftable floors (egress, m-of-n destruction quorum, GET-only write baseline) are structurally separate conjuncts the grant cannot feed. Sovereign signs; offense verifies keyless from the sealed seam; revoke/offense-gate-close/attestation-revoke void it."
+    },
+    {
+      "id": "cli.ci-scan",
+      "name": "vigil ci-scan",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "ci-scan",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_ci_scan"
+      },
+      "check": "cli-native-verb",
+      "rationale": "W4 GitHub-Action runner: normalizes a CI run into one SecurityJob(source=\"ci\"), enqueues it, and drains it through the one authorized runner (a repo with no verified EngagementAuthority is refused, not scanned). Native verb dispatched in-process; parser registered and _cmd_ci_scan resolves."
+    },
+    {
+      "id": "cli.launch-drain",
+      "name": "vigil launch-drain",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "launch-drain",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_launch_drain"
+      },
+      "check": "cli-native-verb",
+      "rationale": "K4-5c customer credit-launch-lease seam poller (sibling of webhook-drain): enqueues one SecurityJob per currently-valid published owner-signed lease after the keyless verify_customer_launch_lease(consume=False) pre-check; enqueue-only, never executes here (the authorized runner is the sole executor). Native verb dispatched in-process; parser registered and _cmd_launch_drain resolves."
+    },
+    {
+      "id": "ui.billing",
+      "name": "UI screen — Billing Admin",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "billing",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen (owner plane, manage_org): a real NAV entry AND a route() destination (renderBilling) in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.tenantassess",
+      "name": "UI screen — Tenant Assessments",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "tenantassess",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen (owner plane, manage_org): a real NAV entry AND a route() destination (renderTenantAssess) in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the set from app.js and requires the registry to match it exactly."
     }
   ]
 }

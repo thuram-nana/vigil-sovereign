@@ -137,6 +137,8 @@
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, perm: "config_nonsecret", ready: true },
       { id: "users", label: "Users & Roles", icon: "key", owner: true, perm: "manage_users", ready: true },
+      { id: "billing", label: "Billing Admin", icon: "book", owner: true, perm: "manage_org", ready: true },
+      { id: "tenantassess", label: "Tenant Assessments", icon: "find", owner: true, perm: "manage_org", ready: true },
       { id: "governance", label: "Governance", icon: "shield", ready: true },
     ]},
     { group: "LEARN", items: [
@@ -2168,11 +2170,18 @@
   // P2 — New Assessment wizard + Live run view
   // ==========================================================================
 
+  // The hash query is user-controlled, so it never names a property: only the keys this app actually reads
+  // (HASH_KEYS) are kept, each written under OUR OWN constant name — a `__proto__` / `constructor` / unknown key
+  // is dropped (CodeQL js/remote-property-injection). Every caller reads one of these names, unchanged.
+  const HASH_KEYS = ["run", "tab", "id", "slug"];
   function hashQuery() {
     const q = (location.hash || "").split("?")[1] || "";
     const out = {};
     q.split("&").forEach(function (kv) { if (!kv) return; const i = kv.indexOf("=");
-      out[decodeURIComponent(i < 0 ? kv : kv.slice(0, i))] = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1)); });
+      const raw = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+      for (let k = 0; k < HASH_KEYS.length; k++) {
+        if (HASH_KEYS[k] === raw) { out[HASH_KEYS[k]] = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1)); break; }
+      } });
     return out;
   }
   function isURL(s) { return /^https?:\/\/.+/i.test(String(s || "").trim()); }
@@ -12230,6 +12239,306 @@
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
+  // ==========================================================================
+  // Owner billing-admin + tenant-assessment READ screens (Slice J1).
+  // Surfaces the six sovereign read projections in the operator cockpit:
+  //   /api/billing/plans     (viewer+)         — the pricing catalog
+  //   /api/billing/orgs       (owner/manage_org) — the tenant directory/picker
+  //   /api/billing/overview?org=   (view_billing)    — credits+wallet+subscription
+  //   /api/billing/invoices?org=   (view_invoices)   — invoice history
+  //   /api/assessments?org=        (view_assessments)— assessment summary
+  //   /api/assessments/findings?org= (view_assessments)— oracle-confirmed findings
+  // All READ-ONLY (getJSON). The server re-enforces the composed admit() gate on
+  // EVERY request; V.can() here is UX only. Every tenant/finding string is a
+  // getJSON value rendered as an h() TEXT child (auto-escaped) — never props.html
+  // — so no stored scan output can inject markup into the cockpit.
+  // ==========================================================================
+  var BADMIN = { org: "", orgName: "" };    // tenant the Billing Admin screen is focused on
+  var TASSESS = { org: "", orgName: "" };   // tenant the Tenant Assessments screen is focused on
+
+  function _jMoney(minor, cur) {
+    var n = (typeof minor === "number" && isFinite(minor)) ? minor : 0;
+    return (n / 100).toFixed(2) + " " + String(cur || "").toUpperCase();
+  }
+  function _jTs(sec) {
+    if (!sec) return "—";
+    try { return new Date(sec * 1000).toISOString().slice(0, 19).replace("T", " ") + "Z"; }
+    catch (e) { return String(sec); }
+  }
+  // " (N)" when the full set is shown, " (N of TOTAL)" when the server page-capped it (no silent truncation).
+  function _jCount(shown, total) {
+    if (total == null) return "";
+    return " (" + ((shown < total) ? (shown + " of " + total) : String(total)) + ")";
+  }
+
+  function renderBilling(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [
+        h("h1", null, "Billing Admin"),
+        h("span.sub", null, "The pricing catalog, the tenant directory, and each tenant's credit balance, "
+          + "subscription and invoice history. Read-only; every projection is re-authorized server-side."),
+      ]),
+      ownerBanner("Owner plane — tenant billing is owner-signed on the server. The tenant directory is owner-only; "
+        + "these are read-only projections."),
+      h("div#billing-plans", null, h("div.empty", null, "Loading catalog…")),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Tenants", "OWNER", h("div#billing-orgs", null, h("div.empty", null, "Loading tenants…")), true),
+        V.card("Tenant billing", null, h("div#billing-detail", null,
+          h("div.empty", null, "Select a tenant to see its credits, subscription and invoices.")), false),
+      ]),
+      h("div#billing-margin", { style: { marginTop: "16px" } }, h("div", { style: { display: "none" } })),
+    ]);
+    loadBillingPlans();
+    loadBillingOrgs();
+    loadBillingMargin();
+    if (BADMIN.org) loadBillingDetail(BADMIN.org, BADMIN.orgName);
+  }
+
+  function loadBillingPlans() {
+    V.getJSON(SOV("/api/billing/plans")).then(function (d) {
+      var host = V.$("#billing-plans"); if (!host) return;
+      var plans = (d && d.plans) || [];
+      if (!plans.length) { V.mount(host, V.card("Pricing catalog", null, h("div.empty", null, "No plans in the catalog yet."))); return; }
+      var rows = plans.map(function (p) {
+        var isSub = p.kind === "subscription_active";
+        return h("tr", null, [
+          h("td.mono", null, p.price_id || "—"),
+          h("td", null, p.name || "—"),
+          h("td", null, isSub ? "subscription" : "top-up"),
+          h("td", null, _jMoney(p.amount_minor, p.currency)),
+          h("td", null, isSub
+            ? (String(p.allotment || 0) + " cr / " + String(p.period_days || 0) + "d")
+            : (String(p.credits || 0) + " cr")),
+        ]);
+      });
+      V.mount(host, V.card("Pricing catalog", null, h("div.scroll-x", null, h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "price_id"), h("th", null, "name"), h("th", null, "kind"),
+          h("th", null, "price"), h("th", null, "grant")])),
+        h("tbody", null, rows),
+      ]))));
+    }).catch(function (e) {
+      var host = V.$("#billing-plans"); if (!host) return;
+      V.mount(host, V.card("Pricing catalog", null, offlineEmpty(e, "The pricing catalog is on the sovereign plane.")));
+    });
+  }
+
+  function loadBillingOrgs() {
+    V.getJSON(SOV("/api/billing/orgs")).then(function (d) {
+      var host = V.$("#billing-orgs"); if (!host) return;
+      var orgs = (d && d.orgs) || [];
+      if (!orgs.length) { V.mount(host, h("div.empty", null, "No tenants yet.")); return; }
+      V.mount(host, h("div.scroll-x", null, h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "tenant"), h("th", null, "org_id"), h("th", null, "owner")])),
+        h("tbody", null, orgs.map(function (o) {
+          return h("tr.click", { onClick: function () { selectBillingOrg(o.org_id, o.name || o.org_id); } }, [
+            h("td", null, o.name || o.org_id), h("td.mono", null, o.org_id), h("td", null, o.owner || "—")]);
+        })),
+      ])));
+    }).catch(function (e) {
+      var host = V.$("#billing-orgs"); if (!host) return;
+      V.mount(host, offlineEmpty(e, "The tenant directory is owner-only (manage_org)."));
+    });
+  }
+
+  // EC-6 operator margin reconciliation (owner-tier, flag-gated). /api/billing/margin 404s when
+  // VIGIL_MARGIN_DASHBOARD_ENABLED is off and 403s for a non-owner, so the section stays HIDDEN unless an owner
+  // on a flag-on deployment gets rows — the billing screen is byte-identical otherwise. A null cost/margin
+  // renders "not configured" (never a fabricated 0); a 'mixed'-currency tenant shows a withheld (—) margin,
+  // never a cross-currency number.
+  function loadBillingMargin() {
+    V.getJSON(SOV("/api/billing/margin")).then(function (d) {
+      var host = V.$("#billing-margin"); if (!host) return;
+      if (!d || !Array.isArray(d.tenants)) { V.mount(host, h("div", { style: { display: "none" } })); return; }
+      var cur = d.currency || "USD";
+      function m(v, c) { return (v === null || v === undefined) ? h("span.dim", null, "not configured") : _jMoney(v, c || cur); }
+      function pct(v) { return (v === null || v === undefined) ? h("span.dim", null, "—") : (String(v) + "%"); }
+      var t = d.totals || {};
+      var note = d.rate_configured
+        ? ("cost rate " + d.cost_rate_micro_minor_per_token + " micro-minor/token"
+          + (d.margin_multiplier_k ? (" · target k=" + d.margin_multiplier_k) : ""))
+        : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
+      var rows = d.tenants.map(function (x) {
+        return h("tr", null, [
+          h("td", null, x.name || x.org_id),
+          h("td.mono", null, String(x.committed_tokens)),
+          h("td.mono", null, String(x.in_flight_tokens)),
+          h("td", null, m(x.billed_revenue_minor, x.currency)),
+          h("td", null, m(x.cost_minor, x.currency)),
+          h("td", null, m(x.margin_minor, x.currency)),
+          h("td", null, pct(x.margin_pct)),
+        ]);
+      });
+      V.mount(host, V.card("Margin · billing↔cost reconciliation", d.rate_configured ? "OWNER" : "NOT CONFIGURED", [
+        h("div.hint", null, note),
+        h("div.scroll-x", null, h("table.tbl", null, [
+          h("thead", null, h("tr", null, [h("th", null, "tenant"), h("th", null, "tokens"), h("th", null, "in flight"),
+            h("th", null, "billed"), h("th", null, "cost"), h("th", null, "margin"), h("th", null, "margin %")])),
+          h("tbody", null, rows.length ? rows
+            : [h("tr", null, h("td", { colspan: "7" }, h("div.empty", null, "no tenant activity")))]),
+          h("tfoot", null, h("tr", null, [
+            h("td", null, h("b", null, "TOTAL (" + String(t.tenant_count || 0) + ")")),
+            h("td.mono", null, String(t.committed_tokens || 0)),
+            h("td.mono", null, String(t.in_flight_tokens || 0)),
+            h("td", null, m(t.billed_revenue_minor)),
+            h("td", null, m(t.cost_minor)),
+            h("td", null, m(t.margin_minor)),
+            h("td", null, pct(t.margin_pct)),
+          ])),
+        ])),
+      ], true));
+    }).catch(function () {
+      // 404 (flag off) / 403 (non-owner) / sovereign offline → keep the margin section HIDDEN (byte-identical).
+      var host = V.$("#billing-margin"); if (!host) return;
+      V.mount(host, h("div", { style: { display: "none" } }));
+    });
+  }
+
+  function selectBillingOrg(org, name) {
+    BADMIN.org = org; BADMIN.orgName = name;
+    loadBillingDetail(org, name);
+  }
+
+  function loadBillingDetail(org, name) {
+    var host = V.$("#billing-detail"); if (!host) return;
+    V.mount(host, h("div.empty", null, "Loading " + (name || org) + "…"));
+    var q = "?org=" + encodeURIComponent(org);
+    Promise.all([
+      V.getJSON(SOV("/api/billing/overview" + q)).catch(function (e) { return { _err: e }; }),
+      V.getJSON(SOV("/api/billing/invoices" + q)).catch(function (e) { return { _err: e }; }),
+    ]).then(function (res) {
+      var ov = res[0], inv = res[1];
+      var host2 = V.$("#billing-detail"); if (!host2) return;
+      var blocks = [h("div.hint", null, [V.icon("info"), h("span", null, "Tenant " + (name || org) + " · " + org)])];
+      if (ov && ov._err) {
+        blocks.push(offlineEmpty(ov._err, "Billing overview is view_billing-gated."));
+      } else if (ov) {
+        var cr = ov.credits || {}, w = ov.wallet || {}, sub = ov.subscription;
+        blocks.push(h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
+          V.tile("Credits available", String(cr.available != null ? cr.available : "—"),
+            "persistent " + String(cr.persistent || 0), (cr.available > 0 ? "ok" : "warn")),
+          V.tile("Plan credits (live)", String(cr.plan_live != null ? cr.plan_live : "—"), null, null),
+          V.tile("Wallet available", String(w.available != null ? w.available : "—"),
+            "granted " + String(w.granted || 0) + " · debited " + String(w.debited || 0), null),
+          V.tile("Account", ov.active ? "active" : "inactive", (sub ? "subscription" : "prepaid"), ov.active ? "ok" : "danger"),
+        ]));
+        blocks.push(sub
+          ? h("div.card", { style: { marginTop: "12px" } }, [
+              h("div.card-h", null, [h("span.label", null, "subscription"), h("h3", null, String(sub.plan_id || "—"))]),
+              h("table.tbl", null, [h("tbody", null, [
+                h("tr", null, [h("td", null, "status"), h("td", null, String(sub.status || "—"))]),
+                h("tr", null, [h("td", null, "allotment"), h("td", null, String(sub.allotment || 0) + " cr")]),
+                h("tr", null, [h("td", null, "period"), h("td.mono", null, _jTs(sub.period_start) + " → " + _jTs(sub.period_end))]),
+              ])]),
+            ])
+          : h("div.hint", { style: { marginTop: "12px" } }, "No active subscription (top-up / prepaid only)."));
+      }
+      if (inv && inv._err) {
+        blocks.push(offlineEmpty(inv._err, "Invoices are view_invoices-gated."));
+      } else if (inv) {
+        var invs = (inv.invoices) || [];
+        blocks.push(h("div.card", { style: { marginTop: "12px" } }, [
+          h("div.card-h", null, [h("span.label", null, "billing history"),
+            h("h3", null, "Invoices" + _jCount(invs.length, inv.count))]),
+          invs.length ? h("div.scroll-x", null, h("table.tbl", null, [
+            h("thead", null, h("tr", null, [h("th", null, "issued"), h("th", null, "invoice_id"), h("th", null, "kind"),
+              h("th", null, "amount"), h("th", null, "credits")])),
+            h("tbody", null, invs.map(function (iv) {
+              return h("tr", null, [h("td.mono", null, _jTs(iv.issued_at)), h("td.mono", null, iv.invoice_id || "—"),
+                h("td", null, iv.kind || "—"), h("td", null, _jMoney(iv.amount_minor, iv.currency)),
+                h("td", null, String(iv.credits || 0))]);
+            })),
+          ])) : h("div.empty", null, "No invoices for this tenant yet."),
+        ]));
+      }
+      V.mount(host2, blocks);
+    });
+  }
+
+  function renderTenantAssess(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [
+        h("h1", null, "Tenant Assessments"),
+        h("span.sub", null, "Per-tenant assessment summaries and oracle-confirmed findings, projected to the owner "
+          + "console. Read-only; the server re-authorizes each tenant projection (view_assessments)."),
+      ]),
+      ownerBanner("Owner plane — findings are tenant-scoped on the server; a tenant sees only its own."),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Tenants", "OWNER", h("div#tassess-orgs", null, h("div.empty", null, "Loading tenants…")), true),
+        V.card("Assessments", null, h("div#tassess-detail", null,
+          h("div.empty", null, "Select a tenant to see its assessment summary and findings.")), false),
+      ]),
+    ]);
+    loadTassessOrgs();
+    if (TASSESS.org) loadTassessDetail(TASSESS.org, TASSESS.orgName);
+  }
+
+  function loadTassessOrgs() {
+    V.getJSON(SOV("/api/billing/orgs")).then(function (d) {
+      var host = V.$("#tassess-orgs"); if (!host) return;
+      var orgs = (d && d.orgs) || [];
+      if (!orgs.length) { V.mount(host, h("div.empty", null, "No tenants yet.")); return; }
+      V.mount(host, h("div.scroll-x", null, h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "tenant"), h("th", null, "org_id")])),
+        h("tbody", null, orgs.map(function (o) {
+          return h("tr.click", { onClick: function () {
+            TASSESS.org = o.org_id; TASSESS.orgName = o.name || o.org_id; loadTassessDetail(o.org_id, TASSESS.orgName);
+          } }, [h("td", null, o.name || o.org_id), h("td.mono", null, o.org_id)]);
+        })),
+      ])));
+    }).catch(function (e) {
+      var host = V.$("#tassess-orgs"); if (!host) return;
+      V.mount(host, offlineEmpty(e, "The tenant directory is owner-only (manage_org)."));
+    });
+  }
+
+  function loadTassessDetail(org, name) {
+    var host = V.$("#tassess-detail"); if (!host) return;
+    V.mount(host, h("div.empty", null, "Loading " + (name || org) + "…"));
+    var q = "?org=" + encodeURIComponent(org);
+    Promise.all([
+      V.getJSON(SOV("/api/assessments" + q)).catch(function (e) { return { _err: e }; }),
+      V.getJSON(SOV("/api/assessments/findings" + q)).catch(function (e) { return { _err: e }; }),
+    ]).then(function (res) {
+      var sum = res[0], fnd = res[1];
+      var host2 = V.$("#tassess-detail"); if (!host2) return;
+      var blocks = [h("div.hint", null, [V.icon("info"), h("span", null, "Tenant " + (name || org) + " · " + org)])];
+      if (sum && sum._err) {
+        blocks.push(offlineEmpty(sum._err, "Assessment summary is view_assessments-gated (operator)."));
+      } else if (sum) {
+        var a = (sum.assessments) || [];
+        blocks.push(h("div.card", { style: { marginTop: "12px" } }, [
+          h("div.card-h", null, [h("span.label", null, "engagements"), h("h3", null, "Assessment summary")]),
+          a.length ? h("div.scroll-x", null, h("table.tbl", null, [
+            h("thead", null, h("tr", null, [h("th", null, "slug"), h("th", null, "host"), h("th", null, "findings")])),
+            h("tbody", null, a.map(function (as) {
+              return h("tr", null, [h("td.mono", null, as.slug || "—"), h("td", null, as.host || "—"),
+                h("td", null, String(as.findings || 0))]);
+            })),
+          ])) : h("div.empty", null, "No assessments for this tenant yet."),
+        ]));
+      }
+      if (fnd && fnd._err) {
+        blocks.push(offlineEmpty(fnd._err, "Findings are view_assessments-gated (operator)."));
+      } else if (fnd) {
+        var fs = (fnd.findings) || [];
+        blocks.push(h("div.card", { style: { marginTop: "12px" } }, [
+          h("div.card-h", null, [h("span.label", null, "oracle-confirmed"),
+            h("h3", null, "Findings" + _jCount(fs.length, fnd.count))]),
+          fs.length ? h("div.scroll-x", null, h("table.tbl", null, [
+            h("thead", null, h("tr", null, [h("th", null, "slug"), h("th", null, "bug class"), h("th", null, "severity"),
+              h("th", null, "title"), h("th", null, "ref")])),
+            h("tbody", null, fs.map(function (f) {
+              return h("tr", null, [h("td.mono", null, f.engagement_slug || "—"), h("td", null, f.bug_class || "—"),
+                h("td", null, f.severity || "—"), h("td", null, f.title || f.summary || "—"),
+                h("td.mono", null, f.finding_ref || "—")]);
+            })),
+          ])) : h("div.empty", null, "No oracle-confirmed findings for this tenant yet."),
+        ]));
+      }
+      V.mount(host2, blocks);
+    });
+  }
+
   function route() {
     const id = current();
     teardownLive();               // close any live stream/timers when navigating away
@@ -12255,6 +12564,8 @@
     if (id === "proof") { renderProof(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
     if (id === "users") { renderUsers(screen); return; }
+    if (id === "billing") { renderBilling(screen); return; }
+    if (id === "tenantassess") { renderTenantAssess(screen); return; }
     if (id === "apikeys") { renderApiKeys(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }
     if (id === "defense") { renderDefense(screen); return; }

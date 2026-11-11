@@ -130,3 +130,19 @@ def test_exact_key_wins_over_wildcard_pattern():
     assert offense_route_key("/api/knowledge/s1/deeplearn") == "/api/knowledge/*/deeplearn"
     assert offense_route_key("/api/replay") == "/api/replay"
     assert offense_route_key("/api/reverify/r9") == "/api/reverify/*"
+
+
+# --- E0: the per-org tenant-admin role (billing != testing, structurally) ----------------------
+def test_org_admin_is_tenant_billing_and_member_admin_never_testing():
+    # Slice E0: `org_admin` is a PER-ORG role (never in the global linear chain), carrying billing +
+    # membership administration but DELIBERATELY no run_engagement / offense_authority — so a paying
+    # tenant-admin can manage their org's money + members yet can NEVER authorize a security assessment.
+    assert "org_admin" not in ROLES                       # per-org only — never a global account role
+    for granted in ("read", "view_billing", "view_usage", "view_invoices", "manage_billing", "manage_members"):
+        assert role_can("org_admin", granted) is True, f"org_admin should carry {granted}"
+    for forbidden in ("run_engagement", "offense_authority", "secrets", "manage_users", "manage_org",
+                      "promote", "kill_release", "approve_a3"):
+        assert role_can("org_admin", forbidden) is False, f"org_admin must NOT carry {forbidden}"
+    assert PERMISSIONS["org_admin"] <= PERMISSIONS["owner"]   # owner remains the ceiling
+    # the four cumulative roles are unchanged by the addition
+    assert PERMISSIONS["operator"] <= PERMISSIONS["owner"] and PERMISSIONS["viewer"] <= PERMISSIONS["analyst"]
