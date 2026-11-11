@@ -24,7 +24,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .reuse import assert_no_offense
 
@@ -66,6 +66,20 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     return pairs, unreadable
 
 
+def _completion_block(spool: Optional[Path], pair: tuple) -> "Callable[[], Optional[str]]":
+    """The sweep's refund precondition, re-read from the spool when called: ``completion_pending`` if a
+    completion for ``pair`` is waiting / quarantined, ``completion_unknown`` if the spool cannot be fully read
+    (or none was given), else None (the refund may proceed)."""
+    def _check() -> Optional[str]:
+        if spool is None:
+            return "completion_unknown"
+        pending, unreadable = _pending_completions(spool)
+        if pair in pending:
+            return "completion_pending"
+        return "completion_unknown" if unreadable else None
+    return _check
+
+
 def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
                                  completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
     """Report (and with ``apply`` full-refund via ``settle_launch``) every abandoned published lease. A lease
@@ -81,8 +95,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     kp = gate.owner_key
     if kp is None:
         raise ValueError("no owner key — the sweep cannot verify leases (fail-closed)")
-    pending, spool_unreadable = (_pending_completions(Path(completion_spool)) if completion_spool is not None
-                                 else (set(), False))
+    spool = Path(completion_spool) if completion_spool is not None else None
+    pending, spool_unreadable = _pending_completions(spool) if spool is not None else (set(), False)
     root = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
@@ -108,8 +122,15 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         if not apply:
             rows.append({**row, "status": "abandoned"})
             continue
-        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now)
-        if not r.get("ok"):
+        # The spool read above is a snapshot taken before this loop: a completion can land after it. So the
+        # settle RE-CHECKS this lease's completion INSIDE its critical section (under the same cross-process lock
+        # the settle-drain's charge takes), right before it decides — a run whose completion exists by then is
+        # never refunded here.
+        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
+                               refuse_if=_completion_block(spool, (doc.engagement_slug, str(doc.nonce))))
+        if r.get("refused"):
+            rows.append({**row, "status": str(r["refused"])})
+        elif not r.get("ok"):
             rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})

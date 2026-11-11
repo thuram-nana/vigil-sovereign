@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..reuse import assert_no_offense
 
@@ -54,6 +54,18 @@ from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-so
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
 _MAX_LEASE_HOURS = 24.0 * 7     # a launch lease caps at a week; a longer engagement re-leases
+
+
+def _refusal(refuse_if: Optional[Callable[[], Optional[str]]]) -> Optional[str]:
+    """A settle caller's precondition, evaluated inside the settle critical section: its reason to refuse, or None.
+    A precondition that raises refuses (fail-closed)."""
+    if refuse_if is None:
+        return None
+    try:
+        why = refuse_if()
+    except Exception as e:  # noqa: BLE001 — an unanswerable precondition never green-lights a settle
+        return f"precondition check failed: {type(e).__name__}"
+    return str(why) if why else None
 
 
 class LaunchGate:
@@ -104,54 +116,6 @@ class LaunchGate:
             return self._base_dir
         from .target_authorization import _base_dir
         return _base_dir()
-
-    def _claim_settlement(self, oid: str, s: str, non: str, consumed: int, now_ts: float) -> Optional[dict]:
-        """Decide whether THIS settle call owns the settlement of lease ``(s, non)``. Returns None when it does
-        (the settlement is durably recorded on the spine AND the seam, the lease revoked — the caller may now
-        move money), else the response to return: ``launch_already_settled`` (moving NO money) or a
-        fail-closed error (nothing moved). Called under ``self._lock``.
-
-        A lease is settled iff an owner-signed ``governor.launch_settled`` record is on the SPINE or the seam
-        settlement marker is present (a pre-spine-record settle). The spine record is what makes this survive a
-        lost / restored-out-of-step seam (the seam is not part of the sovereign backup, and is not derivable
-        from the spine otherwise): without it, a completed (refund 0) run whose marker was lost could be fully
-        refunded by a later launch_cancel. The FIRST verified record by spine seq is the decision, so two
-        settles racing in different processes (each appends its own record) agree on one winner; the loser
-        moves no money. A found-but-unmarked settlement re-asserts the seam revocation (marker + nonce-matched
-        tombstone) so the keyless arm and publish_lease refuse the lease again."""
-        from ..governor.launch_settlement import first_launch_settlement, record_launch_settled
-        already = {"ok": True, "action": "launch_already_settled", "org_id": oid, "slug": s,
-                   "refunded": 0, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
-        try:
-            from vigil_integration.live.credit_lease_broker import (
-                is_lease_settled, record_lease_settlement, tombstone_credit_lease,
-            )
-            base = self._seam_base()
-            kp = self.owner_key
-            if kp is None:                           # settle_launch already refuses without it; fail closed
-                raise ValueError("no owner key")
-            pub = kp.public_key_b64
-
-            def _revoke() -> None:
-                record_lease_settlement(base, s, non)
-                tombstone_credit_lease(base, s, non)   # nonce-matched: never clobber a newer re-lease
-
-            on_seam = is_lease_settled(base, s, non)
-            if on_seam or first_launch_settlement(self.store, pub, org_id=oid, slug=s, nonce=non) is not None:
-                if not on_seam:
-                    _revoke()                        # the seam lost its marker: re-revoke, move no money
-                return already
-            # Seam revocation FIRST (as before this record existed: a seam failure records nothing, so a retry
-            # can still settle), then the spine decision, then — only for the first recorder — the money.
-            _revoke()
-            mine = record_launch_settled(self.store, kp, org_id=oid, slug=s, nonce=non,
-                                         consumed=consumed, issued_at=now_ts)
-            if first_launch_settlement(self.store, pub, org_id=oid, slug=s, nonce=non) != mine:
-                return already                       # a concurrent settle recorded first: it decides the money
-        except Exception as e:  # noqa: BLE001 — a record/revocation failure refuses the settle (no money moved)
-            return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
-                    f"{type(e).__name__}"}
-        return None
 
     @staticmethod
     def _as_dt(now: Any) -> datetime:
@@ -373,22 +337,24 @@ class LaunchGate:
         }
 
     def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any,
-                      expect_org_id: Optional[str] = None) -> dict:
+                      expect_org_id: Optional[str] = None,
+                      refuse_if: Optional[Callable[[], Optional[str]]] = None) -> dict:
         """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. The refund
         is bound to the OWNER-SIGNED LEASE, never to a wire amount — ``signed_lease`` (the object
         ``reserve_launch`` returned) is VERIFIED under a locally-pinned owner trust root and
         ``units_reserved`` / ``org_id`` / ``slug`` / ``nonce`` are taken from the VERIFIED document, so a
         forged or wire-asserted amount cannot mint a refund (the HIGH the red-pen found). Refund =
         ``units_reserved - clamp(consumed_units, 0, units_reserved)``, granted back to the wallet. Idempotent
-        per the lease's (slug, nonce): a re-settle no-ops. ``consumed_units == 0`` is the cancel/release case
-        (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds).
+        per the lease's (slug, nonce), across processes: the first settle fixes the outcome and every later one
+        (any caller, any process) moves nothing and returns ``launch_already_settled`` (``_settle_once``).
+        ``consumed_units == 0`` is the cancel/release case (full refund); a crash before settle simply leaves the
+        cap debited (fail-closed, never over-refunds). ``refuse_if`` is an optional caller precondition evaluated
+        inside the settle critical section (``_settle_once``); a non-empty answer refuses with nothing written.
 
         MONEY-DOCTRINE CLOSE-OUT (K4-1): settling/cancelling refunds the credits AND makes the lease
-        non-runnable. settle records an owner-signed ``governor.launch_settled`` record on the SPINE (so the
-        settlement survives a lost seam; see ``_claim_settlement``) and a ``(slug, nonce)`` seam settlement
-        marker, and tombstones the seam copy
-        (below, nonce-matched so a newer re-lease is never clobbered); ``publish_lease`` refuses a lease whose
-        reservation is already settled; and the keyless arm re-checks settlement in
+        non-runnable. settle records a ``(slug, nonce)`` settlement marker before any money moves and then
+        tombstones the seam copy (nonce-matched so a newer re-lease is never clobbered); ``publish_lease``
+        refuses a lease whose reservation is already settled; and the keyless arm re-checks settlement in
         ``verify_customer_launch_lease`` before it burns the single-use floor — so a settled lease is no
         longer a live bearer capability. The ``reserved - refund == consumed`` net-spend invariant is
         load-bearing on this refund path, and K4-5 settle-on-completion asserts net-spend ==
@@ -419,7 +385,6 @@ class LaunchGate:
         if consumed < 0:
             return {"ok": False, "error": "consumed_units must be non-negative"}
         consumed = min(consumed, reserved)                 # can never claw back more than the signed reservation
-        refund = reserved - consumed
         try:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
@@ -432,23 +397,21 @@ class LaunchGate:
         # also NOT the account's CURRENT enabled state (the owner may disable the line between reserve and
         # settle). A postpaid reservation touched no plan/wallet bucket, so REVERSE the unconsumed draw
         # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
-        # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via the shared settlement marker +
-        # the reverse entry_id. consumed == 0 (cancel) fully reverses the draw.
+        # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via `_settle_once` + the reverse
+        # entry_id. consumed == 0 (cancel) fully reverses the draw.
         if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
-            with self._lock:
-                claimed = self._claim_settlement(oid, s, non, consumed, now_ts)   # spine record + seam marker
-                if claimed is not None:
-                    return claimed                  # already settled (by anyone, any process) / fail-closed error
+            def _move_postpaid(c: int, landed: "set[str]") -> Optional[dict]:
+                r = reserved - c
                 # ALWAYS record the settlement — even a FULL-consumption settle whose refund is 0. The record's
                 # presence clears the reserve from the arrears IN-FLIGHT set (`in_flight_reserved`), so PP-2 bills
                 # the launch for its real consumption; a 0-refund settle is a balance no-op. (Red-pen HIGH: the
                 # prior `if refund > 0` left a fully-consumed launch with no settle record -> invoiced $0.)
-                self.arrears.settle(oid, refund, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
-                # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
-                # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
-                self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
-            return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
-                    "refunded": refund, "refunded_plan": 0, "refunded_wallet": 0, "net_spend": consumed}
+                if "postpaid" in landed:
+                    return {"refunded": 0, "refunded_plan": 0, "refunded_wallet": 0}
+                self.arrears.settle(oid, r, entry_id=f"{SETTLE_ENTRY_PREFIX}{s}:{non}", issued_at=now_ts)
+                return {"refunded": r, "refunded_plan": 0, "refunded_wallet": 0}
+
+            return self._settle_once(oid, s, non, consumed, reserved, now_ts, _move_postpaid, refuse_if)
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
@@ -460,46 +423,125 @@ class LaunchGate:
         plan_deb = self.meter.plan.debited_entry(oid, f"reserve-plan:{s}:{non}")   # (from_plan, period_end) | None
         from_plan = plan_deb[0] if plan_deb else 0
         plan_pe = plan_deb[1] if plan_deb else None
-        plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
-        wallet_refund = refund - plan_refund               # the rest (wallet portion + any plan over-consumption)
-        # MONEY-DOCTRINE INVARIANT (K4-1): net spend == metered consumption and NEITHER bucket is over-refunded.
-        # The sum/net-spend clauses hold by construction (wallet_refund := refund - plan_refund; refund :=
-        # reserved - consumed); the load-bearing clause is ``plan_refund < 0 or wallet_refund < 0``, which FIRES
-        # when the owner-signed reserve debit record over-claims the plan bucket relative to the signed lease
-        # (from_plan > reserved). Without it an inflated plan_refund would be granted while a NEGATIVE
-        # wallet_refund is silently skipped (``if wallet_refund > 0``) — a net OVER-refund / under-charge. A drift
-        # here is an internal inconsistency, not a wire value: refuse (fail-closed, no credits moved) rather than
-        # move the wrong amount, so net spend can never fall below metered consumption.
-        if (plan_refund < 0 or wallet_refund < 0 or plan_refund + wallet_refund != refund
-                or reserved - refund != consumed):
+
+        def _split(c: int) -> "Optional[tuple[int, int]]":
+            r = reserved - c
+            plan_refund = max(0, from_plan - c)            # consumption eats the plan (expiring) portion first
+            wallet_refund = r - plan_refund                # the rest (wallet portion + any plan over-consumption)
+            # MONEY-DOCTRINE INVARIANT (K4-1): net spend == metered consumption and NEITHER bucket is over-refunded.
+            # The sum/net-spend clauses hold by construction (wallet_refund := refund - plan_refund; refund :=
+            # reserved - consumed); the load-bearing clause is ``plan_refund < 0 or wallet_refund < 0``, which
+            # FIRES when the owner-signed reserve debit record over-claims the plan bucket relative to the signed
+            # lease (from_plan > reserved). Without it an inflated plan_refund would be granted while a NEGATIVE
+            # wallet_refund is silently skipped (``if wallet_refund > 0``) — a net OVER-refund / under-charge. A
+            # drift here is an internal inconsistency, not a wire value: refuse (fail-closed, no credits moved)
+            # rather than move the wrong amount, so net spend can never fall below metered consumption.
+            if plan_refund < 0 or wallet_refund < 0 or plan_refund + wallet_refund != r or reserved - r != c:
+                return None
+            return plan_refund, wallet_refund
+
+        if _split(consumed) is None:
             return {"ok": False, "error": "internal: refund invariant violated (bucket split / net-spend)"}
-        with self._lock:
-            # K4-1 / K5 close-out: REVOKE the lease as a bearer capability BEFORE refunding — mark (slug, nonce)
-            # settled (the keyless arm + publish_lease refuse it) and tombstone the published seam bundle. Order
-            # matters and is fail-CLOSED: if we cannot DURABLY record the revocation we do NOT refund, so a lease
-            # is never left refunded-but-still-runnable (the documented gap this slice closes). Idempotent: a
-            # re-settle re-marks the same nonce + finds no bundle, and the refund grants dedupe on entry_id.
-            # IDEMPOTENCY (K4-5 red-pen HIGH): a settle is a no-op for an already-settled (slug, nonce),
-            # REGARDLESS of this call's consumed value. The refund-grant entry-id dedup alone does NOT protect a
-            # refund=0 (COMPLETED) first-settle — it writes NO grant, so a LATER launch_cancel (consumed=0 =>
-            # refund=reserved) would be the FIRST writer of settle-wallet:{s}:{non} and FULLY REFUND a charged,
-            # completed run (a free run / net-spend != consumption). Every settle (incl. refund=0) records the
-            # settlement on the SPINE and the seam before any money moves; see _claim_settlement.
-            claimed = self._claim_settlement(oid, s, non, consumed, now_ts)
-            if claimed is not None:
-                return claimed                      # already settled (by anyone, any process) / fail-closed error
-            if plan_refund > 0 and plan_pe is not None:
+
+        def _move_prepaid(c: int, landed: "set[str]") -> Optional[dict]:
+            split = _split(c)
+            if split is None:
+                return None
+            plan_refund, wallet_refund = split
+            moved_plan = moved_wallet = 0
+            if plan_refund > 0 and plan_pe is not None and "plan" not in landed:
                 self.meter.plan.grant(oid, plan_refund, period_end=plan_pe,
                                       entry_id=f"settle-plan:{s}:{non}", issued_at=now_ts)
-            if wallet_refund > 0:
+                moved_plan = plan_refund
+            if wallet_refund > 0 and "wallet" not in landed:
                 self.wallet.grant(oid, wallet_refund, "refund", source_ref=s,
                                   entry_id=f"settle-wallet:{s}:{non}", issued_at=now_ts)
-            # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
-            # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
-            self._write_cost_settle(oid, s, non, consumed, reserved, now_ts)
-        return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
-                "refunded": refund, "refunded_plan": plan_refund, "refunded_wallet": wallet_refund,
-                "net_spend": consumed}
+                moved_wallet = wallet_refund
+            return {"refunded": moved_plan + moved_wallet, "refunded_plan": moved_plan,
+                    "refunded_wallet": moved_wallet}
+
+        return self._settle_once(oid, s, non, consumed, reserved, now_ts, _move_prepaid, refuse_if)
+
+    def _settle_once(self, oid: str, s: str, non: str, consumed: int, reserved: int, now_ts: float,
+                     move: Callable[[int, "set[str]"], Optional[dict]],
+                     refuse_if: Optional[Callable[[], Optional[str]]]) -> dict:
+        """THE exactly-once settle transaction of lease ``(s, non)``, shared by the prepaid and postpaid paths.
+        ``move(c, landed)`` moves the money of a settlement that consumed ``c`` — writing only the settle entries
+        NOT already in ``landed`` — and returns the amounts it moved (None: the bucket-split invariant failed).
+
+        CROSS-PROCESS ATOMIC (E3c). The check "is this lease already settled?" and everything it decides run
+        under ``settle_lock`` — a flock beside the spine, held across the check, the records and the money — so
+        the settle-drain, ``ops-sweep reservations --apply`` and the cockpit's ``launch_cancel`` (three
+        processes) can never both settle one lease: the FIRST settle fixes the outcome, every later one is a
+        no-op that moves nothing and returns ``launch_already_settled``. (``self._lock`` alone is per-process.)
+
+        SETTLED = the spine says so (``scan_settlement``: an owner-signed ``governor.launch_settled`` decision
+        record, or an owner-signed settle refund/credit entry) OR the seam settlement marker says so (E3b: the
+        marker lives in the seam directory, which can be lost or restored out of step; the spine cannot).
+
+        ORDER (fail-closed, K4-1): [``config.settle_spine_record_enabled()``] the decision record → the seam
+        marker (the revocation the keyless arm and ``publish_lease`` refuse on; a failure to write it moves NO
+        money) → the money → the cost-ledger settle → the nonce-matched tombstone of the published bundle (last,
+        so a settle a crash interrupted is still found by the settle-drain's re-drive). A later settle of a lease
+        that carries a decision record re-asserts the revocation and finishes that decision — the entries not yet
+        on the spine, at the RECORDED consumption, never its own — so a crash can neither strand the refund nor
+        pay it twice. ``refuse_if`` (a caller's precondition, e.g. the sweep's "no completion is pending") is
+        evaluated INSIDE the critical section, after the already-settled check; a non-empty answer refuses the
+        settle with nothing written."""
+        from contextlib import ExitStack
+        from .. import config
+        from ..governor.launch_settlement import record_launch_settled, scan_settlement, settle_lock
+        from vigil_integration.live.credit_lease_broker import (
+            is_lease_settled, record_lease_settlement, tombstone_credit_lease,
+        )
+        kp = self.owner_key
+        if kp is None:                                       # settle_launch refuses first; kept fail-closed
+            return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
+        pub = kp.public_key_b64
+        base = self._seam_base()
+        ev = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non)        # the full scan, unlocked
+        with ExitStack() as held:
+            held.enter_context(self._lock)
+            try:
+                held.enter_context(settle_lock(self.store))
+            except (OSError, ValueError) as e:
+                return {"ok": False, "error": f"could not take the cross-process settle lock (fail-closed): "
+                        f"{type(e).__name__}"}
+            ev = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non, since=ev)   # + since then
+            try:
+                on_seam = is_lease_settled(base, s, non)
+                fresh = not (ev.settled or on_seam)
+                if fresh:
+                    why = _refusal(refuse_if)
+                    if why:
+                        return {"ok": False, "error": f"settle refused: {why}", "refused": why}
+                    if config.settle_spine_record_enabled():
+                        record_launch_settled(self.store, kp, org_id=oid, slug=s, nonce=non, consumed=consumed,
+                                              issued_at=now_ts)
+                if not on_seam:
+                    record_lease_settlement(base, s, non)    # revoke BEFORE any money moves (or re-assert a lost one)
+            except Exception as e:  # noqa: BLE001 — a record/revocation failure refuses the settle (no money moved)
+                return {"ok": False, "error": f"could not revoke the lease on settle (fail-closed): "
+                        f"{type(e).__name__}"}
+            if fresh:
+                decided, moved = consumed, move(consumed, set())
+            elif ev.record_seq is not None and ev.consumed is not None:
+                decided = min(ev.consumed, reserved)
+                moved = move(decided, ev.landed)             # finish a decision a crash interrupted
+            else:
+                decided, moved = consumed, {"refunded": 0, "refunded_plan": 0, "refunded_wallet": 0}
+            if moved is None:
+                return {"ok": False, "error": "internal: refund invariant violated (bucket split / net-spend)"}
+            if fresh or any(moved.values()):
+                # EC-5: settle the cost ledger to the consumed envelope (clamped to the reserved cap), from the
+                # VERIFIED lease. Gated default-OFF + fail-safe (advisory). Idempotent per (slug, nonce).
+                self._write_cost_settle(oid, s, non, decided, reserved, now_ts)
+            try:
+                tombstone_credit_lease(base, s, non)         # nonce-matched: never clobber a newer re-lease
+            except Exception:  # noqa: BLE001 — total by contract; the marker already revokes the lease
+                pass
+        return {"ok": True, "action": "launch_settled" if fresh else "launch_already_settled", "org_id": oid,
+                "slug": s, **moved, "net_spend": decided}
 
     def publish_lease(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
         """Slice K3 (producer): drop an owner-signed lease on the cross-plane seam so the offense plane can
@@ -529,16 +571,19 @@ class LaunchGate:
             return {"ok": False, "error": "this lease belongs to a different org"}
         try:
             from vigil_integration.live.credit_lease_broker import is_lease_settled, write_credit_lease
+            from ..governor.launch_settlement import scan_settlement, settle_lock
+            s, non = doc.engagement_slug, doc.nonce
+            ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=s, nonce=non)
             # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
-            # bearer capability is resurrected on the seam.
-            from ..governor.launch_settlement import first_launch_settlement
-            # ...and the spine settlement record, so a lost/out-of-step seam marker cannot resurrect it either.
-            if is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce) or first_launch_settlement(
-                    self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
-                    nonce=doc.nonce) is not None:
-                return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
-                        "re-published"}
-            write_credit_lease(self._seam_base(), doc.engagement_slug, signed, owner_root)
+            # bearer capability is resurrected on the seam. Settled = the seam marker OR the spine's settlement
+            # evidence (a lost / stale-restored seam must not resurrect it either), checked and written under the
+            # settle critical section, so a publish can never land between a settle's check and its tombstone.
+            with self._lock, settle_lock(self.store):
+                ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=s, nonce=non, since=ev)
+                if ev.settled or is_lease_settled(self._seam_base(), s, non):
+                    return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
+                            "re-published"}
+                write_credit_lease(self._seam_base(), s, signed, owner_root)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         return {"ok": True, "action": "launch_published", "org_id": doc.org_id, "slug": doc.engagement_slug,

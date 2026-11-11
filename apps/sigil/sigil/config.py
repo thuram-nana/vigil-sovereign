@@ -424,6 +424,16 @@ def cost_ledger_write_enabled() -> bool:
     return global_pool_tokens() is not None
 
 
+def settle_spine_record_enabled() -> bool:
+    """True iff every launch settle FIRST appends an owner-signed ``governor.launch_settled`` record (the settle
+    decision, keyed on the lease ``(slug, nonce)``; `governor/launch_settlement.py`) — so a settle that moved no
+    money (a completed run, refund 0) is on the spine, not only in the seam settlement marker, and a later settle
+    can finish a decision a crash interrupted. OFF by default (`VIGIL_SETTLE_SPINE_RECORD` unset /
+    non-affirmative): no record is appended and settle_launch writes the same spine records as before. Set it
+    identically for every process that settles (cockpit, settle-drain, ops-sweep)."""
+    return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail

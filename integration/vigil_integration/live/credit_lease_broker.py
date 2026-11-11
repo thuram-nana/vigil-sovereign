@@ -28,11 +28,17 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from vigil_core import SignedCreditLaunchLease, TrustRoot
+
+try:
+    import fcntl  # POSIX advisory lock — serializes the settlement marker's read-merge-replace across processes
+except ImportError:  # pragma: no cover — non-POSIX: callers' own serialization only
+    fcntl = None  # type: ignore[assignment]
 
 __all__ = [
     "CreditLeaseBundle",
@@ -237,19 +243,40 @@ def _read_settled_nonces(path: Path) -> list[str]:
     return [str(n) for n in nonces] if isinstance(nonces, list) else []
 
 
+@contextmanager
+def _marker_lock(path: Path) -> Iterator[None]:
+    """Exclusive CROSS-PROCESS lock for one marker file's read-merge-replace, on a sibling ``<name>.lock`` inode
+    (it survives the atomic replace of the marker; a ``*.lock`` is a transient the backups skip). Fail-closed: a
+    lockfile that cannot be opened/locked raises, so the caller records nothing (and settles nothing)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(path.parent / (path.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def record_lease_settlement(base_dir: Any, slug: str, nonce: Any) -> Path:
     """Durably mark the lease ``(slug, nonce)`` SETTLED — after this the arm (``verify_customer_launch_lease``)
     and ``publish_lease`` refuse that nonce. Idempotent: re-recording a nonce rewrites the same set. Raises
-    ValueError on an unsafe slug (never writes outside the settlements dir)."""
+    ValueError on an unsafe slug (never writes outside the settlements dir).
+
+    The marker is ONE file per slug holding every settled nonce, so the read-merge-replace runs under
+    ``_marker_lock``: two processes settling two leases of one slug can no longer each read the old set and
+    replace it with their own (a lost update that dropped the other lease's nonce — which, for a charged lease,
+    re-opened its refund)."""
     safe = _safe_component(slug)
     if not safe:
         raise ValueError(f"unsafe lease slug: {slug!r}")
     path = _contained_child(settlements_root(base_dir), f"{safe}.json")
     if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
         raise ValueError(f"unsafe lease slug (escapes settlements dir): {slug!r}")
-    merged = sorted(set(_read_settled_nonces(path) if path.is_file() else []) | {str(nonce)})
-    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _SETTLE_SCHEMA,
-                              "slug": safe, "nonces": merged})
+    with _marker_lock(path):
+        merged = sorted(set(_read_settled_nonces(path) if path.is_file() else []) | {str(nonce)})
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _SETTLE_SCHEMA,
+                                  "slug": safe, "nonces": merged})
     return path
 
 

@@ -1045,19 +1045,32 @@ class Provisioner:
             _cdoc = SignedCreditLaunchLease.model_validate(signed_lease).document
         except Exception as e:  # noqa: BLE001 — a malformed lease is a clean refusal
             raise ProvisionDenied("launch cancel requires the signed launch lease from reserve_launch") from e
-        try:
-            from .target_authorization import _base_dir
-            from vigil_integration.live.credit_lease_broker import read_credit_lease
-            _pub = read_credit_lease(_base_dir(), str(_cdoc.engagement_slug))
-        except Exception:  # noqa: BLE001 — a seam-read failure must not DENY a legitimate pre-start cancel; the
-            _pub = None     # settle_launch is_lease_settled guard is the hard backstop against a double refund
-        if _pub is not None and str(_pub.signed_lease.document.nonce) == str(_cdoc.nonce):
+        def _started() -> Optional[str]:
+            try:
+                from .target_authorization import _base_dir
+                from vigil_integration.live.credit_lease_broker import read_credit_lease
+                _pub = read_credit_lease(_base_dir(), str(_cdoc.engagement_slug))
+            except Exception:  # noqa: BLE001 — a seam-read failure must not DENY a legitimate pre-start cancel;
+                _pub = None     # the settle's settled-check is the hard backstop against a double refund
+            if _pub is not None and str(_pub.signed_lease.document.nonce) == str(_cdoc.nonce):
+                return "started"
+            return None
+
+        def _refuse_started():
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refused_started")
-            raise ProvisionDenied(
+            return ProvisionDenied(
                 "this launch has been started and must settle through its completion; it cannot be cancelled")
+
+        if _started():
+            raise _refuse_started()
+        # ...and RE-CHECKED inside the settle's cross-process critical section (``refuse_if``), which
+        # ``publish_lease`` (launch_start) also holds: a start landing after the check above can no longer be
+        # followed by this full refund.
         r = LaunchGate(self.store).settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
-                                                 expect_org_id=requester_org_id)
+                                                 expect_org_id=requester_org_id, refuse_if=_started)
+        if r.get("refused"):
+            raise _refuse_started()
         if not r.get("ok"):
             raise ProvisionDenied(str(r.get("error") or "launch cancel refused"))
         self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
