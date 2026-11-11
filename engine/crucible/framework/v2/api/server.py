@@ -49,6 +49,29 @@ from vigil_core.rbac import offense_perm_for, role_can
 # the trail.
 _LOG = logging.getLogger("crucible.api.authz")
 
+_LOG_FIELD_MAX = 200    # chars of one caller-influenced value we put in an attribution line
+
+
+def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
+    """The LOGGED copy of a caller-influenced value. A header value can carry an obs-fold (CR LF + space)
+    and any other control; the request path can carry ESC/NUL/DEL. Every character that is not
+    ``str.isprintable()`` (C0/C1 controls, every line breaker ``splitlines`` honours, bidi/zero-width
+    formats, lone surrogates) becomes a visible ``\\xNN`` / ``\\uNNNN`` / ``\\UNNNNNNNN`` escape and the
+    value is capped at ``limit`` characters, so a claimed principal/role can neither forge nor split an
+    audit record, drive the operator's terminal, nor flood the log. Printable text (spaces, non-ASCII
+    names) is returned unchanged."""
+    s = value if isinstance(value, str) else str(value)
+    out = []
+    for ch in s[:limit]:
+        if ch.isprintable():
+            out.append(ch)
+        else:
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp <= 0xFF else f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
+    if len(s) > limit:
+        out.append(f"...[+{len(s) - limit} chars]")
+    return "".join(out)
+
 # a POST body is bounded so an untrusted client cannot exhaust memory. Generous enough
 # for a real third-party report, far below a DoS.
 _MAX_BODY = 8 * 1024 * 1024
@@ -154,12 +177,15 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _log_attribution(self, path: str, actor: dict, allowed: bool, why: str) -> None:
         """Record the action against its principal — the audit trail the loopback bind alone cannot give.
         A permitted action logs at INFO (silent by default); a refusal logs the attributed denial. Never
-        raises (a logging failure must not break the request)."""
+        raises (a logging failure must not break the request). Principal/role are the CLAIMED header
+        values on the unverified branch, so every interpolated value is the escaped + capped LOGGED copy
+        (``_log_safe``); the actor dict and the response body are not rewritten."""
         try:
             verb = "authorized" if allowed else "REFUSED"
             _LOG.info("api action %s: principal=%s role=%s via=%s %s %s%s",
-                      verb, actor.get("principal"), actor.get("role"), actor.get("via"),
-                      self.command, path, "" if allowed else f" ({why})")
+                      verb, _log_safe(actor.get("principal")), _log_safe(actor.get("role")),
+                      _log_safe(actor.get("via")), self.command, _log_safe(path),
+                      "" if allowed else f" ({_log_safe(why, 2 * _LOG_FIELD_MAX)})")
         except Exception:  # noqa: BLE001 — attribution logging is best-effort, never load-bearing
             pass
 
