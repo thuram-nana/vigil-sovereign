@@ -75,14 +75,18 @@ exit 2
 def _run(tmp_path: Path, *, resolvable: list[str], mirrors: str | None = f"{M1} {M2}",
          default_rc: int = 0, fail_uris: list[str] | None = None, keyring: bool = True,
          codename: str = "resolute", extra_env: dict[str, str] | None = None,
-         pkgs: tuple[str, ...] = ("nftables",)):
+         pkgs: tuple[str, ...] = ("nftables",), sources_text: str | None = None,
+         extra_files: dict[str, str] | None = None):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     _exe(bindir / "sudo", '#!/usr/bin/env bash\nexec "$@"\n')
     _exe(bindir / "apt-get", _APT_STUB)
     _exe(bindir / "getent", _GETENT_STUB)
+    for name, body in (extra_files or {}).items():
+        (tmp_path / name).write_text(body.replace("{tmp}", str(tmp_path)), encoding="utf-8")
     sources = tmp_path / "ubuntu.sources"
     sources.write_text(
+        sources_text.replace("{tmp}", str(tmp_path)) if sources_text is not None else
         "Types: deb\n"
         f"URIs: http://{DEFAULT_HOST}/ubuntu/\n"
         "Suites: resolute resolute-updates resolute-backports\n"
@@ -148,8 +152,11 @@ def test_dns_outage_installs_from_a_signed_https_fallback_without_trying_the_def
     assert calls[1][-1] == "nftables" and "-y" in calls[1]
     # The fallback source: HTTPS, the first mirror, all three suites, pinned to the Ubuntu archive key.
     assert f"URIs: {M1}" in srcs
-    assert "Suites: resolute resolute-updates resolute-security" in srcs
-    assert f"Signed-By: {ring}" in srcs
+    assert "Suites: resolute resolute-updates" in srcs
+    assert "Suites: resolute-security" in srcs
+    # Both stanzas are pinned to the Ubuntu archive key, and the -security one to a maximum index age.
+    assert srcs.count(f"Signed-By: {ring}") == 4   # 2 stanzas, recorded for the update and the install
+    assert srcs.count("Valid-Until-Max: 864000") == 2
     assert modes == ["644", "644"]   # world-readable source file, seen by both the update and the install
     _assert_no_insecure(calls, srcs)
 
@@ -186,7 +193,8 @@ def test_a_failing_fallback_mirror_moves_on_to_the_next(tmp_path: Path):
                                    fail_uris=[M1])
     assert proc.returncode == 0, proc.stderr
     assert f"mirror {M1} failed; trying the next one" in proc.stderr
-    assert srcs.count(f"URIs: {M1}") == 1 and srcs.count(f"URIs: {M2}") >= 1
+    # M1 is tried exactly once (its update fails): one source file, two stanzas, so two URIs lines.
+    assert srcs.count(f"URIs: {M1}") == 2 and srcs.count(f"URIs: {M2}") >= 2
 
 
 def test_every_fallback_failing_fails_the_step(tmp_path: Path):
@@ -267,3 +275,67 @@ def test_every_workflow_apt_install_goes_through_the_helper():
             if raw.search(ln):
                 offenders.append(f"{wf.relative_to(_ROOT)}:{n}: {ln.strip()}")
     assert not offenders, "use .github/scripts/apt-retry.sh instead of raw apt:\n" + "\n".join(offenders)
+
+
+# --- the probe asks about the hosts apt will REALLY contact ----------------------------------------------
+# The stock Ubuntu ubuntu.sources opens with a comment that carries a URL, and the GitHub runner image points
+# its Ubuntu sources at `mirror+file:/etc/apt/apt-mirrors.txt`. On the runner, #1080's first CI run probed
+# only the comment's host (help.ubuntu.com) and never the mirrors apt uses.
+_RUNNER_SOURCES = (
+    "# See http://help.dead.example/community/UpgradeNotes for how to upgrade to\n"
+    "# future releases of the distribution.\n"
+    "Types: deb\n"
+    "URIs: mirror+file:{tmp}/apt-mirrors.txt\n"
+    "Suites: resolute resolute-updates resolute-backports\n"
+    "Components: main restricted universe multiverse\n"
+    "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+)
+_RUNNER_MIRRORS = (
+    "# the image's mirror list\n"
+    "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+    "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+)
+
+
+def test_a_url_in_a_comment_is_not_probed(tmp_path: Path):
+    """The comment's host does not resolve, every real mirror does: the defaults must be used."""
+    proc, calls, srcs, _, _ = _run(tmp_path, resolvable=["azure.archive.ubuntu.com", "archive.ubuntu.com"],
+                                   sources_text=_RUNNER_SOURCES,
+                                   extra_files={"apt-mirrors.txt": _RUNNER_MIRRORS})
+    assert proc.returncode == 0, proc.stderr
+    assert "help.dead.example" not in proc.stderr
+    assert not any(_is_fallback(c) for c in calls), calls
+    assert srcs == []
+
+
+def test_the_mirror_list_behind_mirror_file_is_probed(tmp_path: Path):
+    """The image's real mirror does not resolve: that must be detected (and named) before any default try."""
+    proc, calls, srcs, _, _ = _run(tmp_path, resolvable=["archive.ubuntu.com", "mirror-one.example"],
+                                   sources_text=_RUNNER_SOURCES,
+                                   extra_files={"apt-mirrors.txt": _RUNNER_MIRRORS})
+    assert proc.returncode == 0, proc.stderr
+    assert "cannot resolve the default Ubuntu mirror host(s): azure.archive.ubuntu.com" in proc.stderr
+    assert "help.dead.example" not in proc.stderr
+    assert calls and all(_is_fallback(c) for c in calls), calls
+
+
+def test_a_missing_mirror_list_is_not_an_error(tmp_path: Path):
+    """A `mirror+file:` that points nowhere names no host; the defaults are then simply tried."""
+    proc, calls, _, _, _ = _run(tmp_path, resolvable=[], sources_text=_RUNNER_SOURCES)
+    assert proc.returncode == 0, proc.stderr
+    assert [c[0] for c in calls] == ["update", "install"] and not any(_is_fallback(c) for c in calls)
+
+
+def test_the_security_max_age_is_configurable_and_validated(tmp_path: Path):
+    proc, _, srcs, _, _ = _run(tmp_path, resolvable=["mirror-one.example"],
+                               extra_env={"APT_RETRY_SECURITY_MAX_AGE": "3600"})
+    assert proc.returncode == 0, proc.stderr
+    assert "Valid-Until-Max: 3600" in srcs
+    for bad in ("", "0", "-5", "10d", "1\nTrusted: yes"):
+        sub = tmp_path / f"bad{abs(hash(bad))}"
+        sub.mkdir()
+        proc, _, srcs, _, _ = _run(sub, resolvable=["mirror-one.example"],
+                                   extra_env={"APT_RETRY_SECURITY_MAX_AGE": bad})
+        assert proc.returncode == 0, (bad, proc.stderr)
+        assert "Valid-Until-Max: 864000" in srcs, (bad, srcs)
+        _assert_no_insecure([], srcs)

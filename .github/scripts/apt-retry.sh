@@ -27,7 +27,10 @@
 #     the Ubuntu archive key — stricter than the default sources, which accept any key apt trusts. This
 #     script never passes allow-unauthenticated, allow-insecure, `Trusted: yes` or any other option that
 #     weakens apt's checks, and never adds a key. A mirror can make an install fail or serve an older signed
-#     index; it cannot change what a package contains. If no mirror verifies, the step fails (fail closed).
+#     index; it cannot change what a package contains. The -security index is held to a maximum age
+#     (APT_RETRY_SECURITY_MAX_AGE, Valid-Until-Max), so "older" is bounded where it matters; the release and
+#     -updates pockets are not (the release pocket's index is dated release day by design). If no mirror
+#     verifies, the step fails (fail closed).
 #
 # Usage:  apt-retry.sh <package> [<package> ...]
 #
@@ -40,7 +43,7 @@
 # Test seams (all optional): APT_RETRY_UPDATE_TIMEOUT, APT_RETRY_INSTALL_TIMEOUT, APT_RETRY_PROBE_TIMEOUT,
 # APT_RETRY_DEFAULT_ATTEMPTS, APT_RETRY_FALLBACK_MIRRORS (space-separated; set it empty to disable the
 # fallback), APT_RETRY_SOURCES_FILES (the files whose hosts are probed), APT_RETRY_UBUNTU_KEYRING,
-# APT_RETRY_CODENAME.
+# APT_RETRY_CODENAME, APT_RETRY_SECURITY_MAX_AGE.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -55,6 +58,11 @@ _INSTALL_TIMEOUT="${APT_RETRY_INSTALL_TIMEOUT:-300}"
 _PROBE_TIMEOUT="${APT_RETRY_PROBE_TIMEOUT:-5}"
 _DEFAULT_ATTEMPTS="${APT_RETRY_DEFAULT_ATTEMPTS:-2}"
 # `-` not `:-`: an explicitly EMPTY value disables the fallback (the tests rely on this).
+# The oldest -security index a fallback mirror may serve (seconds; default 10 days). Ubuntu's InRelease
+# files carry no Valid-Until, so without this a mirror could serve an old, validly-signed security index
+# indefinitely (a freeze). apt enforces it AFTER verifying the signature, so the bound cannot be forged.
+_SECURITY_MAX_AGE="${APT_RETRY_SECURITY_MAX_AGE:-864000}"
+case "$_SECURITY_MAX_AGE" in ''|*[!0-9]*|0) _SECURITY_MAX_AGE=864000 ;; esac
 _FALLBACK_MIRRORS="${APT_RETRY_FALLBACK_MIRRORS-https://mirrors.edge.kernel.org/ubuntu/ https://mirror.us.leaseweb.net/ubuntu/ https://mirrors.mit.edu/ubuntu/}"
 _SOURCES_FILES="${APT_RETRY_SOURCES_FILES:-/etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list}"
 # The distro-owned Ubuntu archive keyring (package ubuntu-keyring). Newer releases may ship it as .pgp, so
@@ -91,13 +99,32 @@ _resolves() {
   timeout "${_PROBE_TIMEOUT}" getent hosts "$1" >/dev/null 2>&1
 }
 
-# The hosts named by the runner's Ubuntu apt sources (deb822 `URIs:` lines and one-line `deb` entries).
-_default_hosts() {
+# The non-comment lines of the given files (apt ignores lines whose first non-blank character is `#`).
+_source_lines() {
   local f
-  for f in ${_SOURCES_FILES}; do
+  for f in "$@"; do
     [ -r "$f" ] || continue
-    grep -hoE '(https?|ftp)://[^/[:space:]]+' "$f" 2>/dev/null || true
-  done | sed -E 's#^[a-z]+://##; s#^[^@]*@##; s#:[0-9]+$##' | sort -u
+    grep -vE '^[[:space:]]*#' "$f" 2>/dev/null || true
+  done
+}
+
+# The hosts named by the runner's Ubuntu apt sources (deb822 `URIs:` lines and one-line `deb` entries).
+#   * COMMENTS ARE NOT SOURCES. Ubuntu's stock ubuntu.sources opens with a comment that carries a URL
+#     (`# See http://help.ubuntu.com/community/UpgradeNotes ...`); probing it would decide the fallback on a
+#     host apt never contacts.
+#   * `mirror+file:<path>` IS FOLLOWED. The GitHub runner image points its Ubuntu sources at
+#     `mirror+file:/etc/apt/apt-mirrors.txt`, a file of mirror URIs; the hosts apt really uses are in THAT
+#     file, so it is read too (one level, which is all apt itself supports).
+_default_hosts() {
+  local lines lists
+  # shellcheck disable=SC2086  # _SOURCES_FILES is a space-separated list by contract
+  lines="$(_source_lines ${_SOURCES_FILES})"
+  lists="$( { printf '%s\n' "$lines" | grep -oE 'mirror\+file:(//)?/[^[:space:]]+' || true; } \
+              | sed -E 's#^mirror\+file:(//)?##' | sort -u)"
+  # shellcheck disable=SC2086  # one path per word; the image's mirror-list paths contain no spaces
+  { printf '%s\n' "$lines"; _source_lines ${lists}; } \
+    | { grep -oE '(https?|ftp)://[^/[:space:]]+' || true; } \
+    | sed -E 's#^[a-z]+://##; s#^[^@]*@##; s#:[0-9]+$##' | sort -u
 }
 
 # Prints the default mirror hosts that do NOT resolve (empty output: every one resolves, or none is named).
@@ -153,9 +180,16 @@ _fallback_or_fail() {
     cat > "${dir}/vigil-apt-fallback.sources" <<EOF
 Types: deb
 URIs: ${m}
-Suites: ${codename} ${codename}-updates ${codename}-security
+Suites: ${codename} ${codename}-updates
 Components: main restricted universe multiverse
 Signed-By: ${_KEYRING}
+
+Types: deb
+URIs: ${m}
+Suites: ${codename}-security
+Components: main restricted universe multiverse
+Signed-By: ${_KEYRING}
+Valid-Until-Max: ${_SECURITY_MAX_AGE}
 EOF
     chmod 0644 "${dir}/vigil-apt-fallback.sources"
     echo "::notice::apt fallback (${why}): installing ${pkgs[*]} from ${m}; Release signatures are checked against ${_KEYRING}" >&2
