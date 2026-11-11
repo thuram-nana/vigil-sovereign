@@ -268,9 +268,10 @@ GATEWAY_DOCKERFILE = REPO_ROOT / "gateway/Dockerfile"
 
 def _dockerfile_python_minor(dockerfile_text: str) -> str | None:
     """The `major.minor` of a Dockerfile's python base, read from the first non-comment `FROM`/`ARG`
-    line that names `python:X.Y` — so both the direct form (`FROM python:3.13-slim@sha256:…`, the AEGIS
-    image) and the build-arg form (`ARG PYTHON_BASE=python:3.13-slim@…` + `FROM ${PYTHON_BASE}`, the
-    gateway image) resolve. Whole-line `#` comments are skipped first, so a commented example base can
+    line that names `python:X.Y` — so the direct form (`FROM python:3.13-slim@sha256:…`, the AEGIS
+    image), the named-stage form (`ARG PYTHON_BASE=pinned-python` + `FROM python:3.13-slim@… AS
+    pinned-python` + `FROM ${PYTHON_BASE}`, the gateway image) and a build-arg default that names the
+    image itself (`ARG PYTHON_BASE=python:3.13-slim@…`) all resolve. Whole-line `#` comments are skipped first, so a commented example base can
     never be mistaken for the real pin. None when no python base is named."""
     for raw in dockerfile_text.splitlines():
         s = raw.strip()
