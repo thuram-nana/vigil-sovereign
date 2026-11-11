@@ -47,7 +47,7 @@ def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
     from ..ui import assessments, margin
     from . import (accounts, asset_ownership, budget, capability, cost_ledger, customer_credentials, customers,
                    invoices, killswitch, metering, monitoring_authority, monitoring_subscription, orgs, postpaid,
-                   promotion, subscription, wallet)
+                   promotion, report_unlock, subscription, trial_claim, wallet)
     from .identity import owner_pubkey
 
     def touch(registry) -> Callable[[], Any]:
@@ -65,6 +65,8 @@ def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
         ("accounts", touch(accounts.AccountsRegistry(store, owner_key=None))),
         ("customer credentials", touch(customer_credentials.CustomerCredentialRegistry(store, owner_key=None))),
         ("invoices", touch(invoices.InvoiceRegistry(store, owner_key=None))),
+        ("trial claims", touch(trial_claim.TrialClaimRegistry(store, owner_key=None))),
+        ("report unlocks", touch(report_unlock.ReportUnlockRegistry(store, owner_key=None))),
         ("cost ledger", touch(cost_ledger.CostEnvelopeLedger(store, owner_key=None))),
         ("postpaid accounts", touch(postpaid.PostpaidRegistry(store, owner_key=None))),
         ("postpaid arrears", touch(postpaid.PostpaidArrearsLedger(store, owner_key=None))),
