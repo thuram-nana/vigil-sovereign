@@ -636,3 +636,54 @@ def test_a_file_not_named_by_its_content_is_read_every_time(monkeypatch, tmp_pat
     assert led.undrained([ref]) == "" and len(opened) == 1 and PC._PROCESSED_SEEN == {}
     _stripe_envelope(root, _completed_session(ref), "processed", 1)               # same name, new content
     assert ref in led.undrained([ref]) and len(opened) == 2
+
+
+def test_processed_is_read_only_after_two_stable_stage_passes(monkeypatch, tmp_path):
+    """undrained() reads processed/ only AFTER two consecutive stage passes saw the same files. A completed session
+    that the drain moves from working/ to processed/ just as the first stage pass starts is missed by that pass,
+    and must be found in processed/ (reading processed/ before the stage scan would miss it in both places)."""
+    import os
+    root = tmp_path / "stripe-spool"
+    ref = "vigil:org_chk1:n1"
+    (root / "processed").mkdir(parents=True)
+    _stripe_envelope(root, _completed_session(ref), "working", 1)
+    led = _ledger(tmp_path, root)
+    real, passes = led._spool_pass, []
+
+    def drain_moves_it_first(wanted):
+        if not passes:
+            src = root / "working" / f"{1:032x}.json"
+            os.replace(src, root / "processed" / src.name)       # the drain archives it (a subscription no-op)
+        passes.append(1)
+        return real(wanted)
+    monkeypatch.setattr(led, "_spool_pass", drain_moves_it_first)
+    why = led.undrained([ref])
+    assert len(passes) == 2 and not (root / "working" / f"{1:032x}.json").exists()
+    assert "processed/" in why and ref in why, why
+
+
+def test_one_stable_stage_pass_is_not_enough_to_read_processed(monkeypatch, tmp_path):
+    """A webhook in transit between stages during the first pass (out of retry/, not yet back in incoming/) is
+    invisible to it although that pass saw no file vanish. Only a second pass that agrees clears the stages, so it
+    is found there and processed/ is never consulted."""
+    import os
+    root = tmp_path / "stripe-spool"
+    ref = "vigil:org_chk1:n1"
+    (root / "processed").mkdir(parents=True)
+    (root / "incoming").mkdir()
+    _stripe_envelope(root, _completed_session(ref), "retry", 1)
+    led = _ledger(tmp_path, root)
+    real, passes = led._spool_pass, []
+    name, held = f"{1:032x}.json", tmp_path / "in-transit.json"
+
+    def in_transit_during_the_first_pass(wanted):
+        passes.append(1)
+        if len(passes) > 1:
+            return real(wanted)
+        os.replace(root / "retry" / name, held)
+        out = real(wanted)
+        os.replace(held, root / "incoming" / name)               # the drain re-admits it to incoming/
+        return out
+    monkeypatch.setattr(led, "_spool_pass", in_transit_during_the_first_pass)
+    why = led.undrained([ref])
+    assert len(passes) == 2 and "incoming/" in why and ref in why, why
