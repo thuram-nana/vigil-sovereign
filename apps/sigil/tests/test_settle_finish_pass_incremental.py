@@ -5,8 +5,9 @@ With ``VIGIL_SETTLE_SPINE_RECORD`` on, every settle-drain pass finishes the reco
 
   * the pass reads only the spine records appended since the previous pass (a checkpoint beside the spool,
     ``settle_checkpoint``) — an idle pass reads nothing more — and still finishes a lease published after that pass
-    listed the seam (every settlement record of it is after the checkpoint's ``listed_from``); a lease unreadable at
-    that listing, or a checkpoint that cannot be trusted (missing, unreadable, oversized, a symlink, another spine,
+    listed the seam (every settlement record of it is after the checkpoint's ``listed_from``); a lease retired from
+    the seam while a pass lists it keeps the next pass incremental, but a lease file still there unread at that
+    listing, or a checkpoint that cannot be trusted (missing, unreadable, oversized, a symlink, another spine,
     owner key or scope, an anchor rewritten or gone, a pruned spine), means one full read; the continued evidence
     equals a full scan pass after pass, and a checkpoint above its size bound is not kept; the whole spine is read
     again at least every ``FULL_RESCAN_S`` (a bundle restored onto the seam from a backup is found then);
@@ -20,7 +21,9 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * the checkpoint not used / not passed / since_seq ignored  -> test_an_idle_second_pass_reads_only_the_records_...,
                                                                  test_the_control_a_trusted_checkpoint_reads_only_...
   * the continued scan starting at the anchor for a new lease -> test_a_lease_published_while_a_pass_listed_the_seam_...
-  * an unclean listing trusted / the listing always clean     -> test_a_lease_unreadable_at_the_checkpoints_listing_...
+  * an unclean listing trusted / the listing always clean     -> test_a_lease_unreadable_at_the_checkpoints_listing_...,
+                                                                 test_a_lease_retired_while_a_pass_lists_the_seam_...
+  * a lease retired during the listing counted unclean        -> test_a_lease_retired_while_a_pass_lists_the_seam_...
   * each checkpoint check dropped (spine, owner, scope, anchor hash, anchor gone, live window, unknown lease,
     symlink, size)                                            -> test_a_checkpoint_that_cannot_be_trusted_means_...
   * the size bound on write dropped                           -> test_a_checkpoint_too_large_to_keep_is_not_written
@@ -152,6 +155,52 @@ def test_a_lease_unreadable_at_the_checkpoints_listing_is_read_in_full_once_read
     rows = ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 120, checkpoint=cp)
     assert [(r["slug"], r["status"]) for r in rows] == [(r3["slug"], "settle_completed")], rows
     assert _avail(s) == 1_000 - 100
+
+
+@pytest.mark.parametrize("race", ["retired_before_the_listing", "retired_during_the_listing", "unreadable"])
+def test_a_lease_retired_while_a_pass_lists_the_seam_keeps_the_next_pass_incremental(record_on, monkeypatch, race):
+    s = _store()
+    _seat(s, credits=1_000, hosts=(HOST, OTHER, "third.cm"))
+    _noise(s, 40)
+    _reserve(s, units=100, publish=True, hours=8, nonce="P" * 16)         # on the seam throughout
+    r1 = _reserve(s, units=100, publish=True, hours=8, nonce="Q" * 16, host=OTHER)
+    p = lease_path(_base(), r1["slug"])
+    cp = Path(_spool()) / CHECKPOINT_NAME
+    real_list, real_read = B.list_credit_leases, B._read_lease_file
+
+    def retire_r1():                                                      # a settle retires r1: its money landed
+        assert _settle(s, r1, 100, basis="completion:completed")["ok"] and not p.exists()
+
+    def listing(base):                                                    # after the pass globbed the seam
+        monkeypatch.setattr(B, "list_credit_leases", real_list)
+        if race == "retired_before_the_listing":
+            retire_r1()
+        elif race == "unreadable":
+            p.write_bytes(b"{not json")                                   # still on the seam, unreadable
+        return real_list(base)
+
+    def read_lease(path):                                                 # the listing globbed r1, then it went
+        if path == p:
+            monkeypatch.setattr(B, "_read_lease_file", real_read)
+            retire_r1()
+        return real_read(path)
+
+    monkeypatch.setattr(B, "list_credit_leases", listing)
+    if race == "retired_during_the_listing":
+        monkeypatch.setattr(B, "_read_lease_file", read_lease)
+    assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90, checkpoint=cp) == []
+    ck = json.loads(cp.read_text(encoding="utf-8"))
+    assert ck["listing_clean"] is (race != "unreadable"), ck["listing_clean"]
+    assert p.exists() is (race == "unreadable")
+    _reserve(s, units=100, publish=True, hours=8, nonce="R" * 16, host="third.cm")   # a new lease after that listing
+    seen, n, restore = _counting(monkeypatch, s)
+    assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 120, checkpoint=cp) == []
+    restore()
+    if race == "unreadable":
+        assert seen["visits"] >= n, (seen, n)                             # a file still there unread: a full read
+    else:
+        assert seen["visits"] == n - 1 - ck["listed_from"] < n - 40, (seen, n, ck["listed_from"])   # from listed_from
+    assert _avail(s) == 1_000 - 300                                         # three reserved, none refunded
 
 
 def _tamper(field, value):

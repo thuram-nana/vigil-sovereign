@@ -404,8 +404,13 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
         leases.append(b)
     if not leases:
         return []                                          # nothing on the seam: the spine is not read
-    # clean: every in-scope lease file was read and verified by this listing (one lease file per slug)
-    clean = not ({f for f in files if scope == "*" or f == scope} - {b.slug for b in leases})
+    # clean: every in-scope lease file STILL on the seam was read and verified by this listing (one lease file per
+    # slug). So each file the listing did not take is looked up again now: one that is still there (unreadable or
+    # unverified) makes the listing unclean; one gone since the glob does not. A file goes from the seam when a
+    # settle retires its lease (its money landed) or a restore removes it, which the periodic full read covers; a
+    # bundle replaced meanwhile was read as its new lease, or is still there.
+    missing = {f for f in files if scope == "*" or f == scope} - {b.slug for b in leases}
+    clean = not any(os.path.lexists(leases_root(base) / f"{f}.json") for f in missing)
 
     def _scan(keys: Any) -> Any:
         return settle_checkpoint.scan(gate.store, kp.public_key_b64, keys=keys,

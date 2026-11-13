@@ -10,7 +10,8 @@ records appended since:
   ``live_from``                      the first seq the spine still holds (a prune moves it);
   ``anchor``                         ``[seq, entry_hash]`` of the last record the pass read (its ``through``);
   ``listed_from``                    the spine tip read BEFORE that pass listed the seam;
-  ``listing_clean``                  every in-scope lease file on the seam was read and verified by that listing;
+  ``listing_clean``                  every in-scope lease file still on the seam after that listing was read and
+                                     verified by it (a file gone since the pass globbed the seam does not count);
   ``full_at``                        the pass clock of the last FULL read (one is made at least every
                                      :data:`FULL_RESCAN_S`);
   ``leases`` / ``evidence``          every lease that listing found, and the non-empty evidence of each through the
@@ -29,10 +30,13 @@ a lease (its decision and each settle entry) is appended by ``LaunchGate._settle
 So every settlement record of such a lease was appended after its bundle was written, hence after ``listed_from`` was
 read: its seq is greater than ``listed_from``, and a pass with such a lease reads from ``min(anchor, listed_from)``.
 (Reading ``(listed_from, anchor]`` again for the carried leases changes nothing: the first verified decision wins and
-the landed entries are a set.) A listing that was not clean gives no such guarantee, so a new lease after it is a
-full scan. Only a publish writes a lease bundle, but the seam can also be restored from a backup out of step with the
-spine; so a pass reads the whole spine again at least every :data:`FULL_RESCAN_S` (and whenever its clock is behind
-the checkpoint's), and a bundle that reappeared on the seam any other way is found within that time.
+the landed entries are a set.) A lease file that left the seam while that pass listed it was retired by its settle
+(its money landed) or removed by a restore; a bundle for its slug found later was written after it left, so after
+``listed_from`` was read, or was restored, which the periodic full read below covers. A listing that left a file it
+could not read or verify on the seam gives no such guarantee, so a new lease after it is a full scan. Only a publish
+writes a lease bundle, but the seam can also be restored from a backup out of step with the spine; so a pass reads
+the whole spine again at least every :data:`FULL_RESCAN_S` (and whenever its clock is behind the checkpoint's), and a
+bundle that reappeared on the seam any other way is found within that time.
 
 The checkpoint never decides money: it only selects the leases the pass hands to ``settle_launch(finish_only=True)``,
 which re-reads the spine under its locks and moves only the recorded decision, exactly once. A lost or stale
