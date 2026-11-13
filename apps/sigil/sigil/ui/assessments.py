@@ -160,7 +160,7 @@ def _preview_findings(store, org_id: str, *, now: float, limit: int, can_buy: bo
     own = AssetOwnershipRegistry(store, owner_key=None)
     current = {_customer_slug(org_id, h): h for h in own.proven_hosts(org_id, now=now)}
     ever = {_customer_slug(org_id, h): h for h in own.ever_proven_hosts(org_id)}
-    revealed = fp.reveal_ref(_all_finding_rows(store, set(ever)), set(ever))
+    revealed = fp.reveal_seq(_all_finding_rows(store, set(ever)), set(ever))
     rows = fp.apply_preview(_all_finding_rows(store, set(current)), revealed=revealed, host_of={**ever, **current})
     rows.sort(key=lambda t: t[0], reverse=True)
     n = max(1, min(int(limit), 1000))

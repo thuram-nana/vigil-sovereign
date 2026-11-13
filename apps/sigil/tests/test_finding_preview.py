@@ -290,3 +290,26 @@ def test_a_reveal_spent_on_a_lapsed_host_is_not_spent_again(monkeypatch):
     out = _locked_read(s)
     assert {r["finding_ref"] for r in out["findings"]} == {"n0", "n1"}
     assert _revealed(out) == []
+
+
+def test_findings_sharing_a_finding_ref_get_exactly_one_reveal(monkeypatch):
+    """finding_ref is not unique (a check id or class): the reveal is pinned to one record, so every other
+    finding that shares its ref stays locked — within one host and across hosts."""
+    monkeypatch.setenv(_FLAG, "1")
+    s = _store()
+    _prove(s, "org_a", "a.example")
+    _prove(s, "org_a", "b.example")
+    s_ref = "xss"
+    for host, surface in (("a.example", "/q"), ("a.example", "/admin"), ("b.example", "/x")):
+        c = {"engagement_slug": _customer_slug("org_a", host), "finding_ref": s_ref, "bug_class": "xss",
+             "surface": surface, "confidence": 0.9, "how_to_verify": f"SECRET-{host}-{surface}",
+             "summary": f"SUM-{host}-{surface}"}
+        s.append(kind="finding", source="offense", actor="ORACLE",
+                 payload={"certificate": c, "finding_ref": s_ref, "signatures": []})
+    _trial(s, "org_a")
+    out = _locked_read(s)
+    assert out["count"] == 3
+    unlocked = [r for r in out["findings"] if not r["locked"]]
+    assert len(unlocked) == 1 and unlocked[0]["surface"] == "/q"
+    blob = json.dumps(out)
+    assert "SECRET-a.example-/admin" not in blob and "SECRET-b.example-/x" not in blob

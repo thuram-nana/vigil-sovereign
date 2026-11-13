@@ -102,17 +102,18 @@ def derived_title(row: dict) -> str:
     return f"{row.get('bug_class') or 'finding'} at {row.get('surface') or 'unknown surface'}"
 
 
-def reveal_ref(rows: Iterable["tuple[int, dict]"], ever_slugs: "set[str]") -> Optional[str]:
-    """The finding_ref of the ONE revealed finding: the lowest spine seq among findings whose slug is in the
-    org's ever-proven slug set. None when there is none (a failed run with no findings consumes nothing)."""
-    best: "Optional[tuple[int, str]]" = None
+def reveal_seq(rows: Iterable["tuple[int, dict]"], ever_slugs: "set[str]") -> Optional[int]:
+    """The spine seq of the ONE revealed finding: the lowest seq among findings whose slug is in the org's
+    ever-proven slug set. The reveal is pinned to that ONE record — never to its finding_ref, which is not unique
+    (several findings can share a check id or class). None when there is none (a run with no findings consumes
+    nothing)."""
+    best: Optional[int] = None
     for seq, row in rows:
-        ref = row.get("finding_ref")
-        if row.get("engagement_slug") not in ever_slugs or not isinstance(ref, str) or not ref:
+        if row.get("engagement_slug") not in ever_slugs:
             continue
-        if best is None or seq < best[0]:
-            best = (seq, ref)
-    return best[1] if best else None
+        if best is None or seq < best:
+            best = seq
+    return best
 
 
 def lock_row(row: dict, host: Optional[str]) -> dict:
@@ -126,14 +127,14 @@ def lock_row(row: dict, host: Optional[str]) -> dict:
     return out
 
 
-def apply_preview(rows: "list[tuple[int, dict]]", *, revealed: Optional[str],
+def apply_preview(rows: "list[tuple[int, dict]]", *, revealed: Optional[int],
                   host_of: "dict[str, str]") -> "list[tuple[int, dict]]":
     """Project EVERY row (before pagination): the revealed finding stays full (a deep copy, plus host/title/
     severity), every other row is locked. Returns new (seq, row) pairs; the inputs are never modified."""
     out = []
     for seq, row in rows:
         host = host_of.get(str(row.get("engagement_slug")))
-        if revealed is not None and row.get("finding_ref") == revealed:
+        if revealed is not None and seq == revealed:
             full = copy.deepcopy(row)
             sev, basis = derived_severity(row)
             full.update(host=host, title=derived_title(row), severity=sev, severity_basis=basis, locked=False)
