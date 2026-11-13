@@ -438,10 +438,9 @@ def test_the_cockpit_holds_the_report_lock_while_it_runs(tmp_path, monkeypatch):
     stop = fold_warm.start_background(lambda: SpineStore(tmp_path / "spine.jsonl"), name="test")
     try:
         assert stop is not None
-        probe = subprocess.run([sys.executable, "-c", "import sys; from pathlib import Path; "
-                                "from sigil.governor import fold_warm; "
-                                "print(fold_warm._lock_held_elsewhere(Path(sys.argv[1])))", str(path)],
-                               capture_output=True, text=True, timeout=60)
+        code = ("import sys; from pathlib import Path; from sigil.governor import fold_warm; "
+                "print(fold_warm._lock_held_elsewhere(Path(sys.argv[1])))")
+        probe = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True, timeout=60)
         assert probe.stdout.strip() == "True", probe.stderr
     finally:
         stop.set()

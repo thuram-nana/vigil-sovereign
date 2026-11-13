@@ -100,9 +100,9 @@ def test_a_superseded_mismatch_is_a_note_naming_the_previous_cockpit(tmp_path):
                         "mismatched": ["governor.budget", "governor.wallet"]}}))
     section, issues, notes = _doc._fold_cache_audit_report(tmp_path, now=NOW)
     assert issues == [] and section["ok"] is True and section["superseded_mismatched"] == 2
-    assert notes == ["a previous cockpit (pid 1, audit 2026-11-10T09:00:00+00:00) recorded a MISMATCH in "
-                     "governor.budget, governor.wallet; its caches died with it, but investigate a possible spine "
-                     "edit."]
+    assert notes == [("a previous cockpit (pid 1, audit 2026-11-10T09:00:00+00:00) recorded a MISMATCH in "
+                      "governor.budget, governor.wallet; its caches died with it, but investigate a possible spine "
+                      "edit.")]
     out = _doc.render({"ok": True, "issues": [], "notes": notes, "fold_cache_audit": section})
     assert "a previous cockpit (pid 1" in out
 
