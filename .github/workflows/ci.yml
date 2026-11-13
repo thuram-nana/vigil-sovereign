@@ -967,6 +967,9 @@ jobs:
     # modules are burned down over time; the list can never silently grow back.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the money-hygiene step reads the PR's own commit messages (base..head).
+          fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
@@ -978,6 +981,20 @@ jobs:
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      - name: public-repo money hygiene (tracked files + commit, PR and branch text)
+        # The repo is PUBLIC. The markup and target-margin VALUES live only in the private deploy
+        # environment; this blocks a value in any tracked text file, in the PR's own commit messages
+        # (base..head, so main's history is not re-judged), in the PR title/body and in the branch
+        # name. Findings print location + pattern id only, never the matched text. Suite:
+        # apps/sigil/tests/test_public_repo_money_hygiene.py. Stdlib only.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python tools/governance/money_hygiene.py tree
+          if [ -n "$BASE_SHA" ]; then
+            python tools/governance/money_hygiene.py ci --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
       - name: ruff (BLOCKING — E9/F/B real bug classes)
         working-directory: apps/sigil
         run: ruff check sigil
