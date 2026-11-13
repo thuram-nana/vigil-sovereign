@@ -1633,9 +1633,10 @@ class SpineStore:
             before `seq`: a rollback, rewrite or reset);
           * None — undecidable within `max_bytes` of the tail (a large delta, a gap at `seq`, a non-monotonic
             tail, a rotation since the anchor that left more than one segment behind it), a segment the manifest
-            names is missing (one listing of the segments dir), or the manifest is gone while a sealed segment is
-            still on disk: the caller takes the indexed path, which re-resolves a superseded manifest and raises on
-            a lost segment or a removed manifest as the full fold does."""
+            names is missing (one listing of the segments dir), the manifest's segments are not one contiguous run,
+            or the manifest is gone while a sealed segment is still on disk: the caller takes the indexed path,
+            which re-resolves a superseded manifest and raises on a lost segment, a broken run or a removed
+            manifest as the full fold does."""
         if seq < 0:
             return None
         m = read_manifest(self._layout)
@@ -1647,8 +1648,8 @@ class SpineStore:
             target, prev = self._read_target(), None
         else:
             act = m.active()
-            if act is None:
-                return None
+            if act is None or _segment_run_break(m) is not None:
+                return None                               # a broken run: every reader raises on the indexed path
             target = self._layout.seg_path(act)
             sealed = m.sealed_in_order()
             prev = sealed[-1] if sealed else None

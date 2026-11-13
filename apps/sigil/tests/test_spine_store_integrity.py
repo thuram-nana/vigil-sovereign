@@ -154,6 +154,40 @@ def test_append_rechecks_a_same_size_rewrite_under_it(tmp_path):
         a.append(kind="message", source="t", actor="u", payload={"text": "x"})
 
 
+def test_append_rechecks_an_in_place_same_size_rewrite_of_its_tail(tmp_path):
+    """The SAME file (same inode) is rewritten in place to exactly the size this store last checked, its last line
+    replaced by a copy of an older one: the same file at the same size is not "nothing new" — the tail record must
+    still be the one checked."""
+    a = SpineStore(tmp_path / "spine.jsonl")
+    _fixed(a, [f"m{i}" for i in range(6)])
+    p = a._active
+    st = p.stat()
+    lines = p.read_bytes().splitlines(keepends=True)
+    with p.open("r+b") as f:                                        # in place: no new file
+        f.write(b"".join(lines[:5] + [lines[2]]))
+    assert (p.stat().st_ino, p.stat().st_size) == (st.st_ino, st.st_size)   # the precondition this test is about
+    with pytest.raises(SpineError, match="not above every earlier record"):
+        a.append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+def test_append_rechecks_a_replacement_file_that_ends_in_the_record_it_checked(tmp_path):
+    """The active segment is REPLACED by a new file of exactly the checked size that still ends in the very record
+    this store checked, with a copy of that record earlier in it: a different file is re-checked from its start."""
+    import os
+    a = SpineStore(tmp_path / "spine.jsonl")
+    _fixed(a, [f"m{i}" for i in range(6)])
+    p = a._active
+    st = p.stat()
+    lines = p.read_bytes().splitlines(keepends=True)
+    tmp = p.with_name(p.name + ".new")
+    tmp.write_bytes(b"".join(lines[:3] + [lines[5]] + lines[4:]))  # seq 5 at line 3, and again as the tail
+    os.replace(tmp, p)
+    assert p.stat().st_ino != st.st_ino and p.stat().st_size == st.st_size
+    assert p.read_bytes().splitlines(keepends=True)[-1] == lines[-1]
+    with pytest.raises(SpineError, match="not above every earlier record"):
+        a.append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
 def test_append_rechecks_a_longer_rewrite_from_its_start(tmp_path):
     """Another process resets the spine and writes FEWER, LONGER records past this store's checked offset: the
     bytes after that offset are not a continuation, so the segment is re-checked from its start (no false refusal

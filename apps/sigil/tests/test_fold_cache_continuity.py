@@ -738,6 +738,40 @@ def test_a_warm_read_over_a_lost_active_segment_raises_like_the_full_fold(tmp_pa
         _cust(p).by_email("user2@example.com")
 
 
+def _not_a_run(w, edit):
+    """Rewrite the manifest so its segments are no longer one contiguous run (every named file still exists)."""
+    mp = w._layout.manifest_path
+    m = json.loads(mp.read_text())
+    sealed = sorted((g for g in m["segments"] if g["sealed"]), key=lambda g: g["first_seq"])
+    if edit == "the sealed segment before the active is omitted":
+        m["segments"].remove(sealed[-1])
+    else:                                                    # "a second unsealed segment"
+        sealed[0]["sealed"] = False
+    mp.write_text(json.dumps(m))
+
+
+@pytest.mark.parametrize("edit", ["the sealed segment before the active is omitted", "a second unsealed segment"])
+def test_a_warm_read_over_a_manifest_that_is_not_a_contiguous_run_raises_like_the_full_fold(tmp_path, monkeypatch,
+                                                                                             edit):
+    """Every reader refuses a manifest whose segments are not one contiguous run; the warm tail path must too, never
+    answer from the active segment's tail over a spine the full fold refuses to read."""
+    p, w, wreg = _customers_on_two_segments(tmp_path)
+    for i in range(4, 6):
+        wreg.create(f"user{i}@example.com", issued_at=float(next(_issue)))
+    assert w.rotate()
+    for i in range(6, 8):
+        wreg.create(f"user{i}@example.com", issued_at=float(next(_issue)))
+    assert len(read_manifest(w._layout).sealed_in_order()) == 2
+    anchor = list(SpineStore(p).iter_records())[-1]
+    assert _cust(p).by_email("user1@example.com") is not None             # warm; anchor in the active segment
+    _not_a_run(w, edit)
+    assert SpineStore(p).tail_after(anchor.seq, anchor.entry_hash) is None
+    with pytest.raises(store_mod.SpineError, match="not a contiguous segment run"):
+        _full(monkeypatch, lambda: _cust(p).by_email("user1@example.com"))
+    with pytest.raises(store_mod.SpineError, match="not a contiguous segment run"):
+        _cust(p).by_email("user1@example.com")
+
+
 @pytest.mark.parametrize("which", ["active", "sealed", "the oldest of two sealed", "the segments directory"])
 def test_tail_after_is_undecidable_when_a_segment_is_missing(tmp_path, which):
     p = tmp_path / "spine.jsonl"
