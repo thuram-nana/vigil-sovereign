@@ -1186,6 +1186,9 @@ def snapshot_payload(store, K: int, *, prior: Optional[dict] = None,
         "cumulative_merkle_root": cumulative,
         "prev_snapshot_seq": prior_snapshot_seq,
         "trusted_pubkey": tp,
+        # the owner key the succession places at K: a reader seeds from this snapshot only while its own succession
+        # places the same key there (`snapshot.seed_applies`) — the live window is verified with that succession.
+        "base_pubkey": resolver.at(K) or "",
         "folded_state": folded.model_dump(),
     }
 

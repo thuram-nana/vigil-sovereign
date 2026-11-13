@@ -34,7 +34,7 @@ from . import key_history as _kh  # noqa: E402
 from .authn import as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402
-from ..spine.snapshot import SnapshotState  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -178,8 +178,8 @@ class ReportUnlockRegistry:
 
     # -- reads -------------------------------------------------------------------------------------
     def _seed(self, snap) -> "tuple[tuple[dict, dict], int]":
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            return ({}, {}), -1
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            return ({}, {}), -1                           # nothing pruned: the genesis scan is the whole fold
         return seed_state(snap), snap.base_seq - 1
 
     def _cached(self, reader: Callable):

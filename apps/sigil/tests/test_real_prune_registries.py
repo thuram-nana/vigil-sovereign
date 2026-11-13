@@ -947,7 +947,7 @@ def _ui_margin() -> Scenario:
     settle-event fold. `periods` is compared separately in `test_margin_periods_...`: its docstring declares that
     a pruned settle moves into the `unscoped` bucket."""
     def overview(store):
-        out = ui_margin.margin_overview(store, cost_rate=2_000_000, margin_k=2.0)
+        out = ui_margin.margin_overview(store, cost_rate=2_000_000, target_margin=None)
         for t in out.get("tenants", []):
             t["period_tokens_total"] = sum(p.get("committed_tokens", 0) for p in t.pop("periods", []))
         return out
@@ -1161,7 +1161,7 @@ def test_margin_periods_move_pruned_settles_to_unscoped_as_documented(world):
     def read(R):
         return {t["org_id"]: (t["committed_tokens"], [(p["scoped"], p["period_end"], p["committed_tokens"])
                                                       for p in t["periods"]])
-                for t in ui_margin.margin_overview(R.store, cost_rate=2_000_000, margin_k=2.0)["tenants"]}
+                for t in ui_margin.margin_overview(R.store, cost_rate=2_000_000, target_margin=None)["tenants"]}
     before = _both_flags(world, read)
     assert before["OFF"] == before["ON"] and (True, 1000.0, 400) in before["OFF"]["acme"][1]
     prune.commit_prune(world.store(), k, confirm=True)
@@ -1317,9 +1317,11 @@ def test_owner_key_rotation_on_a_pruned_spine_keeps_every_seed(world):
 
 
 def test_a_seed_applies_only_to_its_own_key_or_along_the_validated_succession(world):
-    """`seed_applies`: the seed's own key, or the validated succession tip when the seed's key is the one the
-    succession says was the owner's AT the snapshot seq. Anything else on a pruned spine RAISES (fail closed) —
-    never an empty start over the deleted prefix. On an un-pruned spine a different key starts from genesis."""
+    """`seed_applies`: the reader's validated succession must say the seed's key was the owner's AT the snapshot seq
+    (the seed's own key before any rotation, the succession tip after one). Anything else on a pruned spine RAISES
+    (fail closed) — never an empty start over the deleted prefix, and never the seed on key equality alone: after a
+    rotation the retired key's succession does not end at it, so it verifies none of the live records. On an
+    un-pruned spine a different key starts from genesis."""
     import time
 
     from sigil.reuse import generate_keypair
@@ -1333,30 +1335,41 @@ def test_a_seed_applies_only_to_its_own_key_or_along_the_validated_succession(wo
             _snap.seed_applies(st, who, world.store())
     new_kp, rot_seq = _rotate(world, issued_at=time.time())
     assert _snap.seed_applies(st, new_kp.public_key_b64, world.store()) is True   # the validated tip
-    assert _snap.seed_applies(st, old, world.store()) is True                     # still its own key
+    with pytest.raises(_snap.SnapshotError, match="does not succeed"):
+        _snap.seed_applies(st, old, world.store())         # its own key, but no longer the end of the succession
     with pytest.raises(_snap.SnapshotError):
         _snap.seed_applies(st, stranger, world.store())
     late = st.model_copy(update={"snapshot_seq": rot_seq + 1})                     # the old key no longer covers it
     with pytest.raises(_snap.SnapshotError):
         _snap.seed_applies(late, new_kp.public_key_b64, world.store())
     tip = st.model_copy(update={"trusted_pubkey": new_kp.public_key_b64})
-    assert _snap.seed_applies(tip, new_kp.public_key_b64, world.store()) is True
+    with pytest.raises(_snap.SnapshotError):           # a seed naming a key the succession does not place at its seq
+        _snap.seed_applies(tip, new_kp.public_key_b64, world.store())
     with pytest.raises(_snap.SnapshotError):
         _snap.seed_applies(tip, old, world.store())     # a seed under the NEW key is not the old key's
     assert _snap.seed_applies(SnapshotState.empty(), stranger, world.store()) is False   # nothing pruned
 
 
-def test_a_read_whose_key_is_the_seeds_own_never_walks_the_succession(world, monkeypatch):
-    """The succession walk is only needed when the keys differ; an equal key must not pay for one."""
+def test_a_read_whose_key_is_the_seeds_own_walks_the_succession_once_per_spine_state(world, monkeypatch):
+    """Even the seed's own key is checked against the succession (key equality alone is not enough — see
+    `test_a_reader_still_trusting_a_retired_key_never_reads_the_seed_without_its_live_records`), through the SAME
+    memoized resolver the fold itself uses: repeated reads of one spine state walk the owner-key history once."""
     from sigil.governor import key_history as kh
     _pruned_killswitch_world(world)
-
-    def boom(*a, **kw):
-        raise AssertionError("key_resolver called for a reader holding the seed's own key")
-
     st = SnapshotState.load(world.store())
-    monkeypatch.setattr(kh, "key_resolver", boom)
-    assert _snap.seed_applies(st, st.trusted_pubkey, world.store()) is True
+    walks = {"n": 0}
+    real = kh._resolver_from_history
+
+    def counting(*a, **kw):
+        walks["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kh, "_resolver_from_history", counting)
+    kh.clear_resolver_cache()
+    store = world.store()
+    for _ in range(3):
+        assert _snap.seed_applies(st, st.trusted_pubkey, store) is True
+    assert walks["n"] == 1, walks
 
 
 def test_a_checkpoint_between_the_prune_commit_and_its_manifest_rebase(world):
@@ -1756,14 +1769,20 @@ def test_a_retired_keys_forgery_is_refused_without_the_floor_too(world):
 
 def test_the_trust_root_is_the_succession_tip_not_a_swapped_in_owner_pub(world):
     """An owner.pub swapped in WITHOUT a cross-signed succession record is not trusted (W9-1, unchanged by the
-    refactor onto `owner_succession`)."""
+    refactor onto `owner_succession`). `owner.pub` alone no longer matches `owner.priv`, so no trust root is built
+    at all (the owner key loader refuses a mismatched pair); a complete, consistent pair swapped in is still not the
+    succession tip."""
     import time
 
     from sigil.governor import key_history as kh
     from sigil.reuse import generate_keypair
     _pruned_killswitch_world(world)
     new_kp, _ = kh.rotate(world.store(), issued_at=time.time())
-    (world.root.parent / "keys" / "owner.pub").write_text(generate_keypair().public_key_b64, encoding="utf-8")
+    stranger = generate_keypair()
+    (world.root.parent / "keys" / "owner.pub").write_text(stranger.public_key_b64, encoding="utf-8")
+    with pytest.raises(identity.OwnerKeyUnavailable):
+        _cp.trust_root(world.store())
+    identity.set_owner_key(stranger)
     assert [a.public_key_b64 for a in _cp.trust_root(world.store()).authorizers] == [new_kp.public_key_b64]
 
 
@@ -1877,9 +1896,11 @@ def test_a_retired_keys_head_over_a_forged_snapshot_is_never_laundered_by_a_rout
 
 
 def test_an_owner_pub_swapped_in_without_a_key_fails_closed_on_a_pruned_spine(world):
-    """A same-UID writer replaces `owner.pub` (no private key needed). The head still verifies (the trust root is
-    the succession tip), but no registry may seed from a key the succession does not reach: reads fail CLOSED —
-    the kill switch is never released (an un-pruned spine keeps it engaged the same way)."""
+    """A same-UID writer replaces `owner.pub` (no private key needed): the pair no longer matches, no trust root is
+    built and the pruned boundary is not trusted — reads fail CLOSED. With a complete, consistent pair of its own
+    swapped in, the head still verifies (the trust root is the succession tip), but no registry may seed from a key
+    the succession does not reach: reads fail CLOSED — the kill switch is never released (an un-pruned spine keeps
+    it engaged the same way)."""
     import time
 
     from sigil.governor import key_history as kh
@@ -1887,7 +1908,12 @@ def test_an_owner_pub_swapped_in_without_a_key_fails_closed_on_a_pruned_spine(wo
     _pruned_killswitch_world(world)
     _rotate(world, issued_at=time.time())
     assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
-    identity._PUB.write_text(generate_keypair().public_key_b64, encoding="utf-8")
+    stranger = generate_keypair()
+    identity._PUB.write_text(stranger.public_key_b64, encoding="utf-8")
+    kh.clear_resolver_cache()
+    reads = _default_key_reads(world)
+    assert all(isinstance(v[0], _Raised) and v[0].error.startswith("SnapshotError") for v in reads.values()), reads
+    identity.set_owner_key(stranger)
     kh.clear_resolver_cache()
     reads = _default_key_reads(world)
     assert all(isinstance(v[0], _Raised) and "does not succeed" in str(v[0]) for v in reads.values()), reads
@@ -1914,8 +1940,9 @@ def test_a_forked_succession_on_a_pruned_spine_fails_closed_and_never_releases(w
 
 def test_a_reader_still_holding_the_pre_rotation_key_keeps_every_latch(world):
     """Long-lived objects capture the owner key at construction. After a rotation on a pruned spine a reader that
-    still trusts the RETIRED key must read the seed it was folded under: the kill switch engaged, the gesture
-    capability still disabled — never released / re-enabled."""
+    still trusts the RETIRED key verifies none of the live records (its succession does not end at its key), so it
+    must not read the seed either: it fails closed — the kill switch is never read released, the gesture capability
+    never re-enabled. The current key (the validated tip) reads the seed."""
     import time
     world.apply([lambda R: R.kill.engage(reason="incident"),
                  lambda R: cap.CapabilityGate(R.store, owner_key=world.owner).disable("gesture", reason="x"),
@@ -1934,7 +1961,9 @@ def test_a_reader_still_holding_the_pre_rotation_key_keeps_every_latch(world):
         else:
             world.mp.delenv(FLAG, raising=False)
         fold_cache.clear_all()
-        assert ks.KillSwitch(world.store(), trusted_pubkey=old_pub).is_engaged() is True, on
+        with pytest.raises(SnapshotError, match="does not succeed"):
+            ks.KillSwitch(world.store(), trusted_pubkey=old_pub).is_engaged()
+        # the capability gate maps any read failure to DISABLED (its own fail-closed direction)
         assert cap.CapabilityGate(world.store(), trusted_pubkey=old_pub).is_disabled("gesture") is True, on
         # ... and the CURRENT key (the validated tip) reads the same seed: never an empty start, re-enabled
         assert ks.KillSwitch(world.store()).is_engaged() is True, on
@@ -2164,3 +2193,170 @@ def test_a_half_pruned_snapshot_is_treated_as_pruned_and_an_anonymous_reader_wal
     for anonymous in (None, ""):
         with pytest.raises(_snap.SnapshotError):
             _snap.seed_applies(st, anonymous, world.store())
+
+
+# ======================================================================================================
+# A seed is folded together with the live window, which the reader verifies with its own owner-key succession:
+# the seed applies only while that succession places the keys exactly where the prune placed them
+# ======================================================================================================
+def _device_wallet_world(world, dev_pub: str) -> int:
+    """Below K, under the world's owner key: a device authorized and a wallet grant of 100. Returns K (a sealed
+    boundary; the head is signed). No prune yet."""
+    from sigil.mesh import registry as mreg
+    world.apply([lambda R: mreg.authorize_device(R.store, "phone", dev_pub, world.owner, issued_at=1.0),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1), _noise(2)])
+    world.seal_with_tail(checkpoint=True)
+    return k
+
+
+def _authz_reads(world, dev_pub: str, key: Optional[str]) -> dict:
+    """{'OFF'|'ON': (device authorized, acme wallet)} for a reader trusting `key` (None: production construction,
+    the on-disk owner key), on fresh handles; a raise is captured as `_Raised`."""
+    from sigil.mesh import registry as mreg
+    out = {}
+    for label, on in (("OFF", False), ("ON", True)):
+        if on:
+            world.mp.setenv(FLAG, "1")
+        else:
+            world.mp.delenv(FLAG, raising=False)
+        fold_cache.clear_all()
+        vals: list = []
+        for fn in (lambda s: dev_pub in mreg.authorized_devices(s, trusted_pubkey=key),
+                   lambda s: wl.WalletRegistry(s, trusted_pubkey=key).available("acme")):
+            try:
+                vals.append(fn(world.store()))
+            except Exception as e:  # noqa: BLE001 — compared
+                vals.append(_Raised(f"{type(e).__name__}: {e}"))
+        out[label] = tuple(vals)
+    world.mp.delenv(FLAG, raising=False)
+    return out
+
+
+def _all_refused(reads: dict) -> bool:
+    return all(isinstance(v, _Raised) and v.error.startswith("SnapshotError") for vals in reads.values() for v in vals)
+
+
+def test_a_reader_still_trusting_a_retired_key_never_reads_the_seed_without_its_live_records(world):
+    """Prune under K0, rotate to K1, then revoke the device and debit the wallet under K1. A reader that still
+    trusts K0 — constructed with it before the rotation, or with K0's own key files put back — walks a succession
+    that does not end at its key, so it verifies none of the live records. It must not read the seed on key
+    equality: that would answer the device authorized and the full balance. Every such read fails closed."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.mesh import registry as mreg
+    from sigil.reuse import generate_keypair
+    dev = generate_keypair().public_key_b64
+    k = _device_wallet_world(world, dev)
+    prune.commit_prune(world.store(), k, confirm=True)
+    old = world.owner
+    assert _authz_reads(world, dev, None) == {"OFF": (True, 100), "ON": (True, 100)}
+    new_kp, _ = _rotate(world, issued_at=time.time())
+    mreg.revoke_device(world.store(), "phone", dev, new_kp)
+    wl.WalletRegistry(world.store(), owner_key=new_kp, trusted_pubkey=new_kp.public_key_b64).debit(
+        "acme", 100, entry_id="d1", issued_at=2.0)
+    truth = {"OFF": (False, 0), "ON": (False, 0)}
+    assert _authz_reads(world, dev, None) == truth
+    assert _authz_reads(world, dev, new_kp.public_key_b64) == truth
+    assert _all_refused(_authz_reads(world, dev, old.public_key_b64))       # a reader built before the rotation
+    identity.set_owner_key(old)                                             # the retired key's files put back
+    kh.clear_resolver_cache()
+    assert _cp.verify_checkpoint(world.store())[0], "the head itself still verifies under the succession tip"
+    assert _all_refused(_authz_reads(world, dev, None))
+
+
+@pytest.mark.parametrize("pin", ["removed", "set to the current key"])
+def test_a_genesis_pin_other_than_the_prunes_never_drops_the_live_records_signed_before_a_rotation(world, pin):
+    """The prune runs AFTER a rotation: its seed carries K1, while the live records [K..R) before the rotation are
+    K0's — here the device revoke and the wallet debit. With `owner.genesis.pub` removed or set to K1 the succession
+    is walked from K1 alone: K1 is still the key at the snapshot, but K0's live records no longer verify. The seed
+    must not apply (it would answer the device authorized and the full balance): reads fail closed."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.mesh import registry as mreg
+    from sigil.reuse import generate_keypair
+    dev = generate_keypair().public_key_b64
+    k = _device_wallet_world(world, dev)
+    old = world.owner
+    mreg.revoke_device(world.store(), "phone", dev, old)
+    wl.WalletRegistry(world.store(), owner_key=old, trusted_pubkey=old.public_key_b64).debit(
+        "acme", 100, entry_id="d1", issued_at=2.0)
+    new_kp, rot_seq = _rotate(world, issued_at=time.time())
+    assert rot_seq > k
+    world.seal_with_tail(checkpoint=True)
+    prune.commit_prune(world.store(), k, confirm=True)
+    st = SnapshotState.load(world.store())
+    assert st.trusted_pubkey == new_kp.public_key_b64 and st.snapshot_seq > rot_seq
+    truth = {"OFF": (False, 0), "ON": (False, 0)}
+    assert _authz_reads(world, dev, None) == truth
+    pin_path = world.root.parent / "keys" / "owner.genesis.pub"
+    assert pin_path.read_text(encoding="utf-8").strip() == old.public_key_b64
+    if pin == "removed":
+        pin_path.unlink()
+    else:
+        pin_path.write_text(new_kp.public_key_b64, encoding="utf-8")
+    kh.clear_resolver_cache()
+    assert _cp.verify_checkpoint(world.store())[0], "the head itself still verifies"
+    assert _all_refused(_authz_reads(world, dev, None))
+    pin_path.write_text(old.public_key_b64, encoding="utf-8")               # the pin the prune walked from
+    kh.clear_resolver_cache()
+    assert _authz_reads(world, dev, None) == truth
+
+
+def test_trial_claims_and_report_unlocks_keep_their_seed_across_a_rotation_after_a_prune(world):
+    """Both pricing ledgers seed through the same rule as every other registry: after a prune and a routine key
+    rotation the current key still reads the pruned claim and unlock (never an empty start that would let the same
+    key claim a second trial or re-lock a paying org)."""
+    import time
+
+    from sigil.governor import report_unlock as ru
+    from sigil.governor import trial_claim as tc
+    digest = tc.key_digest("email", "owner@acme.example")
+    world.apply([lambda R: tc.TrialClaimRegistry(R.store, owner_key=world.owner).claim(
+                     "email", digest, "acme", issued_at=1.0),
+                 lambda R: ru.ReportUnlockRegistry(R.store, owner_key=world.owner).unlock(
+                     "acme", "topup", source_ref="evt_1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1)])
+    world.seal_with_tail(checkpoint=True)
+    prune.commit_prune(world.store(), k, confirm=True)
+
+    def reads() -> dict:
+        out = {}
+        for label, on in (("OFF", False), ("ON", True)):
+            if on:
+                world.mp.setenv(FLAG, "1")
+            else:
+                world.mp.delenv(FLAG, raising=False)
+            fold_cache.clear_all()
+            s = world.store()
+            out[label] = (tc.TrialClaimRegistry(s).claimant("email", digest),
+                          ru.ReportUnlockRegistry(s).is_unlocked("acme"))
+        world.mp.delenv(FLAG, raising=False)
+        return out
+
+    assert reads() == {"OFF": ("acme", True), "ON": ("acme", True)}
+    _rotate(world, issued_at=time.time())
+    assert reads() == {"OFF": ("acme", True), "ON": ("acme", True)}
+
+
+def test_a_head_naming_a_snapshot_outside_its_own_signed_window_is_refused(world):
+    """Every prune appends its snapshot record inside the window the head it signs commits. A pruned head naming a
+    record past its own last_seq (in the unsigned tail) is refused even when it is signed by the owner key: no
+    signature covers that record."""
+    _pruned_killswitch_world(world)
+    standing = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    fseq = _forged_snapshot(world, world.owner.public_key_b64, standing.snapshot_seq)
+    (world.root / "floor.json").unlink()
+    _sign_v2_as(world.store(), world.owner.private_key_b64, standing, upto=fseq - 1, snapshot_seq=fseq)
+    assert _cp.verify_checkpoint(world.store())[0]
+    with pytest.raises(SnapshotError, match="outside its own signed window"):
+        SnapshotState.load(world.store())
+    assert _not_released(_default_key_reads(world))
