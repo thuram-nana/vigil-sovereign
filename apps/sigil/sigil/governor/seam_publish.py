@@ -12,12 +12,16 @@ spine has since revoked. Two helpers keep every publish fail-closed:
 * :func:`withdraw_publication` - on any publish failure the existing seam file is removed (or, when its
   directory cannot be written, emptied in place), so the offense plane falls back to default-ungranted /
   default-unattested instead of trusting a stale list. If even that is impossible it says so, and the caller
-  must then fail LOUDLY rather than report a revoke the offense plane never saw. A withdrawal also raises the
-  offense-side rollback floor, so the withdrawn file cannot be replayed onto the seam later.
+  must then fail LOUDLY rather than report a revoke the offense plane never saw. A withdrawal first raises the
+  rollback floor, so the withdrawn file cannot be replayed onto the seam later (and is refused even if it could
+  not be removed).
 * :func:`publish_lock` - one publish at a time per spine (threads AND processes), across snapshot, seal seq,
   write and withdrawal, so an older record list can never be sealed with a newer seq and overwrite a revoke.
-* :func:`raise_close_alarm` / :func:`clear_close_alarm` - a durable alarm `vigil doctor` reports when an offense
-  close could not revoke the published grants because the spine could not be read.
+* :func:`retract_for_revoke` - a revoke raises the floor and removes the publication BEFORE it waits for the
+  publish lock, so a revoke killed while it waits has already un-granted the offense plane.
+* :func:`raise_close_alarm` / :func:`clear_close_alarm` - a durable alarm `vigil doctor` reports when a grant
+  revoke could not be confirmed on the seam (an unreadable spine, or a publication that could be neither
+  re-published nor withdrawn); only an offense close that reconciles every published grant clears it.
 """
 from __future__ import annotations
 
@@ -56,24 +60,47 @@ def encodable_or_revoke(records: Iterable[dict], *, signal: str, engagement_slug
 def withdraw_publication(path_fn: Callable[[], Optional[Path]], *, what: str,
                          cause: Optional[BaseException] = None,
                          floor_fn: Optional[Callable[[], None]] = None) -> bool:
-    """After a failed publish, make sure the offense plane can no longer read the previous publication, so it
-    falls back to default-ungranted rather than trusting a stale list. The file is removed; when its directory
-    cannot be written (EACCES, an immutable directory) it is emptied in place instead, which needs only write
-    access to the file the sovereign itself created, and the offense reader treats an unparseable file as no
-    publication. ``floor_fn`` then raises the offense-side rollback floor above the withdrawn file's seq, so a
-    replay of that file is refused. Returns True only when no previous publication remains readable AND the floor
-    was raised; False otherwise. Never raises: the caller is already handling ``cause``."""
-    if not _withdraw_file(path_fn, what=what, cause=cause):
-        return False
+    """After a failed publish, make sure the offense plane can no longer honour the previous publication, so it
+    falls back to default-ungranted rather than trusting a stale list. ``floor_fn`` FIRST raises the rollback floor
+    above the previous file's seal seq: on its own that already makes the offense plane refuse the file as a
+    rollback, so it covers a file that cannot be removed and a crash before the removal. The file is then removed;
+    when its directory cannot be written (EACCES, an immutable directory) it is emptied in place instead, which
+    needs only write access to the file the sovereign itself created, and the offense reader treats an
+    unparseable file as no publication. Returns True only when the floor was raised AND no previous publication
+    remains readable; False otherwise. Never raises: the caller is already handling ``cause``."""
+    floor_ok = True
     if floor_fn is not None:
         try:
             floor_fn()
         except Exception:  # noqa: BLE001 - must not mask the original failure
-            _log.critical("seam publish of %s FAILED; the publication was withdrawn but the offense rollback floor "
-                          "could NOT be raised, so a replay of the withdrawn file would still be accepted", what,
-                          exc_info=True)
-            return False
-    return True
+            _log.critical("seam publish of %s FAILED and the offense rollback floor could NOT be raised, so a "
+                          "replay of the previous publication would still be accepted", what, exc_info=True)
+            floor_ok = False
+    file_ok = _withdraw_file(path_fn, what=what, cause=cause)
+    return floor_ok and file_ok
+
+
+def retract_for_revoke(path_fn: Callable[[], Optional[Path]], *, what: str,
+                       floor_fn: Callable[[], None]) -> bool:
+    """The revoke direction, BEFORE waiting for the publish lock: raise the rollback floor, then remove the current
+    publication. Always safe (it can only un-grant), and it means a revoke whose process is killed while it waits
+    for the lock (the cockpit ceremonies kill a CLI after 60 s) has already left the offense plane ungranted. The
+    publish that follows re-sends the full list and fails loudly if it cannot. Never raises; returns True when both
+    steps succeeded."""
+    ok = True
+    try:
+        floor_fn()
+    except Exception:  # noqa: BLE001 - best effort; the publish that follows is the guarantee
+        _log.error("revoke of %s: the rollback floor could not be raised ahead of the publish", what, exc_info=True)
+        ok = False
+    try:
+        path = path_fn()
+        if path is not None:
+            path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 - best effort; the publish that follows is the guarantee
+        _log.error("revoke of %s: the publication could not be removed ahead of the publish", what, exc_info=True)
+        ok = False
+    return ok
 
 
 def _withdraw_file(path_fn: Callable[[], Optional[Path]], *, what: str, cause: Optional[BaseException]) -> bool:
@@ -162,22 +189,29 @@ def close_alarm_path() -> Path:
     return home / "alarms" / CLOSE_ALARM_NAME
 
 
-def raise_close_alarm(detail: str) -> None:
-    """Record, durably, that an offense close could not revoke the published grants from the spine. Never raises
-    (logged CRITICAL instead): the close itself must still complete."""
+def raise_close_alarm(detail: str, *, cause: str = "spine_unreadable", failed: Iterable[str] = ()) -> None:
+    """Record, durably, that a grant revoke could not be confirmed on the seam. ``cause`` is ``spine_unreadable``
+    (an offense close could not read the spine; every published grant was withdrawn instead) or
+    ``seam_unreconciled`` (one or more published grants could be neither re-published from the spine nor
+    withdrawn, so they may still authorize; ``failed`` names them). Only an offense close that reconciles every
+    published grant clears it. Never raises (logged CRITICAL instead): the close itself must still complete."""
+    names = sorted({str(f)[:96] for f in failed})
     try:
         p = close_alarm_path()
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = p.parent / (p.name + ".tmp")
-        tmp.write_text(json.dumps({"detail": str(detail)[:500], "at": time.time()}), encoding="utf-8")
+        tmp.write_text(json.dumps({"detail": str(detail)[:500], "cause": str(cause)[:32], "failed": names[:50],
+                                   "at": time.time()}), encoding="utf-8")
         os.chmod(tmp, 0o600)
         os.replace(tmp, p)
     except Exception:  # noqa: BLE001
-        _log.critical("could not record the offense-close revoke alarm: %s", detail, exc_info=True)
+        _log.critical("could not record the eval-capability grant revoke alarm (%s; unconfirmed: %s): %s", cause,
+                      names, detail, exc_info=True)
 
 
 def clear_close_alarm() -> None:
-    """A later close that revoked from a readable spine clears the alarm. Never raises."""
+    """An offense close that revoked from a readable spine AND reconciled every published grant clears the alarm.
+    Never raises."""
     try:
         close_alarm_path().unlink(missing_ok=True)
     except OSError:

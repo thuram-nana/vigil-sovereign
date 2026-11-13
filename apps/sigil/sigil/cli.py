@@ -657,7 +657,13 @@ def cmd_eval_grant(a) -> None:
 
     if a.action == "status":
         g = EvalCapabilityGrant(store)
-        st = g.state(engagement_slug=a.engagement, target=(a.target or None), now=_time.time())
+        tgt = a.target or None
+        if tgt is None:
+            # Without --target, report the grant the offense plane would honour for SOME target (each target is
+            # folded on its own there): the first granted target, else the shared fold's reason.
+            live = g.granted_targets(engagement_slug=a.engagement, now=_time.time())
+            tgt = live[0] if live else None
+        st = g.state(engagement_slug=a.engagement, target=tgt, now=_time.time())
         print(json.dumps({
             "engagement": a.engagement,
             "armed": st.granted,

@@ -228,6 +228,17 @@ def _highwater_path(base_dir: Any, slug: str) -> Optional[Path]:
     return Path(d) / f"{safe}.json"
 
 
+def _shared_floor_path(base_dir: Any, slug: str) -> Optional[Path]:
+    """The SEAM-DIRECTORY rollback floor (``<base>/<floor dir>/<slug>.json``), resolved from ``base_dir`` alone so the
+    sovereign and the offense plane always name the same file. The sovereign raises it on every publish and every
+    withdrawal; the offense reader enforces it in addition to its own (possibly offense-private) floor. Without an
+    offense-private override the two are the same file."""
+    safe = _safe_component(slug)
+    if not safe:
+        return None
+    return Path(base_dir) / _HIGHWATER_DIRNAME / f"{safe}.json"
+
+
 def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[bool, str]":
     from types import SimpleNamespace
 
@@ -242,6 +253,23 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[b
     path = _highwater_path(base_dir, slug)
     if path is None:
         return False, "unsafe slug for the eval-capability-grant high-water floor"
+    shared_path = _shared_floor_path(base_dir, slug)
+    if shared_path is not None and shared_path != path:
+        # The sovereign's floor (raised on every publish and withdrawal) lives in the seam directory; a hardened
+        # deploy keeps the offense floor elsewhere. Enforce both: ratchet the private floor up to the shared one
+        # first, so deleting the shared file later cannot re-open a replay the sovereign already closed.
+        try:
+            shared = load_highwater(shared_path)
+        except HighWaterError as e:
+            return False, f"eval-capability-grant publication floor in the seam directory is corrupt/tampered (fail-closed): {e}"
+        if shared is not None:
+            try:
+                advance_highwater(path, SimpleNamespace(entry_count=shared["entry_count"],
+                                                        last_seq=shared["last_seq"]))
+            except HighWaterDowngrade:
+                pass                                   # the private floor is already at least as high
+            except (OSError, HighWaterError) as e:
+                return False, f"cannot persist the eval-capability-grant high-water floor (fail-closed): {e}"
     try:
         prior = load_highwater(path)
     except HighWaterError as e:
@@ -260,16 +288,17 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[b
 
 
 def advance_publication_floor(base_dir: Any, slug: str, seq: int) -> None:
-    """Raise the offense-side rollback floor for ``slug`` to ``seq`` WITHOUT a publication (UPWARD-ONLY; a
-    no-op when a higher floor is already recorded). The sovereign calls this when it WITHDRAWS a failed
-    publication: the withdrawn file's seal seq is below ``seq``, so a later replay of that file is refused as a
-    rollback instead of re-arming what the spine has revoked. Raises on any failure (unsafe slug, a corrupt or
-    tampered floor, an unwritable floor) so the caller can fail loudly."""
+    """Raise the rollback floor for ``slug`` to ``seq`` (UPWARD-ONLY; a no-op when a higher floor is already
+    recorded). The sovereign calls this after every publish (``seq`` = the new seal seq, so every superseded
+    publication is refused at once) and when it WITHDRAWS a publication (``seq`` above the withdrawn file's seal
+    seq, so a replay of that file is refused). It writes the SEAM-DIRECTORY floor, which the offense reader always
+    enforces, whatever offense-private floor location the offense process is configured with. Raises on any
+    failure (unsafe slug, a corrupt or tampered floor, an unwritable floor) so the caller can fail loudly."""
     from types import SimpleNamespace
 
     from vigil_core.highwater import HighWaterDowngrade, advance_highwater
 
-    path = _highwater_path(base_dir, slug)
+    path = _shared_floor_path(base_dir, slug)   # the seam-directory floor BOTH planes resolve identically
     if path is None:
         raise ValueError(f"unsafe slug for the publication floor: {slug!r}")
     try:
