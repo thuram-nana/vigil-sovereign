@@ -1157,15 +1157,19 @@ def archive_copy(store, K: int, snap_payload: dict, *, adir: Optional[Path] = No
         existing: dict[str, Any] = (json.loads(manifest_path.read_text(encoding="utf-8"))
                                     if manifest_path.exists()
                                     else {"scope": SCOPE, "schema_version": 1, "segments": [], "snapshots": []})
-        have = {row["id"] for row in existing["segments"]}
-        copied = _copy_segments(store, archived, existing, have, segdir, ad)
-        existing["segments"].sort(key=lambda r: r["first_seq"])
-        # append this snapshot's row (idempotent by cumulative root)
-        srow = {k: snap_payload[k] for k in ("base_seq", "base_count", "delta_merkle_root",
-                                             "cumulative_merkle_root", "prev_snapshot_seq")}
-        if not any(s.get("cumulative_merkle_root") == srow["cumulative_merkle_root"]
-                   for s in existing["snapshots"]):
-            existing["snapshots"].append(srow)
+        try:
+            have = {row["id"] for row in existing["segments"]}
+            copied = _copy_segments(store, archived, existing, have, segdir, ad)
+            existing["segments"].sort(key=lambda r: r["first_seq"])
+            # append this snapshot's row (idempotent by cumulative root)
+            srow = {k: snap_payload[k] for k in ("base_seq", "base_count", "delta_merkle_root",
+                                                 "cumulative_merkle_root", "prev_snapshot_seq")}
+            if not any(s.get("cumulative_merkle_root") == srow["cumulative_merkle_root"]
+                       for s in existing["snapshots"]):
+                existing["snapshots"].append(srow)
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise PruneUnsafe(f"the archive manifest {manifest_path} is malformed ({type(e).__name__}: {e}) — "
+                              f"nothing was pruned") from e
         # Verify the CANDIDATE before it is persisted: a refused attempt must leave no row behind (a stale row
         # would make every later prune's archive inconsistent with what the owner commits).
         vok, vwhy = verify_with_archive(store, adir=ad, pending=snap_payload, manifest=existing)
@@ -1199,24 +1203,52 @@ def _copy_segments(store, archived: list[Segment], existing: dict, have: set,
             if not same:
                 raise PruneUnsafe(f"archive already holds seg {seg.id} with a DIFFERENT chain identity — "
                                   f"refusing to overwrite (possible corruption/rewrite)")
-            continue                                        # same segment already archived — idempotent no-op
+            held = ad / prior_row["file"]
+            if _held_copy_ok(held, segdir, src, prior_row["sha256"]):
+                continue                                    # same segment already archived — idempotent no-op
+            # The archived copy is missing, damaged, outside the archive, or the live file itself — and this
+            # segment is still LIVE: copy it again (the pending check then re-verifies it against the owner-signed
+            # live records).
+            _copy_file(src, dst, segdir)
+            if _sha256_file(dst) != sha:
+                raise PruneUnsafe(f"archived copy of seg {seg.id} hashes differently than the source — aborting")
+            prior_row.update(file=f"segments/{src.name}", sha256=sha)
+            copied += 1
+            continue
         if not dst.exists():                                # copy -> fsync -> only then record (crash-safe)
-            data = src.read_bytes()
-            fd, tmp = _mkstemp(segdir, src.name)
-            try:
-                with os.fdopen(fd, "wb") as fo:
-                    fo.write(data)
-                    fo.flush()
-                    os.fsync(fo.fileno())
-                os.replace(tmp, dst)
-            finally:
-                Path(tmp).unlink(missing_ok=True)           # no-op if os.replace already consumed it
-            fsync_dir(segdir)
+            _copy_file(src, dst, segdir)
         if _sha256_file(dst) != sha:
             raise PruneUnsafe(f"archived copy of seg {seg.id} hashes differently than the source — aborting")
         existing["segments"].append(row)
         copied += 1
     return copied
+
+
+def _held_copy_ok(held: Path, segdir: Path, src: Path, sha: str) -> bool:
+    """An archived copy that can be relied on: a regular file in the archive's segments directory (not a symlink,
+    not the live file under another name) whose bytes still hash to what was recorded."""
+    try:
+        if held.is_symlink() or not held.is_file() or held.resolve().parent != segdir.resolve():
+            return False
+        if os.path.samefile(held, src):
+            return False
+        return _sha256_file(held) == sha
+    except OSError:
+        return False
+
+
+def _copy_file(src: Path, dst: Path, segdir: Path) -> None:
+    data = src.read_bytes()
+    fd, tmp = _mkstemp(segdir, src.name)
+    try:
+        with os.fdopen(fd, "wb") as fo:
+            fo.write(data)
+            fo.flush()
+            os.fsync(fo.fileno())
+        os.replace(tmp, dst)
+    finally:
+        Path(tmp).unlink(missing_ok=True)                   # no-op if os.replace already consumed it
+    fsync_dir(segdir)
 
 
 def _mkstemp(directory: Path, name: str):
@@ -1243,6 +1275,28 @@ def _verify_archive_shape(manifest: dict, *, base_prev_hash: str) -> None:
 # ---- re-attach verifier (`sigil spine verify --with-archive`) ------------------------------------------
 def verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optional[dict] = None,
                         manifest: Optional[dict] = None) -> tuple[bool, str]:
+    """`_verify_with_archive` — and a malformed archive manifest (a missing key, a non-integer boundary) is a
+    refusal `(False, reason)`, never an exception."""
+    try:
+        return _verify_with_archive(store, adir=adir, pending=pending, manifest=manifest)
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        return False, f"the archive manifest is malformed ({type(e).__name__}: {e})"
+
+
+def _live_segment_files(store) -> set:
+    """(device, inode) of every file in the live spine's segment directory (and the legacy single file)."""
+    out = set()
+    for p in [store.path, *store._layout.segments_dir.glob("*")]:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        out.add((st.st_dev, st.st_ino))
+    return out
+
+
+def _verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optional[dict] = None,
+                         manifest: Optional[dict] = None) -> tuple[bool, str]:
     """Prove the archived pruned prefix is AUTHENTIC — anchored to the OWNER SIGNATURE, never to the
     (attacker-controllable) archive manifest. Read-only; returns (ok, message). Checks, in order:
       (1) at-rest sha256 of every archived file;
@@ -1278,14 +1332,23 @@ def verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optional
     am = manifest if manifest is not None else json.loads(manifest_path.read_text(encoding="utf-8"))
     segrows = sorted(am["segments"], key=lambda r: r["first_seq"])
 
-    # (1) at-rest integrity + (2) per-record content BINDING (not just chain linkage).
+    # (1) at-rest integrity + (2) per-record content BINDING (not just chain linkage). Each row names a regular
+    # file in the archive's own segments directory — never a path out of it, a symlink, or (for a pending prune)
+    # a live segment file itself, which the prune would then delete.
     arch: list[SpineRecord] = []
+    seg_root = (ad / "segments").resolve()
+    live_files = _live_segment_files(store) if pending is not None else set()
     for row in segrows:
         p = ad / row["file"]
+        if p.is_symlink() or p.resolve().parent != seg_root:
+            return False, f"archived segment {row['file']} is not a file in the archive's segments directory"
         if not p.exists():
             return False, f"archived segment {row['file']} is missing (pruned prefix unrecoverable)"
         if _sha256_file(p) != row["sha256"]:
             return False, f"archived segment {row['file']} sha256 mismatch (at-rest tamper/corruption)"
+        st = p.stat()
+        if (st.st_dev, st.st_ino) in live_files:
+            return False, f"archived segment {row['file']} is a live segment file, not a copy of one"
         for r in read_segment_records(p):
             bok, bwhy = verify_record(r)
             if not bok:
@@ -1321,16 +1384,21 @@ def verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optional
     if pending is not None:
         snap_bases = sorted(int(s["base_seq"]) for s in am["snapshots"])
         stray = [b for b in snap_bases if head_base < b != base_seq]
+        # With no prune committed, nothing relies on the archive yet: moving it aside is always a way out.
+        aside = (f"move {ad} aside (no prune is committed, so nothing relies on it) and prune again"
+                 if head_base == 0 else "")
         if stray:
             return False, (f"the archive holds a row for an uncommitted prune at {stray[0]} (an interrupted "
-                           f"earlier attempt) — complete that one first: `sigil spine prune -K {stray[0]} --yes`")
+                           f"earlier attempt) — complete that one first: `sigil spine prune -K {stray[0]} --yes`"
+                           + (f"; if that cannot pass its referential floors, {aside}" if aside else ""))
         if not arch or arch[0].seq != 0 or arch[-1].seq != base_seq - 1 or len(arch) != base_seq:
             return False, f"archive does not cover exactly [0..{base_seq}) as the pending prune declares"
         if arch[-1].entry_hash != base_prev_hash:
             return False, "archive tail entry_hash != the pending prune's base_prev_hash"
         if (not snap_bases or snap_bases[-1] != base_seq or snap_bases[0] <= 0
                 or len(set(snap_bases)) != len(snap_bases)):
-            return False, "archive snapshot boundaries do not partition [0..pending.base_seq)"
+            return False, ("archive snapshot boundaries do not partition [0..pending.base_seq)"
+                           + (f"; {aside}" if aside else ""))
         live_hash = {r.seq: r.entry_hash for r in store.iter_records() if head_base <= r.seq < base_seq}
         for r in arch:
             if r.seq >= head_base and live_hash.get(r.seq) != r.entry_hash:
@@ -1480,7 +1548,12 @@ def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
     committed = _read_head_on_disk()
     committed_base = committed.base_seq if committed is not None else 0
     if committed is not None and committed.snapshot_seq >= 0 and committed_base == K:
-        # A re-run of a prune whose head already committed (GATE 0 just finished its GC): it is done.
+        # A re-run of a prune whose head already committed (GATE 0 finished its GC if the archive verified): it is
+        # done — but only "complete" if its archive verifies.
+        aok, awhy = verify_with_archive(store)
+        if not aok:
+            raise PruneUnsafe(f"the prune at {K} is committed, but its archive does not verify ({awhy}) — restore "
+                              f"the archive; any pruned segment files still on disk are kept until it verifies")
         return {"base_seq": K, "snapshot_seq": committed.snapshot_seq, "head_last_seq": committed.last_seq,
                 "archived_segments": 0, "files_deleted": 0, "already_complete": True,
                 "cumulative_merkle_root": committed.cumulative_merkle_root}

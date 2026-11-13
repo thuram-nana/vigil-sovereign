@@ -320,3 +320,103 @@ def test_the_pending_check_refuses_a_prune_that_is_not_past_the_committed_one(wo
     payload = {"base_seq": 4, "base_prev_hash": "x", "cumulative_merkle_root": "y"}
     ok, why = prune.verify_with_archive(_store_of(world), pending=payload)
     assert ok is False and "not past" in why
+
+
+# ---- review fold: the archive a deletion relies on, and refusals instead of crashes ---------------------------
+
+def _seg_files(root):
+    return sorted(p.name for p in (root / "spine.segments").glob("seg-*.jsonl"))
+
+
+def test_a_committed_prune_keeps_its_files_until_its_archive_verifies(world, tmp_path):
+    import shutil
+    _crashed_prune(world, 4, "prune_after_head")             # committed; its files below 4 not yet reclaimed
+    files = _seg_files(world)
+    shutil.copytree(world / "archive", tmp_path / "saved")
+    shutil.rmtree(world / "archive")
+    with pytest.raises(prune.PruneUnsafe, match="committed, but its archive does not verify"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert _seg_files(world) == files, "a pruned segment file was deleted while the archive does not verify"
+    _store_of(world).finish_prune()                          # `sigil spine prune-finish` keeps them too
+    assert _seg_files(world) == files
+    shutil.copytree(tmp_path / "saved", world / "archive")
+    assert prune.commit_prune(_store_of(world), 4, confirm=True)["already_complete"] is True
+    assert len(_seg_files(world)) == len(files) - 2           # reclaimed once the archive verifies
+    _verified(world)
+
+
+def _archived_seg0(root):
+    m = _manifest(root)
+    return m, next(r for r in m["segments"] if r["first_seq"] == 0)
+
+
+def _make_row_the_live_file(root, how):
+    import os
+    live = root / "spine.segments" / "seg-00000000.jsonl"
+    m, row = _archived_seg0(root)
+    held = root / "archive" / row["file"]
+    if how == "traversal":
+        row["file"] = "../spine.segments/seg-00000000.jsonl"
+        _mpath(root).write_text(json.dumps(m))
+    else:
+        held.unlink()
+        (os.symlink if how == "symlink" else os.link)(live, held)
+    return live
+
+
+@pytest.mark.parametrize("how", ["traversal", "symlink", "hardlink"])
+def test_the_verifier_refuses_an_archive_row_that_is_the_live_file(world, how):
+    _crashed_prune(world, 4, "prune_after_archive")
+    _make_row_the_live_file(world, how)
+    pay = prune.snapshot_payload(_store_of(world), 4)
+    ok, why = prune.verify_with_archive(_store_of(world), pending=pay)
+    assert ok is False and ("segments directory" in why or "live segment file" in why)
+
+
+@pytest.mark.parametrize("how", ["traversal", "symlink", "hardlink"])
+def test_a_prune_copies_again_an_archive_row_that_is_the_live_file(world, how):
+    import os
+    _crashed_prune(world, 4, "prune_after_archive")
+    live = _make_row_the_live_file(world, how)
+    ino = live.stat().st_ino
+    assert prune.commit_prune(_store_of(world), 4, confirm=True)["base_seq"] == 4
+    _verified(world)
+    m, row = _archived_seg0(world)
+    held = world / "archive" / row["file"]
+    assert held.parent == world / "archive" / "segments" and not held.is_symlink() and held.stat().st_ino != ino
+    assert not os.path.exists(live)
+
+
+@pytest.mark.parametrize("bad", ["4", None, 4.5, {}])
+def test_a_malformed_snapshot_row_is_a_refusal_never_a_traceback(world, capsys, monkeypatch, bad):
+    from sigil import cli
+    _crashed_prune(world, 4, "prune_after_archive")
+    m = _manifest(world)
+    m["snapshots"][0]["base_seq"] = bad
+    _mpath(world).write_text(json.dumps(m))
+    ok, why = prune.verify_with_archive(_store_of(world))
+    assert ok is False and "malformed" in why
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: _store_of(world))
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_spine(NS(action="prune", boundary=4, yes=True, archive=None))
+    assert ei.value.code == 2 and "prune UNSAFE" in capsys.readouterr().err
+    assert _first_seq(world) == 0
+
+
+@pytest.mark.parametrize("damage", ["missing", "flipped"])
+def test_a_damaged_copy_of_a_still_live_segment_is_copied_again(world, damage):
+    _crashed_prune(world, 4, "prune_after_archive")
+    m, row = _archived_seg0(world)
+    held = world / "archive" / row["file"]
+    if damage == "missing":
+        held.unlink()
+    else:
+        held.write_bytes(held.read_bytes()[:-3] + b"X}\n")
+    assert prune.commit_prune(_store_of(world), 4, confirm=True)["base_seq"] == 4
+    _verified(world)
+
+
+def test_a_stuck_uncommitted_row_names_a_way_out_when_no_prune_is_committed(world):
+    _crashed_prune(world, 6, "prune_after_archive")
+    with pytest.raises(prune.PruneUnsafe, match=r"move .*archive aside \(no prune is committed"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)

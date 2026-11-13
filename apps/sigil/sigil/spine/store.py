@@ -960,23 +960,26 @@ class SpineStore:
         deleting it can never lose live data or break a read. Idempotent (missing_ok); a crash mid-delete just
         leaves fewer/more orphans for the next call. Returns the number of files unlinked."""
         self._assert_may_drop_below(base_seq)               # LOW-1: no delete without a committed owner signature
-        m = self._manifest if self._manifest is not None else read_manifest(self._layout)
-        referenced = {self._layout.seg_path(s).name for s in (m.segments if m is not None else [])}
         n = 0
-        for p in sorted(self._layout.segments_dir.glob(f"{SEGMENT_STEM}*")):
-            if self._segment_id_of(p.name) is None or p.name in referenced:
-                continue
-            # only files strictly below the pruned boundary — never anything the retained window might need.
-            if self._segment_below(p, base_seq):
-                try:
-                    p.unlink(missing_ok=True)
-                    p.with_name(p.name + ".idx").unlink(missing_ok=True)
-                    n += 1
-                except OSError:
-                    pass
+        for p in self._orphan_segment_files_below(base_seq):
+            try:
+                p.unlink(missing_ok=True)
+                p.with_name(p.name + ".idx").unlink(missing_ok=True)
+                n += 1
+            except OSError:
+                pass
         if n:
             fsync_dir(self._layout.segments_dir)
         return n
+
+    def _orphan_segment_files_below(self, base_seq: int) -> list[Path]:
+        """The on-disk `seg-*` files the CURRENT manifest does not reference whose records all lie below
+        `base_seq` — only files strictly below the pruned boundary, never anything the retained window needs."""
+        m = self._manifest if self._manifest is not None else read_manifest(self._layout)
+        referenced = {self._layout.seg_path(s).name for s in (m.segments if m is not None else [])}
+        return [p for p in sorted(self._layout.segments_dir.glob(f"{SEGMENT_STEM}*"))
+                if self._segment_id_of(p.name) is not None and p.name not in referenced
+                and self._segment_below(p, base_seq)]
 
     def _segment_below(self, path: Path, base_seq: int) -> bool:
         """True iff the (unreferenced) segment file at `path` holds only records with seq < base_seq. Reads
@@ -1012,6 +1015,15 @@ class SpineStore:
             with self._crossproc_lock():
                 self._refresh_active_under_lock()
                 changed = self._rebase_manifest_below(head.base_seq)
+                if self._orphan_segment_files_below(head.base_seq):
+                    # The files are the last live copy of the pruned prefix: delete them only while the archive
+                    # that replaces them verifies against the owner-signed head.
+                    from .prune import verify_with_archive  # function-local: prune imports this module
+                    ok, why = verify_with_archive(self)
+                    if not ok:
+                        _log.warning("spine: keeping the pruned segment files below seq %d — the archive does "
+                                     "not verify (%s)", head.base_seq, why)
+                        return changed
                 self._delete_orphan_segment_files_below(head.base_seq)
         return changed
 
