@@ -9,7 +9,7 @@
       "finding_ref": "CONF-sqli-breakout",
       "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `sql_injection_breakout` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
       "oracle_context_digest": "97fb252f44d888d09671ee4f407612c6724ce7765cea75606b95c72d92edff11",
-      "oracle_version": "sha256:e5065941d593026eb5bff04c5500f7b5fc8e69f63de7fb02fbf673dfd84a1c71",
+      "oracle_version": "sha256:4a3401aded046838c284e7e8a16e75288cbf7e7f65813a313bf4d8e3684a81bd",
       "schema_version": 1,
       "seq": 0,
       "surface": ""
@@ -31,11 +31,11 @@
     }
   },
   "grounding": "FACT",
-  "id": "f6153cf603c19b4a6298b345db014a495e08653205c1228250eaa1368c1ff1c7",
+  "id": "a4223f8b0b17e8e9c41f38df41a3dba55ac5630f89e6eb98ecc095068fc945b2",
   "oracle": {
     "binding": "crucible/verify:sql_injection_breakout",
     "id": "sql_injection_breakout",
-    "version": "sha256:e5065941d593026eb5bff04c5500f7b5fc8e69f63de7fb02fbf673dfd84a1c71"
+    "version": "sha256:4a3401aded046838c284e7e8a16e75288cbf7e7f65813a313bf4d8e3684a81bd"
   },
   "pcf_version": "0.1",
   "provenance": {
@@ -48,7 +48,7 @@
     "signatures": [
       {
         "key_id": "conformance-fixture",
-        "sig": "ktqMY+ImbmcefhMyOHWrbhNP3WIQiKKy76MoOfXW6PtjNthc6vtsGdhNWZIuRgFj69MFw77LfYIBBT4MgJLEBg=="
+        "sig": "haNsvmlEn5jd5xbrrMIAlr9Poo7Tkesc8V/gEvkNHfK42D/jV8PVtAPWst/NgiyPhujIF/pNDVkeaZX07LC/Cw=="
       }
     ]
   },

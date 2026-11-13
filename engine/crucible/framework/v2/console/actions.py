@@ -4856,6 +4856,107 @@ _CTX_MAX_LINKED_CHAT_CHARS = 2000
 # this context is throwaway grounding for the LLM — over-redaction is the SAFE direction, so we scan free text
 # for credential shapes too. Each entry is (regex, replacement); a key/value or header form keeps the NAME and
 # masks the VALUE, an opaque vendor token / JWT / PEM block is masked whole. Deterministic + total.
+# Two of the masks below are substituted by a linear scan instead of ``.sub``: each pattern's parts are
+# classes that exclude the character that must follow them, so every part is the WHOLE run of its class
+# and a match is decided by measuring runs. ``.sub`` instead re-read a long run from every position in it
+# before failing (``a`` or ``eyJa-`` repeated through an uploaded file: quadratic). The pattern itself is
+# then run only at a position where it matches, so the span and the replacement are the pattern's own.
+_URL_USERINFO_PASSWORD_RE = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^/@\s:]+):[^/@\s]+@")
+_URL_SCHEME_RUN = re.compile(r"(?i)[a-z0-9+.\-]+")
+_URL_SCHEME_FIRST = re.compile(r"(?i)[a-z]")
+_URL_USER_RUN = re.compile(r"[^/@\s:]*")
+_URL_PASSWORD_RUN = re.compile(r"[^/@\s]*")
+_CTX_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,}")
+_CTX_JWT_HEAD = re.compile(r"\beyJ")
+_CTX_JWT_SEGMENT = re.compile(r"[A-Za-z0-9_\-]*")
+
+
+# How many times a scan below named a start where its pattern then did not match. Never expected: the
+# tests hold it at 0 over their corpora. Should it happen, the pattern's own ``.sub`` decides the output.
+_CTX_SCAN_MISSES = [0]
+
+
+def _sub_at(text: str, rx: "re.Pattern[str]", repl: str, starts) -> str:
+    """``rx.sub(repl, text)`` given ``starts``: a generator that yields, left to right, each position where
+    ``rx`` matches as ``.sub`` would find it, and is sent where that match ended (its next search start)."""
+    parts: list[str] = []
+    last = 0
+    start = next(starts, None)
+    while start is not None:
+        m = rx.match(text, start)
+        if m is None:
+            _CTX_SCAN_MISSES[0] += 1
+            return rx.sub(repl, text)
+        parts.append(text[last : m.start()])
+        parts.append(m.expand(repl))
+        last = m.end()
+        try:
+            start = starts.send(last)
+        except StopIteration:
+            start = None
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _url_userinfo_password_starts(text: str):
+    """Where ``_URL_USERINFO_PASSWORD_RE`` matches: in a run of scheme characters followed by ``://``, a user
+    run, ``:``, a password run and ``@``, at the run's first letter."""
+    n = len(text)
+    pos = 0
+    while (run := _URL_SCHEME_RUN.search(text, pos)) is not None:
+        sep = pos = run.end()
+        if not text.startswith("://", sep):
+            continue
+        first = _URL_SCHEME_FIRST.search(text, run.start(), sep)
+        if first is None:
+            continue
+        user_end = _URL_USER_RUN.match(text, sep + 3).end()
+        if user_end == sep + 3 or user_end >= n or text[user_end] != ":":
+            continue
+        password_end = _URL_PASSWORD_RUN.match(text, user_end + 1).end()
+        if password_end == user_end + 1 or password_end >= n or text[password_end] != "@":
+            continue
+        pos = yield first.start()
+
+
+def _ctx_jwt_starts(text: str):
+    """Where ``_CTX_JWT_RE`` matches: at an ``eyJ`` whose first segment (the whole run after it) is six or
+    more characters and ends at a dot that a six-or-more second segment, a dot and a four-or-more third
+    follow. Every ``eyJ`` in one run shares that run's end, so a run is measured once and what follows a
+    given dot is decided once."""
+    run_end = -1
+    after_dot: dict = {}
+    pos = 0
+    while (head := _CTX_JWT_HEAD.search(text, pos)) is not None:
+        start = head.start()
+        first = start + 3
+        if first > run_end:
+            run_end = _CTX_JWT_SEGMENT.match(text, first).end()
+        ok = False
+        if run_end - first >= 6 and text[run_end : run_end + 1] == ".":
+            if run_end not in after_dot:
+                second = run_end + 1
+                second_end = _CTX_JWT_SEGMENT.match(text, second).end()
+                after_dot[run_end] = (
+                    second_end - second >= 6 and text[second_end : second_end + 1] == "."
+                    and _CTX_JWT_SEGMENT.match(text, second_end + 1).end() - (second_end + 1) >= 4)
+            ok = after_dot[run_end]
+        if ok:
+            pos = yield start
+        else:
+            pos = start + 1
+
+
+def _sub_url_userinfo_password(text: str, repl: str) -> str:
+    """``_URL_USERINFO_PASSWORD_RE.sub(repl, text)``, byte-identical, in linear time."""
+    return _sub_at(text, _URL_USERINFO_PASSWORD_RE, repl, _url_userinfo_password_starts(text))
+
+
+def _sub_ctx_jwt(text: str, repl: str) -> str:
+    """``_CTX_JWT_RE.sub(repl, text)``, byte-identical, in linear time."""
+    return _sub_at(text, _CTX_JWT_RE, repl, _ctx_jwt_starts(text))
+
+
 _CTX_SECRET_SUBS = [
     # A PEM BLOCK IS MASKED FIRST, before any key/value rule can eat its opening delimiter.
     # Ordering here is load-bearing, not cosmetic. The kv rule below matches a secret-shaped NAME and then
@@ -4882,7 +4983,7 @@ _CTX_SECRET_SUBS = [
     # a standalone auth SCHEME + opaque token (Bearer/Basic/Negotiate/Digest) anywhere — mask the token.
     (re.compile(r"(?i)\b(bearer|basic|negotiate|digest)\s+[A-Za-z0-9+/=._\-]{6,}"), r"\1 " + MASK),
     # a password in a URL userinfo (scheme://user:PASS@host) — mask the password, keep scheme+user (red-pen BLOCK).
-    (re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^/@\s:]+):[^/@\s]+@"), r"\1:" + MASK + "@"),
+    (_URL_USERINFO_PASSWORD_RE, r"\1:" + MASK + "@"),
     # other secret KEY=VALUE / secret key names: keep the NAME + separator, mask the value TOKEN.
     (re.compile(
         r"(?i)\b(x-csrf-token|x-xsrf-token|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
@@ -4896,9 +4997,10 @@ _CTX_SECRET_SUBS = [
     (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"), MASK),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}"), MASK),
     (re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), MASK),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,}"), MASK),   # JWT
+    (_CTX_JWT_RE, MASK),   # JWT
     # (the PEM rules ran FIRST — see the top of this list for why the order is load-bearing)
 ]
+_CTX_LINEAR_SUBS = {_URL_USERINFO_PASSWORD_RE: _sub_url_userinfo_password, _CTX_JWT_RE: _sub_ctx_jwt}
 
 
 def _redact_context_text(s):
@@ -4908,7 +5010,8 @@ def _redact_context_text(s):
         return s
     out = s
     for rx, repl in _CTX_SECRET_SUBS:
-        out = rx.sub(repl, out)
+        linear = _CTX_LINEAR_SUBS.get(rx)
+        out = linear(out, repl) if linear is not None else rx.sub(repl, out)
     return out
 
 

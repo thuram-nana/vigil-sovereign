@@ -16,6 +16,9 @@ The four defects:
   ``_SFX_TAG_RE.sub``     every ``<`` rescanned to the end of a body with no later ``>``: quadratic
   ``_TXT_STRING_RE``      a string that cannot match retried from every escaped quote inside it: quadratic
   ``_SQL_TAUT_RE``        adjacent ``\\s*\\(?\\s*`` split a whitespace run n ways: quadratic (AEGIS inline path)
+
+and one scan around those patterns: the SQL break-out oracle copied the rest of the value once per quote
+(``text[i + 1:]``, then ``.lstrip()``), quadratic in a value of quotes; it now reads each tail in place.
 """
 from __future__ import annotations
 
@@ -56,6 +59,20 @@ _LEGACY_SFX_TAG_RE = re.compile(r"<[^>]+>")
 _LEGACY_TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _LEGACY_SQL_TAUT_RE = re.compile(
     r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+_LEGACY_SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
+_LEGACY_SQL_STACK_RE = re.compile(
+    r"(?is)^;\s*(?:"
+    r"SELECT\b.{0,120}?\bFROM\b"
+    r"|INSERT\b.{0,40}?\bINTO\b"
+    r"|UPDATE\b.{0,80}?\bSET\b"
+    r"|DELETE\b.{0,40}?\bFROM\b"
+    r"|DROP\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER)\b"
+    r"|CREATE\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER|PROCEDURE)\b"
+    r"|ALTER\s+(?:TABLE|DATABASE|USER|SCHEMA)\b"
+    r"|TRUNCATE\s+TABLE\b"
+    r"|GRANT\b.{0,80}?\bTO\b"
+    r"|EXEC(?:UTE)?\b\s+\w"
+    r")")
 
 _TIME_BOUND_S = 2.0          # the call itself, measured inside the child
 _CHILD_TIMEOUT_S = 30.0      # the child as a whole (interpreter start + import + the call)
@@ -82,6 +99,12 @@ elif case == "txt_unclosed":
     fn = m._resolve_txt_record
 elif case == "sql":
     arg = "'OR" + " " * 1_000_000
+    fn = lambda payload: m.sql_injection_breakout_oracle(payload).fired
+elif case == "sql_quotes":
+    arg = "' " * 500_000
+    fn = lambda payload: m.sql_injection_breakout_oracle(payload).fired
+elif case == "sql_quotes_parens":
+    arg = "\"( )" * 250_000
     fn = lambda payload: m.sql_injection_breakout_oracle(payload).fired
 else:
     raise SystemExit("unknown case " + case)
@@ -129,7 +152,8 @@ def test_child_harness_refuses_an_unknown_case():
 # ------------------------------------------------------------------------------------------------------
 # 0. the standalone verifier carries the SAME patterns (the fixes land in lockstep)
 # ------------------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("name", ["_ZONE_RR_HEADER_RE", "_SFX_TAG_RE", "_TXT_STRING_BODY_RE", "_SQL_TAUT_RE"])
+@pytest.mark.parametrize("name", ["_ZONE_RR_HEADER_RE", "_SFX_TAG_RE", "_TXT_STRING_BODY_RE", "_SQL_TAUT_RE",
+                                  "_SQL_UNION_RE", "_SQL_STACK_RE"])
 def test_standalone_verifier_carries_the_same_pattern(name):
     a, b = getattr(oracles, name), getattr(_MODULES["verify_vf"], name)
     assert (a.pattern, a.flags) == (b.pattern, b.flags)
@@ -369,3 +393,123 @@ def test_sql_structure_verdict_is_unchanged(which):
 def test_a_megabyte_of_whitespace_after_the_operator_is_refused_at_once(which):
     # `'OR` + 1,000,000 spaces through the SQLi oracle: the two adjacent `\s*` split the run a million ways.
     _assert_fast(which, "sql", False)
+
+
+# ------------------------------------------------------------------------------------------------------
+# 5. the SQL break-out scan: quadratic copies of the tail
+# ------------------------------------------------------------------------------------------------------
+def _legacy_sql_breakout_tails(text: str, quote: str):
+    """``_sql_breakout_tails`` as it was: it yielded a COPY of the tail after each unescaped quote."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == quote:
+            if i + 1 < n and text[i + 1] == quote:
+                i += 2
+                continue
+            yield text[i + 1:]
+        i += 1
+
+
+def _legacy_sql_structure_at_start(tail: str) -> str:
+    s = tail.lstrip().lstrip("()").lstrip()
+    if not s:
+        return ""
+    m = _LEGACY_SQL_TAUT_RE.match(s)
+    if m and m.group(2).lower() == m.group(3).lower():
+        return f"{m.group(1).upper()} tautology ({m.group(2)}={m.group(3)})"
+    if _LEGACY_SQL_UNION_RE.match(s):
+        return "UNION SELECT"
+    if _LEGACY_SQL_STACK_RE.match(s):
+        return "stacked statement"
+    return ""
+
+
+def _legacy_sql_verdict(text: str) -> tuple[bool, str, str]:
+    """(fired, quote, structure) of the legacy oracle loop."""
+    if len(text) < 3 or ("'" not in text and '"' not in text):
+        return False, "", ""
+    for quote in ("'", '"'):
+        for tail in _legacy_sql_breakout_tails(text, quote):
+            struct = _legacy_sql_structure_at_start(tail)
+            if struct:
+                return True, quote, struct
+    return False, "", ""
+
+
+_SQL_BREAKOUT_TOKENS = ["'", "'", '"', "''", '""', "\\", "\\'", " ", "  ", "\t", "\n", "\u3000", "\x85", "\x1c",
+                        "(", ")", "((", "OR", "or", " OR ", "1=1", "1", "=", "a", "'a'='a'", "UNION", "union",
+                        " SELECT ", "ALL", ";", "; DROP TABLE t", "; select x from y", "; EXEC xp", "--", "é",
+                        "O'Brien", "x", "LIKE", "AND", "XOR"]
+
+
+def _sql_breakout_corpus() -> list[str]:
+    rng = random.Random(0x5B0)
+    corpus = [_rand_text(rng, _SQL_BREAKOUT_TOKENS, 12) for _ in range(12000)]
+    heads = ["", "x", "O'Brien ", "a\\'b", "''", '"', "it's", "1"]
+    bodies = [" OR 1=1", "OR(a=a", " or 'x' like 'X'", " UNION ALL SELECT 1", "; DROP TABLE t", ";select a from b",
+              " OR 1=2", " UNION", "; delete the row", " AND x_1=x_1 --", ") OR (2=2", "\tXOR\n7<=>7"]
+    for _ in range(4000):                  # break-outs and near-misses after each kind of quote
+        q = rng.choice(["'", '"', "''", "\\'"])
+        corpus.append(rng.choice(heads) + q + rng.choice(["", " ", "( ", " ((", "\u3000"]) + rng.choice(bodies)
+                      + rng.choice(["", "'", " --", '"', "''"]))
+    corpus += ["' " * n for n in range(40)] + ["\"( )" * n for n in range(40)] + ["''" * n + "' OR 1=1" for n in range(20)]
+    corpus += ["\\'" * n + "' UNION SELECT 1" for n in range(20)] + ["x" + " " * n + "'" + " " * n for n in range(20)]
+    corpus += ["O'Brien", "it's fine", "Don't drop the ball; I'll update you", "I've got 5 or 6 options",
+               "credit union, please select", "' OR 1=1 --", "\" or (\"a\"=\"a\"", "'; DROP TABLE users", "admin'--"]
+    return corpus
+
+
+def test_strip_whitespace_is_exactly_isspace():
+    """The tail skip tests ``str.isspace`` per character; ``str.lstrip()`` strips exactly those characters."""
+    for cp in range(0x110000):
+        c = chr(cp)
+        assert (c.lstrip() == "") == c.isspace(), hex(cp)
+
+
+@_BOTH
+def test_sql_breakout_tails_are_the_legacy_tails_by_index(which):
+    tails = _MODULES[which]._sql_breakout_tails
+    seen = 0
+    for text in _sql_breakout_corpus():
+        for quote in ("'", '"'):
+            got = [text[i:] for i in tails(text, quote)]
+            assert got == list(_legacy_sql_breakout_tails(text, quote)), (repr(text), quote)
+            seen += len(got)
+    assert seen > 20000
+
+
+@_BOTH
+def test_sql_structure_read_in_place_equals_the_legacy_copy(which):
+    mod = _MODULES[which]
+    found = 0
+    for text in _sql_breakout_corpus():
+        for start in range(len(text) + 1):
+            want = _legacy_sql_structure_at_start(text[start:])
+            assert mod._sql_structure_at(text, start) == want, (repr(text), start)
+            assert mod._sql_structure_at_start(text[start:]) == want, (repr(text), start)
+            found += bool(want)
+    assert found > 2000
+
+
+@_BOTH
+def test_sql_breakout_verdict_is_unchanged(which):
+    oracle = _MODULES[which].sql_injection_breakout_oracle
+    fired = 0
+    for text in _sql_breakout_corpus():
+        want = _legacy_sql_verdict(text)
+        sig = oracle(text)
+        got = (sig.fired, sig.observed.get("quote", ""), sig.observed.get("structure", ""))
+        assert got == want, repr(text)
+        fired += want[0]
+    assert fired > 1000 and fired < len(_sql_breakout_corpus()) - 1000
+
+
+@_BOTH
+@pytest.mark.parametrize("case", ["sql_quotes", "sql_quotes_parens"])
+def test_a_megabyte_of_quotes_is_scanned_at_once(which, case):
+    # `' ` x 500,000 (and `"( )` x 250,000): the legacy scan copied the rest of the value once per quote.
+    _assert_fast(which, case, False)

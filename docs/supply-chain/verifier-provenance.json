@@ -61,7 +61,7 @@
     },
     {
       "digest": {
-        "sha256": "347eb7def716d724c6d5fa2765237398c163d2ab605f86d4c2dda96a85e464d3"
+        "sha256": "54b27fccffa79c87c9a3d609c76e5388051f786a42d2bf96085224644a4aba56"
       },
       "name": "docs/proof-carrying-finding/verify_vf.py"
     },

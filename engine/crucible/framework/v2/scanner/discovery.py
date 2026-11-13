@@ -353,6 +353,70 @@ _ABS_URL = re.compile(r"""^https?://[^\s'"`<>]+$""", re.I)
 _PROTO_REL = re.compile(r"""^//[^\s'"`<>/][^\s'"`<>]*$""")
 _ABS_PATH = re.compile(r"""^/[A-Za-z0-9_.~%${}\-][^\s'"`<>]*$""")
 
+# A JWT: three dot-separated base64url segments, the first two JSON objects (``eyJ``). Its matches are
+# found by ``_jwt_spans``, never by ``finditer``: a segment cannot hold a dot, so each one is the WHOLE run
+# of segment characters after its start, and ``finditer`` re-read that run from every ``eyJ`` inside it
+# before failing at the missing dot — quadratic on a crawled bundle of ``eyJa-`` repeated.
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b")
+_JWT_HEAD = re.compile(r"\beyJ")
+_JWT_SEGMENT = re.compile(r"[A-Za-z0-9_-]*")
+_WORD_BOUNDARY = re.compile(r"\b")
+
+
+def _jwt_after_first_segment(src: str, dot: int) -> int:
+    """Where a ``_JWT`` match whose first segment ends at the dot ``dot`` ends, or -1 if none can.
+
+    The second segment is ``eyJ`` + the whole run after it, and must end at a dot; the third is the LONGEST
+    run prefix of six or more characters that ends on a word boundary (the regex's greedy ``{6,}\\b``)."""
+    if not src.startswith("eyJ", dot + 1):
+        return -1
+    second = dot + 4
+    second_end = _JWT_SEGMENT.match(src, second).end()
+    if second_end - second < 6 or src[second_end : second_end + 1] != ".":
+        return -1
+    third = second_end + 1
+    end = _JWT_SEGMENT.match(src, third).end()
+    while end - third >= 6:
+        if _WORD_BOUNDARY.match(src, end):
+            return end
+        end -= 1
+    return -1
+
+
+def _jwt_spans(src: str) -> list[tuple[int, int]]:
+    """``[m.span() for m in _JWT.finditer(src)]``, in linear time.
+
+    Every ``eyJ`` inside one run of segment characters has the same first-segment end (the run's end), so
+    the run is measured once, and what follows a given first-segment dot is decided once per dot."""
+    out: list[tuple[int, int]] = []
+    run_end = -1
+    after_dot: dict[int, int] = {}
+    pos = 0
+    while (head := _JWT_HEAD.search(src, pos)) is not None:
+        start = head.start()
+        first = start + 3
+        if first > run_end:
+            run_end = _JWT_SEGMENT.match(src, first).end()
+        end = -1
+        if run_end - first >= 6 and src[run_end : run_end + 1] == ".":
+            if run_end not in after_dot:
+                after_dot[run_end] = _jwt_after_first_segment(src, run_end)
+            end = after_dot[run_end]
+        if end == -1:
+            pos = start + 1
+        else:
+            out.append((start, end))
+            pos = end
+    return out
+
+
+def _secret_spans(rx: re.Pattern[str], src: str) -> list[tuple[int, int]]:
+    """The spans ``rx.finditer(src)`` yields (``_JWT`` through its linear scan)."""
+    if rx is _JWT:
+        return _jwt_spans(src)
+    return [m.span() for m in rx.finditer(src)]
+
+
 # High-signal secret patterns. Each is specific enough that a match is itself the
 # signal — no entropy heuristic needed. The generic ``key = "value"`` case is
 # handled separately below, behind a plausibility guard, because it is the only
@@ -362,7 +426,7 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,48}\b")),
     ("github_token", re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36}\b")),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b")),
+    ("jwt", _JWT),
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
 )
 
@@ -430,10 +494,10 @@ def _mine_secrets(js_source: str) -> list[JsSecret]:
     structured_values: set[str] = set()
 
     for kind, rx in _SECRET_PATTERNS:
-        for m in rx.finditer(js_source):
-            value = m.group(0)
+        for start, end in _secret_spans(rx, js_source):
+            value = js_source[start:end]
             structured_values.add(value)
-            _add_secret(out, seen, kind, value, js_source, m.start(), m.end())
+            _add_secret(out, seen, kind, value, js_source, start, end)
 
     for m in _GENERIC_SECRET.finditer(js_source):
         value = m.group(3)

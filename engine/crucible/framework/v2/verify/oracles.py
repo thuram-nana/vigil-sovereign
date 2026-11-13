@@ -8644,15 +8644,15 @@ def dom_execution_csp_bypass_oracle(binding_calls: Any, canary: str, csp_control
 # two adjacent `\s*` could split a whitespace run n ways, each split failing at the identifier — quadratic
 # on `'OR` + 8k spaces, a value any client of an AEGIS-protected app can send many times per request.
 _SQL_TAUT_RE = re.compile(
-    r"""(?i)^(OR|AND|XOR)\b\s*(?:\(\s*)?['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
-_SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
+    r"""(?i)(OR|AND|XOR)\b\s*(?:\(\s*)?['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+_SQL_UNION_RE = re.compile(r"(?i)UNION\b\s+(?:ALL\s+)?SELECT\b")
 # A stacked statement must have a real STATEMENT SHAPE — the leading keyword AND its required
 # companion (SELECT..FROM, INSERT..INTO, DROP TABLE, ...). SELECT/UPDATE/DELETE/DROP are also ordinary
 # English verbs, so `; select the file` / `; delete the row` (benign UI/support prose) must NOT match;
 # requiring the second keyword is what separates a statement from a verb. `.{0,120}?` is lazy+bounded
 # (ReDoS-safe).
 _SQL_STACK_RE = re.compile(
-    r"(?is)^;\s*(?:"
+    r"(?is);\s*(?:"
     r"SELECT\b.{0,120}?\bFROM\b"
     r"|INSERT\b.{0,40}?\bINTO\b"
     r"|UPDATE\b.{0,80}?\bSET\b"
@@ -8667,9 +8667,10 @@ _SQL_STACK_RE = re.compile(
 
 
 def _sql_breakout_tails(text: str, quote: str):
-    """Yield the QUERY-context tail after EACH UNESCAPED `quote` in `text` (the injection point is
-    `... WHERE x=<quote>PAYLOAD<quote>`, and any quote in the payload could be the break-out). Honours
-    `''` doubling and `\\` escapes so a legitimately-escaped quote stays inside the literal."""
+    """Yield the START INDEX of the QUERY-context tail after EACH UNESCAPED `quote` in `text` (the injection
+    point is `... WHERE x=<quote>PAYLOAD<quote>`, and any quote in the payload could be the break-out).
+    Honours `''` doubling and `\\` escapes so a legitimately-escaped quote stays inside the literal. An
+    index, never the tail itself: a copy of the rest of the value per quote made n quotes cost n^2."""
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -8680,27 +8681,43 @@ def _sql_breakout_tails(text: str, quote: str):
             if i + 1 < n and text[i + 1] == quote:
                 i += 2                              # doubled quote ('' or "") = an escaped quote
                 continue
-            yield text[i + 1:]                      # unescaped closing quote -> a candidate tail
+            yield i + 1                             # unescaped closing quote -> a candidate tail
         i += 1
 
 
 def _sql_structure_at_start(tail: str) -> str:
-    """The SQL structure PROVEN present at the START of a break-out tail, or "" — the near-zero-FP
-    proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
+    """``_sql_structure_at(tail, 0)``: the structure at the start of a tail held as its own string."""
+    return _sql_structure_at(tail, 0)
+
+
+def _sql_structure_at(text: str, start: int) -> str:
+    """The SQL structure PROVEN present at the START of the break-out tail ``text[start:]``, or "" — the
+    near-zero-FP proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
     boolean SELF-tautology (`OR 1=1`, `OR 'a'='a'`), a `UNION [ALL] SELECT`, or a stacked statement
     with a full statement shape (`; DROP TABLE`, `; SELECT .. FROM`). A lone comment (`--`/`/*`) is
     DELIBERATELY not a proof — `'Inception' -- best film`, pasted code comments, and prose em-dashes
     after a quoted word produce it, so it was a false positive; an attacker's comment almost always
-    follows a tautology/UNION we already catch. Prose after an apostrophe never matches."""
-    s = tail.lstrip().lstrip("()").lstrip()
-    if not s:
+    follows a tautology/UNION we already catch. Prose after an apostrophe never matches.
+    The tail is read IN PLACE: the leading whitespace, parens and whitespace (``.lstrip().lstrip("()")
+    .lstrip()``) are skipped by index and each pattern is matched at that index (``.match(text, i)``
+    anchors there, which is why the patterns carry no ``^``), so a value with n quotes is never copied
+    n times."""
+    n = len(text)
+    i = start
+    while i < n and text[i].isspace():
+        i += 1
+    while i < n and text[i] in "()":
+        i += 1
+    while i < n and text[i].isspace():
+        i += 1
+    if i >= n:
         return ""
-    m = _SQL_TAUT_RE.match(s)
+    m = _SQL_TAUT_RE.match(text, i)
     if m and m.group(2).lower() == m.group(3).lower():
         return f"{m.group(1).upper()} tautology ({m.group(2)}={m.group(3)})"
-    if _SQL_UNION_RE.match(s):
+    if _SQL_UNION_RE.match(text, i):
         return "UNION SELECT"
-    if _SQL_STACK_RE.match(s):
+    if _SQL_STACK_RE.match(text, i):
         return "stacked statement"
     return ""
 
@@ -8720,8 +8737,8 @@ def sql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSig
                             evidence="no string-literal break-out (no quote to close the literal)",
                             observed={"param": param})
     for quote in ("'", '"'):
-        for tail in _sql_breakout_tails(text, quote):
-            struct = _sql_structure_at_start(tail)
+        for start in _sql_breakout_tails(text, quote):
+            struct = _sql_structure_at(text, start)
             if struct:
                 return OracleSignal(
                     kind=kind, fired=True, confidence=0.92,
