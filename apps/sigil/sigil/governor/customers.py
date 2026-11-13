@@ -303,6 +303,17 @@ class CustomerRegistry:
             _apply_record(r, resolver, state, custs, issued)
         return {u: c for u, c in custs.items() if state.get(u) == "active"}
 
+    def accounts_ever(self) -> dict[str, CustomerAccount]:
+        """Every account the fold holds, ACTIVE OR REVOKED (owner tooling only — e.g. the trial-claim backfill,
+        which must also cover revoked mailboxes). Same verification and seed as `_fold`, without the active
+        filter; a revoked account carries the email it was last granted with."""
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        state, custs, issued, since = self._seed(snap)
+        for r in self.store.iter_records(since_seq=since):
+            _apply_record(r, resolver, state, custs, issued)
+        return dict(custs)
+
     def _cached(self, reader):
         """`reader(view)` over the verified incremental fold (`fold_read.cached_read`, flag-gated), else
         `_UNCACHED` (the caller then runs the full `_fold`)."""

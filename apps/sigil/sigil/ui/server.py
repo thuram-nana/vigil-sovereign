@@ -1774,6 +1774,11 @@ def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine
     egress) so a test can drive the OIDC callback against an in-process mock IdP with no network.
     ``customer_oidc_http_post``/``customer_oidc_jwks_fetcher`` are the SAME hooks for the customer
     Google-OIDC provider the provisioner builds per request (E2b — default None ⇒ the host-allowlisted egress)."""
+    # The provisioner is built per request, so validate the trial size HERE, once, at boot: a bad
+    # VIGIL_TRIAL_CREDITS refuses to start the cockpit instead of failing every provision request.
+    from .. import config as _cfg
+    from ..governor.trial_policy import check_trial_credits
+    check_trial_credits(_cfg.TRIAL_CREDITS)
     return UIServer((host, port), Handler, token=token,
                     spine_path=Path(spine_path) if spine_path else SPINE_PATH,
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,

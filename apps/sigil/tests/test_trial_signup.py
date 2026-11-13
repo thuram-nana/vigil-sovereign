@@ -325,3 +325,25 @@ def test_the_factory_wires_the_mailbox_limiter_only_when_configured(monkeypatch)
     monkeypatch.setattr(config, "SIGNUP_EMAIL_RATELIMIT_DIR", tempfile.mkdtemp())
     assert build_provisioner(s).signup_email_limiter is not None
     assert build_provisioner(s).trial_claims is not None
+
+
+def test_backfill_covers_revoked_legacy_accounts(monkeypatch):
+    from sigil.governor.trial_claim import backfill_email_claims
+    monkeypatch.delenv(_FLAG, raising=False)
+    p, s, wallet, tc = _prov()
+    first = _signup(p, "a@acme.io")                                 # legacy trial, no claim
+    p.customers.revoke(first["username"])
+    r = backfill_email_claims(p.customers, p.orgs, tc, canonical=canonical_email, issued_at=10_000.0)
+    assert r["claimed"] == 1
+    monkeypatch.setenv(_FLAG, "1")
+    for i, addr in enumerate(["a@acme.io", "a+1@acme.io"]):
+        out = _signup(p, addr, ip=f"9.9.9.{i}")
+        assert out["trial"] == "unavailable" and wallet.available(out["org_id"]) == 0
+
+
+def test_the_cockpit_refuses_to_start_with_a_bad_trial_size(monkeypatch):
+    from sigil import config
+    from sigil.ui import server
+    monkeypatch.setattr(config, "TRIAL_CREDITS", -5)
+    with pytest.raises(ValueError):
+        server.build_server(token="t" * 32, port=0)

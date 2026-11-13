@@ -205,7 +205,7 @@ def backfill_email_claims(customers, orgs, claims, *, canonical, issued_at) -> "
         cur = by_user.get(m.username)
         if cur is None or (m.issued_at, m.org_id) < (cur.issued_at, cur.org_id):
             by_user[m.username] = m
-    accounts = customers._fold()                       # every account the fold holds, including revoked ones
+    accounts = customers.accounts_ever()               # every account the fold holds, including revoked ones
     t = float(issued_at)
     for username in sorted(accounts):
         ekey = canonical(accounts[username].email)

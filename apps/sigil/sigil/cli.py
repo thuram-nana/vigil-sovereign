@@ -1558,8 +1558,9 @@ def _reconcile_once(store) -> list:
 def cmd_trial(a) -> None:
     """`sigil trial backfill-claims` — owner-sign an email trial claim for every existing customer account
     (active or revoked) whose canonical mailbox is not yet claimed, so an existing account cannot take a
-    preview trial through a "+tag" or gmail-dot variant. Idempotent. Run once before turning on
-    VIGIL_TRIAL_PREVIEW_ENABLED. Prints counts only (never a mailbox)."""
+    preview trial through a "+tag" or gmail-dot variant. Idempotent. Run it before turning on
+    VIGIL_TRIAL_PREVIEW_ENABLED and again right after: sign-ups made while the flag is off write no claim.
+    Prints counts only (never a mailbox)."""
     import time as _time
 
     from .governor.customers import CustomerRegistry
@@ -2873,7 +2874,7 @@ def main(argv=None) -> None:
     ptr_sub = ptr.add_subparsers(dest="trial_cmd", required=True)
     ptr_bf = ptr_sub.add_parser("backfill-claims",
                                 help="owner-sign an email trial claim for every existing customer (idempotent; "
-                                     "run once before enabling VIGIL_TRIAL_PREVIEW_ENABLED)")
+                                     "run before AND right after enabling VIGIL_TRIAL_PREVIEW_ENABLED)")
     ptr_bf.set_defaults(fn=cmd_trial)
     pmr = sub.add_parser("monitoring-reconcile",
                          help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
