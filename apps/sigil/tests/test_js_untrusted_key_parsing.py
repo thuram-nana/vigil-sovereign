@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +20,43 @@ _ROOT = Path(__file__).resolve().parents[3]
 _VUI = _ROOT / "packages" / "vigil-ui" / "app.js"
 _CVSS = _ROOT / "apps" / "sigil" / "sigil" / "ui" / "public_site" / "tools" / "cvss-calculator" / "cvss.js"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+
+
+def _need_node() -> None:
+    """These guards execute shipped JavaScript, so they need node. Without it they SKIP on a developer machine,
+    but FAIL in CI (GITHUB_ACTIONS, where every runner that runs this file has node) or wherever
+    VIGIL_REQUIRE_NODE=1 — a guard must never go green by not running."""
+    if shutil.which("node") is not None:
+        return
+    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("VIGIL_REQUIRE_NODE") == "1":
+        pytest.fail("node is required to run the JS key-parsing guards here, and it is not on PATH")
+    pytest.skip("node not installed")
+
+
+@pytest.fixture(autouse=True)
+def _node_present():
+    _need_node()
+
+
+def _outcome_of_need_node() -> str:
+    try:
+        _need_node()
+    except pytest.fail.Exception:
+        return "fail"
+    except pytest.skip.Exception:
+        return "skip"
+    return "ran"
+
+
+def test_a_missing_node_fails_in_ci_and_skips_only_locally(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.delenv("VIGIL_REQUIRE_NODE", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert _outcome_of_need_node() == "fail"
+    monkeypatch.delenv("GITHUB_ACTIONS")
+    assert _outcome_of_need_node() == "skip"
+    monkeypatch.setenv("VIGIL_REQUIRE_NODE", "1")
+    assert _outcome_of_need_node() == "fail"
 
 
 def _slice(src: str, start: str, end_after: str) -> str:
@@ -57,8 +94,49 @@ def test_cvss_parse_vector_keys_only_by_its_own_metric_ids():
     prog = (head + "\n" + fn + "\nconst out = [\n"
             " parseVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'),\n"
             " parseVector('AV:N/__PROTO__:X/CONSTRUCTOR:Y/__proto__:N/AV:Z/ZZ:N/av:l'),\n"
+            " parseVector('AV:N/AV:Z'),\n"
+            " parseVector('CVSS:3.1/AV:L/AC:Q/S:X/S:C'),\n"
             "];\nprocess.stdout.write(JSON.stringify({out, clean: ({}).X === undefined && ({}).N === undefined}));")
     got = _node(prog)
     assert got["out"][0] == {"AV": "N", "AC": "L", "PR": "N", "UI": "N", "S": "U", "C": "H", "I": "H", "A": "H"}
     assert got["out"][1] == {"AV": "L"}                                # only real ids with allowed values
+    assert got["out"][2] == {"AV": "N"}                                # a value the metric does not allow is dropped
+    assert got["out"][3] == {"AV": "L", "S": "C"}                      # ... wherever it sits, the id never keyed by it
     assert got["clean"] is True
+
+
+# Just enough DOM for the calculator's own init (buildGroups -> fromUrl -> render); the page script runs UNMODIFIED.
+_CVSS_PAGE = r"""
+const fs = require("fs"), vm = require("vm");
+const [path, href] = process.argv.slice(1);
+function el() {
+  return { style: {}, dataset: {}, attrs: {}, on: {}, children: [], textContent: "", value: "",
+           appendChild(c) { this.children.push(c); return c; },
+           setAttribute(k, v) { this.attrs[k] = String(v); },
+           addEventListener(t, f) { this.on[t] = f; } };
+}
+const byId = {};
+globalThis.document = { getElementById(id) { return byId[id] || (byId[id] = el()); }, createElement: el };
+globalThis.window = { location: { href }, history: { replaceState() {} } };
+const writes = [];
+Object.defineProperty(Object.prototype, "ZZ", {
+  configurable: true, get() { return ["N"]; }, set(v) { writes.push(v); } });
+vm.runInThisContext(fs.readFileSync(path, "utf8"), { filename: path });
+process.stdout.write(JSON.stringify({ vector: byId["cvss-vector-str"].value, writes }));
+"""
+
+
+def test_cvss_page_never_writes_a_url_chosen_key_that_the_prototype_chain_resolves():
+    """The attacker's path: a shared link's ``?vector=`` -> ``fromUrl()`` -> ``parseVector()``, in the shipped page.
+
+    In a pristine realm upper-casing alone keeps every ``Object.prototype`` name out (each has a lower-case
+    letter), so this only differs when the prototype chain carries an upper-case name — e.g. planted by another
+    script on the page. A guard that LOOKS UP the crafted id (``VALID[id]``) is then satisfied through the chain
+    and assigns the crafted key, which reaches an inherited setter with a value from the URL. The write must be
+    keyed by the calculator's own ORDER list, so a crafted id is never assigned, whatever the chain carries."""
+    href = "https://vigil.example/tools/cvss-calculator/?vector=CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L/ZZ:N"
+    r = subprocess.run(["node", "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["vector"] == "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L"   # the URL's real metrics were applied
+    assert got["writes"] == []                                             # the crafted id was never assigned

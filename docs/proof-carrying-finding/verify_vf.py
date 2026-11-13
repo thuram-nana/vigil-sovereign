@@ -4220,14 +4220,14 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
 
 
 _SQL_TAUT_RE = re.compile(
-    r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+    r"""(?i)(OR|AND|XOR)\b\s*(?:\(\s*)?['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
 
 
-_SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
+_SQL_UNION_RE = re.compile(r"(?i)UNION\b\s+(?:ALL\s+)?SELECT\b")
 
 
 _SQL_STACK_RE = re.compile(
-    r"(?is)^;\s*(?:"
+    r"(?is);\s*(?:"
     r"SELECT\b.{0,120}?\bFROM\b"
     r"|INSERT\b.{0,40}?\bINTO\b"
     r"|UPDATE\b.{0,80}?\bSET\b"
@@ -4242,9 +4242,10 @@ _SQL_STACK_RE = re.compile(
 
 
 def _sql_breakout_tails(text: str, quote: str):
-    """Yield the QUERY-context tail after EACH UNESCAPED `quote` in `text` (the injection point is
-    `... WHERE x=<quote>PAYLOAD<quote>`, and any quote in the payload could be the break-out). Honours
-    `''` doubling and `\\` escapes so a legitimately-escaped quote stays inside the literal."""
+    """Yield the START INDEX of the QUERY-context tail after EACH UNESCAPED `quote` in `text` (the injection
+    point is `... WHERE x=<quote>PAYLOAD<quote>`, and any quote in the payload could be the break-out).
+    Honours `''` doubling and `\\` escapes so a legitimately-escaped quote stays inside the literal. An
+    index, never the tail itself: a copy of the rest of the value per quote made n quotes cost n^2."""
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -4255,27 +4256,43 @@ def _sql_breakout_tails(text: str, quote: str):
             if i + 1 < n and text[i + 1] == quote:
                 i += 2                              # doubled quote ('' or "") = an escaped quote
                 continue
-            yield text[i + 1:]                      # unescaped closing quote -> a candidate tail
+            yield i + 1                             # unescaped closing quote -> a candidate tail
         i += 1
 
 
 def _sql_structure_at_start(tail: str) -> str:
-    """The SQL structure PROVEN present at the START of a break-out tail, or "" — the near-zero-FP
-    proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
+    """``_sql_structure_at(tail, 0)``: the structure at the start of a tail held as its own string."""
+    return _sql_structure_at(tail, 0)
+
+
+def _sql_structure_at(text: str, start: int) -> str:
+    """The SQL structure PROVEN present at the START of the break-out tail ``text[start:]``, or "" — the
+    near-zero-FP proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
     boolean SELF-tautology (`OR 1=1`, `OR 'a'='a'`), a `UNION [ALL] SELECT`, or a stacked statement
     with a full statement shape (`; DROP TABLE`, `; SELECT .. FROM`). A lone comment (`--`/`/*`) is
     DELIBERATELY not a proof — `'Inception' -- best film`, pasted code comments, and prose em-dashes
     after a quoted word produce it, so it was a false positive; an attacker's comment almost always
-    follows a tautology/UNION we already catch. Prose after an apostrophe never matches."""
-    s = tail.lstrip().lstrip("()").lstrip()
-    if not s:
+    follows a tautology/UNION we already catch. Prose after an apostrophe never matches.
+    The tail is read IN PLACE: the leading whitespace, parens and whitespace (``.lstrip().lstrip("()")
+    .lstrip()``) are skipped by index and each pattern is matched at that index (``.match(text, i)``
+    anchors there, which is why the patterns carry no ``^``), so a value with n quotes is never copied
+    n times."""
+    n = len(text)
+    i = start
+    while i < n and text[i].isspace():
+        i += 1
+    while i < n and text[i] in "()":
+        i += 1
+    while i < n and text[i].isspace():
+        i += 1
+    if i >= n:
         return ""
-    m = _SQL_TAUT_RE.match(s)
+    m = _SQL_TAUT_RE.match(text, i)
     if m and m.group(2).lower() == m.group(3).lower():
         return f"{m.group(1).upper()} tautology ({m.group(2)}={m.group(3)})"
-    if _SQL_UNION_RE.match(s):
+    if _SQL_UNION_RE.match(text, i):
         return "UNION SELECT"
-    if _SQL_STACK_RE.match(s):
+    if _SQL_STACK_RE.match(text, i):
         return "stacked statement"
     return ""
 
@@ -4295,8 +4312,8 @@ def sql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSig
                             evidence="no string-literal break-out (no quote to close the literal)",
                             observed={"param": param})
     for quote in ("'", '"'):
-        for tail in _sql_breakout_tails(text, quote):
-            struct = _sql_structure_at_start(tail)
+        for start in _sql_breakout_tails(text, quote):
+            struct = _sql_structure_at(text, start)
             if struct:
                 return OracleSignal(
                     kind=kind, fired=True, confidence=0.92,
@@ -4906,6 +4923,15 @@ def _sfx_status_set(statuses: Any) -> "frozenset[int]":
     return frozenset(out) if out else _SFX_DEFAULT_LOGGED_OUT_STATUSES
 
 
+def _sfx_strip_tags(raw: str) -> str:
+    """``_SFX_TAG_RE.sub(" ", raw)``, byte-identical, in linear time. No tag can start in, or extend past, the
+    text after the LAST ``>``, so only the prefix up to and including it is scanned; inside that prefix every
+    ``<`` reaches a ``>``. Run over the whole body, a response of ``<`` repeated to the transport cap with no
+    ``>`` made every ``<`` rescan to the end of the string (quadratic: ~2 s at 64 KB, ~half an hour at 2 MB)."""
+    cut = raw.rfind(">") + 1
+    return _SFX_TAG_RE.sub(" ", raw[:cut]) + raw[cut:]
+
+
 def _sfx_substantive_body(status: Any, body: str) -> bool:
     """A response usable in the differential — a real 2xx with a non-trivial body that is not itself an
     error/deny page. A response FAILING this proves NOTHING (it can neither score authenticated NOR serve as
@@ -4919,7 +4945,7 @@ def _sfx_substantive_body(status: Any, body: str) -> bool:
     raw = body or ""
     if len(raw.strip()) < _SFX_MIN_BODY:
         return False
-    text = _SFX_WS_RE.sub(" ", _SFX_TAG_RE.sub(" ", raw)).strip().lower()
+    text = _SFX_WS_RE.sub(" ", _sfx_strip_tags(raw)).strip().lower()
     if not text:
         return False
     if _SFX_ERROR_OPENER_RE.match(text):
@@ -6808,7 +6834,28 @@ _DMARC_SP_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=\s*(none|quarantine|reject)\s*(?
 _DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
 
 
-_TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_TXT_STRING_BODY_RE = re.compile(r'(?:[^"\\]|\\.)*')
+
+
+def _txt_string_spans(line: str) -> list[tuple[int, int, str]] | None:
+    """The ``(start, end, content)`` of each character-string ``"((?:[^"\\\\]|\\\\.)*)"`` matches in ``line``,
+    left to right, in ONE linear pass; ``None`` as soon as a quote opens a string that pattern cannot match
+    (it never closes, or it holds a backslash + LF, which ``.`` does not accept).
+
+    ``None`` is exactly what ``_resolve_txt_record`` always concluded for such a line: a quote that starts
+    no match can never lie inside a later one, so it was left as unquoted content ahead of, between or after
+    the strings, and the record was refused. Scanning with ``finditer`` instead retried that dead string from
+    every escaped quote inside it, each retry running on to its end — quadratic on a record a target can
+    publish (``"`` + ``\\"!`` x 21000 + backslash, LF, ``"`` cost ~23 s)."""
+    spans: list[tuple[int, int, str]] = []
+    start = line.find('"')
+    while start != -1:
+        close = _TXT_STRING_BODY_RE.match(line, start + 1).end()
+        if close >= len(line) or line[close] != '"':
+            return None
+        spans.append((start, close + 1, line[start + 1 : close]))
+        start = line.find('"', close + 1)
+    return spans
 
 
 def _decode_txt_escapes(s: str) -> str:
@@ -6846,7 +6893,7 @@ def _decode_txt_escapes(s: str) -> str:
     return "".join(out)
 
 
-_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:(?:\d+[smhdw]?)+|IN|CH|CS|HS))*\s+TXT$")
+_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:\d+(?:[smhdw]\d+)*[smhdw]?|IN|CH|CS|HS))*\s+TXT$")
 
 
 _DMARC_VERSION_RE = re.compile(r"(?i)v\s*=\s*DMARC1\s*(?:;|$)")
@@ -6873,21 +6920,21 @@ def _resolve_txt_record(line: str) -> str | None:
         # content. We cannot tell which without guessing, and guessing is the fault line — so REFUSE. (The
         # QUOTED branch below decodes, because there a backslash is unambiguously a §5.1 escape.)
         return None if "\\" in bare else bare
-    spans = list(_TXT_STRING_RE.finditer(line))
+    spans = _txt_string_spans(line)
     if not spans:
         return None                             # a quote opens a string that never closes
-    head = line[: spans[0].start()].strip()
+    head = line[: spans[0][0]].strip()
     if head and not _ZONE_RR_HEADER_RE.match(head):
         return None                             # unquoted content ahead of the record
-    prev = spans[0].end()
-    for span in spans[1:]:
-        if line[prev : span.start()].strip():
+    prev = spans[0][1]
+    for start, end, _content in spans[1:]:
+        if line[prev:start].strip():
             return None                         # unquoted content BETWEEN character-strings
-        prev = span.end()
+        prev = end
     if line[prev:].strip():
         return None                             # unquoted content trailing the record
     # §5.1 decode each string to wire octets, THEN §3.3.14 concatenate — so every tag regex reads wire bytes
-    return "".join(_decode_txt_escapes(span.group(1)) for span in spans).strip()
+    return "".join(_decode_txt_escapes(content) for _start, _end, content in spans).strip()
 
 
 def _txt_records(raw: Any) -> list[str] | None:

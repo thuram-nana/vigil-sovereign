@@ -14,15 +14,26 @@
 #
 # The base is a build-arg so a builder with a cached base image can avoid a registry pull for it
 # (e.g. --build-arg PYTHON_BASE=python:3.11-slim); the runtime is stdlib-only, so any >=3.11 base works.
+# That needs BuildKit (the default builder): the deprecated legacy builder (DOCKER_BUILDKIT=0, or a docker
+# CLI without buildx) builds every stage, so it pulls the pinned base below even when the ARG overrides
+# it — an offline override there needs that digest already cached.
 #
 # A14 (supply chain): the DEFAULT is digest-pinned. A tag is a mutable pointer — `python:3.13-slim`
 # alone means "whatever the registry serves today", so a silently-retagged or compromised base would
 # be pulled with no signal. A digest is content-addressed: it either matches or the pull fails.
 # Overriding --build-arg PYTHON_BASE=<unpinned> remains possible and is the operator's call; the
 # committed default is what CI and `vigil services up` actually build, and that is pinned.
-# Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
+#
+# Why the pin is a named STAGE and not the ARG's default: Dependabot's docker parser reads only literal
+# `FROM <image>[:tag][@sha256:…]` lines and never substitutes an ARG, so a pin that lived in
+# `ARG PYTHON_BASE=…` was invisible to it (no digest-refresh PRs, ever). The pin is therefore a literal
+# FROM that Dependabot tracks, and the default ARG value names that stage; `FROM ${PYTHON_BASE}` builds on
+# it unless the operator overrides the ARG, in which case BuildKit skips the unused pinned stage (the
+# legacy builder still pulls it — see above).
+# Re-pin with Dependabot's PR, or: bash infra/supply-chain/resolve-image-digests.sh (docs/SUPPLY-CHAIN.md)
 # python:3.13-slim, resolved 2026-09-02 (A14 drift re-pin).
-ARG PYTHON_BASE=python:3.13-slim@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2
+ARG PYTHON_BASE=pinned-python
+FROM python:3.13-slim@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2 AS pinned-python
 FROM ${PYTHON_BASE}
 
 # A dedicated unprivileged user — the proxy drops all capabilities and runs read-only in compose.

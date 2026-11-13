@@ -223,6 +223,13 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "a PR runner. The fast required per-PR proofs are test_mutation_gate_sensitivity.py, fuzz_smoke.rs "
         "and test_fuzz_corpus_replay.py; this job is a signal, never a merge blocker."
     ),
+    "named-mutant corpus — money/gate kill table (scheduled)": (
+        "mutation-fuzz.yml (W11-3 #484) — schedule/workflow_dispatch only; for the hand-picked money/gate "
+        "files flagged in critical-set.json, re-runs the named tests once per named mutant, per plane (~2 min "
+        "today, growing with the corpus), and goes red on any mutant not killed as a signal, never a merge "
+        "blocker. Its fast per-PR counterpart is the static corpus "
+        "validation in integration/tests/test_mutation_critical_set.py (required P5 sovereign leg)."
+    ),
     "strix sandbox live image scan (self-hosted, advisory)": (
         "strix-sandbox-image-scan.yml (W3-7 residual #653) — schedule/workflow_dispatch only, runs-on a "
         "self-hosted/large label and gated on the STRIX_SANDBOX_SCAN repo variable, so it never runs on a "
