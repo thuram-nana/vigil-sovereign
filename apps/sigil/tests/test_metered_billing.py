@@ -75,7 +75,7 @@ def _iso(monkeypatch, tmp_path):
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
     monkeypatch.setattr(config, "MODEL_METER_DIR", tmp_path / "model_meter")
     for k in ("VIGIL_METERED_BILLING", mm.MARGIN_ENV, mm.CANCEL_ENV, "VIGIL_RUN_FLOOR_CREDITS", "VIGIL_MODEL_PRICES",
-              "VIGIL_MODEL_GATEWAY_ENABLED", "VIGIL_MODEL_GATEWAY_PORT", "VIGIL_RUN_MODEL"):
+              "VIGIL_MODEL_GATEWAY_ENABLED", "VIGIL_MODEL_GATEWAY_PORT", "VIGIL_RUN_MODEL", *mm.OBSOLETE_PRICING_ENVS):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -203,7 +203,8 @@ def test_the_grant_is_bound_to_the_verified_lease(monkeypatch, units, effort):
     assert read_model_grant(base, r["slug"], expect_nonce=r["nonce"]).token == bundle.token
 
 
-@pytest.mark.parametrize("env", [{mm.MARGIN_ENV: "1.5"}, {mm.MARGIN_ENV: ""}, {mm.CANCEL_ENV: "free"}])
+@pytest.mark.parametrize("env", [{mm.MARGIN_ENV: "1.5"}, {mm.MARGIN_ENV: ""}, {mm.CANCEL_ENV: "free"},
+                                 {"VIGIL_MARGIN_MULTIPLIER_K": "3"}, {"VIGIL_BILLING_MARKUP_K": ""}])
 def test_a_refused_pricing_config_refuses_the_publish(monkeypatch, env):
     _metered(monkeypatch)
     for k, v in env.items():
@@ -884,6 +885,31 @@ def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeyp
         cli.cmd_settle_drain(a)
     assert ei.value.code == 1 and "wait on the pricing configuration" in capsys.readouterr().err
     cli.cmd_settle_drain(a)                                              # transient only: no exit
+
+
+@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
+def test_flat_billing_ignores_a_retired_pricing_setting(monkeypatch, name):
+    # the refusal guards metered pricing only: the default (flat) launch and settle never read a pricing setting
+    monkeypatch.setenv(name, "2")
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, pub = _reserve(s)
+    assert pub["ok"] and read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"]) is None
+    assert _settle(s, owner, r, "completed")["settled"] == 1 and _avail(s) == 100
+    assert not config.MODEL_METER_DIR.exists()
+
+
+@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
+def test_a_retired_pricing_setting_at_settle_defers_a_charge(monkeypatch, name):
+    # the margin is the only pricing input: a stale second knob refuses to price, so the charge waits (it is not
+    # settled on a guess) until the setting is removed
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    monkeypatch.setenv(name, "2")
+    assert _settle(s, owner, r, "completed")["deferred"] == 1 and _avail(s) == 100
+    monkeypatch.delenv(name)
+    assert _settle(s, owner, r, "completed")["settled"] == 1
 
 
 @pytest.mark.parametrize("usage, cost, charged", [

@@ -12355,7 +12355,10 @@
       var t = d.totals || {};
       var note = d.rate_configured
         ? ("cost rate " + d.cost_rate_micro_minor_per_token + " micro-minor/token"
-          + (d.margin_multiplier_k ? (" · target k=" + d.margin_multiplier_k) : ""))
+          + (d.target_margin_set
+            ? (" · target = cost ÷ (1 − target margin). The target margin is over metered AI cost; until per-run"
+              + " metered cost is recorded, this cost column is the per-token rate estimate")
+            : (d.target_margin_issue ? (" · no target line: " + d.target_margin_issue) : "")))
         : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
       var rows = d.tenants.map(function (x) {
         return h("tr", null, [
@@ -12366,15 +12369,18 @@
           h("td", null, m(x.cost_minor, x.currency)),
           h("td", null, m(x.margin_minor, x.currency)),
           h("td", null, pct(x.margin_pct)),
+          h("td", null, (x.target_revenue_minor === null || x.target_revenue_minor === undefined)
+            ? h("span.dim", null, "—") : _jMoney(x.target_revenue_minor, x.currency || cur)),
         ]);
       });
       V.mount(host, V.card("Margin · billing↔cost reconciliation", d.rate_configured ? "OWNER" : "NOT CONFIGURED", [
         h("div.hint", null, note),
         h("div.scroll-x", null, h("table.tbl", null, [
           h("thead", null, h("tr", null, [h("th", null, "tenant"), h("th", null, "tokens"), h("th", null, "in flight"),
-            h("th", null, "billed"), h("th", null, "cost"), h("th", null, "margin"), h("th", null, "margin %")])),
+            h("th", null, "billed"), h("th", null, "cost"), h("th", null, "margin"), h("th", null, "margin %"),
+            h("th", null, "target")])),
           h("tbody", null, rows.length ? rows
-            : [h("tr", null, h("td", { colspan: "7" }, h("div.empty", null, "no tenant activity")))]),
+            : [h("tr", null, h("td", { colspan: "8" }, h("div.empty", null, "no tenant activity")))]),
           h("tfoot", null, h("tr", null, [
             h("td", null, h("b", null, "TOTAL (" + String(t.tenant_count || 0) + ")")),
             h("td.mono", null, String(t.committed_tokens || 0)),
@@ -12383,6 +12389,7 @@
             h("td", null, m(t.cost_minor)),
             h("td", null, m(t.margin_minor)),
             h("td", null, pct(t.margin_pct)),
+            h("td", null, h("span.dim", null, "—")),
           ])),
         ])),
       ], true));

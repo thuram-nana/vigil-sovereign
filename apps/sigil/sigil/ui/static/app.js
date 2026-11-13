@@ -57,7 +57,10 @@ async function loadMargin() {
   if (!m || !Array.isArray(m.tenants)) { panel.style.display = "none"; return; }  // unavailable -> hidden
   const cur = m.currency || "USD";
   $("#margin-note").textContent = m.rate_configured
-    ? `cost rate ${m.cost_rate_micro_minor_per_token} micro-minor/token${m.margin_multiplier_k ? ` · target k=${m.margin_multiplier_k}` : ""}`
+    ? `cost rate ${m.cost_rate_micro_minor_per_token} micro-minor/token` + (m.target_margin_set
+      ? " · target = cost ÷ (1 − target margin). The target margin is over metered AI cost; until per-run metered"
+        + " cost is recorded, this cost column is the per-token rate estimate"
+      : (m.target_margin_issue ? ` · no target line: ${m.target_margin_issue}` : ""))
     : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
   const t = m.totals || {};
   $("#margin-totals").innerHTML =
@@ -68,14 +71,15 @@ async function loadMargin() {
     `<b>collected</b><span>${money(t.collected_minor, cur)}</span>` +
     `<b>cost</b><span>${money(t.cost_minor, cur)}</span>` +
     `<b>margin</b><span>${money(t.margin_minor, cur)}</span>`;
-  const head = `<tr><th>tenant</th><th>tokens</th><th>in flight</th><th>billed</th><th>cost</th><th>margin</th><th>margin %</th></tr>`;
+  const head = `<tr><th>tenant</th><th>tokens</th><th>in flight</th><th>billed</th><th>cost</th><th>margin</th><th>margin %</th><th>target</th></tr>`;
   const body = m.tenants.map((x) => `<tr><td>${esc(x.name || x.org_id)}</td>
     <td>${x.committed_tokens}</td><td>${x.in_flight_tokens}</td>
     <td>${money(x.billed_revenue_minor, x.currency || cur)}</td>
     <td>${money(x.cost_minor, x.currency || cur)}</td>
     <td>${money(x.margin_minor, x.currency || cur)}</td>
-    <td>${x.margin_pct === null || x.margin_pct === undefined ? '<span class="nc">—</span>' : esc(x.margin_pct) + "%"}</td></tr>`).join("");
-  $("#margin-table").innerHTML = head + (body || '<tr><td colspan="7" class="nc">no tenant activity</td></tr>');
+    <td>${x.margin_pct === null || x.margin_pct === undefined ? '<span class="nc">—</span>' : esc(x.margin_pct) + "%"}</td>
+    <td>${x.target_revenue_minor === null || x.target_revenue_minor === undefined ? '<span class="nc">—</span>' : money(x.target_revenue_minor, x.currency || cur)}</td></tr>`).join("");
+  $("#margin-table").innerHTML = head + (body || '<tr><td colspan="8" class="nc">no tenant activity</td></tr>');
   panel.style.display = "block";
 }
 const kv = (o) => Object.entries(o || {}).map(([a, n]) => `<b>${esc(a)}</b><span>${n}</span>`).join("");

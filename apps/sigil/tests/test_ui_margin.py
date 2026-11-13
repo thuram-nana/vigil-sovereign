@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from fractions import Fraction
 
 from sigil.governor import catalog
 from sigil.governor.authn import signed_payload
@@ -37,6 +39,7 @@ from sigil.ui.server import build_server
 
 TOKEN = "owner-shared-token-xyz789"
 RATE = 300          # micro-minor per token: cost_minor = committed_tokens * 300 // 1_000_000 (clean integers)
+TEST_M = Fraction(1, 7)   # a test-only target margin (not a pricing number): cost 1200 -> target 1200 / (6/7) = 1400
 
 
 @contextlib.contextmanager
@@ -87,18 +90,17 @@ def _seed_acme(store, owner):
 
 # ---- the owner-input catalog accessors (additive, default-UNSET) -------------------------------------
 def test_catalog_cost_rate_accessors_default_none_and_env_override():
-    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN=None, VIGIL_MARGIN_MULTIPLIER_K=None):
+    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN=None):
         assert catalog.cost_rate_micro_minor_per_token() is None     # PLACEHOLDER default: not configured
-        assert catalog.margin_multiplier_k() is None
-    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="300", VIGIL_MARGIN_MULTIPLIER_K="3.5"):
+    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="300"):
         assert catalog.cost_rate_micro_minor_per_token() == 300
-        assert catalog.margin_multiplier_k() == 3.5
-    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="-5", VIGIL_MARGIN_MULTIPLIER_K="0"):
-        assert catalog.cost_rate_micro_minor_per_token() is None     # negative/<=0/junk -> None (fail-closed)
-        assert catalog.margin_multiplier_k() is None
-    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="junk", VIGIL_MARGIN_MULTIPLIER_K="nope"):
+    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="-5"):
+        assert catalog.cost_rate_micro_minor_per_token() is None     # negative/junk -> None (fail-closed)
+    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN="junk"):
         assert catalog.cost_rate_micro_minor_per_token() is None
-        assert catalog.margin_multiplier_k() is None
+    # ONE pricing number: the catalog no longer carries a target multiplier (the target line comes from the
+    # target margin, vigil_core.model_metering.target_margin).
+    assert not hasattr(catalog, "margin_multiplier_k")
     # ADDITIVE: the new accessors do not perturb the existing pricing surface (byte-identical when unset).
     assert isinstance(catalog.plans(), list) and catalog.postpaid_per_credit_minor() == 1
 
@@ -108,8 +110,10 @@ def test_margin_math_per_tenant_configured():
     store = _store()
     owner = ensure_owner_keypair()
     _seed_acme(store, owner)
-    ov = margin.margin_overview(store, cost_rate=RATE, margin_k=3.0)
+    ov = margin.margin_overview(store, cost_rate=RATE, target_margin=TEST_M)
     assert ov["rate_configured"] is True and ov["cost_status"] == "configured"
+    assert ov["target_margin_set"] is True and ov["target_margin_issue"] is None
+    assert ov["target_margin_basis"].startswith("metered AI cost only")
     t = next(x for x in ov["tenants"] if x["org_id"] == "acme")
     assert t["name"] == "Acme Corp"
     # revenue basis = {subscription, topup, postpaid}, PAYMENT excluded (collected axis).
@@ -123,7 +127,8 @@ def test_margin_math_per_tenant_configured():
     # margin = billed - cost = 11400 - 1200 = 10200.  MUTATION-VERIFY (the margin formula).
     assert t["margin_minor"] == 10200
     assert t["margin_pct"] == round(10200 / 11400 * 100, 2)
-    assert t["target_revenue_minor"] == 3600                 # k=3.0 display target (cost*k); never the actual margin
+    # display target = cost / (1 - m) = 1200 / (6/7) = 1400; never the actual margin.  MUTATION-VERIFY.
+    assert t["target_revenue_minor"] == 1400
     assert t["currency"] == "USD"
     # totals reconcile.
     assert ov["totals"] == {"tenant_count": 1, "committed_tokens": 4_000_000, "in_flight_tokens": 1_000_000,
@@ -206,10 +211,61 @@ def test_margin_overview_defaults_to_unconfigured_catalog():
     store = _store()
     owner = ensure_owner_keypair()
     _seed_acme(store, owner)
-    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN=None, VIGIL_MARGIN_MULTIPLIER_K=None):
+    with _env(VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN=None, VIGIL_BILLING_TARGET_MARGIN=None):
         ov = margin.margin_overview(store)                   # read the catalog (no override)
     assert ov["rate_configured"] is False
     assert all(t["cost_minor"] is None for t in ov["tenants"])
+    assert ov["target_margin_set"] is False and "VIGIL_BILLING_TARGET_MARGIN is not set" in ov["target_margin_issue"]
+    assert all(t["target_revenue_minor"] is None for t in ov["tenants"])
+
+
+# ---- the ONE pricing number: the target line comes from the target margin ---------------------------
+def test_target_revenue_is_cost_over_one_minus_margin_rounded_up():
+    # 1003 / (2/3) = 1504.5 -> 1505: rounded UP (the charge's direction), not to even and not down.
+    assert margin._target_revenue(1003, Fraction(1, 3)) == 1505
+    assert margin._target_revenue(1200, TEST_M) == 1400                  # exact: no rounding
+    # a small fractional part still rounds up (half-up rounding would give the lower value here)
+    exact = Fraction(1201) / (1 - TEST_M)
+    assert exact - int(exact) < Fraction(1, 2) and margin._target_revenue(1201, TEST_M) == int(exact) + 1
+    assert margin._target_revenue(0, TEST_M) == 0
+
+
+def test_target_line_reads_the_deploy_margin_and_never_carries_its_value():
+    store = _store()
+    owner = ensure_owner_keypair()
+    _seed_acme(store, owner)
+    decoy = "0." + "1" * 6                                     # a test value, assembled at run time
+    with _env(VIGIL_BILLING_TARGET_MARGIN=decoy, VIGIL_BILLING_MARKUP_K=None, VIGIL_MARGIN_MULTIPLIER_K=None):
+        ov = margin.margin_overview(store, cost_rate=RATE)
+    t = next(x for x in ov["tenants"] if x["org_id"] == "acme")
+    assert ov["target_margin_set"] is True and ov["target_margin_issue"] is None
+    assert t["target_revenue_minor"] == math.ceil(Fraction(1200) / (1 - Fraction(decoy)))
+    body = json.dumps(ov)                                       # a Fraction in the payload would not serialise
+    assert decoy not in body and "1" * 6 not in body
+    m = Fraction(decoy)                                         # nor any other form of it: percent, markup
+    for form in (str(float(m * 100)), str(float(1 / (1 - m))), str(1 / (1 - m)), str(m)):
+        assert form not in body, form
+    # the payload's shape is pinned: a new margin-derived field cannot appear unnoticed
+    assert set(ov) == {"rate_configured", "cost_status", "cost_rate_micro_minor_per_token", "target_margin_set",
+                       "target_margin_basis", "target_margin_issue", "cost_basis", "currency", "tenants", "totals"}
+    assert "estimate" in ov["cost_basis"] and "not metered AI cost" in ov["cost_basis"]
+
+
+def test_a_retired_pricing_setting_removes_the_target_line_with_the_billing_refusal():
+    store = _store()
+    owner = ensure_owner_keypair()
+    _seed_acme(store, owner)
+    decoy = "0." + "1" * 6
+    for name in ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"):
+        others = {n: None for n in ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K") if n != name}
+        with _env(VIGIL_BILLING_TARGET_MARGIN=decoy, **{name: "2"}, **others):
+            ov = margin.margin_overview(store, cost_rate=RATE)
+        assert ov["target_margin_set"] is False
+        assert ov["target_margin_issue"] == (f"{name} is set: remove it; the only pricing input is "
+                                             f"VIGIL_BILLING_TARGET_MARGIN")
+        assert all(t["target_revenue_minor"] is None for t in ov["tenants"])
+        # the ACTUAL margin is unaffected: the target line is display-only.
+        assert next(x for x in ov["tenants"] if x["org_id"] == "acme")["margin_minor"] == 10200
 
 
 # ---- READ-ONLY: a projection mints/appends nothing (no money-state mutation) -------------------------
@@ -218,7 +274,7 @@ def test_margin_projection_is_read_only_no_spine_mutation():
     owner = ensure_owner_keypair()
     _seed_acme(store, owner)
     before = store.next_seq
-    margin.margin_overview(store, cost_rate=RATE, margin_k=3.0)
+    margin.margin_overview(store, cost_rate=RATE, target_margin=TEST_M)
     margin.margin_overview(store, cost_rate=None)
     margin.margin_overview(store)
     assert store.next_seq == before                          # the spine head is unchanged — a pure read
@@ -282,10 +338,10 @@ def test_mixed_currency_withholds_margin_fail_closed():
     inv.record("mix", invoice_id="m_eur", kind="topup", price_id="t", amount_minor=5000,
                currency="EUR", credits=5000, issued_at=200.0)
     cost.settle("mix", 2_000_000, entry_id="settle-cost:mix:1", issued_at=300.0)
-    ov = margin.margin_overview(store, cost_rate=RATE, margin_k=3.0)
+    ov = margin.margin_overview(store, cost_rate=RATE, target_margin=TEST_M)
     t = next(x for x in ov["tenants"] if x["org_id"] == "mix")
     assert t["currency"] == "mixed"
-    # MARGIN WITHHELD — never a fabricated cross-currency margin (including the k-derived display target).
+    # MARGIN WITHHELD — never a fabricated cross-currency margin (including the target-margin display target).
     assert t["margin_minor"] is None and t["margin_pct"] is None and t["target_revenue_minor"] is None
     # ...but committed tokens + the raw billed sum + the single-currency cost ARE still shown.
     assert t["committed_tokens"] == 2_000_000

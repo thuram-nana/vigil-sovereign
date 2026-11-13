@@ -9,8 +9,13 @@ constructs the registries exactly as ``ui/billing.py`` does and calls only READ 
 folds is verified under the trusted owner PUBKEY (``identity.owner_pubkey()``), never the signing key.
 
 MONEY ANCHOR: billed revenue is the Sum of owner-signed ``Invoice.amount_minor`` (catalog-priced at mint), never
-a recomputed / on-the-wire amount; the cost rate + k are OWNER catalog inputs
-(``catalog.cost_rate_micro_minor_per_token`` / ``.margin_multiplier_k``), never numbers invented here. REVENUE
+a recomputed / on-the-wire amount; the cost rate is an OWNER catalog input (``catalog.cost_rate_micro_minor_per_token``)
+and the display TARGET line comes from the one pricing input, the target margin
+(``vigil_core.model_metering.target_margin`` — a margin over METERED AI cost only; payment fees and hosting are
+outside it), as ``target revenue = cost / (1 - target margin)`` — never numbers invented here. The cost the target
+line divides is this view's cost column, today the per-token rate ESTIMATE (committed tokens × the owner's cost
+rate), not each run's metered AI cost; the payload says so (``cost_basis``) until per-run metered cost is recorded and
+replaces it. REVENUE
 BASIS excludes the ``payment`` kind (a PP-2b receipt against postpaid arrears — money IN, not a charge):
 ``billed_revenue = Sum over {subscription, topup, postpaid}``; ``payment`` rows are the COLLECTED axis (the
 billed-vs-collected AR gap), never added to revenue (the double-count guard). NOT-CONFIGURED FAIL-CLOSED: a
@@ -50,13 +55,15 @@ signal / signed-core constants, so per-period verification can never drift from 
 """
 from __future__ import annotations
 
+import math
+from fractions import Fraction
 from typing import Any, Optional
 
 from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from ..governor import catalog as _catalog  # noqa: E402  (owner-input cost rate + target k — the money anchor)
+from ..governor import catalog as _catalog  # noqa: E402  (owner-input cost rate — the money anchor)
 from ..governor import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors the folds)
 from ..governor.authn import as_issued_at, verify_signed  # noqa: E402
 from ..governor.cost_ledger import (  # noqa: E402  (CONSUMED read-only — the ledger itself is NOT modified)
@@ -67,6 +74,7 @@ from ..governor.orgs import OrgRegistry  # noqa: E402
 from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed for the settle seen-set, mirrors _fold)
 from ..governor.fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
+from vigil_core import model_metering as _mm  # noqa: E402  (the one pricing input: the target margin)
 
 # The REVENUE basis — the owner-signed invoice kinds that are a CHARGE. The ``payment`` kind (a PP-2b receipt
 # against postpaid arrears: money IN, reducing outstanding, NOT a charge) is DELIBERATELY excluded from revenue
@@ -226,15 +234,35 @@ def _tenant_periods(tenant_invoices: list, settles: list[tuple[float, int]], com
     return rows
 
 
-def margin_overview(store, *, cost_rate: Any = _UNSET, margin_k: Any = _UNSET) -> dict[str, Any]:
+def _target_margin() -> "tuple[Optional[Fraction], Optional[str]]":
+    """The deploy's target margin, or None and the reason there is none (unset, malformed, or a retired pricing
+    setting still present — the same refusal billing gives). The reason never carries the value."""
+    try:
+        return _mm.target_margin(), None
+    except _mm.MeteringError as exc:
+        return None, str(exc)
+
+
+def _target_revenue(cost_minor: int, m: Fraction) -> int:
+    """The revenue at which ``cost_minor`` earns the target margin ``m``: ``cost / (1 - m)``, exact, rounded UP to
+    a whole minor unit (the same direction the metered charge rounds)."""
+    return math.ceil(Fraction(cost_minor) / (1 - m))
+
+
+def margin_overview(store, *, cost_rate: Any = _UNSET, target_margin: Any = _UNSET) -> dict[str, Any]:
     """The OPERATOR margin reconciliation across ALL tenants (per-tenant primary + per-period secondary), a pure
-    READ-ONLY projection of the owner-signed spine. ``cost_rate`` / ``margin_k`` default to the OWNER catalog
-    (the money anchor — ``catalog.cost_rate_micro_minor_per_token`` / ``.margin_multiplier_k``); an explicit value
-    (incl. None) overrides for testing. When ``cost_rate`` is None the view is 'not configured': every
-    ``cost_minor`` / ``margin_minor`` is None and only committed tokens + billed revenue are shown (never a
-    fabricated number). Assumes the route already authorized the caller owner-tier."""
+    READ-ONLY projection of the owner-signed spine. ``cost_rate`` defaults to the OWNER catalog (the money anchor —
+    ``catalog.cost_rate_micro_minor_per_token``) and ``target_margin`` to the deploy's one pricing input
+    (``vigil_core.model_metering.target_margin``, a margin over METERED AI cost only); an explicit value (incl.
+    None) overrides for testing. When ``cost_rate`` is None the view is 'not configured': every ``cost_minor`` /
+    ``margin_minor`` is None and only committed tokens + billed revenue are shown (never a fabricated number). The
+    target line is display-only: it never changes a price or the actual margin. The margin's value is never in
+    the payload. Assumes the route already authorized the caller owner-tier."""
     rate_micro = _catalog.cost_rate_micro_minor_per_token() if cost_rate is _UNSET else cost_rate
-    k = _catalog.margin_multiplier_k() if margin_k is _UNSET else margin_k
+    if target_margin is _UNSET:
+        m, m_issue = _target_margin()
+    else:
+        m, m_issue = target_margin, (None if target_margin is not None else "no target margin given")
     configured = rate_micro is not None
 
     trusted = owner_pubkey()                           # the trust anchor reads verify under (never the signing key)
@@ -273,8 +301,9 @@ def margin_overview(store, *, cost_rate: Any = _UNSET, margin_k: Any = _UNSET) -
         # MIXED-CURRENCY FAIL-CLOSED: withhold the (revenue - cost) margin + its target/pct when billed spans
         # >1 currency — never fabricate a cross-currency margin (cost + the raw billed sum are still shown).
         margin_m = None if (cost_m is None or mixed) else billed - cost_m
-        # Display-only TARGET line from the owner's k (target revenue = cost * k); never affects actual margin.
-        target_rev = None if (cost_m is None or k is None or mixed) else round(cost_m * k)
+        # Display-only TARGET line from the target margin (target revenue = cost / (1 - m)); never affects the
+        # actual margin or any price.
+        target_rev = None if (cost_m is None or m is None or mixed) else _target_revenue(cost_m, m)
         all_currencies |= currencies
         tenants.append({
             "org_id": oid, "name": names.get(oid, oid),
@@ -303,7 +332,10 @@ def margin_overview(store, *, cost_rate: Any = _UNSET, margin_k: Any = _UNSET) -
         "rate_configured": configured,
         "cost_status": "configured" if configured else "not configured",
         "cost_rate_micro_minor_per_token": rate_micro,
-        "margin_multiplier_k": k,
+        "target_margin_set": m is not None,
+        "target_margin_basis": "metered AI cost only (payment fees and hosting are outside it)",
+        "target_margin_issue": m_issue,
+        "cost_basis": "per-token rate estimate (committed tokens x the owner's cost rate), not metered AI cost",
         "currency": (next(iter(all_currencies)) if len(all_currencies) == 1
                      else ("mixed" if all_currencies else "")),
         "tenants": tenants,
