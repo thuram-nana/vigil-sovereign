@@ -6,7 +6,7 @@
 * `checkout_tx_ref` is the one `vigil:<org>:<nonce>` builder.
 * `BillingSigner(require_verified_amount=True)` refuses a priced event without a verified currency (the underpay
   check then bounds the amount, so 0 is refused too); the default (False) is unchanged.
-* The Stripe adapter declares only the capability it implements (webhook verification).
+* The Stripe adapter declares only the capabilities it implements (webhook verification + the object re-fetch).
 * GOLDEN: a fixed Flutterwave top-up and plan charge produce exactly the recorded spine payloads, so a later
   slice that touches shared code cannot change what Flutterwave mints.
 """
@@ -69,7 +69,7 @@ class _BareProvider(BillingProvider):
 
 
 def test_a_provider_without_hosted_checkout_refuses_explicitly():
-    for p in (_BareProvider(), StripeBillingProvider("whsec_x", enable_reference_adapter=True)):
+    for p in (_BareProvider(), _stripe_ref()):
         assert not p.supports(CAP_HOSTED_CHECKOUT)
         with pytest.raises(UnsupportedCapability):
             p.require(CAP_HOSTED_CHECKOUT)
@@ -77,10 +77,15 @@ def test_a_provider_without_hosted_checkout_refuses_explicitly():
             p.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
 
 
+def _stripe_ref():
+    return StripeBillingProvider("whsec_x", fetcher=lambda kind, oid: {}, expected_mode="test",
+                                 enable_reference_adapter=True)
+
+
 def test_stripe_declares_only_what_it_implements():
-    caps = StripeBillingProvider("whsec_x", enable_reference_adapter=True).capabilities()
-    assert caps == frozenset({CAP_VERIFY_WEBHOOK})
-    for missing in (CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_REFUND, CAP_RECONCILE):
+    caps = _stripe_ref().capabilities()
+    assert caps == frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION})
+    for missing in (CAP_HOSTED_CHECKOUT, CAP_REFUND, CAP_RECONCILE):
         assert missing not in caps
 
 

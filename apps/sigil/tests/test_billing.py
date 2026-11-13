@@ -310,16 +310,33 @@ def test_mock_provider_rejects_malformed():
                                                        "created": 1.0}).encode()), now=1.0) is None  # unknown kind
 
 
-# ---- the Stripe provider: HMAC signature scheme -----------------------------------------------------
+# ---- the Stripe provider: HMAC signature scheme + server-side re-fetch ----------------------------------
 _SECRET = "whsec_test_123"
 
 
-def _stripe_body(etype="invoice.paid", org="acme", price="price_pro", eid="evt_s1", created=1000,
-                 billing_reason="subscription_cycle"):
-    obj = {"metadata": {"org_id": org}, "items": {"data": [{"price": {"id": price}}]}}
-    if etype in ("invoice.paid", "invoice.payment_failed"):
-        obj["billing_reason"] = billing_reason
-    return json.dumps({"id": eid, "type": etype, "created": created, "data": {"object": obj}}).encode()
+def _stripe_sub(org="acme", price="price_pro"):
+    return {"object": "subscription", "id": "sub_1", "livemode": False,
+            "metadata": {"org_id": org, "price_id": price}}
+
+
+def _stripe_invoice(billing_reason="subscription_cycle", status="paid", paid_at=1000):
+    return {"object": "invoice", "id": "in_1", "livemode": False, "status": status, "billing_reason": billing_reason,
+            "subscription": "sub_1", "amount_paid": 5000, "currency": "usd", "created": 990,
+            "status_transitions": {"paid_at": paid_at}}
+
+
+def _stripe(objs=None, **kw):
+    """The Stripe adapter with a fake fetcher serving `objs` (by id)."""
+    table = {"in_1": _stripe_invoice(), "sub_1": _stripe_sub()} if objs is None else objs
+
+    def fetch(kind, oid):
+        return table[oid]
+    return StripeBillingProvider(_SECRET, fetcher=fetch, expected_mode="test", enable_reference_adapter=True, **kw)
+
+
+def _stripe_body(etype="invoice.paid", oid="in_1", eid="evt_s1", created=1000):
+    return json.dumps({"id": eid, "type": etype, "created": created, "livemode": False,
+                       "data": {"object": {"id": oid}}}).encode()
 
 
 def _sig(secret, t, body):
@@ -328,15 +345,15 @@ def _sig(secret, t, body):
 
 
 def test_stripe_valid_signature_parses():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     ev = p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0)
     assert ev is not None and ev.kind == EVENT_SUBSCRIPTION_ACTIVE and ev.org_id == "acme" \
-        and ev.price_id == "price_pro" and ev.event_id == "evt_s1"
+        and ev.price_id == "price_pro" and ev.event_id == "in_1" and ev.amount_minor == 5000 and ev.currency == "USD"
 
 
 def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
-    p = StripeBillingProvider(_SECRET, tolerance_s=300.0, enable_reference_adapter=True)
+    p = _stripe(tolerance_s=300.0)
     body = _stripe_body()
     good = _sig(_SECRET, 1000, body)
     assert p.verify_and_parse(body, "t=1000,v1=deadbeef", now=1000.0) is None      # wrong MAC
@@ -350,7 +367,7 @@ def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
 
 
 def test_stripe_accepts_any_valid_v1_on_rotation():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
     hdr = f"t=1000,v1=deadbeef,v1={mac}"            # one bad + one good v1 (secret rotation) -> accepted
@@ -358,40 +375,43 @@ def test_stripe_accepts_any_valid_v1_on_rotation():
 
 
 def test_stripe_ignores_unmapped_and_missing_org():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body(etype="charge.updated")                 # not a minted type
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
-    body2 = json.dumps({"id": "e", "type": "invoice.paid", "created": 1000,
-                        "data": {"object": {"items": {"data": [{"price": {"id": "price_pro"}}]}}}}).encode()
-    assert p.verify_and_parse(body2, _sig(_SECRET, 1000, body2), now=1000.0) is None   # no org_id metadata
+    sub = _stripe_sub()
+    sub["metadata"] = {"price_id": "price_pro"}                 # the fetched subscription names no tenant
+    p2 = _stripe({"in_1": _stripe_invoice(), "sub_1": sub})
+    body2 = _stripe_body()
+    assert p2.verify_and_parse(body2, _sig(_SECRET, 1000, body2), now=1000.0) is None
 
 
 def test_stripe_ignores_mid_cycle_invoice_billing_reason():
     # Only subscription_create / subscription_cycle invoices advance the period; a mid-cycle proration/update
     # invoice (which Stripe genuinely emits) must be ignored, or it would mint a second overlapping allotment.
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
-    for reason in ("subscription_update", "manual", "subscription_threshold", ""):
-        body = _stripe_body(billing_reason=reason)
+    body = _stripe_body()
+    for reason in ("subscription_update", "manual", "subscription_threshold", "", None):
+        p = _stripe({"in_1": _stripe_invoice(billing_reason=reason), "sub_1": _stripe_sub()})
         assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, \
             f"invoice.paid with billing_reason={reason!r} must be ignored"
-    # the cycle/create reasons DO parse
     for reason in ("subscription_cycle", "subscription_create"):
-        body = _stripe_body(billing_reason=reason)
+        p = _stripe({"in_1": _stripe_invoice(billing_reason=reason), "sub_1": _stripe_sub()})
         assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is not None
 
 
 def test_stripe_subscription_mode_checkout_is_ignored():
-    # a checkout.session.completed in subscription mode is handled by invoice.paid, not as a top-up
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
-    body = json.dumps({"id": "cs1", "type": "checkout.session.completed", "created": 1000,
-                       "data": {"object": {"mode": "subscription", "metadata": {"org_id": "acme"}}}}).encode()
+    # a subscription-mode session is minted by its invoice.paid, never as a top-up
+    session = {"object": "checkout.session", "id": "cs_test_a1", "livemode": False, "mode": "subscription",
+               "status": "complete", "payment_status": "paid", "client_reference_id": "vigil:acme:n1",
+               "amount_total": 5000, "currency": "usd", "created": 1000}
+    p = _stripe({"cs_test_a1": session})
+    body = _stripe_body(etype="checkout.session.completed", oid="cs_test_a1")
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
 
 
 def test_stripe_timestamp_must_be_plain_ascii_digits():
     """`t` is decimal ASCII digits only. Non-ASCII digits used to pass float() and then crash on encode("ascii");
     exponent, sign, whitespace and nan/inf forms are refused too (all return None, never raise)."""
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
     for t in ("１０００", "١٠٠٠", "1e3", "+1000", " 1000", "nan", "inf", "-1000", "1000.0", "",
@@ -401,7 +421,7 @@ def test_stripe_timestamp_must_be_plain_ascii_digits():
 
 
 def test_stripe_tolerance_edge_is_inclusive():
-    p = StripeBillingProvider(_SECRET, tolerance_s=300.0, enable_reference_adapter=True)
+    p = _stripe(tolerance_s=300.0)
     body = _stripe_body()
     good = _sig(_SECRET, 1000, body)
     assert p.verify_and_parse(body, good, now=1300.0) is not None and p.verify_and_parse(body, good, now=700.0)
@@ -409,7 +429,7 @@ def test_stripe_tolerance_edge_is_inclusive():
 
 
 def test_stripe_v1_must_be_lowercase_hex_sha256():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
     for v1 in (mac.upper(), mac[:-1], mac + "0", "ｆ" * 64, " " + mac):
@@ -417,33 +437,38 @@ def test_stripe_v1_must_be_lowercase_hex_sha256():
     assert p.verify_and_parse(body, f"t=1000,v1={mac}", now=1000.0) is not None
 
 
-def test_stripe_event_without_a_stable_time_mints_nothing():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
-    for created in (None, 0, -5, "nan", "soon"):
-        obj = {"id": "evt_t", "type": "invoice.paid",
-               "data": {"object": {"metadata": {"org_id": "acme"}, "billing_reason": "subscription_cycle",
-                                   "items": {"data": [{"price": {"id": "price_pro"}}]}}}}
-        if created is not None:
-            obj["created"] = created
-        body = json.dumps(obj).encode()
-        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, created
+def test_stripe_paid_invoice_without_a_stable_time_mints_nothing():
+    body = _stripe_body()
+    for paid_at in (None, 0, -5, "nan", "1000", 1000.5, True, 10 ** 13):
+        p = _stripe({"in_1": _stripe_invoice(paid_at=paid_at), "sub_1": _stripe_sub()})
+        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, paid_at
 
 
-def test_stripe_secret_required():
+def test_stripe_secret_fetcher_and_mode_required():
+    fetch = lambda kind, oid: {}                                                    # noqa: E731
     with pytest.raises(ValueError):
-        StripeBillingProvider("", enable_reference_adapter=True)
+        StripeBillingProvider("", fetcher=fetch, expected_mode="test", enable_reference_adapter=True)
+    with pytest.raises(ValueError):
+        StripeBillingProvider(_SECRET, fetcher=None, expected_mode="test",           # type: ignore[arg-type]
+                              enable_reference_adapter=True)
+    for mode in ("", "prod", "LIVE", None):
+        with pytest.raises(ValueError):
+            StripeBillingProvider(_SECRET, fetcher=fetch, expected_mode=mode,         # type: ignore[arg-type]
+                                  enable_reference_adapter=True)
 
 
 # ---- Stripe disabled-by-default guard ----------------------------------------------------------------
 def test_stripe_disabled_by_default():
+    fetch = lambda kind, oid: {}                                                    # noqa: E731
     with pytest.raises(UnsupportedCapability):
-        StripeBillingProvider("whsec_x")                            # no opt-in -> refuses
-    assert StripeBillingProvider("whsec_x", enable_reference_adapter=True) is not None   # explicit flag
+        StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test")       # no opt-in -> refuses
+    assert StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test",
+                                 enable_reference_adapter=True) is not None         # explicit flag
     import os
     _prev = os.environ.get("VIGIL_BILLING_ENABLE_STRIPE")
     os.environ["VIGIL_BILLING_ENABLE_STRIPE"] = "1"
     try:
-        assert StripeBillingProvider("whsec_x") is not None         # env opt-in
+        assert StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test") is not None   # env opt-in
     finally:
         if _prev is None:
             os.environ.pop("VIGIL_BILLING_ENABLE_STRIPE", None)
@@ -725,7 +750,8 @@ def test_flutterwave_capabilities_and_noauth_gate():
 def _all_providers():
     return [
         ("mock", MockBillingProvider("sek")),
-        ("stripe", StripeBillingProvider("whsec_x", enable_reference_adapter=True)),
+        ("stripe", StripeBillingProvider("whsec_x", fetcher=lambda kind, oid: {}, expected_mode="test",
+                                         enable_reference_adapter=True)),
         ("flutterwave", FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))),
     ]
 
