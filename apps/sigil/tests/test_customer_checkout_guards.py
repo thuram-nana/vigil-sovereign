@@ -8,9 +8,12 @@
     before the first plan's webhook drained. An owner-signed, expiring, cross-process-exclusive PENDING
     plan-checkout record now refuses a second plan checkout for the org until the plan drains (then the drained
     subscription refuses it) or the record expires — and it cannot expire while its link can still bill: a plan
-    checkout asks the processor for a bounded payment session that the record's TTL outlives, plus the drain lag.
-    Deleting the record does not reopen the window (the created plan checkout is on the spine audit), and the
-    checkout audit names the tx_ref. Top-ups are unaffected (their processor payload is unchanged).
+    checkout asks the processor for a bounded payment session that the record's TTL outlives, plus a margin. Nor
+    does it lapse on time alone while the link may have been PAID: an expired record stays while the billing spool
+    holds an undrained webhook for its tx_ref (a quarantine waits for an operator — no time bound), and a spool
+    that cannot prove that keeps refusing. Deleting the record does not reopen the window (the created plan
+    checkout is on the spine audit), and the checkout audit names the tx_ref. Top-ups are unaffected (their
+    processor payload is unchanged).
 (c) (the edge's blank-hop-key refusal lives in test_custui.py; the limiter primitive in test_login_ratelimit.py.)
 """
 from __future__ import annotations
