@@ -705,6 +705,190 @@ def test_a_coalesced_append_with_a_payload_that_is_not_an_object_fails_only_its_
     assert ["x"] not in joined and SpineStore(tmp_path / "spine.jsonl").verify()[0]
 
 
+# Each append argument the record rule types, with a value the readers would skip the record for (or that cannot be
+# written at all). A bool is not an int: True gets past the schema check (True == 1) but not past the record rule.
+_UNREADABLE = [("ts", 1700000000), ("ts", 1.5), ("ts", True), ("ts", ["2026-01-01"]), ("ts", {"t": 1}),
+               ("ts", "\ud800"), ("parent_id", "3"), ("parent_id", True), ("parent_id", 3.0),
+               ("parent_id", float("nan")), ("parent_id", object()), ("supersedes_id", "1"),
+               ("supersedes_id", False), ("supersedes_id", 2.5), ("schema_version", True), ("schema_version", 1.0),
+               ("source", None), ("source", 5), ("source", "\udc80"), ("actor", None), ("actor", ["u"])]
+_UNREADABLE_IDS = [f"{k}-{type(v).__name__}-{i}" for i, (k, v) in enumerate(_UNREADABLE)]
+_GOOD = {"kind": "event", "source": "t", "actor": "u", "payload": {"n": 0}}
+
+
+@pytest.mark.parametrize("field,value", _UNREADABLE, ids=_UNREADABLE_IDS)
+def test_append_refuses_a_record_its_readers_would_skip_before_any_lock(tmp_path, monkeypatch, field, value):
+    s = _legacy(tmp_path, 3)
+    before = s._active.read_bytes()
+    _lock_forbidden(monkeypatch)
+    for dedup in (False, True):
+        with pytest.raises(SpineError, match="refusing to append"):
+            s.append(**dict(_GOOD, **{field: value}), dedup=dedup)
+    monkeypatch.undo()
+    assert s._active.read_bytes() == before
+    assert s.append(**_GOOD) == 3                                                         # not a lost seq
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    assert [r.seq for r in fresh.iter_records()] == [0, 1, 2, 3] and fresh.verify()[0]
+
+
+@pytest.mark.parametrize("field,value", _UNREADABLE, ids=_UNREADABLE_IDS)
+def test_append_many_refuses_a_batch_with_a_record_its_readers_would_skip_before_any_lock(tmp_path, monkeypatch,
+                                                                                          field, value):
+    s = _legacy(tmp_path, 3)
+    before = s._active.read_bytes()
+    _lock_forbidden(monkeypatch)
+    with pytest.raises(SpineError, match=r"refusing to append: append_many spec\[1\] "):
+        s.append_many([_GOOD, dict(_GOOD, **{field: value}), _GOOD])
+    monkeypatch.undo()
+    assert s._active.read_bytes() == before
+    assert s.append_many([_GOOD, _GOOD]) == [3, 4]                                        # no seq lost
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    assert [r.seq for r in fresh.iter_records()] == [0, 1, 2, 3, 4] and fresh.verify()[0]
+
+
+def test_a_coalesced_append_its_readers_would_skip_fails_only_its_owner(tmp_path, monkeypatch):
+    """With group commit on, the refusal comes before the append joins a batch: the appends batched with it are
+    written and read back, and the chain verifies."""
+    s = _legacy(tmp_path, 3)
+    s._group_commit_coalesce = True
+    joined = []
+    real = SpineStore._append_coalesced
+
+    def coalesced(self, spec):
+        joined.append(spec["ts"])
+        return real(self, spec)
+
+    monkeypatch.setattr(SpineStore, "_append_coalesced", coalesced)
+    with pytest.raises(SpineError, match="ts is not a string"):
+        s.append(**_GOOD, ts=1700000000)
+    assert joined == []
+    out, errs = [], []
+
+    def ok(i):
+        try:
+            out.append(s.append(kind="event", source="t", actor="u", payload={"n": i}))
+        except Exception as e:  # noqa: BLE001 — recorded
+            errs.append(e)
+
+    def bad(field, value):
+        try:
+            s.append(**dict(_GOOD, **{field: value}))
+        except SpineError as e:
+            errs.append(e)
+
+    ts = ([threading.Thread(target=ok, args=(i,)) for i in range(6)]
+          + [threading.Thread(target=bad, args=fv) for fv in (("ts", 1700000000), ("parent_id", "3"),
+                                                              ("schema_version", True))])
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(30)
+    assert sorted(out) == list(range(3, 9)) and len(errs) == 3 and all(isinstance(e, SpineError) for e in errs)
+    assert 1700000000 not in joined
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    assert [r.seq for r in fresh.iter_records()] == list(range(9)) and fresh.verify()[0]
+
+
+def _read_back_by_every_reader(path: Path, n: int) -> None:
+    """Every reader returns all `n` records (seqs 0..n-1) of the spine at `path`, and the chain verifies."""
+    from sigil.spine.store import _last_valid_boundary
+    fresh = SpineStore(path)
+    assert [r.seq for r in fresh.iter_records()] == list(range(n))
+    assert all(fresh.get(q) is not None and fresh.get(q).seq == q for q in range(n))
+    assert fresh.count() == n
+    ok, why = fresh.verify()
+    assert ok, why
+    assert [e["seq"] for e in SpineTailer(SpineStore(path)).poll()] == list(range(n))
+    first = fresh.get(0)
+    assert [r.seq for r in SpineStore(path).tail_after(0, first.entry_hash)] == list(range(1, n))
+    end, tip = _last_valid_boundary(fresh._active)
+    assert tip is not None and tip.seq == n - 1 and end == fresh._active.stat().st_size
+
+
+# The values the property test draws each typed argument from: well-formed, falsy, wrong-typed, and unwritable.
+_DRAW = {
+    "ts": [None, "", "2026-01-01T00:00:00Z", "x", 0, False, 1700000000, 1.5, True, [], ["a"], {}, "\ud800"],
+    "parent_id": [None, 0, 3, -1, 10 ** 20, True, False, "3", 3.0, float("nan"), [], {}],
+    "supersedes_id": [None, 0, 7, True, "7", 7.5],
+    "schema_version": [1, True, 1.0, "1", 2, None, 0],
+    "source": ["t", "", "ü", None, 5, ["u"], "\udc80", True],
+    "actor": ["u", "", None, 0, {"a": 1}, "\ud834"],
+}
+
+
+def _draws(seed: int, n: int) -> "list[dict]":
+    """Every single-argument deviation from a good append, then `n` seeded random combinations."""
+    import random
+    rng = random.Random(seed)
+    base = {"ts": None, "parent_id": None, "supersedes_id": None, "schema_version": 1, "source": "t", "actor": "u"}
+    out = [dict(base, **{k: v}) for k, vs in _DRAW.items() for v in vs]
+    out += [{k: rng.choice(vs) for k, vs in _DRAW.items()} for _ in range(n)]
+    return out
+
+
+def test_whatever_append_accepts_every_reader_reads_back(tmp_path):
+    """Property: for any value of the typed arguments, `append` either refuses (SpineError, no byte written) or writes
+    a record that every reader reads back — never a record the next append truncates as a torn tail or a reader
+    skips."""
+    from sigil.spine.store import _last_valid_boundary
+    path = tmp_path / "spine.jsonl"
+    s = SpineStore(path)
+    n = accepted = refused = 0
+    for i, args in enumerate(_draws(1, 150)):
+        before = s._active.read_bytes() if s._active.exists() else b""
+        try:
+            seq = s.append(kind="event", payload={"i": i}, **args)
+        except SpineError:
+            refused += 1
+            assert (s._active.read_bytes() if s._active.exists() else b"") == before, args
+            continue
+        assert seq == n, args
+        n += 1
+        accepted += 1
+        assert _last_valid_boundary(s._active)[1].seq == seq, args           # the next append chains from it
+    assert accepted > 20 and refused > 20
+    _read_back_by_every_reader(path, n)
+
+
+def test_whatever_append_many_accepts_every_reader_reads_back(tmp_path):
+    """The same property for a batch: a batch is refused whole (no byte written) or every record in it reads back."""
+    path = tmp_path / "spine.jsonl"
+    s = SpineStore(path)
+    n = accepted = refused = 0
+    for i, args in enumerate(_draws(2, 80)):
+        before = s._active.read_bytes() if s._active.exists() else b""
+        try:
+            seqs = s.append_many([_GOOD, dict(_GOOD, payload={"i": i}, **args), _GOOD])
+        except SpineError:
+            refused += 1
+            assert (s._active.read_bytes() if s._active.exists() else b"") == before, args
+            continue
+        assert seqs == [n, n + 1, n + 2], args
+        n += 3
+        accepted += 1
+    assert accepted > 10 and refused > 10
+    _read_back_by_every_reader(path, n)
+
+
+def test_a_transcript_with_a_timestamp_or_role_that_is_not_a_string_is_ingested(tmp_path):
+    """The transcript ingester passes the store only a string ts (otherwise the ingest time) and a string actor
+    (otherwise the record's own type), so a malformed transcript line is ingested and read back, never refused."""
+    from sigil.ingest.transcript import ingest_transcript
+    tr = tmp_path / "t.jsonl"
+    rows = [{"type": "user", "uuid": "a", "timestamp": 1700000000, "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "uuid": "b", "parentUuid": "a", "timestamp": "2026-01-01T00:00:00Z",
+             "message": {"role": 7, "content": [{"type": "text", "text": "hello"}]}},
+            {"type": "user", "uuid": "c", "parentUuid": "b", "timestamp": ["x"],
+             "message": {"role": ["user"], "content": "again"}}]
+    tr.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    s = SpineStore(tmp_path / "spine.jsonl")
+    assert ingest_transcript(s, tr, "p") == (3, 3)
+    recs = list(SpineStore(tmp_path / "spine.jsonl").iter_records())
+    assert [(r.seq, r.actor, r.parent_id) for r in recs] == [(0, "user", None), (1, "assistant", 0), (2, "user", 1)]
+    assert recs[1].ts == "2026-01-01T00:00:00Z" and all(isinstance(r.ts, str) and r.ts for r in recs)
+    _read_back_by_every_reader(tmp_path / "spine.jsonl", 3)
+
+
 def test_verify_record_reports_a_kind_that_is_not_a_string():
     from types import SimpleNamespace
     rec = SimpleNamespace(seq=1, kind=["message"], scope="sigil", source="t", actor="u", payload={},

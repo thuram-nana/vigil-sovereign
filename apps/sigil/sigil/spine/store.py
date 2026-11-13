@@ -95,29 +95,70 @@ _REQUIRED_KEYS = ("seq", "scope", "kind", "source", "actor", "cert_digest", "pre
 _STR_KEYS = ("scope", "kind", "source", "actor", "cert_digest", "prev_hash", "entry_hash")
 
 
-def _record_dict(raw: "bytes | str") -> "dict | None":
-    """The ONE rule for what a spine line is — every reader, the tip finders and the append check apply it: a JSON
-    object carrying every chain field, with an integer seq, string fields, a string ts and integer
-    schema_version / parent_id / supersedes_id (the shape `append` writes). Anything else is skipped as malformed,
-    never yielded as a record (a mid-file one then surfaces as a gap in verify()).
+_INT_OR_NONE_KEYS = ("schema_version", "parent_id", "supersedes_id")
+
+
+def _record_problem(d: object) -> "str | None":
+    """What makes a decoded spine line NOT a record, or None when it is one — the ONE rule, applied by every reader,
+    the tip finders and the append check (through `_record_dict`) and by the write path before it takes a lock
+    (`_refuse_unreadable_record`), so the store never writes a line its own readers skip: a JSON object carrying
+    every chain field, with an integer seq, string fields, a string ts and an integer (or absent / null)
+    schema_version / parent_id / supersedes_id. An integer is exactly an int: a bool is not one.
 
     The payload's shape is NOT part of this rule. A complete, chained line whose payload is not a JSON object is a
     record: every reader yields it, the chain continues from it, and each consumer that folds it fails closed on it
     (a capability gate answers disabled, the kill switch raises, a cached view poisons)."""
+    if not isinstance(d, dict):
+        return "not a JSON object"
+    missing = [k for k in _REQUIRED_KEYS if k not in d]
+    if missing:
+        return f"missing {', '.join(missing)}"
+    if type(d["seq"]) is not int:
+        return f"seq is not an integer ({type(d['seq']).__name__})"
+    for k in _STR_KEYS:
+        if not isinstance(d[k], str):
+            return f"{k} is not a string ({type(d[k]).__name__})"
+    if not isinstance(d.get("ts", ""), str):
+        return f"ts is not a string ({type(d['ts']).__name__})"
+    for k in _INT_OR_NONE_KEYS:
+        if d.get(k) is not None and type(d[k]) is not int:
+            return f"{k} is not an integer ({type(d[k]).__name__})"
+    return None
+
+
+def _record_dict(raw: "bytes | str") -> "dict | None":
+    """`raw` decoded, when it is a record by `_record_problem`'s rule; None otherwise. Anything else is skipped as
+    malformed, never yielded as a record (a mid-file one then surfaces as a gap in verify())."""
     try:
         d = json.loads(raw)
     except ValueError:                                   # incl. UnicodeDecodeError
         return None
-    if not isinstance(d, dict) or not all(k in d for k in _REQUIRED_KEYS):
-        return None
-    if type(d["seq"]) is not int or not all(isinstance(d[k], str) for k in _STR_KEYS):
-        return None
-    if not isinstance(d.get("ts", ""), str):
-        return None
-    if any(d.get(k) is not None and type(d.get(k)) is not int for k in ("schema_version", "parent_id",
-                                                                        "supersedes_id")):
-        return None
-    return d
+    return d if _record_problem(d) is None else None
+
+
+def _stored_ts(ts: object) -> object:
+    """The `ts` a record line carries for an append's `ts` argument: the caller's, or now when none is given."""
+    return ts or now_iso()
+
+
+def _refuse_unreadable_record(*, kind: object, source: object, actor: object, parent_id: object,
+                              supersedes_id: object, ts: object, schema_version: object, where: str = "") -> None:
+    """Refuse, BEFORE any lock/byte (and before an append joins a group-commit batch), an append whose record line the
+    readers would skip. The line is built exactly as `_write_record_locked` stores these fields — with placeholder
+    chain fields, which the writer always computes in the right shape, and an empty payload, which
+    `_validate_payload` owns — serialized as the writer serializes it, decoded as a reader decodes it, and judged by
+    the readers' own `_record_problem`. A value that cannot be serialized at all is refused the same way."""
+    probe = {"seq": 0, "scope": SCOPE, "kind": kind, "source": source, "actor": actor, "payload": {},
+             "parent_id": parent_id, "supersedes_id": supersedes_id, "ts": _stored_ts(ts),
+             "cert_digest": "", "prev_hash": "", "entry_hash": "", "schema_version": schema_version}
+    try:
+        decoded = json.loads((json.dumps(probe, ensure_ascii=False) + "\n").encode("utf-8"))
+    except (TypeError, ValueError, RecursionError) as exc:          # ValueError incl. UnicodeEncodeError
+        raise SpineError(f"refusing to append: {where}a record field cannot be written "
+                         f"({type(exc).__name__})") from None
+    why = _record_problem(decoded)
+    if why is not None:
+        raise SpineError(f"refusing to append: {where}{why}, so no reader would read the record back")
 
 
 def _parse_record(raw: "bytes | str") -> "SpineRecord | None":
@@ -1205,7 +1246,7 @@ class SpineStore:
         # schema_version sits OUTSIDE content (like seq/ts/chain fields), so it is not part of cert_digest —
         # that keeps the change additive and legacy records' chain byte-identical (W5-1).
         record = {
-            "seq": entry.seq, **content, "ts": ts or now_iso(),
+            "seq": entry.seq, **content, "ts": _stored_ts(ts),
             "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
             "schema_version": schema_version,
         }
@@ -1372,6 +1413,10 @@ class SpineStore:
                     f"kind/source/actor/payload; refusing to write a partial batch")
             self._validate_kind_schema(s.get("kind"), s.get("schema_version", SCHEMA_VERSION))
             self._validate_payload(s.get("payload"), f"append_many spec[{i}] ")
+            _refuse_unreadable_record(kind=s["kind"], source=s["source"], actor=s["actor"],
+                                      parent_id=s.get("parent_id"), supersedes_id=s.get("supersedes_id"),
+                                      ts=s.get("ts"), schema_version=s.get("schema_version", SCHEMA_VERSION),
+                                      where=f"append_many spec[{i}] ")
         with spine_lock(self.path):
             with self._crossproc_lock():
                 self._refresh_active_under_lock()
@@ -1436,9 +1481,13 @@ class SpineStore:
         # W5-1 write-path enforcement: a record with an out-of-vocabulary kind or an unknown schema version is
         # REFUSED before any lock is taken or byte written (fail CLOSED), so nothing junk reaches the immutable
         # chain; layer 2 = verify() re-checks kind on read. Shared with append_many via _validate_kind_schema,
-        # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path.
+        # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path. A
+        # record whose line the readers would skip (`_refuse_unreadable_record`, judged by the readers' own rule) is
+        # refused the same way, on both paths, before dedup and before it can join a group-commit batch.
         self._validate_kind_schema(kind, schema_version)
         self._validate_payload(payload)
+        _refuse_unreadable_record(kind=kind, source=source, actor=actor, parent_id=parent_id,
+                                  supersedes_id=supersedes_id, ts=ts, schema_version=schema_version)
         # SCALE-C1b: COMMIT-COALESCING FRONT-END (default-OFF). Before taking spine_lock, route INDEPENDENT
         # concurrent appends into one group that a single leader thread writes via the UNCHANGED append_many()
         # (one fsync per group — the 1M-scale concurrent-append throughput lift). Take the DIRECT path (today's
