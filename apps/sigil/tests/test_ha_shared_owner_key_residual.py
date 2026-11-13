@@ -134,7 +134,11 @@ def test_checkpoint_trust_root_is_1of1_single_owner(monkeypatch, tmp_path):
     single-owner predicate is not a no-op — a synthetic 2-of-2 per-host head root is REJECTED by it, so a
     silently-introduced per-host multi-key head (which would falsify the concession) would be caught."""
     owner = generate_keypair()
-    monkeypatch.setattr(C, "_owner_keys", lambda: (owner.private_key_b64, owner.public_key_b64))
+
+    def _never(*_a):
+        raise AssertionError("a verify path must never read (or mint) the owner PRIVATE key")
+    monkeypatch.setattr(C, "_owner_keys", _never)
+    (tmp_path / "owner.pub").write_text(owner.public_key_b64, encoding="utf-8")
     monkeypatch.setattr(C, "_PUB", tmp_path / "owner.pub")   # no genesis pin beside it -> current key is genesis
 
     class _FakeStore:

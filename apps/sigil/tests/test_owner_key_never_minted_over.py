@@ -1,14 +1,15 @@
 """The owner key is never re-minted over an existing one.
 
 `ensure_owner_keypair()` (governance signing) and `spine.checkpoint._owner_keys()` (the head signer, and
-`trust_root()` through it) used to generate a NEW owner keypair whenever the private key read back as
+at the time `trust_root()` through it) used to generate a NEW owner keypair whenever the private key read back as
 nothing. That covered a fresh install, but also a missing `owner.priv` next to an existing `owner.pub`, an
 unreadable one, and a sealed one the vault could not unseal. In those states the old identity was silently
 replaced: every pinned verifier, every grant the old key signed and every backup's trust root would stop
 matching.
 
 Both paths now share one loader. It mints ONLY when neither key file exists. Every other incomplete or
-unusable state raises `OwnerKeyUnavailable` and writes nothing.
+unusable state raises `OwnerKeyUnavailable` and writes nothing. Verification (`trust_root()`) no longer
+goes through the loader at all: it reads only the public key and never mints.
 """
 from __future__ import annotations
 
@@ -189,11 +190,14 @@ def test_checkpoint_signer_refuses_on_a_pub_only_home(pub_only_home):
     assert not priv.exists() and pub.read_text().strip() == kp.public_key_b64
 
 
-def test_trust_root_never_mints_a_new_owner(pub_only_home):
-    """trust_root() is a VERIFY path; through _owner_keys it used to mint a whole new owner on this home."""
+def test_trust_root_never_mints_a_new_owner(pub_only_home, tmp_path):
+    """trust_root() is a VERIFY path; through _owner_keys it used to mint a whole new owner on this home. It
+    now reads only the PUBLIC key (an off-box private key is a supported layout): it anchors on the existing
+    owner.pub exactly and writes nothing, while the signer above still refuses on the same home."""
+    from sigil.spine.store import SpineStore
     priv, pub, kp = pub_only_home
-    with pytest.raises(I.OwnerKeyUnavailable):
-        C.trust_root()
+    tr = C.trust_root(SpineStore(tmp_path / "spine" / "spine.jsonl"))
+    assert [a.public_key_b64 for a in tr.authorizers] == [kp.public_key_b64]
     assert not priv.exists() and pub.read_text().strip() == kp.public_key_b64
 
 
