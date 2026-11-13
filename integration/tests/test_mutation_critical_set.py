@@ -28,7 +28,9 @@ the manifest's ``named_mutants: true`` flags EQUAL the corpus files, every mutan
 and compiles and names a real test in its own plane (so a refactor that orphans a mutant turns the PR red,
 not the next weekly run), the sovereign plane's PYTHONPATH never holds the engine, and the runner itself is
 proven to tell KILLED (an assertion) from CRASHED (any other exception) from SURVIVED from ERROR (a mutant that
-does not import, a collection error), and to restore the source, also after an interrupted run.
+does not import, a collection error), and to restore the source, also after an interrupted run: through the CLI
+the restore runs BEFORE the corpus is validated, only from a sidecar that verifies (written atomically, with the
+sha256 of the original), and never while another run holds the tree.
 
 STDLIB ONLY (``json`` + ``tomllib``, Python >=3.11) and framework-free, so it runs in the sovereign leg of
 the required ``integration two-env boundary (P5)`` job over the whole ``integration/tests`` directory.
@@ -38,6 +40,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -375,13 +379,189 @@ def test_named_mutant_runner_restores_a_source_an_interrupted_run_left_mutated(t
     """A run killed mid-mutant (SIGKILL: no finally runs) leaves the mutant in the source and the original in
     the sidecar; the next run puts the original back before it reads anything, and scores against it."""
     src, corpus = _synthetic_plane(tmp_path)
-    before = src.read_bytes()
-    named_mutants.sidecar(src).write_bytes(before)
-    src.write_text("def admit(units):\n    return 0 <= units <= 10\n", encoding="utf-8")   # the left-over mutant
+    before, mtime = _left_by_a_sigkill(src, _mut("strong", ["test_floor"]))
     run = named_mutants.run_file({"path": "pkg/gate.py", "plane": "sovereign", "mutants": [_mut("strong", ["test_floor"])]},
                                  corpus, tmp_path, timeout=120)
-    assert src.read_bytes() == before and not named_mutants.sidecar(src).exists()
+    assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime and not named_mutants.sidecar(src).exists()
     assert run.baseline_ok and [r.verdict for r in run.results] == [named_mutants.KILLED], run.results
+
+
+def _left_by_a_sigkill(src: Path, mutant: dict) -> tuple[bytes, int]:
+    """The tree exactly as run_file leaves it when SIGKILLed with a mutant applied (no ``finally`` ran): the
+    sidecar written, then the mutant in the source. Returns the original bytes and mtime."""
+    original, st = src.read_bytes(), src.stat()
+    named_mutants.write_sidecar(src, original, st)
+    src.write_bytes(original.decode("utf-8").replace(mutant["old"], mutant["new"], 1).encode("utf-8"))
+    assert src.read_bytes() != original
+    return original, st.st_mtime_ns
+
+
+def _synthetic_tree(tmp_path) -> tuple[Path, dict]:
+    """A whole synthetic repo the CLI can run on: _synthetic_plane's source and tests, both planes, a critical
+    set naming the gate, the corpus, and a byte-for-byte copy of the runner under tools/mutation/ (so the copy's
+    REPO is this tree, and it is the shipped runner code that runs)."""
+    src, _ = _synthetic_plane(tmp_path)
+    (tmp_path / "eng").mkdir()
+    corpus = {
+        "planes": {
+            "sovereign": {"cwd": ".", "pythonpath": ["pkg"], "forbidden_pythonpath": ["eng"],
+                          "source_roots": ["pkg/"], "test_roots": ["tests/"]},
+            "offense": {"cwd": ".", "pythonpath": ["eng"], "forbidden_pythonpath": ["pkg"],
+                        "source_roots": ["eng/"], "test_roots": ["eng/"]},
+        },
+        "files": [{"path": "pkg/gate.py", "plane": "sovereign", "mutants": [_mut("strong", ["test_floor"])]}],
+    }
+    tools = tmp_path / "tools" / "mutation"
+    tools.mkdir(parents=True)
+    (tools / "named-mutants.json").write_text(json.dumps(corpus), encoding="utf-8")
+    (tools / "critical-set.json").write_text(json.dumps({"critical_set": [
+        {"path": "pkg/gate.py", "lang": "python", "mutation": False, "named_mutants": True}]}), encoding="utf-8")
+    shutil.copyfile(named_mutants.__file__, tools / "named_mutants.py")
+    assert not named_mutants.validate_corpus(corpus, tmp_path), "precondition: the synthetic corpus validates"
+    return src, corpus
+
+
+def _cli(tree: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTEST_ADDOPTS")}
+    return subprocess.run([sys.executable, str(tree / "tools" / "mutation" / "named_mutants.py"), *args],
+                          cwd=str(tree), env=env, capture_output=True, text=True, timeout=300)
+
+
+def _sidecar_files(src: Path) -> list[Path]:
+    """The sidecar and any temp file of one, next to ``src``."""
+    return sorted(src.parent.glob(src.name + named_mutants.SIDECAR_SUFFIX + "*"))
+
+
+def test_named_mutant_cli_restores_a_sigkilled_run_before_it_validates(tmp_path):
+    """A run SIGKILLed with a mutant applied leaves the mutant in the source and the original in the sidecar. That
+    mutant has removed its own 'old' text, so the corpus does not validate as left: the CLI restores every
+    corpus file BEFORE it validates — the source byte- and mtime-exact, the sidecar gone — then scores against
+    the original (exit 0: the one mutant is KILLED over a green baseline)."""
+    src, corpus = _synthetic_tree(tmp_path)
+    before, mtime = _left_by_a_sigkill(src, corpus["files"][0]["mutants"][0])
+    problems = named_mutants.validate_corpus(corpus, tmp_path)
+    assert any("found 0 (stale corpus?)" in p for p in problems), f"precondition: the corpus fails as left: {problems}"
+    cp = _cli(tmp_path, "--plane", "sovereign")
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert "restored pkg/gate.py from the sidecar an interrupted run left" in cp.stdout, cp.stdout
+    assert "1/1 killed" in cp.stdout, cp.stdout
+    assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime, "the source was not restored exactly"
+    assert not _sidecar_files(src), "the sidecar outlived the restore"
+
+
+def test_named_mutant_cli_restores_every_corpus_file_whatever_plane_it_runs(tmp_path):
+    """The startup restore covers every file the corpus names, not only the selected plane's (validation covers
+    them all), and runs for --list too."""
+    src, corpus = _synthetic_tree(tmp_path)
+    before, mtime = _left_by_a_sigkill(src, corpus["files"][0]["mutants"][0])
+    cp = _cli(tmp_path, "--plane", "offense", "--list")
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime and not _sidecar_files(src)
+
+
+@pytest.mark.parametrize("damage", [
+    lambda b: b[:-7],                              # cut short by a crash mid-write
+    lambda b: b[:20],                              # cut short inside the header
+    lambda b: b[:-1] + bytes([b[-1] ^ 1]),         # altered, same length
+    lambda b: b.partition(b"\n")[2],               # no header: the bare original bytes
+    lambda b: b"",                                 # empty
+    lambda b: b.replace(named_mutants.SIDECAR_FORMAT.encode(), b"named-mutants-sidecar/0", 1),  # not this format
+], ids=["cut-short", "cut-in-header", "altered", "no-header", "empty", "other-format"])
+def test_named_mutant_sidecar_that_does_not_verify_is_refused_and_the_source_is_untouched(tmp_path, damage):
+    """A sidecar whose bytes do not match the sha256 its header records is never copied over the source: the
+    restore refuses loudly (SidecarError; through the CLI exit 3, before anything validates or runs) and the
+    healthy source and the sidecar are left exactly as found."""
+    src, _corpus = _synthetic_tree(tmp_path)
+    side = named_mutants.write_sidecar(src, src.read_bytes(), src.stat())
+    side.write_bytes(damage(side.read_bytes()))
+    left_src, left_side, mtime = src.read_bytes(), side.read_bytes(), src.stat().st_mtime_ns
+    with pytest.raises(named_mutants.SidecarError):
+        named_mutants.restore_interrupted(src)
+    assert src.read_bytes() == left_src and side.read_bytes() == left_side
+    cp = _cli(tmp_path, "--plane", "sovereign")
+    assert cp.returncode == 3, cp.stdout + cp.stderr
+    assert "does not verify" in cp.stderr and "pkg/gate.py" in cp.stderr, cp.stderr
+    assert "1/1 killed" not in cp.stdout, "a run went ahead over a sidecar that does not verify"
+    assert src.read_bytes() == left_src and src.stat().st_mtime_ns == mtime and side.read_bytes() == left_side
+
+
+def test_named_mutant_sidecar_is_written_atomically(tmp_path, monkeypatch):
+    """The sidecar is written to a temp file in its own directory, flushed and fsynced there, and only then
+    renamed into place, so a crash leaves no sidecar or a whole one, never one cut short. What lands verifies."""
+    src, _ = _synthetic_plane(tmp_path)
+    before, st = src.read_bytes(), src.stat()
+    side = named_mutants.sidecar(src)
+    events: list[tuple] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        fs = os.fstat(fd)
+        events.append(("fsync", fs.st_ino, fs.st_size, side.exists()))
+        real_fsync(fd)
+
+    def replace(a, b):
+        events.append(("replace", Path(a), Path(b), os.stat(a).st_ino))
+        real_replace(a, b)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    assert named_mutants.write_sidecar(src, before, st) == side
+    renames = [e for e in events if e[0] == "replace"]
+    assert len(renames) == 1, events
+    _, tmp, dst, ino = renames[0]
+    assert dst == side and tmp.parent == side.parent and tmp != side, renames
+    synced = events[: events.index(renames[0])]
+    assert ("fsync", ino, side.stat().st_size, False) in synced, f"the whole temp was not fsynced before the rename: {events}"
+    assert named_mutants.read_sidecar(side) == (before, st.st_atime_ns, st.st_mtime_ns)
+
+    side.unlink()
+
+    def crash(a, b):
+        raise KeyboardInterrupt("signal 15")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(KeyboardInterrupt):
+        named_mutants.write_sidecar(src, before, st)
+    assert not _sidecar_files(src), "an interrupted write left a sidecar (or its temp) behind"
+    assert src.read_bytes() == before
+
+
+def test_named_mutant_runner_keeps_the_sidecar_before_the_mutant_touches_the_source(tmp_path, monkeypatch):
+    """run_file writes the sidecar while the source still holds the original, so a crash between the two leaves
+    a healthy source (and at most a sidecar that restores it to itself), never a mutant with no sidecar."""
+    src, corpus = _synthetic_plane(tmp_path)
+    before = src.read_bytes()
+    seen: list[bytes] = []
+    real = named_mutants.write_sidecar
+
+    def write_sidecar(s, original, st):
+        seen.append(s.read_bytes())
+        return real(s, original, st)
+
+    monkeypatch.setattr(named_mutants, "write_sidecar", write_sidecar)
+    run = named_mutants.run_file({"path": "pkg/gate.py", "plane": "sovereign", "mutants": [_mut("strong", ["test_floor"])]},
+                                 corpus, tmp_path, timeout=120)
+    assert [r.verdict for r in run.results] == [named_mutants.KILLED], run.results
+    assert seen == [before], "the sidecar must be written while the source still holds the original"
+    assert src.read_bytes() == before and not _sidecar_files(src)
+
+
+def test_named_mutant_cli_refuses_a_tree_another_run_holds(tmp_path):
+    """Two runs in one tree must not overlap: the second's startup restore would put back a mutant the first has
+    applied, mid-test. While another run holds the tree the CLI touches nothing (exit 3), not even a sidecar
+    that verifies (it may belong to that live run); once the holder is gone the restore goes ahead."""
+    src, corpus = _synthetic_tree(tmp_path)
+    before, mtime = _left_by_a_sigkill(src, corpus["files"][0]["mutants"][0])    # here: a LIVE run's mutant
+    side = named_mutants.sidecar(src)
+    left_src, left_side = src.read_bytes(), side.read_bytes()
+    with named_mutants._tree_lock(tmp_path) as held:
+        assert held
+        cp = _cli(tmp_path, "--plane", "sovereign", "--list")
+    assert cp.returncode == 3 and "another named-mutants run holds" in cp.stderr, cp.stdout + cp.stderr
+    assert src.read_bytes() == left_src and side.read_bytes() == left_side
+    cp = _cli(tmp_path, "--plane", "sovereign", "--list")
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime and not _sidecar_files(src)
 
 
 @pytest.mark.parametrize("rc,rows,verdict", [
