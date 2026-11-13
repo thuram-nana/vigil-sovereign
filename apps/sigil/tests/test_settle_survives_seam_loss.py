@@ -28,7 +28,7 @@ from sigil import ops_sweeps
 from sigil.governor.asset_ownership import METHOD_DNS_TXT, AssetOwnershipRegistry
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.governor.launch_settlement import (
-    LAUNCH_SETTLED_SIGNAL, record_launch_settled, scan_settlement, settle_lock_path,
+    LAUNCH_SETTLED_SIGNAL, SettlementDecision, record_launch_settled, scan_settlement, settle_lock_path,
 )
 from sigil.governor.orgs import OrgRegistry
 from sigil.governor.postpaid import POSTPAID_CREDIT_SIGNAL, PostpaidArrearsLedger, PostpaidRegistry
@@ -221,8 +221,8 @@ def test_a_settlement_record_not_signed_by_the_owner_is_ignored(record_on):
     s = _store()
     _seat(s)
     r = _reserve(s)
-    record_launch_settled(s, generate_keypair(), org_id=ORG, slug=r["slug"], nonce=r["nonce"], consumed=30,
-                          issued_at=NOW)
+    record_launch_settled(s, generate_keypair(), org_id=ORG, slug=r["slug"], nonce=r["nonce"],
+                          decision=SettlementDecision.prepaid(30, 30, 0, 0, 0.0, "settle"), issued_at=NOW)
     st = _settle(s, r, 0)                                            # a legitimate pre-start cancel
     assert st["action"] == "launch_settled" and st["refunded"] == 30 and _avail(s) == 100
 
@@ -230,9 +230,11 @@ def test_a_settlement_record_not_signed_by_the_owner_is_ignored(record_on):
 def test_the_spine_lookup_is_bound_to_org_slug_and_nonce():
     s = _store()
     kp = ensure_owner_keypair()
-    record_launch_settled(s, kp, org_id="org_b", slug="cust_x", nonce="n1", consumed=5, issued_at=NOW)
-    seq = record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", consumed=5, issued_at=NOW)
-    record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", consumed=0, issued_at=NOW)
+    five, zero = (SettlementDecision.prepaid(30, 5, 0, 25, 0.0, "settle"),
+                  SettlementDecision.prepaid(30, 0, 0, 30, 0.0, "cancel"))
+    record_launch_settled(s, kp, org_id="org_b", slug="cust_x", nonce="n1", decision=five, issued_at=NOW)
+    seq = record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", decision=five, issued_at=NOW)
+    record_launch_settled(s, kp, org_id=ORG, slug="cust_x", nonce="n1", decision=zero, issued_at=NOW)
     pub = kp.public_key_b64
     ev = scan_settlement(s, pub, org_id=ORG, slug="cust_x", nonce="n1")
     assert (ev.record_seq, ev.consumed, ev.through) == (seq, 5, s.next_seq - 1)     # the FIRST decision wins
@@ -384,7 +386,8 @@ def test_a_competing_decision_landing_after_the_unlocked_scan_is_honoured(record
         calls["n"] += 1
         if calls["n"] == 1:                                          # just after the unlocked scan
             real_kp = ensure_owner_keypair()
-            ls.record_launch_settled(s, real_kp, org_id=ORG, slug=r["slug"], nonce=r["nonce"], consumed=30,
+            ls.record_launch_settled(s, real_kp, org_id=ORG, slug=r["slug"], nonce=r["nonce"],
+                                     decision=SettlementDecision.prepaid(30, 30, 0, 0, 0.0, "completion:completed"),
                                      issued_at=NOW)
         return ev
 
