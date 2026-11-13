@@ -230,3 +230,30 @@ def test_collect_wires_the_section_in(monkeypatch, tmp_path):
     monkeypatch.delenv("VIGIL_MODEL_GATEWAY_ENABLED", raising=False)
     section, issues, _ = d._metering_report()
     assert section["metered_billing"] is True and issues
+
+
+def test_a_retired_pricing_setting_kept_in_sigil_env_is_reported(monkeypatch, tmp_path):
+    # billing reads sigil.env through sigil.config, so a retired setting kept there blocks metered billing: doctor
+    # must say so too (it reads the same layered environment)
+    for k in list(ON) + list(mm.OBSOLETE_PRICING_ENVS):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    (tmp_path / "sigil.env").write_text("VIGIL_MARGIN_MULTIPLIER_K=3\n", encoding="utf-8")
+    section, issues, _ = d._metering_report(probe=_alive)
+    assert section == {"configured": False, "ok": False}
+    assert len(issues) == 1 and issues[0].startswith("VIGIL_MARGIN_MULTIPLIER_K is set: remove it")
+
+
+def test_collect_reports_a_retired_setting_on_a_flat_deploy(monkeypatch, tmp_path):
+    # the whole doctor, not just the section: neither flag on, a retired setting present -> not ok, and the refusal
+    # is listed under "Action needed"
+    for k in list(ON) + list(mm.OBSOLETE_PRICING_ENVS):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.setenv("VIGIL_BILLING_MARKUP_K", "")
+    report = d.collect(tmp_path)
+    says = "VIGIL_BILLING_MARKUP_K is set: remove it; the only pricing input is VIGIL_BILLING_TARGET_MARGIN"
+    assert report["ok"] is False and any(m.startswith(says) for m in report["issues"])
+    assert report["metering"] == {"configured": False, "ok": False}
+    out = d.render(report)
+    assert "Action needed" in out and says in out.split("Action needed", 1)[1]
