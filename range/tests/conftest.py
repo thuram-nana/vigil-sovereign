@@ -2,23 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import socket
-import sys
-
-# Allow `import vigil_range` when running the suite from a checkout without an editable install.
-_RANGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _RANGE_ROOT not in sys.path:
-    sys.path.insert(0, _RANGE_ROOT)
-
-REPO_ROOT = os.path.dirname(_RANGE_ROOT)
-
-
-def free_port() -> int:
-    """An ephemeral loopback port, released immediately (races are acceptable in a single-host test)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+# The helpers the test modules import live in range_testsupport, not here: a test that does
+# `from conftest import …` gets whichever module is registered as `conftest` in sys.modules, and in a
+# pytest process that also collects another tree (CI's offense leg runs integration/, engine/ and docs/
+# tests in the same process) that is the OTHER tree's conftest. A uniquely named module cannot collide.
+from range_testsupport import REPO_ROOT, free_port  # noqa: F401  (re-exported for old imports)
 
 
 import time  # noqa: E402
