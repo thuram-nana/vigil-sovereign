@@ -152,7 +152,7 @@ class UIServer(ThreadingHTTPServer):
         self.spine_path = spine_path
         from .authn_audit import FailedAuthnCoalescer
         self.failed_tokens = FailedTokenCache()                 # anonymous-cost bounds (see their docstrings)
-        self.authn_failures = FailedAuthnCoalescer()
+        self.authn_failures = FailedAuthnCoalescer(store_factory=self.store)
         # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled for the plane.
         self.metrics = set_plane("sovereign")
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
@@ -186,6 +186,10 @@ class UIServer(ThreadingHTTPServer):
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
+
+    def server_close(self) -> None:
+        self.authn_failures.close()                # every pending failed-login count is written before we go
+        super().server_close()
 
 
 def _json_bytes(obj) -> bytes:
@@ -251,28 +255,18 @@ class Handler(BaseHTTPRequestHandler):
         return p
 
     def _client_source(self) -> str:
-        """The client a request came from: the peer address, or — when the peer is a loopback reverse proxy —
-        the address that proxy forwarded (the last `X-Forwarded-For` hop, else `X-Real-IP`). Used only to GROUP
-        failed-authentication audit records; it never authorizes anything."""
-        peer = str(self.client_address[0]) if self.client_address else ""
-        try:
-            behind_proxy = ipaddress.ip_address(peer).is_loopback
-        except ValueError:
-            behind_proxy = False
-        if behind_proxy:
-            fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[-1].strip()
-            for cand in (fwd, (self.headers.get("X-Real-IP") or "").strip()):
-                try:
-                    return str(ipaddress.ip_address(cand))
-                except ValueError:
-                    continue
-        return peer
+        """The peer address a request came from — used only to GROUP failed-authentication audit records; it never
+        authorizes anything. Forwarded headers are not trusted (a loopback proxy in front may pass the client's own
+        through), so behind a proxy every client groups as the proxy: bounded, and not choosable by the client."""
+        return str(self.client_address[0]) if self.client_address else ""
 
-    def _authn_failure(self, store, *, username: str = "", method: str = "", reason: str = "") -> None:
+    def _authn_failure(self, store, *, username: str = "", method: str = "", reason: str = "",
+                       proven: bool = False) -> None:
         """Audit one FAILED login: the first of its (client, method, reason) group in a window is recorded at
-        once, the rest are counted into one summary (`FailedAuthnCoalescer`)."""
+        once, the rest are counted into one summary (`FailedAuthnCoalescer`). `proven`: a first factor proved
+        `username` (a second-factor failure), so the account is part of the group and of its summary."""
         self.server.authn_failures.record(store, "authn.login.failure", source=self._client_source(),
-                                          username=username, method=method, reason=reason)
+                                          username=username, method=method, reason=reason, proven=proven)
 
     def _principal(self):
         """The authenticated principal for THIS request, or None. Resolution order (either carrier works, so
@@ -905,7 +899,7 @@ class Handler(BaseHTTPRequestHandler):
         # carrier and every downstream call site are UNCHANGED — the gate lives only at /api/login.
         terr = self._check_totp(p.username, body, require=False)
         if terr is not None:
-            self._authn_failure(store, username=p.username, method="bearer", reason="totp")
+            self._authn_failure(store, username=p.username, method="bearer", reason="totp", proven=True)
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         record_authn(store, "authn.login.success", username=p.username, method="bearer", outcome="success")
         self._json({"ok": True, **self._principal_json(p)})
@@ -921,12 +915,11 @@ class Handler(BaseHTTPRequestHandler):
         from .authn_audit import record_authn
         p = self._principal()
         sid = self._session_cookie()
-        if sid:
-            self._session_ledger().revoke(sid)     # true server-side invalidation of the cookie session
+        ended = bool(sid) and self._session_ledger().revoke(sid)   # true server-side invalidation of the session
         self._clear_session_cookie()
-        if p is not None or sid:
-            # A logout by nobody (no principal, no session) changes nothing and is not recorded: an anonymous
-            # client could otherwise append to the spine at will.
+        if p is not None or ended:
+            # A logout that ends no session and has no principal changes nothing and is not recorded: an anonymous
+            # client (with or without a made-up cookie) could otherwise append to the spine at will.
             record_authn(self.server.store(), "authn.logout",
                          username=(p.username if p else ""), method="logout", outcome="success")
         self._json({"ok": True})
@@ -972,7 +965,7 @@ class Handler(BaseHTTPRequestHandler):
         # handed out on the first factor alone.
         terr = self._check_totp(username, body)
         if terr is not None:
-            self._authn_failure(store, username=username, method="pop", reason="totp")
+            self._authn_failure(store, username=username, method="pop", reason="totp", proven=True)
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         # Proven. Mint a fresh owner-signed session bearer for this account (owner is the sole signer; the
         # user proved possession, the server re-binds). Returned through the same X-SIGIL-Token carrier.
@@ -1016,7 +1009,7 @@ class Handler(BaseHTTPRequestHandler):
                                "error": "invalid username or password"}, 401)
         terr = self._check_totp(username, body)
         if terr is not None:
-            self._authn_failure(store, username=username, method="password", reason="totp")
+            self._authn_failure(store, username=username, method="password", reason="totp", proven=True)
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
@@ -1888,3 +1881,5 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
         srv.serve_forever()
     except KeyboardInterrupt:
         srv.shutdown()
+    finally:
+        srv.server_close()                        # writes any pending failed-login counts (FailedAuthnCoalescer)

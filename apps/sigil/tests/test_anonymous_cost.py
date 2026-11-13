@@ -4,9 +4,11 @@
     BEFORE the account fold; the legacy owner token is compared first, whatever its shape.
   * A well-shaped token that just FAILED to resolve is remembered (bounded, short TTL) so repeating it costs no
     second fold; a success is never remembered, so a revocation takes effect on the very next request.
-  * A logout by nobody (no principal, no session) appends nothing.
-  * Failed logins are coalesced per (client, method, reason) and window: the first is recorded at once with its
-    client, the rest are counted into one summary record — an attack is never invisible on the spine.
+  * A logout that ends no session and has no principal (a made-up cookie included) appends nothing.
+  * Failed logins are coalesced per (client, method, reason[, a username a first factor proved]) and window: the
+    first is recorded at once with its client (the peer address — forwarded headers are not trusted), the rest
+    are counted into one summary record, written when the window ends (on the next request, by a background
+    flush, or at shutdown) and retried if the spine refuses it — an attack is never invisible on the spine.
 
 Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=packages/core/vigil_core:apps/sigil:integration \
      .venv-sovereign/bin/python -m pytest -q apps/sigil/tests/test_anonymous_cost.py
@@ -77,15 +79,22 @@ def _authn(server):
 
 @pytest.fixture
 def folds(monkeypatch):
-    """Count account folds (`AccountsRegistry.resolve`)."""
-    calls = {"n": 0}
+    """Count account folds (`AccountsRegistry.resolve`) and, separately, every spine read (`iter_records`)."""
+    from sigil.spine.store import SpineStore
+    calls = {"n": 0, "reads": 0}
     real = acc.AccountsRegistry.resolve
+    real_iter = SpineStore.iter_records
 
     def spy(self, *a, **k):
         calls["n"] += 1
         return real(self, *a, **k)
 
+    def spy_iter(self, *a, **k):
+        calls["reads"] += 1
+        return real_iter(self, *a, **k)
+
     monkeypatch.setattr(acc.AccountsRegistry, "resolve", spy)
+    monkeypatch.setattr(SpineStore, "iter_records", spy_iter)
     return calls
 
 
@@ -101,7 +110,7 @@ def test_a_token_that_cannot_be_a_bearer_is_refused_without_a_fold(folds, tok):
         assert bearer_shape_ok(tok) is False
         assert _req(port, f"/api/whoami?token={q}")[1].get("authenticated") is False
         assert _req(port, f"/api/accounts?token={q}")[0] == 401
-        assert folds["n"] == 0
+        assert folds["n"] == 0 and folds["reads"] == 0, "the spine was read for a token that cannot be a bearer"
     finally:
         s.shutdown()
 
@@ -112,7 +121,8 @@ def test_the_bearers_the_cockpit_mints_and_the_creation_minimum_have_a_valid_sha
     assert bearer_shape_ok("!#$%&()*+,-./:;<=>?@[]^_`{|}~0123456789")
 
 
-@pytest.mark.parametrize("bad", ["x" * 15, "x" * 513, "spaced token value!!", "nön-ascii-tokenvalue"])
+@pytest.mark.parametrize("bad", ["x" * 15, "x" * 513, "spaced token value!!", "nön-ascii-tokenvalue",
+                                 "ctrl\x01-token-value-xx", "del\x7f-token-value-xxx"])
 def test_account_creation_refuses_a_bearer_the_cockpit_would_never_resolve(bad):
     ensure_owner_keypair()
     from sigil.spine.store import SpineStore
@@ -205,17 +215,23 @@ def test_the_failed_token_memory_is_bounded_and_expires():
 # ======================================================================================================
 # 3. a logout by nobody appends nothing
 # ======================================================================================================
-def test_a_logout_by_nobody_appends_nothing_and_a_real_logout_is_still_audited():
+def test_a_logout_that_ends_no_session_appends_nothing_and_a_real_logout_is_still_audited():
+    from pathlib import Path
+
+    from sigil.ui.sessions import SessionLedger
     s, port, _clock = _serve()
     try:
         before = len(_authn(s))
-        for _ in range(5):
-            assert _req(port, "/api/logout", method="POST", body={})[0] == 200
-        assert len(_authn(s)) == before
+        for cookie in (None, "sigil_session=an-old-session-id", "sigil_session=" + secrets.token_urlsafe(32)):
+            h = {"Cookie": cookie} if cookie else None
+            assert _req(port, "/api/logout", method="POST", body={}, headers=h)[0] == 200
+        assert len(_authn(s)) == before, "a logout that ended nothing was audited"
         assert _req(port, "/api/logout", method="POST", body={}, token=TOKEN)[0] == 200
         assert [e["event"] for e in _authn(s)[before:]] == ["authn.logout"]
-        assert _req(port, "/api/logout", method="POST", body={},
-                    headers={"Cookie": "sigil_session=an-old-session-id"})[0] == 200
+        base = Path(s.spine_path)
+        sid = SessionLedger(base.parent / (base.name + ".sessions")).create("owner", "owner", is_owner=True)
+        assert sid
+        assert _req(port, "/api/logout", method="POST", body={}, headers={"Cookie": f"sigil_session={sid}"})[0] == 200
         assert [e["event"] for e in _authn(s)[before:]] == ["authn.logout", "authn.logout"]
     finally:
         s.shutdown()
@@ -224,65 +240,186 @@ def test_a_logout_by_nobody_appends_nothing_and_a_real_logout_is_still_audited()
 # ======================================================================================================
 # 4. failed logins are coalesced, never invisible
 # ======================================================================================================
-def _fail_login(port, *, client=None, username=None):
+def _fail_login(port, *, forwarded=None, username=None):
     body = {"token": secrets.token_urlsafe(32)} if username is None else {"username": username,
                                                                           "password": "wrong-password"}
-    h = {"X-Forwarded-For": client} if client else None
+    h = {"X-Forwarded-For": forwarded, "X-Real-IP": forwarded} if forwarded else None
     return _req(port, "/api/login", method="POST", body=body, headers=h)[0]
+
+
+def _fails(s):
+    return [e for e in _authn(s) if e["event"] == "authn.login.failure"]
 
 
 def test_a_burst_of_failed_logins_records_the_first_at_once_and_counts_the_rest():
     s, port, clock = _serve()
     try:
-        for _ in range(20):
-            assert _fail_login(port, client="203.0.113.7") == 401
-        fails = [e for e in _authn(s) if e["event"] == "authn.login.failure"]
-        assert len(fails) == 1 and fails[0]["client"] == "203.0.113.7" and "coalesced" not in fails[0]
+        for i in range(20):                                  # a forwarded address the client chose splits nothing
+            assert _fail_login(port, forwarded=f"203.0.113.{i}") == 401
+        fails = _fails(s)
+        assert len(fails) == 1 and fails[0]["client"] == "127.0.0.1" and "coalesced" not in fails[0]
         clock.t += s.authn_failures.window_s
         _req(port, "/healthz")                            # any request flushes a window that has ended
-        fails = [e for e in _authn(s) if e["event"] == "authn.login.failure"]
+        fails = _fails(s)
         assert len(fails) == 2
         summary = fails[1]
-        assert summary["coalesced"] == 19 and summary["client"] == "203.0.113.7"
+        assert summary["coalesced"] == 19 and summary["client"] == "127.0.0.1" and summary["method"] == "bearer"
         assert summary["window_s"] == s.authn_failures.window_s and summary["reason"] == "invalid_token"
+        assert summary["username"] == "(coalesced)" and summary["since"].endswith("+00:00")
         _req(port, "/healthz")
-        assert len([e for e in _authn(s) if e["event"] == "authn.login.failure"]) == 2, "a summary written twice"
-        assert _fail_login(port, client="203.0.113.7") == 401                 # a new window: recorded at once
-        assert len([e for e in _authn(s) if e["event"] == "authn.login.failure"]) == 3
+        assert len(_fails(s)) == 2, "a summary written twice"
+        assert _fail_login(port) == 401                    # a new window: recorded at once
+        assert len(_fails(s)) == 3
     finally:
         s.shutdown()
 
 
-def test_each_client_method_and_reason_is_its_own_group_and_usernames_do_not_split_it():
+def test_methods_are_their_own_groups_and_claimed_usernames_do_not_split_one():
     s, port, _clock = _serve()
     try:
-        _fail_login(port, client="203.0.113.7")
-        _fail_login(port, client="203.0.113.8")
-        for i in range(5):                                 # varying the username does not open new groups
-            _fail_login(port, client="203.0.113.7", username=f"user{i}")
-        fails = [e for e in _authn(s) if e["event"] == "authn.login.failure"]
-        assert [(e["client"], e["method"]) for e in fails] == [
-            ("203.0.113.7", "bearer"), ("203.0.113.8", "bearer"), ("203.0.113.7", "password")]
+        _fail_login(port)
+        _fail_login(port)
+        for i in range(5):                                 # varying the claimed username does not open new groups
+            _fail_login(port, username=f"user{i}")
+        assert [(e["client"], e["method"], e["reason"]) for e in _fails(s)] == [
+            ("127.0.0.1", "bearer", "invalid_token"), ("127.0.0.1", "password", "bad_credentials")]
     finally:
         s.shutdown()
+
+
+def test_every_failed_login_goes_through_the_coalescer():
+    """No login path appends its own failure record: each one calls `_authn_failure`, and every second-factor
+    failure (the username a first factor proved) is marked proven."""
+    import inspect
+    src = inspect.getsource(srvmod)
+    assert src.count('"authn.login.failure"') == 1 and "def _authn_failure" in src
+    assert src.count('reason="totp", proven=True)') == 3 and src.count('reason="totp")') == 0
+
+
+class _Rec:
+    def __init__(self, fail_first: int = 0):
+        self.written: list = []
+        self.fail = fail_first
+
+    def append(self, **kw):
+        if self.fail:
+            self.fail -= 1
+            raise OSError("spine busy")
+        self.written.append(kw["payload"])
+
+
+def _coalescer(**kw):
+    clock = _Clock()
+    return FailedAuthnCoalescer(window_s=60.0, clock=clock, **kw), clock
+
+
+def test_client_method_reason_and_a_proven_username_each_split_a_group():
+    c, clock = _coalescer()
+    st = _Rec()
+    for src, method, reason, user, proven in [
+            ("198.51.100.1", "password", "bad_credentials", "a", False),
+            ("198.51.100.1", "password", "bad_credentials", "b", False),   # a claimed username: same group
+            ("198.51.100.2", "password", "bad_credentials", "a", False),   # another client
+            ("198.51.100.1", "bearer", "bad_credentials", "", False),      # another method
+            ("198.51.100.1", "password", "totp", "tim", True),             # another reason, a proven username
+            ("198.51.100.1", "password", "totp", "ann", True),             # another proven username
+            ("198.51.100.1", "password", "totp", "tim", True)]:            # counted
+        c.record(st, "authn.login.failure", source=src, username=user, method=method, reason=reason, proven=proven)
+    assert [(p["client"], p["method"], p.get("reason"), p["username"]) for p in st.written] == [
+        ("198.51.100.1", "password", "bad_credentials", "a"), ("198.51.100.2", "password", "bad_credentials", "a"),
+        ("198.51.100.1", "bearer", "bad_credentials", "anonymous"), ("198.51.100.1", "password", "totp", "tim"),
+        ("198.51.100.1", "password", "totp", "ann")]
+    clock.t += 60.0
+    c.flush(lambda: st)
+    assert [(p["username"], p["coalesced"]) for p in st.written[5:]] == [("(coalesced)", 1), ("tim", 1)]
+
+
+def test_the_next_failure_after_a_window_ends_writes_its_summary():
+    c, clock = _coalescer()
+    st = _Rec()
+    for _ in range(4):
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    clock.t += 60.0
+    c.record(st, "authn.login.failure", source="203.0.113.2", method="bearer", reason="invalid_token")
+    assert [(p["client"], p.get("coalesced")) for p in st.written] == [
+        ("203.0.113.1", None), ("203.0.113.1", 3), ("203.0.113.2", None)]
+
+
+def test_a_summary_the_spine_refuses_stays_owed_and_is_written_later():
+    c, clock = _coalescer()
+    st = _Rec()
+    for _ in range(3):
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    clock.t += 60.0
+    st.fail = 1
+    c.flush(lambda: st)                                  # the spine refuses the summary write
+    c.flush(lambda: (_ for _ in ()).throw(OSError("no spine")))   # and then cannot even be opened
+    assert [p.get("coalesced") for p in st.written] == [None]
+    for _ in range(2):                    # the next failure writes the owed summary, then opens a new window
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    clock.t += 60.0
+    c.flush(lambda: st)
+    assert [p.get("coalesced") for p in st.written] == [None, 2, None, 1], "an owed count was lost"
+
+
+def test_a_first_record_the_spine_refuses_is_counted_into_the_summary():
+    c, clock = _coalescer()
+    st = _Rec(fail_first=1)
+    c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    clock.t += 60.0
+    c.flush(lambda: st)
+    assert [p.get("coalesced") for p in st.written] == [2]
+
+
+def test_close_writes_every_pending_count_and_server_close_calls_it():
+    st = _Rec()
+    c, _clock = _coalescer(store_factory=lambda: st)
+    for _ in range(3):
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    c.close()                                            # the window has NOT ended
+    assert [p.get("coalesced") for p in st.written] == [None, 2]
+    s, port, _clock = _serve()
+    try:
+        for _ in range(3):
+            _fail_login(port)
+    finally:
+        s.shutdown()
+        s.server_close()
+    assert [e.get("coalesced") for e in _fails(s)] == [None, 2]
+
+
+def test_an_idle_server_still_writes_the_count_when_the_window_ends():
+    from sigil.spine.store import SpineStore
+    p = tempfile.mktemp(suffix=".jsonl")
+    c = FailedAuthnCoalescer(window_s=0.3, store_factory=lambda: SpineStore(p))
+    st = SpineStore(p)
+    for _ in range(4):
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        got = [r.payload.get("coalesced") for r in SpineStore(p).iter_records()]
+        if got == [None, 3]:
+            break
+        time.sleep(0.05)
+    assert got == [None, 3], "no summary was written without a further request"
+
+
+def test_the_bounds_are_the_documented_ones():
+    t, a = FailedTokenCache(), FailedAuthnCoalescer()
+    assert (t.ttl_s, t.max_entries) == (5.0, 4096) and (a.window_s, a.max_keys) == (60.0, 1024)
 
 
 def test_a_flood_of_distinct_clients_still_leaves_a_record_and_a_count():
     clock = _Clock()
     c = FailedAuthnCoalescer(window_s=60.0, max_keys=2, clock=clock)
-    written: list = []
-
-    class _Store:
-        def append(self, **kw):
-            written.append(kw["payload"])
-
-    st = _Store()
+    st = _Rec()
     for i in range(10):
         c.record(st, "authn.login.failure", source=f"198.51.100.{i}", method="bearer", reason="invalid_token")
-    assert [p["client"] for p in written] == ["198.51.100.0", "198.51.100.1", "*"]
+    assert [p["client"] for p in st.written] == ["198.51.100.0", "198.51.100.1", "*"]
     clock.t += 60.0
     c.flush(lambda: st)
-    summary = written[-1]
+    summary = st.written[-1]
     assert summary["client"] == "*" and summary["coalesced"] == 7
 
 
@@ -290,12 +427,11 @@ def test_a_summary_is_written_even_if_the_attack_stops_and_only_probes_arrive():
     s, port, clock = _serve()
     try:
         for _ in range(3):
-            _fail_login(port, client="203.0.113.9")
+            _fail_login(port)
         clock.t += s.authn_failures.window_s + 5
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as r:   # a scraper
             assert r.status == 200
-        fails = [e for e in _authn(s) if e["event"] == "authn.login.failure"]
-        assert [e.get("coalesced") for e in fails] == [None, 2]
+        assert [e.get("coalesced") for e in _fails(s)] == [None, 2]
     finally:
         s.shutdown()
 
@@ -303,17 +439,44 @@ def test_a_summary_is_written_even_if_the_attack_stops_and_only_probes_arrive():
 # ======================================================================================================
 # 5. the client a failure is attributed to
 # ======================================================================================================
-def test_the_client_is_the_forwarded_address_only_behind_a_loopback_proxy(monkeypatch):
+def test_the_client_is_the_peer_and_forwarded_headers_are_ignored():
     class _H:
         def __init__(self, peer, headers):
             self.client_address, self.headers = (peer, 0), headers
 
     src = srvmod.Handler._client_source
-    assert src(_H("127.0.0.1", {"X-Forwarded-For": "203.0.113.1, 198.51.100.2"})) == "198.51.100.2"
-    assert src(_H("127.0.0.1", {"X-Real-IP": "203.0.113.3"})) == "203.0.113.3"
-    assert src(_H("127.0.0.1", {"X-Forwarded-For": "not-an-ip"})) == "127.0.0.1"
-    assert src(_H("::1", {"X-Forwarded-For": "2001:db8::1"})) == "2001:db8::1"
-    assert src(_H("10.0.0.5", {"X-Forwarded-For": "203.0.113.1"})) == "10.0.0.5", "only a loopback proxy is trusted"
+    for peer in ("127.0.0.1", "::1", "10.0.0.5"):
+        assert src(_H(peer, {"X-Forwarded-For": "203.0.113.1, 198.51.100.2", "X-Real-IP": "203.0.113.3"})) == peer
+
+
+def test_the_api_ask_owner_token_check_compares_bytes():
+    class _H:
+        def __init__(self, tok):
+            self.headers = {"X-SIGIL-Token": tok}
+            self.server = type("S", (), {"token": TOKEN})()
+
+        def _query(self):
+            return {}
+
+    ok = srvmod.Handler._token_ok
+    assert ok(_H(TOKEN)) is True
+    assert ok(_H("nön-ascii-owner-token")) is False and ok(_H("\udc80" + TOKEN[1:])) is False
+
+
+def test_a_lone_surrogate_token_in_a_json_body_is_a_plain_refusal():
+    s, port, _clock = _serve()
+    try:
+        raw = json.dumps({"token": "\udc80-lone-surrogate-token-xx"}).encode("ascii")   # the JSON escape
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/login", data=raw, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Origin": f"http://127.0.0.1:{port}", "Host": f"127.0.0.1:{port}"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("accepted")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401
+    finally:
+        s.shutdown()
 
 
 @pytest.mark.parametrize("tok", ["nön-ascii-owner-token", "\udc80-lone-surrogate-token-xx"])
