@@ -51,7 +51,8 @@ export SIGIL_HOME=/mnt/vigil-data/.sigil      # a durable, replicated volume —
 mkdir -p "$SIGIL_HOME"
 ```
 
-Persist `SIGIL_HOME` in each unit's env file (`~/.sigil/cockpit.env`, `customer.env`, `public.env`).
+Persist `SIGIL_HOME` in each unit's env file (`~/.sigil/cockpit.env`, `customer.env`, `public.env`, and
+`~/.config/vigil/billing-drain.env` once you run the billing drain — §9).
 
 ## 3. Owner key + vault seal (the single most important secret)
 
@@ -161,10 +162,16 @@ sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
 ```
 
 To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
-dead-man monitored; it defaults to this same `$SIGIL_HOME/billing-spool`, which must equal the proxy's
-`VIGIL_BILLING_WEBHOOK_SPOOL`). Run the timer **or** `watch`, never both — two drainers reclaim each other's
-in-flight work. See `infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave
-webhook at the operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
+dead-man monitored). **Set `SIGIL_HOME` in `~/.config/vigil/billing-drain.env`** (§2) — always, even if you
+never moved it: the drain never falls back to `~/.sigil`, and refuses (the unit goes FAILED) without it, when
+`~/.sigil/cockpit.env` names a different `SIGIL_HOME`, or when that home holds no owner identity. The unit names
+no spool: the drain derives this same `$SIGIL_HOME/billing-spool`, or drains the proxy's
+`VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into the same env file — which you must do if the proxy spools
+anywhere else (the drain cannot see the proxy's env); a spool that contradicts it is refused. Run the timer **or**
+`watch`, never both — a per-spool lock serialises them: a timer pass that cannot get it within 120 s fails loudly,
+and a `watch` that keeps finding it held warns on stderr every 120 s. See
+`infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave webhook at the
+operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.
 
 ## 9b. (Optional) Stripe instead of Flutterwave (default-OFF)
@@ -186,7 +193,12 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
 3. **Drain.** Install `infra/systemd/vigil-billing-drain-stripe.{service,timer}` with its env file:
    `VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1`, `VIGIL_BILLING_ENABLE_STRIPE=1`, the same webhook secret,
    `VIGIL_STRIPE_SECRET_KEY` (the restricted key; its live/test prefix sets the mode) and
-   `VIGIL_STRIPE_API_VERSION`. Its spool must equal the proxy's and must not be the Flutterwave spool. The
+   `VIGIL_STRIPE_API_VERSION`. Its spool must equal the proxy's and must not be the Flutterwave spool. **Set
+   `SIGIL_HOME` in `~/.config/vigil/billing-drain-stripe.env`** too, as for the Flutterwave drain (§9): the
+   Stripe drain mints onto the same spine and refuses without it, when `~/.sigil/cockpit.env` names a different
+   one, or when it holds no owner identity. Once `SIGIL_HOME` is moved, set `VIGIL_STRIPE_BILLING_SPOOL` to the
+   proxy's spool: the drain refuses the unit's `~/.sigil` default then, and refuses any spool that contradicts a
+   `VIGIL_STRIPE_WEBHOOK_SPOOL` copied into that env file. The same per-spool lock serialises passes. The
    webhook secret must be the proxy's exact value: a delivery the drain cannot verify is quarantined and the unit
    alarms (rotate both together). The Stripe drain always alarms on a paid charge it cannot credit.
 4. **Prove it in test mode first**: a top-up purchase, a plan purchase, a renewal and a failed renewal (Stripe

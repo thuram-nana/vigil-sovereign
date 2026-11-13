@@ -39,10 +39,12 @@ def _key(mode="test"):
 def home(monkeypatch):
     d = tempfile.mkdtemp()
     monkeypatch.setenv("SIGIL_HOME", d)
+    monkeypatch.setenv("HOME", tempfile.mkdtemp())   # hermetic: the drain compares with ~/.sigil/cockpit.env
     from sigil import config
     monkeypatch.setattr(config, "SPINE_PATH", Path(d) / "spine" / "spine.jsonl")
     for k in ("VIGIL_BILLING_DRAIN_ENABLED", "VIGIL_BILLING_WEBHOOK_SECRET", "VIGIL_BILLING_SPOOL",
-              "VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_NET_RECOVERY_ENABLED"):
+              "VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_NET_RECOVERY_ENABLED", "VIGIL_STRIPE_WEBHOOK_SPOOL",
+              "VIGIL_STRIPE_BILLING_SPOOL"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("VIGIL_STRIPE_BILLING_DRAIN_ENABLED", "1")
     monkeypatch.setenv("VIGIL_BILLING_ENABLE_STRIPE", "1")
@@ -285,3 +287,118 @@ def test_the_stripe_lane_refuses_the_default_flutterwave_spool(home, capsys, mon
     os.makedirs(flw_default, exist_ok=True)
     code, text = _run(["billing-drain", "--provider", "stripe", "--spool", flw_default], capsys)
     assert code == 2 and "Flutterwave billing spool" in text
+
+
+# ---- audit E2 on the Stripe lane: the same operating guards as the Flutterwave drain ---------------------------------
+def _stripe_argv(spool):
+    return ["billing-drain", "drain", "--provider", "stripe", "--spool", str(spool)]
+
+
+def test_the_stripe_lane_requires_sigil_home_absolute_and_expanded(home, capsys, monkeypatch):
+    """The Stripe drain mints onto the spine under SIGIL_HOME too: it never falls back to an implicit ~/.sigil."""
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool)
+    monkeypatch.delenv("SIGIL_HOME")
+    code, text = _run(_stripe_argv(spool), capsys)
+    assert code == 2 and "SIGIL_HOME is not set" in text and "billing-drain-stripe.env" in text, text
+    for bad in ("%h/.sigil", "relative/.sigil"):
+        monkeypatch.setenv("SIGIL_HOME", bad)
+        code, text = _run(_stripe_argv(spool), capsys)
+        assert code == 2 and "SIGIL_HOME must be an ABSOLUTE" in text and repr(bad) in text
+    assert _WHSEC not in text and sorted(p.name for p in spool.iterdir()) == ["incoming"]   # nothing claimed
+
+
+def test_the_stripe_lane_refuses_a_sigil_home_that_is_not_the_cockpits(home, capsys, monkeypatch):
+    import os
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool)
+    cockpit_env = Path(os.environ["HOME"]) / ".sigil" / "cockpit.env"
+    cockpit_env.parent.mkdir(parents=True)
+    cockpit_env.write_text("SIGIL_HOME=/srv/new-volume/.sigil\n", encoding="utf-8")
+    code, text = _run(_stripe_argv(spool), capsys)
+    assert code == 2 and "is not the cockpit's" in text and "billing-drain-stripe.env" in text, text
+    assert sorted(p.name for p in spool.iterdir()) == ["incoming"]
+
+
+def test_the_stripe_lane_refuses_a_home_with_no_owner_identity(tmp_path):
+    """A real interpreter (the owner key paths are fixed at import): SIGIL_HOME names a directory with no owner
+    identity — not the cockpit's — so the Stripe drain refuses rather than run "healthy" over it."""
+    import os
+    import subprocess
+    import sys
+    typo, user = tmp_path / "mnt" / ".sigil-typo", tmp_path / "user"
+    user.mkdir()
+    spool = tmp_path / "stripe-spool"
+    _spool_stripe(spool)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("VIGIL_", "SIGIL_"))}
+    env.update(HOME=str(user), SIGIL_HOME=str(typo), PYTHONPATH=os.pathsep.join(p for p in sys.path if p),
+               VIGIL_STRIPE_BILLING_DRAIN_ENABLED="1", VIGIL_BILLING_ENABLE_STRIPE="1",
+               VIGIL_STRIPE_WEBHOOK_SECRET=_WHSEC, VIGIL_STRIPE_SECRET_KEY=_key(),
+               VIGIL_STRIPE_API_VERSION="2000-01-01")
+    r = subprocess.run([sys.executable, "-c", f"from sigil.cli import main; main({_stripe_argv(spool)!r})"],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "holds no owner identity" in r.stderr and str(typo) in r.stderr and "drained:" not in r.stdout
+    assert _WHSEC not in r.stdout + r.stderr and sorted(p.name for p in spool.iterdir()) == ["incoming"]
+
+
+def test_a_stripe_spool_that_contradicts_the_proxys_stripe_spool_is_refused(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    intake, other = Path(tempfile.mkdtemp()) / "intake", Path(tempfile.mkdtemp()) / "other"
+    monkeypatch.setenv("VIGIL_STRIPE_WEBHOOK_SPOOL", str(intake))
+    _spool_stripe(other)
+    code, text = _run(_stripe_argv(other), capsys)
+    assert code == 2 and "NOT the spool the proxy writes paid webhooks to" in text and "VIGIL_STRIPE_WEBHOOK_SPOOL" in text
+    assert sorted(p.name for p in other.iterdir()) == ["incoming"]                        # nothing touched
+    (intake / "incoming").mkdir(parents=True)
+    alias = intake.parent / "alias"
+    alias.symlink_to(intake)                                       # the same directory spelled differently
+    cli.main(_stripe_argv(alias))
+    assert "drained: 0 minted" in capsys.readouterr().out
+
+
+def test_the_stripe_units_fixed_home_default_is_refused_when_sigil_home_is_elsewhere(home, capsys, monkeypatch):
+    """The Stripe unit passes its %h/.sigil/stripe-billing-spool default; once SIGIL_HOME is moved that is a
+    directory the proxy does not write to — the pass must FAIL, not exit 0 — unless the proxy's variable confirms it."""
+    import os
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    legacy = Path(os.environ["HOME"]) / ".sigil" / "stripe-billing-spool"
+    code, text = _run(_stripe_argv(legacy), capsys)
+    assert code == 2 and "fixed ~/.sigil default, but SIGIL_HOME is" in text, text
+    assert os.path.join(os.environ["SIGIL_HOME"], "stripe-billing-spool") in text and not legacy.exists()
+    monkeypatch.setenv("VIGIL_STRIPE_WEBHOOK_SPOOL", str(legacy))
+    cli.main(_stripe_argv(legacy))
+    assert "drained: 0 minted" in capsys.readouterr().out
+    monkeypatch.delenv("VIGIL_STRIPE_WEBHOOK_SPOOL")
+    monkeypatch.setenv("SIGIL_HOME", str(Path(os.environ["HOME"]) / ".sigil"))  # never moved: the default is fine
+    cli.main(_stripe_argv(legacy))
+    assert "drained: 0 minted" in capsys.readouterr().out
+
+
+def test_a_stripe_pass_that_cannot_get_the_lock_fails_loudly_and_touches_nothing(home, capsys, monkeypatch):
+    """The shared single-drainer lock and its CLI handling hold on the Stripe lane: a pass whose spool another
+    drainer holds past the wait exits 1 (the dead-man alarms) and claims nothing."""
+    import fcntl
+    import os
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    monkeypatch.setattr(cli, "_BILLING_LOCK_WAIT_S", 0.3)
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool)
+    (spool / "working").mkdir()
+    fd = os.open(spool / "working" / ".drain.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        code, text = _run(_stripe_argv(spool), capsys)
+        assert code == 1 and "has held the lock" in text and "drained:" not in text, text
+        assert (spool / "incoming" / "evt1.json").exists() and not list((spool / "rejected").iterdir())
+    finally:
+        os.close(fd)
+    cli.main(_stripe_argv(spool))                         # lock free: the pass runs and mints
+    assert "drained: 1 minted" in capsys.readouterr().out

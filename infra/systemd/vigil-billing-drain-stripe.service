@@ -15,9 +15,18 @@
 # sigil.governor.stripe_egress).
 #
 # SECRETS — inject from your secret manager (GO-LIVE §9b); never commit them. The EnvironmentFile below (mode 0600)
-# is the documented FALLBACK — see vigil-billing-drain-stripe.env.example.
+# is the documented FALLBACK — see vigil-billing-drain-stripe.env.example. Only the drain process gets them: the
+# heartbeat hook below runs with an allow-listed environment.
+# SIGIL_HOME is REQUIRED in the env file below, moved or not (GO-LIVE §2; outside ~/.sigil, also add it to
+# ReadWritePaths): the drain mints onto the spine under it and never falls back to ~/.sigil, so without it the drain
+# REFUSES (FAILED). It also refuses a SIGIL_HOME that ~/.sigil/cockpit.env contradicts, or one that holds no owner
+# identity.
 # The spool default below MUST equal the proxy's VIGIL_STRIPE_WEBHOOK_SPOOL, or the drain runs "healthy" on an empty
-# directory and credits nothing. ONE DRAINER per spool: this timer OR a manual watch, never both.
+# directory and credits nothing. The drain REFUSES (unit FAILED) a spool that contradicts VIGIL_STRIPE_WEBHOOK_SPOOL
+# when that is set in the env file below, and this ~/.sigil default while SIGIL_HOME is elsewhere: then set
+# VIGIL_STRIPE_BILLING_SPOOL in the env file. ONE DRAINER per spool: this timer OR a manual watch, never both. A
+# second drainer cannot break a pass: each pass holds an exclusive lock (<spool>/working/.drain.lock). A pass that
+# finds it held waits up to 120 s for the other pass to end; still held after that, it touches nothing and FAILS.
 #
 # Manual run / logs:
 #     systemctl --user start vigil-billing-drain-stripe.service
@@ -41,11 +50,20 @@ Environment=VIGIL_STRIPE_BILLING_SPOOL=%h/.sigil/stripe-billing-spool
 EnvironmentFile=-%h/.config/vigil/billing-drain-stripe.env
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --provider stripe --spool ${VIGIL_STRIPE_BILLING_SPOOL}
+# Each pass starts a fresh process, so every mint FOLDS the spine from the start (O(spine)) on top of its HTTPS
+# re-fetches (each bounded at 15 s). A tight bound would kill a legitimately slow pass on a large spine EVERY time
+# (never credited). This bound only frees the single-drainer lock from a WEDGED pass, which the dead-man has already
+# alarmed on (no heartbeat within ~2 min); the next pass reclaims its claim (idempotent). Above the 120 s lock wait.
+TimeoutStartSec=1800
 
 # --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
 StateDirectory=vigil
 Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
-ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+# The EnvironmentFile is unit-wide, so the heartbeat hook (a different venv, another codebase) would inherit every
+# secret in it (the Stripe webhook secret and API key, and anything else an operator puts there). An ALLOW-list, not
+# a strip-list: the hook runs with an EMPTY environment plus the three values it reads (systemd turns "$$" into "$";
+# SERVICE_RESULT exists only in this hook's own environment, so the shell forwards it).
+ExecStopPost=/bin/sh -c 'exec /usr/bin/env -i HOME="$$HOME" SERVICE_RESULT="$$SERVICE_RESULT" VIGIL_ALERT_STATE_DIR="$$VIGIL_ALERT_STATE_DIR" "$$0" unit-heartbeat "$$1"' %h/vigil/.venv-offense/bin/vigil %n
 
 # --- hardening -------------------------------------------------------------
 NoNewPrivileges=yes

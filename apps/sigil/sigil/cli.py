@@ -1466,7 +1466,10 @@ def _stripe_billing_watcher(a):
         sys.exit(2)
     if os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
         refuse("the Stripe adapter is not enabled (VIGIL_BILLING_ENABLE_STRIPE)")
-    _require_expanded_path(a.spool, "--spool", required=True)
+    # The same operating guards as the Flutterwave lane: a spool that contradicts the proxy's Stripe spool (or the
+    # fixed ~/.sigil default under a moved SIGIL_HOME) and an implicit ~/.sigil home are refused (exit 2).
+    spool = _resolve_billing_spool(getattr(a, "spool", ""), lane="stripe")
+    _require_explicit_billing_home("stripe")
     secret = os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET", "")
     if not secret:
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET is not set")
@@ -1474,8 +1477,8 @@ def _stripe_billing_watcher(a):
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET must differ from VIGIL_BILLING_WEBHOOK_SECRET (one secret per provider)")
     from . import config
     flw_default = os.path.join(os.environ.get("SIGIL_HOME") or str(config.SIGIL_HOME), "billing-spool")
-    if any(_same_dir(a.spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
-                                            os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
+    if any(_same_dir(spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
+                                          os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
         refuse("--spool is the Flutterwave billing spool (VIGIL_BILLING_SPOOL / VIGIL_BILLING_WEBHOOK_SPOOL); "
                "the Stripe lane drains its own spool")
     fetcher = _stripe_object_fetcher()
@@ -1488,6 +1491,7 @@ def _stripe_billing_watcher(a):
         se._api_version()
     except se.StripeEgressError:
         refuse("VIGIL_STRIPE_API_VERSION is unset or malformed")
+    _require_billing_owner_home(spool, "stripe")
     # The Stripe lane is always loud: a paid Stripe object it cannot credit (no tenant, time or currency, an
     # off-catalog or underpaid plan, a monitoring price with no line) quarantines and alarms, never a silent no-op —
     # whatever the plan-checkout flag in this unit's environment says.
@@ -1496,7 +1500,155 @@ def _stripe_billing_watcher(a):
                                      strict=True)
     del secret
     signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True)
-    return BillingSpoolWatcher(signer, spool_dir=a.spool, envelope_reader=StripeEnvelopeV1())
+    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
+
+
+# The money-IN drain lanes: (the drain's own spool variable — None: the lane drains exactly the --spool its unit
+# passes —, the proxy's (writer's) spool variable, the runbook spool name under SIGIL_HOME, the drain unit's env file
+# under ~/.config/vigil, the prefix its refusals carry).
+_BILLING_LANES = {
+    "flutterwave": ("VIGIL_BILLING_SPOOL", "VIGIL_BILLING_WEBHOOK_SPOOL", "billing-spool", "billing-drain.env",
+                    "billing-drain"),
+    "stripe": (None, "VIGIL_STRIPE_WEBHOOK_SPOOL", "stripe-billing-spool", "billing-drain-stripe.env",
+               "billing-drain --provider stripe"),
+}
+
+
+def _resolve_billing_spool(arg: "str | None", lane: str = "flutterwave") -> str:
+    """The ONE place the money-IN drain decides WHICH spool it drains, so it cannot run "healthy" on a directory
+    the proxy never writes to (a paid webhook spooled, never credited, the unit exiting 0).
+
+    The writer is the proxy's ``/webhooks/billing`` route, which spools into ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the
+    runbook value: ``$SIGIL_HOME/billing-spool``). With no explicit spool (``--spool`` / ``VIGIL_BILLING_SPOOL``)
+    the drain therefore DERIVES it: the writer's own variable when it is visible here, else
+    ``$SIGIL_HOME/billing-spool`` — it follows a moved ``SIGIL_HOME`` instead of a fixed ``~/.sigil`` default.
+    An explicit spool still wins, but is REFUSED (exit 2 -> the unit is FAILED and the dead-man alarms) when it
+    contradicts what this process can see: it differs from the writer's variable, or it is the legacy fixed
+    default ``~/.sigil/billing-spool`` while ``SIGIL_HOME`` points elsewhere and nothing confirms the choice.
+
+    The Stripe lane (``lane="stripe"``) drains exactly the ``--spool`` its unit passes (still required), under the
+    same two refusals against its own writer variable ``VIGIL_STRIPE_WEBHOOK_SPOOL`` and its fixed
+    ``~/.sigil/stripe-billing-spool`` default."""
+    import os
+    from pathlib import Path
+
+    from .config import _resolve_home
+
+    def _same(x: str, y: "str | Path") -> bool:
+        return os.path.realpath(x) == os.path.realpath(str(y))
+
+    own_env, intake_env, name, _env_file, who = _BILLING_LANES[lane]
+    intake = os.environ.get(intake_env, "").strip()
+    explicit = (arg or (os.environ.get(own_env, "") if own_env else "") or "").strip()
+    home_default = _resolve_home() / name
+    spool = (explicit or intake or str(home_default)) if own_env else explicit
+    _require_expanded_path(spool, "--spool", required=True)
+    if own_env:
+        agree = f"Drop --spool / {own_env}, or make them agree."
+        follow = (f"Drop --spool / {own_env} so the spool follows SIGIL_HOME, or set {intake_env} to the directory "
+                  f"the proxy really uses.")
+    else:
+        agree = f"Make the unit's --spool (VIGIL_STRIPE_BILLING_SPOOL) agree with {intake_env}."
+        follow = (f"Set VIGIL_STRIPE_BILLING_SPOOL (the unit's --spool) to the proxy's {intake_env}, or copy "
+                  f"{intake_env} into the drain's env file to confirm this directory.")
+    if explicit and intake and not _same(explicit, intake):
+        print(f"{who}: the spool to drain ({explicit}) is NOT the spool the proxy writes paid webhooks to "
+              f"({intake_env}={intake}) — refusing (fail-closed: draining the wrong directory "
+              f"credits nobody while exiting 0). {agree}", file=sys.stderr)
+        sys.exit(2)
+    if (explicit and not intake and _same(explicit, Path.home() / ".sigil" / name)
+            and not _same(explicit, home_default)):
+        print(f"{who}: the spool to drain ({explicit}) is the fixed ~/.sigil default, but SIGIL_HOME is "
+              f"{_resolve_home()} (the runbook spool is {home_default}) — refusing (fail-closed: draining the "
+              f"wrong directory credits nobody while exiting 0). {follow}", file=sys.stderr)
+        sys.exit(2)
+    return spool
+
+
+# The cockpit unit's env file (sigil-cockpit.service `EnvironmentFile=-%h/.sigil/cockpit.env`), where GO-LIVE §2
+# persists a moved SIGIL_HOME. The drain only READS its SIGIL_HOME line to compare; it never loads the file.
+_COCKPIT_ENV = (".sigil", "cockpit.env")
+
+
+def _cockpit_env_sigil_home() -> "tuple[str, str] | None":
+    """``(file, value)`` of the LAST ``SIGIL_HOME=`` assignment in the cockpit's env file (systemd EnvironmentFile
+    syntax: a line with no ``=`` is ignored, one pair of surrounding quotes is stripped; a ``#``/``;`` comment line
+    never carries the bare key), or None when the file is absent, unreadable or names no (or an empty) SIGIL_HOME —
+    nothing to compare against."""
+    from pathlib import Path
+    f = Path.home().joinpath(*_COCKPIT_ENV)
+    try:
+        if not f.is_file():                     # never block on a FIFO planted at that name
+            return None
+        with open(f, "rb") as fh:
+            raw = fh.read(64 * 1024).decode("utf-8", errors="replace")
+    except OSError:                             # e.g. replaced between the check and the open
+        return None
+    value = None
+    for line in raw.split("\n"):
+        k, sep, v = line.strip().partition("=")
+        if not sep or k.strip() != "SIGIL_HOME":
+            continue
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        value = v
+    return (str(f), value) if value else None
+
+
+def _require_explicit_billing_home(lane: str = "flutterwave") -> None:
+    """The money-IN drain mints OWNER-signed credit onto the spine under SIGIL_HOME and, with no spool named,
+    drains ``$SIGIL_HOME/billing-spool``. So it NEVER falls back to the implicit ``~/.sigil``: SIGIL_HOME must be
+    set — absolute and expanded — in this process's own environment. A fallback cannot tell "never moved" from "moved
+    for the cockpit and the proxy, but not in this drain's env file": the drain then drains an empty
+    ``~/.sigil/billing-spool`` and exits 0 forever (the dead-man reading it HEALTHY), or — given the proxy's spool —
+    credits a ``~/.sigil`` spine the cockpit never reads. Whatever owner key happens to sit in ``~/.sigil`` (a
+    pre-move install, a copy-migration, any owner-signing command run without SIGIL_HOME exported) proves nothing.
+    When the cockpit's own env file names a SIGIL_HOME, this one must be the same directory (a stale copy — e.g.
+    the old volume after a migration — is refused). Exit 2 either way: the unit goes FAILED and MONEY-5 alarms.
+    The Stripe lane mints onto the same spine, so it is held to the same rule (its env file: billing-drain-stripe)."""
+    import os
+    from pathlib import Path
+    _own, _intake, _name, env_file, who = _BILLING_LANES[lane]
+    home = os.environ.get("SIGIL_HOME", "").strip()
+    if not home:
+        print(f"{who}: SIGIL_HOME is not set in this drain's environment — refusing (fail-closed: the drain "
+              f"mints onto the spine under SIGIL_HOME and drains its billing-spool, and an implicit ~/.sigil may "
+              f"not be the cockpit's home: a paid webhook would wait uncredited while the pass exits 0). Set "
+              f"SIGIL_HOME to the cockpit's SIGIL_HOME in ~/.config/vigil/{env_file} (an install that never "
+              f"moved it: SIGIL_HOME=/home/<user>/.sigil).", file=sys.stderr)
+        sys.exit(2)
+    if "%" in home or not Path(home).is_absolute():
+        print(f"{who}: SIGIL_HOME must be an ABSOLUTE, already-expanded path (got {home!r}; systemd does "
+              f"NOT expand %h inside an EnvironmentFile value) — refusing.", file=sys.stderr)
+        sys.exit(2)
+    cockpit = _cockpit_env_sigil_home()
+    if cockpit is not None and os.path.realpath(cockpit[1]) != os.path.realpath(home):
+        print(f"{who}: this drain's SIGIL_HOME ({home}) is not the cockpit's — {cockpit[0]} sets "
+              f"SIGIL_HOME={cockpit[1]} — refusing (fail-closed: the drain would credit a spine the cockpit never "
+              f"reads, or drain a spool the proxy never writes to, while exiting 0). Make SIGIL_HOME in "
+              f"~/.config/vigil/{env_file} the cockpit's.", file=sys.stderr)
+        sys.exit(2)
+
+
+def _require_billing_owner_home(spool: str, lane: str = "flutterwave") -> None:
+    """The drain mints OWNER-signed credit onto the spine under SIGIL_HOME. A home with no owner identity is not the
+    cockpit's (a mistyped path, a fresh volume): draining its spool would exit 0 forever while paid webhooks wait
+    (the dead-man reading it HEALTHY), and nothing there could be minted. A defence in depth only — an owner key
+    proves nothing about WHOSE home it is (``_require_explicit_billing_home``). Exit 2."""
+    from .config import _resolve_home
+    from .governor.identity import owner_pubkey
+    _own, _intake, _name, env_file, who = _BILLING_LANES[lane]
+    if not owner_pubkey():
+        print(f"{who}: SIGIL_HOME ({_resolve_home()}) holds no owner identity, so it is not the cockpit's "
+              f"home — refusing (fail-closed: draining {spool} would credit nobody while exiting 0). Set the "
+              f"cockpit's SIGIL_HOME in this drain's env (~/.config/vigil/{env_file}).", file=sys.stderr)
+        sys.exit(2)
+
+
+# How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
+# handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
+_BILLING_LOCK_WAIT_S = 120.0
 
 
 def cmd_billing_drain(a) -> None:
@@ -1514,10 +1666,11 @@ def cmd_billing_drain(a) -> None:
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
-    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
-    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
-    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
-    _require_expanded_path(a.spool, "--spool", required=True)
+    # Front B (money-IN automation): WHICH spool is resolved in one place (`_resolve_billing_spool`), which also
+    # refuses a literal %h / relative path — that would drain NOTHING while exiting 0 (a paid customer never
+    # credited, and the dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    spool = _resolve_billing_spool(getattr(a, "spool", ""))
+    _require_explicit_billing_home()                   # no implicit ~/.sigil for the money mint (exit 2)
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1527,6 +1680,7 @@ def cmd_billing_drain(a) -> None:
         print("billing-drain: no server-side transaction verifier is configured — refusing (fail-closed; a "
               "verif-hash alone never grants value)", file=sys.stderr)
         sys.exit(2)
+    _require_billing_owner_home(spool)                 # a home with no owner identity is not the cockpit's (exit 2)
 
     from .governor.billing import FlutterwaveBillingProvider
     from .inbound.billing_spool import BillingSpoolWatcher
@@ -1540,22 +1694,31 @@ def cmd_billing_drain(a) -> None:
     signer = _billing_signer(FlutterwaveBillingProvider(secret, verifier,
                                                         checkout_creator=_billing_checkout_creator(),
                                                         alarm_unaccounted_plans=alarm), store, alarm=alarm)
-    watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
+    watcher = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash=secret)
     del secret
     _run_billing_watcher(a, watcher)
 
 
 def _run_billing_watcher(a, watcher) -> None:
     """Run one billing drain pass (or watch), with the shared reporting: NET-2b parked count, and a FAILED exit
-    (the dead-man alarms) while anything sits in quarantine."""
+    (the dead-man alarms) while anything sits in quarantine. Both lanes: a pass waits out another drainer's pass
+    (the single-drainer lock) for ``_BILLING_LOCK_WAIT_S`` and then FAILS loudly, and a starved ``watch`` warns."""
+    spool = watcher.spool
     if getattr(a, "billing_cmd", "drain") == "watch":
-        print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
+        print(f"  watching {spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
         try:
-            watcher.watch(interval=a.interval)
+            watcher.watch(interval=a.interval, busy_warn_s=_BILLING_LOCK_WAIT_S)   # a starved watch says so
         except KeyboardInterrupt:
             pass
     else:
-        r = watcher.drain()
+        r = watcher.drain(wait_s=_BILLING_LOCK_WAIT_S)   # waits out another drainer's pass (single-drainer lock)
+        if r.get("busy"):
+            # Still held after the wait: a stuck drainer (or a second one that never lets go). This pass touched
+            # nothing — and must NOT read as a healthy pass, or a wedged holder would hide behind exit 0 forever.
+            print(f"billing-drain: another billing drainer has held the lock on {spool} for over "
+                  f"{int(_BILLING_LOCK_WAIT_S)} s — this pass touched nothing. Find the stuck drainer (run the "
+                  f"timer OR `watch`, never both).", file=sys.stderr)
+            sys.exit(1)
         print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
         parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
@@ -3010,7 +3173,10 @@ def main(argv=None) -> None:
                               "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
                               "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
     pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
-    pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
+    pbd.add_argument("--spool", default="",
+                     help="the billing spool directory (its incoming/ is drained). Default: $VIGIL_BILLING_SPOOL, "
+                          "else the proxy's $VIGIL_BILLING_WEBHOOK_SPOOL, else $SIGIL_HOME/billing-spool "
+                          "(--provider stripe: required, its own Stripe spool)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
                      help="which provider's spool this drains (stripe: default-OFF, VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
