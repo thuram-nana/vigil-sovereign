@@ -59,7 +59,6 @@ import hashlib
 import json
 import os
 import secrets
-import stat
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -110,8 +109,9 @@ def billing_spool_dirs() -> "list[Path]":
 
 
 def _envelope_tx_ref(path: Path) -> Optional[str]:
-    """The ``data.tx_ref`` of one spooled billing envelope, or None when it cannot be attributed (not a bounded
-    regular file, not the envelope / body JSON, no tx_ref). Never follows a symlink or blocks on a FIFO. RAISES
+    """The ``data.tx_ref`` of one spooled billing envelope, or None when it cannot be attributed (unreadable, over
+    the envelope cap, not the envelope / body JSON, no tx_ref). Never follows a symlink (O_NOFOLLOW), never blocks
+    on a FIFO (O_NONBLOCK: it reads as empty) and never reads more than the cap + 1 bytes. RAISES
     ``FileNotFoundError`` when the file vanished since it was listed (the drain moved it)."""
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -120,9 +120,6 @@ def _envelope_tx_ref(path: Path) -> Optional[str]:
     except OSError:
         return None
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_ENVELOPE:
-            return None
         chunks: "list[bytes]" = []
         while sum(map(len, chunks)) <= _MAX_ENVELOPE:
             b = os.read(fd, _MAX_ENVELOPE + 1)
@@ -130,12 +127,12 @@ def _envelope_tx_ref(path: Path) -> Optional[str]:
                 break
             chunks.append(b)
     except OSError:
-        return None
+        return None                                # e.g. a directory named *.json
     finally:
         os.close(fd)
     raw = b"".join(chunks)
     if len(raw) > _MAX_ENVELOPE:
-        return None                                # it grew past the cap after the size check
+        return None                                # the drain refuses it unread too: it can never be minted as is
     try:
         env = json.loads(raw.decode("utf-8"))
         body = json.loads(base64.b64decode(env["body_b64"], validate=True))

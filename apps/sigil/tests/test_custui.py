@@ -365,18 +365,22 @@ def _bad_provisioner(reply: bytes):
     return srv, srv.server_address[1]
 
 
-@pytest.mark.parametrize("reply", [
-    b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\n<html></html>",    # not JSON
-    b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"ok\": tr",  # truncated
-], ids=["not_json", "truncated"])
-def test_an_unreadable_provisioner_reply_is_one_clean_502_on_every_verb(tmp_path, monkeypatch, reply):
+_UNREADABLE = (502, {"error": "provisioner reply unreadable"})
+
+
+@pytest.mark.parametrize("reply,want", [
+    (b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\n<html></html>", _UNREADABLE),
+    (b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"ok\": tr", _UNREADABLE),
+    (b"HTTP/1.0 403 Forbidden\r\nContent-Length: 400\r\n\r\n{\"error\": \"pro",          # a truncated REFUSAL keeps
+     (403, {"error": "provision error"})),                                                  # its status
+], ids=["not_json", "truncated", "truncated_refusal"])
+def test_an_unreadable_provisioner_reply_is_one_clean_answer_on_every_verb(tmp_path, monkeypatch, reply, want):
     """Audit E1c (root cause): a hop reply the edge cannot read used to raise out of `_provision` — a 400 on POST
-    and, on GET, a handler traceback and a DROPPED connection. Both verbs now answer the same clean 502."""
+    and, on GET, a handler traceback and a DROPPED connection. Both verbs now answer the same clean status."""
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
     bad, bport = _bad_provisioner(reply)
     edge, ep = _edge(f"http://127.0.0.1:{bport}", str(tmp_path / "custsessions"))
     try:
-        want = (502, {"error": "provisioner reply unreadable"})
         assert _post(_opener(), ep, "/api/customer/login", {"email": "x@acme.com", "password": "pw"}) == want
         sid = edge.sessions.create("cust_reader", "customer", org_id="org_reader")
         assert _get(_opener(), ep, "/api/customer/billing", cookie=f"{CUSTOMER_COOKIE}={sid}") == want

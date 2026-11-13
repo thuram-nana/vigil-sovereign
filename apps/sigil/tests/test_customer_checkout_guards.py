@@ -447,11 +447,13 @@ def test_only_an_earlier_plan_checkout_of_this_org_holds_the_window(monkeypatch,
     assert [x.get("payment_plan") for x in posted][-1] == _PLAN and len(posted) == 3
 
 
-@pytest.mark.parametrize("fault", ["unwired", "not_found", "unattributable", "symlink", "oversize", "unlistable"])
+@pytest.mark.parametrize("fault", ["unwired", "not_found", "unattributable", "symlink", "oversize", "fifo",
+                                   "unlistable"])
 def test_a_spool_that_cannot_prove_the_earlier_plan_unpaid_keeps_refusing(monkeypatch, tmp_path, fault):
     """Fail-closed: the expired record lapses only on a spool that was READ and shows no webhook that could be its
     payment. Unwired, not found, an envelope that cannot be read or attributed (a symlink is never followed, an
-    oversize file never read), or a stage that cannot be listed all keep refusing — and keep the plan un-offered."""
+    oversize file never trusted, a FIFO never blocks the read), or a stage that cannot be listed all keep refusing —
+    and keep the plan un-offered."""
     import os
 
     from sigil.ui.pending_checkout import DEFAULT_TTL_S
@@ -473,10 +475,13 @@ def test_a_spool_that_cannot_prove_the_earlier_plan_unpaid_keeps_refusing(monkey
         real = _spool_webhook(tmp_path, "vigil:org_other:n", 7002)        # attributable — but only via the link
         (root / "rejected").mkdir()
         (root / "rejected" / "x.json").symlink_to(real)
-    elif fault == "oversize":
-        (root / "rejected").mkdir()
-        big = _envelope({"data": {"tx_ref": "vigil:org_other:n", "pad": "x" * (256 * 1024)}})
+    elif fault == "oversize":                                         # past the 256 KiB envelope cap (padding a
+        (root / "rejected").mkdir()                                   # valid envelope: its head alone would parse)
+        big = _envelope({"data": {"tx_ref": "vigil:org_other:n"}}) + b" " * (256 * 1024)
         (root / "rejected" / "x.json").write_bytes(big)
+    elif fault == "fifo":
+        (root / "rejected").mkdir()
+        os.mkfifo(root / "rejected" / "x.json")                       # no writer: a blocking open would hang
     else:
         (root / "retry").write_text("not a directory", encoding="utf-8")
     later = 5000.0 + DEFAULT_TTL_S + 1
