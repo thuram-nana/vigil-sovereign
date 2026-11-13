@@ -418,9 +418,10 @@ class CompletionSpoolWatcher:
         """E3bc: finish every RECORDED settle of a lease on this drain's seam (in its scope) that a crash or an
         error interrupted, whatever decided it — a completion, a cancel, a sweep or an expired pause
         (``ops_sweeps.finish_interrupted_settles``: ``settle_launch(finish_only=True)``, which moves only the recorded
-        decision, exactly once). Without this an expired-pause settle interrupted after its settlement marker would
-        wait for an operator's sweep, and a relaunch on that host would be refused until then. A roll-forward of a
-        completion's settle writes that completion's notification (NTF-3), as the re-drive does. Returns
+        decision, exactly once). So such a settle — an expired-pause settle stopped after its settlement marker
+        included — lands on the drain's next pass with no operator, and a relaunch on that host waits only until
+        then. A roll-forward of a completion's settle writes that completion's notification (NTF-3), as the re-drive
+        does. Returns
         ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported on
         stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run."""
         import types
