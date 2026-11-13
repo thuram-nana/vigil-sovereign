@@ -180,6 +180,7 @@ SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap 
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
 SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
 TRIAL_LAUNCH_CAP_DIR = _customer / "trial_launch_cap"   # the global daily trial-launch cap's markers
+TRIAL_IP_LIMIT_DIR = _customer / "trial_ip_limit"       # the opt-in per-IP trial-grant limiter's markers
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
@@ -215,6 +216,8 @@ SIGNUP_EMAIL_PER_HOUR = _int_env("VIGIL_SIGNUP_EMAIL_PER_HOUR", 0)
 # trial launches per rolling 24h, all trial orgs together (bounds daily trial spend at cap x trial reservation).
 # Owner-set; 0 (the default) means trial launches are off.
 TRIAL_LAUNCH_DAILY_CAP = _int_env("VIGIL_TRIAL_LAUNCH_DAILY_CAP", 0)
+# preview trial GRANTS per client IP per rolling 24h, when VIGIL_TRIAL_IP_LIMIT_ENABLED is on.
+TRIAL_GRANTS_PER_IP = _int_env("VIGIL_TRIAL_GRANTS_PER_IP", 3)
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
 # decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
 # later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
@@ -250,6 +253,12 @@ def trial_preview_enabled() -> bool:
     only when the org, its canonical mailbox and its trial entries are all unclaimed (one trial per org and per
     mailbox), and later slices show that org partial results until it buys credits."""
     return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def trial_ip_limit_enabled() -> bool:
+    """True iff the opt-in per-IP soft limit on preview trial grants is ON (`VIGIL_TRIAL_IP_LIMIT_ENABLED`
+    affirmative; default OFF)."""
+    return (os.environ.get("VIGIL_TRIAL_IP_LIMIT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def trial_product_id() -> str:
