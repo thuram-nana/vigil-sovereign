@@ -238,6 +238,23 @@ def test_admit_refuses_on_a_corrupt_marker_and_does_not_reset_it(tmp_path, conte
     assert json.loads(lim._marker("a").read_text(encoding="utf-8"))["fails"] == [1.0]   # nothing recorded
 
 
+@pytest.mark.parametrize("content", ["", "{torn", "[]"])
+def test_a_corrupt_marker_older_than_any_lock_it_could_hold_is_counted_afresh(tmp_path, content):
+    """A marker torn by a crash (or otherwise corrupt) refuses — but not for ever: once the FILE is older than one
+    window + the longest lock, nothing it held can still be live, so the key is admitted and counted afresh (before,
+    only another key's sweep could ever reap it: a quiet single-org deployment stayed locked out)."""
+    import os
+    lim = _alim(tmp_path / "l")
+    assert lim.admit("a", now=1.0) is None
+    lim._marker("a").write_text(content, encoding="utf-8")
+    t = 10_000.0
+    os.utime(lim._marker("a"), (t - lim.window_s - lim.max_lock_s + 5, t - lim.window_s - lim.max_lock_s + 5))
+    assert lim.admit("a", now=t) == lim.base_lock_s                    # still within reach of a live lock: refuse
+    os.utime(lim._marker("a"), (t - lim.window_s - lim.max_lock_s - 5, t - lim.window_s - lim.max_lock_s - 5))
+    assert lim.admit("a", now=t) is None
+    assert json.loads(lim._marker("a").read_text(encoding="utf-8"))["fails"] == [t]   # counted from zero
+
+
 def test_admit_refuses_when_the_directory_bound_is_full(tmp_path):
     lim = _alim(tmp_path / "l", max_keys=1)
     assert lim.admit("a", now=1.0) is None
@@ -253,11 +270,29 @@ def test_the_sweep_never_reaps_the_lock_file(tmp_path):
 
 def test_admit_is_exact_across_concurrent_processes(tmp_path):
     """8 PROCESSES x 6 attempts on one marker dir: exactly max_fails (10) are admitted — the flock serializes the
-    read-check-write across processes (no lost update lets two processes admit on the same count)."""
-    code = ("lim = m.LoginRateLimiter(sys.argv[2], max_fails=10, window_s=1e6, base_lock_s=1e6)\n"
+    read-check-write across processes (no lost update lets two processes admit on the same count). Every process
+    waits at a start barrier and the read-to-write step is widened (test instrumentation), so the attempts really
+    overlap: without the flock, processes read the same count and admit past the ceiling on every run."""
+    import time
+    bar = tmp_path / "barrier"
+    code = ("import os, time\n"
+            "lim = m.LoginRateLimiter(sys.argv[2], max_fails=10, window_s=1e6, base_lock_s=1e6)\n"
+            "real = lim._next_record\n"
+            "def slow(rec, t):\n"
+            "    time.sleep(0.01)\n"
+            "    return real(rec, t)\n"
+            "lim._next_record = slow\n"
+            "open(sys.argv[3] + '.ready.' + str(os.getpid()), 'w').close()\n"
+            "while not os.path.exists(sys.argv[3] + '.go'):\n"
+            "    time.sleep(0.002)\n"
             "sys.stdout.write(''.join('1' if lim.admit('org', 'user', now=1000.0) is None else '0' "
             "for _ in range(6)))\n")
-    procs = _procs(code, str(tmp_path / "l"), n=8)
-    out = "".join(p.communicate(timeout=60)[0] for p in procs)
+    procs = _procs(code, str(tmp_path / "l"), str(bar), n=8)
+    deadline = time.monotonic() + 60
+    while len(list(tmp_path.glob("barrier.ready.*"))) < 8:
+        assert time.monotonic() < deadline and all(p.poll() is None for p in procs), "a worker never got ready"
+        time.sleep(0.01)
+    (tmp_path / "barrier.go").touch()
+    out = "".join(p.communicate(timeout=120)[0] for p in procs)
     assert all(p.returncode == 0 for p in procs)
     assert len(out) == 48 and out.count("1") == 10, out

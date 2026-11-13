@@ -348,6 +348,57 @@ def test_an_edge_without_a_hop_key_refuses_every_verb_cleanly(tmp_path, monkeypa
         sov.shutdown(); edge.shutdown()
 
 
+def _bad_provisioner(reply: bytes):
+    """A loopback stand-in for the cockpit that answers every hop with 200 + ``reply`` VERBATIM (raw bytes, so
+    the reply can lie about its length — a truncated body — or not be JSON at all)."""
+    import socketserver
+
+    class _H(socketserver.StreamRequestHandler):
+        def handle(self):
+            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                pass                                              # (headers; the body is never read)
+            self.wfile.write(reply)
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+@pytest.mark.parametrize("reply", [
+    b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\n<html></html>",    # not JSON
+    b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"ok\": tr",  # truncated
+], ids=["not_json", "truncated"])
+def test_an_unreadable_provisioner_reply_is_one_clean_502_on_every_verb(tmp_path, monkeypatch, reply):
+    """Audit E1c (root cause): a hop reply the edge cannot read used to raise out of `_provision` — a 400 on POST
+    and, on GET, a handler traceback and a DROPPED connection. Both verbs now answer the same clean 502."""
+    monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
+    bad, bport = _bad_provisioner(reply)
+    edge, ep = _edge(f"http://127.0.0.1:{bport}", str(tmp_path / "custsessions"))
+    try:
+        want = (502, {"error": "provisioner reply unreadable"})
+        assert _post(_opener(), ep, "/api/customer/login", {"email": "x@acme.com", "password": "pw"}) == want
+        sid = edge.sessions.create("cust_reader", "customer", org_id="org_reader")
+        assert _get(_opener(), ep, "/api/customer/billing", cookie=f"{CUSTOMER_COOKIE}={sid}") == want
+    finally:
+        edge.shutdown(); bad.shutdown()
+
+
+def test_an_unexpected_get_fault_answers_a_clean_500(tmp_path, monkeypatch):
+    """Any other GET-handler fault gets do_POST's catch-all treatment: one JSON error, no internals, never a
+    dropped connection."""
+    from sigil.ui.custui import CustomerHandler
+
+    def boom(self, action):
+        raise RuntimeError("internal detail that must not leak")
+    monkeypatch.setattr(CustomerHandler, "_customer_read_relay", boom)
+    edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "custsessions"))
+    try:
+        assert _get(_opener(), ep, "/api/customer/billing") == (500, {"error": "request failed"})
+    finally:
+        edge.shutdown()
+
+
 def test_serve_customer_cli_fails_closed_on_a_public_bind():
     """The `sigil serve-customer` CLI must REFUSE a public/unspecified bind (exit 2) — the customer edge
     sets a session cookie, so it may never face the internet directly; it binds loopback/private behind a

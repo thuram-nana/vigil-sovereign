@@ -156,6 +156,14 @@ class LoginRateLimiter:
             raise
         return fd
 
+    def _outlived(self, marker: Path, t: float) -> bool:
+        """True iff `marker` was last written longer ago than any lockout (`max_lock_s`) or in-window attempt
+        (`window_s`) it could encode — so whatever it holds is no longer live. False on any stat fault."""
+        try:
+            return t - os.stat(marker, follow_symlinks=False).st_mtime > self.window_s + self.max_lock_s
+        except OSError:
+            return False
+
     def _next_record(self, rec: dict, t: float) -> "tuple[dict, Optional[float]]":
         """The marker state after one more failure/attempt at `t`, and the lockout it arms (None if none)."""
         fails = self._recent_fails(rec, t)
@@ -279,14 +287,20 @@ class LoginRateLimiter:
             recs: "list[dict]" = []
             worst: "Optional[float]" = None
             for k in keys:                             # read EVERY key before recording ANY (all-or-nothing gate)
+                marker = self._marker(k)
                 try:
-                    rec = json.loads(self._marker(k).read_text(encoding="utf-8"))
+                    rec = json.loads(marker.read_text(encoding="utf-8"))
                 except FileNotFoundError:
                     rec = {}                           # no attempts yet (NOT an error)
                 except (OSError, ValueError):
-                    return self.base_lock_s            # unreadable / corrupt / hostile marker → refuse, never reset
+                    rec = None
                 if not isinstance(rec, dict):
-                    return self.base_lock_s
+                    # unreadable / corrupt / hostile marker → refuse, never reset — until the FILE is older than any
+                    # lock or in-window attempt it could still encode (a write torn by a crash must not lock the key
+                    # out for ever, and only `_sweep` on ANOTHER key's admit would otherwise ever reap it).
+                    if not self._outlived(marker, t):
+                        return self.base_lock_s
+                    rec = {}                           # nothing it held can still be live: count afresh
                 lu = rec.get("lock_until")
                 if isinstance(lu, (int, float)) and not isinstance(lu, bool) and float(lu) - t > 0:
                     worst = max(worst or 0.0, float(lu) - t)

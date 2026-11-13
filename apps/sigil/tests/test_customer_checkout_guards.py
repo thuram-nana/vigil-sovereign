@@ -80,6 +80,35 @@ def test_concurrent_real_hop_checkouts_cannot_overrun_the_limit(tmp_path, monkey
         sov.shutdown(); edge.shutdown()
 
 
+def test_overlapping_checkout_attempts_are_guarded_and_counted_atomically(monkeypatch):
+    """The real-hop tests above reach the limiter one request at a time (each hop pays a slow body binding). Here the
+    attempts really overlap — a start barrier, and the limiter's read-to-write step widened (test instrumentation) —
+    as concurrent requests in several cockpit threads or processes would: exactly _CHECKOUT_MAX are admitted. A
+    check-then-record limiter (``check`` + ``record_failure``) would let every one of them through."""
+    import threading
+    import time
+
+    from sigil.ui.provision import Provisioner
+    _on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    lim = p.checkout_limiter
+    real = lim._next_record
+
+    def slow(rec, t):
+        time.sleep(0.02)
+        return real(rec, t)
+    lim._next_record = slow
+    n = Provisioner._CHECKOUT_MAX + 6
+    start = threading.Barrier(n)
+
+    def attempt(_i):
+        start.wait(timeout=30)
+        return p._checkout_rate_ok(admin, org, 5000.0)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+        admitted = list(ex.map(attempt, range(n)))
+    assert admitted.count(True) == Provisioner._CHECKOUT_MAX, admitted
+
+
 @pytest.mark.parametrize("fault", ["unwritable", "corrupt"])
 def test_limiter_state_that_cannot_be_read_or_written_refuses_over_the_hop(tmp_path, monkeypatch, fault):
     import hashlib
