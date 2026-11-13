@@ -81,8 +81,9 @@ the spine** — never the source of truth.
   `drain_error`), and also reports a lease still published more than 10 minutes after its settlement
   marker was written (`launch_settlements.unfinished`) — so such a hold is never silent, whether or not
   the marker exists. Each pass reads only the spine records appended since the previous one, from a
-  checkpoint beside the spool (`.settle-scan.json`); a missing or unreadable one, one from another spine
-  or a spine reset, restored or pruned since means one full read. The lock files are transients that
+  checkpoint beside the spool (`.settle-scan.json`), and the whole spine at least once an hour (so a lease
+  restored onto the seam from a backup is found then); a missing or unreadable checkpoint, one from
+  another spine or a spine reset, restored or pruned since means one full read. The lock files are transients that
   both backup legs skip: `<stem>.settle.lock` beside the spine, the settlement, pause and
   paused‑past‑expiry `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the
   completion spool (created by the settle drain). **Run `ops-sweep reservations --apply` as the service

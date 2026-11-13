@@ -410,7 +410,7 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
     def _scan(keys: Any) -> Any:
         return settle_checkpoint.scan(gate.store, kp.public_key_b64, keys=keys,
                                       path=Path(checkpoint) if checkpoint is not None else None, scope=scope,
-                                      listed_from=listed_from, listing_clean=clean)
+                                      listed_from=listed_from, listing_clean=clean, now=float(now))
 
     pending = gate.interrupted_settlements([b.signed_lease for b in leases], strict=True, scan=_scan)
     rows: "list[dict]" = []

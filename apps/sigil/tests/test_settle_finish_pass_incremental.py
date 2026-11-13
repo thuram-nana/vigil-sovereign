@@ -8,7 +8,8 @@ With ``VIGIL_SETTLE_SPINE_RECORD`` on, every settle-drain pass finishes the reco
     listed the seam (every settlement record of it is after the checkpoint's ``listed_from``); a lease unreadable at
     that listing, or a checkpoint that cannot be trusted (missing, unreadable, oversized, a symlink, another spine,
     owner key or scope, an anchor rewritten or gone, a pruned spine), means one full read; the continued evidence
-    equals a full scan pass after pass, and a checkpoint above its size bound is not kept;
+    equals a full scan pass after pass, and a checkpoint above its size bound is not kept; the whole spine is read
+    again at least every ``FULL_RESCAN_S`` (a bundle restored onto the seam from a backup is found then);
   * a spine the pass cannot read raises, so the drain reports ``settle_finish_error`` — never "nothing to finish"
     (a read-only report still reports nothing);
   * one unreadable settlement marker is that lease's ``settle_failed``, never the whole pass;
@@ -23,6 +24,8 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * each checkpoint check dropped (spine, owner, scope, anchor hash, anchor gone, live window, unknown lease,
     symlink, size)                                            -> test_a_checkpoint_that_cannot_be_trusted_means_...
   * the size bound on write dropped                           -> test_a_checkpoint_too_large_to_keep_is_not_written
+  * the periodic full read dropped / a clock gone back trusted -> test_a_lease_restored_onto_the_seam_is_found_...,
+                                                                 test_a_checkpoint_that_cannot_be_trusted_means_...
   * the carried evidence dropped                              -> test_the_continued_evidence_equals_a_full_scan_...
   * the finish pass swallowing a spine read error             -> test_a_finish_pass_that_cannot_read_the_spine_...
   * is_lease_settled outside the per-lease try                -> test_one_unreadable_settlement_marker_is_that_...
@@ -159,7 +162,7 @@ def _tamper(field, value):
 
 @pytest.mark.parametrize("how", [
     "missing", "garbage", "oversized", "other_spine", "other_owner", "other_scope", "anchor_rewritten",
-    "anchor_beyond_tip", "spine_pruned", "evidence_unknown_lease", "symlink",
+    "anchor_beyond_tip", "spine_pruned", "evidence_unknown_lease", "symlink", "full_read_due", "clock_went_back",
 ])
 def test_a_checkpoint_that_cannot_be_trusted_means_one_full_read(record_on, monkeypatch, how, tmp_path):
     s = _store()
@@ -181,6 +184,8 @@ def test_a_checkpoint_that_cannot_be_trusted_means_one_full_read(record_on, monk
         "anchor_rewritten": _tamper("anchor", lambda c, s_: [c["anchor"][0], "0" * 64]),
         "anchor_beyond_tip": _tamper("anchor", lambda c, s_: [s_.next_seq + 10, c["anchor"][1]]),
         "spine_pruned": _tamper("live_from", 1),
+        "full_read_due": _tamper("full_at", NOW + 120 - settle_checkpoint.FULL_RESCAN_S),
+        "clock_went_back": _tamper("full_at", NOW + 121),
         "evidence_unknown_lease": _tamper("evidence", [[[ORG, "cust_x", "n"], {
             "record_seq": None, "malformed": False, "landed": ["wallet"], "decision": None}]]),
     }
@@ -205,6 +210,26 @@ def test_a_checkpoint_that_cannot_be_trusted_means_one_full_read(record_on, monk
     restore()
     assert rows == [] and seen["visits"] >= n, (how, seen, n)              # read from seq 0, nothing to finish
     assert json.loads(cp.read_text(encoding="utf-8"))["anchor"][0] == s.next_seq - 1   # a fresh checkpoint
+
+
+def test_a_lease_restored_onto_the_seam_is_found_by_the_periodic_full_read(record_on, monkeypatch):
+    s = _store()
+    _seat(s, credits=1_000, hosts=(HOST, OTHER))
+    _reserve(s, units=100, publish=True, hours=8, nonce="P" * 16)
+    rK = _reserve(s, units=300, publish=True, hours=8, nonce="K" * 16, host=OTHER)
+    _decided_no_marker(monkeypatch, s, rK)                                 # decided, only the spine shows it
+    p = lease_path(_base(), rK["slug"])
+    kept = p.read_bytes()
+    p.unlink()                                                             # its bundle lost from the seam ...
+    _noise(s, 5)
+    cp = Path(_spool()) / CHECKPOINT_NAME
+    full = settle_checkpoint.FULL_RESCAN_S
+    assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90, checkpoint=cp) == []
+    assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90 + full / 2, checkpoint=cp) == []
+    p.write_bytes(kept)                                                    # ... and restored from a backup
+    rows = ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90 + full, checkpoint=cp)
+    assert [(r["slug"], r["status"]) for r in rows] == [(rK["slug"], "settle_completed")], rows
+    assert _avail(s) == 1_000 - 100 and not _published(rK)
 
 
 def test_the_control_a_trusted_checkpoint_reads_only_the_tail(record_on, monkeypatch):
@@ -248,7 +273,7 @@ def test_the_continued_evidence_equals_a_full_scan_pass_after_pass(record_on, mo
         tip = settle_checkpoint.spine_tip(s)
         keys = [(ORG, r["slug"], r["nonce"]) for r in listed]
         got = settle_checkpoint.scan(s, kp.public_key_b64, keys=keys, path=cp, scope="*", listed_from=tip,
-                                     listing_clean=True)
+                                     listing_clean=True, now=NOW)
         want = scan_settlements(s, kp.public_key_b64, keys=keys)
         fields = ("through", "record_seq", "decision", "malformed", "landed")
         assert {k: [getattr(v, f) for f in fields] for k, v in got.items()} == {

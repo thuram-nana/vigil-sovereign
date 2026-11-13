@@ -11,6 +11,8 @@ records appended since:
   ``anchor``                         ``[seq, entry_hash]`` of the last record the pass read (its ``through``);
   ``listed_from``                    the spine tip read BEFORE that pass listed the seam;
   ``listing_clean``                  every in-scope lease file on the seam was read and verified by that listing;
+  ``full_at``                        the pass clock of the last FULL read (one is made at least every
+                                     :data:`FULL_RESCAN_S`);
   ``leases`` / ``evidence``          every lease that listing found, and the non-empty evidence of each through the
                                      anchor (``launch_settlement.evidence_to_json``).
 
@@ -28,7 +30,9 @@ So every settlement record of such a lease was appended after its bundle was wri
 read: its seq is greater than ``listed_from``, and a pass with such a lease reads from ``min(anchor, listed_from)``.
 (Reading ``(listed_from, anchor]`` again for the carried leases changes nothing: the first verified decision wins and
 the landed entries are a set.) A listing that was not clean gives no such guarantee, so a new lease after it is a
-full scan.
+full scan. Only a publish writes a lease bundle, but the seam can also be restored from a backup out of step with the
+spine; so a pass reads the whole spine again at least every :data:`FULL_RESCAN_S` (and whenever its clock is behind
+the checkpoint's), and a bundle that reappeared on the seam any other way is found within that time.
 
 The checkpoint never decides money: it only selects the leases the pass hands to ``settle_launch(finish_only=True)``,
 which re-reads the spine under its locks and moves only the recorded decision, exactly once. A lost or stale
@@ -39,6 +43,7 @@ SOVEREIGN PLANE ONLY (FATAL-2): ``assert_no_offense()`` at import.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 from pathlib import Path
@@ -53,6 +58,8 @@ CHECKPOINT_NAME = ".settle-scan.json"
 _SCHEMA = "vigil-settle-scan-checkpoint-v1"
 #: The largest checkpoint written or read; a larger one is not kept (each pass then reads the whole spine).
 MAX_BYTES = 4 << 20
+#: A pass reads the whole spine at least this often (seconds of the pass clock), whatever the checkpoint says.
+FULL_RESCAN_S = 3600.0
 
 
 def spine_tip(store) -> int:
@@ -69,12 +76,12 @@ def _live_from(store) -> int:
 
 
 class _Checkpoint:
-    __slots__ = ("through", "anchor_hash", "listed_from", "listing_clean", "keys", "evidence")
+    __slots__ = ("through", "anchor_hash", "listed_from", "listing_clean", "full_at", "keys", "evidence")
 
-    def __init__(self, through: int, anchor_hash: str, listed_from: int, listing_clean: bool,
+    def __init__(self, through: int, anchor_hash: str, listed_from: int, listing_clean: bool, full_at: float,
                  keys: "set[tuple[str, str, str]]", evidence: "dict[tuple[str, str, str], Any]") -> None:
         self.through, self.anchor_hash = through, anchor_hash
-        self.listed_from, self.listing_clean = listed_from, listing_clean
+        self.listed_from, self.listing_clean, self.full_at = listed_from, listing_clean, full_at
         self.keys, self.evidence = keys, evidence
 
 
@@ -130,6 +137,9 @@ def _load(path: Path, store, pubkey: str, scope: str) -> Optional[_Checkpoint]:
             return None
         if type(obj.get("live_from")) is not int:
             return None
+        full_at = obj["full_at"]
+        if isinstance(full_at, bool) or not isinstance(full_at, (int, float)) or not math.isfinite(full_at):
+            return None
         keys = {_key(k) for k in obj["leases"]}
         evidence: "dict[tuple[str, str, str], Any]" = {}
         for item in obj["evidence"]:
@@ -147,11 +157,12 @@ def _load(path: Path, store, pubkey: str, scope: str) -> Optional[_Checkpoint]:
     rec = store.get(through)
     if rec is None or rec.seq != through or rec.entry_hash != anchor[1]:
         return None
-    return _Checkpoint(through, anchor[1], listed_from, clean, keys, evidence)
+    return _Checkpoint(through, anchor[1], listed_from, clean, float(full_at), keys, evidence)
 
 
 def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through: int, through_hash: str,
-          listed_from: int, listing_clean: bool, evidence: "dict[tuple[str, str, str], Any]") -> None:
+          listed_from: int, listing_clean: bool, full_at: float,
+          evidence: "dict[tuple[str, str, str], Any]") -> None:
     """Replace the checkpoint atomically (best-effort: a write that fails, or would exceed :data:`MAX_BYTES`, leaves
     no checkpoint, so the next pass reads the whole spine)."""
     from .governor.launch_settlement import evidence_to_json
@@ -159,7 +170,7 @@ def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through
     body = json.dumps({
         "schema": _SCHEMA, "spine": str(store.path), "owner": pubkey, "scope": scope, "live_from": int(live_from),
         "anchor": [int(through), str(through_hash)], "listed_from": int(min(listed_from, through)),
-        "listing_clean": bool(listing_clean), "leases": sorted([list(k) for k in evidence]),
+        "listing_clean": bool(listing_clean), "full_at": float(full_at), "leases": sorted([list(k) for k in evidence]),
         "evidence": sorted([[list(k), evidence_to_json(ev)] for k, ev in evidence.items() if ev.settled]),
     }, sort_keys=True, separators=(",", ":"))
     try:
@@ -174,18 +185,20 @@ def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through
 
 
 def scan(store, pubkey: str, *, keys: "Iterable[tuple[str, str, str]]", path: "Optional[Path]", scope: str,
-         listed_from: int, listing_clean: bool) -> "dict[tuple[str, str, str], Any]":
+         listed_from: int, listing_clean: bool, now: float) -> "dict[tuple[str, str, str], Any]":
     """The settlement evidence of every lease in ``keys`` — what ``launch_settlement.scan_settlements`` returns for
     the records the spine holds — reading only what was appended since the checkpoint at ``path`` when it is usable
     (the module docstring), else the whole spine; then the checkpoint is replaced (best-effort). ``listed_from`` is
     the spine tip this pass read before it listed ``keys`` (:func:`spine_tip`) and ``listing_clean`` whether that
-    listing read and verified every in-scope lease file. ``path=None`` reads the whole spine and keeps nothing. A
-    spine read failure raises."""
+    listing read and verified every in-scope lease file; ``now`` is the pass clock (a full read is due every
+    :data:`FULL_RESCAN_S`). ``path=None`` reads the whole spine and keeps nothing. A spine read failure raises."""
     from .governor.launch_settlement import scan_settlements_since
     want = {(str(o), str(s), str(n)) for o, s, n in keys}
     cp = _load(path, store, pubkey, scope) if path is not None else None
     if cp is not None and not (want <= cp.keys or cp.listing_clean):
         cp = None                                          # a new lease after a listing that was not clean: full
+    if cp is not None and not cp.full_at <= now < cp.full_at + FULL_RESCAN_S:
+        cp = None                                          # a full read is due (or the clock went back): full
     since, start = None, -1
     if cp is not None:
         # A lease the checkpoint does not carry was published after its listing began: every settlement record of
@@ -193,10 +206,12 @@ def scan(store, pubkey: str, *, keys: "Iterable[tuple[str, str, str]]", path: "O
         start = cp.through if want <= cp.keys else min(cp.through, cp.listed_from)
         since = {k: cp.evidence[k] for k in want & cp.keys if k in cp.evidence}
     evs, through, through_hash = scan_settlements_since(store, pubkey, keys=want, since=since, since_seq=start)
+    full_at = cp.full_at if cp is not None else float(now)
     if path is not None:
         if through_hash is None and cp is not None and through == cp.through:
             through_hash = cp.anchor_hash                  # nothing appended since the anchor: it still holds
         if through_hash is not None:
             _save(path, store, pubkey, scope, live_from=_live_from(store), through=through,
-                  through_hash=through_hash, listed_from=listed_from, listing_clean=listing_clean, evidence=evs)
+                  through_hash=through_hash, listed_from=listed_from, listing_clean=listing_clean,
+                  full_at=full_at, evidence=evs)
     return evs
