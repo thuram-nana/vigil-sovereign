@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 import pytest
-from conftest import REPO_ROOT
+from range_testsupport import REPO_ROOT
 
 CHARTER = os.path.join(REPO_ROOT, "targets", "meridian", "charter.md")
 # the exact section header ethics.parse_scope keys on (framework/v2/common/ethics.py:_SCOPE_HEADER)

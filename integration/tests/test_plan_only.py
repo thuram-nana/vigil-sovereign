@@ -44,13 +44,27 @@ def _complete() -> LLMDecision:
 
 @pytest.fixture()
 def hermetic_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
+    # Setting CRUCIBLE_ROOT to a path that does not exist was NOT hermetic, three ways over. The engine only
+    # honours a root that contains its sentinel file, so a bare path fell back to the source tree and the
+    # CLI tests wrote a charter into engine/crucible/targets/; `crucible_root` is lru_cached, so even a
+    # valid root is ignored once an earlier test has resolved one; and the CLI's default base_dir is the
+    # CURRENT DIRECTORY, so they also left an operator keypair, the offense keys, a spine and a usage
+    # ledger in the checkout the suite was started from. So: a real root with the sentinel, the cache
+    # reset on both sides of the test, and the test run from the temp dir.
+    from framework.v2.common import paths as _paths
+    root = tmp_path / "crucible-root"
+    root.mkdir()
+    (root / _paths._SENTINEL).write_text("# hermetic test root\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(root))
+    _paths._reset_cache()
+    monkeypatch.chdir(tmp_path)
     # Force the keyless-live REPLAY think path: if a key were resolvable, think() would take the cloud path
     # (and, with none valid, fail-closed to ASK_USER) — leaving the scripted decisions inert and the test
     # vacuous. Unset every key source so the ReplayThinker actually supplies each decision.
     for k in ("ANTHROPIC_API_KEY", "VIGIL_ANTHROPIC_API_KEY", "CLAUDE_API_KEY"):
         monkeypatch.delenv(k, raising=False)
-    return tmp_path
+    yield tmp_path
+    _paths._reset_cache()
 
 
 def _engine(tmp_path, replay, *, plan_only: bool):

@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from conftest import free_port
+from range_testsupport import free_port
 
 from vigil_range.meridian import Config, serve
 from vigil_range.meridian.app import stop_servers
