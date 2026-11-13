@@ -1279,6 +1279,14 @@ def cmd_settle_drain(a) -> None:
                   f"(VIGIL_BILLING_TARGET_MARGIN / VIGIL_BILLING_CANCEL_SETTLEMENT / the price table, in THIS unit's "
                   f"environment). Fix it; this unit stays FAILED until they settle.", file=sys.stderr)
             sys.exit(1)
+        if r.get("settle_stuck"):
+            # E3bc: a recorded settle this drain has not been able to finish for longer than its grace (or a finish
+            # pass that keeps failing) holds that customer's refund and any relaunch on the host. Fail the unit.
+            print(f"  ALARM: {r['settle_stuck']} recorded settle(s) have not been finished for more than 10 minutes "
+                  f"(the reasons are on stderr above): the refund has not landed and a new launch on that host is "
+                  f"refused with a retry. Fix the cause (the seam / spine / spool must be writable by this unit's "
+                  f"user); this unit stays FAILED until they finish. `vigil doctor` lists them.", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_ops_sweep(a) -> None:

@@ -1524,10 +1524,22 @@ def _probe_model_gateway(url: str) -> "bool | None":
     return None
 
 
-#: How long a lease may stay published after its settlement marker was written before ``vigil doctor`` reports the
-#: settle as unfinished (E3bc): a settle retires its lease within moments, and the settle drain (every ~60 s) finishes
-#: an interrupted one, so a lasting one is an issue, a settle in progress is not.
-_UNFINISHED_SETTLE_GRACE_S = 600.0
+#: How long a lease may stay published after its settlement marker was written — or a recorded settle stay on the
+#: settle drain's unfinished record — before ``vigil doctor`` reports it as a hard issue (E3bc): a settle retires its
+#: lease within moments, and the settle drain (every ~60 s) finishes an interrupted one, so a lasting one is an issue,
+#: a settle in progress is not. The drain ALARMs on the same grace (one constant: ``live/settle_progress``).
+from .live.settle_progress import UNFINISHED_SETTLE_GRACE_S as _UNFINISHED_SETTLE_GRACE_S  # noqa: E402
+
+
+def _settle_spool_dir() -> Path:
+    """The settle drain's completion spool, where it records the settles it could not finish
+    (``live/settle_progress``): ``VIGIL_SETTLE_SPOOL`` in this environment (or ``sigil.env``), else in
+    ``~/.config/vigil/settle-drain.env``, else the unit's default ``~/.sigil/spool/settle``. Never raises."""
+    v = (_runtime_env().get("VIGIL_SETTLE_SPOOL") or "").strip()
+    if not v:
+        v = ((_parse_env_file(Path.home() / ".config" / "vigil" / "settle-drain.env") or {}).get("VIGIL_SETTLE_SPOOL")
+             or "").strip()
+    return Path(v).expanduser() if v else Path.home() / ".sigil" / "spool" / "settle"
 
 #: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
 #: (the full list is in ``report["paused_launches"]["unreadable"]``) — keeps one bad directory from flooding it.
@@ -1957,6 +1969,42 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
         report["launch_settlements"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the launch-settlement probe could not run: {exc}")
+    # E3bc — the settle drain's own record of the recorded settles it has NOT been able to finish (written beside its
+    # completion spool every pass: live/settle_progress). It holds a settle whatever stopped it — its seam marker never
+    # written included, which the marker probe above cannot see — and a finish pass that keeps failing. Past the same
+    # grace each is a HARD issue (`launch_settlements["drain_unfinished"]` slugs / `["drain_error"]`, added only when
+    # present), as the drain itself ALARMs and fails its unit. With the record flag off nothing is read. Best-effort.
+    try:
+        if (_runtime_env().get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _AFFIRMATIVE:
+            import time as _time
+
+            from .live import settle_progress as _sp
+            _spool = _settle_spool_dir()
+            try:
+                _st = _sp.read_state(_spool)
+            except ValueError as exc:
+                report.setdefault("launch_settlements", {})["drain_record"] = "unreadable"
+                _note(f"the settle drain's record of unfinished settles ({_display_path(_sp.state_path(_spool))}) "
+                      f"cannot be read ({exc}); its next pass rewrites it. Run `vigil doctor` as the drain's user.")
+                _st = {}
+            _held, _err = _sp.overdue(_st, now=_time.time(), grace=_UNFINISHED_SETTLE_GRACE_S)
+            _mins = int(_UNFINISHED_SETTLE_GRACE_S // 60)
+            if _held:
+                report.setdefault("launch_settlements", {})["drain_unfinished"] = sorted({s for s, _n in _held})
+                _issue(f"{len(_held)} recorded customer launch settle(s) could not be finished by the settle drain for "
+                       f"more than {_mins} minutes: the refund has not landed, and a new launch on that host is "
+                       f"refused with a retry until it does. The drain prints the cause each pass (its unit's "
+                       f"journal); typically the seam (VIGIL_SETTLE_BASE_DIR), the spine or the spool is not writable "
+                       f"by the drain's user. Fix it; the drain's next pass finishes the settle.")
+            if _err:
+                report.setdefault("launch_settlements", {})["drain_error"] = _err
+                _issue(f"the settle drain's pass that finishes interrupted settles has failed for more than {_mins} "
+                       f"minutes ({_err}): a recorded settle it cannot see stays unfinished, and the relaunch it "
+                       f"holds is refused with a retry. Check the spine (`sigil verify`) and the drain unit "
+                       f"(`vigil alerts --status`).")
+    except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
+        report.setdefault("launch_settlements", {})["drain_record"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the settle drain's record of unfinished settles could not be read: {exc}")
 
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.

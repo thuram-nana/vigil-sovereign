@@ -425,7 +425,8 @@ class CompletionSpoolWatcher:
     def drain(self) -> dict:
         """One settle pass: :meth:`_drain_completions`; then — only while ``config.settle_spine_record_enabled()``
         — :meth:`_finish_interrupted_settles`, which adds ``settle_completed`` / ``settle_unfinished`` only when it
-        acted; then — only while ``config.paused_expiry_settle_enabled()`` (E8, default OFF) —
+        acted (and ``settle_stuck`` only when a recorded settle has stayed unfinished past its grace); then — only
+        while ``config.paused_expiry_settle_enabled()`` (E8, default OFF) —
         :meth:`_settle_expired_pauses`, whose counts are added as ``expired_settled`` / ``expired_unsettled``. With
         both flags off the pass is byte-identical. Completions go FIRST, so a run that finished is charged (and a
         completion's own interrupted settle finished, with its notification) before anything else of its lease."""
@@ -449,27 +450,53 @@ class CompletionSpoolWatcher:
 
         Returns ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported
         on stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run (the spine or
-        a ledger unreadable)."""
+        a ledger unreadable). Every pass records what it left unfinished, and since when, beside the spool
+        (``vigil_integration.live.settle_progress``, which ``vigil doctor`` reads); ``settle_stuck`` counts the leases
+        left unfinished — and a finish pass that kept failing — for longer than ``UNFINISHED_SETTLE_GRACE_S``, or 1
+        when that record cannot be written while something is unfinished (the CLI then ALARMs and fails the unit)."""
+        from vigil_integration.live import settle_progress
+
         from ..ops_sweeps import finish_interrupted_settles
         from ..settle_checkpoint import CHECKPOINT_NAME
+        now = float(self._now())
+        out: dict = {}
         try:
-            rows = finish_interrupted_settles(self._gate, now=float(self._now()), scope=self.scope,
-                                              on_completed=self._finished_notice,
+            rows = finish_interrupted_settles(self._gate, now=now, scope=self.scope, on_completed=self._finished_notice,
                                               checkpoint=self.spool / CHECKPOINT_NAME)
         except Exception as exc:  # noqa: BLE001 — this pass never sinks the completion drain
             _sys.stderr.write(f"vigil settle-drain: WARNING interrupted settles not checked: "
                               f"{type(exc).__name__}: {exc}\n")
-            return {"settle_finish_error": type(exc).__name__}
-        done = [r for r in rows if r["status"] == "settle_completed"]
-        left = [r for r in rows if r["status"] in ("deferred", "settle_failed")]
-        for r in left:
-            _sys.stderr.write(f"vigil settle-drain: a recorded settle of {r['slug']} is not finished yet: "
-                              f"{r['status']}{' (' + str(r['error']) + ')' if r.get('error') else ''}\n")
-        out: dict = {}
-        if done:
-            out["settle_completed"] = len(done)
-        if left:
-            out["settle_unfinished"] = len(left)
+            out["settle_finish_error"] = type(exc).__name__
+            unfinished = None
+        else:
+            done = [r for r in rows if r["status"] == "settle_completed"]
+            left = [r for r in rows if r["status"] in ("deferred", "settle_failed")]
+            for r in left:
+                _sys.stderr.write(f"vigil settle-drain: a recorded settle of {r['slug']} is not finished yet: "
+                                  f"{r['status']}{' (' + str(r['error']) + ')' if r.get('error') else ''}\n")
+            if done:
+                out["settle_completed"] = len(done)
+            if left:
+                out["settle_unfinished"] = len(left)
+            unfinished = [(r["slug"], r["nonce"]) for r in left]
+        try:
+            state = settle_progress.update_state(self.spool, now=now, unfinished=unfinished,
+                                                 error=out.get("settle_finish_error"))
+        except OSError as exc:
+            if unfinished is None or unfinished:            # held, and how long can no longer be told: alarm now
+                _sys.stderr.write(f"vigil settle-drain: WARNING could not record the unfinished settles: "
+                                  f"{type(exc).__name__}\n")
+                out["settle_stuck"] = 1
+            return out
+        stuck, err = settle_progress.overdue(state, now=now, grace=settle_progress.UNFINISHED_SETTLE_GRACE_S)
+        for slug, _nonce in stuck:
+            _sys.stderr.write(f"vigil settle-drain: a recorded settle of {slug} has not finished for more than "
+                              f"{int(settle_progress.UNFINISHED_SETTLE_GRACE_S)} s\n")
+        if err:
+            _sys.stderr.write(f"vigil settle-drain: the pass that finishes interrupted settles has failed for more "
+                              f"than {int(settle_progress.UNFINISHED_SETTLE_GRACE_S)} s ({err})\n")
+        if stuck or err:
+            out["settle_stuck"] = len(stuck) + int(bool(err))
         return out
 
     def _finished_notice(self, row: dict) -> None:

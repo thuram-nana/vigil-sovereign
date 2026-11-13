@@ -87,6 +87,9 @@ assert "strix" not in _m, "credit_lease_pause must not import strix at module sc
 import vigil_integration.live.credit_lease_expiry  # E8: the expired-paused-launch settle predicate (both planes)
 assert "framework" not in _m, "credit_lease_expiry must not import framework at module scope"
 assert "strix" not in _m, "credit_lease_expiry must not import strix at module scope"
+import vigil_integration.live.settle_progress  # E3bc: the settle drain's unfinished-settle record (both planes)
+assert "framework" not in _m, "settle_progress must not import framework at module scope"
+assert "strix" not in _m, "settle_progress must not import strix at module scope"
 import vigil_integration.live.net_recovery  # NET-2 (#73): the bounded-recovery primitive (both planes, stdlib-only)
 assert "framework" not in _m, "net_recovery must not import framework at module scope"
 assert "strix" not in _m, "net_recovery must not import strix at module scope"

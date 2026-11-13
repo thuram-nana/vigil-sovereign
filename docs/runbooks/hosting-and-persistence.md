@@ -70,12 +70,19 @@ the spine** — never the source of truth.
   lease in its scope that was interrupted — whatever decided it (a completion, a cancel, a sweep, an
   expired pause) — moving only the recorded decision, exactly once, then retires the lease, and prints
   `interrupted settles: N finished, M left for the next pass` when it acted. `ops-sweep reservations
-  --apply` finishes it too. `vigil doctor` (with the flag on in its environment or `sigil.env`) reports a
-  lease still published more than 10 minutes after its settlement was recorded as a hard issue
-  (`launch_settlements.unfinished`). Each pass reads only the spine records appended since the previous
-  one, from a checkpoint beside the spool (`.settle-scan.json`); a missing or unreadable one, one from
-  another spine or a spine reset, restored or pruned since means one full read. The lock files are
-  transients that
+  --apply` finishes it too. A settle the drain cannot finish (a busy lock, a ledger, the seam or the spine
+  not writable — its seam marker never written included) is named on stderr every pass and recorded,
+  with when it was first left unfinished, beside the completion spool (`.settle-unfinished.json`); once
+  it has stayed unfinished for more than 10 minutes — or the finish pass itself has kept failing that
+  long (an unreadable spine) — the drain prints an `ALARM` and exits non‑zero, so its unit stays FAILED
+  and the dead‑man alarms. `vigil doctor` (with the flag on in its environment or `sigil.env`) reads the
+  same record (the spool from `VIGIL_SETTLE_SPOOL`, else `~/.config/vigil/settle-drain.env`, else
+  `~/.sigil/spool/settle`) and reports both as hard issues (`launch_settlements.drain_unfinished` /
+  `drain_error`), and also reports a lease still published more than 10 minutes after its settlement
+  marker was written (`launch_settlements.unfinished`) — so such a hold is never silent, whether or not
+  the marker exists. Each pass reads only the spine records appended since the previous one, from a
+  checkpoint beside the spool (`.settle-scan.json`); a missing or unreadable one, one from another spine
+  or a spine reset, restored or pruned since means one full read. The lock files are transients that
   both backup legs skip: `<stem>.settle.lock` beside the spine, the settlement, pause and
   paused‑past‑expiry `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the
   completion spool (created by the settle drain). **Run `ops-sweep reservations --apply` as the service
