@@ -269,6 +269,8 @@ def test_the_pending_record_expires_and_the_drained_plan_takes_over(monkeypatch)
     # the first plan's webhook drains: the DRAINED subscription now refuses a second plan, also past the TTL
     SubscriptionRegistry(p.store).subscribe(org, "pro", 2000, period_start=5000.0, period_end=100_000.0,
                                             issued_at=5001.0)
+    with pytest.raises(ProvisionDenied, match="already has a plan"):    # (checked first: the accurate reason
+        p.billing_checkout(admin, org, _PLAN, now=5060.0)                # while the record is still live too)
     with pytest.raises(ProvisionDenied, match="already has a plan"):
         p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
     assert len(posted) == 1
