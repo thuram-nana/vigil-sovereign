@@ -830,6 +830,9 @@ def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
             _atomic_swap_unit(staged_unit, layout.disk(subtree))
 
 
+_EVAL_SEAM_PUBLICATION_DIRS = ("eval-capability-grants", "eval-offense-attestations")
+
+
 def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
     """Yield ``(absolute_path, base-relative posix rel)`` for every packageable file under ``base_dir``.
     Skips: transient ``*.lock``; the TPM-sealed KEK ``vault/`` dir (machine-bound, re-provisioned on restore);
@@ -852,6 +855,12 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
         if len(parts) >= 2 and parts[0] == _QUEUE_SUBDIR and parts[1] == _QUEUE_DONE_SUBDIR:
             continue
         if rel in skip_names:
+            continue
+        # The eval-capability-grant / eval-offense-attestation PUBLICATIONS are a mirror of the sovereign spine, not
+        # offense state. Restoring an old one would bring back a grant or attestation the spine has since revoked
+        # (with the old, lower floor beside it). Never package them: a restored host stays ungranted / unattested
+        # until the sovereign re-publishes (the next arm, revoke or offense close). Their floors stay packaged.
+        if parts[0] in _EVAL_SEAM_PUBLICATION_DIRS:
             continue
         # W5-4 (#448) × W7-4 (#462): the top-level install manifest is a per-INSTALL/host marker the startup
         # gate WRITES into whatever data dir this binary runs against — it describes the operating install,

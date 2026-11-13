@@ -1725,6 +1725,32 @@ def collect(repo_root) -> dict:
         if ce_hold is not None:
             report["customer_execution_hold"] = {"state": "ENABLED", "detail": _CUSTOMER_EXECUTION_FLIP_CRITERIA}
             _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {ce_hold}")
+    # 9c) An eval-capability grant revoke that could not be confirmed on the seam leaves this durable alarm: either
+    #     an offense close could not read the spine (every published grant was withdrawn instead), or one or more
+    #     publications could be neither re-published nor withdrawn and may STILL authorize. A HARD issue until an
+    #     offense close reconciles every published grant. Absent alarm => nothing is added (byte-identical report).
+    _close_alarm = home / "alarms" / "eval-grant-close-revoke.json"
+    if _close_alarm.exists():
+        _failed: list = []
+        try:
+            import json as _json
+            _rec = _json.loads(_close_alarm.read_text(encoding="utf-8"))
+            _detail = str(_rec.get("detail", ""))[:300]
+            _failed = [str(x)[:96] for x in (_rec.get("failed") or []) if isinstance(x, str)][:10]
+        except (OSError, ValueError, AttributeError, TypeError):
+            _detail = "the alarm record is unreadable"
+            _failed = ["(unknown: the alarm record is unreadable)"]
+        if _failed:
+            _issue(f"an eval-capability grant revoke could NOT be confirmed on the seam for {', '.join(_failed)} "
+                   f"({_detail}): its published grant may STILL AUTHORIZE on the offense plane. Make the seam "
+                   f"directory (VIGIL_BASE_DIR) writable and the spine readable (`sigil verify`), then close offense "
+                   f"again: the close re-publishes every grant from the spine and clears this alarm only when every "
+                   f"one is confirmed.")
+        else:
+            _issue(f"offense close could not revoke the eval-capability grants because the SPINE could not be read "
+                   f"({_detail}). Every published grant was withdrawn and its rollback floor raised, so the offense "
+                   f"plane is ungranted. Repair the spine (`sigil verify`), then close offense again to revoke on the "
+                   f"spine and clear this alarm.")
     # 10) Integrity (W6-7) — continuously verify the property the product EXISTS to guarantee: the spine
     #    hash-chain / attestation. Runs the boundary-safe integrity verifier over the sovereign spine home
     #    (SIGIL_HOME): chain integrity, signed-head freshness, the anti-rollback floor, clock skew, plus the
