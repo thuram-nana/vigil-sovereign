@@ -1311,7 +1311,8 @@ class Provisioner:
                         "a plan checkout for this workspace is already in progress — complete it, or wait for it to "
                         "expire (contact support)", code="refused_pending_spine", detail=why[:160])
                 # ... and an EARLIER plan checkout whose window ended may still have been PAID: refuse while its
-                # webhook waits undrained in the billing spool (quarantine has no time bound), whatever the record.
+                # webhook waits undrained in the billing spool (quarantine has no time bound), or while its completed
+                # Stripe subscription checkout has no drained plan yet, whatever the record.
                 unconfirmed = self.pending_checkouts.undrained(lapsed)
                 if unconfirmed:
                     self.pending_checkouts.release(requester_org_id, pending_ref)
@@ -1948,7 +1949,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
-    from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs
+    from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs, stripe_billing_spool_dirs
     from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
@@ -1997,7 +1998,8 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         # reading the billing-webhook spool (read-only) before an expired one may lapse.
         pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=orgs.owner_key,
                                                trusted_pubkey=orgs.trusted_pubkey,
-                                               billing_spools=billing_spool_dirs()),
+                                               billing_spools=billing_spool_dirs(),
+                                               stripe_spools=stripe_billing_spool_dirs()),
         # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
         checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,

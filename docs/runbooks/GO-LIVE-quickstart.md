@@ -185,7 +185,8 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    write Checkout Sessions) and pin the API version you test against (one that accepts the Checkout Session
    `adaptive_pricing` setting: every session VIGIL creates turns it off). Turn **Adaptive Pricing off** in the
    Dashboard as well (the charge must be in the catalog currency). Stripe checkout charges only currencies whose
-   Stripe minor unit is confirmed to match the catalog's (USD today). Add a webhook endpoint at `https://<operator ingress>/webhooks/stripe`
+   Stripe minor unit is confirmed to match the catalog's (USD today), and a plan (subscription) checkout accepts
+   card only. Add a webhook endpoint at `https://<operator ingress>/webhooks/stripe`
    subscribed to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed`.
 2. **Proxy route.** Set `VIGIL_STRIPE_WEBHOOK_SPOOL` (e.g. `$SIGIL_HOME/stripe-billing-spool`) and

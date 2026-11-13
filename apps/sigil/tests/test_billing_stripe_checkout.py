@@ -49,6 +49,8 @@ class _Stripe:
                 "created": 1000}
         if "expires_at" in params:                     # Stripe echoes the session bound it was asked for
             sess["expires_at"] = params["expires_at"]
+        if "payment_method_types" in params:           # ... and the payment methods it was limited to
+            sess["payment_method_types"] = list(params["payment_method_types"])
         sess.update(self.override)
         self.sessions[sid] = sess
         return copy.deepcopy(sess)
@@ -162,6 +164,34 @@ def test_a_plan_checkout_is_a_subscription_recurring_in_days_with_subscription_m
     assert params["subscription_data"] == {"metadata": {"org_id": "acme", "price_id": "price_pro",
                                                         "tx_ref": "vigil:acme:n1"}}
     assert "payment_intent_data" not in params
+
+
+def test_a_plan_checkout_is_card_only_and_a_topup_payload_is_unchanged():
+    """A plan session is limited to card, so its first invoice is settled when the checkout completes; a top-up
+    session's payload does not change."""
+    from sigil.governor.stripe_egress import encode_form
+    api = _Stripe()
+    p = _provider(api)
+    _checkout(p, price="price_pro", payment_plan="price_pro", session_minutes=30)
+    _checkout(p, nonce="n2")
+    (plan, _k), (topup, _k2) = api.calls
+    assert plan["payment_method_types"] == ["card"]
+    assert ("payment_method_types[0]", "card") in encode_form(plan)
+    assert "payment_method_types" not in topup
+
+
+@pytest.mark.parametrize("echo", ["absent", [], ["card", "us_bank_account"], ["us_bank_account"], "card", ("card",)])
+def test_a_plan_session_that_does_not_confirm_card_only_is_refused(echo):
+    if echo == "absent":
+        api = _Stripe()
+        api.create = (lambda real: (lambda params, *, idempotency_key: {
+            k: v for k, v in real(params, idempotency_key=idempotency_key).items()
+            if k != "payment_method_types"}))(api.create)
+    else:
+        api = _Stripe(payment_method_types=echo)
+    with pytest.raises(UnsupportedCapability, match="card-only"):
+        _checkout(_provider(api), price="price_pro", payment_plan="price_pro")
+    assert _checkout(_provider(_Stripe(payment_method_types=echo)), nonce="n2").hosted_link   # a top-up is not checked
 
 
 def test_the_status_is_appended_where_the_customer_app_reads_it():

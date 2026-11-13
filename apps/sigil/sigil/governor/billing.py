@@ -197,6 +197,8 @@ _STRIPE_CHECKOUT_CURRENCIES = frozenset({"USD"})
 # minutes (never past the 24 h ceiling); the pending plan-checkout record's drain margin absorbs it.
 _STRIPE_SESSION_MIN_RANGE = (30, 1440)
 _STRIPE_SESSION_SLACK_S = 60
+# A plan (subscription-mode) session accepts these payment methods only; the response must echo them.
+_STRIPE_PLAN_PAYMENT_METHODS = ("card",)
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -289,8 +291,9 @@ class StripeBillingProvider(BillingProvider):
         (test/live), catalog amount (one-off) and currency, with an https link on exactly `checkout.stripe.com`.
         `session_minutes` (a plan checkout; None sends no bound, as before) sets the session's `expires_at` so the
         link stops being payable before the provisioner's pending plan-checkout record lapses; the response must
-        then echo that same `expires_at`. Fail-closed throughout: any refusal raises `UnsupportedCapability` /
-        `ValueError`."""
+        then echo that same `expires_at`. A plan session is card-only (`payment_method_types`), and the response
+        must echo that too; a top-up's payload is unchanged. Fail-closed throughout: any refusal raises
+        `UnsupportedCapability` / `ValueError`."""
         self.require(CAP_HOSTED_CHECKOUT)
         creator = self._checkout_creator
         if creator is None:                            # unreachable once require() passed; kept for type narrowing
@@ -336,6 +339,10 @@ class StripeBillingProvider(BillingProvider):
             # the charge must be in the catalog currency: never let Stripe localise it on this session
             "adaptive_pricing": {"enabled": False},
         }
+        if mode == "subscription":
+            # a plan is paid by card only (this adapter's hosted checkout is card), so its first invoice is
+            # settled when the checkout completes rather than days later by a delayed-notification method
+            params["payment_method_types"] = list(_STRIPE_PLAN_PAYMENT_METHODS)
         if session_minutes is not None:
             sm, (lo, hi) = session_minutes, _STRIPE_SESSION_MIN_RANGE
             if not isinstance(sm, int) or not lo <= sm <= hi:      # (a bool is below the range's floor)
@@ -349,6 +356,10 @@ class StripeBillingProvider(BillingProvider):
             raise UnsupportedCapability(f"checkout creation failed ({type(exc).__name__})") from None
         if "expires_at" in params and (not isinstance(resp, Mapping) or resp.get("expires_at") != params["expires_at"]):
             raise UnsupportedCapability("checkout creation failed: the provider did not confirm the bounded payment "
+                                        "session")
+        if "payment_method_types" in params and (not isinstance(resp, Mapping)
+                                                 or resp.get("payment_method_types") != params["payment_method_types"]):
+            raise UnsupportedCapability("checkout creation failed: the provider did not confirm a card-only plan "
                                         "session")
         link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
         if not link:

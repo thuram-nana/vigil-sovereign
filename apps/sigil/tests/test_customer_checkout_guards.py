@@ -188,23 +188,28 @@ def test_the_factory_wires_the_owner_signed_pending_records(tmp_path, monkeypatc
     assert isinstance(led, PendingPlanCheckouts) and led.dir == tmp_path / "pending"
     assert led.owner_key.public_key_b64 == led.trusted_pubkey == kp.public_key_b64
     assert led.billing_spools is not None and tmp_path / "proxy-spool" in led.billing_spools   # reads the spool
+    from sigil.ui.pending_checkout import stripe_billing_spool_dirs
+    # processed/ is read only in the Stripe spool locations (never the Flutterwave spool's drained ledger)
+    assert led.stripe_spools == stripe_billing_spool_dirs() and tmp_path / "proxy-spool" not in led.stripe_spools
 
 
 def test_the_billing_spool_is_looked_for_where_the_proxy_and_the_drain_put_it(tmp_path, monkeypatch):
     """Both processors' spools: the provisioner's checkout serves Flutterwave or Stripe (VIGIL_BILLING_PROVIDER)."""
-    from sigil.ui.pending_checkout import billing_spool_dirs
+    from sigil.ui.pending_checkout import billing_spool_dirs, stripe_billing_spool_dirs
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
     for k in ("VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_BILLING_SPOOL", "VIGIL_STRIPE_WEBHOOK_SPOOL",
               "VIGIL_STRIPE_BILLING_SPOOL"):
         monkeypatch.delenv(k, raising=False)
     home = tmp_path / "home"
     assert billing_spool_dirs() == [home / "billing-spool", home / "stripe-billing-spool"]   # the runbook defaults
+    assert stripe_billing_spool_dirs() == [home / "stripe-billing-spool"]
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(tmp_path / "w"))
     monkeypatch.setenv("VIGIL_BILLING_SPOOL", str(tmp_path / "d"))
     monkeypatch.setenv("VIGIL_STRIPE_WEBHOOK_SPOOL", str(tmp_path / "sw"))
     monkeypatch.setenv("VIGIL_STRIPE_BILLING_SPOOL", str(tmp_path / "sd"))
     assert billing_spool_dirs() == [tmp_path / "w", tmp_path / "d", home / "billing-spool",
                                     tmp_path / "sw", tmp_path / "sd", home / "stripe-billing-spool"]
+    assert stripe_billing_spool_dirs() == [tmp_path / "sw", tmp_path / "sd", home / "stripe-billing-spool"]
 
 
 # --- (b) the pending plan-checkout record ---------------------------------------------------------------------

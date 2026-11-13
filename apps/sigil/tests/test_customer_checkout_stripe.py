@@ -51,6 +51,8 @@ class _FakeStripe:
                 "currency": li["currency"], "url": f"https://checkout.stripe.com/c/pay/{sid}"}
         if "expires_at" in params:                     # Stripe echoes the session bound it was asked for
             sess["expires_at"] = params["expires_at"]
+        if "payment_method_types" in params:           # ... and the payment methods it was limited to
+            sess["payment_method_types"] = list(params["payment_method_types"])
         return sess
 
 
@@ -191,12 +193,14 @@ def _stripe_guarded(monkeypatch, tmp_path, now=5000.0):
     return p, admin, org, other, fake, tmp_path / "stripe-spool"
 
 
-def _stripe_envelope(root, obj: dict, stage: str, n: int):
-    """What the proxy's /webhooks/stripe spools (``vigil.webhook.stripe.v1``) for an event about ``obj``."""
+def _stripe_envelope(root, obj: dict, stage: str, n: int, etype: "str | None" = None):
+    """What the proxy's /webhooks/stripe spools (``vigil.webhook.stripe.v1``) for an event about ``obj`` (of type
+    ``etype``; by default ``invoice.paid`` for an invoice, else ``checkout.session.completed``)."""
     import base64
     import json
-    body = {"id": f"evt_{n}", "type": "invoice.paid" if obj.get("object") == "invoice"
-            else "checkout.session.completed", "livemode": False, "data": {"object": obj}}
+    body = {"id": f"evt_{n}", "type": etype or ("invoice.paid" if obj.get("object") == "invoice"
+                                                else "checkout.session.completed"),
+            "livemode": False, "data": {"object": obj}}
     env = {"schema": "vigil.webhook.stripe.v1", "body_b64": base64.b64encode(json.dumps(body).encode()).decode(),
            "stripe_signature": "t=1,v1=00", "received_at": 1.0}
     d = root / stage
@@ -301,3 +305,186 @@ def test_a_stripe_webhook_that_cannot_be_attributed_refuses(monkeypatch, tmp_pat
     with pytest.raises(ProvisionDenied, match="has not been confirmed"):
         p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
     assert "cannot be attributed" in seen[-1]["reason"] and len(fake.calls) == 1
+
+
+# ---- a COMPLETED Stripe subscription checkout drains as a no-op: it holds the window until a plan from it drains --
+_COMPLETED = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+
+
+def _completed_session(ref: str, *, mode: str = "subscription", paid: str = "unpaid") -> dict:
+    return {"object": "checkout.session", "id": "cs_test_1z", "mode": mode, "status": "complete",
+            "payment_status": paid, "client_reference_id": ref, "metadata": {"tx_ref": ref}, "subscription": "sub_1"}
+
+
+def _plan_invoice(ref: str) -> dict:
+    return {"object": "invoice", "id": "in_1", "parent": {"subscription_details": {"metadata": {"tx_ref": ref}}}}
+
+
+@pytest.mark.parametrize("paid", ["unpaid", "paid"])
+@pytest.mark.parametrize("etype", _COMPLETED)
+def test_a_completed_stripe_subscription_checkout_holds_the_window_until_its_plan_drains(monkeypatch, tmp_path,
+                                                                                        etype, paid):
+    """The drain archives a subscription-mode completed session to processed/ as a no-op (that subscription's
+    invoice.paid mints the plan). The checkout DID complete, so past its window the plan must not be offered or
+    sold again while no plan from it has drained."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _stripe_envelope(root, _completed_session(first, paid=paid), "processed", 1, etype=etype)
+    seen = _audits(p)
+    later = 5000.0 + DEFAULT_TTL_S + 1
+    assert p.customer_billing_offers(admin, org, now=later)["plan_checkout_pending"] is True
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=later)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed"
+    assert first in seen[-1]["reason"] and "processed/" in seen[-1]["reason"]
+    assert len(fake.calls) == 1 and fake.calls[0]["payment_method_types"] == ["card"]
+
+
+def test_a_completed_stripe_subscription_checkout_holds_without_its_pending_record(monkeypatch, tmp_path):
+    """The spine backstop reads the same: with the pending record file gone, the lapsed spine row's completed
+    checkout still refuses the second plan."""
+    from pathlib import Path
+
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _stripe_envelope(root, _completed_session(first), "processed", 1)
+    for rec in Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64):
+        rec.unlink()
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed" and first in seen[-1]["reason"]
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("settle", ["invoice.paid", "checkout.session.async_payment_failed"])
+def test_the_hold_lifts_once_its_plan_invoice_drains_or_its_async_payment_fails(monkeypatch, tmp_path, settle):
+    """Once that subscription's invoice.paid has drained (a drained live plan then refuses on its own), or its
+    delayed payment failed, the completed session no longer holds the window."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _stripe_envelope(root, _completed_session(first), "processed", 1)
+    _stripe_envelope(root, _plan_invoice(first) if settle == "invoice.paid" else _completed_session(first),
+                     "processed", 2, etype=settle)
+    later = 5000.0 + DEFAULT_TTL_S + 1
+    assert p.customer_billing_offers(admin, org, now=later)["plan_checkout_pending"] is False
+    p.billing_checkout(admin, org, _PLAN, now=later)
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize("case", ["other_checkout", "payment_mode", "names_no_checkout", "not_an_envelope",
+                                  "billing_schema"])
+def test_only_a_completed_subscription_session_for_this_checkout_holds(monkeypatch, tmp_path, case):
+    """Attribution is exact, and processed/ holds only what is ours: another checkout's completed session, a
+    one-off (payment-mode) session, an event naming no checkout, or a file that is not an envelope does not hold
+    the window (processed/ is the drain's permanent ledger; anything it archived was already handled)."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    if case == "other_checkout":
+        _stripe_envelope(root, _completed_session("vigil:org_other:n9"), "processed", 1)
+    elif case == "payment_mode":
+        _stripe_envelope(root, _completed_session(first, mode="payment", paid="paid"), "processed", 1)
+    elif case == "names_no_checkout":
+        _stripe_envelope(root, {"object": "checkout.session", "id": "cs_test_9z", "mode": "subscription"},
+                         "processed", 1)
+    elif case == "not_an_envelope":
+        (root / "processed").mkdir(parents=True, exist_ok=True)
+        (root / "processed" / ("0" * 32 + ".json")).write_text("not json")
+    else:  # the Flutterwave envelope schema: only the Stripe envelope schema carries Stripe's drained events
+        import base64
+        import json
+        body = {"type": "checkout.session.completed", "data": {"object": _completed_session(first)}}
+        (root / "processed").mkdir(parents=True, exist_ok=True)
+        (root / "processed" / ("2" * 32 + ".json")).write_text(json.dumps(
+            {"schema": "vigil.webhook.billing.v1", "body_b64": base64.b64encode(json.dumps(body).encode()).decode()}))
+    p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert len(fake.calls) == 2
+
+
+def test_each_earlier_checkout_is_held_on_its_own(monkeypatch, tmp_path):
+    """Two earlier plan checkouts on the spine: the first completed and its plan drained (then lapsed), the second
+    completed with no plan drained. With the pending record gone, the second still refuses on its own."""
+    from pathlib import Path
+
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _stripe_envelope(root, _completed_session(first), "processed", 1)
+    _stripe_envelope(root, _plan_invoice(first), "processed", 2)
+    t1 = 5000.0 + DEFAULT_TTL_S + 1
+    second = p.billing_checkout(admin, org, _PLAN, now=t1)["tx_ref"]
+    _stripe_envelope(root, _completed_session(second), "processed", 3)
+    for rec in Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64):
+        rec.unlink()
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=t1 + DEFAULT_TTL_S + 1)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed" and second in seen[-1]["reason"]
+    assert len(fake.calls) == 2
+
+
+def test_another_checkouts_settling_event_does_not_lift_the_hold(monkeypatch, tmp_path):
+    """Lifting is exact too: another checkout's drained invoice or failed payment leaves THIS hold in place."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _stripe_envelope(root, _completed_session(first), "processed", 1)
+    _stripe_envelope(root, _plan_invoice("vigil:org_other:n9"), "processed", 2)
+    _stripe_envelope(root, _completed_session("vigil:org_other:n9"), "processed", 3,
+                     etype="checkout.session.async_payment_failed")
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("fault", ["file", "stage"])
+def test_a_processed_file_that_cannot_be_read_refuses(monkeypatch, tmp_path, fault):
+    """Fail-closed: a file in the Stripe spool's processed/ that cannot be read, or a processed/ that cannot be
+    listed, could hide the completed session."""
+    import os
+
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    if fault == "file":
+        (root / "processed").mkdir(parents=True, exist_ok=True)
+        os.symlink(tmp_path / "elsewhere.json", root / "processed" / ("1" * 32 + ".json"))   # never followed
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "processed").write_text("")                     # not a directory: it cannot be listed
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert "processed/" in seen[-1]["reason"] and "unreadable" in seen[-1]["reason"]
+    assert len(fake.calls) == 1
+
+
+def test_only_the_stripe_spools_processed_is_read(tmp_path):
+    """The ledger reads processed/ only in the spools it is given as Stripe's (production: the Stripe spool
+    locations), so the Flutterwave spool's drained ledger is never read."""
+    import os
+
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import PendingPlanCheckouts
+    flw, stripe = tmp_path / "flw", tmp_path / "stripe"
+    for root in (flw, stripe):
+        (root / "processed").mkdir(parents=True)
+    os.symlink(tmp_path / "x.json", flw / "processed" / ("1" * 32 + ".json"))   # unreadable, but not read
+    kp = generate_keypair()
+    led = PendingPlanCheckouts(tmp_path / "pending", owner_key=kp, trusted_pubkey=kp.public_key_b64,
+                               billing_spools=[flw, stripe], stripe_spools=[stripe])
+    assert led.undrained(["vigil:org_chk1:n1"]) == ""
+    os.symlink(tmp_path / "x.json", stripe / "processed" / ("1" * 32 + ".json"))
+    assert "unreadable" in led.undrained(["vigil:org_chk1:n1"])
+    every = PendingPlanCheckouts(tmp_path / "pending", owner_key=kp, trusted_pubkey=kp.public_key_b64,
+                                 billing_spools=[flw])      # not told which are Stripe's: it reads them all
+    assert "unreadable" in every.undrained(["vigil:org_chk1:n1"])

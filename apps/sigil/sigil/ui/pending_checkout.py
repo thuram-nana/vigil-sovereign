@@ -30,10 +30,14 @@ LAPSES ONLY when the billing spool shows no undrained webhook for its tx_ref (``
     checkout go), ``undrained`` reads the billing spools READ-ONLY (Flutterwave's and Stripe's: the provisioner's
     checkout serves either processor) — every stage where a spooled webhook waits
     undrained: ``incoming/``, ``working/``, ``retry/`` (NET-2b parking) and ``rejected/`` (quarantine) — and the
-    second plan is refused while a webhook for that earlier tx_ref sits there (``processed/`` is drained: a minted
-    plan is ``_org_has_live_plan``'s, a definitive no-op was not paid). Fail-closed: no spool wired or found, a stage
-    that cannot be listed, or an envelope that cannot be read or attributed to a tx_ref refuses too. The offers read
-    (``pending``) reports such a record as pending, so the UI never re-offers a plan that checkout would refuse.
+    second plan is refused while a webhook for that earlier tx_ref sits there. ``processed/`` is drained: a minted
+    plan is ``_org_has_live_plan``'s. A no-op there is not proof the checkout went unpaid, though: on the Stripe lane
+    the drain archives a SUBSCRIPTION-mode completed session as a no-op (that subscription's ``invoice.paid`` mints
+    the plan), so such a session in the Stripe spool's ``processed/`` keeps refusing until an ``invoice.paid`` or a
+    ``checkout.session.async_payment_failed`` for the same tx_ref has drained too. Fail-closed: no spool wired or
+    found, a stage that cannot be listed, or an envelope that cannot be read or attributed to a tx_ref refuses too.
+    The offers read (``pending``) reports such a record as pending, so the UI never re-offers a plan that checkout
+    would refuse.
   * EXCLUSIVE across processes — the read-decide-write runs under an exclusive ``flock`` on ``<dir>/.claim.lock``,
     and a new record is published with ``os.link`` (an atomic exclusive create of a fully-written file), so two
     racing POSTs — in one cockpit process or several — can never both claim.
@@ -91,29 +95,46 @@ _MAX_BYTES = 8192
 # claimed into ``working/``, parked in ``retry/`` (NET-2b), quarantined in ``rejected/``. ``processed/`` is drained.
 _SPOOL_STAGES = ("incoming", "working", "retry", "rejected")
 _MAX_ENVELOPE = 256 * 1024                 # the proxy's / the drain's envelope cap
+# Stripe lane, ``processed/``: the drain archives a SUBSCRIPTION-mode session of these types as a no-op (that
+# subscription's ``invoice.paid`` mints the plan) though the checkout completed; one of the settling types for the
+# same tx_ref ends that (a plan from it drained, or its delayed payment failed).
+_STRIPE_COMPLETED = frozenset({"checkout.session.completed", "checkout.session.async_payment_succeeded"})
+_STRIPE_SETTLED = frozenset({"invoice.paid", "checkout.session.async_payment_failed"})
 _SPOOL_PASSES = 3                          # a webhook the drain moves mid-scan is caught by a re-read (see below)
 UNCONFIRMED_MESSAGE = ("a payment for an earlier plan checkout of this workspace has not been confirmed yet — a "
                        "second plan is refused until it is (contact support if this persists)")
 
 
-def billing_spool_dirs() -> "list[Path]":
-    """Every place this deployment's billing-webhook spools can be, resolved NOW. Flutterwave: the proxy's
-    ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the writer), the drain's ``VIGIL_BILLING_SPOOL`` and the runbook default
-    ``$SIGIL_HOME/billing-spool``. Stripe (the same checkout seam serves it): the proxy's
-    ``VIGIL_STRIPE_WEBHOOK_SPOOL``, the drain unit's ``VIGIL_STRIPE_BILLING_SPOOL`` and its default
-    ``$SIGIL_HOME/stripe-billing-spool``. ``undrained`` scans each one that exists (more places can only refuse
-    more)."""
+_FLUTTERWAVE_SPOOLS = (("VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_BILLING_SPOOL"), "billing-spool")
+_STRIPE_SPOOLS = (("VIGIL_STRIPE_WEBHOOK_SPOOL", "VIGIL_STRIPE_BILLING_SPOOL"), "stripe-billing-spool")
+
+
+def _spool_dirs(*lanes: "tuple[tuple[str, ...], str]") -> "list[Path]":
     from ..config import _resolve_home
     out: "list[Path]" = []
     home = _resolve_home()
-    for envs, default in ((("VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_BILLING_SPOOL"), "billing-spool"),
-                          (("VIGIL_STRIPE_WEBHOOK_SPOOL", "VIGIL_STRIPE_BILLING_SPOOL"), "stripe-billing-spool")):
+    for envs, default in lanes:
         for env in envs:
             raw = os.environ.get(env, "")
             if raw.strip():
                 out.append(Path(raw.strip()))
         out.append(home / default)
     return out
+
+
+def billing_spool_dirs() -> "list[Path]":
+    """Every place this deployment's billing-webhook spools can be, resolved NOW. Flutterwave: the proxy's
+    ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the writer), the drain's ``VIGIL_BILLING_SPOOL`` and the runbook default
+    ``$SIGIL_HOME/billing-spool``. Stripe (the same checkout seam serves it): ``stripe_billing_spool_dirs``.
+    ``undrained`` scans each one that exists (more places can only refuse more)."""
+    return _spool_dirs(_FLUTTERWAVE_SPOOLS, _STRIPE_SPOOLS)
+
+
+def stripe_billing_spool_dirs() -> "list[Path]":
+    """The Stripe lane's spool locations, resolved NOW: the proxy's ``VIGIL_STRIPE_WEBHOOK_SPOOL``, the drain unit's
+    ``VIGIL_STRIPE_BILLING_SPOOL`` and its default ``$SIGIL_HOME/stripe-billing-spool``. ``undrained`` also reads
+    the ``processed/`` stage of these (see ``_completed_subscription_checkouts``)."""
+    return _spool_dirs(_STRIPE_SPOOLS)
 
 
 _STRIPE_ENVELOPE_SCHEMA = "vigil.webhook.stripe.v1"   # ``inbound.billing_spool.StripeEnvelopeV1``
@@ -139,18 +160,11 @@ def _stripe_body_tx_ref(body: object) -> Optional[str]:
     return refs.pop() if len(refs) == 1 else None
 
 
-def _envelope_tx_ref(path: Path) -> Optional[str]:
-    """The tx_ref of one spooled billing envelope — a Flutterwave body's ``data.tx_ref``, or for the Stripe envelope
-    schema the reference ``_stripe_body_tx_ref`` reads — or None when it cannot be attributed (unreadable, over the
-    envelope cap, not the envelope / body JSON, no tx_ref). Never follows a symlink (O_NOFOLLOW), never blocks on a
-    FIFO (O_NONBLOCK: it reads as empty) and never reads more than the cap + 1 bytes. RAISES ``FileNotFoundError``
-    when the file vanished since it was listed (the drain moved it)."""
-    try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except FileNotFoundError:
-        raise
-    except OSError:
-        return None
+def _read_capped(path: Path) -> bytes:
+    """At most the envelope cap + 1 bytes of ``path``. Never follows a symlink (O_NOFOLLOW) and never blocks on a
+    FIFO (O_NONBLOCK: it reads as empty). RAISES ``OSError`` when it cannot be opened or read (e.g. a directory
+    named *.json), ``FileNotFoundError`` when it vanished since it was listed (the drain moved it)."""
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         chunks: "list[bytes]" = []
         while sum(map(len, chunks)) <= _MAX_ENVELOPE:
@@ -158,11 +172,22 @@ def _envelope_tx_ref(path: Path) -> Optional[str]:
             if not b:
                 break
             chunks.append(b)
-    except OSError:
-        return None                                # e.g. a directory named *.json
     finally:
         os.close(fd)
-    raw = b"".join(chunks)
+    return b"".join(chunks)
+
+
+def _envelope_tx_ref(path: Path) -> Optional[str]:
+    """The tx_ref of one spooled billing envelope — a Flutterwave body's ``data.tx_ref``, or for the Stripe envelope
+    schema the reference ``_stripe_body_tx_ref`` reads — or None when it cannot be attributed (unreadable, over the
+    envelope cap, not the envelope / body JSON, no tx_ref). Reads through ``_read_capped``. RAISES
+    ``FileNotFoundError`` when the file vanished since it was listed (the drain moved it)."""
+    try:
+        raw = _read_capped(path)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return None
     if len(raw) > _MAX_ENVELOPE:
         return None                                # the drain refuses it unread too: it can never be minted as is
     try:
@@ -172,6 +197,22 @@ def _envelope_tx_ref(path: Path) -> Optional[str]:
     except (UnicodeDecodeError, ValueError, binascii.Error, KeyError, TypeError):
         return None
     return ref if isinstance(ref, str) and ref else None
+
+
+def _stripe_processed_event(raw: bytes) -> "tuple[str, str, Optional[str]]":
+    """(event type, tx_ref, session mode) of one Stripe envelope from ``processed/``, with "" for a type or tx_ref
+    it does not carry (and for any file that is not a Stripe envelope within the cap)."""
+    if len(raw) > _MAX_ENVELOPE:
+        return "", "", None
+    try:
+        env = json.loads(raw.decode("utf-8"))
+        if not isinstance(env, dict) or env.get("schema") != _STRIPE_ENVELOPE_SCHEMA:
+            return "", "", None
+        body = json.loads(base64.b64decode(env["body_b64"], validate=True))
+    except (UnicodeDecodeError, ValueError, binascii.Error, KeyError, TypeError):
+        return "", "", None
+    return (_str_at(body, "type") or "", _stripe_body_tx_ref(body) or "",
+            _str_at(body, "data", "object", "mode"))
 
 
 class PendingCheckoutRefused(Exception):
@@ -194,7 +235,8 @@ class PendingPlanCheckouts:
 
     def __init__(self, path: "str | os.PathLike", *, owner_key, trusted_pubkey: Optional[str],
                  ttl_s: float = DEFAULT_TTL_S,
-                 billing_spools: "Optional[Sequence[str | os.PathLike]]" = None) -> None:
+                 billing_spools: "Optional[Sequence[str | os.PathLike]]" = None,
+                 stripe_spools: "Optional[Sequence[str | os.PathLike]]" = None) -> None:
         self.dir = Path(path)
         self.owner_key = owner_key
         self.trusted_pubkey = trusted_pubkey
@@ -202,6 +244,9 @@ class PendingPlanCheckouts:
         # the billing-webhook spool(s) ``undrained`` reads (production: ``billing_spool_dirs()``). None ⇒ an expired
         # record can never be confirmed unpaid, so it never lapses (fail-closed).
         self.billing_spools = None if billing_spools is None else [Path(d) for d in billing_spools]
+        # the spools whose ``processed/`` holds Stripe's drained events (production: ``stripe_billing_spool_dirs()``).
+        # None ⇒ every billing spool's ``processed/`` is read (reading more can only hold more).
+        self.stripe_spools = None if stripe_spools is None else [Path(d) for d in stripe_spools]
 
     def _marker(self, org_id: str) -> Path:
         return self.dir / hashlib.sha256(f"org:{org_id}".encode("utf-8")).hexdigest()
@@ -280,14 +325,52 @@ class PendingPlanCheckouts:
                     seen.add((f"{root}/{stage}", name))
         return "", (frozenset(seen) if stable else None)
 
+    def _completed_subscription_checkouts(self, wanted: "set[str]") -> str:
+        """Stripe lane: why one of ``wanted`` COMPLETED its subscription checkout but no plan from it has drained
+        yet ("" when none did). The drain archives a subscription-mode ``checkout.session.completed`` /
+        ``.async_payment_succeeded`` to ``processed/`` as a no-op — that subscription's ``invoice.paid`` mints the
+        plan — so in ``processed/`` such a session proves a completed checkout, not an unpaid one. It holds its
+        tx_ref until an ``invoice.paid`` (a plan from it drained) or a ``checkout.session.async_payment_failed``
+        for the same tx_ref is in ``processed/`` too. Fail-closed: a ``processed/`` that cannot be listed, or a file
+        in it that cannot be read, returns a reason. A readable file there that is not a Stripe event naming one of
+        ``wanted`` does not hold: ``processed/`` is the drain's permanent ledger of what it already handled."""
+        spools = self.billing_spools if self.stripe_spools is None else self.stripe_spools
+        completed: "set[str]" = set()
+        settled: "set[str]" = set()
+        for root in (d for d in (spools or ()) if d.is_dir()):
+            try:
+                names = sorted(e.name for e in os.scandir(root / "processed") if e.name.endswith(".json"))
+            except FileNotFoundError:
+                continue                           # nothing has drained there yet
+            except OSError as exc:
+                return f"billing spool processed/ is unreadable ({type(exc).__name__})"
+            for name in names:
+                try:
+                    etype, ref, mode = _stripe_processed_event(_read_capped(root / "processed" / name))
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    return f"billing spool processed/{name[:24]} is unreadable ({type(exc).__name__})"
+                if ref not in wanted:
+                    continue
+                if etype in _STRIPE_COMPLETED and mode == "subscription":
+                    completed.add(ref)
+                elif etype in _STRIPE_SETTLED:
+                    settled.add(ref)
+        held = sorted(completed - settled)
+        return f"its completed checkout has no drained plan yet (billing spool processed/): {held[0]}" if held else ""
+
     def undrained(self, tx_refs: "Iterable[str]") -> str:
         """Why one of these EARLIER plan checkouts (``tx_refs``) may have been PAID but not yet DRAINED — "" only
         when the billing spool proves no webhook for any of them is waiting in ``incoming/``, ``working/``,
-        ``retry/`` or ``rejected/``. Read-only. FAIL-CLOSED: no spool wired or found, a stage that cannot be listed,
-        or an envelope that cannot be read or attributed to a tx_ref returns a reason (it could be one of them).
-        The drain moves envelopes between stages while this reads (``retry/`` -> ``incoming/`` -> ``working/`` ->
-        ``retry/``|``rejected/``), so one pass could miss a moving file: "" is returned only once two consecutive
-        passes saw the same files, and a spool that keeps changing refuses."""
+        ``retry/`` or ``rejected/``, and no Stripe subscription checkout among them completed without a plan from
+        it draining (``_completed_subscription_checkouts``). Read-only. FAIL-CLOSED: no spool wired or found, a
+        stage that cannot be listed, or an envelope that cannot be read or attributed to a tx_ref returns a reason
+        (it could be one of them). The drain moves envelopes between stages while this reads (``retry/`` ->
+        ``incoming/`` -> ``working/`` -> ``retry/``|``rejected/``|``processed/``), so one pass could miss a moving
+        file: the undrained stages count as clear only once two consecutive passes saw the same files (a spool
+        that keeps changing refuses), and ``processed/`` is read after that, so an envelope that left them by then
+        is read there."""
         wanted = {str(r) for r in tx_refs if r}
         if not wanted:
             return ""
@@ -297,7 +380,7 @@ class PendingPlanCheckouts:
             if why:
                 return why
             if listing is not None and listing == prev:
-                return ""
+                return self._completed_subscription_checkouts(wanted)
             prev = listing
         return "the billing spool kept changing while it was read"
 
