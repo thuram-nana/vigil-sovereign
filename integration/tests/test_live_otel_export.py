@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.server
 import logging
 import pathlib
+import socket
 import threading
 
 import pytest
@@ -540,6 +541,53 @@ def test_a_healthy_collector_logs_no_circuit_breaker_warning(caplog):
             sink(new_span("op", spine_hash="h", seq=i))
     assert sink.exported == 5
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+
+# Red-pen secret-leak fold: the REAL exporter — and urllib3 under it — log export failures with text they build
+# from the RAW url (``Max retries exceeded with url: /v1/traces?api_key=…``, ``Failed to parse:
+# '127.0.0.1:4318&token=…' is not a valid host or port``, urllib3's DEBUG request line). With no logging
+# configured, ``logging.lastResort`` printed those WARNING / ERROR lines to the operator's stderr. These run the
+# pinned library itself; the otel-free half is in test_otlp_egress_pin.py.
+
+def _dead_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@pytest.mark.parametrize("shape", [
+    "/v1/traces?api_key=SECRETKEY",
+    "/tenant/SECRETKEY/v1/traces",
+    "/v1/traces;token=SECRETKEY",
+    "/v1/traces?api_key=%53ECRETKEY",          # sent — and printed — decoded, as "SECRETKEY"
+    "&token=SECRETKEY",                        # the pin accepts it; the library cannot parse it
+])
+def test_the_real_exporters_own_failure_lines_never_carry_the_endpoint(caplog, shape):
+    ep = f"http://127.0.0.1:{_dead_port()}{shape}"
+    assert endpoint_is_loopback(ep) is True
+    sink = OTLPSink(ep, max_consecutive_failures=1)
+    assert type(sink._exporter).__name__ == "OTLPSpanExporter"
+    with caplog.at_level(logging.DEBUG):
+        sink(new_span("op", spine_hash="h", seq=1))
+    assert sink.dropped == 1
+    library = [r for r in caplog.records if r.name.startswith("opentelemetry.exporter")]
+    assert library, "the exporter logged no failure line — this proof would be vacuous"
+    assert "SECRETKEY" not in caplog.text
+    assert not any("SECRETKEY" in r.getMessage() for r in caplog.records)
+
+
+def test_the_real_request_line_at_debug_never_carries_the_endpoint(caplog):
+    with _OTLPReceiver() as rx:
+        sink = OTLPSink(rx.url + "/v1/traces?api_key=SECRETKEY")
+        with caplog.at_level(logging.DEBUG):
+            sink(new_span("op", spine_hash="h", seq=1))
+    assert sink.exported == 1 and rx.requests[0][0] == "/v1/traces?api_key=SECRETKEY"   # the wire is unchanged
+    lines = [r.getMessage() for r in caplog.records if r.name == "urllib3.connectionpool"]
+    assert any('"POST /… HTTP/1.1" 200' in m for m in lines), lines   # the request line is still logged...
+    assert "SECRETKEY" not in caplog.text                               # ...without the path or query
 
 
 def test_no_wallclock_or_rng_in_the_exporter_source():
