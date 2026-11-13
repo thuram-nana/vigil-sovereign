@@ -123,6 +123,49 @@ def test_read_bytes_secret_fails_closed_on_the_wrong_context(tmp_path):
         v.read_bytes_secret(p, context=OTHER_CTX)           # right file, wrong purpose ⇒ refuse
 
 
+
+# ── peek_text_secret: the READ-ONLY read (a verify path) never migrates and still fails closed ──────────
+
+def test_peek_text_secret_never_migrates_a_plaintext_file_when_enabled(tmp_path):
+    import os
+    v = _provisioned(tmp_path)
+    p = tmp_path / "owner.priv"
+    p.write_text("  bGVnYWN5LXBsYWludGV4dA==\n", encoding="utf-8")       # legacy plaintext, vault now enabled
+    st = os.stat(p)
+    before = (p.read_bytes(), st.st_ino, st.st_mtime_ns)
+    assert v.peek_text_secret(p, context=CTX) == "bGVnYWN5LXBsYWludGV4dA=="
+    st = os.stat(p)
+    assert (p.read_bytes(), st.st_ino, st.st_mtime_ns) == before          # byte-identical: nothing written
+    assert not is_sealed(p.read_bytes())
+    assert v.read_text_secret(p, context=CTX) == "bGVnYWN5LXBsYWludGV4dA=="  # control: the migrating read seals
+    assert is_sealed(p.read_bytes())
+    assert v.peek_text_secret(p, context=CTX) == "bGVnYWN5LXBsYWludGV4dA=="  # and peek opens the sealed copy
+
+
+def test_peek_text_secret_absent_or_empty_is_none(tmp_path):
+    v = _provisioned(tmp_path)
+    assert v.peek_text_secret(tmp_path / "absent", context=CTX) is None
+    (tmp_path / "empty").write_text(" \n", encoding="utf-8")
+    assert v.peek_text_secret(tmp_path / "empty", context=CTX) is None
+
+
+def test_peek_text_secret_fails_closed_on_a_sealed_file_it_cannot_open(tmp_path):
+    v = _provisioned(tmp_path)
+    p = tmp_path / "secret.key"
+    v.write_text_secret(p, "c2VjcmV0LWtleQ==", context=CTX)
+    with pytest.raises(VaultLocked):
+        v.peek_text_secret(p, context=OTHER_CTX)                           # wrong purpose
+    raw = bytearray(p.read_bytes())
+    raw[len(raw) // 2] ^= 0x01
+    p.write_bytes(bytes(raw))
+    with pytest.raises(VaultLocked):
+        v.peek_text_secret(p, context=CTX)                                 # corrupted at rest
+    dead = Vault(tmp_path / "vault", _make_fake_tpm(unavailable=True))
+    v.write_text_secret(p, "c2VjcmV0LWtleQ==", context=CTX)
+    with pytest.raises(VaultLocked):
+        dead.peek_text_secret(p, context=CTX)                              # the KEK cannot be unsealed
+
+
 # ── write_text_secret must actually SEAL when enabled (mutation killer: forgetting to seal) ─────────────
 
 def test_write_text_secret_lands_sealed_when_the_vault_is_enabled(tmp_path):

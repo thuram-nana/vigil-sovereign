@@ -41,13 +41,17 @@ def _snapshot(*paths):
 
 
 class _FakeVault:
-    """A vault whose reads are scripted; records every write so a refusal can prove it wrote nothing."""
+    """A vault whose reads are scripted (the migrating read and the read-only ``peek``); records every write so a
+    refusal can prove it wrote nothing."""
 
     def __init__(self, read):
         self._read = read
         self.writes = []
 
     def read_text_secret(self, path, *, context):
+        return self._read(path)
+
+    def peek_text_secret(self, path, *, context):
         return self._read(path)
 
     def write_text_secret(self, path, value, *, context):
@@ -308,3 +312,105 @@ def test_verify_without_priv_anchors_on_owner_pub_alone(signed_home):
     _resign_with(store, home, generate_keypair())
     ok, msg = C.verify_checkpoint(store)
     assert ok is False and "TAMPERING" in msg, msg
+
+
+class _MemKek:
+    """A provisioned in-memory KEK custody backend for a REAL ``Vault`` (``dead``: the KEK cannot be loaded)."""
+
+    def __init__(self, *, dead=False):
+        self._kek, self._dead = os.urandom(32), dead
+
+    def is_provisioned(self, directory):
+        return True
+
+    def provision(self, directory):
+        pass
+
+    def load(self, directory):
+        from vigil_core.kek import KekError
+        if self._dead:
+            raise KekError("simulated: the KEK cannot be loaded")
+        return self._kek
+
+    def load_from(self, directory, pub_name, priv_name):
+        return self.load(directory)
+
+    def reseal(self, directory, kek, *, pub_name, priv_name):
+        raise AssertionError("a verify never reseals")
+
+    def available(self):
+        return not self._dead
+
+    def label(self):
+        return "in-memory test KEK"
+
+
+def _file_state(p):
+    st = os.stat(p)
+    return p.read_bytes(), st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def test_verify_never_migrates_a_plaintext_priv_when_the_vault_is_enabled(signed_home, monkeypatch, tmp_path):
+    """A plaintext owner.priv (written before the vault was provisioned) with the vault now ENABLED: the vault's
+    migrating read would seal it in place, so verify reads it read-only. owner.priv stays byte-identical (bytes,
+    inode, mtime) through a passing verify AND through the refusal of a swapped owner.pub."""
+    from vigil_core import is_sealed
+    store, priv, pub, home = signed_home
+    vault = V.Vault(tmp_path / "vault-enabled", backend=_MemKek())
+    assert vault.enabled()
+    monkeypatch.setattr(V, "owner_vault", lambda: vault)
+    assert not is_sealed(priv.read_bytes())
+    before = _file_state(priv)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is True, msg
+    assert _file_state(priv) == before
+    other = generate_keypair()
+    pub.write_text(other.public_key_b64, encoding="utf-8")
+    _resign_with(store, home, other)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and msg.startswith("owner.pub is not the public key of owner.priv"), msg
+    with pytest.raises(I.OwnerKeyUnavailable, match="not the public key"):
+        C.trust_root(store)
+    assert _file_state(priv) == before
+    # the hazard is real for this vault: its migrating read seals the same file in place
+    vault.read_text_secret(priv, context=V.OWNER_PRIV_CONTEXT)
+    assert is_sealed(priv.read_bytes())
+
+
+def test_verify_unseals_a_sealed_priv_in_memory_and_writes_nothing(signed_home, monkeypatch, tmp_path):
+    """A SEALED owner.priv is opened in memory: verify passes on the genuine pair, refuses a swapped owner.pub,
+    and leaves the sealed file untouched either way."""
+    from vigil_core import is_sealed
+    store, priv, pub, home = signed_home
+    vault = V.Vault(tmp_path / "vault-enabled", backend=_MemKek())
+    monkeypatch.setattr(V, "owner_vault", lambda: vault)
+    vault.read_text_secret(priv, context=V.OWNER_PRIV_CONTEXT)          # migrate it once (the signing path does)
+    assert is_sealed(priv.read_bytes())
+    before = _file_state(priv)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is True, msg
+    other = generate_keypair()
+    pub.write_text(other.public_key_b64, encoding="utf-8")
+    _resign_with(store, home, other)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and msg.startswith("owner.pub is not the public key of owner.priv"), msg
+    assert _file_state(priv) == before
+
+
+def test_verify_with_an_unloadable_kek_reads_a_plaintext_priv_and_refuses_a_sealed_one(signed_home, monkeypatch,
+                                                                                    tmp_path):
+    """The KEK is only needed to OPEN a sealed owner.priv: with it unloadable, a plaintext owner.priv is still read
+    (and checked) as it is, while a sealed one fails verify closed as unsealable. Nothing is written."""
+    store, priv, pub, home = signed_home
+    good = V.Vault(tmp_path / "vault-enabled", backend=_MemKek())
+    dead = V.Vault(tmp_path / "vault-dead", backend=_MemKek(dead=True))
+    monkeypatch.setattr(V, "owner_vault", lambda: dead)
+    before = _file_state(priv)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is True, msg
+    assert _file_state(priv) == before
+    good.read_text_secret(priv, context=V.OWNER_PRIV_CONTEXT)           # now sealed under a KEK `dead` cannot load
+    sealed = _file_state(priv)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and "cannot be unsealed" in msg, msg
+    assert _file_state(priv) == sealed
