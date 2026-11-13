@@ -130,6 +130,13 @@ class BillingProvider(ABC):
         if capability not in self.capabilities():
             raise UnsupportedCapability(f"{type(self).__name__} does not support capability {capability!r}")
 
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+        """Open a tenant-bound hosted checkout. The base adapter has none: it refuses with `UnsupportedCapability`
+        (an explicit refusal, never an AttributeError from a duck-typed call). Adapters that can override it."""
+        raise UnsupportedCapability(f"{type(self).__name__} does not support capability {CAP_HOSTED_CHECKOUT!r}")
+
 
 def _ct_equal(a: str, b: str) -> bool:
     """Constant-time string compare (never short-circuit on the first differing byte — no timing oracle on the
@@ -185,8 +192,11 @@ class StripeBillingProvider(BillingProvider):
         # NOTE: no CAP_UNATTENDED_TOPUP — off-session recurring is approval-gated at the provider, so the reference
         # adapter does not DECLARE it unconditionally (declaring it would let an outbound flow `require()` it and
         # believe unattended charging is available when it has not been approved).
-        return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
-                          CAP_RECURRING_PLAN, CAP_REFUND, CAP_RECONCILE})
+        # Declares only what is implemented: webhook verification. Server-side transaction re-verify and hosted
+        # checkout are declared once their injected fetcher / creator exist; refund and reconcile are not
+        # implemented, so they are never declared (a declared-but-missing capability lets a caller `require()` it
+        # and then fail on the call).
+        return frozenset({CAP_VERIFY_WEBHOOK})
 
     def _verify_signature(self, raw_body: bytes, sig_header: str, now: float) -> bool:
         if not isinstance(sig_header, str) or not sig_header:
@@ -406,6 +416,19 @@ def _flw_checkout_link(resp: object) -> Optional[str]:
         return None
     data = resp.get("data")
     link = data.get("link") if isinstance(data, Mapping) else None
+    return _https_link_on(link, suffix_domains=_FLW_CHECKOUT_DOMAINS)
+
+
+_FLW_CHECKOUT_DOMAINS = frozenset({"flutterwave.com"})
+
+
+def _https_link_on(link: object, *, exact_hosts: "frozenset[str] | tuple[str, ...]" = (),
+                   suffix_domains: "frozenset[str] | tuple[str, ...]" = ()) -> Optional[str]:
+    """``link`` if it is a safe hosted-checkout URL on a pinned host, else None (fail-closed). Safe means: an
+    ``https://`` URL with NO whitespace / control characters (a smuggled CR/LF can never split a later
+    ``Location:`` header), NO embedded credentials, a host, and a host that is EXACTLY one of ``exact_hosts`` or is
+    one of ``suffix_domains`` / a subdomain of one (``host == d or host.endswith("." + d)`` — never a bare suffix
+    match, so ``evilflutterwave.com`` is refused). Shared by every provider's checkout-link check."""
     if not isinstance(link, str) or not link.startswith("https://"):
         return None
     if any(ord(c) < 0x21 or ord(c) == 0x7f for c in link):     # whitespace / control chars (CRLF response-split)
@@ -417,9 +440,17 @@ def _flw_checkout_link(resp: object) -> Optional[str]:
     host = (u.hostname or "").lower()
     if u.scheme != "https" or "@" in (u.netloc or "") or not host:   # no userinfo; must have a host
         return None
-    if host != "flutterwave.com" and not host.endswith(".flutterwave.com"):
-        return None                                            # pin the provider's hosted-checkout domain
-    return link
+    if host in exact_hosts:
+        return link
+    if any(host == d or host.endswith("." + d) for d in suffix_domains):
+        return link
+    return None                                                # pin the provider's hosted-checkout domain
+
+
+def checkout_tx_ref(org: str, nonce: str) -> str:
+    """The tenant-binding checkout reference ``vigil:<org>:<nonce>`` every provider carries (Flutterwave ``tx_ref``,
+    Stripe ``client_reference_id``), so the inbound mint and the dangling-reference sweep read one format."""
+    return f"{_TX_REF_PREFIX}:{org}:{nonce}"
 
 
 @dataclass(frozen=True)
@@ -706,7 +737,7 @@ class FlutterwaveBillingProvider(BillingProvider):
         n = nonce or secrets.token_urlsafe(18)
         if not isinstance(n, str) or ":" in n or not n:
             raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
-        tx_ref = f"{_TX_REF_PREFIX}:{org}:{n}"
+        tx_ref = checkout_tx_ref(org, n)
         payload: "dict[str, Any]" = {
             "tx_ref": tx_ref,
             "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
@@ -764,7 +795,8 @@ class BillingSigner:
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
-                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None):
+                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None,
+                 require_verified_amount: bool = False):
         self.provider = provider
         # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
         # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
@@ -795,6 +827,11 @@ class BillingSigner:
         # a paid-but-uncredited charge -> raise UnaccountedPayment (quarantine + alarm). Default OFF ⇒ byte-identical
         # (the deliberate top-up "unknown price is a safe no-op" decision is untouched either way).
         self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
+        # Opt-in (default OFF => byte-identical): a priced TOPUP / plan ACTIVE event must carry a verified currency,
+        # or it mints nothing (a plan raises UnaccountedPayment when the alarm is on); the underpay check then
+        # bounds the amount. The Flutterwave adapter already enforces this itself (#1093); a signer serving another
+        # provider sets it.
+        self._require_verified_amount = bool(require_verified_amount)
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
@@ -846,6 +883,13 @@ class BillingSigner:
         # amount is still bound by the price_id -> entitlement mapping, not silently refused here.
         if event.kind in (EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE):
             exp = self._expected.get(event.price_id)
+            # (an amount below the catalog price, including 0, is refused by the underpay check just below)
+            if exp is not None and self._require_verified_amount and not event.currency:
+                if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
+                    raise UnaccountedPayment(
+                        f"verified plan charge {event.event_id} for org {oid!r} carries no verified amount/currency "
+                        f"for {event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
+                return None                           # no verified amount/currency -> mint nothing (fail-closed)
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
                     if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
