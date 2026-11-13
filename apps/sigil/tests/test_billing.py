@@ -98,6 +98,25 @@ def test_topup_emits_an_invoice_with_the_catalog_amount():
     assert len(inv.invoices("acme")) == 1, "a replayed webhook must not duplicate the invoice line"
 
 
+def test_only_a_paid_topup_counts_as_a_credit_purchase():
+    s, inv, mock, signer = _inv_rig()
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    # credits that were GRANTED, not bought: a trial, a plan refill, a settle refund, even a hand-made "topup"
+    # wallet grant — none writes an invoice, so none is a purchase
+    for i, kind in enumerate(("trial", "subscription_refill", "refund", "topup")):
+        w.grant("acme", 500, kind, entry_id=f"grant_{i}", issued_at=float(10 + i))
+    assert w.available("acme") == 2_000 and inv.has_purchased_credits("acme") is False
+    body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 50.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=50.0) is not None
+    assert inv.has_purchased_credits("acme") is False, "a plan subscription is not a credit purchase"
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None
+    assert inv.has_purchased_credits("acme") is True
+    assert inv.has_purchased_credits("globex") is False
+
+
 def test_subscription_emits_an_invoice_with_the_period():
     _s, inv, mock, signer = _inv_rig()
     body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
