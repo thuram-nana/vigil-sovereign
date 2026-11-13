@@ -31,10 +31,12 @@ Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snaps
 import itertools
 import tempfile
 
+import pytest
+
 from sigil.governor.authn import signed_payload
 from sigil.mesh.registry import CAP_SIGNAL, advertise_capability, capability_map
 from sigil.reuse import generate_keypair
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -150,9 +152,8 @@ def test_split_fold_equals_full_scan(monkeypatch):
         "the non-str None host key carried through the snapshot seed (build()==scan for non-str keys)"
     assert split["laptop"]["has_camera"] is True, "the live fold overwrote the seeded (pre-seam) laptop value"
 
-    # --- pubkey BYPASS (rewrite rule 4): a mismatched anchor ignores the snapshot, re-scans from genesis ---
-    bypass_split = capability_map(s, AP)   # AP != synthetic.trusted_pubkey(OP) -> bypass, seed {}, since=-1
-    assert bypass_split == bypass_full, "a mismatched trust anchor bypasses the snapshot -> same as a full scan"
-    assert set(bypass_split) == {"rogue", "rogue2"}, "under the attacker anchor only the attacker-signed hosts verify"
-    assert "desk" not in bypass_split and None not in bypass_split, \
-        "the OP-folded snapshot seed (incl. its None key) is NOT leaked into an attacker-anchor query"
+    # --- a mismatched anchor on a PRUNED snapshot fails CLOSED: the OP-folded seed (incl. its None key) is never
+    # leaked into an attacker-anchor query, and an empty restart over the deleted prefix is not an answer either ---
+    assert set(bypass_full) == {"rogue", "rogue2"}, "under the attacker anchor only the attacker-signed hosts verify"
+    with pytest.raises(SnapshotError, match="does not succeed"):
+        capability_map(s, AP)   # AP != synthetic.trusted_pubkey(OP), and nothing makes AP OP's successor

@@ -12,7 +12,7 @@ from .ingest.docs import ingest_docs
 from .ingest.transcript import ingest_transcript
 from .mesh import authorize_device, authorized_devices, revoke_device
 from .reuse import sha256_hex
-from .spine.checkpoint import checkpoint, verify_checkpoint
+from .spine.checkpoint import CheckpointRefused, checkpoint, standing_pruned_head, verify_checkpoint
 from .spine.store import SpineStore
 from .vectors.index import VectorIndex
 
@@ -265,6 +265,17 @@ def cmd_voice(a) -> None:
     print(f"  events:     {p.events}")
 
 
+def _head_declares_prune() -> bool:
+    """True iff the on-disk signed head declares a committed hard prune (also true in the prune's own crash window,
+    before the manifest is rebased)."""
+    from .config import HEAD_PATH
+    from .reuse import SignedChainHead
+    try:
+        return SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8")).snapshot_seq >= 0
+    except Exception:  # noqa: BLE001 — absent / unparseable: the live-window check decides
+        return False
+
+
 def cmd_warden_anchor_set(a) -> None:
     """Cross-anchor the WARDEN action-log head into the append-only spine (anti-rollback).
     AUTHENTICATED: the (count, head_hash, pubkey) tuple must carry a valid Ed25519 signature by
@@ -275,6 +286,7 @@ def cmd_warden_anchor_set(a) -> None:
         print("REJECTED: warden-anchor-set signature invalid (only the WARDEN key may anchor)", file=sys.stderr)
         sys.exit(2)
     store = SpineStore()
+    standing_pruned_head(store)   # a pruned spine whose head could not be re-signed: refuse BEFORE appending
     store.append(kind="warden_checkpoint", source="warden", actor="warden",
                  payload={"count": int(a.count), "head_hash": a.head_hash, "pubkey": a.pubkey})
     checkpoint(store)  # re-sign the spine head so the anchor sits under the spine's signature (anti-truncation)
@@ -1850,8 +1862,12 @@ def cmd_key(a) -> None:
             print(f"  epoch {e.epoch:>3}  seq [{e.start}, {end})  {e.pubkey}")
         print(f"validated current   : {succ.current}")
         if cur and cur != succ.current:
+            from .spine.snapshot import live_window_start
+            fix = ("put back the owner key files of the validated tip from a file-level copy of SIGIL_HOME "
+                   "(re-genesis is refused on a hard-pruned spine)"
+                   if live_window_start(store) > 0 or _head_declares_prune() else "recover with `sigil key re-genesis`")
             print(f"!! on-disk owner.pub ({cur}) is NOT the validated succession tip — tampered/inconsistent "
-                  f"key state (recover with `sigil key re-genesis`)", file=sys.stderr)
+                  f"key state ({fix})", file=sys.stderr)
             sys.exit(2)
         print(f"epochs: {len(succ.epochs)}  (rotations so far: {len(succ.epochs) - 1})")
         _cmd_key_material(a)                                # + per-key at-rest sealing / KEK/DEK/warden state
@@ -1862,12 +1878,22 @@ def cmd_key(a) -> None:
                   "and re-anchors the head. Pre-rotation heads/grants keep verifying. Re-run with --yes.",
                   file=sys.stderr)
             sys.exit(2)
+        if getattr(a, "finish", False):
+            # The owner finishes a rotation that was interrupted before it re-signed a PRUNED spine's head: the
+            # head is still under the retired key, which no routine sign carries forward (see
+            # `standing_pruned_head`). Deliberate and owner-run, like `sigil floor reset --yes`.
+            checkpoint(store, admit_incumbent=True)
+            print("rotation FINISHED: the pruned head is re-signed under the current owner key.")
+            return
+        # A pruned spine whose head could not be re-signed: refuse BEFORE rotating. The head validated here (under
+        # the key being retired) is the one the re-sign below carries forward — no later sign trusts the old key.
+        standing = standing_pruned_head(store)
         try:
             new_kp, seq = kh.rotate(store, issued_at=time.time())
         except (ValueError, kh.SuccessionError) as e:
             print(f"!! rotation refused (fail-closed): {e}", file=sys.stderr)
             sys.exit(2)
-        checkpoint(store)                                   # re-sign the head+floor under the NEW owner key
+        checkpoint(store, carry=standing)                   # re-sign the head+floor under the NEW owner key
         print(f"owner key ROTATED. succession record @ seq {seq}.")
         print(f"new owner pubkey: {new_kp.public_key_b64}")
         print("every pre-rotation head and grant still verifies (walked from the pinned genesis root).")
@@ -1880,6 +1906,13 @@ def cmd_key(a) -> None:
                   "verifiable continuity of ALL pre-re-genesis history (every prior head, grant and "
                   "succession record stops being authenticated by the new root). Use ONLY for an actual key "
                   "COMPROMISE. Re-run with --yes --i-understand-continuity-is-abandoned.", file=sys.stderr)
+            sys.exit(2)
+        from .spine.snapshot import live_window_start
+        if live_window_start(store) > 0 or _head_declares_prune():
+            print("refusing: this spine was hard-pruned. Its prune boundary is owner-signed under the key history "
+                  "`sigil key re-genesis` abandons, so the new root could not carry it forward and every seeded "
+                  "read would fail closed. Nothing was changed. (Re-genesis on a pruned spine is not supported.)",
+                  file=sys.stderr)
             sys.exit(2)
         new_kp, seq = kh.re_genesis(store, issued_at=time.time())
         checkpoint(store)
@@ -3089,6 +3122,9 @@ def main(argv=None) -> None:
                       choices=["status", "rotate", "re-genesis", "seal-warden",
                                "rotate-warden", "rotate-dek", "rotate-kek", "reconcile"])
     pkey.add_argument("--yes", action="store_true", help="confirm a rotate / re-genesis")
+    pkey.add_argument("--finish", action="store_true",
+                      help="rotate only: finish a rotation that was interrupted before it re-signed a "
+                           "hard-pruned spine's head (re-signs it under the current owner key)")
     pkey.add_argument("--i-understand-continuity-is-abandoned", dest="i_understand", action="store_true",
                       help="re-genesis only: acknowledge that ALL pre-re-genesis history stops being "
                            "authenticated by the new root")
@@ -3247,7 +3283,11 @@ def main(argv=None) -> None:
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
     _assert_store_operable_or_exit(a.cmd)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except CheckpointRefused as e:         # a pruned spine with no verifying pruned head: never sign over it
+        print(f"!! {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 # Commands that DIAGNOSE or FIX a degraded store must run even when a migration is needed — otherwise the

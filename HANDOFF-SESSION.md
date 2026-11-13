@@ -348,8 +348,9 @@ same API flag-OFF after every randomized op, and fail if a cached read silently 
   attestation folds (owner ceremonies, documented "never cached"), `budget.report` (CLI), `revoke_all`, the eval
   `_publish` scans, the cockpit HUD's one-time tip scan.
 - **Memory:** one folded state per registry per process — S4 sizes it against the owner's targets.
-- **`SnapshotState.load` is itself O(snapshot) per read once a prune exists** (today the prune cutover is unwired,
-  so it returns the cheap empty identity). When prune goes live, memoize the loaded snapshot on the signed head.
+- **`SnapshotState.load` is O(live window) per read once a prune exists**: the prune cutover IS wired (`sigil spine
+  prune -K N --yes`), and on a pruned spine every `load` re-verifies the owner-signed head over the whole live window
+  (`verify_checkpoint`) before it trusts the boundary. Memoize the verified boundary on the signed head (S1/S4 note).
 
 ### 4.3 S0d — DONE (kept for the record of what it covered)
 Follow the S0a–S0c pattern exactly (shared step → seed → view → `_cached` via `fold_read.cached_read`; equivalence

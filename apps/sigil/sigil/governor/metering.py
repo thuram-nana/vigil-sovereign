@@ -57,7 +57,7 @@ from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -263,7 +263,7 @@ class PlanCreditLedger:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's (byte-identical under the empty snapshot)."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, set()), -1
         return (dict(snap.plan_granted_map()), dict(snap.plan_debited_map()),
                 set(snap.plan_seen_set())), snap.base_seq - 1

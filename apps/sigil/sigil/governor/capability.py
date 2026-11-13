@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.fold_cache import FoldCache
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
@@ -172,7 +172,7 @@ class CapabilityGate:
         """(latch, since) for `capability`: seeded from the folded snapshot prefix (default ENABLED; a missing
         high-water row means no enable was honored for it in the pruned prefix), or the genesis start when the
         trusted anchor differs from the snapshot's (see `_scan_enabled`)."""
-        if self.trusted_pubkey != st.trusted_pubkey:
+        if not seed_applies(st, self.trusted_pubkey, self.store):
             return _Latch(True, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
         return (_Latch(st.capability_latch_map().get(capability, True),
                        st.capability_issued_map().get(capability, NO_HIGHWATER)), st.base_seq - 1)
