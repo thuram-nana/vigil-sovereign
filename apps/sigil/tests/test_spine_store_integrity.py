@@ -142,6 +142,19 @@ def test_append_rechecks_a_longer_rewrite_from_its_start(tmp_path):
     assert a.verify()[0]
 
 
+def test_append_rechecks_a_rewrite_that_ends_on_a_record_boundary(tmp_path):
+    """The rewrite has a record boundary exactly at this store's checked offset, but a different record before it:
+    that is not a continuation, so the high-water from the old content must not be applied to the new one."""
+    a = SpineStore(tmp_path / "spine.jsonl")
+    _fixed(a, [f"a{i}" for i in range(10)])                         # 10 equal lines, seqs 0..9
+    lx = a._active.stat().st_size // 10
+    b = SpineStore(tmp_path / "spine.jsonl")
+    b.reset()
+    _fixed(b, ["b" * (2 + lx) for _ in range(6)])                   # 6 lines of exactly 2*lx: a boundary at 10*lx
+    assert b._active.stat().st_size == 12 * lx and a._tail_checked[1] == 10 * lx
+    assert a.append(kind="message", source="t", actor="u", payload={"text": "after"}) == 6
+
+
 def test_append_after_a_torn_tail_still_works(tmp_path):
     s = _legacy(tmp_path, 4)
     with s._active.open("ab") as f:
@@ -211,6 +224,11 @@ def _wrong_link(m):
     next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["first_prev_hash"] = "0" * 64
 
 
+def _extra_unsealed(m):
+    act = next(g for g in m["segments"] if not g["sealed"])
+    m["segments"].append(dict(act, id=98, file=act["file"].replace(".jsonl", "-b.jsonl")))
+
+
 def _sealed_without_last(m):
     next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["last_seq"] = None
 
@@ -219,14 +237,16 @@ def _shifted_first_seq(m):
     next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["first_seq"] = 4
 
 
-@pytest.mark.parametrize("edit", [_omit_middle, _omit_last_sealed, _two_unsealed, _overlapping, _wrong_link,
-                                  _sealed_without_last, _shifted_first_seq])
+@pytest.mark.parametrize("edit", [_omit_middle, _omit_last_sealed, _two_unsealed, _extra_unsealed, _overlapping,
+                                  _wrong_link, _sealed_without_last, _shifted_first_seq])
 def test_every_reader_refuses_a_manifest_that_is_not_a_contiguous_run(tmp_path, edit):
     s = _segmented(tmp_path)
     mp = s._layout.manifest_path
     m = json.loads(mp.read_text())
     edit(m)
     mp.write_text(json.dumps(m))
+    for g in m["segments"]:
+        (mp.parent / g["file"]).touch()                             # every named file exists: only the run is wrong
     fresh = SpineStore(tmp_path / "spine.jsonl")
     for read in (lambda: list(fresh.iter_records()), fresh.count, lambda: fresh.get(10), fresh.verify):
         with pytest.raises(SpineError, match="not a contiguous segment run"):
@@ -349,7 +369,10 @@ def _first_events(port, path, n=1):
     body = ""
     with urllib.request.urlopen(req, timeout=5) as r:
         while body.count("data: ") < n:
-            body += r.read1(4000).decode("utf-8")
+            chunk = r.read1(4000)
+            if not chunk:                                           # the stream ended (a crashed handler)
+                break
+            body += chunk.decode("utf-8")
     return [json.loads(ln[len("data: "):]) for ln in body.splitlines() if ln.startswith("data: ")]
 
 
