@@ -348,10 +348,9 @@ same API flag-OFF after every randomized op, and fail if a cached read silently 
   attestation folds (owner ceremonies, documented "never cached"), `budget.report` (CLI), `revoke_all`, the eval
   `_publish` scans, the cockpit HUD's one-time tip scan. Reviewed 2026-11-11 (S0 retroactive review, lens 8): sound
   — none is on a per-request customer path and no cached read feeds a decision they gate. Still full scans per
-  request with the flag ON, to move in a later slice: the cockpit `/api/snapshot` (polled every 4 s), `/metrics`,
-  and the customer monitoring-events bell (`inbound/monitoring_spool.py`, polled every 45 s per customer).
-- **`ts` / `schema_version` are outside the chain:** an in-place edit of either before the anchor passes `verify()`
-  and the anchor; only the audit sees it (the budget fold buckets on `ts`).
+  request with the flag ON, to move in a later slice: the cockpit `/api/snapshot` (polled every 4 s), `/metrics`
+  (at most once per `METRICS_PROJECTION_TTL_S`), and the customer monitoring-events bell
+  (`inbound/monitoring_spool.py`, polled every 45 s per customer).
 - **The audit's final compare runs under the fold's entry lock** (O(state), seconds at 1M customers, once per fold
   per audit); an incremental per-view digest would make it O(1).
 - **Memory:** one folded state per registry per process — S4 sizes it against the owner's targets.

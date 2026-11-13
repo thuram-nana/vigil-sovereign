@@ -15,12 +15,10 @@ and it is trusted only while it is provably a prefix of the current spine:
     re-reads that record; if it is missing or its `entry_hash` differs (a restore, rollback, re-genesis,
     rewrite or reset spine) the entry is DISCARDED and the fold rebuilt from the spine. `entry_hash` links
     `prev_hash`, so an equal anchor means an equal prefix of CHAINED content (kind, source, actor, payload, parent
-    links) for any chain that `SpineStore.verify()` accepts. A record's `ts` and `schema_version` are outside the
-    content digest and `entry_hash`: an in-place edit of them before the anchor passes `verify()` AND the anchor
-    (the budget fold buckets agent spend by `ts`), and only `audit()` sees it. An in-place edit that BREAKS the
-    chain before the anchor is not re-read here either: it is what `verify()` and the chain check exist to catch.
-    `audit()` (S0d) rebuilds every cached fold from the spine and compares it with the cached state (`sigil verify
-    --folds`, the cockpit's periodic audit, `vigil doctor`).
+    links) for any chain that `SpineStore.verify()` accepts; a record's `ts` and `schema_version` sit outside the
+    content digest. Records before the anchor are not re-read here: `verify()` and the chain check cover the chain,
+    and `audit()` (S0d) rebuilds every cached fold from the spine and compares the result with the cached state
+    (`sigil verify --folds`, the cockpit's periodic audit, `vigil doctor`).
     The anchor is proven, and the new records read, from the END of the active segment when the store offers
     `tail_after` (S0d — no seq index is built, so a per-request store pays O(new records), not O(segment)); an
     anchor that is the last record of the segment before the active one is proven against the manifest's
