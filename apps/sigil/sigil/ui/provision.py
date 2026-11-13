@@ -32,7 +32,7 @@ import hashlib
 import math
 import secrets
 import time
-from typing import Optional
+from typing import NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -43,6 +43,10 @@ from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
+_LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
+                        "in Billing to unlock it.")
+_LOCKED_COMPLETED_BODY = ("An assessment run completed. Every finding is listed in your assessments; buy credits in "
+                          "Billing to unlock the full proof and fix.")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
 # The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` (which carries
@@ -160,9 +164,9 @@ class Provisioner:
     email token in the response when no real sender is configured — it must stay False in production."""
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
-                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
+                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
-                 trial_credits: int = _DEFAULT_TRIAL_CREDITS,
+                 trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -190,12 +194,25 @@ class Provisioner:
         # uniqueness + the per-ip/email rate-limit — a ceiling on trial-credit farming (Finding: trial
         # abuse). None ⇒ no global cap (tests inject a low-cap one; the factory wires a daily cap).
         self.signup_cap_limiter = signup_cap_limiter
+        # Pricing S3 — a SEPARATE per-canonical-mailbox sign-up limiter (its own marker dir, its own threshold).
+        # It is checked and counted only AFTER the per-ip guard passed, so a stranger cannot cheaply lock a
+        # victim's sign-up from one address. None ⇒ no per-mailbox limit.
+        self.signup_email_limiter = signup_email_limiter
         # A SEPARATE per-org member-management limiter (grant/revoke). None ⇒ NO member-mgmt rate limiting
         # (so there is no "checked-but-never-incremented" dead gate — the review's finding); when injected,
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
         self.member_limiter = member_limiter
         self.email_sender = email_sender
-        self.trial_credits = int(trial_credits)
+        # The trial size is validated HERE (fail at boot): an out-of-range value would otherwise half-commit every
+        # sign-up — the account/org/membership are appended before wallet.grant refuses it. 0 means "no trial".
+        from ..governor.trial_policy import check_trial_credits
+        self.trial_credits = check_trial_credits(trial_credits)
+        # Pricing S3 — the owner-signed trial-claim ledger (one trial per canonical mailbox). Consulted only while
+        # VIGIL_TRIAL_PREVIEW_ENABLED is on; None with the flag on ⇒ no preview trial is granted (fail-closed).
+        self.trial_claims = trial_claims
+        # Pricing S7 — the GLOBAL daily trial-launch cap (VIGIL_TRIAL_LAUNCH_DAILY_CAP). None ⇒ trial launches are
+        # refused (the owner has not set a cap); paid launches never consult it.
+        self.trial_launch_limiter = trial_launch_limiter
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -286,6 +303,45 @@ class Provisioner:
         nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
         return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
 
+    def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str) -> str:
+        """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
+        append is idempotent, so a retry re-applies it safely. Returns "granted", "none" (trial size 0) or
+        "unavailable" (preview on and this org / mailbox already had a trial).
+
+        Preview OFF: the legacy grant (entry `trial:<org>`), unchanged — except that an org that already holds a
+        `trial-preview:<org>` grant (a retry after the flag was turned off) is not granted a second trial.
+        Preview ON: eligible only if the org holds neither trial entry AND the canonical mailbox is unclaimed or
+        claimed by this same org; then the mailbox claim is written and the trial granted under
+        `trial-preview:<org>`. Not eligible: the account/org/membership still commit, with no trial."""
+        if self.trial_credits == 0:
+            return "none"
+        from .. import config
+        legacy, preview = f"trial:{org_id}", f"trial-preview:{org_id}"
+        if not config.trial_preview_enabled():
+            if self.wallet.has_grant_entry(org_id, preview):
+                return "granted"
+            self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=legacy, source_ref=source_ref,
+                              issued_at=self._next_issued())
+            return "granted"
+        if self.wallet.has_grant_entry(org_id, preview):
+            return "granted"                                    # an idempotent retry of THIS sign-up
+        if self.wallet.has_grant_entry(org_id, legacy) or self.trial_claims is None:
+            return "unavailable"
+        from ..governor.trial_claim import key_digest
+        from ..governor.trial_policy import canonical_email
+        ekey = canonical_email(email)
+        if not ekey:
+            return "unavailable"                                # no mailbox to key the one-per-mailbox limit on
+        digest = key_digest("email", ekey)
+        holder = self.trial_claims.claimant("email", digest)
+        if holder is not None and holder != org_id:
+            return "unavailable"
+        if holder is None:
+            self.trial_claims.claim("email", digest, org_id, issued_at=self._next_issued())
+        self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=preview, source_ref=source_ref,
+                          issued_at=self._next_issued())
+        return "granted"
+
     # -- signup (two-phase) ------------------------------------------------------------------------
     def request_signup(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Phase 1: rate-limit, then issue a single-use verify token and send it. Mints NOTHING yet (no
@@ -295,6 +351,15 @@ class Provisioner:
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
         self.rate_limiter.record_failure(f"signup:ip:{ip}", now=t)   # count every attempt (anti-flood)
+        if self.signup_email_limiter is not None:
+            from ..governor.trial_policy import canonical_email
+            ekey = canonical_email(email_l)
+            if ekey:
+                mkey = f"signup:mailbox:{ekey}"
+                locked = self.signup_email_limiter.locked(mkey, now=t)
+                if locked is not None:
+                    raise ProvisionRateLimited(locked)
+                self.signup_email_limiter.record_failure(mkey, now=t)
         token = self.email_tokens.issue(email_l, PURPOSE_VERIFY, now=t) if email_l else None
         sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email",
                                                       f"Confirm: token {token}") if token else False
@@ -358,8 +423,7 @@ class Provisioner:
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
             self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-            self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=f"trial:{org_id}",
-                              source_ref="signup", issued_at=self._next_issued())
+            trial = self._grant_signup_trial(org_id, email, source_ref="signup")
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
@@ -369,7 +433,10 @@ class Provisioner:
             if self.signup_cap_limiter is not None:         # count this signup toward the cap (post-commit)
                 self.signup_cap_limiter.record_failure("signup:global", now=t)
         self.email_tokens.revoke_for_email(email)      # drop any other outstanding tokens for this email
-        return {"username": username, "org_id": org_id}
+        out = {"username": username, "org_id": org_id}
+        if trial == "unavailable":
+            out["trial"] = "unavailable"                # generic: never says which limit applied
+        return out
 
     # -- login / recovery --------------------------------------------------------------------------
     def login(self, email: str, password: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
@@ -511,8 +578,7 @@ class Provisioner:
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
         self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-        self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=f"trial:{org_id}",
-                          source_ref="signup-google", issued_at=self._next_issued())
+        self._grant_signup_trial(org_id, email, source_ref="signup-google")
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
@@ -860,8 +926,19 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied(f"unknown or unavailable launch product: {pid!r}")
             units = int(product.units)
-        r = LaunchGate(self.store).reserve_launch(
-            requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+        if self._preview_locked(requester_org_id):
+            # Pricing S7: a locked trial org — trial product only, one registrable domain (first claim wins,
+            # with proof history), and the global daily cap. The checks AND the reserve run under ONE hold of
+            # the re-entrant spine lock (LaunchGate takes the same lock), so nothing lands in between.
+            with self._lock:
+                domain = self._trial_launch_check(requester, requester_org_id, host, pid, now=t)
+                r = LaunchGate(self.store).reserve_launch(
+                    requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+                if r.get("ok"):
+                    self._trial_launch_commit(requester_org_id, domain, now=t)
+        else:
+            r = LaunchGate(self.store).reserve_launch(
+                requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
         if not r.get("ok"):
             self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
                         target=host, outcome="denied")
@@ -873,6 +950,62 @@ class Provisioner:
         if pid:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
+
+    def _trial_launch_refuse(self, requester: str, org_id: str, host: str, reason: str, text: str) -> "NoReturn":
+        self._audit("launch_reserve", requester=requester, org_id=org_id, target=host,
+                    outcome="trial_refused", reason=reason)
+        raise ProvisionDenied(text)
+
+    def _trial_launch_check(self, requester: str, org_id: str, host: str, pid: str, *, now: float) -> str:
+        """Caller holds the lock. Refuses (generic text, never naming another org) unless: the trial product is
+        configured and is the one requested; the host has an ICANN registrable domain (not an IP, localhost, or
+        a free-subdomain platform under a PRIVATE suffix; the vendored list's sha256 matches); no other org
+        claims that domain, or — with no claim yet — no other org has EVER held a signed proof in it; this org
+        claims no other domain; and the daily cap is configured and not reached. Returns the domain."""
+        from .. import config
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.registrable_domain import TrialDomainRefused, load_rules, same_domain, trial_domain
+        from ..governor.trial_claim import key_digest
+        product = config.trial_product_id()
+        if not product or self.trial_claims is None or self.trial_launch_limiter is None:
+            self._trial_launch_refuse(requester, org_id, host, "trial_not_configured",
+                                      "trial scans are not available yet — buy credits to scan")
+        if pid != product:
+            self._trial_launch_refuse(requester, org_id, host, "trial_product_only",
+                                      "your trial covers the trial scan only — buy credits for other scans")
+        rules = load_rules()
+        try:
+            domain = trial_domain(host, rules=rules)
+        except TrialDomainRefused as exc:
+            self._trial_launch_refuse(requester, org_id, host, exc.reason,
+                                      "trial scans need your own registered domain — buy credits to scan it")
+        digest = key_digest("domain", domain)
+        holder = self.trial_claims.claimant("domain", digest)
+        if holder is not None and holder != org_id:
+            self._trial_launch_refuse(requester, org_id, host, "domain_claimed",
+                                      "trial scans are limited to one workspace per domain — buy credits to "
+                                      "scan it")
+        if any(k == "domain" and d != digest for k, d in self.trial_claims.claims_of(org_id)):
+            self._trial_launch_refuse(requester, org_id, host, "second_domain",
+                                      "your trial covers one domain — buy credits to scan another")
+        if holder is None:
+            for o, h in AssetOwnershipRegistry(self.store, owner_key=None).ever_proven_pairs():
+                if o != org_id and same_domain(h, domain, rules=rules):
+                    self._trial_launch_refuse(requester, org_id, host, "domain_history",
+                                              "trial scans are limited to one workspace per domain — buy "
+                                              "credits to scan it")
+        if self.trial_launch_limiter.locked("trial:launch:global", now=now) is not None:
+            self._trial_launch_refuse(requester, org_id, host, "daily_cap",
+                                      "trial scans are paused for today — try again later or buy credits")
+        return domain
+
+    def _trial_launch_commit(self, org_id: str, domain: str, *, now: float) -> None:
+        """After a successful trial reserve (lock held): write the domain claim (first wins) and count the cap."""
+        from ..governor.trial_claim import key_digest
+        digest = key_digest("domain", domain)
+        if self.trial_claims.claimant("domain", digest) is None:
+            self.trial_claims.claim("domain", digest, org_id, issued_at=self._next_issued())
+        self.trial_launch_limiter.record_failure("trial:launch:global", now=now)
 
     # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
     # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
@@ -1357,13 +1490,22 @@ class Provisioner:
         import time as _t
         from . import assessments as _assess
         return self._customer_read(requester, requester_org_id, "view_assessments",
-                                   lambda s, o: _assess.assessment_summary(s, o, now=_t.time()))
+                                   lambda s, o: _assess.assessment_summary(s, o, now=_t.time(),
+                                                                           preview=self._preview_locked(o)))
 
     def customer_assessment_findings(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         import time as _t
         from . import assessments as _assess
-        return self._customer_read(requester, requester_org_id, "view_assessments",
-                                   lambda s, o: _assess.assessment_findings(s, o, now=_t.time()))
+        return self._customer_read(
+            requester, requester_org_id, "view_assessments",
+            lambda s, o: _assess.assessment_findings(
+                s, o, now=_t.time(), preview=self._preview_locked(o),
+                can_buy=self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")))
+
+    def _preview_locked(self, org_id: str) -> bool:
+        """Pricing S5: is this org's finding detail locked (trial preview, not unlocked)? Server-side only."""
+        from .finding_preview import preview_locked
+        return preview_locked(self.store, org_id, wallet=self.wallet)
 
     def customer_assets(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         """Per-host ownership status (verified / pending / expired) for the SESSION org's assets — the read
@@ -1408,17 +1550,30 @@ class Provisioner:
 
         # 1) Assessment findings — each confirmed FACT is a notification. admit_customer returns bool (no raise),
         #    so a denied source is simply skipped. Tenant-scoped inside the projector by the org's own slug set.
+        locked = self._preview_locked(requester_org_id)
         if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
             from . import assessments as _assess
-            found = _assess.assessment_findings(self.store, requester_org_id, now=t)
+            found = _assess.assessment_findings(self.store, requester_org_id, now=t, preview=locked)
             for f in found.get("findings", []):
                 ref = str(f.get("finding_ref") or "").strip()
                 if not ref:
                     continue
                 sev = str(f.get("severity") or "medium").strip().lower() or "medium"
+                # Pricing S5: a locked finding's body is fixed copy pointing at Billing (never its summary).
+                body = (_LOCKED_FINDING_BODY if f.get("locked") else str(f.get("summary") or ""))
                 items.append({"id": "finding:" + ref, "kind": "finding", "severity": sev,
-                              "title": str(f.get("title") or ref),
-                              "body": str(f.get("summary") or ""), "ts": None})
+                              "title": str(f.get("title") or ref), "body": body, "ts": None})
+        # Pricing S5: a one-time notice when a trial-preview org's reports are unlocked (stable id, so the
+        # per-viewer seen-set shows it once). Only for orgs that received the preview trial.
+        from .. import config as _cfg
+        if (_cfg.trial_preview_enabled() and not locked
+                and self.wallet.has_grant_entry(requester_org_id, f"trial-preview:{requester_org_id}")
+                and self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                             permission="view_assessments")):
+            items.append({"id": "billing:reports_unlocked", "kind": "billing", "severity": "info",
+                          "title": "Full results unlocked",
+                          "body": "Your full assessment results, with proof and fix, are now available.",
+                          "ts": None})
 
         # 2) Billing standing — dunning / lapsed / exhausted, from owner-signed STATES only (no money number
         #    decides a notification). past_due (dunning) is the sharpest; a canceled subscription and an
@@ -1498,6 +1653,7 @@ class Provisioner:
                                        "An assessment run was canceled. You were not charged for this run.")
                 else:  # completed (the only remaining signed outcome; flat-per-run consumed, no refund)
                     sev, head, body = ("info", "Assessment completed",
+                                       _LOCKED_COMPLETED_BODY if locked else
                                        "An assessment run completed. View any findings in your assessments.")
                 items.append({"id": "outcome:" + slug + ":" + nonce, "kind": "assessment",
                               "severity": sev, "title": head, "body": body, "ts": o.get("ts")})
@@ -1587,6 +1743,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     IdP) so no network is touched."""
     from .. import config
     from ..governor.customer_credentials import CustomerCredentialRegistry
+    from ..governor.trial_claim import TrialClaimRegistry
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
@@ -1629,6 +1786,10 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         # several times the cap — the red-pen's CO10.)
         signup_cap_limiter=LoginRateLimiter(config.SIGNUP_CAP_DIR, max_fails=config.SIGNUP_DAILY_CAP,
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
+        signup_email_limiter=(LoginRateLimiter(config.SIGNUP_EMAIL_RATELIMIT_DIR,
+                                               max_fails=config.SIGNUP_EMAIL_PER_HOUR, window_s=3600.0,
+                                               base_lock_s=3600.0, max_lock_s=3600.0)
+                              if config.SIGNUP_EMAIL_PER_HOUR > 0 else None),   # default OFF (0)
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
         # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
@@ -1644,6 +1805,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         signcount=SignCountLedger(config.CUSTOMER_PASSKEY_SIGNCOUNT_DIR),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
+        trial_claims=TrialClaimRegistry(store),
+        # Pricing S7: the global daily trial-launch cap; base_lock = window so it holds for the full day.
+        trial_launch_limiter=(LoginRateLimiter(config.TRIAL_LAUNCH_CAP_DIR, max_fails=config.TRIAL_LAUNCH_DAILY_CAP,
+                                               window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
+                              if config.TRIAL_LAUNCH_DAILY_CAP > 0 else None),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
     )

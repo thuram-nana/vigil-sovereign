@@ -634,6 +634,35 @@ class AssetOwnershipRegistry:
                 out.append(h)
         return sorted(out)
 
+    def ever_proven_hosts(self, org_id: str) -> list[str]:
+        """Every host `org_id` has EVER held an owner-signed, verified proof for (the proof fold's signed issued
+        map), whatever its state or expiry now, in host order. Unsigned revokes never add a host here (they only
+        touch the state map). Used to pin the trial preview's one reveal across proof expiry and re-proving."""
+        if not isinstance(org_id, str) or not org_id:
+            return []
+        hit = self._proofs_cached(lambda v: sorted(h for (o, h) in v.issued if o == org_id))
+        if hit is not _UNCACHED:
+            return hit
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        (state, issued, rows), since = self._proof_seed(snap)
+        for r in self.store.iter_records(since_seq=since):
+            _apply_ownership_record(r, resolver, PROOF_SIGNAL, _PROOF_CORE, _proof_row, state, issued, rows)
+        return sorted(h for (o, h) in issued if o == org_id)
+
+    def ever_proven_pairs(self) -> "list[tuple[str, str]]":
+        """Every (org_id, host) that has EVER held an owner-signed, verified proof (the signed issued map), across
+        all orgs. Unsigned revokes never add a pair. Used by the trial domain-history check."""
+        hit = self._proofs_cached(lambda v: sorted(v.issued))
+        if hit is not _UNCACHED:
+            return hit
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        (state, issued, rows), since = self._proof_seed(snap)
+        for r in self.store.iter_records(since_seq=since):
+            _apply_ownership_record(r, resolver, PROOF_SIGNAL, _PROOF_CORE, _proof_row, state, issued, rows)
+        return sorted(issued)
+
     def assets_overview(self, org_id: str, *, now: float) -> list[dict]:
         """Per-host ownership status for ALL of ``org_id``'s assets, in host order — the tenant-scoped read
         behind the customer "Domains" view (SS-4). DEFAULT-DENY to this org: it folds the owner-authenticated
