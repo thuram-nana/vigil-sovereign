@@ -1,14 +1,16 @@
 """Audit E1b — the owner-signed PENDING plan-checkout record behind the second-plan guard.
 
 The CHK-1b double-billing guard (``Provisioner._org_has_live_plan``) reads only DRAINED subscriptions, and a plan
-charge reaches the subscription registry only once its webhook drains — which can lag a paid checkout by a drain
-tick, or by the ~15 min NET-2b transient-verify parking window. Until then a second (third, ...) plan checkout for
-the same org was created and could be paid: two processor subscriptions, the customer billed twice.
+charge reaches the subscription registry only once its webhook drains — a drain tick after it is spooled, ~15 min
+of NET-2b transient-verify parking, or, once the drain QUARANTINES it (a transient verify failure with NET-2b off,
+or its retry budget spent), only when an operator re-drives it: that lag has NO upper bound. Until then a second
+(third, ...) plan checkout for the same org was created and could be paid: two processor subscriptions, the
+customer billed twice.
 
 ``PendingPlanCheckouts.claim`` records, per ORG, the plan checkout being opened, BEFORE the outbound processor
 call. A second plan checkout for the same org is refused while that record is live; once the first plan drains, the
-drained subscription refuses it instead (``_org_has_live_plan``), so the record only has to bridge the undrained
-gap. Pinned properties:
+drained subscription refuses it instead (``_org_has_live_plan``). In between, a record whose window has ended
+LAPSES ONLY when the billing spool shows no undrained webhook for its tx_ref (``undrained``). Pinned properties:
 
   * TAMPER-EVIDENT — the record is OWNER-SIGNED (``governor.authn.signed_payload`` over the org, price, tx_ref and
     its window), the same signature the provisioner puts on every owner record. Neither the keyless customer edge
@@ -20,11 +22,17 @@ gap. Pinned properties:
   * EXPIRING, but never before the link it guards is dead — ``expires_at = created_at + ttl_s``. A plan checkout
     asks the processor for a hosted-payment SESSION of ``PLAN_LINK_SESSION_MIN`` minutes (after which the processor
     closes the payment page and fails any uncompleted transaction), so the link cannot be paid after that; the
-    default ``DEFAULT_TTL_S`` covers that session PLUS ``DRAIN_LAG_S`` (a payment completed in the session's last
-    second still has to clear the 60 s drain timer and up to ~15 min of NET-2b parking before its plan is drained
-    and ``_org_has_live_plan`` takes over). So an ABANDONED checkout does not lock the org out of buying a plan
-    for ever, and a record can only lapse once its link can no longer bill. An expired, verified record is
-    replaced by the next claim.
+    default ``DEFAULT_TTL_S`` covers that session PLUS ``DRAIN_LAG_S`` of margin for the processor to deliver the
+    webhook of a payment completed in the session's last second. So an ABANDONED checkout does not lock the org out
+    of buying a plan for ever. (The session bound is the processor's to honour; see ``billing.create_checkout``.)
+  * A PAID-BUT-UNDRAINED plan never lapses on time alone — the window says nothing about whether the link was
+    paid. Before an expired record is replaced (and before the provisioner lets an expired spine-audited plan
+    checkout go), ``undrained`` reads the billing spool READ-ONLY — every stage where a spooled webhook waits
+    undrained: ``incoming/``, ``working/``, ``retry/`` (NET-2b parking) and ``rejected/`` (quarantine) — and the
+    second plan is refused while a webhook for that earlier tx_ref sits there (``processed/`` is drained: a minted
+    plan is ``_org_has_live_plan``'s, a definitive no-op was not paid). Fail-closed: no spool wired or found, a stage
+    that cannot be listed, or an envelope that cannot be read or attributed to a tx_ref refuses too. The offers read
+    (``pending``) reports such a record as pending, so the UI never re-offers a plan that checkout would refuse.
   * EXCLUSIVE across processes — the read-decide-write runs under an exclusive ``flock`` on ``<dir>/.claim.lock``,
     and a new record is published with ``os.link`` (an atomic exclusive create of a fully-written file), so two
     racing POSTs — in one cockpit process or several — can never both claim.
@@ -33,8 +41,9 @@ gap. Pinned properties:
   * TOP-UPS are never claimed: only the plan branch of ``billing_checkout`` calls this.
   * DELETION fails closed: the file lives under SIGIL_HOME, so a local writer could delete it — but the provisioner
     also writes each CREATED plan checkout (its tx_ref and this record's ``expires_at``) to the tamper-evident spine
-    audit and refuses a new plan checkout while such a row is still within its window, so deleting the file does
-    not reopen the second-plan window (see ``Provisioner._spine_live_plan_checkout``).
+    audit and refuses a new plan checkout while such a row is still within its window, or while an expired one's
+    webhook waits undrained (see ``Provisioner._spine_plan_checkouts``), so deleting the file does not reopen the
+    second-plan window.
 
 ``release`` drops a record only if it is still THIS checkout's (same tx_ref) — used when the processor refused the
 checkout, so a customer who never received a link can retry at once. Fail-closed throughout: no owner key, no
@@ -44,12 +53,15 @@ FATAL-2: sovereign-side (``assert_no_offense`` at import); stdlib + the sovereig
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
 import secrets
+import stat
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Sequence
 
 from ..reuse import assert_no_offense
 
@@ -66,12 +78,71 @@ SIGNAL = "provision.pending_plan_checkout"
 _CORE = ("signal", "org_id", "price_id", "tx_ref", "created_at", "expires_at")
 # The hosted-payment session a PLAN checkout asks the processor for (minutes; the processor's ceiling is 1440).
 PLAN_LINK_SESSION_MIN = 30
-# The worst-case lag from a payment completed at the session's last second to its plan being DRAINED: the 60 s
-# drain timer + NET-2b parking (5 s doubling to a 300 s cap over 8 attempts, ~915 s), with ample margin.
+# A MARGIN, not a bound: time for the webhook of a payment completed at the session's last second to reach the
+# billing spool (and, normally, to drain: the 60 s drain timer + NET-2b parking, ~915 s). It does NOT bound the
+# drain lag — a quarantined webhook waits for an operator — which is why an expired record still refuses while
+# ``undrained`` finds its webhook in the spool. Only a webhook that has not reached the spool yet is covered by
+# this margin alone.
 DRAIN_LAG_S = 30 * 60.0
 DEFAULT_TTL_S = PLAN_LINK_SESSION_MIN * 60.0 + DRAIN_LAG_S
 _LOCK_NAME = ".claim.lock"
 _MAX_BYTES = 8192
+# Where a spooled billing webhook waits UNDRAINED (``inbound.billing_spool``'s layout): written to ``incoming/``,
+# claimed into ``working/``, parked in ``retry/`` (NET-2b), quarantined in ``rejected/``. ``processed/`` is drained.
+_SPOOL_STAGES = ("incoming", "working", "retry", "rejected")
+_MAX_ENVELOPE = 256 * 1024                 # the proxy's / the drain's envelope cap
+_SPOOL_PASSES = 3                          # a webhook the drain moves mid-scan is caught by a re-read (see below)
+UNCONFIRMED_MESSAGE = ("a payment for an earlier plan checkout of this workspace has not been confirmed yet — a "
+                       "second plan is refused until it is (contact support if this persists)")
+
+
+def billing_spool_dirs() -> "list[Path]":
+    """Every place this deployment's billing-webhook spool can be, resolved NOW: the proxy's
+    ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the writer), the drain's ``VIGIL_BILLING_SPOOL`` and the runbook default
+    ``$SIGIL_HOME/billing-spool``. ``undrained`` scans each one that exists (more places can only refuse more)."""
+    from ..config import _resolve_home
+    out: "list[Path]" = []
+    for raw in (os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), os.environ.get("VIGIL_BILLING_SPOOL", "")):
+        if raw.strip():
+            out.append(Path(raw.strip()))
+    out.append(_resolve_home() / "billing-spool")
+    return out
+
+
+def _envelope_tx_ref(path: Path) -> Optional[str]:
+    """The ``data.tx_ref`` of one spooled billing envelope, or None when it cannot be attributed (not a bounded
+    regular file, not the envelope / body JSON, no tx_ref). Never follows a symlink or blocks on a FIFO. RAISES
+    ``FileNotFoundError`` when the file vanished since it was listed (the drain moved it)."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_ENVELOPE:
+            return None
+        chunks: "list[bytes]" = []
+        while sum(map(len, chunks)) <= _MAX_ENVELOPE:
+            b = os.read(fd, _MAX_ENVELOPE + 1)
+            if not b:
+                break
+            chunks.append(b)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if len(raw) > _MAX_ENVELOPE:
+        return None                                # it grew past the cap after the size check
+    try:
+        env = json.loads(raw.decode("utf-8"))
+        body = json.loads(base64.b64decode(env["body_b64"], validate=True))
+        ref = body["data"]["tx_ref"]
+    except (UnicodeDecodeError, ValueError, binascii.Error, KeyError, TypeError):
+        return None
+    return ref if isinstance(ref, str) and ref else None
 
 
 class PendingCheckoutRefused(Exception):
@@ -93,11 +164,15 @@ class PendingPlanCheckouts:
     under ``path``. ``owner_key`` signs, ``trusted_pubkey`` verifies (production: the deployment owner identity)."""
 
     def __init__(self, path: "str | os.PathLike", *, owner_key, trusted_pubkey: Optional[str],
-                 ttl_s: float = DEFAULT_TTL_S) -> None:
+                 ttl_s: float = DEFAULT_TTL_S,
+                 billing_spools: "Optional[Sequence[str | os.PathLike]]" = None) -> None:
         self.dir = Path(path)
         self.owner_key = owner_key
         self.trusted_pubkey = trusted_pubkey
         self.ttl_s = float(ttl_s)
+        # the billing-webhook spool(s) ``undrained`` reads (production: ``billing_spool_dirs()``). None ⇒ an expired
+        # record can never be confirmed unpaid, so it never lapses (fail-closed).
+        self.billing_spools = None if billing_spools is None else [Path(d) for d in billing_spools]
 
     def _marker(self, org_id: str) -> Path:
         return self.dir / hashlib.sha256(f"org:{org_id}".encode("utf-8")).hexdigest()
@@ -145,6 +220,58 @@ class PendingPlanCheckouts:
             return None, "malformed validity window"
         return rec, ""
 
+    def _spool_pass(self, wanted: "set[str]") -> "tuple[str, Optional[frozenset]]":
+        """ONE read of every undrained stage: (why, None) when a wanted tx_ref waits there or a stage / envelope
+        cannot be read or attributed (fail-closed); ("", None) when a listed file vanished mid-pass; else ("",
+        the listing)."""
+        roots = [d for d in (self.billing_spools or ()) if d.is_dir()]
+        if not roots:
+            return (f"no billing spool found (looked in {', '.join(str(d) for d in self.billing_spools or ())})"
+                    if self.billing_spools else "no billing spool is wired"), None
+        seen: "set[tuple[str, str]]" = set()
+        stable = True
+        for root in roots:
+            for stage in _SPOOL_STAGES:
+                try:
+                    names = sorted(e.name for e in os.scandir(root / stage) if e.name.endswith(".json"))
+                except FileNotFoundError:
+                    continue                       # never created: nothing has waited there
+                except OSError as exc:
+                    return f"billing spool {stage}/ is unreadable ({type(exc).__name__})", None
+                for name in names:
+                    try:
+                        ref = _envelope_tx_ref(root / stage / name)
+                    except FileNotFoundError:
+                        stable = False             # moved by the drain mid-pass: the next pass sees it settled
+                        continue
+                    if ref is None:
+                        return f"billing spool {stage}/{name[:24]} cannot be attributed to a tx_ref", None
+                    if ref in wanted:
+                        return f"its webhook waits undrained in billing spool {stage}/: {ref}", None
+                    seen.add((f"{root}/{stage}", name))
+        return "", (frozenset(seen) if stable else None)
+
+    def undrained(self, tx_refs: "Iterable[str]") -> str:
+        """Why one of these EARLIER plan checkouts (``tx_refs``) may have been PAID but not yet DRAINED — "" only
+        when the billing spool proves no webhook for any of them is waiting in ``incoming/``, ``working/``,
+        ``retry/`` or ``rejected/``. Read-only. FAIL-CLOSED: no spool wired or found, a stage that cannot be listed,
+        or an envelope that cannot be read or attributed to a tx_ref returns a reason (it could be one of them).
+        The drain moves envelopes between stages while this reads (``retry/`` -> ``incoming/`` -> ``working/`` ->
+        ``retry/``|``rejected/``), so one pass could miss a moving file: "" is returned only once two consecutive
+        passes saw the same files, and a spool that keeps changing refuses."""
+        wanted = {str(r) for r in tx_refs if r}
+        if not wanted:
+            return ""
+        prev: "Optional[frozenset]" = None
+        for _ in range(_SPOOL_PASSES):
+            why, listing = self._spool_pass(wanted)
+            if why:
+                return why
+            if listing is not None and listing == prev:
+                return ""
+            prev = listing
+        return "the billing spool kept changing while it was read"
+
     def claim(self, org_id: str, price_id: str, tx_ref: str, *, now: float) -> dict:
         """Record THIS org's pending plan checkout (``tx_ref``), or raise ``PendingCheckoutRefused``. Exclusive
         across threads and processes; see the module docstring for the refusal cases. Returns ``{"record": the
@@ -190,7 +317,13 @@ class PendingPlanCheckouts:
                         f"second subscription is refused rather than billed)",
                         code="refused_pending_plan",
                         detail=f"pending plan checkout until {ea:.0f}{skew}: {rec.get('tx_ref')}")
-                os.unlink(marker)                      # a VERIFIED, EXPIRED record: the abandoned checkout lapses
+                # A VERIFIED, EXPIRED record lapses only when its link was not paid-but-undrained: the window alone
+                # cannot tell an abandoned checkout from a paid one whose webhook the drain has not minted yet.
+                why = self.undrained((str(rec.get("tx_ref") or ""),))
+                if why:
+                    raise PendingCheckoutRefused(UNCONFIRMED_MESSAGE, code="refused_pending_unconfirmed",
+                                                 detail=f"expired pending record kept: {why}")
+                os.unlink(marker)                      # the abandoned checkout lapses
             core = {"signal": SIGNAL, "org_id": org_id, "price_id": price_id, "tx_ref": tx_ref,
                     "created_at": t, "expires_at": t + self.ttl_s}
             payload = signed_payload(core, self.owner_key)
@@ -217,11 +350,16 @@ class PendingPlanCheckouts:
             os.close(fd)
 
     def pending(self, org_id: str, *, now: float) -> bool:
-        """Read-only: True iff a plan checkout for the org is in progress — a verified record still inside its window,
-        OR a record that cannot be trusted (fail-closed: ``claim`` would refuse it too). For the offers read, so the
-        UI does not offer a plan that checkout would refuse. Takes no lock (a stale answer is only a UI hint)."""
+        """Read-only: True iff a plan checkout for the org is in progress — a verified record still inside its window
+        or expired with its webhook still undrained (``undrained``), OR a record that cannot be trusted (fail-closed:
+        ``claim`` would refuse each of these too). For the offers read, so the UI does not offer a plan that checkout
+        would refuse. Takes no lock (a stale answer is only a UI hint)."""
         rec, problem = self._read(self._marker(str(org_id)), str(org_id))
-        return bool(problem) or (rec is not None and float(now) < float(rec["expires_at"]))
+        if problem:
+            return True
+        if rec is None:
+            return False
+        return float(now) < float(rec["expires_at"]) or bool(self.undrained((str(rec.get("tx_ref") or ""),)))
 
     def release(self, org_id: str, tx_ref: str) -> bool:
         """Drop the org's pending record iff it is still THIS checkout's (verified, same ``tx_ref``). Best-effort:

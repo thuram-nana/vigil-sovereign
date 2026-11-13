@@ -151,9 +151,22 @@ def test_the_factory_wires_the_owner_signed_pending_records(tmp_path, monkeypatc
     from sigil.ui.provision import build_provisioner
     monkeypatch.setattr(config, "PENDING_PLAN_CHECKOUT_DIR", tmp_path / "pending")
     kp = ensure_owner_keypair()
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(tmp_path / "proxy-spool"))
     led = build_provisioner(SpineStore(str(tmp_path / "s.jsonl"))).pending_checkouts
     assert isinstance(led, PendingPlanCheckouts) and led.dir == tmp_path / "pending"
     assert led.owner_key.public_key_b64 == led.trusted_pubkey == kp.public_key_b64
+    assert led.billing_spools is not None and tmp_path / "proxy-spool" in led.billing_spools   # reads the spool
+
+
+def test_the_billing_spool_is_looked_for_where_the_proxy_and_the_drain_put_it(tmp_path, monkeypatch):
+    from sigil.ui.pending_checkout import billing_spool_dirs
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SPOOL", raising=False)
+    monkeypatch.delenv("VIGIL_BILLING_SPOOL", raising=False)
+    assert billing_spool_dirs() == [tmp_path / "home" / "billing-spool"]          # the runbook default
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SPOOL", str(tmp_path / "w"))
+    monkeypatch.setenv("VIGIL_BILLING_SPOOL", str(tmp_path / "d"))
+    assert billing_spool_dirs() == [tmp_path / "w", tmp_path / "d", tmp_path / "home" / "billing-spool"]
 
 
 # --- (b) the pending plan-checkout record ---------------------------------------------------------------------
@@ -244,6 +257,267 @@ def test_an_abandoned_plan_checkout_unblocks_after_the_ttl(monkeypatch):
     assert DEFAULT_TTL_S >= 3 * 915                           # well above the ~15 min NET-2b parking window
 
 
+# --- (b2) a PAID plan whose webhook the drain has not minted never lapses on time alone -----------------------
+
+_SECRET = "verif-hash-test"          # a dummy webhook verif-hash, never a real one
+
+
+def _envelope(body: dict) -> bytes:
+    import base64
+    return json.dumps({"schema": "vigil.webhook.billing.v1",
+                       "body_b64": base64.b64encode(json.dumps(body).encode()).decode()}).encode()
+
+
+def _spool_webhook(root: Path, tx_ref: str, txid: int, stage: str = "incoming") -> Path:
+    """What the proxy spools for a paid charge (a Flutterwave ``charge.completed`` body names its tx_ref)."""
+    import hashlib
+    env = _envelope({"event": "charge.completed", "data": {"id": txid, "tx_ref": tx_ref, "status": "successful"}})
+    d = root / stage
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / (hashlib.sha256(env).hexdigest()[:32] + ".json")
+    f.write_bytes(env)
+    return f
+
+
+def _plan_charge(txid: int, tx_ref: str, created: float) -> dict:
+    from sigil.governor import catalog
+    from sigil.governor.billing import _to_major
+    amount_minor, currency = catalog.expected_amounts()[_PLAN]
+    return {"id": txid, "status": "successful", "payment_plan": _PLAN, "amount": _to_major(amount_minor, currency),
+            "currency": currency, "created_at": created, "tx_ref": tx_ref}
+
+
+def _drain_rig(p, verifier, clock):
+    """The REAL billing drain (BillingSigner + BillingSpoolWatcher) on the provisioner's own spine and spool."""
+    from sigil.governor import catalog
+    from sigil.governor.billing import BillingSigner, FlutterwaveBillingProvider
+    from sigil.governor.metering import PlanCreditLedger
+    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.governor.wallet import WalletRegistry
+    from sigil.inbound.billing_spool import BillingSpoolWatcher
+    signer = BillingSigner(FlutterwaveBillingProvider(_SECRET, verifier), wallet=WalletRegistry(p.store),
+                           subscriptions=SubscriptionRegistry(p.store), plan=PlanCreditLedger(p.store),
+                           catalog=catalog.entitlements(), expected=catalog.expected_amounts())
+    root = p.pending_checkouts.billing_spools[0]
+    return BillingSpoolWatcher(signer, spool_dir=str(root), verif_hash=_SECRET, now_fn=lambda: clock[0]), root
+
+
+@pytest.mark.parametrize("net2b", [False, True])
+def test_a_paid_plan_the_drain_has_not_minted_keeps_refusing_past_the_ttl(monkeypatch, net2b):
+    """The customer pays plan checkout #1; the drain's /verify hits ONE transient failure, so the webhook is
+    quarantined (NET-2b off: at once; on: once its bounded retries are spent) and waits for an operator — no time
+    bound. Past the record's window a second plan checkout must still be refused (and not offered), until the plan
+    drains, after which the drained subscription refuses it."""
+    from sigil.governor.flutterwave_egress import FlutterwaveEgressError
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    if net2b:
+        monkeypatch.setenv("VIGIL_NET_RECOVERY_ENABLED", "1")
+    else:
+        monkeypatch.delenv("VIGIL_NET_RECOVERY_ENABLED", raising=False)
+    ensure_owner_keypair()
+    p, admin, _t, org, other, _w = _provisioner()
+    p.orgs.grant_membership(other, admin, "org_admin", issued_at=5.0)
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    t0 = 10_000.0
+    first = p.billing_checkout(admin, org, _PLAN, now=t0)["tx_ref"]
+    charges = {"7001": _plan_charge(7001, first, t0 + 60)}             # the customer PAID at t0+60
+    down = [True]
+
+    def verifier(txid):
+        if down[0]:
+            exc = FlutterwaveEgressError("Flutterwave GET returned HTTP 503")
+            exc.transient = True
+            raise exc
+        return charges.get(str(txid))
+    clock = [t0 + 61]
+    watcher, root = _drain_rig(p, verifier, clock)
+    _spool_webhook(root, first, 7001)                                 # the proxy spooled it and answered 202
+    while not watcher.drain()["rejected"]:
+        assert net2b and (root / "retry").is_dir()
+        clock[0] += 400.0                                             # past the 300 s cap: every parked one is due
+    assert list((root / "rejected").glob("*.json"))
+    later = t0 + DEFAULT_TTL_S + 60                                   # the record's window has ended
+    offers = p.customer_billing_offers(admin, org, now=later)
+    assert offers["has_active_plan"] is False and offers["plan_checkout_pending"] is True   # no plan re-offered
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=later)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed" and first in seen[-1]["reason"]
+    assert "rejected/" in seen[-1]["reason"]
+    assert p.customer_billing_offers(admin, org, now=later)["plan_checkout_pending"] is True  # the record was kept
+    p.billing_checkout(admin, other, _PLAN, now=later)                # another org is not blocked
+    p.billing_checkout(admin, org, _TOPUP, now=later)                 # nor are this org's top-ups
+    assert [x.get("payment_plan") for x in posted] == [_PLAN, _PLAN, None]   # ONE plan for org, one for other
+    # the operator re-drives the quarantined webhook once the processor is healthy: the plan DRAINS
+    down[0] = False
+    for f in (root / "rejected").glob("*.json"):
+        f.replace(root / "incoming" / f.name)
+    clock[0] = later + 60
+    assert watcher.drain()["minted"] == 1
+    with pytest.raises(ProvisionDenied, match="already has a plan"):
+        p.billing_checkout(admin, org, _PLAN, now=later + 120)
+    assert [x.get("payment_plan") for x in posted] == [_PLAN, _PLAN, None]
+
+
+@pytest.mark.parametrize("stage", ["incoming", "working", "retry", "rejected"])
+def test_an_undrained_webhook_in_any_spool_stage_holds_an_expired_window(monkeypatch, stage):
+    """incoming/ (a late delivery, or a stopped drain), working/ (claimed mid-drain), retry/ (NET-2b parking),
+    rejected/ (quarantine): wherever the paid webhook waits, the expired record does not lapse."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _spool_webhook(p.pending_checkouts.billing_spools[0], first, 7001, stage)
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert f"{stage}/" in seen[-1]["reason"] and len(posted) == 1
+
+
+def test_a_deleted_record_does_not_let_a_paid_but_undrained_plan_lapse(monkeypatch):
+    """With the record file gone, the spine audit's lapsed plan checkout is checked against the spool instead —
+    and the refused attempt leaves no claim behind."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    _spool_webhook(p.pending_checkouts.billing_spools[0], first, 7001, "rejected")
+    _record_path(p).unlink()
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed" and first in seen[-1]["reason"]
+    assert not any(Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64)) and len(posted) == 1
+
+
+@pytest.mark.parametrize("whose", ["another_org", "own_topup"])
+def test_only_an_earlier_plan_checkout_of_this_org_holds_the_window(monkeypatch, whose):
+    """The spool check is exact: another org's undrained plan, or this org's undrained TOP-UP, is not an earlier
+    plan checkout of this org — the abandoned plan checkout lapses as usual."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    _plans_on(monkeypatch)
+    p, admin, _t, org, other, _w = _provisioner()
+    p.orgs.grant_membership(other, admin, "org_admin", issued_at=5.0)
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    ref = (p.billing_checkout(admin, other, _PLAN, now=5000.0)["tx_ref"] if whose == "another_org"
+           else p.billing_checkout(admin, org, _TOPUP, now=5000.0)["tx_ref"])
+    _spool_webhook(p.pending_checkouts.billing_spools[0], ref, 7001, "rejected")
+    p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert [x.get("payment_plan") for x in posted][-1] == _PLAN and len(posted) == 3
+
+
+@pytest.mark.parametrize("fault", ["unwired", "not_found", "unattributable", "symlink", "oversize", "unlistable"])
+def test_a_spool_that_cannot_prove_the_earlier_plan_unpaid_keeps_refusing(monkeypatch, tmp_path, fault):
+    """Fail-closed: the expired record lapses only on a spool that was READ and shows no webhook that could be its
+    payment. Unwired, not found, an envelope that cannot be read or attributed (a symlink is never followed, an
+    oversize file never read), or a stage that cannot be listed all keep refusing — and keep the plan un-offered."""
+    import os
+
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    root = p.pending_checkouts.billing_spools[0]
+    if fault == "unwired":
+        p.pending_checkouts.billing_spools = None
+    elif fault == "not_found":
+        p.pending_checkouts.billing_spools = [tmp_path / "nowhere"]
+    elif fault == "unattributable":
+        (root / "rejected").mkdir()
+        (root / "rejected" / "x.json").write_text("{torn", encoding="utf-8")
+    elif fault == "symlink":
+        real = _spool_webhook(tmp_path, "vigil:org_other:n", 7002)        # attributable — but only via the link
+        (root / "rejected").mkdir()
+        (root / "rejected" / "x.json").symlink_to(real)
+    elif fault == "oversize":
+        (root / "rejected").mkdir()
+        big = _envelope({"data": {"tx_ref": "vigil:org_other:n", "pad": "x" * (256 * 1024)}})
+        (root / "rejected" / "x.json").write_bytes(big)
+    else:
+        (root / "retry").write_text("not a directory", encoding="utf-8")
+    later = 5000.0 + DEFAULT_TTL_S + 1
+    assert p.customer_billing_offers(admin, org, now=later)["plan_checkout_pending"] is True
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=later)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed" and len(posted) == 1
+    assert os.path.exists(_record_path(p))                            # the expired record was kept
+
+
+def test_a_webhook_the_drain_moves_mid_scan_is_still_seen(tmp_path, monkeypatch):
+    """The drain re-admits retry/ -> incoming/ while the guard reads: a one-pass scan (incoming/ first) would miss
+    the moving file. The scan re-reads until two passes agree, so it is caught; a spool that never settles refuses."""
+    from sigil.reuse import generate_keypair
+    from sigil.ui import pending_checkout as pc
+    k = generate_keypair()
+    root = tmp_path / "spool"
+    led = pc.PendingPlanCheckouts(tmp_path / "pc", owner_key=k, trusted_pubkey=k.public_key_b64,
+                                  billing_spools=[root])
+    parked = _spool_webhook(root, "vigil:org_a:n1", 7001, "retry")
+    (root / "incoming").mkdir()
+    real = pc._envelope_tx_ref
+    moves = {"n": 0}
+
+    def drain_moves_it(path):
+        if path.parent.name == "retry" and moves["n"] == 0:
+            moves["n"] += 1
+            parked.replace(root / "incoming" / parked.name)               # re-admitted just after incoming/ was read
+        return real(path)
+    monkeypatch.setattr(pc, "_envelope_tx_ref", drain_moves_it)
+    assert "incoming/" in led.undrained(["vigil:org_a:n1"])
+
+    def always_moving(path):
+        raise FileNotFoundError(path)
+    monkeypatch.setattr(pc, "_envelope_tx_ref", always_moving)
+    assert led.undrained(["vigil:org_a:n1"]) == "the billing spool kept changing while it was read"
+    monkeypatch.setattr(pc, "_envelope_tx_ref", real)
+    (root / "incoming" / parked.name).unlink()
+    assert led.undrained(["vigil:org_a:n1"]) == ""                     # a settled spool without it: proven absent
+
+
+def test_a_plan_that_drains_while_the_claim_is_taken_still_refuses(monkeypatch):
+    """The live-plan check runs before the claim; the first plan can drain in between (e.g. over a record that had
+    just expired). It is re-checked under the claim, so the second subscription is refused and the claim freed."""
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    ensure_owner_keypair()
+    p, admin, _t, org, _o, _w = _provisioner()
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    real_claim = p.pending_checkouts.claim
+    later = 5000.0 + DEFAULT_TTL_S + 1
+
+    def claim_while_it_drains(*a, **k):
+        SubscriptionRegistry(p.store).subscribe(org, "pro", 2000, period_start=5060.0, period_end=1e7,
+                                                issued_at=later)       # the drain minted it in the gap
+        return real_claim(*a, **k)
+    p.pending_checkouts.claim = claim_while_it_drains
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="already has a plan"):
+        p.billing_checkout(admin, org, _PLAN, now=later)
+    assert len(posted) == 1 and seen[-1]["outcome"] == "refused_existing_plan"
+    assert not any(Path(p.pending_checkouts.dir).glob("[0-9a-f]" * 64))   # the claim was freed
+
+
 def test_an_in_flight_plan_checkout_refuses_a_second_before_its_link_exists(monkeypatch):
     """The record is claimed BEFORE the outbound call, so a second request arriving while the first is still talking
     to the processor (no link, no "created" audit row yet) is refused by the record itself."""
@@ -262,8 +536,10 @@ def test_an_in_flight_plan_checkout_refuses_a_second_before_its_link_exists(monk
 
 
 def test_the_record_outlives_the_payable_link_plus_the_drain_lag():
-    """The record may only lapse once the link cannot bill: TTL >= the processor session the plan checkout asks
-    for + the 60 s drain timer + the full NET-2b parking window (computed from its live defaults)."""
+    """The record's window outlasts the processor session the plan checkout asks for, plus a margin for the webhook
+    of a last-second payment to arrive (at least the 60 s drain timer + the full NET-2b parking window, computed from
+    its live defaults). The window is NOT what keeps a paid-but-undrained plan from lapsing — the spool check is
+    (test_a_paid_plan_the_drain_has_not_minted_keeps_refusing_past_the_ttl)."""
     from vigil_integration.live import net_recovery
 
     from sigil.ui.pending_checkout import DEFAULT_TTL_S, DRAIN_LAG_S, PLAN_LINK_SESSION_MIN
@@ -367,12 +643,12 @@ def test_a_spine_read_fault_refuses_the_plan_and_frees_the_claim(monkeypatch):
 
     def broken(org_id, t):
         raise OSError("segment unreadable")                   # e.g. a manifest-referenced segment is missing
-    p._spine_live_plan_checkout = broken
+    p._spine_plan_checkouts = broken
     seen = _audits(p)
     with pytest.raises(ProvisionDenied, match="already in progress"):
         p.billing_checkout(admin, org, _PLAN, now=5000.0)
     assert posted == [] and seen[-1]["outcome"] == "refused_pending_spine" and "OSError" in seen[-1]["reason"]
-    del p._spine_live_plan_checkout
+    del p._spine_plan_checkouts
     p.billing_checkout(admin, org, _PLAN, now=5001.0)                    # no claim was left behind: retry works
     assert len(posted) == 1
 
@@ -538,7 +814,8 @@ from sigil.reuse import KeyPair
 from sigil.ui import pending_checkout as pc
 pub, priv = sys.stdin.read().split()                 # the throwaway test key, never on argv
 kp = KeyPair(public_key_b64=pub, private_key_b64=priv)
-led = pc.PendingPlanCheckouts(sys.argv[1], owner_key=kp, trusted_pubkey=kp.public_key_b64)
+led = pc.PendingPlanCheckouts(sys.argv[1], owner_key=kp, trusted_pubkey=kp.public_key_b64,
+                              billing_spools=[sys.argv[1] + ".spool"])   # an empty webhook spool: nothing undrained
 real_read = led._read
 
 def slow_read(*a):
@@ -560,6 +837,7 @@ except pc.PendingCheckoutRefused:
 def _race(d, k, now: float) -> str:
     import time
     bar = f"{d}.barrier"
+    Path(f"{d}.spool").mkdir(exist_ok=True)
     procs = [subprocess.Popen([sys.executable, "-c", _CLAIM_WORKER, str(d), f"n{i}", str(now), bar],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) for i in range(8)]
     for p in procs:

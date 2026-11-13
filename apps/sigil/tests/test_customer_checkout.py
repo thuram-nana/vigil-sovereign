@@ -58,7 +58,8 @@ def _provisioner():
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,
                                           base_lock_s=Provisioner._CHECKOUT_WINDOW_S),
         pending_checkouts=PendingPlanCheckouts(tempfile.mkdtemp(), owner_key=owner,
-                                               trusted_pubkey=owner.public_key_b64),
+                                               trusted_pubkey=owner.public_key_b64,
+                                               billing_spools=[tempfile.mkdtemp()]),   # an (empty) webhook spool
         email_sender=NullEmailSender(), trial_credits=100, now_fn=lambda: float(next(clock)))
     admin, tester, org, other = ("cust_admin000000000000001", "cust_tester00000000000001", "org_chk1", "org_other")
     custs.create("admin@acme.com", issued_at=1.0, password="password-xyz", username=admin)

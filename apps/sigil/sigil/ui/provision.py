@@ -943,12 +943,15 @@ class Provisioner:
         cur = SubscriptionRegistry(self.store).subscription(org_id)
         return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
 
-    def _spine_live_plan_checkout(self, org_id: str, t: float) -> str:
-        """Audit E1b backstop — the tx_ref of a PLAN checkout that the spine audit shows CREATED for ``org_id`` and
-        whose pending window (the row's ``expires_at``, the pending record's) is still open at ``t``; else "". The
-        pending record is a SIGIL_HOME file a local writer could delete; this row is on the tamper-evident spine,
-        so a deleted record still refuses the second plan (fail-closed). A spine read fault raises (caller refuses).
-        A full scan, but only on a plan checkout (rare, and rate-limited)."""
+    def _spine_plan_checkouts(self, org_id: str, t: float) -> "tuple[str, list[str]]":
+        """Audit E1b backstop — the PLAN checkouts the spine audit shows CREATED for ``org_id`` (a created plan row
+        carries its pending window's ``expires_at``): ``(live, lapsed)`` — the tx_ref of one whose window is still
+        open at ``t`` (else ""), and the tx_refs of those whose window has ended. The pending record is a SIGIL_HOME
+        file a local writer could delete; these rows are on the tamper-evident spine, so a deleted record still
+        refuses the second plan while a window is open, or while a lapsed one's webhook waits undrained
+        (fail-closed). A spine read fault raises (caller refuses). A full scan, but only on a plan checkout (rare,
+        and rate-limited)."""
+        live, lapsed = "", []
         for r in self.store.iter_records():
             pl = r.payload
             if not (isinstance(pl, dict) and pl.get("signal") == "provision.audit"
@@ -956,9 +959,13 @@ class Provisioner:
                     and pl.get("org_id") == str(org_id)[:64]):
                 continue
             ea = pl.get("expires_at")
-            if isinstance(ea, (int, float)) and not isinstance(ea, bool) and t < float(ea):
-                return str(pl.get("tx_ref") or "?")
-        return ""
+            if not isinstance(ea, (int, float)) or isinstance(ea, bool):
+                continue                                  # a top-up row (no pending window)
+            if t < float(ea):
+                live = live or str(pl.get("tx_ref") or "?")
+            elif pl.get("tx_ref"):
+                lapsed.append(str(pl["tx_ref"]))
+        return live, lapsed
 
     def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
                                 now: "Optional[float]" = None) -> dict:
@@ -1045,11 +1052,13 @@ class Provisioner:
         pending_until = 0.0
         if is_plan and str(price_id) in offered:
             # Audit E1b: `_org_has_live_plan` sees only DRAINED plans, so a paid plan whose webhook has not drained
-            # yet (a drain tick, or NET-2b parking) left room for a second processor subscription. Claim the org's
-            # owner-signed, expiring PENDING plan-checkout record BEFORE the outbound call (exclusive across
-            # processes); a live one refuses this checkout. The tx_ref is fixed up front so the record names it.
+            # yet (a drain tick, NET-2b parking, or a quarantine awaiting an operator) left room for a second
+            # processor subscription. Claim the org's owner-signed, expiring PENDING plan-checkout record BEFORE the
+            # outbound call (exclusive across processes); a live one — or an expired one whose webhook still waits
+            # undrained in the billing spool — refuses this checkout. The tx_ref is fixed up front so the record
+            # names it.
             from ..governor.billing import checkout_tx_ref
-            from .pending_checkout import PendingCheckoutRefused
+            from .pending_checkout import UNCONFIRMED_MESSAGE, PendingCheckoutRefused
             nonce = secrets.token_urlsafe(18)
             pending_ref = checkout_tx_ref(requester_org_id, nonce)   # the admitted org: validated like create_checkout
             try:
@@ -1061,8 +1070,9 @@ class Provisioner:
                 pending_note, pending_until = claimed.get("replaced", ""), float(claimed["record"]["expires_at"])
                 # the deletion-proof backstop: a CREATED plan checkout still inside its window on the spine audit
                 # refuses even if its pending record file is gone (a deleted record must not reopen the window).
+                lapsed: "list[str]" = []
                 try:
-                    live = self._spine_live_plan_checkout(requester_org_id, t)
+                    live, lapsed = self._spine_plan_checkouts(requester_org_id, t)
                 except Exception as exc:  # noqa: BLE001 — a spine read fault is fail-CLOSED, never "no checkout"
                     live, why = "?", f"the spine audit could not be read ({type(exc).__name__})"
                 else:
@@ -1072,10 +1082,25 @@ class Provisioner:
                     raise PendingCheckoutRefused(
                         "a plan checkout for this workspace is already in progress — complete it, or wait for it to "
                         "expire (contact support)", code="refused_pending_spine", detail=why[:160])
+                # ... and an EARLIER plan checkout whose window ended may still have been PAID: refuse while its
+                # webhook waits undrained in the billing spool (quarantine has no time bound), whatever the record.
+                unconfirmed = self.pending_checkouts.undrained(lapsed)
+                if unconfirmed:
+                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    raise PendingCheckoutRefused(UNCONFIRMED_MESSAGE, code="refused_pending_unconfirmed",
+                                                 detail=unconfirmed[:160])
             except PendingCheckoutRefused as exc:
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                             target=str(price_id), outcome=exc.code, reason=exc.detail, tx_ref=pending_ref)
                 raise ProvisionDenied(str(exc)) from None
+            # The first plan may have DRAINED between the pre-claim check above and the claim (e.g. over a record
+            # that had just expired): re-check under the claim, so a plan that is now live still refuses.
+            if self._org_has_live_plan(requester_org_id, t):
+                self.pending_checkouts.release(requester_org_id, pending_ref)
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan", tx_ref=pending_ref)
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
         from .pending_checkout import PLAN_LINK_SESSION_MIN
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
@@ -1669,7 +1694,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
-    from .pending_checkout import PendingPlanCheckouts
+    from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs
     from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
@@ -1710,9 +1735,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
-        # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key).
+        # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key),
+        # reading the billing-webhook spool (read-only) before an expired one may lapse.
         pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=orgs.owner_key,
-                                               trusted_pubkey=orgs.trusted_pubkey),
+                                               trusted_pubkey=orgs.trusted_pubkey,
+                                               billing_spools=billing_spool_dirs()),
         # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
         checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
                                           window_s=Provisioner._CHECKOUT_WINDOW_S,
