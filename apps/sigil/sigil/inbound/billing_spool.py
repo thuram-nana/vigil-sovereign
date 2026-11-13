@@ -13,7 +13,9 @@ rest.
 The ``sig_header`` passed to ``ingest`` is the webhook secret (resolved OFF-SPINE from the env, the SAME value the
 proxy validated the inbound header against). The proxy already authenticated the inbound ``verif-hash``; supplying
 the secret here simply lets ``ingest`` run its single verify->mint path, whose real authority is the re-verify.
-The secret stays in the env on the sovereign host and is NEVER written to the spool.
+The secret stays in the env on the sovereign host and is NEVER written to the spool. That is the default
+``FlutterwaveEnvelopeV1`` reader; a provider whose signature binds each delivery and its time instead passes its own
+``EnvelopeReader`` (one schema per drain; an envelope of any other schema is quarantined, never read).
 
 BOUNDARY INVARIANTS (mirror ``inbound/spool_watcher.py`` — treat every byte as hostile):
   * SOVEREIGN-only: imports NO ``framework`` / ``strix`` (``assert_no_offense`` at import); the mint is the
@@ -84,19 +86,68 @@ class BillingSpoolError(RuntimeError):
     """A fail-closed refusal while draining one billing-webhook envelope (nothing was spined)."""
 
 
+def decode_envelope_body(obj: "dict[str, Any]") -> bytes:
+    """The raw webhook body of one parsed envelope: ``body_b64`` must be strict base64 and decode to at most
+    ``_MAX_DECODED_BODY`` bytes, or this raises BillingSpoolError (quarantine; nothing is spined)."""
+    body_b64 = obj.get("body_b64")
+    if not isinstance(body_b64, str):
+        raise BillingSpoolError("envelope missing body_b64")
+    try:
+        raw = base64.b64decode(body_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise BillingSpoolError(f"body_b64 is not valid base64: {exc}") from exc
+    if len(raw) > _MAX_DECODED_BODY:
+        raise BillingSpoolError("decoded webhook body exceeds the size cap")
+    return raw
+
+
+class EnvelopeReader:
+    """Turns one parsed inert envelope of exactly ``schema`` into the ``(raw_body, sig_header, now)`` that
+    ``BillingSigner.ingest`` verifies. A provider whose signature binds the delivery (and its time) supplies its own
+    reader; the drain checks the schema BEFORE calling ``read``, so a reader only ever sees its own envelopes."""
+
+    schema: str = ""
+
+    def read(self, obj: "dict[str, Any]", *, drain_now: float) -> "tuple[bytes, str, float]":
+        raise NotImplementedError
+
+
+class FlutterwaveEnvelopeV1(EnvelopeReader):
+    """The ``vigil.webhook.billing.v1`` envelope (``{schema, body_b64}``). Flutterwave's ``verif-hash`` header IS
+    the static secret, so the proxy stores the body only and the drain supplies the off-spine secret as the
+    signature header, at the drain's own clock (the authority is the server-side transaction re-verify)."""
+
+    schema = _ENVELOPE_SCHEMA
+
+    def __init__(self, secret: Optional[str]) -> None:
+        if not isinstance(secret, str) or not secret:
+            raise ValueError("verif_hash (the off-spine webhook secret) is required — fail-closed without it")
+        self._secret = secret
+
+    def read(self, obj: "dict[str, Any]", *, drain_now: float) -> "tuple[bytes, str, float]":
+        return decode_envelope_body(obj), self._secret, drain_now
+
+
 class BillingSpoolWatcher:
     """Drains an inbound billing-webhook spool through ``BillingSigner.ingest`` onto the owner-signed spine,
     fail-closed. Construction mirrors ``inbound.spool_watcher.SpoolWatcher`` (same on-disk claim/dedup/quarantine
     contract and the same hostile-file hardening)."""
 
-    def __init__(self, signer: BillingSigner, *, spool_dir: str | os.PathLike, verif_hash: str,
-                 now_fn: Callable[[], float] = time.time) -> None:
+    def __init__(self, signer: BillingSigner, *, spool_dir: str | os.PathLike, verif_hash: Optional[str] = None,
+                 now_fn: Callable[[], float] = time.time, envelope_reader: Optional[EnvelopeReader] = None) -> None:
         if not isinstance(signer, BillingSigner):
             raise ValueError("a BillingSigner is required — the drain never mints on its own")
-        if not isinstance(verif_hash, str) or not verif_hash:
-            raise ValueError("verif_hash (the off-spine webhook secret) is required — fail-closed without it")
+        # Exactly one source of the (body, signature, time) triple: the Flutterwave secret (the default V1 reader,
+        # byte-identical to before) OR an explicit reader. Both, or neither, is a misconfiguration -> refuse.
+        if envelope_reader is None:
+            envelope_reader = FlutterwaveEnvelopeV1(verif_hash)      # validated inside (None / "" refused)
+        elif verif_hash is not None:
+            raise ValueError("pass verif_hash OR envelope_reader, not both — fail-closed on an ambiguous drain")
+        if not isinstance(envelope_reader, EnvelopeReader) or not isinstance(envelope_reader.schema, str) \
+                or not envelope_reader.schema:
+            raise ValueError("envelope_reader must be an EnvelopeReader with a non-empty schema")
         self.signer = signer
-        self.verif_hash = verif_hash
+        self._reader = envelope_reader
         self._now = now_fn
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
@@ -121,21 +172,14 @@ class BillingSpoolWatcher:
             raise BillingSpoolError(f"not valid JSON: {exc}") from exc
         if not isinstance(obj, dict):
             raise BillingSpoolError("envelope is not a JSON object")
-        if obj.get("schema") != _ENVELOPE_SCHEMA:
+        if obj.get("schema") != self._reader.schema:
             raise BillingSpoolError(f"unexpected envelope schema {obj.get('schema')!r}")
-        body_b64 = obj.get("body_b64")
-        if not isinstance(body_b64, str):
-            raise BillingSpoolError("envelope missing body_b64")
-        try:
-            raw = base64.b64decode(body_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise BillingSpoolError(f"body_b64 is not valid base64: {exc}") from exc
-        if len(raw) > _MAX_DECODED_BODY:
-            raise BillingSpoolError("decoded webhook body exceeds the size cap")
-        # The authoritative verify->mint path. ingest does the verif-hash compare (vs the injected secret) +
-        # the MANDATORY server-side re-verify + the owner-signed mint, and is itself idempotent by event_id.
-        # None ⇒ the webhook did not re-verify / carried no catalog entitlement ⇒ nothing minted (safe no-op).
-        return self.signer.ingest(raw, self.verif_hash, now=float(self._now()))
+        raw, sig_header, now = self._reader.read(obj, drain_now=float(self._now()))
+        # The authoritative verify->mint path. ingest does the signature check (for Flutterwave: the verif-hash
+        # vs the injected secret) + the MANDATORY server-side re-verify + the owner-signed mint, and is itself
+        # idempotent by event_id. None ⇒ the webhook did not re-verify / carried no catalog entitlement ⇒ nothing
+        # minted (safe no-op).
+        return self.signer.ingest(raw, sig_header, now=float(now))
 
     def _quarantine(self, path: Path, reason: str) -> None:
         dest = self.rejected / path.name

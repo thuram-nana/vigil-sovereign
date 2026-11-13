@@ -660,6 +660,17 @@ CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
 FLUTTERWAVE_EGRESS_ALLOWLIST = frozenset({"api.flutterwave.com"})
 
 
+# --- Stripe OUTBOUND billing egress (SHIPPED OFF BY DEFAULT) ----------------------------
+# The outbound host allowlist for the Stripe API calls in `governor.stripe_egress` (object re-fetch for an inbound
+# event, hosted-checkout create), enforced BEFORE any socket opens. Gated DEFAULT-OFF on `VIGIL_STRIPE_SECRET_KEY`:
+# unset ⇒ nothing is wired and no Stripe egress exists. There is no API-base override, so the key-holding egress
+# can only ever reach this host.
+STRIPE_EGRESS_ALLOWLIST = frozenset({"api.stripe.com"})
+# The ONLY host a Stripe hosted-checkout link may point at (`billing._https_link_on`, exact match). A link pin, never
+# fetched — it is deliberately NOT in the egress allowlist above.
+STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
+
+
 def customer_oidc_enabled() -> bool:
     """True iff customer Google-OIDC login is ON (`VIGIL_CUSTOMER_OIDC_ENABLED` ∈ {1,true,yes,on,enabled}).
     OFF by default and INDEPENDENT of the operator `SIGIL_OIDC_ENABLED`. When OFF the edge's
