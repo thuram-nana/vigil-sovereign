@@ -48,8 +48,9 @@ KNOWN_EXCLUDED: dict[str, str] = {
     # test_claim_discipline happens to run first and inserts integration/ onto sys.path — a fragile
     # cross-suite ordering side effect that the wholesale run (filesystem order: console before scanner) does
     # not provide. Excluded so crucible-core stays order-independent (rather than silently relying on suite
-    # ordering); the proper home for them is a job that installs the integration package — a separate
-    # follow-up. Until then they are honestly documented here, not dark by accident.
+    # ordering). Their home is the offense leg of "integration two-env boundary (P5)", which has both planes
+    # and lists this file; integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py fails the
+    # build if a file --ignore'd here is not on that list.
     "framework/v2/console/tests/test_chat_inject.py": "imports vigil_integration at run time; crucible-core does not install the integration package (two-env boundary)",
 }
 
