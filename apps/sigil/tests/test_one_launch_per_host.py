@@ -51,12 +51,15 @@ LATE = EDGE + 1.0
 BUSY = "finish or cancel the launch already in progress"
 
 
-@pytest.fixture(autouse=True)
-def _iso(monkeypatch):
+@pytest.fixture(autouse=True, params=["", "1"], ids=["record_off", "record_on"])
+def _iso(monkeypatch, request):
+    """Every test runs with the settle record (``VIGIL_SETTLE_SPINE_RECORD``) off and on, whatever the caller's env."""
     monkeypatch.setenv("VIGIL_BASE_DIR", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     monkeypatch.delenv("VIGIL_ONE_LAUNCH_PER_HOST", raising=False)
     monkeypatch.delenv("VIGIL_SETTLE_SPINE_RECORD", raising=False)
+    if request.param:
+        monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", request.param)
 
 
 @pytest.fixture
@@ -204,8 +207,9 @@ def test_a_completed_first_launch_frees_the_target(one_on):
     _seat(s)
     a = _reserve(s, publish=True)
     assert LaunchGate(s).settle_launch(signed_lease=a["lease"], consumed_units=30, now=NOW + 60)["refunded"] == 0
+    recorded = bool(os.environ.get("VIGIL_SETTLE_SPINE_RECORD"))
     assert scan_settlement(s, ensure_owner_keypair().public_key_b64, org_id=ORG, slug=a["slug"],
-                           nonce=a["nonce"]).settled is False     # only the seam marker records this settle
+                           nonce=a["nonce"]).settled is recorded  # record off: only the seam marker records it
     assert _try_reserve(s, now=NOW + 120)["ok"]
 
 
@@ -697,3 +701,82 @@ def test_finish_only_never_releases_an_unsettled_reservation():
     r = _release(s, a, finish_only=True)
     assert r["ok"] and r["action"] == "launch_not_settled" and r["refunded"] == 0
     assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])
+
+
+# ---- the remaining E7 guards, each pinned ------------------------------------------------------------------------
+def test_start_fails_closed_when_the_check_cannot_run(one_on, monkeypatch):
+    import sigil.governor.launch_reservations as lr
+    s = _store()
+    _seat(s)
+    a = _reserve(s)
+    monkeypatch.setattr(lr, "scan_reservations", lambda *a_, **k: (_ for _ in ()).throw(OSError("spine unreadable")))
+    out = _publish(s, a)
+    assert not out["ok"] and "fail-closed" in out["error"] and _seam_nonce(a["slug"]) is None
+
+
+def test_the_release_rescans_the_spine_inside_the_settle(monkeypatch):
+    # a drained settle's outcome record lands after the release's unlocked scan: the in-lock continued scan sees it
+    import sigil.governor.launch_reservations as lr
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    real = lr.scan_reservations
+    calls = {"n": 0}
+
+    def _then_outcome(*args, **kw):
+        out = real(*args, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            s.append(kind="assessment_outcome", source="sigil", actor="settle-drain",
+                     payload={"engagement_slug": a["slug"], "org_id": ORG, "outcome": "completed",
+                              "nonce": a["nonce"], "ts": NOW + 30})
+        return out
+
+    monkeypatch.setattr(lr, "scan_reservations", _then_outcome)
+    r = _release(s, a)
+    assert r.get("refused") == "outcome_recorded" and _avail(s) == 40, r
+
+
+def test_apply_needs_the_completion_spool():
+    s = _store()
+    _seat(s)
+    with pytest.raises(ValueError, match="completion_spool"):
+        ops_sweeps.sweep_superseded_reservations(LaunchGate(s), now=LATE, ttl_s=TTL, apply=True)
+
+
+def _append_signed(store, core, key):
+    from sigil.governor.authn import signed_payload
+    store.append(kind="event", source="governor", actor="WARDEN",
+                 payload={**signed_payload(core, key), "by": "owner", "requested_by": "owner", "tier": "A0",
+                          "decision": "auto", "reason": "test"})
+
+
+def test_a_legacy_owner_signed_settle_record_settles_the_reservation_as_scan_settlement_reads_it():
+    from sigil.governor.launch_settlement import LAUNCH_SETTLED_SIGNAL
+    s = _store()
+    _seat(s)
+    kp = ensure_owner_keypair()
+    a = _reserve(s)
+    _append_signed(s, {"signal": LAUNCH_SETTLED_SIGNAL, "org_id": ORG, "slug": a["slug"], "nonce": a["nonce"],
+                       "consumed": 0, "issued_at": NOW}, kp)                      # the v1 draft record
+    key = (ORG, a["slug"], a["nonce"])
+    assert scan_settlement(s, kp.public_key_b64, org_id=ORG, slug=a["slug"], nonce=a["nonce"]).settled
+    assert key in scan_reservations(s, kp.public_key_b64).settled
+
+
+def test_forged_reservation_and_settle_evidence_is_ignored():
+    from sigil.governor.launch_settlement import LAUNCH_SETTLED_SIGNAL
+    s = _store()
+    _seat(s)
+    kp = ensure_owner_keypair()
+    a = _reserve(s)
+    foreign = generate_keypair()
+    _append_signed(s, {"signal": LAUNCH_SETTLED_SIGNAL, "v": 2, "org_id": ORG, "slug": a["slug"],
+                       "nonce": a["nonce"], "mode": "prepaid", "reserved": 30, "consumed": 0, "refund_plan": 0,
+                       "refund_wallet": 30, "refund_postpaid": 0, "plan_period_end": 0.0, "basis": "cancel",
+                       "issued_at": NOW}, foreign)                                # not the owner's key
+    WalletRegistry(s, owner_key=foreign).debit(ORG, 5, engagement_id=a["slug"], entry_id=f"reserve-wallet:{a['slug']}:x9",
+                                               issued_at=NOW)                    # a foreign "reservation"
+    ix = scan_reservations(s, kp.public_key_b64)
+    assert (ORG, a["slug"], a["nonce"]) not in ix.settled
+    assert (ORG, a["slug"], "x9") not in ix.reservations and (ORG, a["slug"], a["nonce"]) in ix.reservations
