@@ -702,6 +702,7 @@ jobs:
               integration/tests/test_live_executor.py \
               integration/tests/test_think_model_sovereignty.py \
               integration/tests/test_backup_roundtrip.py \
+              integration/tests/test_backup_eval_seam_excluded.py \
               integration/tests/test_backup_staged_restore.py \
               integration/tests/test_backup_sqlite_snapshot.py \
               integration/tests/test_backup_engine_layout.py \
