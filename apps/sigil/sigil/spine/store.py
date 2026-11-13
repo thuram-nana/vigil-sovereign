@@ -1226,6 +1226,14 @@ class SpineStore:
                 f"refusing to append record with unknown schema_version {schema_version!r} "
                 f"(known: {sorted(KNOWN_SCHEMA_VERSIONS)}) — upgrade sigil before writing this version")
 
+    @staticmethod
+    def _validate_payload(payload: object, where: str = "") -> None:
+        """Refuse a payload that is not a JSON object BEFORE any lock/byte (and before an append joins a group-commit
+        batch, so the appends batched with it are never failed by it). Such a record would be read as a record,
+        and every consumer that folds it fails closed on it; no writer may put one on the spine."""
+        if not isinstance(payload, dict):
+            raise SpineError(f"refusing to append: {where}payload is not a JSON object ({type(payload).__name__})")
+
     # --- SCALE-C1b: concurrent-append coalescing (leader/follower group commit, DEFAULT-OFF) ------------
     def _holds_spine_lock(self) -> bool:
         """True iff THIS thread already holds the re-entrant spine lock for this store (an OUTER
@@ -1363,6 +1371,7 @@ class SpineStore:
                     f"append_many spec[{i}] is missing required field(s) {missing} — each spec needs "
                     f"kind/source/actor/payload; refusing to write a partial batch")
             self._validate_kind_schema(s.get("kind"), s.get("schema_version", SCHEMA_VERSION))
+            self._validate_payload(s.get("payload"), f"append_many spec[{i}] ")
         with spine_lock(self.path):
             with self._crossproc_lock():
                 self._refresh_active_under_lock()
@@ -1429,6 +1438,7 @@ class SpineStore:
         # chain; layer 2 = verify() re-checks kind on read. Shared with append_many via _validate_kind_schema,
         # so a future caller (e.g. an LLM-emitted cand.kind) can never inject an arbitrary kind on either path.
         self._validate_kind_schema(kind, schema_version)
+        self._validate_payload(payload)
         # SCALE-C1b: COMMIT-COALESCING FRONT-END (default-OFF). Before taking spine_lock, route INDEPENDENT
         # concurrent appends into one group that a single leader thread writes via the UNCHANGED append_many()
         # (one fsync per group — the 1M-scale concurrent-append throughput lift). Take the DIRECT path (today's

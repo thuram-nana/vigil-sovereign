@@ -30,10 +30,11 @@ from sigil.governor.identity import ensure_owner_keypair
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
 from sigil.spine.snapshot import SnapshotState, build
-from sigil.spine.store import SpineStore
+from sigil.spine.store import SpineError, SpineStore
 from sigil.ui import assessments as am
 from sigil.ui import margin as mg
 from sigil.ui.target_authorization import _customer_slug
+from test_spine_store_integrity import write_chained_line
 
 ATTACKER = generate_keypair()
 ORGS = ["acme", "globex"]
@@ -246,7 +247,9 @@ def test_a_corrupt_record_fails_the_capability_gate_closed_in_both_paths(tmp_pat
     raises — with the flag on exactly as with it off, and the error is never cached."""
     regs = _Regs(SpineStore(str(tmp_path / "spine.jsonl")))
     assert regs.caps.is_enabled("voice") and not regs.kill.is_engaged()       # warm
-    regs.store.append(kind="event", source="t", actor="u", payload=["not", "a", "dict"])
+    with pytest.raises(SpineError, match="payload is not a JSON object"):     # no append can write it ...
+        regs.store.append(kind="event", source="t", actor="u", payload=["not", "a", "dict"])
+    write_chained_line(regs.store, ["not", "a", "dict"], kind="event", source="t", actor="u")   # ... a hand edit can
     for flag in ("1", ""):
         monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
         assert regs.caps.is_enabled("voice") is False

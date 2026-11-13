@@ -569,19 +569,29 @@ def test_a_line_of_the_wrong_shape_is_skipped_by_every_reader_never_a_crash(tmp_
     assert fresh.append(kind="message", source="t", actor="u", payload={"text": "x"}) == 6   # not chained from it
 
 
-def _chained(s: SpineStore, payload, *, kind="event") -> None:
+def write_chained_line(s: SpineStore, payload, *, kind="event", source="t", actor="u",
+                       ts="2026-01-01T00:00:00Z") -> int:
     """Write, by hand, a complete line that continues the chain exactly as `append` would (seq + 1, prev_hash = the
-    tip's entry_hash, the real cert_digest and entry_hash) but whose payload is `payload`."""
-    from sigil.reuse import digest_payload
-    tip = list(SpineStore(s.path).iter_records())[-1]
-    content = {"scope": tip.scope, "kind": kind, "source": "t", "actor": "u", "payload": payload,
+    tip's entry_hash, the real cert_digest and entry_hash) but whose payload is `payload` — the only way to put a
+    payload that is not a JSON object on the spine, since `append` refuses one. Returns its seq."""
+    from sigil.config import SCOPE
+    from sigil.reuse import ChainEntry, append_entry, digest_payload
+    fresh = SpineStore(s.path)
+    recs = list(fresh.iter_records())
+    prior = [ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest, entry_hash=r.entry_hash)
+             for r in recs[-1:]]                                    # none: the genesis record
+    content = {"scope": SCOPE, "kind": kind, "source": source, "actor": actor, "payload": payload,
                "parent_id": None, "supersedes_id": None}
-    digest = digest_payload(content)
-    seq = tip.seq + 1
-    rec = {"seq": seq, **content, "ts": "2026-01-01T00:00:00Z", "cert_digest": digest,
-           "prev_hash": tip.entry_hash, "entry_hash": _entry_hash(seq, tip.entry_hash, digest), "schema_version": 1}
-    with s._active.open("ab") as f:
+    entry = append_entry(prior, digest_payload(content))
+    rec = {"seq": entry.seq, **content, "ts": ts, "cert_digest": entry.cert_digest, "prev_hash": entry.prev_hash,
+           "entry_hash": entry.entry_hash, "schema_version": 1}
+    seq = entry.seq
+    with fresh._active.open("ab") as f:
         f.write((json.dumps(rec) + "\n").encode())
+    return seq
+
+
+_chained = write_chained_line
 
 
 @pytest.mark.parametrize("payload", [["not", "a", "dict"], "text", 5, True])
@@ -616,6 +626,83 @@ def test_a_copy_of_a_record_with_a_payload_that_is_not_an_object_is_a_duplicate_
     assert ok is False and "duplicated or reordered" in why
     with pytest.raises(SpineError, match="not above every earlier record"):
         fresh.append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+_NOT_OBJECTS = [["not", "a", "dict"], "text", 5, True, None, ()]
+
+
+def _lock_forbidden(monkeypatch):
+    """Fail the test if the write path takes the spine lock (the refusal must come before any lock)."""
+    from sigil.spine import store as store_mod
+
+    def taken(*a, **kw):
+        raise AssertionError("the spine lock was taken")
+
+    monkeypatch.setattr(store_mod, "spine_lock", taken)
+
+
+@pytest.mark.parametrize("payload", _NOT_OBJECTS)
+def test_append_refuses_a_payload_that_is_not_an_object_before_any_lock(tmp_path, monkeypatch, payload):
+    s = _legacy(tmp_path, 3)
+    before = s._active.read_bytes()
+    _lock_forbidden(monkeypatch)
+    for dedup in (False, True):
+        with pytest.raises(SpineError, match="payload is not a JSON object"):
+            s.append(kind="message", source="t", actor="u", payload=payload, dedup=dedup)
+    monkeypatch.undo()
+    assert s._active.read_bytes() == before
+    assert s.append(kind="message", source="t", actor="u", payload={"text": "ok"}) == 3     # not a lost seq
+
+
+@pytest.mark.parametrize("payload", _NOT_OBJECTS)
+def test_append_many_refuses_a_batch_with_a_payload_that_is_not_an_object_before_any_lock(tmp_path, monkeypatch,
+                                                                                           payload):
+    s = _legacy(tmp_path, 3)
+    before = s._active.read_bytes()
+    _lock_forbidden(monkeypatch)
+    good = {"kind": "message", "source": "t", "actor": "u", "payload": {"text": "ok"}}
+    with pytest.raises(SpineError, match=r"spec\[1\] payload is not a JSON object"):
+        s.append_many([good, dict(good, payload=payload), good])
+    assert s._active.read_bytes() == before
+
+
+def test_a_coalesced_append_with_a_payload_that_is_not_an_object_fails_only_its_owner(tmp_path, monkeypatch):
+    """With group commit on, the refusal comes before the append joins a batch: it never reaches the leader's
+    append_many, so the appends batched with it are written."""
+    s = _legacy(tmp_path, 3)
+    s._group_commit_coalesce = True
+    joined = []
+    real = SpineStore._append_coalesced
+
+    def coalesced(self, spec):
+        joined.append(spec["payload"])
+        return real(self, spec)
+
+    monkeypatch.setattr(SpineStore, "_append_coalesced", coalesced)
+    with pytest.raises(SpineError, match="payload is not a JSON object"):
+        s.append(kind="message", source="t", actor="u", payload=["not", "a", "dict"])
+    assert joined == []
+    out, errs = [], []
+
+    def ok(i):
+        try:
+            out.append(s.append(kind="event", source="t", actor="u", payload={"n": i}))
+        except Exception as e:  # noqa: BLE001 — recorded
+            errs.append(e)
+
+    def bad():
+        try:
+            s.append(kind="event", source="t", actor="u", payload=["x"])
+        except SpineError as e:
+            errs.append(e)
+
+    ts = [threading.Thread(target=ok, args=(i,)) for i in range(6)] + [threading.Thread(target=bad)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(30)
+    assert sorted(out) == list(range(3, 9)) and len(errs) == 1 and isinstance(errs[0], SpineError)
+    assert ["x"] not in joined and SpineStore(tmp_path / "spine.jsonl").verify()[0]
 
 
 def test_verify_record_reports_a_kind_that_is_not_a_string():
