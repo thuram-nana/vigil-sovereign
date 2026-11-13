@@ -488,3 +488,151 @@ def test_only_the_stripe_spools_processed_is_read(tmp_path):
     every = PendingPlanCheckouts(tmp_path / "pending", owner_key=kp, trusted_pubkey=kp.public_key_b64,
                                  billing_spools=[flw])      # not told which are Stripe's: it reads them all
     assert "unreadable" in every.undrained(["vigil:org_chk1:n1"])
+
+
+# ---- processed/ is a never-pruned ledger: its reads are bounded, and a bound that is hit holds ----------------------
+def _ledger_envelope(proc, obj: dict, etype: str) -> str:
+    """Write one Stripe event to ``proc`` (a processed/) the way the drain names it: by the sha256 of its bytes."""
+    import base64
+    import hashlib
+    import json
+    body = {"id": "evt_x", "type": etype, "livemode": False, "data": {"object": obj}}
+    raw = json.dumps({"schema": "vigil.webhook.stripe.v1", "body_b64": base64.b64encode(json.dumps(body).encode())
+                      .decode(), "stripe_signature": "t=1,v1=00", "received_at": 1.0}).encode()
+    name = hashlib.sha256(raw).hexdigest() + ".json"
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / name).write_bytes(raw)
+    return name
+
+
+def _counted_processed_reads(monkeypatch, stages=None):
+    """Start from an empty remembered ledger and count every processed/ file opened (and, into ``stages``, every
+    file opened in an undrained stage)."""
+    import sigil.ui.pending_checkout as PC
+    monkeypatch.setattr(PC, "_PROCESSED_SEEN", {})
+    opened: list = []
+    real = PC._read_capped
+
+    def counting(path):
+        if path.parent.name == "processed":
+            opened.append(path.name)
+        elif stages is not None:
+            stages.append(path.name)
+        return real(path)
+    monkeypatch.setattr(PC, "_read_capped", counting)
+    return opened
+
+
+def _ledger(tmp_path, *roots):
+    from sigil.reuse import generate_keypair
+    from sigil.ui.pending_checkout import PendingPlanCheckouts
+    kp = generate_keypair()
+    return PendingPlanCheckouts(tmp_path / "pending", owner_key=kp, trusted_pubkey=kp.public_key_b64,
+                                billing_spools=list(roots), stripe_spools=list(roots))
+
+
+def test_each_processed_file_is_opened_once_across_offers_reads(monkeypatch, tmp_path):
+    """The offers read (``pending``) of an org whose record has expired re-checks processed/ every time. Each
+    content-addressed file there is opened ONCE (then remembered by its name), and the spool locations that resolve
+    to the same directory are read once (the undrained stages too): a later read opens only what is new."""
+    import os
+
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    root = tmp_path / "stripe-spool"
+    os.symlink(root, tmp_path / "alias", target_is_directory=True)
+    proc = root / "processed"
+    for i in range(40):                                              # the ledger: other checkouts' settled plans
+        _ledger_envelope(proc, _plan_invoice(f"vigil:org_old{i}:n{i}"), "invoice.paid")
+    _stripe_envelope(root, _plan_invoice("vigil:org_other:n9"), "retry", 7)   # another org's webhook, parked
+    led = _ledger(tmp_path, root, tmp_path / "alias", root)
+    ref = led.claim("org_chk1", _PLAN, "vigil:org_chk1:n1", now=1000.0)["record"]["tx_ref"]
+    _ledger_envelope(proc, _completed_session(ref), "checkout.session.completed")
+    staged: list = []
+    opened = _counted_processed_reads(monkeypatch, staged)
+    later = 1000.0 + DEFAULT_TTL_S + 1
+    assert led.pending("org_chk1", now=later) is True                # the completed checkout holds
+    assert len(opened) == 41 and len(set(opened)) == 41              # every file once, not once per alias
+    assert len(staged) == 2                                          # the parked one: once per stage pass
+    for _ in range(3):
+        assert led.pending("org_chk1", now=later) is True
+    assert len(opened) == 41                                         # nothing re-opened
+    settled = _ledger_envelope(proc, _plan_invoice(ref), "invoice.paid")
+    assert led.pending("org_chk1", now=later) is False               # its plan drained: the hold lifts
+    assert opened[41:] == [settled]                                  # ... and only the new file was opened
+
+
+def test_a_read_budget_that_is_hit_holds_until_the_ledger_is_read(monkeypatch, tmp_path):
+    """At most ``_PROCESSED_READ_BUDGET`` unseen files are opened per check; a check that leaves any unread holds
+    (reads as pending, refuses the claim) and the next check reads on from there."""
+    import sigil.ui.pending_checkout as PC
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S, PendingCheckoutRefused
+    root = tmp_path / "stripe-spool"
+    for i in range(25):
+        _ledger_envelope(root / "processed", _plan_invoice(f"vigil:org_old{i}:n{i}"), "invoice.paid")
+    led = _ledger(tmp_path, root)
+    led.claim("org_chk1", _PLAN, "vigil:org_chk1:n1", now=1000.0)
+    opened = _counted_processed_reads(monkeypatch)
+    monkeypatch.setattr(PC, "_PROCESSED_READ_BUDGET", 10)
+    later = 1000.0 + DEFAULT_TTL_S + 1
+    assert led.pending("org_chk1", now=later) is True and len(opened) == 10
+    with pytest.raises(PendingCheckoutRefused, match="has not been confirmed") as exc:
+        led.claim("org_chk1", _PLAN, "vigil:org_chk1:n2", now=later)
+    assert "has 5 envelope(s) not read yet" in exc.value.detail and len(opened) == 20
+    assert led.undrained(["vigil:org_chk1:n1"]) == "" and len(opened) == 25
+    assert led.pending("org_chk1", now=later) is False and len(opened) == 25
+    assert led.claim("org_chk1", _PLAN, "vigil:org_chk1:n2", now=later)["record"]["tx_ref"] == "vigil:org_chk1:n2"
+
+
+def test_a_ledger_over_the_entry_cap_holds_without_being_read(monkeypatch, tmp_path):
+    """A processed/ of more than ``_PROCESSED_MAX_ENTRIES`` files holds without opening any; a second location
+    resolving to the same directory does not count its files twice."""
+    import os
+
+    import sigil.ui.pending_checkout as PC
+    root = tmp_path / "stripe-spool"
+    for i in range(6):
+        _ledger_envelope(root / "processed", _plan_invoice(f"vigil:org_old{i}:n{i}"), "invoice.paid")
+    os.symlink(root, tmp_path / "alias", target_is_directory=True)
+    led = _ledger(tmp_path, root, tmp_path / "alias")
+    opened = _counted_processed_reads(monkeypatch)
+    monkeypatch.setattr(PC, "_PROCESSED_MAX_ENTRIES", 6)
+    assert led.undrained(["vigil:org_chk1:n1"]) == "" and len(opened) == 6
+    _ledger_envelope(root / "processed", _plan_invoice("vigil:org_old6:n6"), "invoice.paid")
+    assert "holds more than 6 envelopes" in led.undrained(["vigil:org_chk1:n1"])
+    assert len(opened) == 6
+
+
+def test_the_remembered_ledger_is_capped_and_drops_files_that_are_gone(monkeypatch, tmp_path):
+    """The names remembered never exceed ``_PROCESSED_MAX_ENTRIES``: once full, names no longer listed make room."""
+    import sigil.ui.pending_checkout as PC
+    root = tmp_path / "stripe-spool"
+    names = [_ledger_envelope(root / "processed", _plan_invoice(f"vigil:org_old{i}:n{i}"), "invoice.paid")
+             for i in range(4)]
+    led = _ledger(tmp_path, root)
+    opened = _counted_processed_reads(monkeypatch)
+    monkeypatch.setattr(PC, "_PROCESSED_MAX_ENTRIES", 4)
+    assert led.undrained(["vigil:org_chk1:n1"]) == "" and sorted(PC._PROCESSED_SEEN) == sorted(names)
+    for gone in names[:2]:
+        (root / "processed" / gone).unlink()
+    new = [_ledger_envelope(root / "processed", _plan_invoice(f"vigil:org_new{i}:n{i}"), "invoice.paid")
+           for i in range(2)]
+    assert led.undrained(["vigil:org_chk1:n1"]) == ""
+    assert sorted(PC._PROCESSED_SEEN) == sorted(names[2:] + new) and sorted(opened[4:]) == sorted(new)
+    assert led.undrained(["vigil:org_chk1:n1"]) == "" and len(opened) == 6
+    listed = [(root / "processed", sorted(names[2:] + new + ["e" * 64 + ".json"]))]
+    PC._remember_processed("e" * 64 + ".json", ("", ""), listed)      # full, and every name still listed
+    assert len(PC._PROCESSED_SEEN) == 4 and "e" * 64 + ".json" not in PC._PROCESSED_SEEN
+
+
+def test_a_file_not_named_by_its_content_is_read_every_time(monkeypatch, tmp_path):
+    """Only a content-addressed name fixes what the file holds; any other file is opened on every check, so a
+    rewrite of it is seen."""
+    import sigil.ui.pending_checkout as PC
+    root = tmp_path / "stripe-spool"
+    ref = "vigil:org_chk1:n1"
+    _stripe_envelope(root, _plan_invoice("vigil:org_other:n9"), "processed", 1)
+    led = _ledger(tmp_path, root)
+    opened = _counted_processed_reads(monkeypatch)
+    assert led.undrained([ref]) == "" and len(opened) == 1 and PC._PROCESSED_SEEN == {}
+    _stripe_envelope(root, _completed_session(ref), "processed", 1)               # same name, new content
+    assert ref in led.undrained([ref]) and len(opened) == 2

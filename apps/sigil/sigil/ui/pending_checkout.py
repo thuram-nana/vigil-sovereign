@@ -34,8 +34,10 @@ LAPSES ONLY when the billing spool shows no undrained webhook for its tx_ref (``
     plan is ``_org_has_live_plan``'s. A no-op there is not proof the checkout went unpaid, though: on the Stripe lane
     the drain archives a SUBSCRIPTION-mode completed session as a no-op (that subscription's ``invoice.paid`` mints
     the plan), so such a session in the Stripe spool's ``processed/`` keeps refusing until an ``invoice.paid`` or a
-    ``checkout.session.async_payment_failed`` for the same tx_ref has drained too. Fail-closed: no spool wired or
-    found, a stage that cannot be listed, or an envelope that cannot be read or attributed to a tx_ref refuses too.
+    ``checkout.session.async_payment_failed`` for the same tx_ref has drained too. ``processed/`` is never pruned,
+    so its reads are bounded (each file opened once per process, a fixed number per check), and a bound that is hit
+    refuses. Fail-closed: no spool wired or found, a stage that cannot be listed, or an envelope that cannot be read
+    or attributed to a tx_ref refuses too.
     The offers read (``pending``) reports such a record as pending, so the UI never re-offers a plan that checkout
     would refuse.
   * EXCLUSIVE across processes — the read-decide-write runs under an exclusive ``flock`` on ``<dir>/.claim.lock``,
@@ -64,6 +66,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -100,6 +103,16 @@ _MAX_ENVELOPE = 256 * 1024                 # the proxy's / the drain's envelope 
 # same tx_ref ends that (a plan from it drained, or its delayed payment failed).
 _STRIPE_COMPLETED = frozenset({"checkout.session.completed", "checkout.session.async_payment_succeeded"})
 _STRIPE_SETTLED = frozenset({"invoice.paid", "checkout.session.async_payment_failed"})
+# ``processed/`` is the drain's permanent ledger (never pruned), so reading it is BOUNDED: the drain names each file
+# there by the sha256 of its bytes, so what one holds is remembered by name (``_PROCESSED_SEEN``) and that file is
+# opened at most once per process; one read opens at most ``_PROCESSED_READ_BUDGET`` files it has not seen; and a
+# ledger of more than ``_PROCESSED_MAX_ENTRIES`` files is not read at all. Hitting either bound HOLDS (the earlier
+# checkout reads as pending; a second plan is refused), it never lets one through. Files left unread by the budget
+# are read by the next call.
+_PROCESSED_READ_BUDGET = 4096
+_PROCESSED_MAX_ENTRIES = 200_000
+_PROCESSED_SEEN: "dict[str, tuple[str, str]]" = {}      # content-addressed name -> (completed|settled|"", tx_ref)
+_PROCESSED_SEEN_LOCK = threading.Lock()
 _SPOOL_PASSES = 3                          # a webhook the drain moves mid-scan is caught by a re-read (see below)
 UNCONFIRMED_MESSAGE = ("a payment for an earlier plan checkout of this workspace has not been confirmed yet — a "
                        "second plan is refused until it is (contact support if this persists)")
@@ -215,6 +228,48 @@ def _stripe_processed_event(raw: bytes) -> "tuple[str, str, Optional[str]]":
             _str_at(body, "data", "object", "mode"))
 
 
+def _processed_hold(raw: bytes) -> "tuple[str, str]":
+    """What one ``processed/`` file means for the hold: ("completed", tx_ref) for a subscription-mode completed
+    session, ("settled", tx_ref) for an event that ends that hold, else ("", "")."""
+    etype, ref, mode = _stripe_processed_event(raw)
+    if ref and etype in _STRIPE_COMPLETED and mode == "subscription":
+        return "completed", ref
+    if ref and etype in _STRIPE_SETTLED:
+        return "settled", ref
+    return "", ""
+
+
+def _remember_processed(name: str, hold: "tuple[str, str]", listed: "Sequence[tuple[Path, list[str]]]") -> None:
+    """Remember what the content-addressed ``processed/`` file ``name`` means. Never more than
+    ``_PROCESSED_MAX_ENTRIES`` names: when full, names no longer in ``listed`` (this call's listing) are dropped
+    first; a name that still does not fit is simply read again by a later call."""
+    with _PROCESSED_SEEN_LOCK:
+        if len(_PROCESSED_SEEN) >= _PROCESSED_MAX_ENTRIES:
+            keep = {n for _dir, names in listed for n in names}
+            for gone in [n for n in _PROCESSED_SEEN if n not in keep]:
+                del _PROCESSED_SEEN[gone]
+        if len(_PROCESSED_SEEN) < _PROCESSED_MAX_ENTRIES:
+            _PROCESSED_SEEN[name] = hold
+
+
+def _distinct_dirs(paths: "Iterable[Path]") -> "list[Path]":
+    """The directories among ``paths``, each physical directory once: two spool locations that resolve to the same
+    directory (e.g. the proxy's and the drain's variable both naming the default spool) are read once."""
+    out: "list[Path]" = []
+    seen: "set[tuple[int, int]]" = set()
+    for d in paths:
+        if not d.is_dir():
+            continue
+        try:
+            st = os.stat(d)
+        except FileNotFoundError:
+            continue                               # removed since is_dir(): as if it never existed
+        if (st.st_dev, st.st_ino) not in seen:
+            seen.add((st.st_dev, st.st_ino))
+            out.append(d)
+    return out
+
+
 class PendingCheckoutRefused(Exception):
     """A plan checkout may not be opened now. ``str(exc)`` is safe to show the customer; ``detail`` is the
     operator-readable reason (for the audit) and ``code`` a short machine outcome."""
@@ -298,7 +353,7 @@ class PendingPlanCheckouts:
         """ONE read of every undrained stage: (why, None) when a wanted tx_ref waits there or a stage / envelope
         cannot be read or attributed (fail-closed); ("", None) when a listed file vanished mid-pass; else ("",
         the listing)."""
-        roots = [d for d in (self.billing_spools or ()) if d.is_dir()]
+        roots = _distinct_dirs(self.billing_spools or ())
         if not roots:
             return (f"no billing spool found (looked in {', '.join(str(d) for d in self.billing_spools or ())})"
                     if self.billing_spools else "no billing spool is wired"), None
@@ -333,32 +388,67 @@ class PendingPlanCheckouts:
         tx_ref until an ``invoice.paid`` (a plan from it drained) or a ``checkout.session.async_payment_failed``
         for the same tx_ref is in ``processed/`` too. Fail-closed: a ``processed/`` that cannot be listed, or a file
         in it that cannot be read, returns a reason. A readable file there that is not a Stripe event naming one of
-        ``wanted`` does not hold: ``processed/`` is the drain's permanent ledger of what it already handled."""
+        ``wanted`` does not hold: ``processed/`` is the drain's permanent ledger of what it already handled.
+
+        BOUNDED (that ledger is never pruned): each physical spool directory is read once, a content-addressed file
+        (named by the sha256 of its bytes, as the drain names them) is opened once per process and then answered
+        from ``_PROCESSED_SEEN``, at most ``_PROCESSED_READ_BUDGET`` files not seen yet are opened per call, and a
+        ledger of more than ``_PROCESSED_MAX_ENTRIES`` files is not read. Files left unread, or a ledger over that
+        size, return a reason (it holds, like any file that could not be read)."""
         spools = self.billing_spools if self.stripe_spools is None else self.stripe_spools
-        completed: "set[str]" = set()
-        settled: "set[str]" = set()
-        for root in (d for d in (spools or ()) if d.is_dir()):
+        listed: "list[tuple[Path, list[str]]]" = []
+        total = 0
+        for root in _distinct_dirs(spools or ()):
+            names: "list[str]" = []
             try:
-                names = sorted(e.name for e in os.scandir(root / "processed") if e.name.endswith(".json"))
+                with os.scandir(root / "processed") as entries:
+                    for e in entries:
+                        if not e.name.endswith(".json"):
+                            continue
+                        total += 1
+                        if total > _PROCESSED_MAX_ENTRIES:
+                            return (f"billing spool processed/ holds more than {_PROCESSED_MAX_ENTRIES} envelopes, "
+                                    f"more than this check reads")
+                        names.append(e.name)
             except FileNotFoundError:
                 continue                           # nothing has drained there yet
             except OSError as exc:
                 return f"billing spool processed/ is unreadable ({type(exc).__name__})"
+            listed.append((root / "processed", sorted(names)))
+        completed: "set[str]" = set()
+        settled: "set[str]" = set()
+        budget, unread = _PROCESSED_READ_BUDGET, 0
+        for processed, names in listed:
             for name in names:
-                try:
-                    etype, ref, mode = _stripe_processed_event(_read_capped(root / "processed" / name))
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    return f"billing spool processed/{name[:24]} is unreadable ({type(exc).__name__})"
+                hold = _PROCESSED_SEEN.get(name)
+                if hold is None:
+                    if budget <= 0:
+                        unread += 1
+                        continue
+                    budget -= 1
+                    try:
+                        raw = _read_capped(processed / name)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        return f"billing spool processed/{name[:24]} is unreadable ({type(exc).__name__})"
+                    hold = _processed_hold(raw)
+                    if name == hashlib.sha256(raw).hexdigest() + ".json":   # content-addressed: its meaning is fixed
+                        _remember_processed(name, hold, listed)
+                kind, ref = hold
                 if ref not in wanted:
                     continue
-                if etype in _STRIPE_COMPLETED and mode == "subscription":
+                if kind == "completed":
                     completed.add(ref)
-                elif etype in _STRIPE_SETTLED:
+                elif kind == "settled":
                     settled.add(ref)
         held = sorted(completed - settled)
-        return f"its completed checkout has no drained plan yet (billing spool processed/): {held[0]}" if held else ""
+        if held:
+            return f"its completed checkout has no drained plan yet (billing spool processed/): {held[0]}"
+        if unread:
+            return (f"billing spool processed/ has {unread} envelope(s) not read yet (at most "
+                    f"{_PROCESSED_READ_BUDGET} are read per check)")
+        return ""
 
     def undrained(self, tx_refs: "Iterable[str]") -> str:
         """Why one of these EARLIER plan checkouts (``tx_refs``) may have been PAID but not yet DRAINED — "" only
