@@ -690,25 +690,39 @@ All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF;
   grant) and writes it BEFORE the lease, after a per-launch **metered marker** (`MODEL_METER_DIR/<meter_id>.metered`)
   that fixes the launch's billing mode. A pricing setting the core refuses — no target margin, no cancel policy, a
   run model (`VIGIL_RUN_MODEL`) with no price — refuses the publish (no lease, no grant); a failed lease write removes
-  only a grant that call created (a failed re-publish never removes a live run's grant).
+  only a grant that call created (a failed re-publish never removes a live run's grant). The grant is valid from the
+  lease's start for the longest grant lifetime (`MAX_GRANT_LIFETIME_S`, past the at-most-a-week lease window), so a
+  run armed late in its window, or resumed after it, keeps its model access; the settle closes the meter, after
+  which the grant spends nothing.
 - **One launch per org+host in flight while metering is involved:** `publish_lease` refuses a new launch while an
   earlier, unsettled one holds the seam's single per-slug lease, when either is metered (a replaced lease would leave
   the earlier run unable to settle, and a customer cancel would read it as never started). Flat-to-flat is unchanged
-  (that root cause predates metering; reported).
+  (that root cause predates metering; reported). Where metering is involved the check, the grant and the lease
+  write run under one per-org+host `flock` (`MODEL_METER_DIR/publish-<hash>.lock`, across threads and the cockpit and
+  customer servers), so two concurrent publishes cannot both pass; a flat-only publish takes no lock and writes no
+  file.
 - `ui/launch_gate.py::settle_launch`: EVERY settle (completion, customer cancel, abandoned-lease sweep) of a launch
   published metered (its marker or meter on disk) first closes the run's meter, so a settled lease can spend nothing
   more, and retires the grant. A request still in flight or a meter not writable right now refuses with `retry`
   (the completion drain defers it); a broken meter refuses without it (quarantined).
 - `integration/vigil_integration/live/model_grant_broker.py`: `<base>/model-grants/<slug>.json` (0600 in 0700,
   atomic, nonce-bound via `expect_nonce`, loopback-URL-only, never follows a symlink, never prints the token).
-- **The billing mode is the launch's, never the flag's at settle time:** a launch published flat settles flat and
-  one published metered settles metered whatever `VIGIL_METERED_BILLING` says later. So turning metering OFF does not
+- **The billing mode is the launch's, never the flag's at settle time:** it is decided ONCE, at the launch's first
+  publish. A launch published flat settles flat — and a re-publish of it (a double-click after the owner turns
+  metering on) stays flat — and one published metered settles metered whatever `VIGIL_METERED_BILLING` says later. So turning metering OFF does not
   change how already-published metered launches settle: keep the target margin and the cancel policy set (in the
   settle drain's environment too) until they have all settled, or their settles defer.
 - `inbound/completion_spool.py::_consumed_for`: metered launch → close the meter, then completed = metered (clamped to
   [floor, reservation]); canceled = `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` | `refund`, no default); failed
   = 0. Only confirmed spend is billed. A request in flight, a transient meter error or an unset pricing setting
-  DEFERS the settle (back to `incoming/`, reported as `deferred`); a broken meter is quarantined.
+  DEFERS the settle (back to `incoming/`, reported as `deferred`); a broken meter is quarantined. A wait on the
+  pricing configuration never clears by retrying, so it is also reported as `deferred_config` and `vigil settle-drain`
+  exits 1 (the unit FAILS, the dead-man alarms) until it is fixed — set the pricing settings in the drain's own
+  environment (`infra/systemd/vigil-settle-drain.env.example`).
+- `ops_sweeps.sweep_abandoned_reservations`: an abandoned launch published metered is refunded in full like a flat
+  one (the sweep cannot tell a customer who paused and never resumed from a run VIGIL lost), and its row reports the
+  meter's confirmed spend (`metered_cost_nano`, `metered_requests`) so the spend a refund leaves VIGIL paying is never
+  silent. Whether such a launch should instead be charged under the cancel policy is an owner decision (open).
 - `vigil_core/run_tier.effort_for` (quick → high, deep → xhigh; unknown → high, never an escalation).
 - `backup.py`: `model_meter` captured (money data), restored functionally (`GrantMeter.verify` totals).
 - `integration/vigil_integration/doctor.py::_metering_report` — HARD issues (each blocks metered bring-up): metered
@@ -717,7 +731,9 @@ All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF;
   (floor, price table, an unpriced run model, gateway limits); with metered billing, no target margin (launches and
   charges refuse) and no cancel policy (launches and cancelled-run settles refuse). Notes: no daily ceiling; the
   gateway down or replaced while billing is flat. The flags read `1/true/yes/on/enabled` exactly as the runtime does.
-  The margin value is never printed. Nothing is rendered when neither flag is set.
+  The margin value is never printed. Nothing is rendered when neither flag is set. Doctor reads the environment the
+  cockpit reads: its own, with `$SIGIL_HOME/sigil.env` layered under it (where the settings UI saves the provider
+  key), exactly as `sigil.config` does. A probe that breaks never hides the issues already found.
 
 **Interim limits (until later slices):**
 - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the

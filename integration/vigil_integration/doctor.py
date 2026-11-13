@@ -1375,7 +1375,7 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     default; metered launches and settles refuse until they are set). The margin's value is never printed.
     ``probe(url) -> bool | None`` checks the gateway answers (tests inject one); the default sends one
     unauthenticated request and expects the gateway's own 401."""
-    e = dict(os.environ) if env is None else env
+    e = _runtime_env() if env is None else env
     metered = (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE
     gateway_on = (e.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _AFFIRMATIVE
     if not metered and not gateway_on:
@@ -1442,7 +1442,10 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     except ValueError as exc:                 # MeteringError is a ValueError
         issues.append(f"metered pricing configuration refused: {exc}")
     if gateway_on:
-        alive = (probe or _probe_model_gateway)(url)
+        try:
+            alive = (probe or _probe_model_gateway)(url)
+        except Exception:  # noqa: BLE001 — a probe that breaks must never take the issues above with it
+            alive = None
         section["reachable"] = alive
         if alive is False:
             (issues if metered else notes).append(
@@ -1456,9 +1459,29 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     return section, issues, notes
 
 
+def _runtime_env() -> dict:
+    """The environment the cockpit's metering reads: this process's, with ``$SIGIL_HOME/sigil.env`` layered UNDER
+    it exactly as ``sigil.config._load_env_file`` does at import (the real environment wins; ``\n``-only lines;
+    ``#`` comments). The cockpit's settings UI saves the provider key there, so reading ``os.environ`` alone would
+    report a key the gateway has as missing, and miss a metering flag set there. Stdlib mirror, no sigil import."""
+    e = dict(os.environ)
+    try:
+        raw = (_sigil_home() / "sigil.env").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return e
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        e.setdefault(k.strip(), v.strip())
+    return e
+
+
 def _probe_model_gateway(url: str) -> "bool | None":
     """True iff ``url`` answers an unauthenticated budget read with the gateway's own 401; False when nothing
-    listens; None when something else answers."""
+    listens; None when something else answers (any other status or body, or not HTTP at all)."""
+    import http.client
     import json as _json
     import urllib.error
     import urllib.request
@@ -1468,11 +1491,14 @@ def _probe_model_gateway(url: str) -> "bool | None":
     except urllib.error.HTTPError as e:
         try:
             body = _json.loads(e.read() or b"{}")
-        except ValueError:
+        except (ValueError, OSError, http.client.HTTPException):
             return None
-        return True if e.code == 401 and (body.get("error") or {}).get("type") == "authentication_error" else None
+        err = body.get("error") if isinstance(body, dict) else None
+        return True if e.code == 401 and isinstance(err, dict) and err.get("type") == "authentication_error" else None
     except (urllib.error.URLError, OSError):
         return False
+    except http.client.HTTPException:          # something that does not speak HTTP holds the port
+        return None
     return None
 
 
@@ -2095,7 +2121,8 @@ def render(report: dict) -> str:
     if isinstance(mt, dict) and mt.get("configured") and "error" not in mt:
         # PRICING M1c: rendered ONLY when metered billing or the gateway is configured (default output unchanged).
         mode = "metered" if mt.get("metered_billing") else "flat (metering OFF)"
-        reach = {True: "answering", False: "NOT answering", None: "unknown"}.get(mt.get("reachable"), "not enabled")
+        reach = ("not enabled" if not mt.get("gateway_enabled") else
+                 {True: "answering", False: "NOT answering"}.get(mt.get("reachable"), "something else answers"))
         lines.append(f"\n{_mark(bool(mt.get('ok')))}billing: {mode}; model gateway {mt.get('url')}: {reach}"
                      + (f"; floor {mt.get('floor_credits')} credits" if "floor_credits" in mt else "")
                      + ("; target margin set" if mt.get("target_margin_set") else "")

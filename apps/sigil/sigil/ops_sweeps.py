@@ -66,11 +66,30 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     return pairs, unreadable
 
 
+def _metered_spend(gate: Any, slug: str, nonce: str) -> dict:
+    """For a launch published metered (PRICING M1c), its meter's confirmed spend — what a full refund leaves VIGIL
+    paying — so the sweep never refunds metered spend silently. ``{}`` for a flat launch."""
+    try:
+        if not gate._launch_was_metered(slug, nonce):
+            return {}
+        from vigil_core.model_grant import meter_id
+        from . import config
+        from .model_gateway import GrantMeter
+        t = GrantMeter(config.MODEL_METER_DIR).totals(meter_id(str(slug), str(nonce)))
+        return {"metered_cost_nano": int(t.cost_nano), "metered_requests": int(t.requests)}
+    except (OSError, ValueError):
+        return {"metered_cost": "unreadable"}
+
+
 def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
                                  completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
     """Report (and with ``apply`` full-refund via ``settle_launch``) every abandoned published lease. A lease
     with a completion still pending/quarantined in ``completion_spool`` is reported ``completion_pending`` and
-    never refunded (its run finished; the drain must charge it). ``apply`` REQUIRES ``completion_spool``."""
+    never refunded (its run finished; the drain must charge it). ``apply`` REQUIRES ``completion_spool``.
+
+    An abandoned launch published metered (PRICING M1c) is refunded in full like a flat one — the sweep cannot
+    tell a customer who paused and never resumed from a run VIGIL lost — and its row carries the meter's confirmed
+    spend (``metered_cost_nano``), so the spend a refund leaves VIGIL paying is always reported, never silent."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
 
@@ -106,7 +125,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "completion_unknown"})
             continue
         if not apply:
-            rows.append({**row, "status": "abandoned"})
+            rows.append({**row, "status": "abandoned", **_metered_spend(gate, doc.engagement_slug, doc.nonce)})
             continue
         r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now)
         if not r.get("ok"):
@@ -114,7 +133,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
         else:
-            rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0))})
+            rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
+                         **_metered_spend(gate, doc.engagement_slug, doc.nonce)})
     return {"applied": bool(apply), "items": rows}
 
 

@@ -55,7 +55,7 @@ from sigil.ui.launch_gate import LaunchGate
 from sigil.ui.target_authorization import add_customer_target
 from vigil_core import AuthorizerKey, generate_keypair, run_tier
 from vigil_core import model_metering as mm
-from vigil_core.model_grant import ModelGrant, decode_token, meter_id
+from vigil_core.model_grant import MAX_GRANT_LIFETIME_S, ModelGrant, decode_token, meter_id
 from vigil_integration.jobs.completion_signal import emit_completion_signal
 from vigil_integration.live import credit_lease_broker
 from vigil_integration.live.credit_lease_broker import read_credit_lease
@@ -192,7 +192,11 @@ def test_the_grant_is_bound_to_the_verified_lease(monkeypatch, units, effort):
     assert grant.model == "claude-opus-4-8"
     assert grant.effort == effort == run_tier.effort_for(run_tier.run_tier_for_units(units))
     assert grant.cap_nano_usd == mm.usd_cap_nano_for_credits(units, markup=Fraction(2)) == units * 5_000_000
-    assert (grant.issued_at, grant.not_after) == (lease.not_before.timestamp(), lease.not_after.timestamp())
+    # valid from the lease's start for the longest grant lifetime: always past the lease window (at most a week),
+    # so a run armed late in its window, or resumed after it, keeps its model access until its settle closes the meter
+    assert (grant.issued_at, grant.not_after) == (lease.not_before.timestamp(),
+                                                  lease.not_before.timestamp() + MAX_GRANT_LIFETIME_S)
+    assert grant.not_after >= lease.not_after.timestamp() + 3_600
     assert grant.meter_id == meter_id(r["slug"], r["nonce"])
     # deterministic: re-publishing the same lease mints the identical grant (no clock, no randomness)
     assert _g.publish_lease(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
@@ -348,6 +352,151 @@ def test_a_launch_marked_metered_is_re_published_with_its_grant(monkeypatch):
     assert read_model_grant(base, r["slug"], expect_nonce=r["nonce"]) is not None
 
 
+def test_a_launch_started_flat_is_re_published_flat_after_the_flag_is_on(monkeypatch):
+    # the billing mode is decided once, at the first publish: a double-click after the owner turns metering on must
+    # never switch a run already under way unmetered to metered (it would settle at the floor)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, g, pub = _reserve(s)                                       # started flat
+    assert pub["ok"]
+    _metered(monkeypatch)
+    again = g.publish_lease(signed_lease=r["lease"], expect_org_id=ORG)
+    assert again["ok"] and again["action"] == "launch_published"
+    assert read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"]) is None
+    assert not (config.MODEL_METER_DIR / f"{meter_id(r['slug'], r['nonce'])}.metered").exists()
+    assert _settle(s, owner, r, "completed")["settled"] == 1
+    assert _avail(s) == 100                                              # the flat charge, never the floor
+
+
+def test_the_customer_start_retried_after_the_flag_is_on_keeps_the_run_flat(monkeypatch):
+    from sigil.ui.provision import build_provisioner
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, _ = _reserve(s, publish=False)
+    p = build_provisioner(s)
+    assert p.launch_start("u", ORG, r["lease"])["slug"] == r["slug"]      # started flat (metering off)
+    _metered(monkeypatch)
+    assert p.launch_start("u", ORG, r["lease"])["slug"] == r["slug"]      # the customer clicks start again
+    assert _settle(s, owner, r, "completed")["settled"] == 1 and _avail(s) == 100
+
+
+def test_a_new_launch_after_the_flag_is_on_is_metered(monkeypatch):
+    # the decision is per launch: a first publish while the flag is on is metered (a flat launch on the seam earlier
+    # does not make the next one flat)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r1, g, pub = _reserve(s)                                      # flat
+    assert pub["ok"] and _settle(s, owner, r1, "completed")["settled"] == 1
+    _metered(monkeypatch)
+    r2 = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=50, now=NOW)
+    assert g.publish_lease(signed_lease=r2["lease"], expect_org_id=ORG)["ok"]
+    assert read_model_grant(os.environ["VIGIL_BASE_DIR"], r2["slug"], expect_nonce=r2["nonce"]) is not None
+
+
+def test_a_new_launch_while_a_flat_one_runs_is_refused_once_metering_is_on(monkeypatch):
+    # only the SAME launch keeps its flat mode: another launch published after the flag is on is metered, so the
+    # one-launch-per-host rule applies and it never replaces the flat run still on the seam
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r1, g, pub = _reserve(s)                                     # flat, still running
+    assert pub["ok"]
+    _metered(monkeypatch)
+    r2 = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=50, now=NOW)
+    out = g.publish_lease(signed_lease=r2["lease"], expect_org_id=ORG)
+    assert out["ok"] is False and "earlier launch on this host" in out["error"]
+    assert read_credit_lease(os.environ["VIGIL_BASE_DIR"], r1["slug"]).signed_lease.document.nonce == r1["nonce"]
+
+
+def test_concurrent_metered_publishes_on_one_host_let_one_through(monkeypatch):
+    # the one-launch check, the grant and the lease write are one step per host: a second publish that starts while
+    # the first is between its check and its lease write waits for it, then sees it and is refused
+    import threading
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r1, g, _ = _reserve(s, publish=False)
+    r2 = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=50, now=NOW)
+    real = LaunchGate._publish_model_grant
+    seen: dict = {}
+
+    def other(out=seen):
+        out["r2"] = LaunchGate(s).publish_lease(signed_lease=r2["lease"], expect_org_id=ORG)
+
+    def interleaved(self, doc, kp):
+        if str(doc.nonce) == r1["nonce"] and "t" not in seen:
+            seen["t"] = threading.Thread(target=other)
+            seen["t"].start()
+            seen["t"].join(timeout=1.0)
+            seen["waited"] = seen["t"].is_alive()                        # held off by the first publish's lock
+        return real(self, doc, kp)
+    monkeypatch.setattr(LaunchGate, "_publish_model_grant", interleaved)
+    out1 = g.publish_lease(signed_lease=r1["lease"], expect_org_id=ORG)
+    seen["t"].join(timeout=10)
+    assert out1["ok"] and seen["waited"] is True
+    assert seen["r2"]["ok"] is False and "earlier launch on this host" in seen["r2"]["error"]
+    assert read_credit_lease(os.environ["VIGIL_BASE_DIR"], r1["slug"]).signed_lease.document.nonce == r1["nonce"]
+
+
+def test_a_flat_publish_takes_no_lock(monkeypatch):
+    def no_lock(*a, **k):
+        raise AssertionError("a flat-only publish must not take the metering lock")
+    monkeypatch.setattr(LaunchGate, "_publish_lock", staticmethod(no_lock))
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, _r, _g, pub = _reserve(s)
+    assert pub["ok"] and not config.MODEL_METER_DIR.exists()
+
+
+def test_a_run_armed_late_keeps_its_model_access_past_the_lease_window(monkeypatch):
+    from sigil.governor.identity import owner_pubkey
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, pub = _reserve(s)
+    base = os.environ["VIGIL_BASE_DIR"]
+    lease = read_credit_lease(base, r["slug"]).signed_lease.document
+    token = read_model_grant(base, r["slug"], expect_nonce=r["nonce"]).token
+    clock = {"t": lease.not_after.timestamp() - 60}                      # armed a minute before the window closes
+    cfg = gw.GatewayConfig(api_key="sk-dummy", owner_pubkey=owner_pubkey(), meter_dir=config.MODEL_METER_DIR,
+                           clock=lambda: clock["t"])
+    gate = gw.ModelGateway(cfg)
+    try:
+        assert gate.authenticate({"x-api-key": token}).meter_id == meter_id(r["slug"], r["nonce"])
+        clock["t"] = lease.not_after.timestamp() + 3_000                 # still running after the window
+        assert gate.authenticate({"x-api-key": token}).meter_id == meter_id(r["slug"], r["nonce"])
+        clock["t"] = lease.not_before.timestamp() + MAX_GRANT_LIFETIME_S # the grant itself is still bounded
+        with pytest.raises(gw._Refusal):
+            gate.authenticate({"x-api-key": token})
+    finally:
+        gate.stop()
+        gate.meter.shutdown()
+
+
+def test_the_abandoned_sweep_reports_the_metered_spend_it_refunds(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, pub = _reserve(s)
+    assert pub["ok"]
+    _spend(r, USAGE, USAGE_COST)                                         # then paused, never resumed
+    spool = tempfile.mkdtemp()
+    for sub in ("incoming", "working", "rejected"):
+        os.makedirs(os.path.join(spool, sub))
+    later = NOW + 8 * 3600 + 2 * 86400
+    seen = sweep_abandoned_reservations(g, now=later, ttl_s=86400, completion_spool=spool)["items"]
+    assert [(x["status"], x["metered_cost_nano"], x["metered_requests"]) for x in seen] == [
+        ("abandoned", USAGE_COST, 1)]
+    done = sweep_abandoned_reservations(g, now=later, ttl_s=86400, apply=True, completion_spool=spool)["items"]
+    assert [(x["status"], x["refunded"], x["metered_cost_nano"]) for x in done] == [("refunded", 900, USAGE_COST)]
+    assert _closed(r) and _avail(s) == 1_000
+
+
+def test_the_abandoned_sweep_reports_no_metered_spend_for_a_flat_launch():
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, pub = _reserve(s)
+    spool = tempfile.mkdtemp()
+    for sub in ("incoming", "working", "rejected"):
+        os.makedirs(os.path.join(spool, sub))
+    items = sweep_abandoned_reservations(g, now=NOW + 8 * 3600 + 2 * 86400, ttl_s=86400,
+                                         completion_spool=spool)["items"]
+    assert [x["status"] for x in items] == ["abandoned"] and not any(k.startswith("metered") for k in items[0])
+    assert not config.MODEL_METER_DIR.exists()
+
+
 def test_an_unpriced_run_model_refuses_the_publish(monkeypatch):
     _metered(monkeypatch)
     monkeypatch.setenv("VIGIL_RUN_MODEL", "claude-unpriced-1")
@@ -369,6 +518,7 @@ def test_a_retryable_settle_refusal_defers_the_completion(monkeypatch):
     w = _watcher(s, owner, r, "completed")
     out = w.drain()
     assert (out["settled"], out["rejected"], out.get("deferred")) == (0, 0, 1) and _avail(s) == 100
+    assert "deferred_config" not in out                                  # a transient wait is not an alarm
     assert w.drain()["settled"] == 1
 
 
@@ -457,8 +607,40 @@ def test_an_unset_margin_at_settle_defers_a_charge_but_not_a_failure(monkeypatch
     owner, r, _g, _pub = _reserve(s)
     _spend(r, USAGE, USAGE_COST)
     monkeypatch.delenv(mm.MARGIN_ENV)
-    assert _settle(s, owner, r, "completed")["deferred"] == 1 and _avail(s) == 100
+    out = _settle(s, owner, r, "completed")
+    assert out["deferred"] == 1 and out["deferred_config"] == 1 and _avail(s) == 100   # a configuration wait: alarm
     assert _settle(s, owner, r, "failed")["settled"] == 1 and _avail(s) == 1_000   # a failed run needs no price
+
+
+def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeypatch, tmp_path, capsys):
+    # a charge waiting on the pricing configuration never clears by retrying: the unit fails (the dead-man alarms);
+    # a transient wait (a request still in flight) alone exits 0
+    import types
+    from sigil import cli
+    from sigil.inbound import completion_spool as cs
+    owner = ensure_owner_keypair()
+    gov = generate_keypair()
+    deleg = delegate_offense_governance(
+        owner, authorizers=[AuthorizerKey(key_id="gov", name="gov", public_key_b64=gov.public_key_b64)],
+        threshold=1, scope="*", not_after=9_000_000_000)
+    dfile = tmp_path / "delegation.json"
+    dfile.write_text(deleg.model_dump_json(), encoding="utf-8")
+    results = iter([{"settled": 0, "noop": 0, "rejected": 0, "deduped": 0, "deferred": 1, "deferred_config": 1},
+                    {"settled": 0, "noop": 0, "rejected": 0, "deduped": 0, "deferred": 1}])
+
+    class _Watcher:
+        def __init__(self, *a, **k):
+            self.rejected = tmp_path / "rejected"
+
+        def drain(self):
+            return next(results)
+    monkeypatch.setattr(cs, "CompletionSpoolWatcher", _Watcher)
+    a = types.SimpleNamespace(spool=str(tmp_path), base_dir=str(tmp_path), delegation=str(dfile), scope="*",
+                              settle_cmd="drain", interval=2.0)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_settle_drain(a)
+    assert ei.value.code == 1 and "wait on the pricing configuration" in capsys.readouterr().err
+    cli.cmd_settle_drain(a)                                              # transient only: no exit
 
 
 @pytest.mark.parametrize("usage, cost, charged", [

@@ -130,13 +130,74 @@ def test_the_default_probe_recognises_only_the_gateway():
     assert d._probe_model_gateway("http://127.0.0.1:9") is False                     # nothing listens
     gateway_401 = {"type": "error", "error": {"type": "authentication_error", "message": "x"}}
     for code, body, want in ((401, gateway_401, True), (401, {"error": {"type": "other"}}, None),
-                             (403, gateway_401, None), (200, {}, None)):
+                             (403, gateway_401, None), (200, {}, None),
+                             # a foreign 401 of any other shape is "something else", never a crash
+                             (401, {"error": "unauthorized"}, None), (401, [], None), (401, None, None),
+                             (401, "denied", None), (401, 7, None)):
         srv = _serve(code, body)
         try:
             assert d._probe_model_gateway(f"http://127.0.0.1:{srv.server_address[1]}") is want, (code, body)
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+def test_a_service_that_does_not_speak_http_is_something_else():
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def answer():
+        c, _ = srv.accept()
+        c.recv(1024)
+        c.sendall(b"hello, not http\r\n")
+        c.close()
+    threading.Thread(target=answer, daemon=True).start()
+    try:
+        assert d._probe_model_gateway(f"http://127.0.0.1:{srv.getsockname()[1]}") is None
+    finally:
+        srv.close()
+
+
+def test_a_probe_that_breaks_never_hides_the_hard_issues():
+    def broken(url):
+        raise AttributeError("a probe bug")
+    section, issues, _ = d._metering_report({**ON, mm.MARGIN_ENV: ""}, probe=broken)
+    assert section["ok"] is False and section["reachable"] is None
+    assert any("cannot price a run" in m for m in issues)
+    assert any("something other than the model gateway" in m for m in issues)
+
+
+def test_the_billing_line_names_the_gateway_state():
+    section, _, _ = d._metering_report({k: v for k, v in ON.items() if k != "VIGIL_MODEL_GATEWAY_ENABLED"},
+                                       probe=_alive)
+    out = d.render({"ok": False, "issues": [], "notes": [], "metering": section})
+    assert "model gateway http://127.0.0.1:8742: not enabled" in out
+    section, _, _ = d._metering_report(dict(ON), probe=lambda url: None)
+    out = d.render({"ok": False, "issues": [], "notes": [], "metering": section})
+    assert "model gateway http://127.0.0.1:8742: something else answers" in out
+
+
+def test_the_doctor_reads_sigil_env_as_the_cockpit_does(monkeypatch, tmp_path):
+    # the cockpit layers $SIGIL_HOME/sigil.env under its environment (the settings UI saves the provider key there);
+    # the doctor must read the same, or it reports a key the gateway has as missing and misses flags set there
+    for k in list(ON) + ["ANTHROPIC_API_KEY", "VIGIL_MODEL_GATEWAY_PORT"]:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.setenv("VIGIL_GATEWAY_DAILY_LIMIT_USD", "9")
+    (tmp_path / "sigil.env").write_text(
+        "# saved by the settings UI\nVIGIL_MODEL_GATEWAY_ENABLED=1\nANTHROPIC_API_KEY=sk-dummy-not-real\n"
+        "VIGIL_GATEWAY_DAILY_LIMIT_USD=bad\n", encoding="utf-8")
+    section, issues, _ = d._metering_report(probe=_alive)
+    assert section["gateway_enabled"] is True and issues == [], issues   # the key is found; the real env wins
+    assert section["daily_limit_usd"] == "9"
+    (tmp_path / "sigil.env").write_text("VIGIL_METERED_BILLING=1\n", encoding="utf-8")
+    section, issues, _ = d._metering_report(probe=_alive)
+    assert section["metered_billing"] is True and any("VIGIL_MODEL_GATEWAY_ENABLED" in m for m in issues)
+    (tmp_path / "sigil.env").unlink()
+    assert d._metering_report(probe=_alive) == ({"configured": False}, [], [])
 
 
 def test_collect_wires_the_section_in(monkeypatch, tmp_path):

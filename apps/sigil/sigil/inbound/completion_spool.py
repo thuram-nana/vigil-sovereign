@@ -59,7 +59,12 @@ class CompletionSpoolError(RuntimeError):
 class CompletionSpoolDeferred(CompletionSpoolError):
     """The completion cannot be settled YET (PRICING M1c): the run's model meter has a request in flight or cannot
     be written right now, or the metered pricing configuration is not set. Nothing is settled; the file goes back to
-    ``incoming/`` and the next drain retries it (never quarantined, never a guessed charge)."""
+    ``incoming/`` and the next drain retries it (never quarantined, never a guessed charge). ``config`` marks a wait
+    on the pricing configuration: no retry clears it until the owner fixes the deployment, so it is alarm-worthy."""
+
+    def __init__(self, msg: str, *, config: bool = False) -> None:
+        super().__init__(msg)
+        self.config = config
 
 
 class CompletionSpoolWatcher:
@@ -251,7 +256,8 @@ class CompletionSpoolWatcher:
             return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
                                        cap=reserved)
         except mm.MeteringError as exc:
-            raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}") from exc
+            raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}",
+                                          config=True) from exc
 
     @staticmethod
     def _consumed(outcome: str, reserved: int) -> int:
@@ -339,7 +345,7 @@ class CompletionSpoolWatcher:
             _sys.stderr.write("vigil settle-drain: WARNING offense-governance delegation is not currently valid "
                               "(expired / out-of-horizon) — settling nothing this drain (will retry on renewal)\n")
             return {"settled": 0, "noop": 0, "rejected": 0, "deduped": 0}
-        settled = noop = rejected = deduped = deferred = 0
+        settled = noop = rejected = deduped = deferred = deferred_config = 0
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
                 continue
@@ -371,6 +377,7 @@ class CompletionSpoolWatcher:
                     pass                             # left in working/: the next drain's reclaim returns it
                 _sys.stderr.write(f"vigil settle-drain: deferred {src.name}: {exc}\n")
                 deferred += 1
+                deferred_config += int(exc.config)
                 continue
             except CompletionSpoolError as exc:
                 self._quarantine(claimed, f"settle refused: {exc}")
@@ -391,6 +398,8 @@ class CompletionSpoolWatcher:
         out = {"settled": settled, "noop": noop, "rejected": rejected, "deduped": deduped}
         if deferred:
             out["deferred"] = deferred               # PRICING M1c only: the flat result shape is unchanged
+        if deferred_config:
+            out["deferred_config"] = deferred_config
         return out
 
     def watch(self, *, interval: float = 2.0, sleep: Optional[Callable[[float], None]] = None) -> None:

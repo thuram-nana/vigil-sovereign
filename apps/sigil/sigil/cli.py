@@ -1264,6 +1264,13 @@ def cmd_settle_drain(a) -> None:
                   f"quarantine; this unit stays FAILED (the dead-man alarms) until rejected/ is empty.",
                   file=sys.stderr)
             sys.exit(1)
+        if r.get("deferred_config"):
+            # PRICING M1c: a metered charge waiting on the pricing configuration never clears by retrying — the run
+            # stays unsettled with the whole reservation debited until the owner fixes the deployment. Fail the unit.
+            print(f"  ALARM: {r['deferred_config']} metered settle(s) wait on the pricing configuration "
+                  f"(VIGIL_BILLING_TARGET_MARGIN / VIGIL_BILLING_CANCEL_SETTLEMENT / the price table, in THIS unit's "
+                  f"environment). Fix it; this unit stays FAILED until they settle.", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_ops_sweep(a) -> None:
