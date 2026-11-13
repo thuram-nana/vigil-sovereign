@@ -110,10 +110,15 @@ def settle_lock(store, *, wait_s: Optional[float] = None) -> Iterator[None]:
     """Hold the cross-process settle critical section for ``store``'s spine (see the module docstring). Waits at
     most ``wait_s`` (default ``config.settle_lock_wait_s()``), then raises :data:`SettleLockBusy`; an unusable lock
     file (or no ``fcntl``) raises ``OSError``; a store without a path raises ``ValueError``. Nothing is held when
-    it raises."""
+    it raises.
+
+    An absent lock file is created ``O_EXCL`` and, when this process is root (a ``sudo ops-sweep``), handed to the
+    owner of the spine directory (``locked_file(create=False, chown_like=...)``, as the completion spool lock is),
+    so the services that settle as that user can always open it."""
     from .. import config
     path = settle_lock_path(store)
-    with locked_file(path, wait_s=config.settle_lock_wait_s() if wait_s is None else float(wait_s)):
+    with locked_file(path, wait_s=config.settle_lock_wait_s() if wait_s is None else float(wait_s), create=False,
+                     chown_like=path.parent):
         yield
 
 

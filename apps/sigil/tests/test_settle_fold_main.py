@@ -41,6 +41,7 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * the drain's in-lock past-expiry guard passing a None    -> test_a_failed_completion_whose_past_expiry_record_...
   * the postpaid mover ignores the seen-set                 -> test_a_pruned_landed_postpaid_settle_is_not_reissued_...
   * the relaunch gate's _unlanded ignores a seen-set        -> test_flag_on_a_relaunch_over_a_landed_settle_the_live_...
+  * the settle lock created without the root hand-over      -> test_a_root_opener_hands_the_settle_lock_to_the_spine_...
 
 Run: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -m pytest apps/sigil/tests/test_settle_fold_main.py
 """
@@ -899,6 +900,35 @@ def test_settle_lock_busy_or_unopenable_is_retryable_and_writes_nothing(flag, mo
     t0 = time.monotonic()
     out = _settle(s, r, 0)
     assert time.monotonic() - t0 < 3.0 and out["ok"] is False and out.get("retry") is True and _avail(s) == 70
+
+
+def test_a_root_opener_hands_the_settle_lock_to_the_spine_directorys_owner(monkeypatch):
+    """A root process (``sudo ops-sweep``) that creates ``<stem>.settle.lock`` hands it to the spine directory's
+    owner, so the services that settle as that user can always open it; one that exists is opened as it is."""
+    s = _store()
+    p = settle_lock_path(s)
+    assert not p.exists()
+    seen = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: seen.append((uid, gid)))
+    with ls.settle_lock(s, wait_s=1.0):
+        pass
+    st = p.parent.stat()
+    assert p.is_file() and (p.stat().st_mode & 0o777) == 0o600
+    assert seen == [(st.st_uid, st.st_gid)]
+    with ls.settle_lock(s, wait_s=1.0):                              # present: opened as it is, never re-chowned
+        pass
+    assert seen == [(st.st_uid, st.st_gid)]
+
+
+def test_a_non_root_opener_creates_the_settle_lock_without_a_chown(monkeypatch):
+    s = _store()
+    seen = []
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: seen.append((uid, gid)))
+    with ls.settle_lock(s, wait_s=1.0):
+        pass
+    assert settle_lock_path(s).is_file() and (settle_lock_path(s).stat().st_mode & 0o777) == 0o600 and seen == []
 
 
 def test_a_record_append_failure_returns_retry_and_moves_nothing(record_on, monkeypatch):
