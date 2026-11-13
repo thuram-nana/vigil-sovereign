@@ -63,7 +63,7 @@ def _write_raw(path: Path, lines: list[bytes]) -> None:
 
 # ---- append refuses a non-monotonic tail -----------------------------------------------------------------------
 
-@pytest.mark.parametrize("copied", [(3,), (3, 4)])
+@pytest.mark.parametrize("copied", [(3,), (3, 4), (9,)])       # an older line, an older run, the tip again
 def test_append_refuses_a_tail_that_is_not_the_highest_seq(tmp_path, copied):
     s = _legacy(tmp_path)
     with s._active.open("ab") as f:
@@ -107,6 +107,41 @@ def test_append_rechecks_a_spine_that_was_reset_and_regrew(tmp_path):
     assert a.verify()[0]
 
 
+def _fixed(s, payloads):
+    for t in payloads:
+        s.append(kind="message", source="t", actor="u", payload={"text": t}, ts="2026-01-01T00:00:00Z")
+
+
+def test_append_rechecks_a_same_size_rewrite_under_it(tmp_path):
+    """Another process rewrites the active segment to EXACTLY the size this store last checked, ending in a copied
+    older line: the size alone must not pass for "nothing new" — the tail record must be the one checked."""
+    a = SpineStore(tmp_path / "spine.jsonl")
+    _fixed(a, [f"m{i}" for i in range(6)])
+    size = a._active.stat().st_size
+    b = SpineStore(tmp_path / "spine.jsonl")
+    b.reset()
+    _fixed(b, [f"n{i}" for i in range(5)])
+    with b._active.open("ab") as f:
+        f.write(_line_of(b, 2))
+    assert a._active.stat().st_size == size                         # the precondition this test is about
+    with pytest.raises(SpineError, match="not above every earlier record"):
+        a.append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+def test_append_rechecks_a_longer_rewrite_from_its_start(tmp_path):
+    """Another process resets the spine and writes FEWER, LONGER records past this store's checked offset: the
+    bytes after that offset are not a continuation, so the segment is re-checked from its start (no false refusal
+    from this store's stale high-water)."""
+    a = SpineStore(tmp_path / "spine.jsonl")
+    _fixed(a, [f"m{i}" for i in range(20)])
+    b = SpineStore(tmp_path / "spine.jsonl")
+    b.reset()
+    _fixed(b, ["y" * 2000 for _ in range(5)])
+    assert a._active.stat().st_size > a._tail_checked[1]
+    assert a.append(kind="message", source="t", actor="u", payload={"text": "after"}) == 5
+    assert a.verify()[0]
+
+
 def test_append_after_a_torn_tail_still_works(tmp_path):
     s = _legacy(tmp_path, 4)
     with s._active.open("ab") as f:
@@ -129,7 +164,11 @@ def _swapped(p: Path, lines):
     _write_raw(p, lines[:4] + [lines[5], lines[4]] + lines[6:])
 
 
-@pytest.mark.parametrize("tamper", [_dup_at_end, _dup_in_middle, _swapped])
+def _dup_of_last(p: Path, lines):
+    _write_raw(p, lines + [lines[-1]])
+
+
+@pytest.mark.parametrize("tamper", [_dup_at_end, _dup_in_middle, _swapped, _dup_of_last])
 def test_verify_flags_a_duplicated_or_reordered_line(tmp_path, tamper):
     s = _legacy(tmp_path)
     assert s.verify()[0]
@@ -172,7 +211,16 @@ def _wrong_link(m):
     next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["first_prev_hash"] = "0" * 64
 
 
-@pytest.mark.parametrize("edit", [_omit_middle, _omit_last_sealed, _two_unsealed, _overlapping, _wrong_link])
+def _sealed_without_last(m):
+    next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["last_seq"] = None
+
+
+def _shifted_first_seq(m):
+    next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["first_seq"] = 4
+
+
+@pytest.mark.parametrize("edit", [_omit_middle, _omit_last_sealed, _two_unsealed, _overlapping, _wrong_link,
+                                  _sealed_without_last, _shifted_first_seq])
 def test_every_reader_refuses_a_manifest_that_is_not_a_contiguous_run(tmp_path, edit):
     s = _segmented(tmp_path)
     mp = s._layout.manifest_path
@@ -247,6 +295,20 @@ def test_the_tailer_flags_it_and_keeps_advancing(tmp_path):
     assert [e["seq"] for e in t.poll()] == [nxt]
 
 
+def test_the_tailer_flags_a_record_it_cannot_verify_and_keeps_advancing(tmp_path, monkeypatch):
+    import sigil.spine.tail as tail_mod
+    s = _legacy(tmp_path, 3)
+    t = SpineTailer(SpineStore(tmp_path / "spine.jsonl"), since_seq=0)
+
+    def boom(r):
+        raise RuntimeError("verifier failure")
+
+    monkeypatch.setattr(tail_mod, "verify_record", boom)
+    evs = t.poll()
+    assert [e["seq"] for e in evs] == [1, 2] and not any(e["integrity_ok"] for e in evs)
+    assert "could not be verified" in evs[0]["integrity_reason"] and t.cursor == 2
+
+
 def test_dedup_skips_a_record_with_no_canonical_form(tmp_path):
     s = _legacy(tmp_path, 3)
     seq = _append_surrogate_record(s)
@@ -272,6 +334,60 @@ def test_api_record_reports_it(tmp_path):
         srv.shutdown()
     assert code == 200 and body["integrity_ok"] is False and "not canonicalisable" in body["integrity_reason"]
     assert body["payload"]["text"] == "bad \ud800 text"
+
+
+def _serve(tmp_path):
+    from sigil.ui.server import build_server
+    srv = build_server(token="test-secret-token-xyz", port=0, spine_path=str(tmp_path / "spine.jsonl"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    return srv, srv.server_address[1]
+
+
+def _first_events(port, path, n=1):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+    body = ""
+    with urllib.request.urlopen(req, timeout=5) as r:
+        while body.count("data: ") < n:
+            body += r.read1(4000).decode("utf-8")
+    return [json.loads(ln[len("data: "):]) for ln in body.splitlines() if ln.startswith("data: ")]
+
+
+def test_the_live_stream_carries_it(tmp_path):
+    s = _legacy(tmp_path, 3)
+    seq = _append_surrogate_record(s)
+    srv, port = _serve(tmp_path)
+    try:
+        evs = _first_events(port, f"/api/stream?token=test-secret-token-xyz&since={seq - 1}")
+    finally:
+        srv.shutdown()
+    assert evs[0]["seq"] == seq and evs[0]["integrity_ok"] is False
+
+
+def test_the_hud_stream_carries_a_lone_surrogate(tmp_path):
+    import os
+
+    from sigil.voice.hud_status import status_path
+    s = _legacy(tmp_path, 1)
+    tip = s._read_last_entry()
+    rec = {"seq": 1, "scope": "sigil", "kind": "event", "source": "voice", "actor": "OWNER",
+           "payload": {"signal": "sigil.nav", "screen_id": "x\ud800"}, "parent_id": None, "supersedes_id": None,
+           "ts": "2026-01-01T00:00:00Z", "cert_digest": "c" * 64, "prev_hash": tip.entry_hash,
+           "entry_hash": _entry_hash(1, tip.entry_hash, "c" * 64), "schema_version": 1}
+    with s._active.open("ab") as f:
+        f.write((json.dumps(rec) + "\n").encode("ascii"))
+    status_path().write_text('{"state": "listening", "transcript": "t\\ud800", "feedback": ""}', encoding="utf-8")
+    srv, port = _serve(tmp_path)
+    try:
+        evs = _first_events(port, "/api/sigil/hud?token=test-secret-token-xyz&since=0", n=2)
+    finally:
+        srv.shutdown()
+        try:
+            os.unlink(status_path())
+        except OSError:
+            pass
+    assert {"t": "nav", "screen_id": "x\ud800", "seq": 1} in evs
+    assert {"t": "state", "state": "listening", "transcript": "t\ud800", "feedback": ""} in evs
 
 
 def test_the_cockpit_json_encoder_round_trips_a_lone_surrogate():

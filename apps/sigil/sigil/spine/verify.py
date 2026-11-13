@@ -39,7 +39,7 @@ def verify_record(record) -> tuple[bool, str]:
     try:
         bound = digest_payload(content) == record.cert_digest
         derived = _entry_hash(record.seq, record.prev_hash, record.cert_digest) == record.entry_hash
-    except (UnicodeError, ValueError, TypeError) as e:
+    except (ValueError, TypeError) as e:          # a lone surrogate has no canonical form (UnicodeEncodeError)
         return False, (f"binding break at seq {record.seq}: content is not canonicalisable ({type(e).__name__}) "
                        f"(record tampered)")
     if not bound:

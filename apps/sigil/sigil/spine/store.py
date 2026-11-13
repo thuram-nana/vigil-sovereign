@@ -356,7 +356,7 @@ class SpineStore:
             try:
                 rr = self.decrypted(r)                   # fail-closed: an unopenable record is NOT a match
                 rkey = self._content_key(rr.kind, rr.source, rr.actor, rr.payload, rr.parent_id, rr.supersedes_id)
-            except Exception:  # noqa: BLE001 — locked/corrupt/non-canonicalisable content ⇒ skip (never a false dedup)
+            except Exception:  # noqa: BLE001 — locked/corrupt/non-canonical content ⇒ skip (no false dedup)
                 continue
             if rkey == key:
                 return r.seq
@@ -1730,7 +1730,7 @@ class SpineStore:
                 }
                 try:
                     bound = digest_payload(content) == r.cert_digest
-                except (UnicodeError, ValueError, TypeError) as e:   # e.g. a lone surrogate: no canonical form
+                except (ValueError, TypeError) as e:   # a lone surrogate has no canonical form (UnicodeEncodeError)
                     return False, f"binding break at seq {r.seq}: content is not canonicalisable ({type(e).__name__})"
                 if not bound:
                     return False, f"binding break at seq {r.seq}: payload does not match cert_digest (record tampered)"
