@@ -4,8 +4,10 @@
 and rebind gates). The stdlib refuses whitespace in a request target, but ESC / NUL / DEL / BS arrive
 intact and there was no length cap, so an unauthenticated peer could write terminal escape sequences
 (erase the previous audit line, clear the screen) or a 64 KiB line into the WARNING log, which goes to
-stderr by default. These tests drive the REAL server over a raw socket and assert on the emitted record;
-the JSON response body is deliberately left unchanged."""
+stderr by default. The escape is injective (the backslash itself is escaped), so a real ESC and a typed
+backslash sequence cannot log identically, and a request the static handler cannot even resolve (an
+embedded NUL) is refused AND recorded rather than dropped. These tests drive the REAL server over a raw
+socket and assert on the emitted record; the JSON response body is deliberately left unchanged."""
 import logging
 import socket
 import tempfile
@@ -105,6 +107,32 @@ def test_a_legitimate_denial_line_is_unchanged(caplog):
         srv.server_close()
 
 
+def test_a_real_escape_and_a_typed_backslash_sequence_log_differently(caplog):
+    srv, port = _serve()
+    try:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            _raw(port, b"GET /x\x1bB")                                # a real ESC byte
+            _raw(port, b"GET /x\\x1bB")                               # the 7 printable characters
+        assert _denials(caplog) == ["bridge denied: GET /x\\x1bB -> 404 (not found)",
+                                    "bridge denied: GET /x\\x5cx1bB -> 404 (not found)"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_an_unresolvable_static_path_is_refused_and_recorded_not_dropped(caplog):
+    # an embedded NUL used to raise inside Path.resolve(): the connection dropped and NO denial was logged.
+    srv, port = _serve()
+    try:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            resp = _raw(port, b"GET /static/\x00\x1b[2J")
+        assert resp.startswith(b"HTTP/1.0 404") or resp.startswith(b"HTTP/1.1 404"), resp
+        assert _denials(caplog) == ["bridge denied: GET /static/\\x00\\x1b[2J -> 404 (not found)"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 class _Stub:
     """Just enough of the handler for `_deny`: the logged copy vs. the response body."""
     command = "GET"
@@ -141,6 +169,8 @@ def test_log_safe_escapes_every_non_printable_not_just_cr_lf():
     for ok in ("/api/pending", "stale request (timestamp outside freshness window)", "Zoë 山田", ""):
         assert f(ok) == ok
     assert f(None) == "None" and f(404) == "404"                  # never raises on a non-string
+    # injective: the backslash is escaped too, so escaped "evidence" cannot be typed in by a peer.
+    assert f("\\") == "\\x5c" and f("/x\x1bB") != f("/x\\x1bB")
     capped = f("B" * 5000)
     assert len(capped) < 240 and capped.startswith("B" * 200) and "4800" in capped
     assert f("C" * 200) == "C" * 200                             # exactly at the cap: untouched

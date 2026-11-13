@@ -75,13 +75,15 @@ _LOG_FIELD_MAX = 200                              # chars of one peer-influenced
 def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
     """The LOGGED copy of a peer-influenced value: every character that is not `str.isprintable()`
     (C0/C1 controls incl. ESC/NUL/DEL, every line breaker `splitlines` honours, bidi/zero-width formats,
-    lone surrogates) becomes a visible `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN` escape, and the value is capped
-    at `limit` characters. So a request cannot drive the operator's terminal, forge or split an audit
-    record, or flood the log. Printable text (spaces, non-ASCII letters) is returned unchanged."""
+    lone surrogates) AND the backslash itself becomes a visible `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN` escape,
+    so the encoding is injective (a real ESC logs `\\x1b`; a typed backslash-x-1-b logs `\\x5cx1b`), and
+    the value is capped at `limit` characters. So a request cannot drive the operator's terminal, forge or
+    split an audit record, plant look-alike escaped "evidence", or flood the log. Any other printable text
+    (spaces, non-ASCII letters) is returned unchanged."""
     s = value if isinstance(value, str) else str(value)
     out = []
     for ch in s[:limit]:
-        if ch.isprintable():
+        if ch.isprintable() and ch != "\\":
             out.append(ch)
         else:
             cp = ord(ch)
@@ -347,7 +349,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_static(self, sub: str):
         base = _WEBAPP.resolve()
-        target = (base / sub).resolve()
+        try:
+            target = (base / sub).resolve()
+        except (OSError, ValueError):                            # e.g. an embedded NUL: refuse AND audit it,
+            return self._deny(404, "not found")                  # never drop the connection unrecorded
         if base != target and base not in target.parents:        # traversal guard (allowlist by containment)
             return self._deny(404, "not found")
         if not target.is_file():

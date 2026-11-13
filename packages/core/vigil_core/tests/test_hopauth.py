@@ -78,6 +78,14 @@ def test_non_finite_ts_is_refused_even_when_signed_with_the_real_key():
         assert verify_hop_assertion(KEY, P, R, M, PATH, bad, sig, now=1700000000.0) is False, bad
 
 
+def test_a_non_ascii_sig_fails_closed_instead_of_raising():
+    # compare_digest over two str raises TypeError on non-ASCII. A hostile X-VIGIL-Role-Sig must be an
+    # ordinary False (an attributed refusal at the caller), never an exception that drops the request
+    # before the refusal is recorded. The ts is fresh and the key real, so ONLY the sig can refuse it.
+    for hostile in ("\xe9", "café☃", stamp_hop_assertion(KEY, P, R, M, PATH, TS) + " "):
+        assert verify_hop_assertion(KEY, P, R, M, PATH, TS, hostile, now=float(TS)) is False, hostile
+
+
 def test_default_now_uses_wall_clock_for_a_fresh_stamp():
     import time
     ts = str(int(time.time()))
