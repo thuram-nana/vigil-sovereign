@@ -20,11 +20,13 @@
 # `LoadCredentialEncrypted=` + your manager's env injection. The EnvironmentFile below (mode 0600) is the
 # documented FALLBACK — see vigil-billing-drain.env.example. Only the drain process gets them: the heartbeat hook
 # below runs with an allow-listed environment.
+# SIGIL_HOME is REQUIRED in the env file below, moved or not (GO-LIVE §2; outside ~/.sigil, also add it to
+# ReadWritePaths): the drain mints onto the spine under it and never falls back to ~/.sigil, so without it the drain
+# REFUSES (FAILED) instead of running "healthy" on an empty ~/.sigil spool. It also refuses a SIGIL_HOME that
+# ~/.sigil/cockpit.env contradicts, or one that holds no owner identity.
 # THE SPOOL is not named here: the drain DERIVES it — the proxy's own VIGIL_BILLING_WEBHOOK_SPOOL when that is
-# set in the env file below, else the runbook path $SIGIL_HOME/billing-spool — so it follows a moved SIGIL_HOME
-# instead of running "healthy" on an empty ~/.sigil directory and crediting nothing. If you moved SIGIL_HOME
-# (GO-LIVE §2), set SIGIL_HOME in the env file below (the drain also mints onto the spine under it) and add it to
-# ReadWritePaths; a drain whose SIGIL_HOME holds no owner identity (the move not carried here) REFUSES (FAILED).
+# set in the env file below, else the runbook path $SIGIL_HOME/billing-spool. The drain cannot see the proxy's env:
+# if the proxy spools anywhere else, copy its VIGIL_BILLING_WEBHOOK_SPOOL into the env file below.
 # An explicit VIGIL_BILLING_SPOOL still wins, but the drain REFUSES (unit FAILED) one that contradicts
 # VIGIL_BILLING_WEBHOOK_SPOOL, or that is ~/.sigil/billing-spool while SIGIL_HOME is elsewhere.
 # ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both. A second drainer cannot break a

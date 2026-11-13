@@ -124,6 +124,7 @@ def test_inbound_finding_drain_exits_nonzero_on_a_standing_quarantine(tmp_path, 
 
 def test_billing_drain_exits_nonzero_on_a_standing_quarantine(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
+    monkeypatch.setenv("HOME", tempfile.mkdtemp())        # hermetic: the drain compares with ~/.sigil/cockpit.env
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     ensure_owner_keypair()
     monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")

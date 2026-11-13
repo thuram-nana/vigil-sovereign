@@ -162,11 +162,14 @@ sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
 ```
 
 To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
-dead-man monitored). It names no spool: the drain derives this same `$SIGIL_HOME/billing-spool` — or the
-proxy's `VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into `~/.config/vigil/billing-drain.env` — so **put your
-moved `SIGIL_HOME` in that env file too** (§2); a drain that cannot see it, or a spool that contradicts them, is
-refused (the unit goes FAILED), never drained "healthy". Run the timer **or** `watch`, never both — a per-spool lock
-serialises them, and a pass that cannot get it within 120 s fails loudly. See
+dead-man monitored). **Set `SIGIL_HOME` in `~/.config/vigil/billing-drain.env`** (§2) — always, even if you
+never moved it: the drain never falls back to `~/.sigil`, and refuses (the unit goes FAILED) without it, when
+`~/.sigil/cockpit.env` names a different `SIGIL_HOME`, or when that home holds no owner identity. The unit names
+no spool: the drain derives this same `$SIGIL_HOME/billing-spool`, or drains the proxy's
+`VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into the same env file — which you must do if the proxy spools
+anywhere else (the drain cannot see the proxy's env); a spool that contradicts it is refused. Run the timer **or**
+`watch`, never both — a per-spool lock serialises them: a timer pass that cannot get it within 120 s fails loudly,
+and a `watch` pass that cannot get it warns on stderr. See
 `infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave webhook at the
 operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.

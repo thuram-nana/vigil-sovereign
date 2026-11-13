@@ -30,6 +30,7 @@ _SCHEMA = "vigil.webhook.billing.v1"
 def home(monkeypatch):
     d = tempfile.mkdtemp()
     monkeypatch.setenv("SIGIL_HOME", d)
+    monkeypatch.setenv("HOME", tempfile.mkdtemp())   # hermetic: the drain compares with ~/.sigil/cockpit.env
     # `cli.main()` runs a store-operability gate (assert_operable) BEFORE the command, against the store at
     # config.SPINE_PATH. Point it at THIS test's fresh home so the gate is not tripped by the shared,
     # order-polluted process home — another test earlier in the suite may have left a legacy single-file
@@ -312,24 +313,135 @@ def test_a_derived_spool_is_still_refused_when_it_is_not_an_absolute_expanded_pa
     assert code == 2 and "--spool must be an ABSOLUTE" in text
 
 
-def test_a_drain_that_cannot_see_the_moved_sigil_home_refuses_instead_of_draining_an_empty_spool(tmp_path):
-    """The operator moved SIGIL_HOME for the cockpit and the proxy (GO-LIVE §2) but not into the drain's env file.
-    With no spool named the drain then derives ~/.sigil/billing-spool — a directory the proxy never writes to — and
-    used to exit 0 on it forever while the paid webhook waited under the moved home. A REAL interpreter (the
-    owner-key paths are bound at import, from the environment the unit gives the process)."""
+# ---- WHOSE home: the money mint never falls back to an implicit ~/.sigil --------------------------------------
+
+_DUMMY_FLW = "dummy-flw-key"
+
+
+def _real_drain(tmp_path, *, stray_owner: bool, proxy_spool: bool, sigil_home: "Path | None" = None):
+    """`sigil billing-drain drain` in a REAL interpreter, as the unit runs it, after the GO-LIVE §2 move: the
+    cockpit's home is <tmp>/mnt/.sigil (holding the paid webhook the proxy spooled), the drain's env has no
+    SIGIL_HOME. ``stray_owner``: an owner-signing command was run once without SIGIL_HOME exported (or a pre-move
+    install / a copy-migration left one), so ~/.sigil holds a REAL owner identity. ``proxy_spool``: the drain env
+    carries the proxy's VIGIL_BILLING_WEBHOOK_SPOOL (the right spool — but a ~/.sigil spine)."""
     import subprocess
     import sys
     user_home, moved = tmp_path / "user", tmp_path / "mnt" / ".sigil"
     user_home.mkdir()
     _spool_charge(moved / "billing-spool", 9911)
-    env = {k: v for k, v in os.environ.items() if k not in ("SIGIL_HOME", "VIGIL_BILLING_SPOOL",
+    env = {k: v for k, v in os.environ.items() if k not in ("SIGIL_HOME", "SIGIL_SPINE_DIR", "VIGIL_BILLING_SPOOL",
                                                              "VIGIL_BILLING_WEBHOOK_SPOOL")}
-    env.update(HOME=str(user_home), VIGIL_BILLING_DRAIN_ENABLED="1", VIGIL_BILLING_WEBHOOK_SECRET=_SECRET,
-               VIGIL_FLW_SECRET_KEY="dummy-flw-key", PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    env.update(HOME=str(user_home), PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    if stray_owner:
+        subprocess.run([sys.executable, "-c", "from sigil.governor.identity import ensure_owner_keypair; "
+                        "ensure_owner_keypair()"], env=env, check=True, timeout=120)
+        assert (user_home / ".sigil" / "spine" / "keys" / "owner.pub").is_file()
+    env.update(VIGIL_BILLING_DRAIN_ENABLED="1", VIGIL_BILLING_WEBHOOK_SECRET=_SECRET, VIGIL_FLW_SECRET_KEY=_DUMMY_FLW,
+               VIGIL_FLW_API_BASE="http://127.0.0.1:1")   # a re-verify would be refused before any socket opens
+    if proxy_spool:
+        env["VIGIL_BILLING_WEBHOOK_SPOOL"] = str(moved / "billing-spool")
+    if sigil_home is not None:
+        env["SIGIL_HOME"] = str(sigil_home)
     r = subprocess.run([sys.executable, "-c", "from sigil.cli import main; main(['billing-drain', 'drain'])"],
                        env=env, capture_output=True, text=True, timeout=120)
+    return r, user_home, moved
+
+
+@pytest.mark.parametrize("stray_owner", [False, True], ids=["no-owner-key-in-~/.sigil", "stray-owner-key-in-~/.sigil"])
+@pytest.mark.parametrize("proxy_spool", [False, True], ids=["no-spool-named", "proxy-spool-named"])
+def test_a_drain_without_sigil_home_refuses_whatever_identity_sits_in_the_default_home(tmp_path, stray_owner,
+                                                                                         proxy_spool):
+    """The operator moved SIGIL_HOME for the cockpit and the proxy but not into the drain's env file. The drain used
+    to fall back to ~/.sigil: with no spool named it drained an empty ~/.sigil/billing-spool and exited 0 forever
+    (the dead-man reading it HEALTHY) — refused only while ~/.sigil held no owner key, which any owner-signing
+    command run without SIGIL_HOME exported creates; given the proxy's spool it CONSUMED the paid webhook onto a
+    ~/.sigil spine the cockpit never reads. Now it refuses before touching any spool or spine."""
+    r, user_home, moved = _real_drain(tmp_path, stray_owner=stray_owner, proxy_spool=proxy_spool)
     assert r.returncode == 2, (r.stdout, r.stderr)
-    assert "holds no owner identity" in r.stderr and "billing-drain.env" in r.stderr and "drained:" not in r.stdout
-    assert _SECRET not in r.stdout + r.stderr and "dummy-flw-key" not in r.stdout + r.stderr
+    assert "SIGIL_HOME is not set" in r.stderr and "billing-drain.env" in r.stderr and "drained:" not in r.stdout
+    assert _SECRET not in r.stdout + r.stderr and _DUMMY_FLW not in r.stdout + r.stderr
     assert not (user_home / ".sigil" / "billing-spool").exists()                 # the wrong spool was never made
+    assert not (user_home / ".sigil" / "spine" / "spine.jsonl").exists()        # nothing minted onto ~/.sigil
+    spool = moved / "billing-spool"
+    assert (spool / "incoming" / "9911.json").exists()                           # the paid webhook still waits …
+    assert sorted(p.name for p in spool.iterdir()) == ["incoming"]               # … untouched (no claim, no lock)
+
+
+def test_a_sigil_home_that_holds_no_owner_identity_is_refused(tmp_path):
+    """SIGIL_HOME is set, but to a directory that is not the cockpit's (a mistyped path, a fresh volume): nothing
+    could be minted there, and its spool is not the proxy's. Refused rather than drained "healthy"."""
+    typo = tmp_path / "mnt" / ".sigil-typo"
+    r, user_home, moved = _real_drain(tmp_path, stray_owner=True, proxy_spool=True, sigil_home=typo)
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "holds no owner identity" in r.stderr and str(typo) in r.stderr and "drained:" not in r.stdout
     assert (moved / "billing-spool" / "incoming" / "9911.json").exists()
+    assert sorted(p.name for p in (moved / "billing-spool").iterdir()) == ["incoming"]
+
+
+def test_sigil_home_must_be_absolute_and_expanded(armed, capsys, monkeypatch):
+    spool = Path(tempfile.mkdtemp()) / "spool"
+    for bad in ("%h/.sigil", "relative/.sigil"):
+        monkeypatch.setenv("SIGIL_HOME", bad)
+        code, text = _run(["billing-drain", "drain", "--spool", str(spool)], capsys)
+        assert code == 2 and "SIGIL_HOME must be an ABSOLUTE" in text and repr(bad) in text
+    assert not spool.exists()
+
+
+def test_a_drain_whose_sigil_home_is_not_the_cockpits_refuses(armed, capsys):
+    """billing-drain.env still names the OLD volume after a copy-migration (a real owner key and spine there) while
+    the cockpit's env file names the new one: draining the old spool would exit 0 over a directory the proxy no
+    longer writes to. Refused, naming both."""
+    cockpit_env = armed.user_home / ".sigil" / "cockpit.env"
+    cockpit_env.parent.mkdir(parents=True)
+    new_home = Path(tempfile.mkdtemp()) / "new-volume" / ".sigil"
+    cockpit_env.write_text(f"SIGIL_UI_PORT=8765\nSIGIL_HOME={new_home}\n", encoding="utf-8")
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    code, text = _run(["billing-drain", "drain"], capsys)
+    assert code == 2 and "is not the cockpit's" in text and str(cockpit_env) in text and str(new_home) in text
+    assert str(armed.sigil_home) in text and _SECRET not in text
+    assert sorted(p.name for p in (armed.sigil_home / "billing-spool").iterdir()) == ["incoming"]   # untouched
+    # systemd ignores a line with no "=": the cockpit still runs on the new volume
+    cockpit_env.write_text(f"SIGIL_HOME={new_home}\nSIGIL_HOME\n", encoding="utf-8")
+    code, text = _run(["billing-drain", "drain"], capsys)
+    assert code == 2 and "is not the cockpit's" in text
+
+
+def test_the_cockpit_env_check_reads_systemd_syntax_and_accepts_the_same_directory(armed, capsys):
+    """Comments, quotes, a later assignment overriding an earlier one (systemd's rule), and the same directory
+    spelled through a symlink all agree; a cockpit env file naming no SIGIL_HOME (the cockpit on its default) is
+    nothing to compare against."""
+    cockpit_env = armed.user_home / ".sigil" / "cockpit.env"
+    cockpit_env.parent.mkdir(parents=True)
+    alias = Path(tempfile.mkdtemp()) / "alias"
+    alias.symlink_to(armed.sigil_home)
+    cockpit_env.write_text(f"# SIGIL_HOME=/somewhere/else\n; SIGIL_HOME=/nor/here\nSIGIL_HOME=/stale/first\n"
+                           f"  SIGIL_HOME = \"{alias}\"  \n", encoding="utf-8")
+    _spool_charge(armed.sigil_home / "billing-spool", 9911)
+    cli.main(["billing-drain", "drain"])
+    assert "1 minted" in capsys.readouterr().out and armed.available() == armed.credits
+    for nothing_to_compare in ("SIGIL_UI_PORT=8765\n", "SIGIL_HOME=/stale/first\nSIGIL_HOME=\n"):
+        cockpit_env.write_text(nothing_to_compare, encoding="utf-8")
+        cli.main(["billing-drain", "drain"])
+        assert "drained: 0 minted" in capsys.readouterr().out
+
+
+def test_the_cockpit_env_check_never_blocks_or_crashes_on_a_file_that_is_not_regular(armed, monkeypatch):
+    """A FIFO planted at the cockpit env file's name would block a plain read forever (the pass wedged until the
+    unit's timeout); one replaced between the check and the open must not crash the drain. Neither is a value."""
+    import threading
+    cockpit_env = armed.user_home / ".sigil" / "cockpit.env"
+    cockpit_env.parent.mkdir(parents=True)
+    os.mkfifo(cockpit_env)
+    got: list = []
+    t = threading.Thread(target=lambda: got.append(cli._cockpit_env_sigil_home()), daemon=True)
+    t.start()
+    t.join(5)
+    blocked = t.is_alive()
+    if blocked:                                              # release the blocked reader before failing
+        os.close(os.open(cockpit_env, os.O_WRONLY | os.O_NONBLOCK))
+        t.join(10)
+    assert not blocked and got == [None]
+    cockpit_env.unlink()
+    cockpit_env.mkdir()                                      # "replaced by something unreadable after the check"
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    assert cli._cockpit_env_sigil_home() is None

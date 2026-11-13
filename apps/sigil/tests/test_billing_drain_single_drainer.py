@@ -241,6 +241,7 @@ def cli_rig(tmp_path, monkeypatch):
     from sigil.governor.identity import ensure_owner_keypair
     from sigil.spine.store import SpineStore
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))      # hermetic: the drain compares with ~/.sigil/cockpit.env
     monkeypatch.setattr(config, "SPINE_PATH", tmp_path / "spine" / "spine.jsonl")
     monkeypatch.setattr(cli, "SpineStore", lambda: SpineStore(tmp_path / "own-spine.jsonl"))
     monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")

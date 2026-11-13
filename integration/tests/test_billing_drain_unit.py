@@ -40,7 +40,8 @@ def test_the_unit_names_no_spool_so_the_drain_derives_it_from_sigil_home():
     assert not any(ln.startswith("Environment=VIGIL_BILLING_SPOOL") for ln in d)
     assert "EnvironmentFile=-%h/.config/vigil/billing-drain.env" in d
     env = _ENV.read_text()
-    assert re.search(r"^# SIGIL_HOME=", env, re.M) and "MOVED SIGIL_HOME" in env   # the moved-home step is documented
+    # SIGIL_HOME is REQUIRED (moved or not): the drain never falls back to ~/.sigil (test_cli_billing_drain.py)
+    assert re.search(r"^# SIGIL_HOME=", env, re.M) and "REQUIRED, ALWAYS" in env and "MOVED SIGIL_HOME" not in env
 
 
 def test_a_hung_pass_is_bounded():
@@ -133,7 +134,8 @@ def test_the_spool_must_match_the_proxy_and_is_documented():
     assert "VIGIL_BILLING_WEBHOOK_SPOOL" in text and "MUST equal" in text
     runbook = (_REPO / "docs" / "runbooks" / "GO-LIVE-quickstart.md").read_text()
     assert "$SIGIL_HOME/billing-spool" in runbook                     # the derived default IS the runbook path
-    assert "billing-drain.env" in runbook and "moved `SIGIL_HOME`" in runbook    # the moved-home step
+    assert "**Set `SIGIL_HOME` in `~/.config/vigil/billing-drain.env`**" in runbook   # always, moved or not
+    assert "never falls back to `~/.sigil`" in runbook
 
 
 def test_one_drainer_rule_is_stated_everywhere():

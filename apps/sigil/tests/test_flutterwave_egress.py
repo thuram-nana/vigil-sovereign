@@ -290,6 +290,7 @@ def test_request_json_raises_fail_closed_on_a_transient_transport_failure(monkey
 def _home(monkeypatch):
     d = tempfile.mkdtemp()
     monkeypatch.setenv("SIGIL_HOME", d)
+    monkeypatch.setenv("HOME", tempfile.mkdtemp())   # hermetic: the drain compares with ~/.sigil/cockpit.env
     from sigil import config
     monkeypatch.setattr(config, "SPINE_PATH", Path(d) / "spine" / "spine.jsonl")
     monkeypatch.delenv("VIGIL_BILLING_DRAIN_ENABLED", raising=False)

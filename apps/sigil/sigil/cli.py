@@ -1395,6 +1395,70 @@ def _resolve_billing_spool(arg: "str | None") -> str:
     return spool
 
 
+# The cockpit unit's env file (sigil-cockpit.service `EnvironmentFile=-%h/.sigil/cockpit.env`), where GO-LIVE §2
+# persists a moved SIGIL_HOME. The drain only READS its SIGIL_HOME line to compare; it never loads the file.
+_COCKPIT_ENV = (".sigil", "cockpit.env")
+
+
+def _cockpit_env_sigil_home() -> "tuple[str, str] | None":
+    """``(file, value)`` of the LAST ``SIGIL_HOME=`` assignment in the cockpit's env file (systemd EnvironmentFile
+    syntax: a line with no ``=`` is ignored, one pair of surrounding quotes is stripped; a ``#``/``;`` comment line
+    never carries the bare key), or None when the file is absent, unreadable or names no (or an empty) SIGIL_HOME —
+    nothing to compare against."""
+    from pathlib import Path
+    f = Path.home().joinpath(*_COCKPIT_ENV)
+    try:
+        if not f.is_file():                     # never block on a FIFO planted at that name
+            return None
+        with open(f, "rb") as fh:
+            raw = fh.read(64 * 1024).decode("utf-8", errors="replace")
+    except OSError:                             # e.g. replaced between the check and the open
+        return None
+    value = None
+    for line in raw.split("\n"):
+        k, sep, v = line.strip().partition("=")
+        if not sep or k.strip() != "SIGIL_HOME":
+            continue
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        value = v
+    return (str(f), value) if value else None
+
+
+def _require_explicit_billing_home() -> None:
+    """The money-IN drain mints OWNER-signed credit onto the spine under SIGIL_HOME and, with no spool named,
+    drains ``$SIGIL_HOME/billing-spool``. So it NEVER falls back to the implicit ``~/.sigil``: SIGIL_HOME must be
+    set — absolute and expanded — in this process's own environment. A fallback cannot tell "never moved" from "moved
+    for the cockpit and the proxy, but not in this drain's env file": the drain then drains an empty
+    ``~/.sigil/billing-spool`` and exits 0 forever (the dead-man reading it HEALTHY), or — given the proxy's spool —
+    credits a ``~/.sigil`` spine the cockpit never reads. Whatever owner key happens to sit in ``~/.sigil`` (a
+    pre-move install, a copy-migration, any owner-signing command run without SIGIL_HOME exported) proves nothing.
+    When the cockpit's own env file names a SIGIL_HOME, this one must be the same directory (a stale copy — e.g.
+    the old volume after a migration — is refused). Exit 2 either way: the unit goes FAILED and MONEY-5 alarms."""
+    import os
+    from pathlib import Path
+    home = os.environ.get("SIGIL_HOME", "").strip()
+    if not home:
+        print("billing-drain: SIGIL_HOME is not set in this drain's environment — refusing (fail-closed: the drain "
+              "mints onto the spine under SIGIL_HOME and drains its billing-spool, and an implicit ~/.sigil may "
+              "not be the cockpit's home: a paid webhook would wait uncredited while the pass exits 0). Set "
+              "SIGIL_HOME to the cockpit's SIGIL_HOME in ~/.config/vigil/billing-drain.env (an install that never "
+              "moved it: SIGIL_HOME=/home/<user>/.sigil).", file=sys.stderr)
+        sys.exit(2)
+    if "%" in home or not Path(home).is_absolute():
+        print(f"billing-drain: SIGIL_HOME must be an ABSOLUTE, already-expanded path (got {home!r}; systemd does "
+              f"NOT expand %h inside an EnvironmentFile value) — refusing.", file=sys.stderr)
+        sys.exit(2)
+    cockpit = _cockpit_env_sigil_home()
+    if cockpit is not None and os.path.realpath(cockpit[1]) != os.path.realpath(home):
+        print(f"billing-drain: this drain's SIGIL_HOME ({home}) is not the cockpit's — {cockpit[0]} sets "
+              f"SIGIL_HOME={cockpit[1]} — refusing (fail-closed: the drain would credit a spine the cockpit never "
+              f"reads, or drain a spool the proxy never writes to, while exiting 0). Make SIGIL_HOME in "
+              f"~/.config/vigil/billing-drain.env the cockpit's.", file=sys.stderr)
+        sys.exit(2)
+
+
 # How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
 # handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
 _BILLING_LOCK_WAIT_S = 120.0
@@ -1415,6 +1479,7 @@ def cmd_billing_drain(a) -> None:
     # refuses a literal %h / relative path — that would drain NOTHING while exiting 0 (a paid customer never
     # credited, and the dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
     spool = _resolve_billing_spool(getattr(a, "spool", ""))
+    _require_explicit_billing_home()                   # no implicit ~/.sigil for the money mint (exit 2)
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1428,12 +1493,12 @@ def cmd_billing_drain(a) -> None:
     from .governor.identity import owner_pubkey
     if not owner_pubkey():
         # The drain mints OWNER-signed credit onto the spine under SIGIL_HOME. A home with no owner identity is
-        # not the cockpit's — typically SIGIL_HOME was moved (GO-LIVE §2) but not into this unit's env file, so
-        # the derived spool is an empty ~/.sigil directory the proxy never writes to. Draining it would exit 0
-        # forever while paid webhooks wait (the dead-man reading it HEALTHY), and nothing there could be minted.
+        # not the cockpit's (a mistyped path, a fresh volume): draining its spool would exit 0 forever while paid
+        # webhooks wait (the dead-man reading it HEALTHY), and nothing there could be minted. A defence in depth
+        # only — an owner key proves nothing about WHOSE home it is (_require_explicit_billing_home).
         print(f"billing-drain: SIGIL_HOME ({_resolve_home()}) holds no owner identity, so it is not the cockpit's "
-              f"home — refusing (fail-closed: draining {spool} would credit nobody while exiting 0). If you moved "
-              f"SIGIL_HOME, set it in this drain's env (~/.config/vigil/billing-drain.env).", file=sys.stderr)
+              f"home — refusing (fail-closed: draining {spool} would credit nobody while exiting 0). Set the "
+              f"cockpit's SIGIL_HOME in this drain's env (~/.config/vigil/billing-drain.env).", file=sys.stderr)
         sys.exit(2)
 
     from .governor import catalog
