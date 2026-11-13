@@ -1621,16 +1621,32 @@ def _floor_up_to_committed(store, head) -> bool:
     return True
 
 
+def _canonical_snapshot(payload: Any) -> Optional[str]:
+    """A snapshot payload as one canonical string, or None when it is not one: the folded state as
+    `SnapshotState.load` reads it (`from_folded`), each of its row lists in a fixed order and every key sorted. The
+    row lists are built from dicts and sets, so a payload computed by another process (another hash seed) lists the
+    same rows in another order — the same snapshot, the same string."""
+    try:
+        folded = SnapshotState.from_folded(payload["folded_state"]).model_dump()
+        rows = {f: (sorted(v, key=lambda row: json.dumps(row, sort_keys=True)) if isinstance(v, list) else v)
+                for f, v in folded.items()}
+        return json.dumps({**payload, "folded_state": rows}, sort_keys=True)
+    except Exception:  # noqa: BLE001 — not a snapshot this build reads: never this prune's own record
+        return None
+
+
 def _append_snapshot_idempotent(store, snap_payload: dict) -> int:
-    """Append the `kind="snapshot"` fold, unless an identical one (same cumulative_merkle_root + base_seq)
-    already sits in the recent tail — the RESUME guard: a prune retried after a crash between the snapshot
-    append and the head sign must not stack a second snapshot. Returns the snapshot record's seq."""
+    """Append the `kind="snapshot"` fold, unless THIS prune's own snapshot already sits in the recent tail — the
+    RESUME guard: a prune retried after a crash between the snapshot append and the head sign must not stack a
+    second snapshot. A record is this prune's own only when its whole payload, the folded state included, is the
+    one this prune computed (`_canonical_snapshot`) — the head signed next commits that record as the seed of every
+    fold, so a record matching only its boundary and cumulative root is never taken for it. Returns the snapshot
+    record's seq."""
+    own = _canonical_snapshot(snap_payload)
     tip = store.next_seq - 1
-    if tip >= 0:
+    if own is not None and tip >= 0:
         for r in store.iter_records(since_seq=max(-1, tip - 8)):
-            if (r.kind == "snapshot" and isinstance(r.payload, dict)
-                    and r.payload.get("cumulative_merkle_root") == snap_payload["cumulative_merkle_root"]
-                    and r.payload.get("base_seq") == snap_payload["base_seq"]):
+            if r.kind == "snapshot" and _canonical_snapshot(r.payload) == own:
                 return r.seq
     return store.append(kind="snapshot", source="spine", actor="OWNER", payload=snap_payload)
 

@@ -38,7 +38,9 @@ Run: SIGIL_HOME=$(mktemp -d) python -m pytest tests/test_real_prune_registries.p
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -2710,3 +2712,132 @@ def test_a_cached_build_judges_its_seed_with_the_resolver_it_folds_with(world, m
         assert kh.resolver_for(store, current="other") is not res
         assert kh.resolver_for(other, current="k") is not res
     assert kh.resolver_for(store, current="k") is not res
+
+
+# ======================================================================================================
+# The owner-signed pruned head names this prune's OWN snapshot record — never another `kind="snapshot"` record
+# that merely shares its boundary and cumulative root
+# ======================================================================================================
+def _ready_to_prune(world: _World, grants: tuple = (("acme", 100, "g1"),)) -> int:
+    """The kill switch engaged and `grants` ((org, credits, entry_id), ...) below K, a sealed live segment and an
+    owner-signed head: a spine ready for a real prune at the returned K. Nothing is pruned yet."""
+    world.apply([lambda R: R.kill.engage(reason="incident")]
+                + [lambda R, g=g: R.wallet.grant(g[0], g[1], "trial", entry_id=g[2], issued_at=1.0) for g in grants])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1), _noise(2)])
+    world.seal_with_tail(checkpoint=True)
+    return k
+
+
+def _mint(p: dict) -> dict:
+    p["folded_state"]["killswitch_engaged"] = False
+    p["folded_state"]["wallet_granted"] = [[row[0], 10_000_000] for row in p["folded_state"]["wallet_granted"]]
+    return p
+
+
+def _forget_consumed_grants(p: dict) -> dict:
+    p["folded_state"]["wallet_seen"] = []
+    return p
+
+
+def _another_base_key(p: dict) -> dict:
+    from sigil.reuse import generate_keypair
+    p["base_pubkey"] = generate_keypair().public_key_b64
+    return p
+
+
+def _one_more_field(p: dict) -> dict:
+    p["note"] = "x"
+    return p
+
+
+def _unreadable_folded_state(p: dict) -> dict:
+    p["folded_state"]["unknown_row"] = []
+    return p
+
+
+@pytest.mark.parametrize("label,alter", [
+    ("releases the kill switch and mints credit", _mint),
+    ("forgets the consumed grant keys", _forget_consumed_grants),
+    ("names another owner key at the boundary", _another_base_key),
+    ("carries one more field", _one_more_field),
+    ("carries a folded state this build does not read", _unreadable_folded_state),
+])
+def test_a_prune_never_adopts_a_snapshot_record_it_did_not_compute(world, label, alter):
+    """A `kind="snapshot"` record in the live tail with this prune's `base_seq` and `cumulative_merkle_root` (public
+    values, computable from the spine) and the owner's envelope (`spine`/`OWNER`), but a payload other than the one
+    this prune computes, is not this prune's snapshot: the head the prune signs names a record of its own. The kill
+    switch stays engaged, the wallet holds what was granted, a replayed grant credits nothing, on both fold-cache
+    legs."""
+    k = _ready_to_prune(world)
+    own = prune.snapshot_payload(world.store(), k)
+    other = alter(copy.deepcopy(own))
+    assert (other["base_seq"], other["cumulative_merkle_root"]) == (own["base_seq"], own["cumulative_merkle_root"])
+    oseq = world.store().append(kind="snapshot", source="spine", actor="OWNER", payload=other)
+    rep = prune.commit_prune(world.store(), k, confirm=True)
+    head = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    assert head.snapshot_seq == rep["snapshot_seq"] != oseq, f"the prune adopted a record it did not compute: {label}"
+    named = world.store().get(head.snapshot_seq)
+    assert json.loads(json.dumps(named.payload)) == json.loads(json.dumps(own)), label
+    assert _cp.verify_checkpoint(world.store())[0] and prune.verify_with_archive(world.store())[0]
+    assert _both_flags(world, lambda R: (R.kill.is_engaged(), R.wallet.available("acme"))) == {
+        "OFF": (True, 100), "ON": (True, 100)}, label
+    world.apply([lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])   # a replay
+    assert _both_flags(world, lambda R: R.wallet.available("acme")) == {"OFF": 100, "ON": 100}, label
+
+
+def test_an_unreadable_snapshot_payload_is_never_matched_to_a_record(world):
+    """The resume guard adopts a record only as the snapshot this prune computed: a payload this build cannot read
+    is matched to nothing — not even to a record carrying the very same unreadable payload — and is appended."""
+    bad = {"base_seq": 1, "cumulative_merkle_root": "0" * 64, "folded_state": {"unknown_row": []}}
+    first = world.store().append(kind="snapshot", source="spine", actor="OWNER", payload=bad)
+    assert prune._append_snapshot_idempotent(world.store(), bad) == first + 1
+
+
+class _Interrupted(Exception):
+    pass
+
+
+def test_a_prune_re_run_after_a_crash_adopts_the_snapshot_record_it_appended(world, monkeypatch):
+    """A prune that dies between its snapshot append and its head sign, then re-runs, signs a head over the record
+    the interrupted attempt appended — one snapshot record for the prune — although that attempt's process listed
+    the set- and dict-derived rows in another order (its own hash seed: simulated here by reversing every row list
+    and key order). A record appended BEFORE the attempt that shares its boundary and cumulative root but not its
+    folded state is passed over. The kill switch stays engaged and every wallet holds what was granted, on both
+    fold-cache legs."""
+    import sigil.spine.store as _store
+    k = _ready_to_prune(world, grants=(("acme", 100, "g1"), ("beta", 40, "g2")))
+    own = prune.snapshot_payload(world.store(), k)
+    lseq = world.store().append(kind="snapshot", source="spine", actor="OWNER", payload=_mint(copy.deepcopy(own)))
+    real_payload = prune.snapshot_payload
+
+    def reordered(d: dict) -> dict:
+        return {f: (list(reversed(v)) if isinstance(v, list) else v) for f, v in reversed(list(d.items()))}
+
+    def other_process(store, K, **kw):
+        p = real_payload(store, K, **kw)
+        return reordered({**p, "folded_state": reordered(p["folded_state"])})
+
+    def crash(name):
+        if name == "prune_after_snapshot":
+            raise _Interrupted(name)
+
+    monkeypatch.setattr(prune, "snapshot_payload", other_process)
+    monkeypatch.setattr(_store, "_crash_hook", crash)
+    with pytest.raises(_Interrupted):
+        prune.commit_prune(world.store(), k, confirm=True)
+    monkeypatch.setattr(_store, "_crash_hook", None)
+    monkeypatch.setattr(prune, "snapshot_payload", real_payload)
+    crashed = [r.seq for r in world.store().iter_records() if r.kind == "snapshot" and r.seq != lseq]
+    assert len(crashed) == 1 and _cp.SignedChainHead.model_validate_json(_head_bytes(world)).snapshot_seq < 0
+    on_disk = json.dumps(world.store().get(crashed[0]).payload)
+    assert on_disk != json.dumps(json.loads(json.dumps(own))), "the attempt's rows must really be in another order"
+    rep = prune.commit_prune(world.store(), k, confirm=True)
+    assert rep["snapshot_seq"] == crashed[0], "the re-run did not sign the record its interrupted attempt appended"
+    assert [r.seq for r in world.store().iter_records() if r.kind == "snapshot"] == [lseq, crashed[0]]
+    assert _cp.verify_checkpoint(world.store())[0] and prune.verify_with_archive(world.store())[0]
+    assert _both_flags(world, lambda R: (R.kill.is_engaged(), R.wallet.available("acme"),
+                                         R.wallet.available("beta"))) == {"OFF": (True, 100, 40),
+                                                                          "ON": (True, 100, 40)}
