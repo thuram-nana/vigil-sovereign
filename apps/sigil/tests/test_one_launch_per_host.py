@@ -533,3 +533,167 @@ def test_ops_sweep_reservations_reports_and_applies_the_superseded_rows(monkeypa
     monkeypatch.setenv("VIGIL_OPS_SWEEP_APPLY_ENABLED", "1")
     out = _cli_sweep(monkeypatch, capsys, s, apply=True, completion_spool=_spool())
     assert _statuses(out) == [(b["nonce"], "refunded"), (a["nonce"], "released")] and _avail(s) == 100
+
+
+# ---- the release follows the settle exactly-once slice: spool lock, busy lock, interrupted settle -------------
+def _watcher(store, a, spool):
+    from sigil.governor.identity import delegate_offense_governance
+    from sigil.inbound.completion_spool import CompletionSpoolWatcher
+    owner = ensure_owner_keypair()
+    gov = generate_keypair()
+    deleg = delegate_offense_governance(
+        owner, authorizers=[AuthorizerKey(key_id="gov", name="gov", public_key_b64=gov.public_key_b64)],
+        threshold=1, scope=a["slug"], not_after=9_000_000_000)
+    return CompletionSpoolWatcher(store, spool_dir=spool, owner_pubkey=owner.public_key_b64, delegation=deleg,
+                                  scope=a["slug"], base_dir=_base(), now_fn=lambda: NOW + 10)
+
+
+def test_the_release_recheck_sees_a_completion_reclaimed_between_its_globs(monkeypatch):
+    """A completed run's claim stranded in working/ is moved back to incoming/ by the drain's reclaim exactly while the
+    release's in-lock re-check is between its incoming/ and working/ globs: the reclaim waits on the spool lock the
+    re-check holds shared, so the re-check still sees the completion and refuses the refund."""
+    import threading
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    spool = _spool()
+    w = _watcher(s, a, spool)
+    gate = LaunchGate(s)
+    real_release = gate.release_superseded_reservation
+    real_glob = Path.glob
+    seen: dict = {"armed": False, "alive": None}
+    reclaim = threading.Thread(target=w._reclaim_working)
+
+    def _strand_then_release(**kw):                       # after the sweep's up-front read of the spool
+        (Path(spool) / "working" / "c.json").write_text(json.dumps({"document": {
+            "engagement_slug": a["slug"], "nonce": a["nonce"], "outcome": "completed"}}), encoding="utf-8")
+        seen["armed"] = True
+        return real_release(**kw)
+
+    def _glob(self, pattern):
+        if seen["armed"] and self == Path(spool) / "working":
+            seen["armed"] = False
+            reclaim.start()                               # the drain's reclaim, between the two globs
+            reclaim.join(0.5)
+            seen["alive"] = reclaim.is_alive()
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(gate, "release_superseded_reservation", _strand_then_release)
+    monkeypatch.setattr(Path, "glob", _glob)
+    out = ops_sweeps.sweep_superseded_reservations(gate, now=LATE, ttl_s=TTL, apply=True, completion_spool=spool)
+    reclaim.join(10)
+    assert seen["alive"] is True                          # it waited for the re-check's shared hold
+    assert _statuses(out) == [(a["nonce"], "completion_pending")] and _avail(s) == 40, out
+    assert not is_lease_settled(_base(), a["slug"], a["nonce"])
+    assert len(list((Path(spool) / "incoming").glob("*.json"))) == 1      # ...and then reclaimed it
+
+
+@pytest.mark.parametrize("kind", ["dir", "fifo", "symlink"])
+def test_an_unlockable_spool_is_completion_unknown_for_a_release(kind):
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    spool = _spool()
+    p = Path(spool) / ".spool.lock"
+    if kind == "dir":
+        p.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(p)
+    else:
+        (Path(spool) / "elsewhere").write_text("", encoding="utf-8")
+        p.symlink_to(Path(spool) / "elsewhere")
+    assert _statuses(_sweep(s, apply=True, spool=spool)) == [(a["nonce"], "completion_unknown")]
+    assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])
+
+
+def test_a_mispointed_spool_gets_no_lock_file_from_the_release_sweep():
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    spool = tempfile.mkdtemp()                            # none of the drain's subdirs
+    assert _statuses(_sweep(s, apply=True, spool=spool)) == [(a["nonce"], "completion_unknown")]
+    assert os.listdir(spool) == [] and _avail(s) == 40
+
+
+def test_a_busy_settle_lock_defers_the_release(monkeypatch):
+    from sigil.governor.launch_settlement import settle_lock
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    monkeypatch.setenv("VIGIL_SETTLE_LOCK_WAIT_S", "0.1")
+    with settle_lock(s):                                  # another settle holds the cross-process lock
+        out = _sweep(s, apply=True)
+    assert _statuses(out) == [(a["nonce"], "deferred")] and "retry" in out["items"][0]["error"]
+    assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])
+    assert _statuses(_sweep(s, apply=True)) == [(a["nonce"], "released")] and _avail(s) == 70
+
+
+def test_a_release_interrupted_after_its_decision_is_finished_exactly_once(monkeypatch):
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", "1")
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    real_grant = WalletRegistry.grant
+
+    def _crash(self, *a_, **k):                           # the money move dies after the decision + the marker
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WalletRegistry, "grant", _crash)
+    assert _statuses(_sweep(s, apply=True)) == [(a["nonce"], "deferred")]
+    monkeypatch.setattr(WalletRegistry, "grant", real_grant)
+    assert is_lease_settled(_base(), a["slug"], a["nonce"]) and _avail(s) == 40
+    dry = _sweep(s)                                       # report-only: what the recorded decision still owes
+    assert _statuses(dry) == [(a["nonce"], "settle_interrupted")] and dry["items"][0]["pending_wallet"] == 30
+    assert _avail(s) == 40
+    done = _sweep(s, apply=True)
+    assert _statuses(done) == [(a["nonce"], "settle_completed")] and done["items"][0]["refunded"] == 30
+    assert _avail(s) == 70
+    assert _sweep(s, apply=True)["items"] == [] and _sweep(s)["items"] == []      # landed: nothing more, ever
+    assert _avail(s) == 70
+
+
+def test_a_settled_reservation_is_left_to_the_abandoned_sweep_while_its_lease_is_on_the_seam(monkeypatch):
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", "1")
+    s = _store()
+    _seat(s)
+    a = _reserve(s, publish=True)
+    _reserve(s)                                           # a later reservation: A is no longer the newest
+    real_grant = WalletRegistry.grant
+    monkeypatch.setattr(WalletRegistry, "grant", lambda self, *a_, **k: (_ for _ in ()).throw(OSError("disk full")))
+    assert not LaunchGate(s).settle_launch(signed_lease=a["lease"], consumed_units=0, now=NOW + 60)["ok"]
+    monkeypatch.setattr(WalletRegistry, "grant", real_grant)
+    assert _seam_nonce(a["slug"]) == a["nonce"]           # its tombstone never landed: the seam still holds it
+    assert _sweep(s, apply=True)["items"] == [] and _avail(s) == 40
+
+
+def test_a_release_that_finds_a_settle_interrupted_meanwhile_reports_what_it_moved(monkeypatch):
+    # the sweep read A as unsettled; before its release takes the settle lock a customer cancel of A records its
+    # decision and the marker, then dies before the money: the release finishes THAT decision, at its amounts
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", "1")
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    gate = LaunchGate(s)
+    real_release = gate.release_superseded_reservation
+
+    def _cancel_dies_first(**kw):
+        real_grant = WalletRegistry.grant
+        monkeypatch.setattr(WalletRegistry, "grant", lambda self, *a_, **k: (_ for _ in ()).throw(OSError("full")))
+        r = LaunchGate(s).settle_launch(signed_lease=a["lease"], consumed_units=0, now=NOW + 60, basis="cancel")
+        assert r.get("retry") and not r["ok"]
+        monkeypatch.setattr(WalletRegistry, "grant", real_grant)
+        return real_release(**kw)
+
+    monkeypatch.setattr(gate, "release_superseded_reservation", _cancel_dies_first)
+    out = ops_sweeps.sweep_superseded_reservations(gate, now=LATE, ttl_s=TTL, apply=True, completion_spool=_spool())
+    assert _statuses(out) == [(a["nonce"], "settle_completed")] and out["items"][0]["refunded"] == 30, out
+    assert _avail(s) == 70 and _sweep(s, apply=True)["items"] == []
+
+
+def test_finish_only_never_releases_an_unsettled_reservation():
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    r = _release(s, a, finish_only=True)
+    assert r["ok"] and r["action"] == "launch_not_settled" and r["refunded"] == 0
+    assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])

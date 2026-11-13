@@ -313,6 +313,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
 _REFUND_OUTCOMES = frozenset({"failed", "canceled"})     # a completion whose settle is the full refund anyway
 
 
+_CHARGING_SUBDIRS = ("incoming", "working", "processed", "rejected")
+
+
 def _charging_completions(spool: Path) -> tuple[set, bool]:
     """E7 — ``(slug, nonce)`` of every completion anywhere in the completion spool (waiting, claimed, ARCHIVED in
     ``processed/`` or quarantined) whose outcome could CHARGE its launch: any outcome but ``failed`` /
@@ -320,15 +323,26 @@ def _charging_completions(spool: Path) -> tuple[set, bool]:
     ends in a quarantined FAILED, which must not block its release; a COMPLETED, even one the drain archived as a
     no-op, must.) Signatures are not checked: any such claim blocks. Returns ``(pairs, unreadable)`` with the same
     fail-closed reading as ``_pending_completions``: an unparseable file, or a spool with none of the drain's
-    subdirs, makes the completion state UNKNOWN."""
+    subdirs, makes the completion state UNKNOWN — and, as there, the globs run under the spool lock held SHARED (a
+    lock that cannot be taken still scans, but reads as unreadable)."""
+    if not any((spool / sub).is_dir() for sub in _CHARGING_SUBDIRS):
+        return set(), True
+    from vigil_integration.live.seam_lock import locked_file
+    try:
+        with locked_file(spool / ".spool.lock", shared=True, create=False, chown_like=spool, wait_s=5.0):
+            return _scan_charging(spool)
+    except OSError:
+        pairs, _unreadable = _scan_charging(spool)
+        return pairs, True
+
+
+def _scan_charging(spool: Path) -> tuple[set, bool]:
     pairs: set = set()
     unreadable = False
-    saw_subdir = False
-    for sub in ("incoming", "working", "processed", "rejected"):
+    for sub in _CHARGING_SUBDIRS:
         d = spool / sub
         if not d.is_dir():
             continue
-        saw_subdir = True
         for fp in sorted(d.glob("*.json*")):
             if fp.name.endswith(".reason"):
                 continue
@@ -343,7 +357,7 @@ def _charging_completions(spool: Path) -> tuple[set, bool]:
                 continue
             if outcome not in _REFUND_OUTCOMES:
                 pairs.add(pair)
-    return pairs, unreadable or not saw_subdir
+    return pairs, unreadable
 
 
 def _release_block(spool: Path, pair: tuple) -> "Callable[[], Optional[str]]":
@@ -358,6 +372,17 @@ def _release_block(spool: Path, pair: tuple) -> "Callable[[], Optional[str]]":
     return _check
 
 
+def _seam_holds(base: Any, slug: str, nonce: str) -> bool:
+    """Whether the seam's lease for ``slug`` is launch ``nonce``'s (``sweep_abandoned_reservations`` then owns it).
+    Unreadable reads as False: finishing a recorded settle twice is a no-op (exactly once), missing it is not."""
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    try:
+        b = read_credit_lease(base, slug)
+        return b is not None and str(b.signed_lease.document.nonce) == str(nonce)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
                                   completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
     """E7 — report (and with ``apply`` release, i.e. full-refund via ``LaunchGate.release_superseded_reservation``)
@@ -369,12 +394,19 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     sweep is what settles it. A reservation is listed when it is unsettled (no settlement evidence on the spine, no
     seam settlement marker) and ``LaunchGate._release_refusal`` finds it superseded (a later reservation of the same
     target exists and the seam lease is not its own) and past its grace (its longest lease window + ``ttl_s`` since
-    the reserve); one whose evidence is contradictory is listed as ``outcome_recorded`` / ``seam_inconsistent`` and
-    never released. A charging completion for it anywhere in ``completion_spool`` reports ``completion_pending`` (an
-    unreadable spool: ``completion_unknown``) and is never refunded. ``apply`` REQUIRES ``completion_spool``; the
-    gate re-decides everything inside the settle critical section, exactly once per (slug, nonce)."""
+    the reserve); one whose evidence is contradictory is listed as ``outcome_recorded`` / ``seam_inconsistent``, and
+    one published metered as ``metered`` / ``metered_unknown``, and none of them is released. A charging completion
+    for it anywhere in ``completion_spool`` reports ``completion_pending`` (an unreadable spool:
+    ``completion_unknown``) and is never refunded. ``apply`` REQUIRES ``completion_spool``; the gate re-decides
+    everything inside the settle critical section, exactly once per (slug, nonce): a busy settle lock is
+    ``deferred``, and a release that finished a recorded settle a crash interrupted is ``settle_completed`` with
+    the amounts it moved. With ``VIGIL_SETTLE_SPINE_RECORD`` on, a SETTLED reservation the seam holds no lease for
+    whose recorded decision has an entry that has not landed is finished under ``apply`` (``settle_completed``) and
+    reported ``settle_interrupted`` with its pending amounts without it (as ``sweep_abandoned_reservations`` does
+    for a lease on the seam)."""
     from vigil_integration.live.credit_lease_broker import is_lease_settled
 
+    from . import config
     from .governor.launch_reservations import scan_reservations
 
     if ttl_s < 0:
@@ -391,13 +423,30 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     rows: list[dict] = []
     for res in sorted(ix.reservations.values(), key=lambda r: r.seq):
         oid, slug, nonce = res.key
+        row = {"slug": slug, "org_id": oid, "nonce": nonce, "units_reserved": res.reserved,
+               "reserved_at": res.issued_at}
         if res.key in ix.settled or is_lease_settled(base, slug, nonce):
-            continue                                       # settled — nothing held
+            # settled — nothing held. With the settle record on, it may be a settle a crash interrupted after its
+            # decision, and with no lease on the seam only this sweep reaches it: FINISH it under ``apply`` (only the
+            # recorded decision, never a fresh refund; no grace or spool check) and report it without, exactly as
+            # sweep_abandoned_reservations does for a lease on the seam. Flag off: skipped.
+            if config.settle_spine_record_enabled() and not _seam_holds(base, slug, nonce):
+                pending = gate.interrupted_release(org_id=oid, slug=slug, nonce=nonce)
+                if pending and apply:
+                    r = gate.release_superseded_reservation(org_id=oid, slug=slug, nonce=nonce, now=now,
+                                                            grace_s=ttl_s, finish_only=True)
+                    if r.get("rolled_forward"):
+                        rows.append({**row, "status": "settle_completed", **_moved(r)})
+                    elif not r.get("ok") and r.get("retry"):
+                        rows.append({**row, "status": "deferred", "error": r.get("error", "")})
+                    elif not r.get("ok"):
+                        rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
+                elif pending:
+                    rows.append({**row, "status": "settle_interrupted", **pending})
+            continue
         why = gate._release_refusal(oid, slug, res, ix, now, ttl_s)
         if why in ("not_superseded", "started", "in_grace"):
             continue                                       # not (yet) a superseded reservation
-        row = {"slug": slug, "org_id": oid, "nonce": nonce, "units_reserved": res.reserved,
-               "reserved_at": res.issued_at}
         if why is not None:
             rows.append({**row, "status": why})
             continue
@@ -414,8 +463,12 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
                                                 refuse_if=_release_block(cast(Path, spool), (slug, nonce)))
         if r.get("refused"):
             rows.append({**row, "status": str(r["refused"])})
+        elif not r.get("ok") and r.get("retry"):
+            rows.append({**row, "status": "deferred", "error": r.get("error", "")})
         elif not r.get("ok"):
             rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
+        elif r.get("action") == "launch_already_settled" and r.get("rolled_forward"):
+            rows.append({**row, "status": "settle_completed", **_moved(r)})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
         else:

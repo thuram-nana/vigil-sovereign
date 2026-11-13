@@ -1090,8 +1090,24 @@ class LaunchGate:
             return "seam_inconsistent"
         return None
 
+    def interrupted_release(self, *, org_id: str, slug: str, nonce: str) -> Optional[dict]:
+        """READ-ONLY, for a reservation the seam no longer holds a lease for: the not-yet-landed part of launch
+        ``(slug, nonce)``'s RECORDED settlement decision (what the next settle of it would finish), or None. The
+        superseded-reservation sweep's counterpart of :meth:`interrupted_settlement`; takes no lock, writes nothing."""
+        from ..governor.launch_settlement import scan_settlement
+        kp = self.owner_key
+        if kp is None:
+            return None
+        try:
+            oid, s, non = str(org_id), str(slug), str(nonce)
+            ev = scan_settlement(self.store, kp.public_key_b64, org_id=oid, slug=s, nonce=non)
+            return self._unlanded(oid, s, non, ev)
+        except Exception:  # noqa: BLE001 — a read-only report: an unreadable state reports nothing
+            return None
+
     def release_superseded_reservation(self, *, org_id: str, slug: str, nonce: str, now: Any, grace_s: float = 0.0,
-                                       refuse_if: Optional[Callable[[], Optional[str]]] = None) -> dict:
+                                       refuse_if: Optional[Callable[[], Optional[str]]] = None,
+                                       finish_only: bool = False) -> dict:
         """E7 — FULL-REFUND one reservation that a later launch of the same ``(org, host)`` superseded on the seam
         (that later lease replaced its lease, so the engine refuses its job, the settle-drain quarantines its
         completion and no seam listing shows it: nothing else would ever settle it). There is no signed lease to
@@ -1102,7 +1118,8 @@ class LaunchGate:
         process, moves nothing and returns ``launch_already_settled``. Inside that critical section, before
         anything is written, ``_release_refusal`` (the reservation is superseded, not started, past its grace, the
         seam is consistent) and then the caller's ``refuse_if`` must both pass; a refusal returns ``refused``. The
-        decision record (settle record on) names it ``sweep:refund``."""
+        decision record (settle record on) names it ``sweep:refund``. ``finish_only`` only finishes a recorded
+        settlement a crash interrupted (``settle_launch``'s ``finish_only``): never a fresh refund."""
         from ..governor.launch_reservations import scan_reservations
         kp = self.owner_key
         if kp is None:
@@ -1129,7 +1146,8 @@ class LaunchGate:
             live = scan_reservations(self.store, kp.public_key_b64, org_id=oid, slug=s, since=ix)
             return self._release_refusal(oid, s, res, live, now_ts, grace) or _refusal(refuse_if)
 
-        return self._settle_reservation(oid, s, non, res.reserved, 0, now_ts, _precondition, "sweep:refund")
+        return self._settle_reservation(oid, s, non, res.reserved, 0, now_ts, _precondition, "sweep:refund",
+                                        finish_only)
 
     def _verify_lease_for_pause(self, signed_lease: Any, expect_org_id: Optional[str]):
         """Owner-pinned verify + tenant-bind for a pause/resume request (same guarantee as publish/settle): the
