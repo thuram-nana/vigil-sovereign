@@ -680,11 +680,15 @@ class LaunchGate:
         except Exception:  # noqa: BLE001 — a read-only report: an unreadable state reports nothing
             return None
 
-    def interrupted_settlements(self, signed_leases: Iterable[Any]) -> "dict[tuple[str, str, str], dict]":
+    def interrupted_settlements(self, signed_leases: Iterable[Any], *, strict: bool = False,
+                                scan: "Optional[Callable[[Any], Any]]" = None) -> "dict[tuple[str, str, str], dict]":
         """READ-ONLY: :meth:`interrupted_settlement` for MANY leases, reading the spine ONCE
         (``launch_settlement.scan_settlements``) — ``{(org_id, slug, nonce): pending}`` for each lease that verifies
-        owner-pinned and whose RECORDED decision has money that has not landed. Takes no lock and writes nothing; an
-        unreadable state reports nothing (for that lease, or for every lease when the spine cannot be read)."""
+        owner-pinned and whose RECORDED decision has money that has not landed. Takes no lock and writes nothing; for
+        a report (the default) an unreadable state reports nothing (for that lease, or for every lease when the spine
+        cannot be read). ``strict`` (the drain's finish pass) RAISES instead, so a spine or ledger it cannot read is
+        reported, never taken for "nothing to finish". ``scan(keys)`` replaces the one-pass scan (the drain's
+        incremental, checkpointed read: ``settle_checkpoint.scan``)."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
         from ..governor.launch_settlement import scan_settlements
         kp = self.owner_key
@@ -705,12 +709,15 @@ class LaunchGate:
         if not keys:
             return {}
         try:
-            evs = scan_settlements(self.store, kp.public_key_b64, keys=keys)
+            evs = scan(keys) if scan is not None else scan_settlements(self.store, kp.public_key_b64, keys=keys)
         except Exception:  # noqa: BLE001 — a read-only report: an unreadable spine reports nothing
+            if strict:
+                raise
             return {}
         out: "dict[tuple[str, str, str], dict]" = {}
         for k, ev in evs.items():
-            pending = self.unlanded_settlement(org_id=k[0], slug=k[1], nonce=k[2], evidence=ev)
+            pending = (self._unlanded(k[0], k[1], k[2], ev) if strict else
+                       self.unlanded_settlement(org_id=k[0], slug=k[1], nonce=k[2], evidence=ev))
             if pending:
                 out[k] = pending
         return out

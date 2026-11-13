@@ -19,7 +19,8 @@
 3. INTERRUPTED RECORDED SETTLES (``finish_interrupted_settles``, run by the settle drain on every pass while
    ``VIGIL_SETTLE_SPINE_RECORD`` is on): finishes, from its RECORDED decision only, every settle of a lease still on
    the seam that a crash or an error interrupted. Every sweep and that pass read the spine's settlement evidence
-   in ONE pass for all the launches they list.
+   in ONE pass for all the launches they list; the drain's pass reads only the records appended since its previous
+   pass (a checkpoint beside its spool: ``settle_checkpoint``).
 
 SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no framework/offense.
 """
@@ -349,7 +350,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     return {"applied": bool(apply), "items": rows}
 
 
-def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*") -> "list[dict]":
+def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
+                               on_completed: "Optional[Callable[[dict], None]]" = None,
+                               checkpoint: "Optional[str | os.PathLike]" = None) -> "list[dict]":
     """FINISH every recorded settle of a lease still on ``gate``'s seam (only ``scope``'s, unless ``*``) that a crash
     or an error interrupted — whatever decided it (a completion, a cancel, a sweep, an expired pause) — so a recorded
     refund never waits for an operator and a relaunch on that host is never held back by it. The settle drain runs
@@ -363,13 +366,20 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*") -> "l
     decision (never a fresh one, never this caller's amounts) and then retires the lease — so this moves no money
     that was not already decided.
 
+    ``checkpoint`` (the drain's ``<spool>/.settle-scan.json``) makes the spine read INCREMENTAL: only the records
+    appended since the last pass are read when it is usable (``settle_checkpoint``); without it the whole spine is
+    read. ``on_completed(row)`` is called for each ``settle_completed`` row right after its settle returns, before the
+    next lease (the drain writes a completion's notification there, so a crash later in the pass cannot lose it); an
+    error it raises is ignored.
+
     One row per lease it acted on: ``settle_completed`` (the moved amounts and the recorded ``basis``),
     ``already_settled`` (nothing was left to move; the lease is retired), ``deferred`` (a busy lock or ledger: the
-    next pass retries) or ``settle_failed`` (with ``error``). Never raises for one lease."""
+    next pass retries) or ``settle_failed`` (with ``error``). Never raises for one lease; RAISES when the pass itself
+    cannot run (the spine or a ledger cannot be read), so the caller reports it — never "nothing to finish"."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
-    from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
+    from vigil_integration.live.credit_lease_broker import is_lease_settled, leases_root, list_credit_leases
 
-    from . import config
+    from . import config, settle_checkpoint
 
     if not config.settle_spine_record_enabled():
         return []
@@ -379,6 +389,8 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*") -> "l
     root = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
+    listed_from = settle_checkpoint.spine_tip(gate.store)  # BEFORE the listing (settle_checkpoint: why)
+    files = {fp.name[:-len(".json")] for fp in leases_root(base).glob("*.json")}   # every lease file, by slug
     leases = []
     for b in list_credit_leases(base):
         try:
@@ -392,22 +404,35 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*") -> "l
         leases.append(b)
     if not leases:
         return []                                          # nothing on the seam: the spine is not read
-    pending = gate.interrupted_settlements([b.signed_lease for b in leases])
+    # clean: every in-scope lease file was read and verified by this listing (one lease file per slug)
+    clean = not ({f for f in files if scope == "*" or f == scope} - {b.slug for b in leases})
+
+    def _scan(keys: Any) -> Any:
+        return settle_checkpoint.scan(gate.store, kp.public_key_b64, keys=keys,
+                                      path=Path(checkpoint) if checkpoint is not None else None, scope=scope,
+                                      listed_from=listed_from, listing_clean=clean)
+
+    pending = gate.interrupted_settlements([b.signed_lease for b in leases], strict=True, scan=_scan)
     rows: "list[dict]" = []
     for b in leases:
         doc = b.signed_lease.document
         oid, slug, nonce = str(doc.org_id), str(doc.engagement_slug), str(doc.nonce)
-        if (oid, slug, nonce) not in pending and not is_lease_settled(base, slug, nonce):
-            continue                                       # no recorded settle of it is left unfinished
         row: dict = {"slug": slug, "org_id": oid, "nonce": nonce}
         try:
+            if (oid, slug, nonce) not in pending and not is_lease_settled(base, slug, nonce):
+                continue                                   # no recorded settle of it is left unfinished
             r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
                                    basis="sweep:refund", finish_only=True)
-        except Exception as e:  # noqa: BLE001 — one bad lease never sinks the pass (a settle is atomic)
+        except Exception as e:  # noqa: BLE001 — one bad lease (an unreadable marker included) never sinks the pass
             rows.append({**row, "status": "settle_failed", "error": f"{type(e).__name__}: {e}"})
             continue
         if r.get("rolled_forward"):
             rows.append({**row, "status": "settle_completed", "basis": str(r.get("basis") or ""), **_moved(r)})
+            if on_completed is not None:
+                try:
+                    on_completed(rows[-1])
+                except Exception:  # noqa: BLE001 — a notice never undoes or blocks the settle that landed
+                    pass
         elif not r.get("ok") and r.get("retry"):
             rows.append({**row, "status": "deferred", "error": str(r.get("error", ""))})
         elif not r.get("ok"):

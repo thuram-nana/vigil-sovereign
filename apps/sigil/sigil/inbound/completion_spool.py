@@ -443,26 +443,25 @@ class CompletionSpoolWatcher:
         (``ops_sweeps.finish_interrupted_settles``: ``settle_launch(finish_only=True)``, which moves only the recorded
         decision, exactly once). So such a settle — an expired-pause settle stopped after its settlement marker
         included — lands on the drain's next pass with no operator, and a relaunch on that host waits only until
-        then. A roll-forward of a completion's settle writes that completion's notification (NTF-3), as the re-drive
-        does. Returns
-        ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported on
-        stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run."""
-        import types
+        then. A roll-forward of a completion's settle writes that completion's notification (NTF-3) right after that
+        settle returns, as the re-drive does. The spine is read incrementally from the checkpoint beside the spool
+        (``settle_checkpoint``).
 
+        Returns ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported
+        on stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run (the spine or
+        a ledger unreadable)."""
         from ..ops_sweeps import finish_interrupted_settles
+        from ..settle_checkpoint import CHECKPOINT_NAME
         try:
-            rows = finish_interrupted_settles(self._gate, now=float(self._now()), scope=self.scope)
+            rows = finish_interrupted_settles(self._gate, now=float(self._now()), scope=self.scope,
+                                              on_completed=self._finished_notice,
+                                              checkpoint=self.spool / CHECKPOINT_NAME)
         except Exception as exc:  # noqa: BLE001 — this pass never sinks the completion drain
             _sys.stderr.write(f"vigil settle-drain: WARNING interrupted settles not checked: "
                               f"{type(exc).__name__}: {exc}\n")
             return {"settle_finish_error": type(exc).__name__}
         done = [r for r in rows if r["status"] == "settle_completed"]
         left = [r for r in rows if r["status"] in ("deferred", "settle_failed")]
-        for r in done:
-            basis = str(r.get("basis") or "")
-            if basis.startswith("completion:"):
-                lease_doc = types.SimpleNamespace(engagement_slug=r["slug"], org_id=r["org_id"], nonce=r["nonce"])
-                self._record_outcome(lease_doc, None, outcome=basis.split(":", 1)[1])   # the RECORDED outcome
         for r in left:
             _sys.stderr.write(f"vigil settle-drain: a recorded settle of {r['slug']} is not finished yet: "
                               f"{r['status']}{' (' + str(r['error']) + ')' if r.get('error') else ''}\n")
@@ -472,6 +471,15 @@ class CompletionSpoolWatcher:
         if left:
             out["settle_unfinished"] = len(left)
         return out
+
+    def _finished_notice(self, row: dict) -> None:
+        """NTF-3 for a completion's settle the finish pass just finished (``rolled_forward`` with a ``completion:``
+        basis): the RECORDED outcome, for the verified lease the row names. Nothing for any other basis."""
+        import types
+        basis = str(row.get("basis") or "")
+        if basis.startswith("completion:"):
+            lease_doc = types.SimpleNamespace(engagement_slug=row["slug"], org_id=row["org_id"], nonce=row["nonce"])
+            self._record_outcome(lease_doc, None, outcome=basis.split(":", 1)[1])
 
     def _settle_expired_pauses(self) -> dict:
         """E8: settle every PAUSED launch in this drain's scope whose lease window closed more than the settle grace

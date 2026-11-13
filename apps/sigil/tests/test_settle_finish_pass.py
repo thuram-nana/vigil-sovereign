@@ -178,7 +178,8 @@ def test_the_finish_pass_never_makes_a_fresh_settle(record_on):
     assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90) == []
     real = LaunchGate.interrupted_settlements
     try:                                                # even a pass that believed it pending only FINISHES
-        LaunchGate.interrupted_settlements = lambda self, leases: {(ORG, rA["slug"], rA["nonce"]): {"pending_wallet": 1}}
+        LaunchGate.interrupted_settlements = lambda self, leases, **kw: {(ORG, rA["slug"], rA["nonce"]):
+                                                                         {"pending_wallet": 1}}
         assert ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90) == []
     finally:
         LaunchGate.interrupted_settlements = real

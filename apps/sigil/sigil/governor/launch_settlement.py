@@ -303,12 +303,29 @@ def scan_settlements(store, trusted_pubkey: Optional[str], *,
     entry's exact entry id), the same first-verified-decision rule, the same succession-aware verification. Only the
     records of the listed leases are verified. A lease with an empty part gets an empty evidence (as
     ``scan_settlement`` returns for it). Total on hostile payloads."""
+    return scan_settlements_since(store, trusted_pubkey, keys=keys)[0]
+
+
+def scan_settlements_since(store, trusted_pubkey: Optional[str], *, keys: "Any",
+                           since: "Optional[dict[tuple[str, str, str], SettlementEvidence]]" = None,
+                           since_seq: int = -1) -> "tuple[dict[tuple[str, str, str], SettlementEvidence], int, Optional[str]]":
+    """:func:`scan_settlements`, CONTINUED: each lease in ``keys`` starts from its evidence in ``since`` (copied, never
+    changed in place) or from an empty one, and only the records after ``since_seq`` are read. Returns ``(evidence,
+    through, through_hash)``: the evidence of every lease, the highest seq read (``since_seq`` when nothing was) and
+    the ``entry_hash`` of that last record (None when nothing was read). Re-reading a record a lease's evidence
+    already covers changes nothing (the first verified decision wins; ``landed`` is a set), so a caller may start
+    below what a carried evidence covers. With ``since=None`` and ``since_seq=-1`` this is exactly
+    :func:`scan_settlements`. Raises what the spine read raises."""
     want: "dict[tuple[str, str, str], SettlementEvidence]" = {}
     for k in keys:
         o, s, n = (str(x or "") for x in k)
-        want[(o, s, n)] = SettlementEvidence()
+        prior = since.get((o, s, n)) if since else None
+        want[(o, s, n)] = (SettlementEvidence(through=prior.through, record_seq=prior.record_seq,
+                                              decision=prior.decision, malformed=prior.malformed,
+                                              landed=set(prior.landed))
+                           if prior is not None else SettlementEvidence())
     if not trusted_pubkey:
-        return want
+        return want, since_seq, None
     live = {k for k in want if all(k)}
     # (org_id, signal, entry_id) -> (lease, signed core, tag), for every settle entry a listed lease can have
     entries: "dict[tuple[str, str, str], tuple[tuple[str, str, str], tuple[str, ...], str]]" = {}
@@ -318,12 +335,12 @@ def scan_settlements(store, trusted_pubkey: Optional[str], *,
         entries[(o, CREDIT_GRANT_SIGNAL, f"{SETTLE_WALLET_PREFIX}{tail}")] = (k, _GRANT_CORE, "wallet")
         entries[(o, PLAN_GRANT_SIGNAL, f"{SETTLE_PLAN_PREFIX}{tail}")] = (k, _PLAN_GRANT_CORE, "plan")
         entries[(o, POSTPAID_CREDIT_SIGNAL, f"{SETTLE_ENTRY_PREFIX}{tail}")] = (k, _PP_CREDIT_CORE, "postpaid")
-    through = -1
+    through, through_hash = since_seq, None
     resolver = None
     if live:
-        for r in store.iter_records():
+        for r in store.iter_records(since_seq=since_seq):
             if r.seq > through:
-                through = r.seq
+                through, through_hash = r.seq, r.entry_hash
             p = r.payload
             if not isinstance(p, dict):
                 continue
@@ -362,6 +379,40 @@ def scan_settlements(store, trusted_pubkey: Optional[str], *,
                 resolver = _kh.key_resolver(store, current=trusted_pubkey)
             if verify_signed(p, core, resolver.at(r.seq)):
                 ev.landed.add(tag)
-    for k in live:
-        want[k].through = through
-    return want
+        for k in live:
+            want[k].through = through
+    return want, through, through_hash
+
+
+def evidence_to_json(ev: SettlementEvidence) -> dict:
+    """``ev`` as plain JSON (its ``through`` excluded: a caller that persists it records the seq it is good to)."""
+    d = ev.decision
+    return {"record_seq": ev.record_seq, "malformed": bool(ev.malformed), "landed": sorted(ev.landed),
+            "decision": None if d is None else {
+                "mode": d.mode, "reserved": d.reserved, "consumed": d.consumed, "refund_plan": d.refund_plan,
+                "refund_wallet": d.refund_wallet, "refund_postpaid": d.refund_postpaid,
+                "plan_period_end": d.plan_period_end, "basis": d.basis}}
+
+
+def evidence_from_json(obj: Any, *, through: int) -> SettlementEvidence:
+    """The inverse of :func:`evidence_to_json`, good to seq ``through``. Raises ``ValueError`` on anything that is not
+    exactly what it writes: a decision failing an invariant, a decision without a record (or the reverse), an unknown
+    landed tag."""
+    if not isinstance(obj, dict) or set(obj) != {"record_seq", "malformed", "landed", "decision"}:
+        raise ValueError("not a settlement evidence")
+    rs, malformed, landed, dec = obj["record_seq"], obj["malformed"], obj["landed"], obj["decision"]
+    if rs is not None and (isinstance(rs, bool) or not isinstance(rs, int) or not 0 <= rs <= through):
+        raise ValueError("bad record_seq")
+    if not isinstance(malformed, bool) or not isinstance(landed, list) or not set(landed) <= {"wallet", "plan",
+                                                                                              "postpaid"}:
+        raise ValueError("bad malformed / landed")
+    decision = None
+    if dec is not None:
+        decision = _decision_from({**dec, "v": SETTLED_RECORD_VERSION}) if isinstance(dec, dict) else None
+        if decision is None or set(dec) != {"mode", "reserved", "consumed", "refund_plan", "refund_wallet",
+                                            "refund_postpaid", "plan_period_end", "basis"}:
+            raise ValueError("bad decision")
+    if (rs is None) != (decision is None and not malformed) or (malformed and decision is not None):
+        raise ValueError("decision / record mismatch")
+    return SettlementEvidence(through=int(through), record_seq=rs, decision=decision, malformed=malformed,
+                              landed={str(t) for t in landed})
