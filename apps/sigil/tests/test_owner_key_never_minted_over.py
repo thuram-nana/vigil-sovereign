@@ -9,7 +9,8 @@ matching.
 
 Both paths now share one loader. It mints ONLY when neither key file exists. Every other incomplete or
 unusable state raises `OwnerKeyUnavailable` and writes nothing. Verification (`trust_root()`) no longer
-goes through the loader at all: it reads only the public key and never mints.
+goes through the loader at all and never mints: it checks owner.pub against owner.priv when the private key is
+on the box, and anchors on owner.pub alone only when it is not.
 """
 from __future__ import annotations
 
@@ -216,3 +217,94 @@ def test_when_existence_cannot_be_determined_it_never_mints(tmp_path, monkeypatc
     with pytest.raises(I.OwnerKeyUnavailable):
         I.load_or_init_owner_keypair(priv, pub, keys)
     assert not priv.exists() and not pub.exists()
+
+
+# ---- the verify path: a present owner.priv must match owner.pub ----------------------------------------
+
+@pytest.fixture
+def signed_home(tmp_path, monkeypatch):
+    """A spine home with a genuine owner pair, a signed head and an owner-signed floor, all under tmp_path."""
+    import sigil.spine.floor as F
+    from sigil.spine.store import SpineStore
+    priv, pub, keys = _paths(tmp_path)
+    monkeypatch.setattr(C, "HEAD_PATH", tmp_path / "head.json")
+    monkeypatch.setattr(C, "KEYS_DIR", keys)
+    monkeypatch.setattr(C, "_PRIV", priv)
+    monkeypatch.setattr(C, "_PUB", pub)
+    monkeypatch.setattr(F, "FLOOR_PATH", tmp_path / "floor.json")
+    store = SpineStore(tmp_path / "spine.jsonl")
+    for i in range(3):
+        store.append(kind="event", source="t", actor="u", payload={"i": i})
+    C.checkpoint(store)
+    assert C.verify_checkpoint(store)[0]
+    return store, priv, pub, tmp_path
+
+
+def _resign_with(store, home, kp):
+    """Re-sign head.json and floor.json with ``kp`` (what a writer holding only ``kp`` can produce)."""
+    import sigil.spine.floor as F
+    from sigil.reuse.chain import sign_head
+    from sigil.config import OWNER_KEY_ID, SCOPE
+    head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, kp.private_key_b64)])
+    (home / "head.json").write_text(head.model_dump_json(), encoding="utf-8")
+    (home / "floor.json").unlink()
+    F.advance_floor(head, owner_key=kp)
+
+
+def test_verify_fails_closed_when_owner_pub_is_not_the_present_privs(signed_home):
+    """With owner.priv on the box, the verify path checks that owner.pub is ITS public key (the check the shared
+    loader makes for signing). A replaced owner.pub, with head and floor re-signed under the new key, must not
+    verify; the refusal names the mismatch and writes nothing."""
+    store, priv, pub, home = signed_home
+    other = generate_keypair()
+    pub.write_text(other.public_key_b64, encoding="utf-8")
+    _resign_with(store, home, other)
+    before = _snapshot(priv, pub)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and msg.startswith("owner.pub is not the public key of owner.priv"), msg
+    assert _snapshot(priv, pub) == before
+    with pytest.raises(I.OwnerKeyUnavailable, match="not the public key"):
+        C.trust_root(store)
+
+
+def test_verify_fails_closed_when_a_present_priv_cannot_be_read(signed_home, monkeypatch):
+    """A present owner.priv that cannot be unsealed (or read) is not the off-box layout: verify refuses, as the
+    loader does, rather than anchoring on owner.pub alone."""
+    store, priv, pub, _home = signed_home
+
+    def locked(path):
+        raise V.VaultLocked("simulated unseal failure")
+
+    fake = _FakeVault(locked)
+    monkeypatch.setattr(V, "owner_vault", lambda: fake)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and "cannot be unsealed" in msg, msg
+    assert fake.writes == []
+    fake2 = _FakeVault(lambda path: None)
+    monkeypatch.setattr(V, "owner_vault", lambda: fake2)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and "unreadable" in msg, msg
+    assert fake2.writes == []
+
+
+def test_verify_treats_a_dangling_priv_link_as_present(signed_home):
+    """A dangling owner.priv link (a moved key volume) is not the off-box layout: verify fails closed."""
+    store, priv, pub, home = signed_home
+    priv.unlink()
+    os.symlink(home / "gone" / "owner.priv", priv)
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and "unreadable" in msg, msg
+    assert os.path.islink(priv)
+
+
+def test_verify_without_priv_anchors_on_owner_pub_alone(signed_home):
+    """The off-box / upgrade-drill layout (owner.pub only) still verifies the genuine head, and a head re-signed
+    under another key still fails there (the anchor is owner.pub)."""
+    store, priv, pub, home = signed_home
+    priv.unlink()
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is True, msg
+    assert not priv.exists()
+    _resign_with(store, home, generate_keypair())
+    ok, msg = C.verify_checkpoint(store)
+    assert ok is False and "TAMPERING" in msg, msg

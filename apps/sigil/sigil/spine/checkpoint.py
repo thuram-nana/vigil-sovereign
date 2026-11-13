@@ -64,12 +64,16 @@ class OwnerPublicKeyMissing(RuntimeError):
 
 
 def _owner_pub_for_verify() -> str:
-    """The owner PUBLIC key for a VERIFY path. Never reads (or unseals) the private key and NEVER mints a
-    keypair — a box whose owner key is kept OFF-box (only the public key local), or a scoped copy that
-    deliberately carries no private key (the upgrade drill), verifies against the existing key. A verify only
-    runs over a signed head, so a missing (or empty) ``owner.pub`` is never a first use: minting there would
-    silently re-key the trust root and report the genuine head as TAMPERING. It fails closed instead
-    (``OwnerPublicKeyMissing``), and any OTHER read error propagates (verify fails closed on it too)."""
+    """The owner PUBLIC key for a VERIFY path. NEVER mints a keypair. A verify only runs over a signed head, so
+    a missing (or empty) ``owner.pub`` is never a first use: minting there would silently re-key the trust root
+    and report the genuine head as TAMPERING. It fails closed instead (``OwnerPublicKeyMissing``), and any OTHER
+    read error propagates (verify fails closed on it too).
+
+    When ``owner.priv`` sits beside it, ``owner.pub`` must be ITS public key — the consistency check the shared
+    loader makes before signing — so a replaced or stale ``owner.pub`` fails closed naming the mismatch, as does
+    a present private key that cannot be read or unsealed (``OwnerKeyUnavailable``). Only when ``owner.priv`` is
+    ABSENT — the owner key kept OFF-box, or a scoped copy that deliberately carries no private key (the upgrade
+    drill) — does the verify anchor on ``owner.pub`` alone."""
     try:
         pub = _PUB.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -77,6 +81,9 @@ def _owner_pub_for_verify() -> str:
     if not pub:
         raise OwnerPublicKeyMissing(f"no owner public key at {_PUB} — the signed head cannot be verified "
                                     "(verification never mints a key; restore owner.pub)")
+    from ..governor.identity import check_owner_pub_against_priv
+    # the private key BESIDE this public key (like the genesis pin below): the pair under verification
+    check_owner_pub_against_priv(_PUB.parent / "owner.priv", pub)
     return pub
 
 
@@ -275,9 +282,10 @@ def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
         floor = load_floor()                                # None if absent -> byte-identical to pre-floor
     except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
         return False, f"durable anti-rollback floor unreadable — refuse to certify (possible tamper): {e}"
+    from ..governor.identity import OwnerKeyUnavailable
     try:
         return classify_head(head, store.entries(), trust_root(store), floor=floor)
-    except OwnerPublicKeyMissing as e:                      # fail CLOSED, naming the real cause
+    except (OwnerPublicKeyMissing, OwnerKeyUnavailable) as e:   # fail CLOSED, naming the real cause
         return False, str(e)
     except Exception as e:  # noqa: BLE001 — malformed head sig/key material (e.g. non-base64) makes verify_one
         # raise; a PRESENT head whose signature material is malformed is TAMPER — fail CLOSED with a clean
