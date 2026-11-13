@@ -1,7 +1,7 @@
 {
   "id": "W11-3b",
   "issue": 484,
-  "note": "The NAMED-MUTANT corpus for the money/gate files the scheduled mutmut/cosmic-ray kill-suite cannot reach (critical-set.json mutation=false: the sovereign-leg apps/sigil files cannot load beside framework, and the engine gates are outside the vigil_core-scoped runner). Each mutant is ONE exact old->new source replacement that breaks ONE named guard, plus the test node(s) that must kill it. tools/mutation/named_mutants.py runs ONE plane per process tree (planes.*.pythonpath is rebuilt from scratch and absolute; the sovereign plane never holds engine/crucible, the offense plane never holds apps/sigil), checks the union of each file's named tests is GREEN on the unmutated source, then applies each mutant, runs only its named tests (-x), and always restores the original bytes and mtime. KILLED means pytest exited 1; exit 0 is SURVIVED; anything else (collection/usage error, timeout, a mutant that does not compile) is ERROR, never a kill. Run: python tools/mutation/named_mutants.py --plane sovereign|offense [--file <path>] [--mutant <id>]. Wired into .github/workflows/mutation-fuzz.yml (job \"named-mutant corpus\", scheduled, red on any survivor). Every file here must be a python entry of critical-set.json flagged \"named_mutants\": true (and vice versa), and every mutant must still apply exactly once, compile and name a real test in its own plane: integration/tests/test_mutation_critical_set.py enforces this on every PR, so a refactor that moves a guard's text must update its mutant in the same PR. A mutant that SURVIVES is a missing test (or dead code): add the test, never weaken the mutant.",
+  "note": "The NAMED-MUTANT corpus for a hand-picked subset of the money/gate files the scheduled mutmut/cosmic-ray kill-suite cannot reach (critical-set.json mutation=false: the sovereign-leg apps/sigil files cannot load beside framework, and the engine gates are outside the vigil_core-scoped runner). Each mutant is ONE exact old->new source replacement that breaks ONE named guard, plus the test node(s) that must kill it. tools/mutation/named_mutants.py runs ONE plane per process tree (planes.*.pythonpath is rebuilt from scratch and absolute; the sovereign plane never holds engine/crucible, the offense plane never holds apps/sigil), checks the module imports and the union of each file's named tests is GREEN on the unmutated source, then applies each mutant (the original kept in a <file>.named-mutant.orig sidecar until restored), checks the mutant still imports, runs only its named tests (-x), and always restores the original bytes and mtime. KILLED means pytest exited 1 AND a named test failed by an assertion (AssertionError or pytest.fail, DID NOT RAISE included); a test failing by any other exception is CRASHED; exit 0 is SURVIVED; anything else (a mutant that does not import or compile, collection/usage/setup error, timeout) is ERROR. Only KILLED is a kill. Run: python tools/mutation/named_mutants.py --plane sovereign|offense [--file <path>] [--mutant <id>]. Wired into .github/workflows/mutation-fuzz.yml (job \"named-mutant corpus\", scheduled, red on any survivor). Every file here must be a python entry of critical-set.json flagged \"named_mutants\": true (and vice versa), and every mutant must still apply exactly once, compile and name a real test in its own plane: integration/tests/test_mutation_critical_set.py enforces this on every PR, so a refactor that moves a guard's text must update its mutant in the same PR. A mutant that SURVIVES is a missing test (or dead code): add the test, never weaken the mutant. SCOPE: only the files below carry named mutants, and for each only the guards listed; the other mutation=false python files of critical-set.json are covered by their own suites alone (the kill table lists them).",
   "planes": {
     "sovereign": {
       "cwd": ".",
@@ -135,7 +135,7 @@
       "mutants": [
         {
           "id": "launch_gate.units_floor_zero",
-          "guard": "a reservation is in [1, MAX_UNITS]: a 0-unit launch is refused",
+          "guard": "a reservation is in [1, MAX_UNITS]: the gate itself refuses a 0-unit launch (a clean refusal, never an exception from the lease model past it)",
           "old": "if not (1 <= u <= _MAX_UNITS):",
           "new": "if not (0 <= u <= _MAX_UNITS):",
           "tests": [
@@ -197,12 +197,30 @@
           ]
         },
         {
+          "id": "launch_gate.publish_unpinned",
+          "guard": "publish verifies the lease under the PINNED owner key (a re-signed or altered lease never reaches the seam)",
+          "old": "        ok, reason = verify_credit_launch_lease(signed, owner_root)   # PINNED to our owner key, not the wire\n        if not ok:\n            return {\"ok\": False, \"error\": f\"lease does not verify under the owner key: {reason}\"}\n        doc = signed.document\n        if expect_org_id is not None and doc.org_id != expect_org_id:",
+          "new": "        ok, reason = verify_credit_launch_lease(signed, owner_root)   # PINNED to our owner key, not the wire\n        if False:\n            return {\"ok\": False, \"error\": f\"lease does not verify under the owner key: {reason}\"}\n        doc = signed.document\n        if expect_org_id is not None and doc.org_id != expect_org_id:",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_publish_refuses_a_lease_the_owner_did_not_sign"
+          ]
+        },
+        {
           "id": "launch_gate.settle_tenant_binding",
           "guard": "settle is tenant-bound: a customer cannot settle another org's lease",
           "old": "        if expect_org_id is not None and oid != expect_org_id:\n            return {\"ok\": False, \"error\": \"this lease belongs to a different org\"}\n        try:\n            consumed = int(consumed_units)",
           "new": "        if False:\n            return {\"ok\": False, \"error\": \"this lease belongs to a different org\"}\n        try:\n            consumed = int(consumed_units)",
           "tests": [
             "apps/sigil/tests/test_custui.py::test_launch_cancel_relays_and_is_tenant_bound"
+          ]
+        },
+        {
+          "id": "launch_gate.settle_negative_consumed",
+          "guard": "settle refuses a negative consumed_units, so a refund never exceeds the signed reservation",
+          "old": "        if consumed < 0:\n            return {\"ok\": False, \"error\": \"consumed_units must be non-negative\"}",
+          "new": "        if False:\n            return {\"ok\": False, \"error\": \"consumed_units must be non-negative\"}",
+          "tests": [
+            "apps/sigil/tests/test_launch_gate.py::test_settle_refuses_a_negative_consumed_no_over_refund"
           ]
         },
         {

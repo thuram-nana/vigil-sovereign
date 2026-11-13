@@ -130,12 +130,15 @@ jobs:
           echo "::notice::cargo-fuzz warden_classify complete — a crash here is a real fail-open bug."
 
   # ----------------------------------------------------------------------------------------------
-  # NAMED-MUTANT CORPUS — the money/gate files mutmut cannot reach (critical-set.json mutation=false).
+  # NAMED-MUTANT CORPUS — a hand-picked subset of the money/gate files mutmut cannot reach (critical-set.json
+  # mutation=false, flagged named_mutants: true; the kill table lists the files it does NOT cover).
   # tools/mutation/named-mutants.json names, per file, a fixed list of guard-breaking mutants and the test
   # that must kill each; tools/mutation/named_mutants.py runs ONE plane per process with a PYTHONPATH built
-  # from scratch (the sovereign plane never has engine/crucible on it — FATAL-2), checks a green baseline,
-  # applies each mutant, runs only its named tests, and always restores the source. KILLED means pytest
-  # exited 1; a collection error / timeout / non-compiling mutant is ERROR, never a kill. Unlike the
+  # from scratch (the sovereign plane never has engine/crucible on it — FATAL-2), checks the module imports
+  # and a green baseline, applies each mutant, runs only its named tests, and always restores the source.
+  # KILLED means pytest exited 1 AND a named test failed by an assertion; a test failing by another
+  # exception is CRASHED, and a mutant that does not import / a collection error / a timeout is ERROR —
+  # none of those is a kill. Unlike the
   # best-effort steps above this job goes RED on any survivor: that red is the signal (the workflow is
   # still scheduled-only, never a merge blocker). The corpus itself is validated on every PR by
   # integration/tests/test_mutation_critical_set.py, so it cannot go stale between runs.

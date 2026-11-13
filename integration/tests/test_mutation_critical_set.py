@@ -19,13 +19,16 @@ mutmut config never lists it — a manifest that describes a discipline the buil
 controls below prove the equality check has teeth: a config missing a manifest file, and a config naming a
 file the manifest does not, are BOTH reported.
 
-THE NAMED-MUTANT CORPUS. The money/gate files mutmut cannot reach (``mutation: false`` — sovereign-leg
-``apps/sigil`` files and engine gates) are mutated instead by ``tools/mutation/named-mutants.json``, run per
-plane by ``tools/mutation/named_mutants.py`` in the scheduled workflow. The guards below bind that corpus too:
+THE NAMED-MUTANT CORPUS. A hand-picked subset of the money/gate files mutmut cannot reach (``mutation: false``
+— sovereign-leg ``apps/sigil`` files and engine gates; those flagged ``named_mutants: true``) is mutated instead
+by ``tools/mutation/named-mutants.json``, run per plane by ``tools/mutation/named_mutants.py`` in the scheduled
+workflow; the remaining ``mutation: false`` files are covered by their own suites alone. The guards below bind
+that corpus too:
 the manifest's ``named_mutants: true`` flags EQUAL the corpus files, every mutant still applies exactly once
 and compiles and names a real test in its own plane (so a refactor that orphans a mutant turns the PR red,
 not the next weekly run), the sovereign plane's PYTHONPATH never holds the engine, and the runner itself is
-proven to tell KILLED from SURVIVED from ERROR and to restore the source.
+proven to tell KILLED (an assertion) from CRASHED (any other exception) from SURVIVED from ERROR (a mutant that
+does not import, a collection error), and to restore the source, also after an interrupted run.
 
 STDLIB ONLY (``json`` + ``tomllib``, Python >=3.11) and framework-free, so it runs in the sovereign leg of
 the required ``integration two-env boundary (P5)`` job over the whole ``integration/tests`` directory.
@@ -303,48 +306,120 @@ def _dup_line(rel: str) -> str:
     return next(ln for ln in text.splitlines() if len(ln.strip()) > 8 and text.count(ln) > 1)
 
 
-def test_named_mutant_runner_kills_survives_errors_and_restores(tmp_path):
-    """The runner has teeth and no false kills, on a synthetic plane: an adequate test KILLS a boundary
-    mutant, a weak test lets the SAME mutant SURVIVE, a mutant that breaks collection is ERROR (never a kill)
-    whether pytest reports it as rc 4 (a named node that no longer collects) or rc 2 (a whole file that fails
-    to import), a red baseline scores nothing, and the source is restored byte- and mtime-exact."""
+def _synthetic_plane(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "tests").mkdir()
     src = tmp_path / "pkg" / "gate.py"
     src.write_text("def admit(units):\n    return 1 <= units <= 10\n", encoding="utf-8")
     os.utime(src, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
-    before, mtime = src.read_bytes(), src.stat().st_mtime_ns
     (tmp_path / "tests" / "test_gate.py").write_text(
-        "from gate import admit\n\n\n"
+        "import pytest\n\nfrom gate import admit\n\n\n"
         "def test_floor():\n    assert admit(1) and not admit(0)\n\n\n"
-        "def test_weak():\n    assert admit(5)\n", encoding="utf-8")
+        "def test_floor_by_fail():\n    if admit(0):\n        pytest.fail('a 0-unit admit')\n\n\n"
+        "def test_weak():\n    assert admit(5)\n\n\n"
+        "@pytest.fixture\ndef floor_checked():\n    assert not admit(0)\n\n\n"
+        "def test_floor_in_fixture(floor_checked):\n    pass\n", encoding="utf-8")
     (tmp_path / "tests" / "test_red.py").write_text("def test_red():\n    assert False\n", encoding="utf-8")
-    corpus = {"planes": {"sovereign": {"cwd": ".", "pythonpath": ["pkg"]}}}
+    return src, {"planes": {"sovereign": {"cwd": ".", "pythonpath": ["pkg"]}}}
 
-    def mut(mid, tests, old="1 <= units", new="0 <= units"):
-        nodes = [t if t.startswith("tests/") else f"tests/test_gate.py::{t}" for t in tests]
-        return {"id": mid, "guard": "floor", "old": old, "new": new, "tests": nodes}
 
+def _mut(mid, tests, old="1 <= units", new="0 <= units"):
+    nodes = [t if t.startswith("tests/") else f"tests/test_gate.py::{t}" for t in tests]
+    return {"id": mid, "guard": "floor", "old": old, "new": new, "tests": nodes}
+
+
+def test_named_mutant_runner_kills_only_on_an_assertion_and_restores(tmp_path):
+    """The runner has teeth and no false kills, on a synthetic plane: an adequate test KILLS a boundary mutant
+    (by assert, and by pytest.fail), a weak test lets the SAME mutant SURVIVE, a mutant that only fails its
+    test by a NameError at call time is CRASHED and a fixture that fails in setup is CRASHED (neither is a
+    kill), a mutant that breaks the module's import is ERROR before any test runs, one that breaks the test
+    file's collection is ERROR, a red baseline scores nothing, and the source is restored byte- and mtime-exact."""
+    src, corpus = _synthetic_plane(tmp_path)
+    before, mtime = src.read_bytes(), src.stat().st_mtime_ns
     entry = {"path": "pkg/gate.py", "plane": "sovereign", "mutants": [
-        mut("strong", ["test_floor"]),
-        mut("weak", ["test_weak"]),
-        mut("breaks-import", ["test_floor"], old="def admit(units):", new="raise ImportError('x')\ndef admit(units):"),
-        mut("breaks-import-file", ["tests/test_gate.py"], old="def admit(units):",
-            new="raise ImportError('x')\ndef admit(units):"),
+        _mut("strong", ["test_floor"]),
+        _mut("strong-by-fail", ["test_floor_by_fail"]),
+        _mut("weak", ["test_weak"]),
+        _mut("name-error-at-call", ["test_floor"], old="    return 1 <= units <= 10",
+             new="    return undefined_name or 1 <= units <= 10"),
+        _mut("setup-error", ["test_floor_in_fixture"]),
+        _mut("breaks-import", ["test_floor"], old="def admit(units):", new="raise ImportError('x')\ndef admit(units):"),
+        _mut("breaks-import-file", ["tests/test_gate.py"], old="def admit(units):",
+             new="raise ImportError('x')\ndef admit(units):"),
+        _mut("breaks-test-collection", ["tests/test_gate.py"], old="def admit(units):", new="def admitted(units):"),
     ]}
     run = named_mutants.run_file(entry, corpus, tmp_path, timeout=120)
     assert run.baseline_ok, run.baseline_detail
     verdicts = {r.mutant: r.verdict for r in run.results}
-    assert verdicts == {"strong": named_mutants.KILLED, "weak": named_mutants.SURVIVED,
-                        "breaks-import": named_mutants.ERROR, "breaks-import-file": named_mutants.ERROR}, run.results
-    assert "rc=4" in run.results[2].detail and "rc=2" in run.results[3].detail, run.results
+    assert verdicts == {
+        "strong": named_mutants.KILLED, "strong-by-fail": named_mutants.KILLED, "weak": named_mutants.SURVIVED,
+        "name-error-at-call": named_mutants.CRASHED, "setup-error": named_mutants.CRASHED,
+        "breaks-import": named_mutants.ERROR, "breaks-import-file": named_mutants.ERROR,
+        "breaks-test-collection": named_mutants.ERROR,
+    }, run.results
+    detail = {r.mutant: r.detail for r in run.results}
+    assert "NameError" in detail["name-error-at-call"] and "setup" in detail["setup-error"], detail
+    assert "does not import" in detail["breaks-import"] and "does not import" in detail["breaks-import-file"]
+    assert "rc=2" in detail["breaks-test-collection"], detail
     assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime, "the source was not restored exactly"
+    assert not named_mutants.sidecar(src).exists(), "the sidecar outlived the run"
 
-    red = {"path": "pkg/gate.py", "plane": "sovereign", "mutants": [mut("strong", ["test_floor", "tests/test_red.py"])]}
+    red = {"path": "pkg/gate.py", "plane": "sovereign", "mutants": [_mut("strong", ["test_floor", "tests/test_red.py"])]}
     run = named_mutants.run_file(red, corpus, tmp_path, timeout=120)
     assert not run.baseline_ok and [r.verdict for r in run.results] == [named_mutants.ERROR]
-    assert "baseline red" in run.results[0].detail
+    assert "baseline not green" in run.results[0].detail
     assert src.read_bytes() == before
+
+
+def test_named_mutant_runner_restores_a_source_an_interrupted_run_left_mutated(tmp_path):
+    """A run killed mid-mutant (SIGKILL: no finally runs) leaves the mutant in the source and the original in
+    the sidecar; the next run puts the original back before it reads anything, and scores against it."""
+    src, corpus = _synthetic_plane(tmp_path)
+    before = src.read_bytes()
+    named_mutants.sidecar(src).write_bytes(before)
+    src.write_text("def admit(units):\n    return 0 <= units <= 10\n", encoding="utf-8")   # the left-over mutant
+    run = named_mutants.run_file({"path": "pkg/gate.py", "plane": "sovereign", "mutants": [_mut("strong", ["test_floor"])]},
+                                 corpus, tmp_path, timeout=120)
+    assert src.read_bytes() == before and not named_mutants.sidecar(src).exists()
+    assert run.baseline_ok and [r.verdict for r in run.results] == [named_mutants.KILLED], run.results
+
+
+@pytest.mark.parametrize("rc,rows,verdict", [
+    (None, None, named_mutants.ERROR),
+    (0, [], named_mutants.SURVIVED),
+    (2, [], named_mutants.ERROR),
+    (4, [], named_mutants.ERROR),
+    (1, None, named_mutants.ERROR),
+    (1, [], named_mutants.ERROR),
+    (1, [{"when": "call", "type": "AssertionError", "assertion": True}], named_mutants.KILLED),
+    (1, [{"when": "call", "type": "NameError", "assertion": False}], named_mutants.CRASHED),
+    (1, [{"when": "setup", "type": "AssertionError", "assertion": True}], named_mutants.CRASHED),
+    (1, [{"when": "call", "type": "ValidationError", "assertion": False},
+         {"when": "call", "type": "Failed", "assertion": True}], named_mutants.KILLED),
+], ids=["timeout", "pass", "rc2", "rc4", "no-probe", "no-rows", "assert", "name-error", "setup-assert",
+        "one-assert-of-two"])
+def test_named_mutant_classification_counts_only_assertions(rc, rows, verdict):
+    assert named_mutants.classify(rc, rows, "tail")[0] == verdict
+
+
+def test_named_mutant_children_get_their_own_vigil_base_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_BASE_DIR", "/somewhere/shared")
+    env = named_mutants.plane_env(_corpus(), "sovereign", _REPO, tmp_path / "m0")
+    assert Path(env["VIGIL_BASE_DIR"]).is_relative_to(tmp_path) and Path(env["VIGIL_BASE_DIR"]).is_dir()
+
+
+def test_named_mutant_kill_table_states_its_scope_and_skips_unselected_files():
+    corpus = _corpus()
+    uncovered = named_mutants.uncovered_files(corpus)
+    man = _manifest()
+    off = {e["path"] for e in man["critical_set"] if e.get("lang") == "python" and e.get("mutation") is False}
+    assert set(uncovered) == off - {f["path"] for f in corpus["files"]} and uncovered, uncovered
+    ran = named_mutants.FileRun(path="a.py", plane="sovereign", baseline_ok=True, baseline_detail="rc=0",
+                                results=[named_mutants.Result("a.py", "m", "g", ["t"], named_mutants.KILLED)])
+    idle = named_mutants.FileRun(path="idle.py", plane="sovereign", baseline_ok=True, baseline_detail="")
+    table = named_mutants.kill_table([ran, idle], "sovereign", uncovered)
+    assert "1/1 killed" in table and "idle.py" not in table
+    assert f"{len(uncovered)} of those carry no named mutants" in table and uncovered[0] in table
 
 
 if __name__ == "__main__":

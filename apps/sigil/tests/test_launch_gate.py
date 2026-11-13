@@ -153,8 +153,11 @@ def test_insufficient_credits_refused():
 def test_bad_units_refused(units):
     s = _store()
     _setup(s, "org_a", "apme.cm", credits=100)
-    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
-    assert r["ok"] is False and _avail(s, "org_a") == 100
+    try:
+        r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
+    except Exception as e:  # noqa: BLE001 — the gate's own bound must refuse; nothing downstream may be reached
+        pytest.fail(f"units={units!r} must be refused by the gate, not raise {type(e).__name__}")
+    assert r["ok"] is False and "units" in r["error"] and _avail(s, "org_a") == 100
 
 
 # --- settle / release: refund bound to the SIGNED lease (net spend == consumption) ------------------
@@ -193,7 +196,41 @@ def test_settle_clamps_consumed_to_reserved():
     s = _store()
     r = _reserve(s)
     out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=999, now=3000.0)
-    assert out["refunded"] == 0 and _avail(s, "org_a") == 70     # clamped: no negative refund, no over-claw
+    assert out["ok"] is True, out                                 # an over-report settles (clamped), never refused
+    assert out.get("refunded") == 0 and _avail(s, "org_a") == 70  # clamped: no negative refund, no over-claw
+
+
+def test_settle_refuses_a_negative_consumed_no_over_refund():
+    """consumed_units is reported by the offense side: a NEGATIVE value is refused outright, so the refund
+    (reserved - consumed) can never exceed what the signed reservation held."""
+    s = _store()
+    r = _reserve(s)                                        # 100 - 30 reserved = 70
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=-5, now=3000.0)
+    assert out["ok"] is False and "non-negative" in out["error"], out
+    assert _avail(s, "org_a") == 70                        # nothing refunded
+
+
+def test_publish_refuses_a_lease_the_owner_did_not_sign():
+    """publish_lease verifies the lease under the PINNED owner key before anything reaches the seam: the same
+    document re-signed by another key, and a genuine lease whose document was altered, are both refused and
+    leave the seam empty; the genuine lease is the control that publishes."""
+    import os
+    from vigil_core import SignedCreditLaunchLease, generate_keypair, sign_credit_launch_lease
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    s = _store()
+    r = _reserve(s)
+    g = _gate(s)
+    base = os.environ["VIGIL_BASE_DIR"]
+    genuine = SignedCreditLaunchLease.model_validate(r["lease"])
+    resigned = sign_credit_launch_lease(genuine.document, {"owner": generate_keypair().private_key_b64})
+    altered = genuine.model_dump(mode="json")
+    altered["document"]["units_reserved"] = int(genuine.document.units_reserved) + 1
+    for bad in (resigned.model_dump(mode="json"), altered):
+        out = g.publish_lease(signed_lease=bad, expect_org_id="org_a")
+        assert out["ok"] is False and "does not verify" in out["error"], out
+        assert read_credit_lease(base, r["slug"]) is None
+    assert g.publish_lease(signed_lease=r["lease"], expect_org_id="org_a")["ok"]
+    assert read_credit_lease(base, r["slug"]) is not None
 
 
 def test_settle_is_idempotent():

@@ -1,10 +1,14 @@
-"""The NAMED-MUTANT corpus runner — a deterministic, bounded, per-plane kill table for the money/gate files.
+"""The NAMED-MUTANT corpus runner — a deterministic, bounded, per-plane kill table for a hand-picked subset
+of the money/gate files.
 
 WHY THIS EXISTS (W11-3, issue #484). mutmut / cosmic-ray (the scheduled kill-suite) mutate only the
 vigil_core-scoped ``mutation: true`` files: their single runner command cannot load ``framework`` beside the
 sovereign-purity asserts, so the K4 money/gate files under ``apps/sigil`` and the engine gates under
 ``engine/crucible`` are ``mutation: false`` in ``critical-set.json``. Their mutation evidence lived only in
-PR bodies ("8/8 killed"), with nothing in the repo that re-runs it. This runner closes that gap:
+PR bodies, with nothing in the repo that re-runs it. This runner re-runs it for the files flagged
+``named_mutants: true`` — a SUBSET of the ``mutation: false`` python files (``uncovered_files`` lists the
+rest, which stay covered only by their own suites), and for each flagged file only the guards its corpus
+entry names, not every mutant a PR body may have reported:
 
   * the corpus (``tools/mutation/named-mutants.json``) names, per file, a FIXED list of mutants — each an
     exact ``old`` -> ``new`` source replacement for ONE guard, plus the test node(s) that must kill it;
@@ -14,9 +18,16 @@ PR bodies ("8/8 killed"), with nothing in the repo that re-runs it. This runner 
   * per file it first runs the union of the named tests on the UNMUTATED source (the baseline must be
     green, else a "kill" means nothing), then applies each mutant, runs only that mutant's named tests,
     and ALWAYS restores the original bytes (and mtime) before the next mutant;
-  * a mutant is KILLED only when pytest exits 1 (tests ran and failed). Exit 0 is SURVIVED. Anything
-    else — collection/usage error, no tests collected, timeout, or a mutant that does not compile — is
-    ERROR, never a kill, so a broken mutant can never pad the score.
+  * before any test runs, the (mutated or original) module is IMPORTED on its own in the plane's
+    environment: a mutant that does not import is ERROR, never a kill;
+  * a mutant is KILLED only when pytest exits 1 AND a named test failed by an ASSERTION (an
+    ``AssertionError`` or a ``pytest.fail``, ``DID NOT RAISE`` included), recorded by a probe plugin in
+    the child. A test that fails by any other exception (a ``NameError`` the mutant introduced, a
+    ``ValidationError`` from code past the broken guard) is CRASHED: reported, and never a kill. Exit 0
+    is SURVIVED; anything else (collection/usage error, setup error, no tests, timeout, a mutant that
+    does not compile) is ERROR. So a broken mutant can never pad the score;
+  * the original bytes are also kept in a sidecar (``<file>.named-mutant.orig``) while a mutant is
+    applied, and any sidecar left by an interrupted run is restored before the next run touches the file.
 
 The output is a Markdown kill table (optionally appended to ``$GITHUB_STEP_SUMMARY``) and a JSON record.
 Exit status: 0 iff every selected mutant was KILLED over a green baseline; 1 otherwise; 2 if the corpus
@@ -55,7 +66,37 @@ CRITICAL_SET = REPO / "tools" / "mutation" / "critical-set.json"
 PLANES = ("sovereign", "offense")
 KILLED = "KILLED"
 SURVIVED = "SURVIVED"
+CRASHED = "CRASHED"     # tests failed, but by an exception other than an assertion: never a kill
 ERROR = "ERROR"
+
+SIDECAR_SUFFIX = ".named-mutant.orig"
+PROBE_MODULE = "_named_mutants_probe"
+# Loaded into every pytest child (-p): records, per failed test phase, whether it failed by an ASSERTION.
+PROBE_SOURCE = '''"""named_mutants probe: per failed test phase, the exception type and whether it is an assertion."""
+import json
+import os
+
+import pytest
+
+_ROWS = []
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.failed:
+        exc = call.excinfo
+        value = exc.value if exc is not None else None
+        assertion = rep.when == "call" and isinstance(value, (AssertionError, pytest.fail.Exception))
+        _ROWS.append({"nodeid": item.nodeid, "when": rep.when, "type": exc.typename if exc else "",
+                      "assertion": bool(assertion)})
+
+
+def pytest_sessionfinish(session, exitstatus):
+    with open(os.environ["NAMED_MUTANTS_PROBE_OUT"], "w", encoding="utf-8") as fh:
+        json.dump(_ROWS, fh)
+'''
 
 DEFAULT_TIMEOUT_S = 600.0
 
@@ -70,6 +111,25 @@ def load_corpus(path: Path = CORPUS) -> dict:
 def critical_python_paths(path: Path = CRITICAL_SET) -> set[str]:
     man = json.loads(Path(path).read_text(encoding="utf-8"))
     return {e["path"] for e in man["critical_set"] if e.get("lang") == "python"}
+
+
+def uncovered_files(corpus: dict, path: Path = CRITICAL_SET) -> list[str]:
+    """The ``mutation: false`` python files of critical-set.json that the corpus does NOT mutate (covered only
+    by their own suites and the per-slice mutation-verify), sorted."""
+    man = json.loads(Path(path).read_text(encoding="utf-8"))
+    off = {e["path"] for e in man["critical_set"] if e.get("lang") == "python" and e.get("mutation") is False}
+    return sorted(off - {f["path"] for f in corpus.get("files") or []})
+
+
+def module_name(rel: str, pythonpath: list[str]) -> str:
+    """The dotted module ``rel`` imports as under the plane's pythonpath (the deepest root that holds it), or ""."""
+    roots = sorted((r.rstrip("/") for r in pythonpath if r.strip("/") and _under(rel, [r])), key=len, reverse=True)
+    if not roots or not rel.endswith(".py"):
+        return ""
+    parts = rel[len(roots[0]) + 1 : -3].split("/")
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts) if parts and all(p.isidentifier() for p in parts) else ""
 
 
 def _under(rel: str, roots: list[str]) -> bool:
@@ -151,6 +211,8 @@ def validate_corpus(corpus: dict, repo: Path = REPO, critical: Optional[set[str]
             problems.append(f"{where}: not under the {plane} plane's source_roots {pl.get('source_roots')}")
         if _under(rel, pl.get("forbidden_pythonpath") or []):
             problems.append(f"{where}: lives under a root the {plane} plane forbids")
+        if not module_name(rel, pl.get("pythonpath") or []):
+            problems.append(f"{where}: is not an importable module under the {plane} plane's pythonpath")
         text = src_path.read_text(encoding="utf-8")
         mutants = entry.get("mutants") or []
         if not mutants:
@@ -223,14 +285,17 @@ class FileRun:
 
 def plane_env(corpus: dict, plane: str, repo: Path, scratch: Path) -> dict[str, str]:
     """The child environment for ONE plane: PYTHONPATH rebuilt from scratch (absolute, never inherited),
-    a fresh SIGIL_HOME, and a private bytecode cache so a stale .pyc can never stand in for a mutant (or for
-    the restored original)."""
+    a fresh SIGIL_HOME and VIGIL_BASE_DIR, and a private bytecode cache so a stale .pyc can never stand in for
+    a mutant (or for the restored original)."""
     pl = corpus["planes"][plane]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(str((repo / p).resolve()) for p in pl["pythonpath"])
     home = scratch / "sigil-home"
     home.mkdir(parents=True, exist_ok=True)
     env["SIGIL_HOME"] = str(home)
+    base = scratch / "vigil-base"
+    base.mkdir(parents=True, exist_ok=True)
+    env["VIGIL_BASE_DIR"] = str(base)
     pyc = scratch / "pycache"
     pyc.mkdir(parents=True, exist_ok=True)
     env["PYTHONPYCACHEPREFIX"] = str(pyc)
@@ -239,9 +304,17 @@ def plane_env(corpus: dict, plane: str, repo: Path, scratch: Path) -> dict[str, 
 
 
 def _run_pytest(tests: list[str], cwd: Path, env: dict[str, str], python: str, timeout: float,
-                stop_first: bool) -> tuple[Optional[int], str, float]:
-    """(returncode | None on timeout, tail of output, seconds)."""
-    cmd = [python, "-m", "pytest", "-p", "no:cacheprovider"]
+                stop_first: bool) -> tuple[Optional[int], str, float, Optional[list[dict]]]:
+    """(returncode | None on timeout, tail of output, seconds, the probe's failure rows | None if unread)."""
+    probe_dir = Path(env["SIGIL_HOME"]).parent / "probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    (probe_dir / f"{PROBE_MODULE}.py").write_text(PROBE_SOURCE, encoding="utf-8")
+    out_path = probe_dir / "rows.json"
+    out_path.unlink(missing_ok=True)
+    env = dict(env)
+    env["PYTHONPATH"] = os.pathsep.join([str(probe_dir), env["PYTHONPATH"]])
+    env["NAMED_MUTANTS_PROBE_OUT"] = str(out_path)
+    cmd = [python, "-m", "pytest", "-p", "no:cacheprovider", "-p", PROBE_MODULE]
     if stop_first:
         cmd.append("-x")
     cmd += tests
@@ -249,10 +322,58 @@ def _run_pytest(tests: list[str], cwd: Path, env: dict[str, str], python: str, t
     try:
         cp = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return None, f"timeout after {timeout:.0f}s", time.monotonic() - t0
+        return None, f"timeout after {timeout:.0f}s", time.monotonic() - t0, None
     out = (cp.stdout or "") + (cp.stderr or "")
     tail = " | ".join(line.strip() for line in out.strip().splitlines()[-3:])
-    return cp.returncode, tail, time.monotonic() - t0
+    try:
+        rows = json.loads(out_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rows = None
+    return cp.returncode, tail, time.monotonic() - t0, rows
+
+
+def _imports(module: str, cwd: Path, env: dict[str, str], python: str, timeout: float) -> tuple[bool, str]:
+    """Does ``module`` import on its own in this plane's environment? (ok, last line of the error)."""
+    try:
+        cp = subprocess.run([python, "-c", "import importlib, sys; importlib.import_module(sys.argv[1])", module],
+                            cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"import timed out after {timeout:.0f}s"
+    err = (cp.stderr or "").strip().splitlines()
+    return cp.returncode == 0, (err[-1] if err else f"rc={cp.returncode}")
+
+
+def classify(rc: Optional[int], rows: Optional[list[dict]], tail: str) -> tuple[str, str]:
+    """(verdict, detail) for one mutant's test run. KILLED needs pytest rc 1 AND a test that failed by an
+    assertion in its call phase; a failure by any other exception is CRASHED; everything else is not a kill."""
+    if rc is None:
+        return ERROR, f"timed out (not a kill): {tail}"
+    if rc == 0:
+        return SURVIVED, "the named tests PASS on the mutant: " + tail
+    if rc != 1:
+        return ERROR, f"rc={rc} (not a kill): {tail}"
+    if rows is None:
+        return ERROR, f"rc=1 but the failure probe recorded nothing (not a kill): {tail}"
+    if any(r.get("assertion") and r.get("when") == "call" for r in rows):
+        return KILLED, tail
+    if rows:
+        kinds = sorted({f"{r.get('type') or '?'} in {r.get('when')}" for r in rows})
+        return CRASHED, "failed by an exception, not an assertion (not a kill): " + ", ".join(kinds)
+    return ERROR, f"rc=1 with no failed test recorded (not a kill): {tail}"
+
+
+def sidecar(src: Path) -> Path:
+    return src.with_name(src.name + SIDECAR_SUFFIX)
+
+
+def restore_interrupted(src: Path) -> bool:
+    """If an interrupted run left ``src`` mutated, its sidecar holds the original: put it back. True if restored."""
+    side = sidecar(src)
+    if not side.is_file():
+        return False
+    src.write_bytes(side.read_bytes())
+    side.unlink()
+    return True
 
 
 def _abs_tests(nodes: list[str], repo: Path) -> list[str]:
@@ -272,6 +393,9 @@ def run_file(entry: dict, corpus: dict, repo: Path, *, python: str = sys.executa
     plane = entry["plane"]
     cwd = repo / corpus["planes"][plane]["cwd"]
     src = repo / entry["path"]
+    if restore_interrupted(src):
+        print(f"[named-mutants] restored {entry['path']} from the sidecar an interrupted run left", flush=True)
+    module = module_name(entry["path"], corpus["planes"][plane]["pythonpath"])
     original = src.read_bytes()
     st = src.stat()
     text = original.decode("utf-8")
@@ -287,16 +411,21 @@ def run_file(entry: dict, corpus: dict, repo: Path, *, python: str = sys.executa
         return run
     with tempfile.TemporaryDirectory(prefix="named-mutants-") as td:
         scratch = Path(td)
-        rc, tail, secs = _run_pytest(_abs_tests(union, repo), cwd, plane_env(corpus, plane, repo, scratch / "base"),
-                                     python, timeout, stop_first=False)
-        run.baseline_ok = rc == 0
-        run.baseline_detail = f"rc={rc}: {tail}"
-        run.baseline_seconds = round(secs, 2)
+        base_env = plane_env(corpus, plane, repo, scratch / "base")
+        imported, why = _imports(module, cwd, base_env, python, timeout) if module else (False, "no module name")
+        if not imported:
+            run.baseline_detail = f"the unmutated module {module or entry['path']} does not import: {why}"
+        else:
+            rc, tail, secs, _rows = _run_pytest(_abs_tests(union, repo), cwd, base_env, python, timeout,
+                                                stop_first=False)
+            run.baseline_ok = rc == 0
+            run.baseline_detail = ("timed out" if rc is None else f"rc={rc}") + f": {tail}"
+            run.baseline_seconds = round(secs, 2)
         for i, m in enumerate(mutants):
             res = Result(path=entry["path"], mutant=m["id"], guard=m["guard"], tests=list(m["tests"]),
                          verdict=ERROR)
             if not run.baseline_ok:
-                res.detail = "baseline red: the unmutated source fails its named tests"
+                res.detail = f"baseline not green, nothing scored: {run.baseline_detail}"
                 run.results.append(res)
                 continue
             if text.count(m["old"]) != 1:
@@ -310,34 +439,41 @@ def run_file(entry: dict, corpus: dict, repo: Path, *, python: str = sys.executa
                 res.detail = f"mutant does not compile: {e.msg}"
                 run.results.append(res)
                 continue
+            env = plane_env(corpus, plane, repo, scratch / f"m{i}")
             try:
+                sidecar(src).write_bytes(original)
                 src.write_bytes(mutated.encode("utf-8"))
-                rc, tail, secs = _run_pytest(_abs_tests(m["tests"], repo), cwd,
-                                             plane_env(corpus, plane, repo, scratch / f"m{i}"),
-                                             python, timeout, stop_first=True)
+                imported, why = _imports(module, cwd, env, python, timeout)
+                if imported:
+                    rc, tail, secs, rows = _run_pytest(_abs_tests(m["tests"], repo), cwd, env, python, timeout,
+                                                       stop_first=True)
             finally:
                 src.write_bytes(original)
                 os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+                sidecar(src).unlink(missing_ok=True)
             if _sha(src.read_bytes()) != _sha(original):  # pragma: no cover — a restore that did not land
                 raise RuntimeError(f"FAILED TO RESTORE {src} — fix the tree before anything else")
-            res.seconds = round(secs, 2)
-            if rc == 1:
-                res.verdict, res.detail = KILLED, tail
-            elif rc == 0:
-                res.verdict, res.detail = SURVIVED, "the named tests PASS on the mutant: " + tail
+            if not imported:
+                res.detail = f"the mutant does not import (not a kill): {why}"
             else:
-                res.verdict, res.detail = ERROR, f"rc={rc} (not a kill): {tail}"
+                res.seconds = round(secs, 2)
+                res.verdict, res.detail = classify(rc, rows, tail)
             run.results.append(res)
             shutil.rmtree(scratch / f"m{i}", ignore_errors=True)
     return run
 
 
-def kill_table(runs: list[FileRun], plane: str) -> str:
+def kill_table(runs: list[FileRun], plane: str, uncovered: Optional[list[str]] = None) -> str:
+    runs = [fr for fr in runs if fr.results]           # a file with no selected mutant ran nothing: no row
     rows = [r for fr in runs for r in fr.results]
     killed = sum(1 for r in rows if r.verdict == KILLED)
     lines = [f"### Named-mutant kill table — {plane} plane: {killed}/{len(rows)} killed", ""]
+    if uncovered is not None:
+        lines += [f"Scope: the corpus mutates the files flagged `named_mutants: true`, a hand-picked subset of the "
+                  f"`mutation: false` python files; {len(uncovered)} of those carry no named mutants and are "
+                  "covered only by their own suites: " + ", ".join(f"`{u}`" for u in uncovered), ""]
     for fr in runs:
-        state = "green" if fr.baseline_ok else f"RED ({fr.baseline_detail})"
+        state = "green" if fr.baseline_ok else f"NOT GREEN ({fr.baseline_detail})"
         lines.append(f"- baseline (unmutated) `{fr.path}`: {state}, {fr.baseline_seconds}s")
     lines += ["", "| file | mutant | guard broken | killed by | verdict | s |", "|---|---|---|---|---|---|"]
     for r in rows:
@@ -351,10 +487,14 @@ def kill_table(runs: list[FileRun], plane: str) -> str:
 
 
 def _install_signal_restore() -> None:
-    """SIGTERM (a CI cancel) becomes KeyboardInterrupt, so the ``finally`` restore in run_file runs."""
+    """SIGTERM (a CI cancel), SIGHUP (a closed terminal) and SIGQUIT become KeyboardInterrupt, so the
+    ``finally`` restore in run_file runs; a SIGKILL is covered by the sidecar the next run restores."""
     def _raise(signum: int, frame: Any) -> None:  # noqa: ARG001
         raise KeyboardInterrupt(f"signal {signum}")
-    signal.signal(signal.SIGTERM, _raise)
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _raise)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -387,6 +527,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if only - known:
             print(f"unknown mutant id(s) for this selection: {sorted(only - known)}", file=sys.stderr)
             return 2
+        entries = [e for e in entries if any(m["id"] in only for m in e["mutants"])]
     if args.list:
         for e in entries:
             for m in e["mutants"]:
@@ -408,7 +549,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         runs.append(fr)
         for r in fr.results:
             print(f"[named-mutants] {r.verdict:8s} {r.mutant}  ({r.seconds}s)", flush=True)
-    table = kill_table(runs, args.plane)
+    table = kill_table(runs, args.plane, uncovered_files(corpus))
     print(table)
     print(f"[named-mutants] wall time {time.monotonic() - t0:.1f}s")
     if args.summary_md:
