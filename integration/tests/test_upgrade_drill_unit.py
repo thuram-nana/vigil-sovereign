@@ -1,7 +1,7 @@
 """DEP-3 (#73) — structural invariants of the opt-in ``vigil-upgrade-drill`` systemd unit + timer that a
 systemd smoke test cannot check on a PR runner: it runs the drill in the SOVEREIGN venv (FATAL-2 — never the
-offense one), the real sovereign home is READ-ONLY to it (kernel-enforced, on top of the drill's own digest
-proof), it has no network, it is a non-restarting oneshot, and its timer is weekly + ships disabled.
+offense one), the real sovereign home is READ-ONLY to it (kernel-enforced, on top of the drill's own
+work-dir isolation), it has no network, it is a non-restarting oneshot, and its timer is weekly + ships disabled.
 """
 from __future__ import annotations
 
@@ -41,3 +41,18 @@ def test_is_a_non_restarting_oneshot_with_a_heartbeat():
 def test_timer_is_weekly_and_targets_the_drill():
     d = _directives(_TIMER)
     assert "OnCalendar=weekly" in d and "Unit=vigil-upgrade-drill.service" in d and "Persistent=true" in d
+
+
+def test_the_unit_text_matches_the_drill_verdicts():
+    """Audit E4c: the header once said a changed source FAILS while the drill returned INCONCLUSIVE (exit 4).
+    The text must describe the real exit codes, and say a busy box is not a failure."""
+    import re
+
+    text = _UNIT.read_text(encoding="utf-8")
+    header = "\n".join(ln for ln in text.splitlines() if ln.startswith("#"))
+    flat = re.sub(r"\s*\n#\s*", " ", header)
+    assert "or the drill FAILS" not in flat
+    assert "0 PASS · 1 FAIL · 3 NOT-RUN" in flat and "4 INCONCLUSIVE (no consistent snapshot could be taken" in flat
+    assert "A BUSY BOX STILL GETS A VERDICT" in flat
+    assert "NEVER HOLDS THE OWNER KEY" in flat
+    assert "before/after digest" not in flat and "`source_changed_during_drill`), never a guard" in flat

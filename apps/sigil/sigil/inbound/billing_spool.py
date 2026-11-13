@@ -61,6 +61,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -151,6 +153,47 @@ class StripeEnvelopeV1(EnvelopeReader):
                 or received <= 0 or received > float(drain_now) + _RECEIVED_AT_FUTURE_SKEW_S:
             raise BillingSpoolError("envelope missing or implausible received_at")
         return raw, sig, float(received)
+
+
+_LOCK_NAME = ".drain.lock"                  # the single-drainer lock: a regular file in working/ (never a *.json)
+_BUSY = {"minted": 0, "noop": 0, "rejected": 0, "deduped": 0, "seqs": [], "busy": True}
+
+
+def _single_drainer(drain):
+    """ONE drainer per spool, across PROCESSES. A pass starts by reclaiming ``working/`` (crash recovery), which
+    is only sound when no OTHER live drainer owns those claims: a second drainer would otherwise take a file the
+    first is mid-verify on, re-verify it a second time, and — if the two outcomes differ — leave a credited
+    payment standing in ``rejected/`` as a false "paid, not credited" alarm. So the WHOLE pass (the reclaim, the
+    NET-2b re-admit of ``retry/``, every claim) runs under an exclusive ``flock`` on ``working/.drain.lock``;
+    ``watch`` takes it per pass because it drains through this same method. The lock lives in ``working/`` (the
+    thing it protects; the reclaim and every sweep touch only ``*.json``, and the spool root keeps its shape) and
+    is a REGULAR file opened read-write, not the ``working/`` directory itself: a network filesystem emulates
+    ``flock`` with a byte-range lock, which needs a writable regular file (NFSv4 keeps no open state for a
+    directory at all), so a directory lock would refuse every pass there. A pass that cannot take the lock within
+    ``wait_s`` seconds (default 0: try once) touches NOTHING and reports ``busy``. The kernel drops the lock when
+    the holder exits or is killed, so a crash never wedges the spool. Fail-closed: a lock that cannot be opened (a
+    symlink or a non-regular file planted at that name included) or taken for any reason but contention RAISES —
+    no lock, no drain."""
+    @functools.wraps(drain)
+    def locked(self, *, wait_s: float = 0.0):
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(str(self.working / _LOCK_NAME), flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"{self.working / _LOCK_NAME} is not a regular file — refusing to drain")
+            deadline = time.monotonic() + max(0.0, float(wait_s))
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return dict(_BUSY, seqs=[])
+                    time.sleep(0.05)
+            return drain(self)
+        finally:
+            os.close(fd)                                 # closing the descriptor releases the lock
+    return locked
 
 
 class BillingSpoolWatcher:
@@ -431,11 +474,13 @@ class BillingSpoolWatcher:
             return f"rejected (transient {type(exc).__name__}; NET-2b deferral failed: {oexc}): {exc}"
         return "deferred"
 
+    @_single_drainer
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {minted, noop, rejected, deduped, seqs}.
 
         Begins with a crash-recovery sweep (``_reclaim_working``) that returns any file stranded in ``working/``
-        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook.
+        by a crashed prior drain back to ``incoming/`` — so a mid-drain crash loses no paid webhook. The whole pass
+        runs under the single-drainer lock (``_single_drainer``; ``wait_s`` bounds the wait for it).
 
         For each file: CLAIM it (atomic rename into ``working/``) BEFORE acting, so a failed archive or a re-run
         can never re-read it from ``incoming/`` and double-process. Read it as a bounded regular UTF-8 file, then
@@ -509,18 +554,34 @@ class BillingSpoolWatcher:
             out["deferred"] = deferred                   # NET-2b only: the OFF result shape is unchanged
         return out
 
-    def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
+    def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None, busy_warn_s: float = 120.0) -> None:
         """Drain in a loop until ``stop`` (a threading.Event) is set. A single bad drain NEVER kills the money
         daemon: an unexpected error OUTSIDE the per-file loop (a transient spine / IO / directory fault) is
         reported to stderr and the loop continues — so the billing-ingress daemon survives a transient blip
-        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator."""
+        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator.
+        Each pass takes the single-drainer lock without waiting; a pass that finds ANOTHER drainer holding it
+        touches nothing (``busy``). Once passes have been busy for ``busy_warn_s`` the loop says so on stderr, and
+        again every ``busy_warn_s`` while it lasts — a wedged holder must never starve ``watch`` silently."""
         import sys as _sys
+        busy_since: Optional[float] = None
+        warned_at: Optional[float] = None
         while True:
+            busy = False
             try:
-                self.drain()
+                busy = bool(self.drain().get("busy"))
             except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
                 _sys.stderr.write("vigil billing-drain: WARNING drain error (continuing): "
                                   f"{type(exc).__name__}: {exc}\n")
+            t = time.monotonic()
+            if not busy:
+                busy_since = warned_at = None
+            else:
+                busy_since = t if busy_since is None else busy_since
+                if t - busy_since >= busy_warn_s and (warned_at is None or t - warned_at >= busy_warn_s):
+                    warned_at = t
+                    _sys.stderr.write(f"vigil billing-drain: WARNING another billing drainer has held the lock on "
+                                      f"{self.spool} for {int(t - busy_since)} s — nothing is being drained. Find "
+                                      f"the stuck drainer (run the timer OR `watch`, never both).\n")
             waiter = getattr(stop, "wait", None)
             if stop is not None and waiter is not None:
                 if waiter(interval):

@@ -18,11 +18,21 @@
 # SECRETS (VIGIL_BILLING_WEBHOOK_SECRET, VIGIL_FLW_SECRET_KEY) — per GO-LIVE §9 inject them from your secret
 # manager, never commit them and prefer not to rest them in plaintext: e.g. a drop-in with systemd
 # `LoadCredentialEncrypted=` + your manager's env injection. The EnvironmentFile below (mode 0600) is the
-# documented FALLBACK — see vigil-billing-drain.env.example.
-# The spool default below is the runbook's ($SIGIL_HOME/billing-spool) and MUST equal the proxy's
-# VIGIL_BILLING_WEBHOOK_SPOOL, or the drain runs "healthy" on an empty directory and credits nothing.
-# ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both (two drainers reclaim each
-# other's in-flight claims: a duplicate ingest, or a false "paid charge UN-MINTED" quarantine alarm).
+# documented FALLBACK — see vigil-billing-drain.env.example. Only the drain process gets them: the heartbeat hook
+# below runs with an allow-listed environment.
+# SIGIL_HOME is REQUIRED in the env file below, moved or not (GO-LIVE §2; outside ~/.sigil, also add it to
+# ReadWritePaths): the drain mints onto the spine under it and never falls back to ~/.sigil, so without it the drain
+# REFUSES (FAILED) instead of running "healthy" on an empty ~/.sigil spool. It also refuses a SIGIL_HOME that
+# ~/.sigil/cockpit.env contradicts, or one that holds no owner identity.
+# THE SPOOL is not named here: the drain DERIVES it — the proxy's own VIGIL_BILLING_WEBHOOK_SPOOL when that is
+# set in the env file below, else the runbook path $SIGIL_HOME/billing-spool. The drain cannot see the proxy's env:
+# if the proxy spools anywhere else, copy its VIGIL_BILLING_WEBHOOK_SPOOL into the env file below.
+# An explicit VIGIL_BILLING_SPOOL still wins, but the drain REFUSES (unit FAILED) one that contradicts
+# VIGIL_BILLING_WEBHOOK_SPOOL, or that is ~/.sigil/billing-spool while SIGIL_HOME is elsewhere.
+# ONE DRAINER: run THIS timer OR a manual `sigil billing-drain watch`, never both. A second drainer cannot break a
+# pass: each pass holds an exclusive lock (<spool>/working/.drain.lock). A pass that finds it held waits up to
+# 120 s for the other pass to end; still held after that, it touches nothing and FAILS (the dead-man alarms on a
+# stuck drainer).
 #
 # Manual run / logs:
 #     systemctl --user start vigil-billing-drain.service
@@ -41,17 +51,28 @@ Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
-# Path DEFAULTS live HERE (systemd expands %h in a unit directive, NEVER inside an EnvironmentFile value); the
-# CLI refuses a relative / %-bearing --spool (exit non-zero → a FAILED dead-man alarm, never a silent no-op).
-Environment=VIGIL_BILLING_SPOOL=%h/.sigil/billing-spool
+# No spool path here (see THE SPOOL above). systemd expands %h in a unit directive, NEVER inside an
+# EnvironmentFile value; the CLI refuses a relative / %-bearing spool (exit non-zero → a FAILED dead-man alarm,
+# never a silent no-op).
 EnvironmentFile=-%h/.config/vigil/billing-drain.env
 WorkingDirectory=%h/.sigil
-ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --spool ${VIGIL_BILLING_SPOOL}
+ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain
+# Each pass starts a fresh process, so every mint FOLDS the spine from the start (O(spine) — a subscription webhook
+# several times over) on top of its HTTPS re-verifies (each bounded at 15 s; a NET-2b deferral adds no wait). A
+# tight bound would kill a legitimately slow pass on a large spine EVERY time (the webhook reclaimed, re-verified
+# and killed again: never credited). This bound only frees the single-drainer lock from a WEDGED pass, which the
+# dead-man has already alarmed on (no heartbeat within ~2 min); the next pass reclaims its claim (idempotent).
+# A pass killed here shows as `timeout` in the MONEY-5 alarm. Above the 120 s lock wait.
+TimeoutStartSec=1800
 
 # --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
 StateDirectory=vigil
 Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
-ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+# The EnvironmentFile is unit-wide, so the heartbeat hook (a different venv, another codebase) would inherit every
+# secret in it (the two payment secrets, and anything else an operator puts there). An ALLOW-list, not a
+# strip-list: the hook runs with an EMPTY environment plus the three values it reads (systemd turns "$$" into "$";
+# SERVICE_RESULT exists only in this hook's own environment, so the shell forwards it).
+ExecStopPost=/bin/sh -c 'exec /usr/bin/env -i HOME="$$HOME" SERVICE_RESULT="$$SERVICE_RESULT" VIGIL_ALERT_STATE_DIR="$$VIGIL_ALERT_STATE_DIR" "$$0" unit-heartbeat "$$1"' %h/vigil/.venv-offense/bin/vigil %n
 
 # --- hardening -------------------------------------------------------------
 NoNewPrivileges=yes
@@ -63,4 +84,4 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# IMPORTANT: if VIGIL_BILLING_SPOOL (or SIGIL_HOME) is outside ~/.sigil, ADD it to ReadWritePaths above.
+# IMPORTANT: if the spool (or SIGIL_HOME) is outside ~/.sigil, ADD it to ReadWritePaths above.

@@ -109,6 +109,11 @@ class _Clock:
         return self.t
 
 
+def _working(spool: Path) -> "list[str]":
+    """What a pass leaves in working/: only the single-drainer lock file when no claim is stranded."""
+    return sorted(p.name for p in (spool / "working").iterdir())
+
+
 def _rig(tmp_path, clock=None, verifier=None):
     s = SpineStore(str(tmp_path / "spine.jsonl"))
     w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
@@ -732,7 +737,7 @@ def test_a_tampered_ledger_never_wedges_the_drain_or_the_payments_behind_it(tmp_
     _spool(spool, _envelope(9912), name="b.json")                          # a healthy payment sorted after it
     res = watcher.drain()                                                   # used to raise on every pass
     assert res["minted"] == 1 and proc.calls == 3 and w.available("acme") == 200   # the payment behind it credited
-    assert list((spool / "incoming").iterdir()) == [] and list((spool / "working").iterdir()) == []
+    assert list((spool / "incoming").iterdir()) == [] and _working(spool) == [".drain.lock"]   # no stranded claim
     if outcome == "re-parked":
         assert res["deferred"] == 1 and res["rejected"] == 0 and watcher.parked_count() == 1
         assert _ledger(spool, name)["attempts"] == 2                       # the budget carried on, never reset
@@ -771,7 +776,7 @@ def test_a_clock_that_fails_only_at_defer_time_quarantines_and_never_escapes(tmp
     _spool(spool, _envelope(9912), name="b.json")                          # sorted AFTER it
     res = watcher.drain()                                                   # used to raise here
     assert res["rejected"] == 1 and res["minted"] == 1 and res["deferred"] == 0 and proc.calls == 2
-    assert list((spool / "working").iterdir()) == [] and watcher.parked_count() == 0
+    assert _working(spool) == [".drain.lock"] and watcher.parked_count() == 0     # no stranded claim
     assert (spool / "rejected" / (name + ".reason")).read_text().startswith(
         "rejected (transient FlutterwaveEgressError; clock unreadable — not retried)")
     assert w.available("acme") == 200

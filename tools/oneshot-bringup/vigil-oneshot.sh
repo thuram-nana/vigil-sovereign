@@ -12,6 +12,9 @@
 #     and into the service env)
 #   → seed .vigil-live/service.env (what the vigil-command unit loads)
 #   → run the `vigil doctor` PRODUCTION GATE — abort if ANY control is UNMET
+#     (one exception: red ONLY on issues doctor lists as `intake_safe_issues` — a
+#     money-IN billing-drain alarm, a fold-cache MISMATCH — still starts the UI, so
+#     payment intake is never held down by them — then aborts before the range)
 #   → start the UI (vigil-command.service) + docker bring-up (vigil-bringup.service)
 #   → wait for /readyz on :8770
 #   → bring up the MERIDIAN range on :19010 (+ :19011)
@@ -535,6 +538,10 @@ phase_service_env(){
     echo "CRUCIBLE_ANTHROPIC_MODEL=$CRUCIBLE_ANTHROPIC_MODEL"
     [ -n "${CRUCIBLE_ANTHROPIC_ZDR:-}" ] && echo "CRUCIBLE_ANTHROPIC_ZDR=$CRUCIBLE_ANTHROPIC_ZDR"
     echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+    # Payment INTAKE is the operator's own setting (the proxy mounts /webhooks/billing, and the Stripe lane's
+    # /webhooks/stripe, only when its spool + secret are set): carry it over from the file being replaced, never
+    # drop it (a rebuilt file without it takes intake down).
+    [ -f "$SERVICE_ENV" ] && grep -E '^VIGIL_(BILLING|STRIPE)_WEBHOOK_(SPOOL|SECRET)=' "$SERVICE_ENV" || true
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$SERVICE_ENV"
@@ -554,6 +561,14 @@ phase_doctor_gate(){
   "$VIGIL" doctor 2>/dev/null | sed 's/^/    /' || true
   if [ "$rc" = 0 ]; then
     ok "vigil doctor exit 0 — all required controls MET under VIGIL_POSTURE=production"
+  elif doctor_red_is_intake_safe_only "$json"; then
+    # Every red is one doctor itself lists as INTAKE-SAFE (`intake_safe_issues`: a money-IN billing-drain alarm, a
+    # fold-cache MISMATCH): it must not hold payment INTAKE down — the proxy's /webhooks/billing only accepts +
+    # durably spools, and a webhook it is not up to accept is lost. So start the UI — and nothing after it (main()
+    # stops before the range + the acceptance run).
+    INTAKE_SAFE_RED_ONLY=1
+    warn "vigil doctor is RED, but ONLY on intake-safe issues (see the issues above: e.g. a paid webhook not credited yet)."
+    warn "Starting the UI so payment intake is not held down; every later phase is REFUSED until they are cleared."
   else
     # surface the unmet controls precisely from the JSON gate block.
     local unmet
@@ -569,6 +584,36 @@ PY
 )"
     die "vigil doctor REFUSES: UNMET controls -> ${unmet}. Fix each above (e.g. seal the vault with tpm2-tools; seed the backup runs) and re-run. The script will not start the UI on a red gate."
   fi
+}
+
+# Prints the payment-webhook routes the running UI ACCEPTS, true (exit 0) when there is at least one: an empty POST
+# with no signature gets each mounted route's OWN refusal (/webhooks/billing: "invalid or missing verif-hash";
+# /webhooks/stripe: "invalid or missing Stripe-Signature" — a secret is configured; nothing is spooled). Unmounted
+# (no VIGIL_BILLING_WEBHOOK_SPOOL / VIGIL_STRIPE_WEBHOOK_SPOOL), the path falls through; with no secret every
+# delivery is refused (503). Anything else, nothing listening included, is "not up".
+billing_intake_up(){
+  local body up=""
+  body="$(curl -sS -m 4 -X POST --data-binary '' "http://127.0.0.1:$UI_PORT/webhooks/billing" 2>/dev/null || true)"
+  case "$body" in *"missing verif-hash"*) up="/webhooks/billing" ;; esac
+  body="$(curl -sS -m 4 -X POST --data-binary '' "http://127.0.0.1:$UI_PORT/webhooks/stripe" 2>/dev/null || true)"
+  case "$body" in *"missing Stripe-Signature"*) up="${up:+$up and }/webhooks/stripe" ;; esac
+  [ -n "$up" ] || return 1
+  echo "$up"
+}
+
+# True (exit 0) ONLY when every hard issue of the doctor report is one the report itself lists under
+# `intake_safe_issues`. Anything unparseable, an empty issue list, or any other issue is "not intake-safe" — the
+# gate then refuses exactly as before (fail-closed).
+doctor_red_is_intake_safe_only(){
+  "$OFFPY" - "$1" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.loads(sys.argv[1]); issues=d["issues"]; safe=d.get("intake_safe_issues") or []
+    ok=isinstance(issues,list) and isinstance(safe,list) and bool(issues) and all(i in safe for i in issues)
+except Exception:
+    ok=False
+sys.exit(0 if ok else 1)
+PY
 }
 
 # =============================================================================
@@ -747,6 +792,11 @@ main(){
   phase_service_env
   phase_doctor_gate
   phase_ui
+  if [ "${INTAKE_SAFE_RED_ONLY:-0}" = 1 ]; then
+    local routes intake="the UI is UP, but it does NOT accept payment webhooks on /webhooks/billing or /webhooks/stripe (neither VIGIL_BILLING_WEBHOOK_SPOOL + VIGIL_BILLING_WEBHOOK_SECRET nor VIGIL_STRIPE_WEBHOOK_SPOOL + VIGIL_STRIPE_WEBHOOK_SECRET are both in the UI's environment: $SERVICE_ENV): payment intake is NOT up"
+    if routes="$(billing_intake_up)"; then intake="the UI is UP and serves $routes (payment intake restored)"; fi
+    die "$intake. vigil doctor is RED on intake-safe issues (listed above; a money-IN alarm means a customer PAID and is NOT credited yet). Clear them, then re-run — the range and the acceptance run are REFUSED on a red gate, and this bring-up is NOT proven green."
+  fi
   phase_meridian
   phase_acceptance
   phase_summary

@@ -59,6 +59,34 @@ def _owner_keys() -> tuple[str, str]:
     return kp.private_key_b64, kp.public_key_b64
 
 
+class OwnerPublicKeyMissing(RuntimeError):
+    """No owner PUBLIC key on this box, so a verify path cannot check the signed head (it never mints one)."""
+
+
+def _owner_pub_for_verify() -> str:
+    """The owner PUBLIC key for a VERIFY path. NEVER mints a keypair. A verify only runs over a signed head, so
+    a missing (or empty) ``owner.pub`` is never a first use: minting there would silently re-key the trust root
+    and report the genuine head as TAMPERING. It fails closed instead (``OwnerPublicKeyMissing``), and any OTHER
+    read error propagates (verify fails closed on it too).
+
+    When ``owner.priv`` sits beside it, ``owner.pub`` must be ITS public key — the consistency check the shared
+    loader makes before signing — so a replaced or stale ``owner.pub`` fails closed naming the mismatch, as does
+    a present private key that cannot be read or unsealed (``OwnerKeyUnavailable``). Only when ``owner.priv`` is
+    ABSENT — the owner key kept OFF-box, or a scoped copy that deliberately carries no private key (the upgrade
+    drill) — does the verify anchor on ``owner.pub`` alone."""
+    try:
+        pub = _PUB.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pub = ""
+    if not pub:
+        raise OwnerPublicKeyMissing(f"no owner public key at {_PUB} — the signed head cannot be verified "
+                                    "(verification never mints a key; restore owner.pub)")
+    from ..governor.identity import check_owner_pub_against_priv
+    # the private key BESIDE this public key (like the genesis pin below): the pair under verification
+    check_owner_pub_against_priv(_PUB.parent / "owner.priv", pub)
+    return pub
+
+
 def trust_root(store: SpineStore | None = None) -> TrustRoot:
     """The 1-of-1 head trust root, W9-1 SUCCESSION-AWARE. The anchor is the CURRENT owner key AS VALIDATED
     by walking the cross-signed succession chain from the pinned genesis — not the raw on-disk `owner.pub`.
@@ -67,7 +95,7 @@ def trust_root(store: SpineStore | None = None) -> TrustRoot:
     become trusted (its signer is not the succession tip). With no rotation, the tip == the on-disk key, so
     this is byte-identical to the pre-W9-1 single-key root. A forked/ambiguous succession falls back to the
     on-disk current key (the grant folds independently fail closed on a fork)."""
-    _, pub = _owner_keys()                                     # current on-disk key (also ensures one exists)
+    pub = _owner_pub_for_verify()                              # current on-disk PUBLIC key (never mints one)
     from ..governor import key_history as _kh
     st = store or SpineStore()
     # The genesis pin lives beside the owner key (`_PUB.parent`), so a test that monkeypatches this module's
@@ -254,8 +282,11 @@ def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
         floor = load_floor()                                # None if absent -> byte-identical to pre-floor
     except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
         return False, f"durable anti-rollback floor unreadable — refuse to certify (possible tamper): {e}"
+    from ..governor.identity import OwnerKeyUnavailable
     try:
         return classify_head(head, store.entries(), trust_root(store), floor=floor)
+    except (OwnerPublicKeyMissing, OwnerKeyUnavailable) as e:   # fail CLOSED, naming the real cause
+        return False, str(e)
     except Exception as e:  # noqa: BLE001 — malformed head sig/key material (e.g. non-base64) makes verify_one
         # raise; a PRESENT head whose signature material is malformed is TAMPER — fail CLOSED with a clean
         # head-FAIL (so `sigil verify` exits 2), never an uncaught traceback (exit 1).

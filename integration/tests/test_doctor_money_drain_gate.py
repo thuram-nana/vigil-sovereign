@@ -89,6 +89,39 @@ def test_doctor_reds_on_a_failed_billing_drain_and_names_the_customer_impact(tmp
     assert not any("vigil-billing-drain.service" in n for n in report["notes"])
 
 
+def test_the_billing_drain_remediation_is_one_an_operator_can_follow(tmp_path, monkeypatch):
+    """The remediation used to name a fixed ~/.sigil/billing-spool (wrong once SIGIL_HOME is moved) and offer a
+    manual `sigil billing-drain drain` as if it cleared the alarm — it cannot: only the UNIT's own run rewrites the
+    heartbeat this alarm reads."""
+    home = tmp_path / "moved" / ".sigil"
+    monkeypatch.setenv("SIGIL_HOME", str(home))
+    monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
+    (tmp_path / "hb").mkdir()
+    _fresh_failed_beat(tmp_path / "hb", "vigil-billing-drain.service")
+    msg = next(i for i in _doc.collect(_REPO)["issues"] if "vigil-billing-drain.service" in i)
+    assert str(home / "billing-spool") in msg and "VIGIL_BILLING_WEBHOOK_SPOOL" in msg
+    assert "~/.sigil/billing-spool" not in msg
+    assert "systemctl --user start vigil-billing-drain.service" in msg and "Only the unit's own run" in msg
+    assert "Keep the proxy UP" in msg
+
+
+def test_a_billing_drain_alarm_is_classified_intake_safe_and_no_other_drain_is(tmp_path, monkeypatch):
+    """`intake_safe_issues` is how a scripted bring-up tells the reds that must not hold payment intake down (here:
+    a paid webhook not credited yet) from every other red. The billing drain's issue is listed there — a
+    settle/finding drain failure (money OUT / results) is not — and a report without one does not carry the key."""
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
+    (tmp_path / "hb").mkdir()
+    _fresh_failed_beat(tmp_path / "hb", "vigil-settle-drain.service")
+    assert "intake_safe_issues" not in _doc.collect(_REPO)
+
+    _fresh_failed_beat(tmp_path / "hb", "vigil-billing-drain.service")
+    report = _doc.collect(_REPO)
+    billing = [i for i in report["issues"] if "vigil-billing-drain.service" in i]
+    assert len(billing) == 1 and report["intake_safe_issues"] == billing
+    assert any("vigil-settle-drain.service" in i for i in report["issues"])       # still a hard issue, unlisted
+
+
 def test_the_settle_and_finding_messages_are_unchanged(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(_ua, "default_state_dir", lambda: tmp_path / "hb")
