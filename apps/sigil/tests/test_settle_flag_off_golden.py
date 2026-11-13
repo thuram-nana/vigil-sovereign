@@ -141,7 +141,7 @@ class _World:
         from sigil import model_gateway as gw
         m = gw.GrantMeter(config.MODEL_METER_DIR)
         g = ModelGrant(grant_id="0" * 32, org_id=ORG, engagement_slug=r["slug"], nonce=r["nonce"],
-                       model="claude-opus-4-8", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
+                       model="test-run-model", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
                        issued_at=NOW - 60)
         rid, _reserved, reason = m.reserve(g, 10 ** 6, 25_000, now=NOW)
         assert reason == "", reason

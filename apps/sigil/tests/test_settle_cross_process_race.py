@@ -449,7 +449,7 @@ def test_metered_publish_vs_cancel_widened_cross_process_never_both(rig, flag, m
     assert read_credit_lease(r.base, lease["slug"]) is not None and read_model_grant(r.base, lease["slug"]) is not None
     assert r.avail() == 1_000 - UNITS
     g = ModelGrant(grant_id="9" * 32, org_id=ORG, engagement_slug=lease["slug"], nonce=lease["nonce"],
-                   model="claude-opus-4-8", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
+                   model="test-run-model", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
                    issued_at=NOW - 60)
     assert gw.GrantMeter(config.MODEL_METER_DIR).reserve(g, 10 ** 6, 25_000, now=NOW)[2] != "closed"
 

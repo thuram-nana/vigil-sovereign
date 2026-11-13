@@ -225,7 +225,7 @@ class _Gov:
 
 def _grant(r, gid="0"):
     return ModelGrant(grant_id=gid * 32, org_id=ORG, engagement_slug=r["slug"], nonce=r["nonce"],
-                      model="claude-opus-4-8", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
+                      model="test-run-model", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
                       issued_at=NOW - 60)
 
 
