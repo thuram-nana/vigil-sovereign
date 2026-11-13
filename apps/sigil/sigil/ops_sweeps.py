@@ -20,7 +20,8 @@
    ``VIGIL_SETTLE_SPINE_RECORD`` is on): finishes, from its RECORDED decision only, every settle of a lease still on
    the seam that a crash or an error interrupted. Every sweep and that pass read the spine's settlement evidence
    in ONE pass for all the launches they list; the drain's pass reads only the records appended since its previous
-   pass (a checkpoint beside its spool: ``settle_checkpoint``).
+   pass (a checkpoint beside its spool: ``settle_checkpoint``). A settled lease it cannot retire from the seam is
+   reported every pass (``tombstone_failed``) and re-driven at most once every 10 minutes.
 
 SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no framework/offense.
 """
@@ -352,7 +353,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
 
 def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
                                on_completed: "Optional[Callable[[dict], None]]" = None,
-                               checkpoint: "Optional[str | os.PathLike]" = None) -> "list[dict]":
+                               checkpoint: "Optional[str | os.PathLike]" = None,
+                               retire: "Optional[str | os.PathLike]" = None) -> "list[dict]":
     """FINISH every recorded settle of a lease still on ``gate``'s seam (only ``scope``'s, unless ``*``) that a crash
     or an error interrupted — whatever decided it (a completion, a cancel, a sweep, an expired pause) — so a recorded
     refund never waits for an operator and a relaunch on that host is never held back by it. The settle drain runs
@@ -372,10 +374,17 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
     next lease (the drain writes a completion's notification there, so a crash later in the pass cannot lose it); an
     error it raises is ignored.
 
+    A settled lease whose money all landed but that its settle could not retire from the seam (its tombstone failed)
+    is reported ``tombstone_failed`` on every pass while it stays there, never ``already_settled``. ``retire`` (the
+    drain's ``<spool>/.settle-retire.json``) keeps when each such lease was last re-driven, so it is re-driven at
+    most once every ``settle_checkpoint.RETIRE_RETRY_S`` (its first re-drive is never skipped, and a lease with money
+    still to land is always driven); without it such a lease is re-driven on every pass.
+
     One row per lease it acted on: ``settle_completed`` (the moved amounts and the recorded ``basis``),
-    ``already_settled`` (nothing was left to move; the lease is retired), ``deferred`` (a busy lock or ledger: the
-    next pass retries) or ``settle_failed`` (with ``error``). Never raises for one lease; RAISES when the pass itself
-    cannot run (the spine or a ledger cannot be read), so the caller reports it — never "nothing to finish"."""
+    ``already_settled`` (nothing was left to move; the lease is retired), ``tombstone_failed`` (nothing was left to
+    move; the lease is still on the seam), ``deferred`` (a busy lock or ledger: the next pass retries) or
+    ``settle_failed`` (with ``error``). Never raises for one lease; RAISES when the pass itself cannot run (the spine
+    or a ledger cannot be read), so the caller reports it — never "nothing to finish"."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, leases_root, list_credit_leases
 
@@ -418,14 +427,22 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
                                       listed_from=listed_from, listing_clean=clean, now=float(now))
 
     pending = gate.interrupted_settlements([b.signed_lease for b in leases], strict=True, scan=_scan)
+    retire_path = Path(retire) if retire is not None else None
+    tried = settle_checkpoint.read_retire_attempts(retire_path, now=float(now)) if retire_path is not None else {}
+    unretired: "dict[tuple[str, str], float]" = {}             # this pass's tombstone_failed leases -> last re-drive
     rows: "list[dict]" = []
     for b in leases:
         doc = b.signed_lease.document
         oid, slug, nonce = str(doc.org_id), str(doc.engagement_slug), str(doc.nonce)
         row: dict = {"slug": slug, "org_id": oid, "nonce": nonce}
         try:
-            if (oid, slug, nonce) not in pending and not is_lease_settled(base, slug, nonce):
-                continue                                   # no recorded settle of it is left unfinished
+            if (oid, slug, nonce) not in pending:
+                if not is_lease_settled(base, slug, nonce):
+                    continue                               # no recorded settle of it is left unfinished
+                if (slug, nonce) in tried:                 # settled, nothing to move, its last re-drive recent
+                    unretired[(slug, nonce)] = tried[(slug, nonce)]
+                    rows.append({**row, "status": "tombstone_failed", "error": _UNRETIRED})
+                    continue
             r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
                                    basis="sweep:refund", finish_only=True)
         except Exception as e:  # noqa: BLE001 — one bad lease (an unreadable marker included) never sinks the pass
@@ -442,9 +459,17 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
             rows.append({**row, "status": "deferred", "error": str(r.get("error", ""))})
         elif not r.get("ok"):
             rows.append({**row, "status": "settle_failed", "error": str(r.get("error", ""))})
+        elif r.get("action") == "launch_already_settled" and _seam_holds(base, slug, nonce):
+            unretired[(slug, nonce)] = float(now)          # its settle could not retire it: re-driven again later
+            rows.append({**row, "status": "tombstone_failed", "error": _UNRETIRED})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
+    if retire_path is not None and (unretired != tried or not unretired):
+        settle_checkpoint.write_retire_attempts(retire_path, unretired)
     return rows
+
+
+_UNRETIRED = "its settle landed but its lease could not be retired from the seam (retried every 10 minutes)"
 
 
 _REFUND_OUTCOMES = frozenset({"failed", "canceled"})     # a completion whose settle is the full refund anyway

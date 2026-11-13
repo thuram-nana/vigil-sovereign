@@ -80,7 +80,11 @@ the spine** — never the source of truth.
   `~/.sigil/spool/settle`) and reports both as hard issues (`launch_settlements.drain_unfinished` /
   `drain_error`), and also reports a lease still published more than 10 minutes after its settlement
   marker was written (`launch_settlements.unfinished`) — so such a hold is never silent, whether or not
-  the marker exists. Each pass reads only the spine records appended since the previous one, from a
+  the marker exists. A lease whose settle landed all its money but that cannot be retired from the seam
+  (its bundle cannot be removed by the drain's user) is named `tombstone_failed` every pass and recorded
+  and alarmed the same way; the drain re-drives it at most once every 10 minutes and keeps when it last
+  did beside the spool (`.settle-retire.json`), so it is retired within 10 minutes of the cause being
+  fixed. Each pass reads only the spine records appended since the previous one, from a
   checkpoint beside the spool (`.settle-scan.json`), and the whole spine at least once an hour (so a lease
   restored onto the seam from a backup is found then); a missing or unreadable checkpoint, one from
   another spine or a spine reset, restored or pruned since means one full read. The lock files are transients that

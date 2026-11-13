@@ -449,7 +449,9 @@ class CompletionSpoolWatcher:
         (``settle_checkpoint``).
 
         Returns ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported
-        on stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run (the spine or
+        on stderr — a settled lease that could not be retired from the seam included, ``tombstone_failed``, which
+        the pass re-drives at most once every 10 minutes: ``<spool>/.settle-retire.json``), each only when non-zero;
+        ``settle_finish_error`` when the pass itself could not run (the spine or
         a ledger unreadable). Every pass records what it left unfinished, and since when, beside the spool
         (``vigil_integration.live.settle_progress``, which ``vigil doctor`` reads); ``settle_stuck`` counts the leases
         left unfinished — and a finish pass that kept failing — for longer than ``UNFINISHED_SETTLE_GRACE_S``, or 1
@@ -457,12 +459,12 @@ class CompletionSpoolWatcher:
         from vigil_integration.live import settle_progress
 
         from ..ops_sweeps import finish_interrupted_settles
-        from ..settle_checkpoint import CHECKPOINT_NAME
+        from ..settle_checkpoint import CHECKPOINT_NAME, RETIRE_NAME
         now = float(self._now())
         out: dict = {}
         try:
             rows = finish_interrupted_settles(self._gate, now=now, scope=self.scope, on_completed=self._finished_notice,
-                                              checkpoint=self.spool / CHECKPOINT_NAME)
+                                              checkpoint=self.spool / CHECKPOINT_NAME, retire=self.spool / RETIRE_NAME)
         except Exception as exc:  # noqa: BLE001 — this pass never sinks the completion drain
             _sys.stderr.write(f"vigil settle-drain: WARNING interrupted settles not checked: "
                               f"{type(exc).__name__}: {exc}\n")
@@ -470,7 +472,7 @@ class CompletionSpoolWatcher:
             unfinished = None
         else:
             done = [r for r in rows if r["status"] == "settle_completed"]
-            left = [r for r in rows if r["status"] in ("deferred", "settle_failed")]
+            left = [r for r in rows if r["status"] in ("deferred", "settle_failed", "tombstone_failed")]
             for r in left:
                 _sys.stderr.write(f"vigil settle-drain: a recorded settle of {r['slug']} is not finished yet: "
                                   f"{r['status']}{' (' + str(r['error']) + ')' if r.get('error') else ''}\n")

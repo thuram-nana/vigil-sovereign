@@ -1284,8 +1284,10 @@ def cmd_settle_drain(a) -> None:
             # pass that keeps failing) holds that customer's refund and any relaunch on the host. Fail the unit.
             print(f"  ALARM: {r['settle_stuck']} recorded settle(s) have not been finished for more than 10 minutes "
                   f"(the reasons are on stderr above): the refund has not landed and a new launch on that host is "
-                  f"refused with a retry. Fix the cause (the seam / spine / spool must be writable by this unit's "
-                  f"user); this unit stays FAILED until they finish. `vigil doctor` lists them.", file=sys.stderr)
+                  f"refused with a retry, or (tombstone_failed) the settled lease could not be retired from the "
+                  f"seam. Fix the cause (the seam / spine / spool must be writable by this unit's user); this unit "
+                  f"stays FAILED until they finish (a lease that could not be retired is retried every 10 "
+                  f"minutes). `vigil doctor` lists them.", file=sys.stderr)
             sys.exit(1)
 
 

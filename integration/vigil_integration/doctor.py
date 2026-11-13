@@ -1993,9 +1993,11 @@ def collect(repo_root) -> dict:
                 report.setdefault("launch_settlements", {})["drain_unfinished"] = sorted({s for s, _n in _held})
                 _issue(f"{len(_held)} recorded customer launch settle(s) could not be finished by the settle drain for "
                        f"more than {_mins} minutes: the refund has not landed, and a new launch on that host is "
-                       f"refused with a retry until it does. The drain prints the cause each pass (its unit's "
-                       f"journal); typically the seam (VIGIL_SETTLE_BASE_DIR), the spine or the spool is not writable "
-                       f"by the drain's user. Fix it; the drain's next pass finishes the settle.")
+                       f"refused with a retry until it does, or (tombstone_failed) the settled lease could not be "
+                       f"retired from the seam. The drain prints the cause each pass (its unit's journal); typically "
+                       f"the seam (VIGIL_SETTLE_BASE_DIR), the spine or the spool is not writable by the drain's user. "
+                       f"Fix it; the drain finishes the settle on its next pass (retires such a lease within "
+                       f"{_mins} minutes).")
             if _err:
                 report.setdefault("launch_settlements", {})["drain_error"] = _err
                 _issue(f"the settle drain's pass that finishes interrupted settles has failed for more than {_mins} "

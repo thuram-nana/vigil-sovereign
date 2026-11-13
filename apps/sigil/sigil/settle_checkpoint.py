@@ -42,6 +42,14 @@ The checkpoint never decides money: it only selects the leases the pass hands to
 which re-reads the spine under its locks and moves only the recorded decision, exactly once. A lost or stale
 checkpoint costs one full read of the spine; it is operational state like the seam files beside it.
 
+RETIRING A SETTLED LEASE. A lease whose settle landed all its money but whose bundle could not be removed from the
+seam (its tombstone failed) is still listed, so the pass re-drives it, and each re-drive reads the spine in full under
+the settle lock. The pass reports such a lease every pass (``tombstone_failed``) and keeps, in a second small file
+beside the spool (``<spool>/.settle-retire.json``: :func:`read_retire_attempts` / :func:`write_retire_attempts`),
+when it last re-drove each one; a lease is re-driven again only :data:`RETIRE_RETRY_S` later. The first re-drive is
+never skipped (a lease not in the file is re-driven), a lease with money still to land is always driven, and a file
+that is missing, unreadable or from a clock that went back means a re-drive: the file only ever saves reads.
+
 SOVEREIGN PLANE ONLY (FATAL-2): ``assert_no_offense()`` at import.
 """
 from __future__ import annotations
@@ -64,6 +72,16 @@ _SCHEMA = "vigil-settle-scan-checkpoint-v1"
 MAX_BYTES = 4 << 20
 #: A pass reads the whole spine at least this often (seconds of the pass clock), whatever the checkpoint says.
 FULL_RESCAN_S = 3600.0
+#: The file (in the completion spool directory) of the settled leases the pass could not retire from the seam.
+RETIRE_NAME = ".settle-retire.json"
+_RETIRE_SCHEMA = "vigil-settle-retire-v1"
+#: A settled lease the pass could not retire is re-driven at most this often (seconds of the pass clock): the settle
+#: drain's alarm grace (``settle_progress.UNFINISHED_SETTLE_GRACE_S``; a test pins them equal). The re-drive is then due
+#: on the pass whose record would first be past that grace, so a lease retired by that re-drive never alarms and one
+#: that still cannot be retired alarms on time; once its cause is fixed, the lease is retired within that time.
+RETIRE_RETRY_S = 600.0
+#: The most leases that file keeps (a lease beyond it is re-driven every pass, as without the file).
+RETIRE_MAX = 512
 
 
 def spine_tip(store) -> int:
@@ -219,3 +237,52 @@ def scan(store, pubkey: str, *, keys: "Iterable[tuple[str, str, str]]", path: "O
                   through_hash=through_hash, listed_from=listed_from, listing_clean=listing_clean,
                   full_at=full_at, evidence=evs)
     return evs
+
+
+def read_retire_attempts(path: Path, *, now: float) -> "dict[tuple[str, str], float]":
+    """``{(slug, nonce): when the pass last re-drove it}`` for each settled lease in the file at ``path`` (the module
+    docstring: RETIRING A SETTLED LEASE) re-driven less than :data:`RETIRE_RETRY_S` before ``now`` — never one from
+    after ``now`` (a clock that went back). Empty when the file is missing, unreadable or not exactly what
+    :func:`write_retire_attempts` writes: every such lease is then re-driven."""
+    raw = _read_bounded(path)
+    if raw is None:
+        return {}
+    out: "dict[tuple[str, str], float]" = {}
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+        if not isinstance(obj, dict) or obj.get("schema") != _RETIRE_SCHEMA or not isinstance(obj["leases"], list):
+            return {}
+        for item in obj["leases"][:RETIRE_MAX]:
+            if not (isinstance(item, list) and len(item) == 3):
+                return {}
+            slug, nonce, at = item
+            if not (isinstance(slug, str) and slug and isinstance(nonce, str) and nonce) or isinstance(at, bool) \
+                    or not isinstance(at, (int, float)) or not math.isfinite(at):
+                return {}
+            if at <= now < at + RETIRE_RETRY_S:
+                out[(slug, nonce)] = float(at)
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        return {}
+    return out
+
+
+def write_retire_attempts(path: Path, attempts: "dict[tuple[str, str], float]") -> None:
+    """Replace the file at ``path`` with ``attempts`` (at most :data:`RETIRE_MAX`, the latest kept), or remove it when
+    there are none. Best-effort: a file that cannot be written is removed, and a lease missing from it is re-driven."""
+    from .spine.atomicio import atomic_write_text
+    if not attempts:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return
+    keep = sorted(attempts.items(), key=lambda kv: (-kv[1], kv[0]))[:RETIRE_MAX]
+    body = json.dumps({"schema": _RETIRE_SCHEMA, "leases": sorted([[s, n, float(at)] for (s, n), at in keep])},
+                      sort_keys=True, separators=(",", ":"))
+    try:
+        atomic_write_text(path, body, prefix=".settle-retire-")
+    except OSError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
