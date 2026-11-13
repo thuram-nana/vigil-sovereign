@@ -21,7 +21,7 @@
 # Config lives in an EnvironmentFile (0600), reusing the backup passphrase:
 #     ~/.config/vigil/backup-push.env
 #       VIGIL_BACKUP_PASSPHRASE=…    (the ONLY key to the encrypted files; never on argv)
-#       VIGIL_BASE_DIR=.vigil-live   (the offense engine home)
+#       VIGIL_BASE_DIR=…             (OPTIONAL absolute override of the shared seam base set below)
 #       VIGIL_PUSH_DEST=…            (transport dest: a bare path / local:<path> for the local-directory
 #                                     backend — a mounted remote FS, sshfs, or a removable disk — or
 #                                     rsync:[user@]host:path / rsync://host/module/path for the real
@@ -49,6 +49,10 @@ Type=oneshot
 
 EnvironmentFile=%h/.config/vigil/backup-push.env
 Environment=PYTHONUNBUFFERED=1
+# The offense engine home = the cross-plane MONEY SEAM base. The SAME value every unit on the launch path
+# sets (sigil-cockpit, vigil-settle-drain, the offense side); `vigil doctor` refuses when they disagree.
+# %h expands HERE, never in the EnvironmentFile (which overrides it only with an ABSOLUTE path).
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
 
 WorkingDirectory=%h/vigil
 # Take a two-plane backup and replicate it off-host in one step. --prune keeps the local retention tidy; the

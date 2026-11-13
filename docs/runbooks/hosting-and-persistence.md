@@ -39,8 +39,11 @@ the spine** — never the source of truth.
 - `SIGIL_HOME` (default `~/.sigil`) — private state: spine, owner keys, the sealed DEK, embedded
   Qdrant/graph/CVE, the customer session/token ledgers. **This is the one directory that must be on
   durable, backed‑up storage.**
-- `VIGIL_BASE_DIR` (default `.vigil-live`) — published owner‑signed artifacts + the cross‑plane seam
-  (credit leases, monitoring authorities). Durable, but rebuildable from the spine.
+- `VIGIL_BASE_DIR` (default `.vigil-live`, relative to the process's working directory; the shipped
+  units all set `%h/.sigil/credit-lease`) — published owner‑signed artifacts + the cross‑plane seam
+  (credit leases, monitoring authorities). Durable, but rebuildable from the spine. Every plane resolves
+  it through one resolver (`vigil_core.seam_base`), and every process on the launch path must see the
+  SAME value — `vigil doctor` refuses when the installed units disagree.
 
 ---
 

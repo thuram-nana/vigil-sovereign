@@ -117,6 +117,26 @@ systemctl --user status sigil-cockpit sigil-customer sigil-public
 The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — start it
 on this host and keep it **private** (SSO/VPN), never a public face.
 
+**One money-seam directory (`VIGIL_BASE_DIR`).** Every process that touches a customer launch — the
+cockpit (`sigil serve`, which publishes the credit lease and writes pause/settlement markers), the settle
+drain, the offense engine (`vigil up`, `vigil launch-drain`) and the offense backup — must use the SAME
+seam directory, or a lease published in one tree is never seen by the drain reading another (every
+completion settles nothing and the credits stay held). The shipped units all set
+`VIGIL_BASE_DIR=%h/.sigil/credit-lease`; in any shell that runs an offense command, export the same value:
+
+```bash
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"   # the value the shipped units set — keep ONE value
+mkdir -p "$VIGIL_BASE_DIR" && chmod 700 "$VIGIL_BASE_DIR"
+vigil doctor                                        # HARD issue if the installed units disagree on it
+```
+
+To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
+`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`) — never in only some of them. The settle
+drain refuses to start when a leftover `VIGIL_SETTLE_BASE_DIR` names a different directory. If an earlier
+install left a `~/.sigil/.vigil-live` directory (the cockpit's old working-directory default), the cockpit
+published there: reconcile its reservations (`sigil ops-sweep reservations --base-dir ~/.sigil/.vigil-live`)
+before you rely on the new seam, and do not delete it while it still holds leases.
+
 ## 7. Reverse proxy + TLS (three separate origins)
 
 Each surface gets its own TLS vhost (templates in `apps/sigil/deploy/reverse-proxy/`), forwarding to the

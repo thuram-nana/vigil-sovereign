@@ -10,7 +10,7 @@
 # it changes NOTHING real.
 #
 # Reuses the local-backup env file for the passphrase + base dir:
-#     ~/.config/vigil/backup.env   (VIGIL_BACKUP_PASSPHRASE=…, VIGIL_BASE_DIR=…)
+#     ~/.config/vigil/backup.env   (VIGIL_BACKUP_PASSPHRASE=…; an optional ABSOLUTE VIGIL_BASE_DIR override)
 #
 # Manual run / logs:
 #     systemctl --user start vigil-backup-drill.service
@@ -30,6 +30,10 @@ Type=oneshot
 
 EnvironmentFile=%h/.config/vigil/backup.env
 Environment=PYTHONUNBUFFERED=1
+# The offense engine home = the cross-plane MONEY SEAM base. The SAME value every unit on the launch path
+# sets (sigil-cockpit, vigil-settle-drain, the offense side); `vigil doctor` refuses when they disagree.
+# %h expands HERE, never in the EnvironmentFile (which overrides it only with an ABSOLUTE path).
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
 # Drive the offense CLI in its own venv; the drill script defaults the crucible root to the CLI's auto-resolve
 # and runs offense-only here (the sovereign leg needs a fresh SIGIL_HOME + the sovereign venv — extend if wanted).
 Environment=VIGIL_CMD=%h/vigil/.venv-offense/bin/vigil

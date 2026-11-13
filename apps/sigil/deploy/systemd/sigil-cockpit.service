@@ -40,6 +40,12 @@ Type=simple
 # means a missing file does not fail the unit; the cockpit defaults to loopback).
 EnvironmentFile=-%h/.sigil/cockpit.env
 Environment=SIGIL_LOG_LEVEL=INFO
+# The cross-plane MONEY SEAM base (credit leases, target authorizations, pause + settlement markers). EVERY
+# unit on the launch path sets the SAME value (vigil-settle-drain, vigil-backup*, and the offense side's
+# VIGIL_BASE_DIR); `vigil doctor` refuses when they disagree. Without it the seam resolved CWD-relative to
+# WorkingDirectory, a different tree from the drain's, so no completion ever settled. %h expands HERE (never in
+# the EnvironmentFile, which overrides this only with an ABSOLUTE path). It sits under ReadWritePaths below.
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
 
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil serve --host ${SIGIL_UI_BIND} --port ${SIGIL_UI_PORT}

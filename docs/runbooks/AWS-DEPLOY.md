@@ -134,7 +134,8 @@ for d in finding-drain settle-drain; do
   cp infra/systemd/vigil-$d.{service,timer} ~/.config/systemd/user/
   cp infra/systemd/vigil-$d.env.example     ~/.config/vigil/$d.env
   # Set ONLY the owner-signed delegation path, as an ABSOLUTE path. The spool, scope and (for settle) the
-  # credit-lease base-dir ship as working %h-expanded defaults in the .service — override them in the env
+  # credit-lease seam VIGIL_BASE_DIR (the SAME value every seam unit sets — GO-LIVE §6) ship as working
+  # %h-expanded defaults in the .service — override them in the env
   # file ONLY with an absolute path. Do NOT put the ENABLE flag here (it is read by the monitor, below).
   # A %h or relative path in an env file does NOT expand and the drain refuses it (fails loud), so keep paths absolute.
   $EDITOR ~/.config/vigil/$d.env

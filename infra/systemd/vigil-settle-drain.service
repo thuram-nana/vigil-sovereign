@@ -18,7 +18,7 @@
 # INSTALL (paired with the timer):
 #   cp infra/systemd/vigil-settle-drain.{service,timer} ~/.config/systemd/user/
 #   cp infra/systemd/vigil-settle-drain.env.example     ~/.config/vigil/settle-drain.env
-#   $EDITOR ~/.config/vigil/settle-drain.env   # set VIGIL_SETTLE_DELEGATION (ABSOLUTE); spool/base-dir/scope default
+#   $EDITOR ~/.config/vigil/settle-drain.env   # set VIGIL_SETTLE_DELEGATION (ABSOLUTE); spool/seam/scope default
 #   systemctl --user daemon-reload && systemctl --user enable --now vigil-settle-drain.timer
 #   # then arm the dead-man: add VIGIL_SETTLE_DRAIN_ENABLED=1 to the MONITOR's env (~/.config/vigil/alerts.env,
 #   # NOT this drain's env) so `vigil alerts` watches this money drain before its first fire.
@@ -36,13 +36,17 @@ Environment=PYTHONUNBUFFERED=1
 # literal-%h --base-dir would make the lease READ find nothing, so every completion becomes a "safe no-op" that
 # is still archived unsettled → a completed run never charged / a cancel never refunded, permanently + silently.
 # The env file (loaded AFTER, so it overrides) carries the per-deployment delegation + any ABSOLUTE override;
-# the CLI refuses a relative / %-bearing --spool or --base-dir, so a mistaken override fails LOUD (FAILED alarm).
+# the CLI refuses a relative / %-bearing --spool and a %-bearing seam base, so a mistaken override fails LOUD.
+# VIGIL_BASE_DIR is the ONE seam base every unit on the launch path shares (sigil-cockpit publishes the lease
+# there): the drain derives its seam from it through the same resolver the cockpit uses (no --base-dir). A
+# legacy VIGIL_SETTLE_BASE_DIR in the env file that names a different tree makes the drain REFUSE (FAILED
+# alarm) instead of silently settling against the wrong one; `vigil doctor` flags units that disagree.
 Environment=VIGIL_SETTLE_SPOOL=%h/.sigil/spool/settle
-Environment=VIGIL_SETTLE_BASE_DIR=%h/.sigil/credit-lease
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
 Environment=VIGIL_SETTLE_SCOPE=*
 EnvironmentFile=-%h/.config/vigil/settle-drain.env
 WorkingDirectory=%h/.sigil
-ExecStart=%h/.sigil/venv/bin/sigil settle-drain drain --spool ${VIGIL_SETTLE_SPOOL} --delegation ${VIGIL_SETTLE_DELEGATION} --scope ${VIGIL_SETTLE_SCOPE} --base-dir ${VIGIL_SETTLE_BASE_DIR}
+ExecStart=%h/.sigil/venv/bin/sigil settle-drain drain --spool ${VIGIL_SETTLE_SPOOL} --delegation ${VIGIL_SETTLE_DELEGATION} --scope ${VIGIL_SETTLE_SCOPE}
 
 # --- heartbeat + staleness alarm (W8-1) ------------------------------------
 StateDirectory=vigil
@@ -51,7 +55,7 @@ ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
 
 # --- hardening -------------------------------------------------------------
 # Reads the settle spool, READS the published credit lease + WRITES the settlement/tombstone under the
-# credit-lease seam root (VIGIL_SETTLE_BASE_DIR) and the spine under ~/.sigil. Network is not locked down
+# credit-lease seam root (VIGIL_BASE_DIR) and the spine under ~/.sigil. Network is not locked down
 # (a KMS-sealed owner KEK needs an outbound aws kms call to mint the owner-signed settle).
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -62,5 +66,5 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# IMPORTANT: if VIGIL_SETTLE_BASE_DIR (the credit-lease seam) is outside ~/.sigil, ADD it to ReadWritePaths
+# IMPORTANT: if VIGIL_BASE_DIR (the credit-lease seam) is outside ~/.sigil, ADD it to ReadWritePaths
 # above, or the owner-signed settle/tombstone write will be denied by ProtectSystem=strict.

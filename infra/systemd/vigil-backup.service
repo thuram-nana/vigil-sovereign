@@ -20,7 +20,7 @@
 # Config (which base dir, and the PASSPHRASE) lives in an EnvironmentFile so the
 # unit is reusable and no secret is baked into the unit:
 #
-#     ~/.config/vigil/backup.env      (VIGIL_BACKUP_PASSPHRASE=…, VIGIL_BASE_DIR=… — see the example)
+#     ~/.config/vigil/backup.env      (VIGIL_BACKUP_PASSPHRASE=…; an optional ABSOLUTE VIGIL_BASE_DIR override)
 #
 # Manual run / logs:
 #     systemctl --user start vigil-backup.service
@@ -31,7 +31,7 @@
 #   cp infra/systemd/vigil-backup.{service,timer} ~/.config/systemd/user/
 #   cp infra/systemd/vigil-backup.env.example      ~/.config/vigil/backup.env
 #   chmod 600 ~/.config/vigil/backup.env
-#   $EDITOR ~/.config/vigil/backup.env             # set VIGIL_BACKUP_PASSPHRASE + VIGIL_BASE_DIR
+#   $EDITOR ~/.config/vigil/backup.env             # set VIGIL_BACKUP_PASSPHRASE
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now vigil-backup.timer
 
@@ -46,6 +46,10 @@ Type=oneshot
 # is read from the ENVIRONMENT by both legs — never passed on argv. Keep this file 0600.
 EnvironmentFile=%h/.config/vigil/backup.env
 Environment=PYTHONUNBUFFERED=1
+# The offense engine home = the cross-plane MONEY SEAM base. The SAME value every unit on the launch path
+# sets (sigil-cockpit, vigil-settle-drain, the offense side); `vigil doctor` refuses when they disagree.
+# %h expands HERE, never in the EnvironmentFile (which overrides it only with an ABSOLUTE path).
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
 
 WorkingDirectory=%h/vigil
 # The offense `vigil` console script drives BOTH legs: the offense backup in-venv, and the sovereign backup as

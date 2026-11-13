@@ -1237,7 +1237,7 @@ def cmd_settle_drain(a) -> None:
     # pointed at the wrong tree finds no lease and archives every completion unsettled.
     from vigil_core.seam_base import SeamBaseError, require_seam_base
     try:
-        seam = require_seam_base(a.base_dir or None)
+        require_seam_base(a.base_dir or None)
     except SeamBaseError as e:
         print(f"settle-drain: {e}", file=sys.stderr)
         sys.exit(2)
@@ -1254,7 +1254,7 @@ def cmd_settle_drain(a) -> None:
         sys.exit(2)
 
     watcher = CompletionSpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner,
-                                     delegation=deleg, scope=a.scope, base_dir=seam)
+                                     delegation=deleg, scope=a.scope, base_dir=(a.base_dir or None))
     if getattr(a, "settle_cmd", "drain") == "watch":
         print(f"  watching {a.spool}/incoming → settle_launch (scope={a.scope}); Ctrl-C to stop")
         try:

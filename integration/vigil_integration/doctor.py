@@ -1263,10 +1263,10 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
 
 # ── #70: is the cross-plane MONEY SEAM inside what the offense backup captures? (ADVISORY) ─────────────────
 # The credit-lease seam (leases, settlement + pause markers) is the shared VIGIL_BASE_DIR both planes agree on;
-# `vigil-settle-drain` reads/writes it at VIGIL_SETTLE_BASE_DIR (unit default %h/.sigil/credit-lease). It is
+# `vigil-settle-drain` reads/writes it at VIGIL_BASE_DIR (unit default %h/.sigil/credit-lease). It is
 # deliberately NOT in the sovereign `sigil backup` (cross-plane: it also holds offense keys — FATAL-2), so it is
-# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR} from
-# ~/.config/vigil/backup.env, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
+# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR}, unit
+# default %h/.sigil/credit-lease, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
 # a dead disk loses every lease + settlement marker. ADVISORY: a note, never an _issue / `ok` flip. DEFAULT-OFF:
 # evaluated only once the money drain is configured (settle-drain.env present) — otherwise nothing changes.
 def _parse_env_file(path: Path) -> "dict | None":
@@ -1292,14 +1292,14 @@ def _money_seam_backup_coverage(home: "Path | None" = None) -> "tuple[dict, list
     settle = _parse_env_file(cfg / "settle-drain.env")
     if settle is None:
         return {"configured": False}, []
-    seam = Path(settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
+    seam = Path(settle.get("VIGIL_BASE_DIR") or settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
     backup = _parse_env_file(cfg / "backup.env")
     section: dict = {"configured": True, "seam": _display_path(seam), "backup_base_dir": None, "covered": False}
     if backup is None:
         return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is backed up by NOTHING: "
                          f"there is no ~/.config/vigil/backup.env (vigil-backup.service). Point the offense "
                          f"backup's VIGIL_BASE_DIR at the seam."]
-    base = Path(backup.get("VIGIL_BASE_DIR") or ".vigil-live").expanduser()
+    base = Path(backup.get("VIGIL_BASE_DIR") or (h / ".sigil" / "credit-lease")).expanduser()   # E3a unit default
     if not base.is_absolute():
         base = h / "vigil" / base                         # the unit's WorkingDirectory=%h/vigil
     section["backup_base_dir"] = _display_path(base)
@@ -1760,6 +1760,18 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the seam-coverage probe must never crash the report
         report["money_seam_backup"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # E3a — every configured money-seam unit must resolve ONE seam base; a disagreement is HARD (a drain reading
+    # another tree settles nothing). Nothing configured ⇒ nothing added. Best-effort: never raises.
+    try:
+        from .seam_base_units import seam_base_agreement
+        report["seam_base"], _sb_issues = seam_base_agreement(repo, parse_env=_parse_env_file,
+                                                              display=_display_path)
+        for _m in _sb_issues:
+            _issue(_m)
+    except Exception as exc:  # noqa: BLE001 — the seam-base probe must never crash the report
+        report["seam_base"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the seam-base agreement probe could not run: {exc}")
 
     # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
     # (nothing configured) adds no note. Best-effort: never raises.
