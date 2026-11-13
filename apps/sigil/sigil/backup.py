@@ -132,6 +132,10 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "vault": "machine-bound TPM-sealed KEK — useless off-box; re-provisioned on the new host (the secrets it "
              "wraps are re-wrapped into the sealed backup body instead)",
     "backups": "the backup OUTPUT directory itself — packaging it would recurse prior backups into new ones",
+    "alarms": "point-in-time operator alarms about the CURRENT seam (e.g. an eval-capability grant revoke that could "
+              "not be confirmed). Not restored: an offense restore leaves the eval publications out (ungranted), "
+              "and the next offense close re-checks every published grant from the spine whether or not the alarm "
+              "exists, re-raising it if a publication still cannot be confirmed",
     "cache": "derived cache — rebuilt on demand, no trust or memory state",
     "models": "re-downloadable ML model files (large) — not trust/memory state",
     "host_id": "per-machine identity — deliberately re-derived on the new host, never carried across",
