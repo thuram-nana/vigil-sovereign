@@ -55,3 +55,4 @@ def test_the_unit_text_matches_the_drill_verdicts():
     assert "0 PASS · 1 FAIL · 3 NOT-RUN" in flat and "4 INCONCLUSIVE (no consistent snapshot could be taken" in flat
     assert "A BUSY BOX STILL GETS A VERDICT" in flat
     assert "NEVER HOLDS THE OWNER KEY" in flat
+    assert "before/after digest" not in flat and "`source_changed_during_drill`), never a guard" in flat

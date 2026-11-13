@@ -65,7 +65,9 @@ ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
 
 # --- hardening -------------------------------------------------------------
 # PURELY LOCAL (copy + upgrade + restore inside PrivateTmp; no egress): the network is removed, and the REAL
-# sovereign home is read-only to this unit (kernel-enforced, on top of the drill's own before/after digest).
+# sovereign home is read-only to this unit (kernel-enforced, on top of the drill's own isolation: a child process
+# scoped to its scratch copy). The drill's after-digest of the real spine is only reported
+# (`source_changed_during_drill`), never a guard.
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes

@@ -12,11 +12,13 @@ have never drilled against your real data is a hope, the same way an un-restored
      throwaway work dir. The snapshot is CONSISTENT: taken under a SHARED flock on the store's own
      cross-process lockfile (writers hold it exclusively per append) and proven byte-faithful by a content
      digest taken before and after the copy; an attempt that raced something outside that lock (a concurrent
-     ``sigil sign`` rewriting the head / floor) is retried, a bounded number of times;
+     ``sigil sign`` rewriting the head / floor, or renaming its temp file away mid-copy) is retried, a bounded
+     number of times;
   2. the remaining steps run in a CHILD process whose ``SIGIL_HOME`` is that scratch home and whose ``TMPDIR``
-     is inside the work dir (it refuses to run otherwise), so every path the spine code derives — the signed
-     head, the owner PUBLIC key, the anti-rollback floor, the upgrade's backup-verify extract — resolves INSIDE
-     the work dir. The child is never told where the real home is;
+     is inside the work dir (it refuses to run otherwise, and refuses any copy its parent did not make — a
+     one-shot nonce), so every path the spine code derives — the signed head, the owner PUBLIC key, the
+     anti-rollback floor, the upgrade's backup-verify extract — resolves INSIDE the work dir. The child is never
+     told where the real home is;
   3. verify the copy (chain; a pruned window is corroborated by the COPY's own signed head with the owner
      PUBLIC key) and record its count + sequence set;
   4. run the REAL ``upgrade()`` orchestrator on the copy (it takes + verifies its own pre-upgrade backup);
@@ -46,8 +48,10 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -70,6 +74,8 @@ _KEYS_DIR = "keys"                   # <spine>/keys: owner.priv|pub, owner.genes
 _SNAPSHOT_ATTEMPTS = 5
 _CHILD_FLAG = "--isolated-copy"      # internal: run the drill steps on an already-taken scratch-home snapshot
 _CHILD_TIMEOUT_S = 6 * 3600
+_NONCE_FILE = ".isolated-copy-nonce"  # <work_dir>/…: the parent's one-shot proof that it made the copy
+_NONCE_ENV = "VIGIL_UPGRADE_DRILL_NONCE"
 
 
 def _is_secret(rel: Path) -> bool:
@@ -82,7 +88,12 @@ def _is_secret(rel: Path) -> bool:
 
 
 def _skipped(rel: Path) -> bool:
-    return bool(rel.parts) and (rel.parts[0] in _SKIP_DIRS or rel.name.endswith(".lock"))
+    """Never copied or digested: the cold-archive, lockfiles, and the transient temp file of an atomic write
+    (``.head-*.tmp`` / ``.tmp-*.tmp`` / a segment's ``.*.gz.tmp``) — a concurrent ``sigil sign`` renames it away
+    at any moment, and nothing ever reads it."""
+    name = rel.name
+    return bool(rel.parts) and (rel.parts[0] in _SKIP_DIRS or name.endswith(".lock")
+                                or (name.startswith(".") and name.endswith(".tmp")))
 
 
 def _iter_files(root: Path) -> Iterator["tuple[Path, Path]"]:
@@ -280,9 +291,20 @@ def _run_isolated(data: Path, work_dir: Path) -> dict:
     env["SIGIL_HOME"] = str(data.parent.parent)
     env["TMPDIR"] = str(tmp)
     env["PYTHONPATH"] = os.pathsep.join([pkg_root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    proc = subprocess.run(
-        [sys.executable, "-m", "sigil.spine.upgrade_drill", _CHILD_FLAG, str(data), "--work-dir", str(work_dir)],
-        cwd=str(work_dir), env=env, capture_output=True, text=True, timeout=_CHILD_TIMEOUT_S)
+    nonce, nonce_file = secrets.token_hex(16), work_dir / _NONCE_FILE
+    nonce_file.unlink(missing_ok=True)
+    fd = os.open(str(nonce_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, nonce.encode("ascii"))
+    finally:
+        os.close(fd)
+    env[_NONCE_ENV] = nonce
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "sigil.spine.upgrade_drill", _CHILD_FLAG, str(data), "--work-dir", str(work_dir)],
+            cwd=str(work_dir), env=env, capture_output=True, text=True, timeout=_CHILD_TIMEOUT_S)
+    finally:
+        nonce_file.unlink(missing_ok=True)
     try:
         res = json.loads(proc.stdout.strip().splitlines()[-1])
         if not isinstance(res, dict) or "status" not in res:
@@ -318,15 +340,21 @@ def _snapshot(src_dir: Path, data_name: str, home: Path) -> "Optional[str]":
         if home.exists():
             shutil.rmtree(home)
         home.mkdir(parents=True)
-        with _shared_writer_lock(src_dir, data_name):
-            tree = _tree_digest(src_dir)
-            before = tree + _floor_digest()
-            shutil.copytree(src_dir, copy_dir, symlinks=False, ignore=_ignore, ignore_dangling_symlinks=True)
-            if floor_src.is_file():
-                shutil.copyfile(floor_src, home / "floor.json")
-            mid = _tree_digest(src_dir) + _floor_digest()
-        copied = _tree_digest(copy_dir) + (hashlib.sha256((home / "floor.json").read_bytes()).hexdigest()
-                                           if (home / "floor.json").is_file() else "<absent>")
+        try:
+            with _shared_writer_lock(src_dir, data_name):
+                tree = _tree_digest(src_dir)
+                before = tree + _floor_digest()
+                shutil.copytree(src_dir, copy_dir, symlinks=False, ignore=_ignore, ignore_dangling_symlinks=True)
+                if floor_src.is_file():
+                    shutil.copyfile(floor_src, home / "floor.json")
+                mid = _tree_digest(src_dir) + _floor_digest()
+            copied = _tree_digest(copy_dir) + (hashlib.sha256((home / "floor.json").read_bytes()).hexdigest()
+                                               if (home / "floor.json").is_file() else "<absent>")
+        except OSError:              # (shutil.Error is one) a file renamed away mid-walk by a concurrent sign:
+            if attempt == _SNAPSHOT_ATTEMPTS - 1:          # an inconsistent attempt — but a PERSISTENT error
+                raise                                       # (unreadable file) is reported as the real FAIL
+            time.sleep(0.2 * (attempt + 1))
+            continue
         if before == mid == copied:
             return tree
         time.sleep(0.2 * (attempt + 1))
@@ -404,14 +432,30 @@ def run_upgrade_drill(spine_path: Path, work_dir: Path) -> dict:
 
 
 def _child_main(data: str, work_dir: str) -> int:
-    """The isolated child: refuse unless this process's SIGIL_HOME IS the snapshot's scratch home and its temp
-    dir (the upgrade's backup-verify extract lands there) is inside the work dir."""
+    """The isolated child runs the (destructive) steps ONLY on a copy its parent made. It refuses unless the
+    parent's one-shot nonce (env) matches the nonce file the parent wrote into the work dir (consumed here, so it
+    never authorizes a second run), the data path is exactly ``<work_dir>/home/spine/<name>``, this process's
+    SIGIL_HOME IS ``<work_dir>/home``, and its temp dir (the upgrade's backup-verify extract lands there) is
+    inside the work dir — so a hand-run of this hidden entry point against a real home never touches it."""
     from .. import config
-    d = Path(data)
+    d, w = Path(data), Path(work_dir).resolve()
+    home = (w / "home").resolve()
+    nonce_file = w / _NONCE_FILE
+    try:
+        made = nonce_file.read_text(encoding="ascii").strip()
+        nonce_file.unlink()
+    except (OSError, UnicodeDecodeError):
+        made = ""
+    sent = os.environ.get(_NONCE_ENV, "").encode("utf-8", "surrogateescape")
     tmp = Path(tempfile.gettempdir()).resolve()
-    if config.SIGIL_HOME.resolve() != d.parent.parent.resolve() or not tmp.is_relative_to(Path(work_dir).resolve()):
-        res = {"status": FAIL, "detail": f"refusing: the isolated drill is not scoped to its copy "
-                                         f"(SIGIL_HOME={config.SIGIL_HOME}, TMPDIR={tmp})", "steps": []}
+    why = ("no matching one-shot nonce from the parent drill" if not (made and hmac.compare_digest(made.encode(), sent))
+           else f"the data path {d} is not the work dir's scratch copy" if d.parent.resolve() != home / "spine"
+           else f"SIGIL_HOME={config.SIGIL_HOME} is not the scratch home" if config.SIGIL_HOME.resolve() != home
+           else f"TMPDIR={tmp} is outside the work dir" if not tmp.is_relative_to(w)
+           else "")
+    if why:
+        res = {"status": FAIL, "detail": f"refusing: the isolated drill is not scoped to its copy ({why})",
+               "steps": []}
     else:
         res = drill_copy(d, Path(work_dir))
     print(json.dumps(res, sort_keys=True, default=str))

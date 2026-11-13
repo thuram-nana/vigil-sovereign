@@ -1,10 +1,12 @@
 """DEP-3 (#73) — the on-box upgrade/rollback drill (``sigil.spine.upgrade_drill``).
 
 It must (a) PASS on a healthy real spine (legacy or already-migrated) — upgrade under this build, detect a
-corrupted deployment, roll back intact; (b) NEVER modify the real spine directory (proven by a content digest,
-and a drill that DID change it must FAIL); (c) FAIL honestly when any step does not hold (source does not
-verify, negative control does not bite, rollback not intact); (d) report NOT-RUN (exit 3), never green, when
-there is no data to drill.
+corrupted deployment, roll back intact; (b) NEVER modify the real spine directory — isolation comes from the
+consistent snapshot plus the child process scoped to its own copy (and, under systemd, ``ReadOnlyPaths=``); the
+after-digest is only REPORTED (``source_changed_during_drill``: a busy box's live appends are expected and never
+fail the drill), while owner key material that changes in the real home, or a private key in the work dir, does
+FAIL it; (c) FAIL honestly when any step does not hold (source does not verify, negative control does not bite,
+rollback not intact); (d) report NOT-RUN (exit 3), never green, when there is no data to drill.
 """
 from __future__ import annotations
 
@@ -128,6 +130,42 @@ def test_a_drill_that_changes_the_real_owner_keys_fails(tmp_path, monkeypatch, k
     assert v["status"] == ud.FAIL and "owner key material" in v["detail"], v
 
 
+@pytest.mark.parametrize("field", ["mtime", "inode", "size", "mode"])
+def test_a_drill_that_rewrites_the_real_owner_keys_under_the_same_names_fails(tmp_path, monkeypatch, field):
+    """A mint can also rewrite owner.priv / owner.pub IN PLACE under the same names (an unreadable or empty
+    owner.priv regenerates both). Each fingerprint field on its own must catch it: the rewrite changes exactly
+    one of mtime, inode, size or mode and leaves the other three as they were."""
+    import os
+    home = _signed_home(tmp_path, pruned=False)
+    kd = home / "spine" / "keys"
+    old_ns = 1_600_000_000 * 10**9
+    for p in kd.iterdir():
+        os.utime(p, ns=(old_ns, old_ns))
+    path = home / "spine" / "spine.jsonl"
+    real = ud._run_isolated
+
+    def rekey(data, work):
+        for p in sorted(kd.iterdir()):
+            st, raw = p.stat(), p.read_bytes()
+            if field == "mtime":
+                p.write_bytes(raw[::-1])                              # same inode, size, mode; new mtime
+            elif field == "inode":
+                tmp = p.with_name(p.name + ".new")
+                tmp.write_bytes(raw[::-1])
+                os.chmod(tmp, st.st_mode & 0o7777)
+                os.replace(tmp, p)
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+            elif field == "size":
+                p.write_bytes(raw + b"=")
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+            else:
+                os.chmod(p, (st.st_mode & 0o7777) ^ 0o040)
+        return real(data, work)
+    monkeypatch.setattr(ud, "_run_isolated", rekey)
+    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    assert v["status"] == ud.FAIL and "owner key material" in v["detail"], v
+
+
 def test_an_unexpected_error_is_a_failed_drill_not_a_crash(tmp_path, monkeypatch):
     path = _real_spine(tmp_path)
 
@@ -212,13 +250,102 @@ def test_a_work_dir_overlapping_the_real_spine_is_refused(tmp_path, where):
 
 
 def test_a_copy_error_is_a_failed_verdict_not_a_traceback(tmp_path, monkeypatch):
+    """A PERSISTENT copy error (every attempt) is the real FAIL, reported — never a crash, never INCONCLUSIVE."""
     path = _real_spine(tmp_path)
 
     def boom(*a, **k):
-        raise OSError("a writer's tmp file vanished mid-copy")
+        raise OSError("a spine file is unreadable")
     monkeypatch.setattr(ud.shutil, "copytree", boom)
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
     v = ud.run_upgrade_drill(path, tmp_path / "work")
     assert v["status"] == ud.FAIL and "OSError" in v["detail"]
+
+
+@pytest.mark.parametrize("where", ["copytree", "digest"])
+def test_a_snapshot_that_trips_over_a_concurrently_renamed_file_is_retried(tmp_path, monkeypatch, where):
+    """A concurrent ``sigil sign`` renames its head temp file away between the listing and the open: copytree
+    raises ``shutil.Error`` / the digest raises FileNotFoundError. That attempt is inconsistent, so it is retried —
+    a healthy busy box gets its verdict, not a false FAIL."""
+    import shutil
+    path = _real_spine(tmp_path)
+    real = {"copytree": ud.shutil.copytree, "digest": ud._tree_digest}[where]
+    calls = []
+
+    def once(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            if where == "copytree":
+                raise shutil.Error([("/spine/.head-x.tmp", "/copy/.head-x.tmp", "No such file or directory")])
+            raise FileNotFoundError("/spine/.head-x.tmp")
+        return real(*a, **k)
+    monkeypatch.setattr(ud.shutil if where == "copytree" else ud, "copytree" if where == "copytree" else "_tree_digest",
+                        once)
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
+    v = ud.run_upgrade_drill(path, tmp_path / "work")
+    assert v["status"] == ud.PASS, v
+
+
+def test_an_atomic_write_temp_file_is_neither_copied_nor_digested(tmp_path):
+    """The transient temp file of an atomic write (``.head-*.tmp`` / ``.tmp-*.tmp``) is renamed away at any moment
+    by a concurrent sign and never read by verify: the snapshot neither copies nor digests it."""
+    path = _real_spine(tmp_path)
+    src = path.parent
+    clean = ud._tree_digest(src)
+    for name in (".head-abc123.tmp", ".tmp-xyz789.tmp"):
+        (src / name).write_text("half-written head\n")
+    assert ud._tree_digest(src) == clean
+    home = tmp_path / "work" / "home"
+    assert ud._snapshot(src, path.name, home) == clean
+    assert not [p for p in (home / "spine").iterdir() if p.name.endswith(".tmp")]
+
+
+def _floor_and_sleeps(path, monkeypatch):
+    floor = path.parent.parent / "floor.json"
+    floor.write_text('{"floor": 1}\n')
+    sleeps = []
+    monkeypatch.setattr(ud.time, "sleep", lambda s: sleeps.append(s))
+    return floor, sleeps
+
+
+@pytest.mark.parametrize("race", ["floor_moved_during_copy", "floor_copy_unfaithful", "tree_copy_unfaithful",
+                                  "source_moved_after_copy"])
+def test_each_snapshot_consistency_guard_forces_a_retry(tmp_path, monkeypatch, race):
+    """Each digest guard on its own: exactly ONE component diverges on the first attempt — the source floor
+    (rewritten mid-copy), the floor COPY, the spine-dir COPY, or the source spine dir after the copy — and the
+    snapshot is retried once, ending byte-faithful to the source (spine dir AND floor)."""
+    from pathlib import Path
+    path = _real_spine(tmp_path)
+    floor, sleeps = _floor_and_sleeps(path, monkeypatch)
+    home = tmp_path / "work" / "home"
+    real_copytree, real_copyfile, first = ud.shutil.copytree, ud.shutil.copyfile, []
+
+    def copytree(src, dst, **kw):
+        out = real_copytree(src, dst, **kw)
+        if not first:
+            first.append(1)
+            if race == "tree_copy_unfaithful":
+                with open(Path(dst) / path.name, "ab") as f:
+                    f.write(b"\n")
+            elif race == "source_moved_after_copy":
+                with open(Path(src) / path.name, "ab") as f:    # raw bytes: the store lock is held SHARED here
+                    f.write(b"\n")
+        return out
+
+    def copyfile(src, dst, **kw):
+        if race == "floor_moved_during_copy" and len(first) == 1:
+            first.append(2)
+            floor.write_text('{"floor": 2}\n')                  # a concurrent sign advanced the floor
+        out = real_copyfile(src, dst, **kw)
+        if race == "floor_copy_unfaithful" and len(first) == 1:
+            first.append(2)
+            Path(dst).write_text("garbage")
+        return out
+    monkeypatch.setattr(ud.shutil, "copytree", copytree)
+    monkeypatch.setattr(ud.shutil, "copyfile", copyfile)
+    assert ud._snapshot(path.parent, path.name, home) is not None
+    assert len(sleeps) == 1, sleeps                                   # retried exactly once
+    assert ud._tree_digest(home / "spine") == ud._tree_digest(path.parent)
+    assert (home / "floor.json").read_bytes() == floor.read_bytes()
 
 
 def test_an_inconsistent_snapshot_is_inconclusive_not_a_fail(tmp_path, monkeypatch):
@@ -520,6 +647,42 @@ def test_verify_never_mints_over_an_existing_owner_public_key(tmp_path, how):
     assert _whole_tree(home / "spine" / "keys") == before          # byte-identical: no mint, owner.pub kept
 
 
+@pytest.mark.parametrize("case", ["no_public_key", "public_key_unreadable"])
+def test_verify_with_no_readable_owner_public_key_fails_closed_and_never_mints(tmp_path, case):
+    """A signed head exists, so a missing owner.pub is never a first use: ``sigil verify`` must not mint a keypair
+    (re-keying the trust root and calling the genuine head TAMPERING). It fails closed naming the missing key, and
+    a public key that exists but cannot be read is reported as that read error, never as absent."""
+    import subprocess
+    home = _signed_home(tmp_path, pruned=False)
+    kd = home / "spine" / "keys"
+    (kd / "owner.priv").unlink()
+    (kd / "owner.pub").unlink()
+    if case == "public_key_unreadable":
+        (kd / "owner.pub").mkdir()                     # present but unreadable (EISDIR): not "absent"
+    before = _whole_tree(kd)
+    env, py = _env(home)
+    r = subprocess.run([py, "-m", "sigil", "verify"], env=env, capture_output=True, text=True)
+    if case == "no_public_key":
+        assert "head  FAIL: no owner public key" in r.stdout, r.stdout + r.stderr
+    else:
+        assert "head  FAIL" in r.stdout and "Is a directory" in r.stdout, r.stdout + r.stderr
+        assert "no owner public key" not in r.stdout
+    assert _whole_tree(kd) == before                   # nothing minted: no owner.priv, owner.pub untouched
+
+
+def test_a_drill_of_a_home_with_no_owner_public_key_names_it_and_never_mints(tmp_path):
+    """Verifying the PRUNED copy of a home that lost owner.pub minted a keypair into the scratch home and then
+    blamed an 'isolation fault'. The drill now fails on the real cause, and no private key appears anywhere."""
+    home = _signed_home(tmp_path, pruned=True)
+    (home / "spine" / "keys" / "owner.pub").unlink()
+    before = _whole_tree(home)
+    v = ud.run_upgrade_drill(home / "spine" / "spine.jsonl", tmp_path / "work")
+    assert v["status"] == ud.FAIL and "no owner public key" in v["detail"], v
+    assert "isolation fault" not in v["detail"]
+    assert not [p for p in (tmp_path / "work").rglob("*") if p.name.endswith(".priv")]
+    assert _whole_tree(home) == before
+
+
 @pytest.mark.parametrize("leak", ["owner.priv", "tmp/spine.dek", "home/spine/keys/owner.priv.tmp"])
 def test_a_private_key_in_the_work_dir_fails_the_drill(tmp_path, monkeypatch, leak):
     path = _real_spine(tmp_path)
@@ -546,27 +709,57 @@ def test_the_drill_steps_refuse_a_copy_holding_a_private_key(tmp_path):
     assert not any(st["step"] == "upgrade" for st in v["steps"])
 
 
-@pytest.mark.parametrize("scope", ["foreign_home", "foreign_tmp", "scoped"])
+@pytest.mark.parametrize("scope", ["foreign_home", "foreign_tmp", "data_outside_copy", "no_nonce", "wrong_nonce",
+                                   "scoped"])
 def test_the_isolated_child_refuses_unless_scoped_to_its_copy(tmp_path, capsys, monkeypatch, scope):
-    """The child runs the steps only when BOTH its SIGIL_HOME is the scratch home and its temp dir (where the
+    """The child runs the steps only on a copy its parent made: the parent's one-shot nonce matches (and is consumed),
+    the data path is the work dir's scratch copy, its SIGIL_HOME is the scratch home, and its temp dir (where the
     upgrade's backup-verify extract lands) is inside the work dir."""
     from sigil import config
     path = _real_spine(tmp_path)
     work = tmp_path / "work"
     home = work / "home"
     assert ud._snapshot(path.parent, path.name, home) is not None
+    if scope != "no_nonce":
+        (work / ud._NONCE_FILE).write_text("a" * 32)
+        monkeypatch.setenv(ud._NONCE_ENV, "b" * 32 if scope == "wrong_nonce" else "a" * 32)
     if scope != "foreign_home":
         monkeypatch.setattr(config, "SIGIL_HOME", home)
     if scope != "foreign_tmp":
         (work / "tmp").mkdir()
         monkeypatch.setattr(ud.tempfile, "tempdir", str(work / "tmp"))
-    assert ud.main([ud._CHILD_FLAG, str(home / "spine" / path.name), "--work-dir", str(work)]) == 0
+    data = path if scope == "data_outside_copy" else home / "spine" / path.name
+    before = ud._tree_digest(path.parent)
+    assert ud.main([ud._CHILD_FLAG, str(data), "--work-dir", str(work)]) == 0
     res = json.loads(capsys.readouterr().out)
+    assert not (work / ud._NONCE_FILE).exists()                            # one-shot: consumed either way
     if scope == "scoped":
         assert res["status"] == ud.PASS, res                               # positive control
     else:
-        assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"]
+        assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"], res
         assert not list(work.rglob("*.tar.gz"))                            # refused before any step ran
+        assert ud._tree_digest(path.parent) == before
+
+
+@pytest.mark.parametrize("work", ["the_real_home", "the_real_homes_parent"])
+def test_the_hidden_child_entry_point_never_runs_on_a_real_home(tmp_path, work):
+    """The audit repro: ``SIGIL_HOME=$H TMPDIR=$H/x python -m sigil.spine.upgrade_drill --isolated-copy
+    $H/spine/spine.jsonl --work-dir $H`` ran upgrade(), the corruption and the rollback on the REAL spine. Run with
+    the real home as the work dir, or with its parent (the real home is then literally ``<work>/home``, so every
+    path check passes and only the parent's nonce stops it), it refuses and the real home is byte-identical."""
+    import subprocess
+    path = _real_spine(tmp_path)                                           # the real home is <tmp>/home
+    real_home = path.parent.parent
+    wd = real_home if work == "the_real_home" else tmp_path
+    (wd / "x").mkdir()
+    before = _whole_tree(real_home)
+    env, py = _env(real_home)
+    env["TMPDIR"] = str(wd / "x")
+    r = subprocess.run([py, "-m", "sigil.spine.upgrade_drill", ud._CHILD_FLAG, str(path), "--work-dir", str(wd)],
+                       env=env, capture_output=True, text=True)
+    res = json.loads(r.stdout.strip().splitlines()[-1])
+    assert res["status"] == ud.FAIL and "not scoped to its copy" in res["detail"], res
+    assert _whole_tree(real_home) == before and not (real_home / "backups").exists()
 
 
 def test_the_copy_is_verified_against_the_boxs_own_anti_rollback_floor(tmp_path):
