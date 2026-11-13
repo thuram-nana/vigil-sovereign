@@ -1,10 +1,8 @@
 """E7 — one outstanding launch per (org, host), and the release of a reservation a later launch superseded.
 
-Every launch of one (org, host) shares one slug, and the seam holds ONE lease per slug. A customer could reserve and
-start a SECOND launch while the first was still unsettled (queued, paused or running): the second lease replaced
-the first on the seam, the engine then refused the first job (its nonce is not the one on the seam), the
-settle-drain quarantined its completion (nonce mismatch), and ``ops-sweep reservations`` — which lists seam leases —
-never saw it again, so its credits stayed held unless the customer cancelled it.
+Every launch of one (org, host) shares one slug, and the seam holds ONE lease per slug, so a launch whose lease a
+later launch of the same target replaced is no longer on the seam: its job is refused at the arm (its nonce is not
+the one on the seam) and its completion is quarantined by the settle-drain (nonce mismatch).
 
 * With ``VIGIL_ONE_LAUNCH_PER_HOST`` on, ``reserve_launch`` / ``launch_start`` refuse the second launch while the
   first is outstanding (decided under the cross-process settle lock — the multi-process half lives in
@@ -304,7 +302,7 @@ def test_scan_reservations_agrees_with_scan_settlement(monkeypatch):
     assert scan_reservations(s, None).reservations == {}          # no owner key: nothing is trusted
 
 
-# ---- the superseded-reservation sweep: the real stranded state, end to end -----------------------------------
+# ---- the superseded-reservation sweep: the real superseded state, end to end ---------------------------------
 def test_sweep_releases_a_superseded_reservation_exactly_once_after_its_completion_was_quarantined():
     from sigil.inbound.completion_spool import CompletionSpoolWatcher
     from sigil.ui.launch_governance import provision_launch_governance
