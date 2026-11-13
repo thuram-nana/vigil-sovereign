@@ -506,7 +506,8 @@ def one_launch_per_host_enabled() -> bool:
     """True iff a customer may hold only ONE outstanding launch per ``(org, host)`` (E7): ``reserve_launch``
     refuses a new reservation while an earlier one for the same target is unsettled, and ``publish_lease``
     (launch_start) refuses to put a lease on the seam over another launch's unsettled lease (the seam holds one
-    lease per slug, so the second would overwrite the first and strand its reservation). Both checks run under
+    lease per slug, so the second would replace the first, whose reservation only `ops-sweep reservations` then
+    settles). Both checks run under
     the cross-process settle lock (`governor/launch_settlement.settle_lock`). OFF by default
     (`VIGIL_ONE_LAUNCH_PER_HOST` unset / non-affirmative): reserve and start behave exactly as before."""
     return (os.environ.get("VIGIL_ONE_LAUNCH_PER_HOST") or "").strip().lower() in _OIDC_AFFIRMATIVE
