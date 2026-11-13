@@ -420,3 +420,92 @@ def test_a_stuck_uncommitted_row_names_a_way_out_when_no_prune_is_committed(worl
     _crashed_prune(world, 6, "prune_after_archive")
     with pytest.raises(prune.PruneUnsafe, match=r"move .*archive aside \(no prune is committed"):
         prune.commit_prune(_store_of(world), 4, confirm=True)
+
+
+# ---- a commit interrupted between its head and its floor; a stale row at the very boundary ----------------------
+
+def test_a_re_run_brings_the_floor_up_to_a_head_committed_without_it(world, monkeypatch, capsys):
+    """The prune commit moves the durable floor with its head. One interrupted between the two (here: the floor write
+    fails) leaves the floor on the pre-prune head; the re-run that reports the prune complete also completes that
+    half, so the committed boundary is pinned against a rollback."""
+    def floor_write_fails(*a, **kw):
+        raise OSError("disk full (test)")
+
+    with monkeypatch.context() as m:
+        m.setattr(_cp, "advance_floor", floor_write_fails)
+        with pytest.raises(OSError):
+            prune.commit_prune(_store_of(world), 4, confirm=True)
+    head = _head(world)
+    assert head.base_seq == 4 and head.snapshot_seq >= 0, "the head committed"
+    assert _fl.load_floor().base_seq == 0, "the floor did not move with it"
+    from sigil import cli
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: _store_of(world))
+    cli.cmd_spine(NS(action="prune", boundary=4, yes=True, archive=None))
+    out = capsys.readouterr().out
+    fl = _fl.load_floor()
+    assert (fl.base_seq, fl.head_sig_hash) == (4, _fl.head_sig_hash(head))
+    assert "already committed" in out and "floor is now brought up" in out
+    rep = prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert rep["already_complete"] is True and rep["floor_advanced"] is False
+    assert _cp.verify_checkpoint(_store_of(world))[0]
+
+
+def test_a_stale_row_at_the_same_boundary_is_superseded_by_the_prune_that_verifies(world):
+    """An earlier attempt at K left a row whose root chained differently (an older build) and that no signed head
+    commits. The prune at K replaces it with its own row — the candidate verifies for exactly this prune — rather
+    than refusing the boundary until the archive is moved aside by hand."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    m = _manifest(world)
+    m["snapshots"] = [dict(m["snapshots"][0], delta_merkle_root="e" * 64, cumulative_merkle_root="f" * 64)]
+    _mpath(world).write_text(json.dumps(m, indent=2), encoding="utf-8")
+    with pytest.raises(prune.PruneUnsafe, match=r"uncommitted prune at 4 .* `sigil spine prune -K 4 --yes`"):
+        prune.commit_prune(_store_of(world), 6, confirm=True)
+    rep = prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert rep["base_seq"] == 4 and _first_seq(world) == 4
+    rows = _manifest(world)["snapshots"]
+    assert [r["base_seq"] for r in rows] == [4] and rows[0]["cumulative_merkle_root"] == _head(world).cumulative_merkle_root
+    _verified(world)
+
+
+def test_a_committed_row_is_never_superseded(world):
+    """The same-boundary replacement never touches a row at or below the boundary the signed head commits."""
+    prune.commit_prune(_store_of(world), 4, confirm=True)
+    m = _manifest(world)
+    srow = dict(m["snapshots"][0], cumulative_merkle_root="f" * 64)
+    assert prune._superseding_uncommitted_rows_at(m, srow) is None
+    pending = dict(srow, base_seq=6, base_count=6)
+    m["snapshots"].append(dict(pending, cumulative_merkle_root="e" * 64))
+    replaced = prune._superseding_uncommitted_rows_at(m, pending)
+    assert replaced is not None and replaced["snapshots"][0] == m["snapshots"][0]
+    assert [r["cumulative_merkle_root"] for r in replaced["snapshots"]] == [m["snapshots"][0]["cumulative_merkle_root"],
+                                                                         "f" * 64]
+
+
+def test_a_damaged_copy_copied_again_must_hash_as_its_source(world, monkeypatch):
+    """The fresh copy of a still-live segment whose archived copy was damaged is checked against the source hash
+    like every first copy: a copy that does not hash as its source stops the prune."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    m, row = _archived_seg0(world)
+    (world / "archive" / row["file"]).unlink()
+    real = prune._copy_file
+
+    def short_copy(src, dst, segdir):
+        real(src, dst, segdir)
+        dst.write_bytes(dst.read_bytes()[:-2])
+
+    monkeypatch.setattr(prune, "_copy_file", short_copy)
+    with pytest.raises(prune.PruneUnsafe, match="hashes differently than the source"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert _first_seq(world) == 0 and _head(world).snapshot_seq < 0
+
+
+def test_a_partition_refusal_names_the_way_out_when_no_prune_is_committed(world):
+    """A candidate whose snapshot rows do not partition the prefix (here: a row at seq 0, which no prune writes) is
+    refused, and — with no prune committed, so nothing relies on the archive — the refusal names moving it aside."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    m = _manifest(world)
+    m["snapshots"].insert(0, dict(m["snapshots"][0], base_seq=0, base_count=0))
+    _mpath(world).write_text(json.dumps(m, indent=2), encoding="utf-8")
+    with pytest.raises(prune.PruneUnsafe, match=r"do not partition .*move .*archive aside \(no prune is committed"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert _first_seq(world) == 0 and _head(world).snapshot_seq < 0

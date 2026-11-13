@@ -1235,12 +1235,39 @@ def archive_copy(store, K: int, snap_payload: dict, *, adir: Optional[Path] = No
         # would make every later prune's archive inconsistent with what the owner commits).
         vok, vwhy = verify_with_archive(store, adir=ad, pending=snap_payload, manifest=existing)
         if not vok:
+            # A row at exactly this boundary that no owner-signed head commits (an earlier attempt at K whose root
+            # an older build chained differently) is superseded by this prune's own row — but only when the
+            # candidate then verifies for exactly this prune; otherwise the refusal stands as it was.
+            replaced = _superseding_uncommitted_rows_at(existing, srow)
+            if replaced is not None and verify_with_archive(store, adir=ad, pending=snap_payload,
+                                                            manifest=replaced)[0]:
+                existing, vok = replaced, True
+        if not vok:
             raise PruneUnsafe(f"the archive does not verify for a prune at {K} ({vwhy}) — nothing was pruned")
         _verify_archive_shape(existing, base_prev_hash=snap_payload["base_prev_hash"])
         atomic_write_text(manifest_path, json.dumps(existing, indent=2), prefix=".amanifest-")
         fsync_dir(ad)
     return {"copied": copied, "archived_segments": len(existing["segments"]),
             "archive_dir": str(ad), "verified": True}
+
+
+def _superseding_uncommitted_rows_at(manifest: dict, srow: dict) -> Optional[dict]:
+    """A copy of `manifest` whose snapshot rows at `srow`'s boundary — other than `srow` itself — are replaced by
+    `srow`, or None when there is none to replace. Only rows ABOVE the boundary the signed head commits: a committed
+    row is never touched."""
+    from .checkpoint import _read_head_on_disk
+    head = _read_head_on_disk()
+    committed = head.base_seq if head is not None and head.snapshot_seq >= 0 else 0
+    k = int(srow["base_seq"])
+    if k <= committed:
+        return None
+    try:
+        stale = [r for r in manifest["snapshots"] if int(r["base_seq"]) == k
+                 and r.get("cumulative_merkle_root") != srow["cumulative_merkle_root"]]
+        rows = [r for r in manifest["snapshots"] if int(r["base_seq"]) != k]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None                                       # a malformed row: the refusal stands as it was
+    return {**manifest, "snapshots": [*rows, srow]} if stale else None
 
 
 def _copy_segments(store, archived: list[Segment], existing: dict, have: set,
@@ -1561,6 +1588,22 @@ def _prior_snapshot(store) -> Optional[dict]:
     return {**rec.payload, "snapshot_seq": rec.seq}
 
 
+def _floor_up_to_committed(head) -> bool:
+    """The prune commit moves the durable floor WITH its head; one interrupted between the two (a crash, an IO
+    error) leaves the floor on the pre-prune head. A re-run completes that half: the floor is advanced (owner-signed,
+    monotonic, under the floor lock) to the verified committed head. True iff it moved."""
+    from ..reuse import KeyPair
+    from .checkpoint import _owner_keys
+    from .floor import advance_floor, floor_lock, load_floor
+    with floor_lock():
+        fl = load_floor()
+        if fl is not None and fl.base_seq >= head.base_seq:
+            return False
+        priv, pub = _owner_keys()
+        advance_floor(head, owner_key=KeyPair(public_key_b64=pub, private_key_b64=priv), _locked=True)
+    return True
+
+
 def _append_snapshot_idempotent(store, snap_payload: dict) -> int:
     """Append the `kind="snapshot"` fold, unless an identical one (same cumulative_merkle_root + base_seq)
     already sits in the recent tail — the RESUME guard: a prune retried after a crash between the snapshot
@@ -1617,6 +1660,7 @@ def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
                               f"the archive; any pruned segment files still on disk are kept until it verifies")
         return {"base_seq": K, "snapshot_seq": committed.snapshot_seq, "head_last_seq": committed.last_seq,
                 "archived_segments": 0, "files_deleted": 0, "already_complete": True,
+                "floor_advanced": _floor_up_to_committed(committed),
                 "cumulative_merkle_root": committed.cumulative_merkle_root}
     if K <= committed_base:
         raise PruneUnsafe(f"the spine is already pruned at {committed_base}; a prune at {K} is not past it")

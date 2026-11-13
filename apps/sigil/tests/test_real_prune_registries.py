@@ -2360,3 +2360,261 @@ def test_a_head_naming_a_snapshot_outside_its_own_signed_window_is_refused(world
     with pytest.raises(SnapshotError, match="outside its own signed window"):
         SnapshotState.load(world.store())
     assert _not_released(_default_key_reads(world))
+
+
+# ======================================================================================================
+# An interrupted rotation: finished only from exactly the head it left behind, and every refusal names one step
+# ======================================================================================================
+def _sign_child_as(store, priv: str, parent, *, upto: int, snapshot_seq: int) -> None:
+    """A pruned head signed with `priv` that is a CHILD of `parent` (its prev_head_hash names it), over the live
+    window up to `upto`, naming `snapshot_seq`."""
+    from vigil_core.chain import _head_payload
+
+    from sigil.reuse import Signature, SignedChainHead, evidence_signing_bytes, sign
+    live = [e for e in store.entries() if parent.base_seq <= e.seq <= upto]
+    head = SignedChainHead(schema_version=2, engagement_slug=parent.engagement_slug, last_seq=live[-1].seq,
+                           entry_count=parent.base_seq + len(live), head_hash=live[-1].entry_hash,
+                           base_seq=parent.base_seq, base_prev_hash=parent.base_prev_hash,
+                           base_count=parent.base_seq, cumulative_merkle_root=parent.cumulative_merkle_root,
+                           snapshot_seq=snapshot_seq, prev_head_hash=_fl.head_sig_hash(parent))
+    msg = evidence_signing_bytes(_head_payload(head))
+    head = head.model_copy(update={"signatures": [Signature(key_id=cfg.OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
+    _cp.HEAD_PATH.write_text(head.model_dump_json(), encoding="utf-8")
+
+
+@pytest.mark.parametrize("past_rotation", [True, False])
+def test_finish_admits_only_the_head_the_floor_records_from_before_the_rotation(world, past_rotation):
+    """`--finish` admits the retired key's head ONLY when it is exactly the head the durable floor records and lies
+    before the rotation record. A child of the floor's head signed by the retired key — reaching past the rotation
+    and naming a snapshot that releases the kill switch, or even one that stays before it — is never re-signed."""
+    import time
+
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    old = world.owner
+    floor_head = _cp.standing_pruned_head(world.store())
+    if not past_rotation:
+        world.apply([_noise(60)])                          # a record the retired key may still cover
+    new_kp, rot_seq = kh.rotate(world.store(), issued_at=time.time())   # ... interrupted before the re-sign
+    if past_rotation:
+        fseq = _forged_snapshot(world, new_kp.public_key_b64, floor_head.snapshot_seq)
+        _sign_child_as(world.store(), old.private_key_b64, floor_head, upto=fseq, snapshot_seq=fseq)
+    else:
+        _sign_child_as(world.store(), old.private_key_b64, floor_head, upto=rot_seq - 1,
+                       snapshot_seq=floor_head.snapshot_seq)
+    before = _head_bytes(world)
+    with pytest.raises(_cp.CheckpointRefused, match="cannot be finished as an interrupted rotation"):
+        _cp.checkpoint(world.store(), admit_incumbent=True)
+    assert _head_bytes(world) == before
+    assert _not_released(_default_key_reads(world))
+
+
+def _interrupted_rotation_world(world):
+    """A pruned spine, re-signed once more after the prune, whose `sigil key rotate` then appended its rotation
+    record and died before the re-sign. Returns the file-level copies of (head.json, floor.json) taken after the
+    prune and before that last re-sign (an owner-signed pair one step behind)."""
+    import time
+
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    copies = ((world.root / "head.json").read_bytes(), (world.root / "floor.json").read_bytes())
+    world.apply([_noise(70)])
+    _cp.checkpoint(world.store())
+    kh.rotate(world.store(), issued_at=time.time())
+    return copies
+
+
+@pytest.mark.parametrize("floor_state", ["deleted", "corrupt", "out of step"])
+def test_an_unfinishable_interrupted_rotation_names_one_recovery_on_every_path(world, monkeypatch, capsys,
+                                                                                floor_state):
+    """Interrupted rotation + a floor that is deleted, corrupt, or records another head: the routine sign,
+    `--finish` and `sigil floor reset --yes` all refuse, write nothing, and name the SAME one step (put back the
+    head and floor from a file-level copy, then `--finish`) — never each other. Taking that step finishes it."""
+    from types import SimpleNamespace as NS
+    cli = _cli(world, monkeypatch)
+    head_copy, floor_copy = _interrupted_rotation_world(world)
+    floor_path = world.root / "floor.json"
+    if floor_state == "deleted":
+        floor_path.unlink()
+    elif floor_state == "corrupt":
+        floor_path.write_text("{not json", encoding="utf-8")
+    else:
+        floor_path.write_bytes(floor_copy)                 # a genuine owner-signed floor, one head behind
+    before = (_head_bytes(world), floor_path.read_bytes() if floor_path.exists() else None)
+    messages = []
+    for path in (lambda: _cp.checkpoint(world.store()),
+                 lambda: _cp.checkpoint(world.store(), admit_incumbent=True),
+                 lambda: _cp.checkpoint(world.store(), force=True)):
+        with pytest.raises(_cp.CheckpointRefused) as e:
+            path()
+        messages.append(str(e.value))
+        assert (_head_bytes(world), floor_path.read_bytes() if floor_path.exists() else None) == before
+    for path in (lambda: cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False)),
+                 lambda: cli.cmd_floor(NS(action="reset", yes=True))):
+        with pytest.raises(_cp.CheckpointRefused) as e:
+            path()
+        messages.append(str(e.value))
+    assert "rotation FINISHED" not in capsys.readouterr().out
+    for m in messages:
+        assert "cannot be finished as an interrupted rotation" in m and _cp._ROTATION_RECOVERY in m, m
+        assert "floor reset --yes" not in m, m
+    # the one step: put back the head and floor from the copy, then finish
+    (world.root / "head.json").write_bytes(head_copy)
+    floor_path.write_bytes(floor_copy)
+    cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False))
+    assert "rotation FINISHED" in capsys.readouterr().out
+    ok, why = _cp.verify_checkpoint(world.store())
+    assert ok and why.endswith("(current)"), why
+    assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
+
+
+def test_a_finishable_interrupted_rotation_names_finish_on_every_path(world, monkeypatch):
+    """With the floor intact, the routine sign and `sigil floor reset --yes` both name `--finish` (floor reset never
+    finishes a rotation itself, and never re-anchors the spine as un-pruned)."""
+    _interrupted_rotation_world(world)
+    before = _head_bytes(world)
+    for force in (False, True):
+        with pytest.raises(_cp.CheckpointRefused, match="finish it with `sigil key rotate --finish --yes`"):
+            _cp.checkpoint(world.store(), force=force)
+        assert _head_bytes(world) == before
+
+
+def test_finish_never_signs_with_an_on_disk_key_that_is_not_the_succession_tip(world, monkeypatch, capsys):
+    """A rotation that died between appending its succession record and storing the new key leaves the RETIRED key
+    on disk while the succession tip is the new one. `--finish` must not sign with the on-disk key (that head would
+    verify nowhere) nor report success: it refuses, writes nothing, and names the key files to put back."""
+    import time
+    from types import SimpleNamespace as NS
+
+    from sigil.governor import identity as idn
+    from sigil.governor import key_history as kh
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+
+    def dies(_kp):
+        raise OSError("power loss before the new key was stored (test)")
+
+    with monkeypatch.context() as m:
+        m.setattr(idn, "set_owner_key", dies)
+        with pytest.raises(OSError):
+            kh.rotate(world.store(), issued_at=time.time())
+    kh.clear_resolver_cache()
+    succ = _cp.owner_succession(world.store())
+    assert succ is not None and succ.current != world.owner.public_key_b64 == identity.owner_pubkey()
+    before = _head_bytes(world)
+    for path in (lambda: cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False)),
+                 lambda: _cp.checkpoint(world.store()),
+                 lambda: _cp.checkpoint(world.store(), force=True)):
+        with pytest.raises(_cp.CheckpointRefused, match="not the validated owner-key succession tip") as e:
+            path()
+        assert _cp._KEY_RECOVERY in str(e.value)
+        assert _head_bytes(world) == before
+    assert "rotation FINISHED" not in capsys.readouterr().out
+
+
+def test_an_interrupted_rotation_in_the_prune_crash_window_is_finished_never_reset(world):
+    """Pruned head committed but the manifest not yet rebased (the prefix is still on disk, from genesis), then a
+    rotation interrupted before its re-sign. That is not a reset spine: the routine sign names `--finish`,
+    `sigil floor reset` never re-anchors it as un-pruned, and `--finish` completes it."""
+    import time
+
+    from sigil.governor import key_history as kh
+    world.apply([lambda R: R.kill.engage(reason="incident"),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1)])
+    world.seal_with_tail(checkpoint=True)
+    s = world.store()
+    payload = prune.snapshot_payload(s, k)
+    prune.archive_copy(s, k, payload)
+    seq = prune._append_snapshot_idempotent(s, payload)
+    _cp.sign_pruned_head(s, base_seq=k, base_prev_hash=payload["base_prev_hash"],
+                         cumulative_merkle_root=payload["cumulative_merkle_root"], snapshot_seq=seq)
+    assert [r.seq for r in world.store().iter_records()][0] == 0
+    kh.rotate(world.store(), issued_at=time.time())
+    before = _head_bytes(world)
+    for force in (False, True):
+        with pytest.raises(_cp.CheckpointRefused, match="key rotate --finish --yes") as e:
+            _cp.checkpoint(world.store(), force=force)
+        assert "reset or replaced" not in str(e.value)
+        assert _head_bytes(world) == before
+    head = _cp.checkpoint(world.store(), admit_incumbent=True)
+    assert (head.schema_version, head.base_seq, head.snapshot_seq) == (2, k, seq)
+    world.store().finish_prune()
+    assert [r.seq for r in world.store().iter_records()][0] == k
+    assert _cp.verify_checkpoint(world.store())[0]
+    assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
+
+
+def test_a_floor_reset_judges_the_head_it_read_before_the_spine(world, monkeypatch):
+    """`sigil floor reset --yes` over a reset spine supersedes only the pruned head it JUDGED. The judged head is
+    read before the spine: a different pruned head landing right after the spine read still stands."""
+    _pruned_killswitch_world(world)
+    world.store().reset()
+    s = world.store()
+    s.append(kind="event", source="t", actor="u", payload={"signal": "noise", "i": 1})
+    judged = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    landed = judged.model_copy(update={"entry_count": judged.entry_count + 1}).model_dump_json()
+    real_entries = SpineStore.entries
+    fired = {"n": 0}
+
+    def entries_then_a_head_lands(self, *a, **kw):
+        out = real_entries(self, *a, **kw)
+        if not fired["n"]:
+            fired["n"] = 1
+            (world.root / "head.json").write_text(landed, encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(SpineStore, "entries", entries_then_a_head_lands)
+    _cp.checkpoint(s, force=True)
+    assert fired["n"] == 1
+    assert _head_bytes(world).decode() == landed
+
+
+@pytest.mark.parametrize("forged", ["past the rotation", "snapshot outside its window", "floor by another key"])
+def test_finish_refuses_a_retired_key_head_even_with_a_floor_naming_it(world, forged):
+    """A holder of the retired key can sign a floor as well as a head. `--finish` still admits only a head inside
+    the retired key's own epoch whose snapshot record lies in its signed window, and only with a floor the retired
+    key signed: each forgery below is refused, writes nothing, and never releases the kill switch."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    _pruned_killswitch_world(world)
+    old = world.owner
+    floor_head = _cp.standing_pruned_head(world.store())
+    new_kp, rot_seq = kh.rotate(world.store(), issued_at=time.time())   # ... interrupted before the re-sign
+    fseq = _forged_snapshot(world, new_kp.public_key_b64, floor_head.snapshot_seq)
+    if forged == "past the rotation":
+        _sign_child_as(world.store(), old.private_key_b64, floor_head, upto=fseq, snapshot_seq=fseq)
+        floor_key = old
+    elif forged == "snapshot outside its window":
+        _sign_child_as(world.store(), old.private_key_b64, floor_head, upto=rot_seq - 1, snapshot_seq=fseq)
+        floor_key = old
+    else:
+        floor_key = generate_keypair()                    # the floor's own signature is not the retired key's
+    disk = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    _fl.reset_floor(disk, owner_key=floor_key)
+    before = _head_bytes(world)
+    with pytest.raises(_cp.CheckpointRefused, match="cannot be finished as an interrupted rotation"):
+        _cp.checkpoint(world.store(), admit_incumbent=True)
+    assert _head_bytes(world) == before
+    assert _not_released(_default_key_reads(world))
+
+
+def test_finish_reports_failure_when_the_head_still_does_not_verify(world, monkeypatch, capsys):
+    """`sigil key rotate --finish --yes` reports success only once the head verifies under the current key."""
+    import time
+    from types import SimpleNamespace as NS
+
+    from sigil.governor import key_history as kh
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    kh.rotate(world.store(), issued_at=time.time())
+    monkeypatch.setattr(cli, "checkpoint", lambda *a, **kw: None)      # a re-sign that did not land
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False))
+    captured = capsys.readouterr()
+    assert e.value.code == 2 and "NOT finished" in captured.err and "rotation FINISHED" not in captured.out

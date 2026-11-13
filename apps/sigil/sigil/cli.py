@@ -1862,9 +1862,9 @@ def cmd_key(a) -> None:
             print(f"  epoch {e.epoch:>3}  seq [{e.start}, {end})  {e.pubkey}")
         print(f"validated current   : {succ.current}")
         if cur and cur != succ.current:
+            from .spine.checkpoint import _KEY_RECOVERY
             from .spine.snapshot import live_window_start
-            fix = ("put back the owner key files of the validated tip from a file-level copy of SIGIL_HOME "
-                   "(re-genesis is refused on a hard-pruned spine)"
+            fix = (_KEY_RECOVERY.rstrip(".")
                    if live_window_start(store) > 0 or _head_declares_prune() else "recover with `sigil key re-genesis`")
             print(f"!! on-disk owner.pub ({cur}) is NOT the validated succession tip — tampered/inconsistent "
                   f"key state ({fix})", file=sys.stderr)
@@ -1883,6 +1883,10 @@ def cmd_key(a) -> None:
             # head is still under the retired key, which no routine sign carries forward (see
             # `standing_pruned_head`). Deliberate and owner-run, like `sigil floor reset --yes`.
             checkpoint(store, admit_incumbent=True)
+            ok, why = verify_checkpoint(store)
+            if not ok:                                      # never report a rotation finished that does not verify
+                print(f"!! the rotation is NOT finished: the head does not verify ({why})", file=sys.stderr)
+                sys.exit(2)
             print("rotation FINISHED: the pruned head is re-signed under the current owner key.")
             return
         # A pruned spine whose head could not be re-signed: refuse BEFORE rotating. The head validated here (under
@@ -2008,6 +2012,9 @@ def cmd_spine(a) -> None:
             print(f"prune UNSAFE at K={a.boundary}: {e}", file=sys.stderr)
             sys.exit(2)
         if rep.get("already_complete"):
+            if rep.get("floor_advanced"):
+                print(f"the prune at {rep['base_seq']} was already committed (its head is signed); its durable "
+                      f"anti-rollback floor is now brought up to that head.")
             print(f"the prune at {rep['base_seq']} was already committed (its head is signed); its cleanup is "
                   f"complete — nothing more to do.")
             return
