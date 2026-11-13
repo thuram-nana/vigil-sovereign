@@ -182,9 +182,12 @@ def test_the_drain_arms_the_alarm_exactly_when_plan_checkout_is_on():
     import inspect
 
     from sigil import cli
-    src = inspect.getsource(cli.cmd_billing_drain)
+    src = inspect.getsource(cli.cmd_billing_drain)                       # the Flutterwave lane: the plan flag decides
     assert "alarm = billing_plan_alarm_enabled()" in src
-    assert src.count("alarm_unaccounted_plans=alarm") == 2               # provider AND signer
+    assert "alarm_unaccounted_plans=alarm" in src and "alarm=alarm" in src   # the provider AND the signer
+    src = inspect.getsource(cli._stripe_billing_watcher)                 # the Stripe lane: always loud
+    assert "alarm = True" in src and "alarm_unaccounted_plans=alarm" in src and "alarm=alarm" in src
+    assert "alarm_unaccounted_plans=alarm" in inspect.getsource(cli._billing_signer)   # the shared signer builder
 
 
 # --- CHK-1b red-pen folds -----------------------------------------------------------------------------------------

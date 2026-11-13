@@ -10,6 +10,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * floor-divide the credits instead of ceil                                  -> test_credits_round_up_and_clamp
   * drop the reservation clamp                                                -> test_credits_round_up_and_clamp
   * give the margin a default, or let it reach 0 or 1                        -> test_the_target_margin_is_required_exact_and_bounded
+  * read the margin while a retired pricing setting is still present           -> test_a_retired_pricing_setting_is_refused
   * price an unknown model at zero                                            -> test_an_unknown_model_is_refused
   * round a price finer than $0.001/MTok instead of refusing it               -> test_price_rows_are_exact_nano_usd
 """
@@ -163,6 +164,26 @@ def test_the_target_margin_is_required_exact_and_bounded():
                                floor=0, cap=99) == 4
     assert mm.credits_for_cost(3 * mm.CREDIT_NANO_USD + 1, markup=mm.billing_markup({mm.MARGIN_ENV: "0.25"}),
                                floor=0, cap=99) == 5
+
+
+def test_a_retired_pricing_setting_is_refused():
+    # ONE pricing number: a deploy still carrying an earlier knob is refused, whatever its value, so it can never
+    # sit next to the margin unnoticed
+    assert mm.OBSOLETE_PRICING_ENVS == ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K")
+    assert mm.obsolete_pricing_settings({mm.MARGIN_ENV: "0.5"}) == ()
+    for name in mm.OBSOLETE_PRICING_ENVS:
+        for value in ("", "3", "junk"):
+            env = {mm.MARGIN_ENV: "0.5", name: value}
+            assert mm.obsolete_pricing_settings(env) == (name,)
+            for fn in (mm.target_margin, mm.billing_markup):
+                with pytest.raises(mm.MeteringError) as exc:
+                    fn(env)
+                assert str(exc.value) == (f"{name} is set: remove it; the only pricing input is "
+                                          f"VIGIL_BILLING_TARGET_MARGIN")
+    both = {n: "1" for n in mm.OBSOLETE_PRICING_ENVS}
+    assert mm.obsolete_pricing_settings(both) == mm.OBSOLETE_PRICING_ENVS
+    with pytest.raises(mm.MeteringError, match="VIGIL_BILLING_MARKUP_K is set"):
+        mm.target_margin(both)                                           # refused even with no margin at all
 
 
 def test_the_cancel_settlement_defaults_to_metered_and_refuses_an_unknown_value():

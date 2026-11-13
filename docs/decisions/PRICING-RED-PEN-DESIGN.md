@@ -46,10 +46,16 @@ flag, so the owner can change any of them without a release. Nothing here is liv
 
 ### 1.1a Owner decisions of 2026-11-11 (later the same day)
 
-- **Margin:** every scan is priced at an **owner-set target margin over its direct cost** (recorded privately,
+- **Margin:** every scan is priced at an **owner-set target margin over its direct cost** (superseded 2026-11-13: the
+  margin is over the **metered AI cost only** — see "One pricing number" below) (recorded privately,
   outside this public repository). It is applied through `VIGIL_BILLING_TARGET_MARGIN` at deploy, which has **no
   default in the code**: while it is unset or invalid, metered pricing stays off (every metered path fails closed).
   Calibration (M5) measures every direct cost (§1.2 c).
+- **One pricing number (2026-11-13):** the target margin is the margin over the run's **metered AI cost only** (the
+  model requests the gateway meters); payment fees, hosting and workers are outside it, so the all-in margin is
+  lower. It is the only pricing input: the margin dashboard's target line is drawn from it, and the earlier knobs
+  `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are refused while present (`vigil doctor` reports a hard
+  issue; metered launches refuse and metered charges wait).
 - **Seats:** $25 per seat (assumed per month). Whether a seat includes credits is open.
 - **Free trial:** a real scan that shows partial results; the full report unlocks once the organisation buys credits
   (any pack, from $5). One trial per verified email AND per verified domain. Ownership proof is still required
@@ -64,7 +70,7 @@ flag, so the owner can change any of them without a release. Nothing here is liv
 |---|---|---|
 | (a) | **The proposed numbers**: the 25-credit floor, the tier budgets 450 / 5,000 / 20,000, the top-up limits (§4.6), gateway concurrency 4 per tenant / 32 global. The owner has not confirmed any of them | env-overridable defaults behind default-OFF flags |
 | (b) | **The margin value.** Decided by the owner (§1.1a) and set at deploy from the owner's private record; never committed | `VIGIL_BILLING_TARGET_MARGIN` (required, no default); `vigil doctor` flags metered billing without it (M1c) |
-| (c) | **Cost basis.** The formula in §4.1 meters the **AI cost only**; the owner wants all direct costs counted (AI, scan workers, storage, payment processing). Calibration (M5) must measure worker and storage cost per run, or derive an overhead factor, and K (or an explicit overhead term) must then be set from the measured total | not built; M5 |
+| (c) | **Cost basis.** The formula in §4.1 meters the **AI cost only**, and the target margin is the margin over that metered AI cost. The owner's profit target is measured **after all costs** (AI, card fees, hosting, workers, storage). Calibration (M5) reports the measured fee and hosting fraction per run, and the owner sets the target margin from it so the all-in margin lands on the target. There is no second pricing knob | not built; M5 |
 | (d) | **Cancellation.** Whether a run the customer cancels is charged for the usage so far (this design's proposal, §4.4) or fully refunded. Decided by the owner (2026-11-13): a cancelled run pays for what it used, and a launch the customer paused and never resumed is charged the same way | `VIGIL_BILLING_CANCEL_SETTLEMENT` = `metered` (the default when unset) or `refund`; an unrecognised value refuses metered launches and defers cancelled-run settles, and `vigil doctor` reports it as a hard issue (M1c) |
 
 ## 2. The products
@@ -124,11 +130,11 @@ charge_credits = min(reservation, max(FLOOR, ceil(cost_usd / (1 − target_margi
 - `cost_usd` is computed on the sovereign side by the model gateway (§5) from the usage Anthropic reports on every
   response it forwards, priced with the cost table (§4.2). It is never an amount the offense plane reports, and never
   the agent runtime's client-side estimate.
-- `target_margin` (`VIGIL_BILLING_TARGET_MARGIN`, a decimal strictly between 0 and 1) is the owner's, set at deploy;
-  the code has no default and refuses to price without it. **FLOOR = 25 credits** ($0.25) per run, covering worker
+- `target_margin` (`VIGIL_BILLING_TARGET_MARGIN`, a decimal strictly between 0 and 1) is the owner's margin over the
+  metered AI cost only, set at deploy; the code has no default and refuses to price without it. **FLOOR = 25 credits** ($0.25) per run, covering worker
   start-up (`VIGIL_RUN_FLOOR_CREDITS`), is a **proposed default, not owner-confirmed** (§1.2 a).
-- `cost_usd` is today the AI cost only. Workers, storage and payment processing are direct costs too; until M5
-  measures them per run, the price undercounts them (§1.2 c).
+- `cost_usd` is today the AI cost only. Workers, storage and payment processing are direct costs too; the target
+  margin is set (from M5's measured fractions) so the all-in margin covers them (§1.2 c).
 - The charge never exceeds the reservation the customer approved.
 
 Because the charge follows the cost, a run that is cheaper or dearer than estimated is charged
@@ -158,7 +164,7 @@ uncached input token and fifty times a cached one. That is why a credit is not a
 ### 4.3 Reservation, live meter and settle
 
 1. The customer sets a budget; it is reserved from the wallet. The run's model grant (§5.1) caps its AI spend at
-   `floor(budget × $0.01 / K)`.
+   `floor(budget × $0.01 / markup)`, where `markup = 1 / (1 − target margin)` (`model_metering.billing_markup`).
 2. During the run the customer sees credits used and credits left, read from the gateway's meter.
 3. At completion the meter is closed and the run settles at `charge_credits`; the rest of the reservation is released.
    The meter cannot be closed while one of the run's requests is still in flight (the settle retries), so the total
@@ -400,7 +406,7 @@ Serial PR queue; each slice is default-OFF, tested both ways, mutation-checked a
 | M2 | Engine: the 90% wrap-up for the report reserve; `max` through Strix with a wire test; runtime caps from the grant as a second line of defence; continue = resume |
 | M3 | Catalog: the six packs and custom top-ups ($5–$500, the §4.6 limits), no bonus; the placeholder catalog retired |
 | M4 | Customer UX: the VIGIL naming sweep and the no-model-id test; target / depth / outcome choice; preflight; estimate, budget, live meter; the tenant statement (§5.4) |
-| M5 | Calibration: each tier N times against the loopback range and the CRUCIBLE corpus; the 10th / 50th / 90th percentiles become the estimates. It must also measure **worker and storage cost per run** (or derive an overhead factor) so the price counts every direct cost (§1.2 c), and re-derive K against the margin target (§1.2 b). Needs the owner's API key and a spend approval |
+| M5 | Calibration: each tier N times against the loopback range and the CRUCIBLE corpus; the 10th / 50th / 90th percentiles become the estimates. It must also measure **worker and storage cost per run** (or derive an overhead factor) and report the measured fee and hosting fraction per run, from which the owner sets the target margin so the all-in margin lands on the target (§1.2 c). Needs the owner's API key and a spend approval |
 | L1 | Live Max: one rate limit and connection cap per engagement at the egress proxy; agents on governed tools only; run-level hard stops |
 | R1 | Red-Pen engine: the workflows, the sandbox reproduction runner, certification through the oracle adapter |
 | R2 | Red-Pen · PR through the PR bot, with the severity marks and the **Fix this** action |

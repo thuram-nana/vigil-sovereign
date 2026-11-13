@@ -156,6 +156,32 @@ def test_dangling_tx_refs_report_only(tmp_path):
     assert sorted(p.name for p in spool.rglob("*")) == before  # nothing moved
 
 
+def test_dangling_tx_refs_read_stripe_bodies_with_the_stripe_provider(tmp_path):
+    """Stripe parity: a Stripe event carries the reference as data.object.client_reference_id (a checkout) or
+    data.object.metadata.tx_ref; the default (Flutterwave) reading never matches a Stripe body, and vice versa."""
+    spool = tmp_path / "spool"
+    for d in ("processed", "rejected", "retry"):
+        (spool / d).mkdir(parents=True)
+
+    def stripe(obj):
+        return json.dumps({"schema": "vigil.webhook.stripe.v1", "stripe_signature": "t=1,v1=00", "received_at": 1,
+                           "body_b64": base64.b64encode(json.dumps(
+                               {"type": "checkout.session.completed", "data": {"object": obj}}).encode()).decode()})
+    (spool / "processed" / "a.json").write_text(stripe({"id": "cs_test_1", "client_reference_id": "vigil:org_a:paid"}))
+    (spool / "rejected" / "b.json").write_text(stripe({"id": "in_1", "metadata": {"tx_ref": "vigil:org_a:quar"}}))
+    (spool / "retry" / "c.json").write_text(stripe({"id": "cs_test_2", "client_reference_id": "vigil:org_a:wait"}))
+    (spool / "processed" / "f.json").write_text(_env({"event": "charge.completed",
+                                                       "data": {"id": 3, "tx_ref": "vigil:org_a:flw"}}))
+    checkouts = [{"tx_ref": f"vigil:org_a:{n}", "created": 0.0} for n in ("paid", "quar", "wait", "lost", "flw")]
+    out = ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100, provider="stripe")
+    assert {(i["tx_ref"].rsplit(":", 1)[1], i["status"]) for i in out["items"]} == {
+        ("quar", "quarantined"), ("wait", "retrying"), ("lost", "no_webhook"), ("flw", "no_webhook")}
+    flw = ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100)
+    assert "vigil:org_a:paid" in {i["tx_ref"] for i in flw["items"]}       # a Stripe body is not a Flutterwave one
+    with pytest.raises(ValueError):
+        ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100, provider="paypal")
+
+
 def _cli(*args, env_extra=None):
     env = dict(os.environ, **(env_extra or {}))
     return subprocess.run([sys.executable, "-m", "sigil.cli", *args], capture_output=True, text=True, env=env,

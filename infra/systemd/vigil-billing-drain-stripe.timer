@@ -1,0 +1,14 @@
+# Every-60s trigger for the VIGIL money-IN billing drain, Stripe lane. OPT-IN — ships disabled like every timer.
+#   systemctl --user enable --now vigil-billing-drain-stripe.timer
+
+[Unit]
+Description=Every-60s trigger for the VIGIL money-IN billing-webhook drain (Stripe lane)
+Documentation=file:%h/vigil/docs/runbooks/GO-LIVE-quickstart.md
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+Unit=vigil-billing-drain-stripe.service
+
+[Install]
+WantedBy=timers.target

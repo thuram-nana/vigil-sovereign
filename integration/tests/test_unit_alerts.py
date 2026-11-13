@@ -102,7 +102,8 @@ def test_registered_units_and_timers_actually_exist_on_disk():
 # while that unit goes silently unwatched. Changing either set is therefore a DELIBERATE edit to this pin.
 _PINNED_OPTIONAL = {"vigil-finding-drain.service", "vigil-settle-drain.service",
                     "vigil-upgrade-drill.service",   # DEP-3: opt-in drill (deliberate pin edit)
-                    "vigil-billing-drain.service"}   # Front B: opt-in money-IN drain (deliberate pin edit)
+                    "vigil-billing-drain.service",   # Front B: opt-in money-IN drain (deliberate pin edit)
+                    "vigil-billing-drain-stripe.service"}   # Stripe lane of the money-IN drain (deliberate pin edit)
 _PINNED_ALWAYS_ON = {
     "vigil-backup.service", "vigil-backup-push.service", "vigil-backup-drill.service",
     "vigil-ha-mirror.service", "vigil-integrity.service", "vigil-posture.service",

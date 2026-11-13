@@ -5,9 +5,12 @@
     charge_credits = min(reservation, max(FLOOR, ceil(cost_usd / (1 − target_margin) × 100)))
 
 where ``cost_usd`` is what the run's model requests cost VIGIL, priced from the usage Anthropic reports on each
-response, and ``target_margin`` is the owner's gross margin over direct cost, set at DEPLOY time
-(``VIGIL_BILLING_TARGET_MARGIN``) and deliberately never committed: there is no default, and while it is unset every
-metered price raises, so metered billing cannot run on a guessed margin. This module is that arithmetic and nothing else: the price table, parsing a response's ``usage`` (a
+response, and ``target_margin`` is the owner's margin over that METERED AI cost only (the model requests the
+gateway meters; payment fees, hosting and every other cost are outside it, so the all-in margin is lower). It is set
+at DEPLOY time (``VIGIL_BILLING_TARGET_MARGIN``), is the ONLY pricing input, and is deliberately never committed:
+there is no default, and while it is unset every metered price raises, so metered billing cannot run on a guessed
+margin. A retired pricing setting (:data:`OBSOLETE_PRICING_ENVS`) still present in the environment is refused the
+same way, so no second pricing knob can sit next to the margin unnoticed. This module is that arithmetic and nothing else: the price table, parsing a response's ``usage`` (a
 non-streamed body or a stream's ``message_start`` / ``message_delta`` events), the cost, the credits, and the USD
 cap a reservation buys. The sovereign model gateway meters with it; the offense-side runtime caps (M2) price with
 the same table, so both planes price a token identically.
@@ -36,8 +39,9 @@ from typing import Any, Mapping, Optional
 
 __all__ = [
     "CREDIT_NANO_USD", "DEFAULT_PRICES", "MeteringError", "PriceRow", "StreamMeter", "Usage",
-    "CANCEL_ENV", "CANCEL_POLICIES", "DEFAULT_RUN_MODEL", "MARGIN_ENV", "RUN_MODEL_ENV", "billing_markup",
-    "cancel_settlement", "cost_nano_usd", "run_model", "credits_for_cost", "format_usd", "price_table", "run_floor_credits",
+    "CANCEL_ENV", "CANCEL_POLICIES", "DEFAULT_RUN_MODEL", "MARGIN_ENV", "OBSOLETE_PRICING_ENVS", "RUN_MODEL_ENV",
+    "billing_markup", "cancel_settlement", "cost_nano_usd", "run_model", "credits_for_cost", "format_usd",
+    "obsolete_pricing_settings", "obsolete_setting_refusal", "price_table", "run_floor_credits", "target_margin",
     "usage_from_api", "usd_cap_nano_for_credits",
 ]
 
@@ -52,6 +56,9 @@ DEFAULT_CANCEL_SETTLEMENT = "metered"   # owner decision 2026-11-13: a cancelled
 RUN_MODEL_ENV = "VIGIL_RUN_MODEL"
 DEFAULT_RUN_MODEL = "claude-opus-4-8"
 CANCEL_POLICIES = ("metered", "refund")
+#: Pricing settings an earlier design read. None is read now: the margin is the one pricing input, so a deploy that
+#: still carries one of these is refused rather than silently ignored.
+OBSOLETE_PRICING_ENVS = ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K")
 DEFAULT_FLOOR_CREDITS = 25
 _MAX_MARKUP = Fraction(100)               # a sanity bound: the margin is at most 0.99, so the markup at most 100
 _MAX_TOKENS_PER_FIELD = 10 ** 12          # far above any real response; bounds a hostile / corrupt count
@@ -372,12 +379,29 @@ def cost_nano_usd(usage: Usage, model: str, prices: "Optional[Mapping[str, Price
 # Credits
 # ---------------------------------------------------------------------------------------------------------------
 
-def target_margin(env: Optional[Mapping[str, str]] = None) -> Fraction:
-    """The owner's target gross margin over direct cost (``VIGIL_BILLING_TARGET_MARGIN``), as an exact fraction:
-    a decimal strictly between 0 and 1 (``0.4`` = 40%), at most 0.99. It has NO default — the value is the owner's
-    and is set at deploy, never in this repository — so an unset, empty or malformed value RAISES, and every metered
-    price (and the launch that would need one) is refused. Never falls back to a guess."""
+def obsolete_pricing_settings(env: Optional[Mapping[str, str]] = None) -> "tuple[str, ...]":
+    """The retired pricing settings (:data:`OBSOLETE_PRICING_ENVS`) present in ``env``, set to anything at all
+    (an empty value is still a stale line in the deploy). Doctor reports each as a hard issue."""
     env = os.environ if env is None else env
+    return tuple(name for name in OBSOLETE_PRICING_ENVS if name in env)
+
+
+def obsolete_setting_refusal(name: str) -> str:
+    """The one sentence every refusal of a retired pricing setting uses (billing and doctor alike)."""
+    return f"{name} is set: remove it; the only pricing input is {MARGIN_ENV}"
+
+
+def target_margin(env: Optional[Mapping[str, str]] = None) -> Fraction:
+    """The owner's target margin (``VIGIL_BILLING_TARGET_MARGIN``) as an exact fraction: a decimal strictly between 0
+    and 1, at most 0.99. It is the margin over the run's METERED AI cost only — the model requests the gateway
+    meters, priced from the table here. Payment fees, hosting and every other cost are not in it, so the all-in
+    margin is lower than this number. It is the only pricing input. It has NO default — the value is the owner's
+    and is set at deploy, never in this repository — so an unset, empty or malformed value RAISES, and every metered
+    price (and the launch that would need one) is refused. A retired pricing setting still present
+    (:func:`obsolete_pricing_settings`) raises too. Never falls back to a guess."""
+    env = os.environ if env is None else env
+    for name in obsolete_pricing_settings(env):
+        raise MeteringError(obsolete_setting_refusal(name))
     raw = env.get(MARGIN_ENV)
     if raw is None or not raw.strip():
         raise MeteringError(f"{MARGIN_ENV} is not set: metered pricing stays off until the deploy sets the owner's "
@@ -395,7 +419,7 @@ def target_margin(env: Optional[Mapping[str, str]] = None) -> Fraction:
 
 
 def billing_markup(env: Optional[Mapping[str, str]] = None) -> Fraction:
-    """The markup ``1 / (1 − target_margin)`` as an exact fraction (> 1): credits charged = direct cost × markup ×
+    """The markup ``1 / (1 − target_margin)`` as an exact fraction (> 1): credits charged = metered AI cost × markup ×
     100. Raises when the margin is unset or invalid (:func:`target_margin`)."""
     return 1 / (1 - target_margin(env))
 

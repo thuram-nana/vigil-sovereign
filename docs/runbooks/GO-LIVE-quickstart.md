@@ -167,6 +167,38 @@ in-flight work. See `infra/systemd/vigil-billing-drain.service` for secret injec
 webhook at the operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.
 
+## 9b. (Optional) Stripe instead of Flutterwave (default-OFF)
+
+Stripe is a second processor with the same money rules: the proxy checks each delivery's `Stripe-Signature`
+and spools it; the drain re-verifies that signature, **re-fetches** the Checkout Session / Invoice /
+Subscription from Stripe with your key, and only then lets the owner catalog decide the credit. Nothing is
+ever minted from the webhook body. Every setting below is default-OFF; secrets come from your secret manager.
+
+1. **Stripe dashboard.** Create a **restricted** API key (read Checkout Sessions, Invoices, Subscriptions;
+   write Checkout Sessions) and pin the API version you test against (one that accepts the Checkout Session
+   `adaptive_pricing` setting: every session VIGIL creates turns it off). Turn **Adaptive Pricing off** in the
+   Dashboard as well (the charge must be in the catalog currency). Stripe checkout charges only currencies whose
+   Stripe minor unit is confirmed to match the catalog's (USD today). Add a webhook endpoint at `https://<operator ingress>/webhooks/stripe`
+   subscribed to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed`.
+2. **Proxy route.** Set `VIGIL_STRIPE_WEBHOOK_SPOOL` (e.g. `$SIGIL_HOME/stripe-billing-spool`) and
+   `VIGIL_STRIPE_WEBHOOK_SECRET` (the endpoint's signing secret; it must differ from the Flutterwave one).
+3. **Drain.** Install `infra/systemd/vigil-billing-drain-stripe.{service,timer}` with its env file:
+   `VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1`, `VIGIL_BILLING_ENABLE_STRIPE=1`, the same webhook secret,
+   `VIGIL_STRIPE_SECRET_KEY` (the restricted key; its live/test prefix sets the mode) and
+   `VIGIL_STRIPE_API_VERSION`. Its spool must equal the proxy's and must not be the Flutterwave spool. The
+   webhook secret must be the proxy's exact value: a delivery the drain cannot verify is quarantined and the unit
+   alarms (rotate both together). The Stripe drain always alarms on a paid charge it cannot credit.
+4. **Prove it in test mode first**: a top-up purchase, a plan purchase, a renewal and a failed renewal (Stripe
+   test clocks), each credited exactly once and visible in the tenant's billing history.
+5. **Checkout.** Only then set `VIGIL_BILLING_PROVIDER=stripe` for the customer checkout (cockpit env), and
+   finally swap in the live key and live endpoint secret. Enabling checkout before the drain would take payment
+   with no credit.
+
+`sigil ops-sweep tx-refs --provider stripe --spool <stripe spool> --checkouts <file>` reports Stripe checkouts
+that never reached a drained webhook. Webhook-driven cancellation is not acted on: a cancelled plan expires at
+the end of its paid period, as with Flutterwave.
+
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`
 
 With `VIGIL_POSTURE=production`, `vigil up` / `vigil engage` **refuse to start** unless **all five** hold
