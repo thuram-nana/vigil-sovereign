@@ -18,6 +18,8 @@ is unsigned, so it is only ever used to REFUSE a release, never to allow anythin
 under the owner key valid AT ITS SEQ (succession-aware), fail-closed: an unsigned / forged / wrong-epoch record is
 ignored. It is a LIVE scan (no snapshot seed, like ``scan_settlement``): a caller scans in full BEFORE taking the
 settle lock and continues the scan (``since``) inside it. ``org_id`` / ``slug`` narrow the scan to one target.
+With ``evidence=True`` the same pass also keeps, per settled lease, exactly what ``scan_settlement`` of it returns
+(``ReservationIndex.settlement``), so ``ops-sweep reservations`` reads every lease's settlement in one pass.
 
 SOVEREIGN PLANE ONLY (FATAL-2): framework-free, ``assert_no_offense()`` at import.
 """
@@ -35,6 +37,7 @@ from . import key_history as _kh  # noqa: E402
 from .authn import verify_signed  # noqa: E402
 from .launch_settlement import (  # noqa: E402
     _SETTLED_CORE_V1, _SETTLED_CORE_V2, LAUNCH_SETTLED_SIGNAL, SETTLE_PLAN_PREFIX, SETTLE_WALLET_PREFIX,
+    SettlementEvidence, _decision_from,
 )
 from .metering import _PLAN_DEBIT_CORE, _PLAN_GRANT_CORE, PLAN_DEBIT_SIGNAL, PLAN_GRANT_SIGNAL  # noqa: E402
 from .postpaid import (  # noqa: E402
@@ -54,11 +57,11 @@ _RESERVE: "dict[str, tuple[str, tuple[str, ...], str]]" = {
     PLAN_DEBIT_SIGNAL: (RESERVE_PLAN_PREFIX, _PLAN_DEBIT_CORE, "plan"),
     POSTPAID_DEBIT_SIGNAL: (RESERVE_ENTRY_PREFIX, _PP_DEBIT_CORE, "postpaid"),
 }
-#: signal -> (entry-id prefix, signed core) of a launch SETTLE entry (the ones ``scan_settlement`` counts)
-_SETTLE: "dict[str, tuple[str, tuple[str, ...]]]" = {
-    CREDIT_GRANT_SIGNAL: (SETTLE_WALLET_PREFIX, _GRANT_CORE),
-    PLAN_GRANT_SIGNAL: (SETTLE_PLAN_PREFIX, _PLAN_GRANT_CORE),
-    POSTPAID_CREDIT_SIGNAL: (SETTLE_ENTRY_PREFIX, _PP_CREDIT_CORE),
+#: signal -> (entry-id prefix, signed core, landed tag) of a launch SETTLE entry (the ones ``scan_settlement`` counts)
+_SETTLE: "dict[str, tuple[str, tuple[str, ...], str]]" = {
+    CREDIT_GRANT_SIGNAL: (SETTLE_WALLET_PREFIX, _GRANT_CORE, "wallet"),
+    PLAN_GRANT_SIGNAL: (SETTLE_PLAN_PREFIX, _PLAN_GRANT_CORE, "plan"),
+    POSTPAID_CREDIT_SIGNAL: (SETTLE_ENTRY_PREFIX, _PP_CREDIT_CORE, "postpaid"),
 }
 
 
@@ -112,18 +115,41 @@ class ReservationIndex:
     reservations: "dict[tuple[str, str, str], Reservation]" = field(default_factory=dict)
     settled: "set[tuple[str, str, str]]" = field(default_factory=set)    # owner-signed settlement evidence
     outcomes: "set[tuple[str, str, str]]" = field(default_factory=set)   # a drained settle's outcome record
+    #: with ``evidence=True``: per settled lease, what ``scan_settlement`` of it returns (its first verified decision
+    #: and the settle entries that landed); None when the scan was not asked to keep it
+    evidence: "Optional[dict[tuple[str, str, str], SettlementEvidence]]" = None
 
     def of(self, org_id: str, slug: str) -> "list[Reservation]":
         """The reservations of one ``(org, slug)``, oldest first."""
         return sorted((r for r in self.reservations.values() if r.org_id == org_id and r.slug == slug),
                       key=lambda r: r.seq)
 
+    def settlement(self, key: "tuple[str, str, str]") -> SettlementEvidence:
+        """The settlement evidence of lease ``key`` (``(org_id, slug, nonce)``) up to ``through`` — what
+        ``scan_settlement`` of that lease returns. Needs a scan made with ``evidence=True`` (ValueError otherwise)."""
+        if self.evidence is None:
+            raise ValueError("this reservation index was scanned without the settlement evidence")
+        ev = self.evidence.get(key)
+        out = SettlementEvidence(through=self.through)
+        if ev is not None:
+            out.record_seq, out.decision, out.malformed, out.landed = (ev.record_seq, ev.decision, ev.malformed,
+                                                                       set(ev.landed))
+        return out
+
 
 def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[str] = None,
-                      slug: Optional[str] = None, since: Optional[ReservationIndex] = None) -> ReservationIndex:
+                      slug: Optional[str] = None, since: Optional[ReservationIndex] = None,
+                      evidence: bool = False) -> ReservationIndex:
     """Scan the spine for launch reservations + their settlement evidence (see the module docstring); with
-    ``since``, continue that earlier scan over only the records appended after it. Total on hostile payloads."""
+    ``since``, continue that earlier scan over only the records appended after it. With ``evidence`` (or when
+    continuing a scan that kept it), the index also keeps, per settled lease, its first verified decision and the
+    settle entries that landed (``ReservationIndex.settlement``) — in the same single pass, so a caller that needs
+    the settlement of every lease never scans the spine once per lease. Total on hostile payloads."""
     ix = since if since is not None else ReservationIndex()
+    if evidence and ix.evidence is None:
+        if ix.through >= 0:                           # the records already scanned were not kept: never half-evidence
+            raise ValueError("cannot keep the settlement evidence while continuing a scan that did not keep it")
+        ix.evidence = {}
     if not trusted_pubkey:
         return ix
     resolver = None
@@ -145,6 +171,7 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
         lease: "Optional[tuple[str, str]]"
         cores: "tuple[tuple[str, ...], ...]"
         bucket: Optional[str] = None
+        tag: Optional[str] = None                     # a settle entry's landed tag (None: a decision record)
         if sig == LAUNCH_SETTLED_SIGNAL:
             s, n = p.get("slug"), p.get("nonce")
             if not (isinstance(s, str) and isinstance(n, str) and s and n):
@@ -156,7 +183,7 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
             prefix, core, bucket = _RESERVE[sig]
             lease, cores = _lease_of(p.get("entry_id"), prefix), (core,)
         elif sig in _SETTLE:
-            prefix, core = _SETTLE[sig]
+            prefix, core, tag = _SETTLE[sig]
             lease, cores = _lease_of(p.get("entry_id"), prefix), (core,)
         else:
             continue
@@ -164,14 +191,27 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
             continue
         key = (oid, lease[0], lease[1])
         if bucket is None and key in ix.settled:
-            continue                                  # already settled: nothing more to learn from this record
+            # already settled: nothing more to learn from this record, unless the index keeps the evidence and this
+            # is the lease's first decision record or a settle entry it has not seen land yet
+            ev = ix.evidence.get(key) if ix.evidence is not None else None
+            if ev is None or (ev.record_seq is not None if tag is None else tag in ev.landed):
+                continue
         if resolver is None:
             resolver = _kh.key_resolver(store, current=trusted_pubkey)
         key_at = resolver.at(r.seq)
-        if not any(verify_signed(p, c, key_at) for c in cores):
+        matched = next((c for c in cores if verify_signed(p, c, key_at)), None)
+        if matched is None:
             continue                                  # fail-closed: unsigned / forged / wrong-epoch record
         if bucket is None:
             ix.settled.add(key)
+            if ix.evidence is not None:
+                ev = ix.evidence.setdefault(key, SettlementEvidence())
+                if tag is not None:
+                    ev.landed.add(tag)
+                else:                                 # the FIRST verified decision record (a later one is skipped above)
+                    ev.record_seq = int(r.seq)
+                    ev.decision = _decision_from(p) if matched is _SETTLED_CORE_V2 else None
+                    ev.malformed = ev.decision is None
             continue
         res = ix.reservations.get(key)
         if res is None:

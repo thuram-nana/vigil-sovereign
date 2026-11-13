@@ -16,6 +16,8 @@
    ``retry/`` for a bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``. REPORT
    ONLY: this sweep never mints, never calls the provider, and never moves a file.
 
+Both reservation sweeps read the spine's settlement evidence in ONE pass for all the launches they list.
+
 SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no framework/offense.
 """
 from __future__ import annotations
@@ -223,7 +225,15 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
     rows: list[dict] = []
-    for b in list_credit_leases(base):
+    leases = list_credit_leases(base)
+    record = config.settle_spine_record_enabled()
+    interrupted: "dict[tuple[str, str, str], dict]" = {}
+    if record and not apply:
+        # the report reads every marker-present lease's settlement in ONE spine pass (never a scan per lease)
+        interrupted = gate.interrupted_settlements(
+            [b.signed_lease for b in leases
+             if is_lease_settled(base, b.signed_lease.document.engagement_slug, b.signed_lease.document.nonce)])
+    for b in leases:
         ok, _ = verify_credit_launch_lease(b.signed_lease, root)
         doc = b.signed_lease.document
         row = {"slug": b.slug, "org_id": doc.org_id, "nonce": doc.nonce,
@@ -235,7 +245,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             # already closed out (tombstone pending) — not abandoned. With the settle record on, it may be a settle
             # a crash interrupted after its marker: FINISH it (finish_only: a recorded decision only, never a fresh
             # one), whatever the TTL or the spool says; report-only shows it. Flag off: skipped, exactly as before.
-            if config.settle_spine_record_enabled():
+            if record:
                 lease_json = b.signed_lease.model_dump(mode="json")
                 if apply:
                     r = gate.settle_launch(signed_lease=lease_json, consumed_units=0, now=now, basis="sweep:refund",
@@ -248,7 +258,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
                     elif not r.get("ok"):
                         rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
                 else:
-                    pending_settle = gate.interrupted_settlement(lease_json)
+                    pending_settle = interrupted.get((str(doc.org_id), str(doc.engagement_slug), str(doc.nonce)))
                     if pending_settle:
                         rows.append({**row, "status": "settle_interrupted", **pending_settle})
             continue
@@ -419,7 +429,10 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     spool = Path(completion_spool) if completion_spool is not None else None
     charging, spool_unreadable = _charging_completions(spool) if spool is not None else (set(), False)
     base = gate._seam_base()
-    ix = scan_reservations(gate.store, kp.public_key_b64)
+    record = config.settle_spine_record_enabled()
+    # ONE pass over the spine: the reservations and, with the settle record on, every settled launch's settlement
+    # evidence (its recorded decision and the entries that landed), so no launch is ever re-scanned on its own here
+    ix = scan_reservations(gate.store, kp.public_key_b64, evidence=record)
     rows: list[dict] = []
     for res in sorted(ix.reservations.values(), key=lambda r: r.seq):
         oid, slug, nonce = res.key
@@ -429,10 +442,13 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
             # settled — nothing held. With the settle record on, it may be a settle a crash interrupted after its
             # decision, and with no lease on the seam only this sweep reaches it: FINISH it under ``apply`` (only the
             # recorded decision, never a fresh refund; no grace or spool check) and report it without, exactly as
-            # sweep_abandoned_reservations does for a lease on the seam. Flag off: skipped.
-            if config.settle_spine_record_enabled() and not _seam_holds(base, slug, nonce):
-                pending = gate.interrupted_release(org_id=oid, slug=slug, nonce=nonce)
-                if pending and apply:
+            # sweep_abandoned_reservations does for a lease on the seam. Its pending part is read from the one-pass
+            # evidence above (the prune-durable seen-sets are consulted only for an entry the scan did not find).
+            # Flag off: skipped.
+            pending = (gate.unlanded_settlement(org_id=oid, slug=slug, nonce=nonce,
+                                                evidence=ix.settlement(res.key)) if record else None)
+            if pending and not _seam_holds(base, slug, nonce):
+                if apply:
                     r = gate.release_superseded_reservation(org_id=oid, slug=slug, nonce=nonce, now=now,
                                                             grace_s=ttl_s, finish_only=True)
                     if r.get("rolled_forward"):
@@ -441,7 +457,7 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
                         rows.append({**row, "status": "deferred", "error": r.get("error", "")})
                     elif not r.get("ok"):
                         rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
-                elif pending:
+                else:
                     rows.append({**row, "status": "settle_interrupted", **pending})
             continue
         why = gate._release_refusal(oid, slug, res, ix, now, ttl_s)

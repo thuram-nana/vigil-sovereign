@@ -44,7 +44,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from ..reuse import assert_no_offense
 
@@ -680,6 +680,50 @@ class LaunchGate:
         except Exception:  # noqa: BLE001 — a read-only report: an unreadable state reports nothing
             return None
 
+    def interrupted_settlements(self, signed_leases: Iterable[Any]) -> "dict[tuple[str, str, str], dict]":
+        """READ-ONLY: :meth:`interrupted_settlement` for MANY leases, reading the spine ONCE
+        (``launch_settlement.scan_settlements``) — ``{(org_id, slug, nonce): pending}`` for each lease that verifies
+        owner-pinned and whose RECORDED decision has money that has not landed. Takes no lock and writes nothing; an
+        unreadable state reports nothing (for that lease, or for every lease when the spine cannot be read)."""
+        from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
+        from ..governor.launch_settlement import scan_settlements
+        kp = self.owner_key
+        if kp is None:
+            return {}
+        root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        keys: "set[tuple[str, str, str]]" = set()
+        for raw in signed_leases:
+            try:
+                signed = SignedCreditLaunchLease.model_validate(raw)
+                if not verify_credit_launch_lease(signed, root)[0]:
+                    continue
+                doc = signed.document
+                keys.add((str(doc.org_id), str(doc.engagement_slug), str(doc.nonce)))
+            except Exception:  # noqa: BLE001 — an unreadable lease reports nothing
+                continue
+        if not keys:
+            return {}
+        try:
+            evs = scan_settlements(self.store, kp.public_key_b64, keys=keys)
+        except Exception:  # noqa: BLE001 — a read-only report: an unreadable spine reports nothing
+            return {}
+        out: "dict[tuple[str, str, str], dict]" = {}
+        for k, ev in evs.items():
+            pending = self.unlanded_settlement(org_id=k[0], slug=k[1], nonce=k[2], evidence=ev)
+            if pending:
+                out[k] = pending
+        return out
+
+    def unlanded_settlement(self, *, org_id: str, slug: str, nonce: str, evidence: Any) -> Optional[dict]:
+        """READ-ONLY: the not-yet-landed part of lease ``(slug, nonce)``'s RECORDED settlement decision, from spine
+        ``evidence`` the caller already read (``scan_settlements`` / ``scan_reservations(evidence=True)``, one pass
+        for many leases), or None — nothing pending, or a state that cannot be read (a report reports nothing)."""
+        try:
+            return self._unlanded(str(org_id), str(slug), str(nonce), evidence)
+        except Exception:  # noqa: BLE001 — a read-only report: an unreadable state reports nothing
+            return None
+
     def _unlanded(self, oid: str, s: str, non: str, ev: Any) -> Optional[dict]:
         """The part of lease ``(s, non)``'s RECORDED settlement decision (``ev``, its spine evidence) whose money has
         not landed — each recorded entry the live scan did not find AND the prune-durable seen-sets confirm absent —
@@ -1101,7 +1145,9 @@ class LaunchGate:
     def interrupted_release(self, *, org_id: str, slug: str, nonce: str) -> Optional[dict]:
         """READ-ONLY, for a reservation the seam no longer holds a lease for: the not-yet-landed part of launch
         ``(slug, nonce)``'s RECORDED settlement decision (what the next settle of it would finish), or None. The
-        superseded-reservation sweep's counterpart of :meth:`interrupted_settlement`; takes no lock, writes nothing."""
+        superseded-reservation sweep's counterpart of :meth:`interrupted_settlement` for ONE launch (the sweep itself
+        reads every launch's evidence in one pass and calls :meth:`unlanded_settlement`); takes no lock, writes
+        nothing."""
         from ..governor.launch_settlement import scan_settlement
         kp = self.owner_key
         if kp is None:

@@ -38,7 +38,9 @@ refund; ``plan_period_end`` finite, ``>= 0`` and ``> 0`` whenever ``refund_plan 
 SETTLED, so it blocks a fresh settle, but never rolled forward), and the owner-signed settle entries that landed
 (``landed``: ``wallet`` / ``plan`` / ``postpaid`` under ``settle-wallet:`` / ``settle-plan:`` /
 ``settle-postpaid:``). Every record is verified under the owner key valid AT ITS SEQ (succession-aware),
-fail-closed: an unsigned or foreign-signed record is ignored. Total on hostile payloads.
+fail-closed: an unsigned or foreign-signed record is ignored. Total on hostile payloads. ``scan_settlements(...)``
+reads the same evidence for MANY leases in one pass over the spine (a sweep or a drain pass that checks every lease
+it lists never scans the spine once per lease).
 
 The scan is LIVE (no snapshot seed), so it is NOT prune-durable (OWNER DECISION OD-3): a caller does the full scan
 BEFORE taking the lock and re-scans only the records appended since (``since``) inside it. A roll-forward never
@@ -286,3 +288,75 @@ def scan_settlement(store, trusted_pubkey: Optional[str], *, org_id: str, slug: 
         if verify_signed(p, core, resolver.at(r.seq)):
             ev.landed.add(tag)
     return ev
+
+
+def scan_settlements(store, trusted_pubkey: Optional[str], *,
+                     keys: "Any") -> "dict[tuple[str, str, str], SettlementEvidence]":
+    """:func:`scan_settlement` for MANY leases in ONE pass over the spine: ``{(org_id, slug, nonce): evidence}`` for
+    every lease in ``keys`` (an iterable of ``(org_id, slug, nonce)``), each exactly what ``scan_settlement`` of
+    that lease returns — the same matching (the record's ``org_id``; the decision's ``slug`` / ``nonce``; the settle
+    entry's exact entry id), the same first-verified-decision rule, the same succession-aware verification. Only the
+    records of the listed leases are verified. A lease with an empty part gets an empty evidence (as
+    ``scan_settlement`` returns for it). Total on hostile payloads."""
+    want: "dict[tuple[str, str, str], SettlementEvidence]" = {}
+    for k in keys:
+        o, s, n = (str(x or "") for x in k)
+        want[(o, s, n)] = SettlementEvidence()
+    if not trusted_pubkey:
+        return want
+    live = {k for k in want if all(k)}
+    # (org_id, signal, entry_id) -> (lease, signed core, tag), for every settle entry a listed lease can have
+    entries: "dict[tuple[str, str, str], tuple[tuple[str, str, str], tuple[str, ...], str]]" = {}
+    for k in live:
+        o, s, n = k
+        tail = f"{s}:{n}"
+        entries[(o, CREDIT_GRANT_SIGNAL, f"{SETTLE_WALLET_PREFIX}{tail}")] = (k, _GRANT_CORE, "wallet")
+        entries[(o, PLAN_GRANT_SIGNAL, f"{SETTLE_PLAN_PREFIX}{tail}")] = (k, _PLAN_GRANT_CORE, "plan")
+        entries[(o, POSTPAID_CREDIT_SIGNAL, f"{SETTLE_ENTRY_PREFIX}{tail}")] = (k, _PP_CREDIT_CORE, "postpaid")
+    through = -1
+    resolver = None
+    if live:
+        for r in store.iter_records():
+            if r.seq > through:
+                through = r.seq
+            p = r.payload
+            if not isinstance(p, dict):
+                continue
+            po, sig = p.get("org_id"), p.get("signal")
+            if not isinstance(po, str) or not isinstance(sig, str):
+                continue
+            if sig == LAUNCH_SETTLED_SIGNAL:
+                ps, pn = p.get("slug"), p.get("nonce")
+                if not (isinstance(ps, str) and isinstance(pn, str)):
+                    continue
+                key = (po, ps, pn)
+                ev = want.get(key) if key in live else None
+                if ev is None or ev.record_seq is not None:
+                    continue
+                if resolver is None:
+                    resolver = _kh.key_resolver(store, current=trusted_pubkey)
+                key_at = resolver.at(r.seq)
+                if verify_signed(p, _SETTLED_CORE_V2, key_at):
+                    ev.record_seq = int(r.seq)
+                    ev.decision = _decision_from(p)
+                    ev.malformed = ev.decision is None
+                elif verify_signed(p, _SETTLED_CORE_V1, key_at):
+                    ev.record_seq, ev.decision, ev.malformed = int(r.seq), None, True
+                continue                              # unsigned / forged / wrong-epoch: ignored (fail-closed)
+            eid = p.get("entry_id")
+            if not isinstance(eid, str):
+                continue
+            hit = entries.get((po, sig, eid))
+            if hit is None:
+                continue
+            lease, core, tag = hit
+            ev = want[lease]
+            if tag in ev.landed:
+                continue
+            if resolver is None:
+                resolver = _kh.key_resolver(store, current=trusted_pubkey)
+            if verify_signed(p, core, resolver.at(r.seq)):
+                ev.landed.add(tag)
+    for k in live:
+        want[k].through = through
+    return want
