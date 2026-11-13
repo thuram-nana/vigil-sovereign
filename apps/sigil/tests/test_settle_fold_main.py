@@ -28,6 +28,11 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * NTF-3 on a sweep-basis roll-forward                     -> test_a_drain_roll_forward_of_a_completion_emits_ntf3_...
   * the tombstone before the money                          -> test_flag_on_sweep_finishes_its_own_interrupted_refund
   * publish without its in-lock re-scan                     -> test_publish_lease_in_lock_rescan_refuses_...
+  * a relaunch replaces a lease whose recorded settle has unlanded money
+                                                            -> test_flag_on_a_relaunch_waits_for_an_interrupted_...
+  * that check refusing a settle whose money all landed     -> test_flag_on_a_relaunch_after_a_settle_whose_money_...
+  * the earlier lease's unlocked scan continued for another nonce
+                                                            -> test_flag_on_a_relaunch_rescans_in_full_when_...
 
 Run: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -m pytest apps/sigil/tests/test_settle_fold_main.py
 """
@@ -1248,6 +1253,114 @@ def test_earlier_launch_spine_settled_with_lost_marker_does_not_block_a_new_mete
         assert is_lease_settled(_base(), r1["slug"], r1["nonce"])    # and its lost marker is re-asserted
     else:
         assert out["ok"] is False and "earlier launch" in out["error"], out   # main: the marker alone decides
+
+
+# =====================================================================================================================
+# the seam holds one lease per org+host: a relaunch never replaces a lease whose recorded settle is unfinished
+# =====================================================================================================================
+def _relaunch(s, units, nonce):
+    r = LaunchGate(s).reserve_launch(requester="u", org_id=ORG, host=HOST, units=units, now=NOW + 120,
+                                     duration_hours=8, nonce=nonce)
+    assert r["ok"], r
+    return r, LaunchGate(s).publish_lease(signed_lease=r["lease"], expect_org_id=ORG)
+
+
+@pytest.mark.parametrize("mode", ["flat", "metered"])
+def test_flag_on_a_relaunch_waits_for_an_interrupted_drain_settle_and_its_refund_lands(record_on, mode, monkeypatch):
+    if mode == "metered":
+        _metered(monkeypatch)
+    s = _store()
+    _seat(s, credits=1_000)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    gov = _Gov(s, rA)
+    gov.emit("failed")                                               # VIGIL's failure: the whole 300 is owed back
+    restore = _kill(monkeypatch, WalletRegistry, "grant", exc=OSError("disk full"))
+    assert gov.watcher().drain().get("deferred") == 1               # interrupted after its decision + marker
+    restore()
+    assert _avail(s) == 700 and LaunchGate(s).interrupted_settlement(rA["lease"])["pending_wallet"] == 300
+    rB, out = _relaunch(s, 100, "B" * 16)                            # the customer relaunches on the same host
+    assert out["ok"] is False and out.get("retry") is True, out
+    assert read_credit_lease(_base(), rA["slug"]).signed_lease.document.nonce == rA["nonce"]   # A's lease stays
+    out = gov.watcher().drain()                                      # the drain finishes A from its record
+    assert (out["settled"], out["rejected"]) == (1, 0) and _avail(s) == 1_000 - 100, out
+    assert LaunchGate(s).interrupted_settlement(rA["lease"]) is None and len(_decisions(s)) == 1
+    assert LaunchGate(s).publish_lease(signed_lease=rB["lease"], expect_org_id=ORG)["ok"]
+    assert gov.watcher().drain()["settled"] == 0 and _avail(s) == 1_000 - 100   # never refunded twice
+
+
+@pytest.mark.parametrize("mode", ["flat", "metered"])
+@pytest.mark.parametrize("dies", ["before_the_money", "before_the_marker"])
+def test_flag_on_a_relaunch_waits_for_an_interrupted_sweep_settle_and_its_refund_lands(record_on, mode, dies,
+                                                                                       monkeypatch):
+    import vigil_integration.live.credit_lease_broker as B
+    if mode == "metered":
+        _metered(monkeypatch)
+    now, ttl = (MLATE, 86400) if mode == "metered" else (NOW + 8 * 3600 + 100, 50)
+    s = _store()
+    _seat(s, credits=1_000)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    spool = _spool()
+    restore = (_kill(monkeypatch, WalletRegistry, "grant") if dies == "before_the_money"
+               else _kill(monkeypatch, B, "record_lease_settlement"))
+    with pytest.raises(SystemExit):
+        _sweep(LaunchGate(s), spool, now=now, ttl=ttl)               # dies after the decision record
+    restore()
+    assert _avail(s) == 700 and len(_decisions(s)) == 1
+    assert is_lease_settled(_base(), rA["slug"], rA["nonce"]) is (dies == "before_the_money")
+    rB, out = _relaunch(s, 100, "B" * 16)
+    assert out["ok"] is False and out.get("retry") is True, out
+    assert read_credit_lease(_base(), rA["slug"]).signed_lease.document.nonce == rA["nonce"]
+    rows = _sweep(LaunchGate(s), spool, now=now, ttl=ttl)            # the next pass finishes A from its record
+    assert [(x["nonce"], x["status"], x["refunded"]) for x in rows] == [(rA["nonce"], "settle_completed", 300)], rows
+    assert _avail(s) == 1_000 - 100 and LaunchGate(s).interrupted_settlement(rA["lease"]) is None
+    assert LaunchGate(s).publish_lease(signed_lease=rB["lease"], expect_org_id=ORG)["ok"]
+    assert len(_decisions(s)) == 1 and _avail(s) == 1_000 - 100
+
+
+def test_flag_on_a_relaunch_rescans_in_full_when_the_seams_lease_changed_before_its_locks(record_on, monkeypatch):
+    import types
+    import vigil_integration.live.credit_lease_broker as B
+    s = _store()
+    _seat(s, credits=1_000)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    gov = _Gov(s, rA)
+    gov.emit("failed")
+    restore = _kill(monkeypatch, WalletRegistry, "grant", exc=OSError("disk full"))
+    assert gov.watcher().drain().get("deferred") == 1
+    restore()
+    rB = LaunchGate(s).reserve_launch(requester="u", org_id=ORG, host=HOST, units=100, now=NOW + 120,
+                                      duration_hours=8, nonce="B" * 16)
+    real, calls = B.read_credit_lease, {"n": 0}
+
+    def _read(base, slug):
+        calls["n"] += 1
+        if calls["n"] == 1:                                          # publish's unlocked read saw another lease
+            return types.SimpleNamespace(signed_lease=types.SimpleNamespace(
+                document=types.SimpleNamespace(nonce="X" * 16)))
+        return real(base, slug)
+
+    monkeypatch.setattr(B, "read_credit_lease", _read)
+    out = LaunchGate(s).publish_lease(signed_lease=rB["lease"], expect_org_id=ORG)
+    assert out["ok"] is False and out.get("retry") is True, out      # A's evidence was read in full under the locks
+    assert real(_base(), rA["slug"]).signed_lease.document.nonce == rA["nonce"] and calls["n"] >= 2
+
+
+@pytest.mark.parametrize("mode", ["flat", "metered"])
+def test_flag_on_a_relaunch_after_a_settle_whose_money_landed_is_not_held_back(record_on, mode, monkeypatch):
+    import vigil_integration.live.credit_lease_broker as B
+    if mode == "metered":
+        _metered(monkeypatch)
+    s = _store()
+    _seat(s, credits=1_000)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    restore = _kill(monkeypatch, B, "tombstone_credit_lease")        # dies after the money, before the tombstone
+    with pytest.raises(SystemExit):
+        _settle(s, rA, 0, basis="completion:failed")
+    restore()
+    assert _avail(s) == 1_000 and read_credit_lease(_base(), rA["slug"]) is not None
+    _, out = _relaunch(s, 100, "B" * 16)
+    assert out["ok"] is True, out                                    # nothing of A's is left to land
+    assert read_credit_lease(_base(), rA["slug"]).signed_lease.document.nonce == "B" * 16
 
 
 # =====================================================================================================================

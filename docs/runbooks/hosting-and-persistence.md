@@ -61,10 +61,14 @@ the spine** — never the source of truth.
   settle answers "busy; retry" — the settle drain defers the completion (back to `incoming/`), the
   sweep reports `deferred`, a customer cancel / start is refused with a retry hint. A pause waits at
   most 2 s and then records the halt anyway (`linearized: false`); a resume never takes the settle
-  lock. The lock files are transients that both backup legs skip: `<stem>.settle.lock` beside the
-  spine, the settlement, pause and paused‑past‑expiry `<slug>.json.lock` files beside their markers,
-  and `<spool>/.spool.lock` in the completion spool (created by the settle drain; a root `ops-sweep`
-  that must create it hands it to the spool directory's owner).
+  lock. With the flag on, a start on a host whose previous launch has a recorded settlement with
+  money still to land is refused with a retry until the settle drain or `ops-sweep reservations
+  --apply` finishes that settlement: both finish it through the previous launch's lease on the
+  seam, which a start would otherwise replace. The lock files are transients that both backup legs
+  skip: `<stem>.settle.lock` beside the spine, the settlement, pause and paused‑past‑expiry
+  `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the completion spool
+  (created by the settle drain; a root `ops-sweep` that must create it hands it to the spool
+  directory's owner).
 
   **`ops-sweep reservations` statuses** added by this: `completion_pending` / `completion_unknown` /
   `pause_changed` / `pause_unknown` when the settle's in‑lock re‑check of the spool or the pause state

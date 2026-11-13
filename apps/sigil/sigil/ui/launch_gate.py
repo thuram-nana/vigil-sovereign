@@ -643,7 +643,7 @@ class LaunchGate:
         the lease owner-pinned, takes no lock and writes nothing (``ops-sweep reservations`` without ``--apply``
         reports it as ``settle_interrupted``)."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
-        from ..governor.launch_settlement import MODE_POSTPAID, scan_settlement
+        from ..governor.launch_settlement import scan_settlement
         kp = self.owner_key
         if kp is None:
             return None
@@ -656,17 +656,25 @@ class LaunchGate:
             doc = signed.document
             oid, s, non = doc.org_id, doc.engagement_slug, doc.nonce
             ev = scan_settlement(self.store, kp.public_key_b64, org_id=oid, slug=s, nonce=non)
-            d = ev.decision
-            if d is None:
-                return None
-            pend_plan = d.refund_plan if (d.refund_plan > 0 and d.plan_period_end > 0 and "plan" not in ev.landed
-                                          and not self.meter.plan.has_grant_entry(oid, f"settle-plan:{s}:{non}")) else 0
-            pend_wallet = d.refund_wallet if (d.refund_wallet > 0 and "wallet" not in ev.landed and not
-                                              self.wallet.has_grant_entry(oid, f"settle-wallet:{s}:{non}")) else 0
-            pend_pp = (d.mode == MODE_POSTPAID and "postpaid" not in ev.landed
-                       and not self.arrears.has_credit_entry(oid, f"{SETTLE_ENTRY_PREFIX}{s}:{non}"))
+            return self._unlanded(oid, s, non, ev)
         except Exception:  # noqa: BLE001 — a read-only report: an unreadable state reports nothing
             return None
+
+    def _unlanded(self, oid: str, s: str, non: str, ev: Any) -> Optional[dict]:
+        """The part of lease ``(s, non)``'s RECORDED settlement decision (``ev``, its spine evidence) whose money has
+        not landed — each recorded entry the live scan did not find AND the prune-durable seen-sets confirm absent —
+        or None when there is no recorded decision or every recorded entry landed. Raises when a ledger cannot be
+        read (the caller decides: a report reports nothing, a publish refuses)."""
+        from ..governor.launch_settlement import MODE_POSTPAID
+        d = ev.decision
+        if d is None:
+            return None
+        pend_plan = d.refund_plan if (d.refund_plan > 0 and d.plan_period_end > 0 and "plan" not in ev.landed
+                                      and not self.meter.plan.has_grant_entry(oid, f"settle-plan:{s}:{non}")) else 0
+        pend_wallet = d.refund_wallet if (d.refund_wallet > 0 and "wallet" not in ev.landed and not
+                                          self.wallet.has_grant_entry(oid, f"settle-wallet:{s}:{non}")) else 0
+        pend_pp = (d.mode == MODE_POSTPAID and "postpaid" not in ev.landed
+                   and not self.arrears.has_credit_entry(oid, f"{SETTLE_ENTRY_PREFIX}{s}:{non}"))
         if not (pend_plan or pend_wallet or pend_pp):
             return None
         return {"pending_plan": int(pend_plan), "pending_wallet": int(pend_wallet),
@@ -699,8 +707,9 @@ class LaunchGate:
         doc = signed.document
         if expect_org_id is not None and doc.org_id != expect_org_id:
             return {"ok": False, "error": "this lease belongs to a different org"}
+        from .. import config
         try:
-            from vigil_integration.live.credit_lease_broker import is_lease_settled
+            from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
             from ..governor.launch_settlement import scan_settlement
             # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
             # bearer capability is resurrected on the seam. (A fast refusal here; the decisive check — the seam
@@ -710,9 +719,17 @@ class LaunchGate:
                         "re-published"}
             ev0 = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
                                   nonce=doc.nonce)                              # the full scan, unlocked
+            # With the settle record on, the settlement evidence of the launch whose lease this publish would replace
+            # is read the same way: the full scan here, unlocked, continued under the locks (_earlier_launch_in_flight).
+            prior = None
+            if config.settle_spine_record_enabled():
+                cur0 = read_credit_lease(self._seam_base(), doc.engagement_slug)
+                earlier0 = str(cur0.signed_lease.document.nonce) if cur0 is not None else ""
+                if earlier0 and earlier0 != str(doc.nonce):
+                    prior = (earlier0, scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id,
+                                                       slug=doc.engagement_slug, nonce=earlier0))
         except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
-        from .. import config
         from ..governor.launch_settlement import SettleLockBusy, settle_lock
         guard = contextlib.ExitStack()
         try:
@@ -737,7 +754,7 @@ class LaunchGate:
             guard.close()
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         with guard:
-            return self._publish_checked(doc, signed, owner_root, kp, ev0)
+            return self._publish_checked(doc, signed, owner_root, kp, ev0, prior)
 
     @staticmethod
     @contextlib.contextmanager
@@ -756,9 +773,11 @@ class LaunchGate:
         finally:
             os.close(fd)
 
-    def _publish_checked(self, doc: Any, signed: Any, owner_root: Any, kp: Any, ev0: Any) -> dict:
+    def _publish_checked(self, doc: Any, signed: Any, owner_root: Any, kp: Any, ev0: Any,
+                         prior: "Optional[tuple[str, Any]]" = None) -> dict:
         """The rest of :meth:`publish_lease`, under the spine + settle locks (and its per-host lock where metering is
-        involved). ``ev0`` is the unlocked settlement scan, continued here over what was appended since."""
+        involved). ``ev0`` is the unlocked settlement scan, continued here over what was appended since; ``prior`` is
+        ``(nonce, its unlocked scan)`` of the lease this publish would replace (settle record on), or None."""
         from .. import config
         from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease, write_credit_lease
         from ..governor.launch_settlement import scan_settlement
@@ -786,7 +805,7 @@ class LaunchGate:
         # running — its completion could then never settle, and a customer cancel would read it as never started.
         # Where metering is involved (this launch, or the one on the seam), one launch per host is in flight at a time.
         try:
-            refusal = self._earlier_launch_in_flight(doc, metered, cur)
+            refusal = self._earlier_launch_in_flight(doc, metered, cur, prior)
         except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         if refusal is not None:
@@ -851,29 +870,45 @@ class LaunchGate:
             logging.getLogger(__name__).warning("could not remove a settled run's model grant", exc_info=True)
         return None
 
-    def _earlier_launch_in_flight(self, doc: Any, metered: bool, cur: Any) -> Optional[dict]:
+    def _earlier_launch_in_flight(self, doc: Any, metered: bool, cur: Any,
+                                  prior: "Optional[tuple[str, Any]]" = None) -> Optional[dict]:
         """The refusal when an earlier, unsettled launch of the same org+host holds the seam (``cur``, the lease on it)
         and metering is involved (``metered`` for this launch, or the earlier one was published metered); None
-        otherwise."""
+        otherwise. With the settle record on, also the refusal (``retry``) while the earlier launch's RECORDED
+        settlement still has money to move, whatever either launch's billing mode. ``prior`` is the unlocked scan of
+        the earlier launch's evidence from :meth:`publish_lease` (continued here), or None."""
         from .. import config
         from vigil_integration.live.credit_lease_broker import is_lease_settled, record_lease_settlement
         if cur is None:
             return None
         earlier = str(cur.signed_lease.document.nonce)
-        if earlier == str(doc.nonce) or is_lease_settled(self._seam_base(), doc.engagement_slug, earlier):
+        if earlier == str(doc.nonce):
+            return None
+        ev_e = None
+        if config.settle_spine_record_enabled() and self.owner_key is not None:
+            # E3bc: the seam holds ONE lease per org+host, and the drain's re-drive and the sweep finish an interrupted
+            # settle only through that lease. So while the earlier launch's recorded decision has an entry that has not
+            # landed, its lease stays on the seam: this publish is refused with a retry until the drain or the sweep
+            # has finished it — the recorded refund always lands, exactly once. Its marker alone says nothing about
+            # the money (it is written before the money moves).
+            from ..governor.launch_settlement import scan_settlement
+            since = prior[1] if prior is not None and prior[0] == earlier else None
+            ev_e = scan_settlement(self.store, self.owner_key.public_key_b64, org_id=doc.org_id,
+                                   slug=doc.engagement_slug, nonce=earlier, since=since)
+            if self._unlanded(doc.org_id, doc.engagement_slug, earlier, ev_e) is not None:
+                return {"ok": False, "retry": True,
+                        "error": "an earlier launch on this host is still finishing its settlement; retry shortly"}
+        if is_lease_settled(self._seam_base(), doc.engagement_slug, earlier):
             return None
         if not (metered or self._launch_was_metered(doc.engagement_slug, earlier)):
             return None
-        if config.settle_spine_record_enabled() and self.owner_key is not None:
+        if ev_e is not None and ev_e.settled:
             # E3bc (A5): with the settle record on, the SPINE also says whether the earlier launch settled — its marker
-            # may have been lost with the seam. Then it is not in flight: re-assert its lost marker (under the settle
-            # lock this publish holds; a failure refuses the publish) and let the new launch through.
-            from ..governor.launch_settlement import scan_settlement
-            ev_e = scan_settlement(self.store, self.owner_key.public_key_b64, org_id=doc.org_id,
-                                   slug=doc.engagement_slug, nonce=earlier)
-            if ev_e.settled:
-                record_lease_settlement(self._seam_base(), doc.engagement_slug, earlier)
-                return None
+            # may have been lost with the seam. Its money has landed (checked above), so it is not in flight:
+            # re-assert its lost marker (under the settle lock this publish holds; a failure refuses the publish) and
+            # let the new launch through.
+            record_lease_settlement(self._seam_base(), doc.engagement_slug, earlier)
+            return None
         return {"ok": False, "error": "an earlier launch on this host has not settled yet; it must finish (or be "
                 "settled) before another starts"}
 
