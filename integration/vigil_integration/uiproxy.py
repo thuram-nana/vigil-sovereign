@@ -220,6 +220,47 @@ _BILLING_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.billing.v1"
 _BILLING_WEBHOOK_MAX_BODY = 128 * 1024                  # pre-auth body cap (Flutterwave payloads are a few KB); its
 #                                                         base64 envelope stays under _GH_WEBHOOK_MAX_ENVELOPE (256K)
 _WEBHOOK_READ_TIMEOUT_S = 20.0                          # bound the pre-auth body read so a slow/incomplete body can't pin a thread
+# Stripe parity: INBOUND Stripe billing webhook (default OFF). Same shape as the Flutterwave route, but Stripe SIGNS
+# each delivery (`Stripe-Signature: t=<unix>,v1=<hmac-sha256 hex over "{t}.{body}">`), so the proxy checks that HMAC
+# (an anti-flood pre-filter) and spools the body WITH the signature header and its receive time, so the sovereign
+# drain re-verifies the same HMAC at the receive time. The proxy never stores the secret and never mints; the money
+# check (re-fetch of the Stripe object + owner-signed mint) is the drain's. Separate spool + secret from Flutterwave.
+_STRIPE_WEBHOOK_SPOOL_ENV = "VIGIL_STRIPE_WEBHOOK_SPOOL"      # set to a spool dir to ENABLE /webhooks/stripe
+_STRIPE_WEBHOOK_SECRET_ENV = "VIGIL_STRIPE_WEBHOOK_SECRET"    # the endpoint's whsec_ secret (empty => fail closed)
+_STRIPE_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.stripe.v1"
+_STRIPE_WEBHOOK_TOLERANCE_S = 300.0                     # |now - t| bound, Stripe's documented default
+_STRIPE_SIG_HEADER_MAX = 2048                           # a few v1 entries during a secret roll fit easily
+_STRIPE_TS_MAX_DIGITS = 12
+
+
+def stripe_signature_ok(secret: str, raw: bytes, header: str, now: float,
+                        tolerance_s: float = _STRIPE_WEBHOOK_TOLERANCE_S) -> bool:
+    """The ``Stripe-Signature`` check, stdlib only, accept/reject-identical to the sovereign
+    ``StripeBillingProvider._verify_signature`` for a header within the size cap (a conformance test pins it): `t`
+    is 1-12 plain ASCII digits, ``|now - t| <= tolerance``, and any ``v1`` equals HMAC-SHA256(secret, ``t + "." +
+    body``) in lowercase hex, compared constant-time. Never raises."""
+    if not secret or not isinstance(header, str) or not header or len(header) > _STRIPE_SIG_HEADER_MAX:
+        return False
+    ts: Optional[str] = None
+    v1s: "list[str]" = []
+    for part in header.split(","):
+        k, _, v = part.strip().partition("=")
+        if k == "t":
+            ts = v
+        elif k == "v1":
+            v1s.append(v)
+    if ts is None or not v1s or not (ts.isascii() and ts.isdigit() and 1 <= len(ts) <= _STRIPE_TS_MAX_DIGITS):
+        return False
+    if abs(now - int(ts)) > tolerance_s:
+        return False
+    expected = hmac.new(secret.encode("utf-8"), ts.encode("ascii") + b"." + raw, hashlib.sha256).hexdigest()
+    for v1 in v1s:
+        try:
+            if hmac.compare_digest(expected, v1):
+                return True
+        except TypeError:                                  # a non-ASCII candidate: refuse it, never raise
+            continue
+    return False
 _GH_ZERO_SHA = "0" * 40                                 # GitHub's null SHA — a branch delete / no-commit push (nothing to scan)
 # Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
 # underscore — so no variant (`X_VIGIL_ROLE`, which some upstreams / WSGI stacks fold to the header the
@@ -1362,7 +1403,8 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None,
                  hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None,
-                 webhook_billing_spool_dir: "Optional[str]" = None):
+                 webhook_billing_spool_dir: "Optional[str]" = None,
+                 webhook_stripe_spool_dir: "Optional[str]" = None):
         self.serve_dir = serve_dir
         # W8-6: the proxy→backend hop's TLS client context, or None (a plaintext hop — the loopback /
         # non-production default). Resolved by `make_proxy_server` via `resolve_hop_tls`, which ALSO refuses
@@ -1412,6 +1454,9 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # it never routes/forwards/spawns/mints. None ⇒ the route is absent (falls through to a 404). The secret
         # is resolved per-request from the env (VIGIL_BILLING_WEBHOOK_SECRET), never stored here.
         self.webhook_billing_spool_dir = str(webhook_billing_spool_dir) if webhook_billing_spool_dir else None
+        # Stripe parity: when set (VIGIL_STRIPE_WEBHOOK_SPOOL), the proxy mounts /webhooks/stripe (HMAC pre-filter +
+        # spool). None => the route is absent. The secret is read per request from VIGIL_STRIPE_WEBHOOK_SECRET.
+        self.webhook_stripe_spool_dir = str(webhook_stripe_spool_dir) if webhook_stripe_spool_dir else None
         # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
         # SSE / polling do not stampede it. Built here so every request handler shares one cache.
         self.auth_cache = _PrincipalCache()
@@ -1524,6 +1569,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # dir is configured; verif-hash-authenticates + SPOOLS one inert body-only event, never mints/forwards.
             if split.path == "/webhooks/billing" and getattr(self.server, "webhook_billing_spool_dir", None):
                 self._webhooks_billing()
+                return
+            # Stripe parity: INBOUND Stripe billing webhook — mounted ONLY when its own spool dir is configured.
+            if split.path == "/webhooks/stripe" and getattr(self.server, "webhook_stripe_spool_dir", None):
+                self._webhooks_stripe()
                 return
             # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
@@ -2161,16 +2210,65 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         self._plane_json({"ok": True, "spooled": True}, status=202, drained=True)
 
-    def _spool_billing_event(self, envelope: str) -> None:
-        """Write one inert billing envelope to ``<billing-spool>/incoming/<sha256(bytes)[:32]>.json`` atomically
+    def _webhooks_stripe(self):
+        """INBOUND Stripe billing webhook — check the ``Stripe-Signature`` HMAC and SPOOL ONE inert event, nothing
+        more. Probe-safe band, like ``_webhooks_billing``. The envelope carries the raw body (base64), the
+        signature header and the receive time, and NEVER the secret: the sovereign drain re-verifies the same HMAC
+        at that receive time, then re-fetches the Stripe object before anything is minted. Fail-closed: wrong
+        method, oversized / slow body, unset secret, or an absent / malformed / stale / wrong signature refuse.
+        A redelivery has a new receive time, so it spools as a new file: exactly-once is the drain's (the mint is
+        anchored on the Stripe object's id), not the spool's."""
+        try:
+            self.connection.settimeout(_WEBHOOK_READ_TIMEOUT_S)
+        except OSError:
+            pass
+        if self.command != "POST":
+            self._plane_json({"ok": False, "error": "method not allowed (POST only)"}, status=405)
+            return
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        self.close_connection = True
+        if clen > _BILLING_WEBHOOK_MAX_BODY:
+            self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
+            return
+        try:
+            raw = self.rfile.read(clen) if clen > 0 else b""
+        except (TimeoutError, OSError):
+            self._plane_json({"ok": False, "error": "request body read timed out"}, status=408, drained=True)
+            return
+        secret = os.environ.get(_STRIPE_WEBHOOK_SECRET_ENV, "")
+        if not secret:
+            self._plane_json({"ok": False, "error": "webhook secret not configured"}, status=503, drained=True)
+            return
+        header = self.headers.get("Stripe-Signature") or ""
+        received_at = time.time()
+        if not stripe_signature_ok(secret, raw, header, received_at):
+            self._plane_json({"ok": False, "error": "invalid or missing Stripe-Signature"}, status=401,
+                             drained=True)
+            return
+        envelope = {"schema": _STRIPE_WEBHOOK_ENVELOPE_SCHEMA, "body_b64": base64.b64encode(raw).decode("ascii"),
+                    "stripe_signature": header, "received_at": received_at}
+        try:
+            self._spool_billing_event(json.dumps(envelope, ensure_ascii=True, sort_keys=True),
+                                      spool_dir=self.server.webhook_stripe_spool_dir)
+        except OSError:   # a spool write failure is retryable (Stripe redelivers) — 503, do NOT 202
+            self._plane_json({"ok": False, "error": "spool write failed"}, status=503, drained=True)
+            return
+        self._plane_json({"ok": True, "spooled": True}, status=202, drained=True)
+
+    def _spool_billing_event(self, envelope: str, *, spool_dir: "Optional[str]" = None) -> None:
+        """Write one inert billing envelope to ``<spool>/incoming/<sha256(bytes)[:32]>.json`` atomically
         (0600 file in a 0700 dir; O_EXCL temp + fsync + os.replace), matching the drain reader's on-disk
-        contract. stdlib-only (the pure-stdlib boundary forbids importing the sibling spool writer).
-        Content-addressed ⇒ re-spooling an identical envelope is idempotent. Raises OSError on any write
-        failure (the caller turns that into a 503 so the provider redelivers)."""
+        contract. ``spool_dir`` defaults to the Flutterwave billing spool. stdlib-only (the pure-stdlib boundary
+        forbids importing the sibling spool writer). Content-addressed ⇒ re-spooling an identical envelope is
+        idempotent. Raises OSError on any write failure (the caller turns that into a 503 so the provider
+        redelivers)."""
         data = envelope.encode("utf-8")
         if len(data) > _GH_WEBHOOK_MAX_ENVELOPE:
             raise OSError("billing webhook envelope exceeds the spool size cap")
-        incoming = Path(self.server.webhook_billing_spool_dir) / "incoming"
+        incoming = Path(spool_dir or self.server.webhook_billing_spool_dir) / "incoming"
         incoming.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(incoming, 0o700)
@@ -2572,7 +2670,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
                       plane_control: "Optional[PlaneControl]" = None,
                       backends: "Optional[dict]" = None,
                       webhook_spool_dir: "Optional[str]" = None,
-                      webhook_billing_spool_dir: "Optional[str]" = None) -> _ProxyServer:
+                      webhook_billing_spool_dir: "Optional[str]" = None,
+                      webhook_stripe_spool_dir: "Optional[str]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
     reachable from the open internet.
@@ -2614,7 +2713,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
                         plane_control=plane_control, backends=backends, hop_tls=hop_tls,
                         webhook_spool_dir=webhook_spool_dir,
-                        webhook_billing_spool_dir=webhook_billing_spool_dir)
+                        webhook_billing_spool_dir=webhook_billing_spool_dir,
+                        webhook_stripe_spool_dir=webhook_stripe_spool_dir)
 
 
 # ==================================================================================================
@@ -3368,7 +3468,8 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=None, backends=backends,
                                   webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
-                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_stripe_spool_dir=(os.environ.get(_STRIPE_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up --proxy-only: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         return 2
@@ -3784,7 +3885,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=plane_control,
                                   webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
-                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_stripe_spool_dir=(os.environ.get(_STRIPE_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()
