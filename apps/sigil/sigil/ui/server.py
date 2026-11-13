@@ -33,6 +33,7 @@ import ipaddress
 import json
 import secrets
 import socket
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -52,6 +53,12 @@ from ..spine.verify import verify_record
 from . import actions as _actions
 
 _STATIC = Path(__file__).parent / "static"
+
+# `/metrics` is UNAUTHENTICATED (the probe posture), and its domain counter is a fold over the WHOLE spine.
+# So that a scraper cannot make the server re-fold the spine per request, the fold runs at most once per
+# this many seconds, counted from the END of the previous one, and never two at once. A scrape in between
+# serves the last projected value. Not a scale target: it bounds how often an anonymous caller triggers work.
+METRICS_PROJECTION_TTL_S = 10.0
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
@@ -101,6 +108,11 @@ class UIServer(ThreadingHTTPServer):
         self.spine_path = spine_path
         # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled for the plane.
         self.metrics = set_plane("sovereign")
+        self.metrics_projection_ttl_s = METRICS_PROJECTION_TTL_S
+        self.metrics_clock = time.monotonic
+        self._metrics_projection_lock = threading.Lock()
+        self._metrics_projected_at: "float | None" = None
+        self._metrics_refusals: "int | None" = None    # THIS server's last projected value
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
         # Anti-DNS-rebinding allowlist: the REAL bound address, plus the loopback pair only when bound to
         # loopback (dev convenience — never added for a private/WG bind), UNIONED with the operator's
@@ -386,19 +398,41 @@ class Handler(BaseHTTPRequestHandler):
         /healthz+/readyz (this cockpit binds loopback or a private WG/Tailscale address only; a public serve
         goes behind the operator's TLS reverse proxy). The body carries no token, path, or account state —
         only aggregate counters. Refusals are projected from the sovereign spine's DENY decisions; facts/
-        leads are offense-plane domain series (0 here). Total: a projection error still renders RED+process."""
-        reg = self.server.metrics
-        try:
-            from ..dashboard import snapshot as _snapshot
-            d = _snapshot(self.server.store())
-            # Feed the *_total counter from the CUMULATIVE spine projection (`refusals_total`), never the
-            # windowed `recent_decisions` — the latter slides with `lookback` and would make the counter go
-            # DOWN, violating counter monotonicity. The spine is append-only, so this only ever grows.
-            refusals = int(d.get("refusals_total") or 0)
-            reg.update_domain_from_snapshot({"totals": {"refusals": refusals}})
-        except Exception:  # noqa: BLE001 — a projection hiccup must not fail the scrape
-            pass
-        self._send(200, reg.render().encode("utf-8"), _OPENMETRICS_CT)
+        leads are offense-plane domain series (0 here). Total: a projection error still renders RED+process.
+        The refusals projection folds the whole spine, so it is rate-bounded (`_project_domain_metrics`);
+        RED, process and gate-denials are live on every scrape."""
+        self._project_domain_metrics()
+        self._send(200, self.server.metrics.render().encode("utf-8"), _OPENMETRICS_CT)
+
+    def _project_domain_metrics(self) -> None:
+        """Re-fold the spine into the refusals counter — at most once per `metrics_projection_ttl_s`,
+        counted from the END of the previous fold (so a slow fold is never re-run back-to-back), and never
+        two at once. A scrape that finds a fold running, or the last one still fresh, serves THIS server's
+        last projected value without waiting — except before the first fold has finished: then it waits for
+        it, so a fresh process never reports 0 for a spine that holds refusals (a scraper would read a counter
+        reset followed by a spike). A failed fold counts too, so a spine that cannot be folded is not re-read
+        per request (the counter then keeps its last value)."""
+        srv = self.server
+        first = srv._metrics_projected_at is None
+        if srv._metrics_projection_lock.acquire(blocking=first):
+            try:
+                last = srv._metrics_projected_at
+                if last is None or srv.metrics_clock() - last >= srv.metrics_projection_ttl_s:
+                    try:
+                        from ..dashboard import snapshot as _snapshot
+                        d = _snapshot(srv.store())
+                        # Feed the *_total counter from the CUMULATIVE spine projection (`refusals_total`), never
+                        # the windowed `recent_decisions` — the latter slides with `lookback` and would make the
+                        # counter go DOWN, violating counter monotonicity.
+                        srv._metrics_refusals = int(d.get("refusals_total") or 0)
+                    except Exception:  # noqa: BLE001 — a projection hiccup must not fail the scrape
+                        pass
+                    finally:
+                        srv._metrics_projected_at = srv.metrics_clock()
+            finally:
+                srv._metrics_projection_lock.release()
+        if srv._metrics_refusals is not None:      # the registry is process-wide: render THIS server's value
+            srv.metrics.update_domain_from_snapshot({"totals": {"refusals": srv._metrics_refusals}})
 
     # --- GET (read plane) -------------------------------------------------------------------------
     def do_GET(self):

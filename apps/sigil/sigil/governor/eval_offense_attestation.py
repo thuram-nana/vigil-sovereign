@@ -138,8 +138,9 @@ def _verify_pop(core: dict, evaluator_sig) -> bool:
         return False
     try:
         return verify_one(pk, pop_signing_bytes(core), evaluator_sig)
-    except (IntegrityError, TypeError):
-        # malformed base64 / wrong-length / non-decodable sig → NOT authentic (fail-closed contract)
+    except (IntegrityError, TypeError, ValueError):
+        # malformed base64 / wrong-length / non-decodable sig, or a core that cannot be UTF-8 canonicalised
+        # (a lone surrogate from a raw spine write) → NOT authentic (fail-closed contract)
         return False
 
 
