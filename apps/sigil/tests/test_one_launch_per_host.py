@@ -97,9 +97,9 @@ def _seat(store, *, credits=100, hosts=(HOST,), org=ORG, postpaid=None, plan=Non
         assert add_customer_target(h, org_id=org, store=store, now=NOW)["ok"]
 
 
-def _try_reserve(store, *, units=30, now=NOW, host=HOST, org=ORG):
+def _try_reserve(store, *, units=30, now=NOW, host=HOST, org=ORG, nonce=None):
     return LaunchGate(store).reserve_launch(requester="u", org_id=org, host=host, units=units, now=now,
-                                            duration_hours=1)
+                                            duration_hours=1, nonce=nonce)
 
 
 def _reserve(store, *, publish=False, **kw):
@@ -780,3 +780,19 @@ def test_forged_reservation_and_settle_evidence_is_ignored():
     ix = scan_reservations(s, kp.public_key_b64)
     assert (ORG, a["slug"], a["nonce"]) not in ix.settled
     assert (ORG, a["slug"], "x9") not in ix.reservations and (ORG, a["slug"], a["nonce"]) in ix.reservations
+
+
+def test_a_reused_nonce_never_inflates_the_released_amount():
+    # a refused re-reserve with the same nonce appends a second (idempotent, no-op) reserve record under the same
+    # entry id: the release refunds the reservation's credits once, from its first record
+    s = _store()
+    _seat(s)
+    a = _reserve(s, publish=True, nonce="n-a")
+    again = LaunchGate(s).reserve_launch(requester="u", org_id=ORG, host=HOST, units=30, now=NOW, duration_hours=1,
+                                         nonce="n-a")
+    assert not again["ok"] and "nonce already used" in again["error"]
+    _reserve(s, publish=True)
+    assert scan_reservations(s, ensure_owner_keypair().public_key_b64).reservations[
+        (ORG, a["slug"], "n-a")].reserved == 30
+    out = _sweep(s, apply=True)
+    assert _statuses(out) == [("n-a", "released")] and out["items"][0]["refunded"] == 30 and _avail(s) == 70
