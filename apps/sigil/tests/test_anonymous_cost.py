@@ -233,6 +233,10 @@ def test_a_logout_that_ends_no_session_appends_nothing_and_a_real_logout_is_stil
         assert sid
         assert _req(port, "/api/logout", method="POST", body={}, headers={"Cookie": f"sigil_session={sid}"})[0] == 200
         assert [e["event"] for e in _authn(s)[before:]] == ["authn.logout", "authn.logout"]
+        ghost = SessionLedger(base.parent / (base.name + ".sessions")).create("ghost", "operator")
+        assert ghost                                     # a live session whose account resolves to no principal
+        assert _req(port, "/api/logout", method="POST", body={}, headers={"Cookie": f"sigil_session={ghost}"})[0] == 200
+        assert [e["event"] for e in _authn(s)[before:]] == ["authn.logout"] * 3, "ending a session was not audited"
     finally:
         s.shutdown()
 
@@ -294,6 +298,23 @@ def test_every_failed_login_goes_through_the_coalescer():
     src = inspect.getsource(srvmod)
     assert src.count('"authn.login.failure"') == 1 and "def _authn_failure" in src
     assert src.count('reason="totp", proven=True)') == 3 and src.count('reason="totp")') == 0
+
+
+def test_the_handler_passes_a_proven_username_through_to_the_coalescer():
+    seen: list = []
+
+    class _C:
+        def record(self, store, event, **kw):
+            seen.append(kw)
+
+    class _H:
+        client_address = ("127.0.0.1", 0)
+        server = type("S", (), {"authn_failures": _C()})()
+        _client_source = srvmod.Handler._client_source
+
+    srvmod.Handler._authn_failure(_H(), None, username="tim", method="password", reason="totp", proven=True)
+    srvmod.Handler._authn_failure(_H(), None, username="eve", method="password", reason="bad_credentials")
+    assert [(k["username"], k["proven"]) for k in seen] == [("tim", True), ("eve", False)]
 
 
 class _Rec:
@@ -362,6 +383,26 @@ def test_a_summary_the_spine_refuses_stays_owed_and_is_written_later():
     assert [p.get("coalesced") for p in st.written] == [None, 2, None, 1], "an owed count was lost"
 
 
+def test_an_owed_summary_merges_with_failures_counted_meanwhile_and_is_retried_first():
+    c, clock = _coalescer()
+    st = _Rec()
+    for _ in range(3):                                   # group A: first + 2 counted
+        c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    clock.t += 50.0
+    c.record(st, "authn.login.failure", source="203.0.113.9", method="bearer", reason="invalid_token")   # group B
+    clock.t += 10.0                                      # A's window has ended; B's has not
+
+    def busy_spine():
+        for _ in range(3):                               # group A fails again while its summary is being written
+            c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+        raise OSError("spine busy")
+
+    c.flush(busy_spine)
+    assert [p.get("coalesced") for p in st.written] == [None, None, None]
+    c.flush(lambda: st)                                  # the owed (ended) group A is first in line, ahead of B
+    assert [(p["client"], p.get("coalesced")) for p in st.written[3:]] == [("203.0.113.1", 4)]
+
+
 def test_a_first_record_the_spine_refuses_is_counted_into_the_summary():
     c, clock = _coalescer()
     st = _Rec(fail_first=1)
@@ -389,20 +430,33 @@ def test_close_writes_every_pending_count_and_server_close_calls_it():
     assert [e.get("coalesced") for e in _fails(s)] == [None, 2]
 
 
-def test_an_idle_server_still_writes_the_count_when_the_window_ends():
+def test_an_idle_server_still_writes_the_count_when_each_window_ends():
     from sigil.spine.store import SpineStore
     p = tempfile.mktemp(suffix=".jsonl")
     c = FailedAuthnCoalescer(window_s=0.3, store_factory=lambda: SpineStore(p))
     st = SpineStore(p)
     for _ in range(4):
         c.record(st, "authn.login.failure", source="203.0.113.1", method="bearer", reason="invalid_token")
+    time.sleep(0.15)
+    for _ in range(2):                                   # a second group, ending later than the first
+        c.record(st, "authn.login.failure", source="203.0.113.2", method="bearer", reason="invalid_token")
+    want = [("203.0.113.1", None), ("203.0.113.2", None), ("203.0.113.1", 3), ("203.0.113.2", 1)]
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        got = [r.payload.get("coalesced") for r in SpineStore(p).iter_records()]
-        if got == [None, 3]:
+        got = [(r.payload.get("client"), r.payload.get("coalesced")) for r in SpineStore(p).iter_records()]
+        if got == want:
             break
         time.sleep(0.05)
-    assert got == [None, 3], "no summary was written without a further request"
+    assert got == want, "a summary was not written without a further request"
+
+
+def test_past_the_group_bound_proven_usernames_share_the_aggregate_group():
+    c, _clock = _coalescer(max_keys=1)
+    st = _Rec()
+    for user in ("tim", "ann", "bob", "eve"):
+        c.record(st, "authn.login.failure", source="203.0.113.1", username=user, method="password",
+                 reason="totp", proven=True)
+    assert [(p["client"], p["username"]) for p in st.written] == [("203.0.113.1", "tim"), ("*", "ann")]
 
 
 def test_the_bounds_are_the_documented_ones():
