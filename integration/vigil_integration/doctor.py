@@ -1411,9 +1411,9 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
             try:
                 section["cancel_settlement"] = _mm.cancel_settlement(e)
             except _mm.MeteringError as exc:
-                issues.append(f"metered billing has no cancellation policy: {exc}. The owner must choose it before "
-                              f"metered billing is enabled; metered launches and cancelled-run settles refuse "
-                              f"until then.")
+                issues.append(f"metered billing has an invalid cancellation policy: {exc}. Fix or unset it (unset "
+                              f"means metered: a cancelled run pays for what it used); metered launches and "
+                              f"cancelled-run settles refuse until then.")
         floor = _mm.run_floor_credits(e)
         prices = _mm.price_table(e)
         model = _mm.run_model(e)

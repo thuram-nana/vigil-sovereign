@@ -3,7 +3,8 @@
   * neither flag set adds nothing (default output unchanged);
   * metered billing without the gateway, a gateway with no provider key, a gateway that does not answer while
     billing is metered, a pricing value the metering core refuses, and — when billing is metered — no target
-    margin or no cancel-settlement policy are HARD issues; the margin's value is never printed;
+    margin or an invalid cancel-settlement policy are HARD issues (an unset policy means metered, the owner's
+    decision of 2026-11-13); the margin's value is never printed;
   * with billing flat, the margin and the cancel policy are not required;
   * no daily ceiling, or an unanswering gateway while billing is still flat, is a note;
   * the line renders the mode, the gateway and the pricing in force.
@@ -58,13 +59,15 @@ def test_misconfigurations_are_hard_issues():
                  ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "0"), ("VIGIL_GATEWAY_DAILY_LIMIT_USD", "-5")):
         section, issues, _ = d._metering_report({**ON, k: v}, probe=_alive)
         assert section["ok"] is False and any("refused" in m for m in issues), (k, v)
-    # metered billing needs the owner's two decisions; each missing one is its own hard issue
+    # metered billing needs a target margin, and a cancel policy that is either unset (= metered) or valid
     for k, v, says in ((mm.MARGIN_ENV, "", "cannot price a run"),
                        (mm.MARGIN_ENV, "1.5", "cannot price a run"),
-                       (mm.CANCEL_ENV, "", "no cancellation policy"),
-                       (mm.CANCEL_ENV, "free", "no cancellation policy")):
+                       (mm.CANCEL_ENV, "free", "invalid cancellation policy")):
         section, issues, _ = d._metering_report({**ON, k: v}, probe=_alive)
         assert section["ok"] is False and len(issues) == 1 and says in issues[0], (k, v, issues)
+    # an UNSET cancel policy is the owner's default (metered), not an issue
+    section, issues, _ = d._metering_report({**ON, mm.CANCEL_ENV: ""}, probe=_alive)
+    assert issues == [] and section["cancel_settlement"] == "metered"
 
 
 def test_the_run_model_must_be_priced_and_concurrency_is_digits_only():

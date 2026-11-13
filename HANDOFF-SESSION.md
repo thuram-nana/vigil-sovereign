@@ -278,7 +278,7 @@ ends with the session's attribution footer.
 |---|---|---|
 | `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost / (1 − target margin) (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
 | `VIGIL_MODEL_GATEWAY_ENABLED` / `VIGIL_MODEL_GATEWAY_PORT` (8742) | the cockpit starts the sovereign model gateway (loopback) | owner / operator |
-| `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` \| `refund`, **no default**: the owner's choice; unset = metered launches refused) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
+| `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` \| `refund`; unset = `metered`, the owner's decision of 2026-11-13: a cancelled run pays for what it used; an unrecognised value refuses metered launches) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
 | `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
 Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
@@ -713,16 +713,18 @@ All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF;
   change how already-published metered launches settle: keep the target margin and the cancel policy set (in the
   settle drain's environment too) until they have all settled, or their settles defer.
 - `inbound/completion_spool.py::_consumed_for`: metered launch → close the meter, then completed = metered (clamped to
-  [floor, reservation]); canceled = `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` | `refund`, no default); failed
+  [floor, reservation]); canceled = `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` | `refund`; unset = `metered`); failed
   = 0. Only confirmed spend is billed. A request in flight, a transient meter error or an unset pricing setting
   DEFERS the settle (back to `incoming/`, reported as `deferred`); a broken meter is quarantined. A wait on the
   pricing configuration never clears by retrying, so it is also reported as `deferred_config` and `vigil settle-drain`
   exits 1 (the unit FAILS, the dead-man alarms) until it is fixed — set the pricing settings in the drain's own
   environment (`infra/systemd/vigil-settle-drain.env.example`).
-- `ops_sweeps.sweep_abandoned_reservations`: an abandoned launch published metered is refunded in full like a flat
-  one (the sweep cannot tell a customer who paused and never resumed from a run VIGIL lost), and its row reports the
-  meter's confirmed spend (`metered_cost_nano`, `metered_requests`) so the spend a refund leaves VIGIL paying is never
-  silent. Whether such a launch should instead be charged under the cancel policy is an owner decision (open).
+- `ops_sweeps.sweep_abandoned_reservations` (owner decision 2026-11-13: a scan paused and never resumed is charged
+  for what it used): an abandoned launch published metered that the CUSTOMER paused (a cleanly-read pause marker holds
+  its nonce) is charged its confirmed metered use, clamped to [floor, reservation] (`charged_paused`); one NOT paused
+  was lost on VIGIL's side and is refunded in full; one whose pause state cannot be read is not settled
+  (`pause_unknown`); a flat launch has no meter and is refunded. Every metered row reports the meter's confirmed spend
+  (`metered_cost_nano`, `metered_requests`).
 - `vigil_core/run_tier.effort_for` (quick → high, deep → xhigh; unknown → high, never an escalation).
 - `backup.py`: `model_meter` captured (money data), restored functionally (`GrantMeter.verify` totals).
 - `integration/vigil_integration/doctor.py::_metering_report` — HARD issues (each blocks metered bring-up): metered

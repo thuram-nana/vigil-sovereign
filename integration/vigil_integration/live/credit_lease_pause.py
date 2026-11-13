@@ -216,6 +216,19 @@ def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:
     return str(nonce) in nonces                     # NONCE-SCOPED: only THIS nonce's pause halts THIS nonce
 
 
+def lease_pause_state(base_dir: Any, slug: Any, nonce: Any) -> Optional[bool]:
+    """Tri-state, for a caller that must NOT guess either way (the abandoned-launch sweep decides whether to CHARGE
+    a launch the customer paused and never resumed): ``True`` when a cleanly-read marker holds this nonce,
+    ``False`` when there is no marker or a cleanly-read marker without it, and ``None`` when the pause state cannot
+    be read positively (an unsafe slug, or an existing marker that is unreadable / corrupt / foreign). Unlike
+    :func:`is_lease_paused` (fail-CLOSED to True, right for the halt), this never turns "cannot tell" into an answer.
+    Total; never raises."""
+    nonces = _marker_nonces(base_dir, slug)
+    if nonces is None:
+        return None
+    return str(nonce) in nonces
+
+
 def paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
     """pause/resume PR-5 (observability) — enumerate the currently-paused launches as ``(slug, [nonces])`` for
     every marker holding at least one paused nonce. READ-ONLY; TOTAL and fail-SAFE to ``[]`` (an absent /

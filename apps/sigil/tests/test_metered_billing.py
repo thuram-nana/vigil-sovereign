@@ -203,8 +203,7 @@ def test_the_grant_is_bound_to_the_verified_lease(monkeypatch, units, effort):
     assert read_model_grant(base, r["slug"], expect_nonce=r["nonce"]).token == bundle.token
 
 
-@pytest.mark.parametrize("env", [{mm.MARGIN_ENV: "1.5"}, {mm.MARGIN_ENV: ""}, {mm.CANCEL_ENV: ""},
-                                 {mm.CANCEL_ENV: "free"}])
+@pytest.mark.parametrize("env", [{mm.MARGIN_ENV: "1.5"}, {mm.MARGIN_ENV: ""}, {mm.CANCEL_ENV: "free"}])
 def test_a_refused_pricing_config_refuses_the_publish(monkeypatch, env):
     _metered(monkeypatch)
     for k, v in env.items():
@@ -465,23 +464,124 @@ def test_a_run_armed_late_keeps_its_model_access_past_the_lease_window(monkeypat
         gate.meter.shutdown()
 
 
-def test_the_abandoned_sweep_reports_the_metered_spend_it_refunds(monkeypatch):
+def _spool():
+    spool = tempfile.mkdtemp()
+    for sub in ("incoming", "working", "rejected"):
+        os.makedirs(os.path.join(spool, sub))
+    return spool
+
+
+LATER = NOW + 8 * 3600 + 2 * 86400                                     # past the lease window + the sweep TTL
+
+
+def test_the_abandoned_sweep_refunds_a_metered_launch_vigil_lost_and_reports_its_spend(monkeypatch):
+    """No pause marker: the customer did not pause it, so the run was lost on VIGIL's side — refunded in full, with
+    the meter's confirmed spend reported (the spend the refund leaves VIGIL paying)."""
     from sigil.ops_sweeps import sweep_abandoned_reservations
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     _owner, r, g, pub = _reserve(s)
     assert pub["ok"]
-    _spend(r, USAGE, USAGE_COST)                                         # then paused, never resumed
-    spool = tempfile.mkdtemp()
-    for sub in ("incoming", "working", "rejected"):
-        os.makedirs(os.path.join(spool, sub))
-    later = NOW + 8 * 3600 + 2 * 86400
-    seen = sweep_abandoned_reservations(g, now=later, ttl_s=86400, completion_spool=spool)["items"]
-    assert [(x["status"], x["metered_cost_nano"], x["metered_requests"]) for x in seen] == [
-        ("abandoned", USAGE_COST, 1)]
-    done = sweep_abandoned_reservations(g, now=later, ttl_s=86400, apply=True, completion_spool=spool)["items"]
+    _spend(r, USAGE, USAGE_COST)
+    spool = _spool()
+    seen = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, completion_spool=spool)["items"]
+    assert [(x["status"], x["paused"], x["metered_cost_nano"], x["metered_requests"]) for x in seen] == [
+        ("abandoned", False, USAGE_COST, 1)]
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=spool)["items"]
     assert [(x["status"], x["refunded"], x["metered_cost_nano"]) for x in done] == [("refunded", 900, USAGE_COST)]
     assert _closed(r) and _avail(s) == 1_000
+
+
+def test_a_metered_launch_the_customer_paused_and_never_resumed_is_charged_for_what_it_used(monkeypatch):
+    """Owner decision 2026-11-13: paused and never resumed = charged for what it used (54 credits here), the rest of
+    the reservation refunded; the meter is closed so nothing more can be spent."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, pub = _reserve(s)
+    assert pub["ok"]
+    _spend(r, USAGE, USAGE_COST)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    spool = _spool()
+    seen = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, completion_spool=spool)["items"]
+    assert [(x["status"], x["paused"]) for x in seen] == [("abandoned", True)]
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=spool)["items"]
+    assert [(x["status"], x["charged"], x["refunded"], x["metered_cost_nano"]) for x in done] == [
+        ("charged_paused", 54, 846, USAGE_COST)]
+    assert _closed(r) and _avail(s) == 1_000 - 54
+    again = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=spool)["items"]
+    assert again == [] and _avail(s) == 1_000 - 54                     # settled exactly once
+
+
+def test_a_paused_metered_launch_with_no_confirmed_use_pays_the_floor(monkeypatch):
+    """Charged for what it used, and every metered run's charge is at least the per-run floor."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    floor = mm.run_floor_credits()
+    assert [(x["status"], x["charged"]) for x in done] == [("charged_paused", floor)]
+    assert _avail(s) == 1_000 - floor
+
+
+def test_a_paused_charge_never_exceeds_the_reservation(monkeypatch):
+    """Confirmed use worth more than the reservation is charged the reservation, never more (and reported so)."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST * 20)                                    # ~1065 credits of use against 900 reserved
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["charged"], x["refunded"]) for x in done] == [("charged_paused", 900, 0)]
+    assert _avail(s) == 1_000 - 900
+
+
+def test_an_unreadable_pause_state_settles_nothing(monkeypatch):
+    """Cannot tell whether the customer paused it: neither charge nor refund — reported for a human."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import pause_path
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    p = pause_path(os.environ["VIGIL_BASE_DIR"], r["slug"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json", encoding="utf-8")                          # a corrupt marker
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [x["status"] for x in done] == ["pause_unknown"]
+    assert _avail(s) == 100 and not _closed(r)                           # the 900 reservation is still held
+
+
+def test_a_paused_charge_waits_on_its_pricing_configuration(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    monkeypatch.delenv(mm.MARGIN_ENV)                                     # the margin is unset at sweep time
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [x["status"] for x in done] == ["deferred_config"]
+    assert _avail(s) == 100                                              # nothing settled; the next pass retries
+
+
+def test_a_flat_launch_paused_and_abandoned_is_refunded(monkeypatch):
+    """A flat launch has no meter, so what it used cannot be measured: refunded in full whatever its pause state."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)]
+    assert _avail(s) == 1_000
 
 
 def test_the_abandoned_sweep_reports_no_metered_spend_for_a_flat_launch():
@@ -589,12 +689,22 @@ def test_a_request_in_flight_defers_the_settle(monkeypatch):
         live.shutdown()
 
 
-def test_an_unset_policy_at_settle_defers_it(monkeypatch):
+def test_an_unset_cancel_policy_settles_a_cancel_metered(monkeypatch):
+    """Owner decision 2026-11-13: unset means a cancelled run pays for what it used (54 credits here)."""
+    _metered(monkeypatch, cancel=None)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, pub = _reserve(s)
+    assert pub["ok"]                                                     # an unset policy no longer refuses the publish
+    _spend(r, USAGE, USAGE_COST)
+    assert _settle(s, owner, r, "canceled")["settled"] == 1 and _avail(s) == 1_000 - 54
+
+
+def test_a_mistyped_policy_at_settle_defers_it(monkeypatch):
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, r, _g, _pub = _reserve(s)
     _spend(r, USAGE, USAGE_COST)
-    monkeypatch.delenv(mm.CANCEL_ENV)
+    monkeypatch.setenv(mm.CANCEL_ENV, "free")                            # a typo never silently picks a policy
     w = _watcher(s, owner, r, "canceled")
     assert w.drain()["deferred"] == 1 and _avail(s) == 100
     monkeypatch.setenv(mm.CANCEL_ENV, "refund")

@@ -48,6 +48,7 @@ PRICES_ENV = "VIGIL_MODEL_PRICES"
 MARGIN_ENV = "VIGIL_BILLING_TARGET_MARGIN"
 FLOOR_ENV = "VIGIL_RUN_FLOOR_CREDITS"
 CANCEL_ENV = "VIGIL_BILLING_CANCEL_SETTLEMENT"
+DEFAULT_CANCEL_SETTLEMENT = "metered"   # owner decision 2026-11-13: a cancelled scan pays for what it used
 RUN_MODEL_ENV = "VIGIL_RUN_MODEL"
 DEFAULT_RUN_MODEL = "claude-opus-4-8"
 CANCEL_POLICIES = ("metered", "refund")
@@ -408,13 +409,17 @@ def run_model(env: Optional[Mapping[str, str]] = None) -> str:
 
 def cancel_settlement(env: Optional[Mapping[str, str]] = None) -> str:
     """How a metered run the customer cancels settles (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` (charged
-    for what it used, at least the floor) or ``refund`` (charged nothing). An owner decision with NO default: an
-    unset or unknown value RAISES, so metered billing refuses to launch or settle a run until the owner chooses."""
+    for what it used, at least the floor, never more than the reservation) or ``refund`` (charged nothing). Unset
+    means ``metered`` (the owner's decision of 2026-11-13: a cancelled scan pays for what it already used). An
+    unrecognised value RAISES, so a typo never silently picks a policy; metered billing then refuses to launch or
+    settle until it is fixed."""
     env = os.environ if env is None else env
     raw = (env.get(CANCEL_ENV) or "").strip().lower()
+    if not raw:
+        return DEFAULT_CANCEL_SETTLEMENT
     if raw not in CANCEL_POLICIES:
-        raise MeteringError(f"{CANCEL_ENV} must be one of {', '.join(CANCEL_POLICIES)} (the owner's choice; it has "
-                            f"no default)")
+        raise MeteringError(f"{CANCEL_ENV} must be one of {', '.join(CANCEL_POLICIES)} (unset means "
+                            f"{DEFAULT_CANCEL_SETTLEMENT})")
     return raw
 
 
