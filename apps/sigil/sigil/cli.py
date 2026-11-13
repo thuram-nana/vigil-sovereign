@@ -1091,7 +1091,8 @@ def _verify_fold_caches(rebuild: bool) -> bool:
     if isinstance(rep, dict):
         from .governor import fold_warm
         sup = rep.get("superseded")
-        sup_bad = sup.get("mismatched") if isinstance(sup, dict) else None
+        sup = sup if isinstance(sup, dict) else {}
+        sup_bad = sup.get("mismatched")
         if isinstance(sup_bad, list) and sup_bad:
             print(f"folds --: a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
                   f"{', '.join(str(f) for f in sup_bad)}; its caches died with it, but investigate a possible spine "

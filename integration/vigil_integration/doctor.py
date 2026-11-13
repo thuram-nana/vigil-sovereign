@@ -1362,7 +1362,8 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
                      f"({', '.join(str(f.get('fold')) for f in errored)}: {errored[0].get('error')}); "
                      f"run `sigil verify`.")
     sup = rep.get("superseded")
-    sup_bad = sup.get("mismatched") if isinstance(sup, dict) else None
+    sup = sup if isinstance(sup, dict) else {}
+    sup_bad = sup.get("mismatched")
     if isinstance(sup_bad, list) and sup_bad:
         section["superseded_mismatched"] = len(sup_bad)
         notes.append(f"a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
