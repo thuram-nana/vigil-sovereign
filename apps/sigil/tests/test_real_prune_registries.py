@@ -2000,6 +2000,29 @@ def test_a_reset_pruned_spine_is_re_anchored_only_by_a_deliberate_floor_reset(wo
     assert SnapshotState.load(world.store()) == SnapshotState.empty()
 
 
+def test_a_floor_reset_supersedes_only_the_pruned_head_it_judged(world, monkeypatch):
+    """`sigil floor reset --yes` over a reset spine replaces the stale pruned head it judged — but a DIFFERENT pruned
+    head that lands between that judgement and the commit (a prune committed concurrently) stands."""
+    _pruned_killswitch_world(world)
+    world.store().reset()
+    s = world.store()
+    s.append(kind="event", source="t", actor="u", payload={"signal": "noise", "i": 1})
+    judged = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    landed = judged.model_copy(update={"entry_count": judged.entry_count + 1}).model_dump_json()
+    real_sign = _cp.sign_head
+
+    def a_prune_lands_first(*a, **k):
+        (world.root / "head.json").write_text(landed, encoding="utf-8")
+        return real_sign(*a, **k)
+
+    monkeypatch.setattr(_cp, "sign_head", a_prune_lands_first)
+    out = _cp.checkpoint(s, force=True)
+    assert _head_bytes(world).decode() == landed and out.snapshot_seq == judged.snapshot_seq
+    monkeypatch.setattr(_cp, "sign_head", real_sign)
+    (world.root / "head.json").write_text(judged.model_dump_json(), encoding="utf-8")
+    assert _cp.checkpoint(s, force=True).snapshot_seq == -1          # the judged head itself is superseded
+
+
 def test_floor_reset_on_a_pruned_spine_with_an_unreadable_floor_re_seeds_it(world, monkeypatch, capsys):
     from types import SimpleNamespace as NS
     cli = _cli(world, monkeypatch)
