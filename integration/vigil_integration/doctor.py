@@ -1568,25 +1568,32 @@ def collect(repo_root) -> dict:
     _close_alarm = home / "alarms" / "eval-grant-close-revoke.json"
     if _close_alarm.exists():
         _failed: list = []
+        _total = 0
+        _cause = ""
         try:
             import json as _json
             _rec = _json.loads(_close_alarm.read_text(encoding="utf-8"))
             _detail = str(_rec.get("detail", ""))[:300]
-            _failed = [str(x)[:96] for x in (_rec.get("failed") or []) if isinstance(x, str)][:10]
+            _cause = str(_rec.get("cause", ""))
+            _all = [str(x)[:96] for x in (_rec.get("failed") or []) if isinstance(x, str)]
+            _total = int(_rec.get("failed_total") or len(_all))
+            _failed = _all[:10]
         except (OSError, ValueError, AttributeError, TypeError):
             _detail = "the alarm record is unreadable"
             _failed = ["(unknown: the alarm record is unreadable)"]
+            _total = 1
+        _more = f" and {_total - len(_failed)} more" if _total > len(_failed) else ""
+        _fix = ("Make the seam directory (VIGIL_BASE_DIR) writable and the spine readable (`sigil verify`), then run "
+                "`sigil eval-grant reconcile` (an offense close does the same): it re-publishes every eval grant and "
+                "attestation from the spine and clears this alarm only when every one is confirmed.")
         if _failed:
-            _issue(f"an eval-capability grant revoke could NOT be confirmed on the seam for {', '.join(_failed)} "
-                   f"({_detail}): its published grant may STILL AUTHORIZE on the offense plane. Make the seam "
-                   f"directory (VIGIL_BASE_DIR) writable and the spine readable (`sigil verify`), then close offense "
-                   f"again: the close re-publishes every grant from the spine and clears this alarm only when every "
-                   f"one is confirmed.")
+            _issue(f"an eval-capability grant / eval-offense attestation revoke could NOT be confirmed on the seam "
+                   f"for {', '.join(_failed)}{_more} ({_detail}): its publication may STILL AUTHORIZE on the offense "
+                   f"plane. {_fix}")
         else:
             _issue(f"offense close could not revoke the eval-capability grants because the SPINE could not be read "
-                   f"({_detail}). Every published grant was withdrawn and its rollback floor raised, so the offense "
-                   f"plane is ungranted. Repair the spine (`sigil verify`), then close offense again to revoke on the "
-                   f"spine and clear this alarm.")
+                   f"({_detail}{'; ' + _cause if _cause and _cause != 'spine_unreadable' else ''}). Every published "
+                   f"grant was withdrawn and its rollback floor raised, so the offense plane is ungranted. {_fix}")
     # 10) Integrity (W6-7) — continuously verify the property the product EXISTS to guarantee: the spine
     #    hash-chain / attestation. Runs the boundary-safe integrity verifier over the sovereign spine home
     #    (SIGIL_HOME): chain integrity, signed-head freshness, the anti-rollback floor, clock skew, plus the
