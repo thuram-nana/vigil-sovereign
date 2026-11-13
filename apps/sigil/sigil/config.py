@@ -176,6 +176,7 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
 SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
+TRIAL_LAUNCH_CAP_DIR = _customer / "trial_launch_cap"   # the global daily trial-launch cap's markers
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
@@ -208,6 +209,9 @@ MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revo
 # sign-up requests per canonical mailbox per hour, counted only after the per-ip guard passed. 0 (the default)
 # leaves the per-mailbox limiter unwired; the trial-preview readiness check requires a positive owner-set value.
 SIGNUP_EMAIL_PER_HOUR = _int_env("VIGIL_SIGNUP_EMAIL_PER_HOUR", 0)
+# trial launches per rolling 24h, all trial orgs together (bounds daily trial spend at cap x trial reservation).
+# Owner-set; 0 (the default) means trial launches are off.
+TRIAL_LAUNCH_DAILY_CAP = _int_env("VIGIL_TRIAL_LAUNCH_DAILY_CAP", 0)
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
 # decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
 # later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
@@ -243,6 +247,12 @@ def trial_preview_enabled() -> bool:
     only when the org, its canonical mailbox and its trial entries are all unclaimed (one trial per org and per
     mailbox), and later slices show that org partial results until it buys credits."""
     return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def trial_product_id() -> str:
+    """The launch product a trial-preview org may run (`VIGIL_TRIAL_PRODUCT_ID`, an offered catalog launch
+    product). Owner-set; no default — while it is unset a locked trial org cannot launch at all."""
+    return (os.environ.get("VIGIL_TRIAL_PRODUCT_ID") or "").strip()
 
 
 def customer_checkout_enabled() -> bool:

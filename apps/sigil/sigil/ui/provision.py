@@ -32,7 +32,7 @@ import hashlib
 import math
 import secrets
 import time
-from typing import Optional
+from typing import NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -166,7 +166,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
-                 trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None,
+                 trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -210,6 +210,9 @@ class Provisioner:
         # Pricing S3 — the owner-signed trial-claim ledger (one trial per canonical mailbox). Consulted only while
         # VIGIL_TRIAL_PREVIEW_ENABLED is on; None with the flag on ⇒ no preview trial is granted (fail-closed).
         self.trial_claims = trial_claims
+        # Pricing S7 — the GLOBAL daily trial-launch cap (VIGIL_TRIAL_LAUNCH_DAILY_CAP). None ⇒ trial launches are
+        # refused (the owner has not set a cap); paid launches never consult it.
+        self.trial_launch_limiter = trial_launch_limiter
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -923,8 +926,19 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied(f"unknown or unavailable launch product: {pid!r}")
             units = int(product.units)
-        r = LaunchGate(self.store).reserve_launch(
-            requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+        if self._preview_locked(requester_org_id):
+            # Pricing S7: a locked trial org — trial product only, one registrable domain (first claim wins,
+            # with proof history), and the global daily cap. The checks AND the reserve run under ONE hold of
+            # the re-entrant spine lock (LaunchGate takes the same lock), so nothing lands in between.
+            with self._lock:
+                domain = self._trial_launch_check(requester, requester_org_id, host, pid, now=t)
+                r = LaunchGate(self.store).reserve_launch(
+                    requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+                if r.get("ok"):
+                    self._trial_launch_commit(requester_org_id, domain, now=t)
+        else:
+            r = LaunchGate(self.store).reserve_launch(
+                requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
         if not r.get("ok"):
             self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
                         target=host, outcome="denied")
@@ -936,6 +950,62 @@ class Provisioner:
         if pid:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
+
+    def _trial_launch_refuse(self, requester: str, org_id: str, host: str, reason: str, text: str) -> "NoReturn":
+        self._audit("launch_reserve", requester=requester, org_id=org_id, target=host,
+                    outcome="trial_refused", reason=reason)
+        raise ProvisionDenied(text)
+
+    def _trial_launch_check(self, requester: str, org_id: str, host: str, pid: str, *, now: float) -> str:
+        """Caller holds the lock. Refuses (generic text, never naming another org) unless: the trial product is
+        configured and is the one requested; the host has an ICANN registrable domain (not an IP, localhost, or
+        a free-subdomain platform under a PRIVATE suffix; the vendored list's sha256 matches); no other org
+        claims that domain, or — with no claim yet — no other org has EVER held a signed proof in it; this org
+        claims no other domain; and the daily cap is configured and not reached. Returns the domain."""
+        from .. import config
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.registrable_domain import TrialDomainRefused, load_rules, same_domain, trial_domain
+        from ..governor.trial_claim import key_digest
+        product = config.trial_product_id()
+        if not product or self.trial_claims is None or self.trial_launch_limiter is None:
+            self._trial_launch_refuse(requester, org_id, host, "trial_not_configured",
+                                      "trial scans are not available yet — buy credits to scan")
+        if pid != product:
+            self._trial_launch_refuse(requester, org_id, host, "trial_product_only",
+                                      "your trial covers the trial scan only — buy credits for other scans")
+        rules = load_rules()
+        try:
+            domain = trial_domain(host, rules=rules)
+        except TrialDomainRefused as exc:
+            self._trial_launch_refuse(requester, org_id, host, exc.reason,
+                                      "trial scans need your own registered domain — buy credits to scan it")
+        digest = key_digest("domain", domain)
+        holder = self.trial_claims.claimant("domain", digest)
+        if holder is not None and holder != org_id:
+            self._trial_launch_refuse(requester, org_id, host, "domain_claimed",
+                                      "trial scans are limited to one workspace per domain — buy credits to "
+                                      "scan it")
+        if any(k == "domain" and d != digest for k, d in self.trial_claims.claims_of(org_id)):
+            self._trial_launch_refuse(requester, org_id, host, "second_domain",
+                                      "your trial covers one domain — buy credits to scan another")
+        if holder is None:
+            for o, h in AssetOwnershipRegistry(self.store, owner_key=None).ever_proven_pairs():
+                if o != org_id and same_domain(h, domain, rules=rules):
+                    self._trial_launch_refuse(requester, org_id, host, "domain_history",
+                                              "trial scans are limited to one workspace per domain — buy "
+                                              "credits to scan it")
+        if self.trial_launch_limiter.locked("trial:launch:global", now=now) is not None:
+            self._trial_launch_refuse(requester, org_id, host, "daily_cap",
+                                      "trial scans are paused for today — try again later or buy credits")
+        return domain
+
+    def _trial_launch_commit(self, org_id: str, domain: str, *, now: float) -> None:
+        """After a successful trial reserve (lock held): write the domain claim (first wins) and count the cap."""
+        from ..governor.trial_claim import key_digest
+        digest = key_digest("domain", domain)
+        if self.trial_claims.claimant("domain", digest) is None:
+            self.trial_claims.claim("domain", digest, org_id, issued_at=self._next_issued())
+        self.trial_launch_limiter.record_failure("trial:launch:global", now=now)
 
     # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
     # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
@@ -1729,6 +1799,10 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         trial_claims=TrialClaimRegistry(store),
+        # Pricing S7: the global daily trial-launch cap; base_lock = window so it holds for the full day.
+        trial_launch_limiter=(LoginRateLimiter(config.TRIAL_LAUNCH_CAP_DIR, max_fails=config.TRIAL_LAUNCH_DAILY_CAP,
+                                               window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
+                              if config.TRIAL_LAUNCH_DAILY_CAP > 0 else None),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
     )
