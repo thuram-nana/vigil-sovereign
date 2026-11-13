@@ -521,5 +521,8 @@ def verify_wielder_proof(proof: "WielderProof | None", *, expected_audience: str
     PoP failure need not cost a live probe. ``expected_audience`` should be the EFFECTIVE (post-attenuation)
     audience from :func:`verify_capability`; a bearer (``"*"``) audience has no key to prove and MUST be handled
     by the caller's policy, not here."""
-    _verify_wielder_proof(proof, expected_audience=expected_audience, challenge=challenge,
-                          cap_digest=capability._digest())
+    try:
+        cap_digest = capability._digest()
+    except (TypeError, ValueError) as e:   # a capability whose core cannot be UTF-8 canonicalised
+        raise CapabilityError(f"capability is malformed: {e}") from e
+    _verify_wielder_proof(proof, expected_audience=expected_audience, challenge=challenge, cap_digest=cap_digest)

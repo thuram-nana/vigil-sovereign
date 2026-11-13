@@ -40,8 +40,10 @@ def test_evaluator_pop_over_an_unencodable_core_is_refused(mod):
     assert mod._verify_pop(payload, PINNED) is False
 
 
-@pytest.mark.parametrize("field,value", [("scope_hosts", [BAD]), ("not_before", "not-a-number")])
+@pytest.mark.parametrize("field,value", [("scope_hosts", [BAD]), ("not_before", "not-a-number"),
+                                         ("not_before", float("inf")), ("not_after", float("-inf"))])
 def test_authority_envelope_with_an_unusable_core_raises_authority_error(field, value):
+    # json.loads accepts Infinity, so an infinite window bound can arrive from an envelope file
     env = {"owner_pubkey": OWNER.public_key_b64, "engagement": "acme", "sig": "AAAA", field: value}
     with pytest.raises(AuthorityError, match="malformed"):
         verify_authority_envelope(env, trusted_owner_pubkey=OWNER.public_key_b64, engagement="acme")
