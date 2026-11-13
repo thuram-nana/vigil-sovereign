@@ -1256,6 +1256,9 @@ def cmd_settle_drain(a) -> None:
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped" + (f", {r['deferred']} deferred (retried next drain)" if r.get("deferred")
                                            else ""))
+        if "expired_settled" in r:              # E8, only while VIGIL_PAUSED_EXPIRY_SETTLE is on
+            print(f"  expired paused launches: {r['expired_settled']} settled, {r['expired_unsettled']} still held"
+                  + (f" (not checked: {r['expired_error']})" if r.get("expired_error") else ""))
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:

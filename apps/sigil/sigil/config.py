@@ -512,6 +512,16 @@ def one_launch_per_host_enabled() -> bool:
     return (os.environ.get("VIGIL_ONE_LAUNCH_PER_HOST") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def paused_expiry_settle_enabled() -> bool:
+    """E8 — True iff the settle-drain also settles every PAUSED customer launch whose lease window closed more than
+    the settle grace ago and that nothing settled (`sigil/paused_expiry_settle.py`, due predicate
+    `vigil_integration/live/credit_lease_expiry.py`), by the owner's paused-launch rule: a metered launch is charged
+    for what it used, a flat one refunded — exactly what `ops-sweep reservations --apply` does for it. OFF by default
+    (`VIGIL_PAUSED_EXPIRY_SETTLE` unset / non-affirmative): the drain is unchanged and such a launch waits for the
+    sweep; `vigil doctor` reports it as a hard issue either way. Set it for the settle-drain unit."""
+    return (os.environ.get("VIGIL_PAUSED_EXPIRY_SETTLE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail

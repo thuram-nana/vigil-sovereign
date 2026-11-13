@@ -1883,6 +1883,17 @@ def collect(repo_root) -> dict:
                   f"`sigil ops-sweep reservations`.")
         if _n_settled:
             report["paused_launches"]["settled"] = _n_settled    # inert: a settled lease never runs again
+        # E8: an expired paused launch (paused when its window closed, or its pause lifted only after) past the settle
+        # grace that NOTHING settled holds a paid reservation nothing can run any more — a HARD issue, whatever the
+        # flag (`expired_unsettled`, added only when non-empty; due predicate: live/credit_lease_expiry).
+        from .live.credit_lease_expiry import due_expired_pauses
+        _due = due_expired_pauses(_pbase, now=_time.time())
+        if _due:
+            report["paused_launches"]["expired_unsettled"] = sorted({d.slug for d in _due})
+            _issue(f"{len(_due)} paused customer launch(es) whose lease window closed more than the settle grace "
+                   f"ago are NOT settled — reserved credits nothing can run any more. The settle drain settles them "
+                   f"(a metered launch charged for what it used, a flat one refunded) when VIGIL_PAUSED_EXPIRY_SETTLE=1 "
+                   f"is set for it; otherwise run `sigil ops-sweep reservations --apply`.")
         _unreadable = unreadable_pause_markers(_pbase)
         if _unreadable:
             report["paused_launches"]["unreadable"] = _unreadable
