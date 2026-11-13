@@ -364,13 +364,18 @@ class EvalCapabilityGrant:
         """Mirror every eval-capability-grant record for ``engagement_slug`` (grants AND revokes) to the
         shared seam, plus an OWNER SEAL over the WHOLE ordered record list + a monotonic publish seq (so an
         off-seam DROP/REORDER/ROLLBACK of the revoke cannot re-arm a revoked grant on the keyless offense
-        plane). Best-effort over an OSError/ValueError (an unwritable/unsafe seam leaves the offense plane
-        UNGRANTED — fail-closed — never falsely granted). The owner key signs ONLY here in SIGIL (FATAL-2)."""
+        plane). FAIL-CLOSED on every failure (``seam_publish``): a record that cannot be canonicalised is published
+        as an unsigned revoke placeholder, and if the publish fails the previous publication is WITHDRAWN, so the
+        offense plane falls back to default-ungranted, never a stale list a revoke never reached. An OSError /
+        ValueError is then absorbed (the spine record stands; the next publish re-sends the full list); anything
+        else re-raises after the withdrawal. The owner key signs ONLY here in SIGIL (FATAL-2)."""
         records = []
         for record in self.store.iter_records():
             p = record.payload if isinstance(record.payload, dict) else {}
             if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
                 records.append(dict(p))
+        from .seam_publish import encodable_or_revoke, withdraw_publication
+        records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
         try:
             from vigil_integration.live.eval_capability_grant import (
                 build_seal,
@@ -388,8 +393,13 @@ class EvalCapabilityGrant:
                     pubkey=self.owner_key.public_key_b64,
                 )
             write_eval_capability_grants(self._base_dir(), engagement_slug, records, seal=seal)
-        except (OSError, ValueError):
-            pass
+        except Exception as e:
+            def _path():
+                from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+                return eval_capability_grant_path(self._base_dir(), engagement_slug)
+            withdraw_publication(_path, what=f"eval-capability-grant {engagement_slug!r}")
+            if not isinstance(e, (OSError, ValueError)):
+                raise
 
 
 def revoke_grants_on_close(store, *, owner_key=None, trusted_pubkey: Optional[str] = None,
