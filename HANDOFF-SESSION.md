@@ -531,7 +531,10 @@ Gate 5 and the owner's flips.
     cost, recorded privately** (outside this public repo), applied via `VIGIL_BILLING_TARGET_MARGIN` at deploy
     (`credits = direct cost / (1 − m) × 100`, `0 < m < 1`, **no committed default**: unset ⇒ metered pricing off).
     **Never write the margin value, a markup-to-margin breakdown or any value-based analysis into this repo or a
-    commit message.** Doctor must flag metered billing without it (M1c-1).
+    commit message.** Doctor must flag metered billing without it (M1c-1). *(2026-11-13, one pricing number:)* `m`
+    is the margin over **metered AI cost only** (fees and hosting are outside it) and is the only pricing input; the
+    margin dashboard's target line is `cost / (1 − m)`, and `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are
+    refused while present (doctor hard issue; metered launches refuse, metered charges wait).
   - *Seats:* $25 per seat (assume per month; whether a seat includes credits is open) — a public price, may go in
     the catalog (M3).
   - *Free trial:* a real scan with partial results, the full report unlocked once the org buys credits (any pack from
@@ -559,7 +562,7 @@ sovereign gateway's meter.
 
 | Setting | Value | Why / env |
 |---|---|---|
-| Target margin | **owner-set, private** — no committed default | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99 |
+| Target margin | **owner-set, private** — no committed default; the margin over metered AI cost only | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99; the only pricing input |
 | Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
 | Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
 | Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |

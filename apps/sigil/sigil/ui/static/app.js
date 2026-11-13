@@ -57,7 +57,9 @@ async function loadMargin() {
   if (!m || !Array.isArray(m.tenants)) { panel.style.display = "none"; return; }  // unavailable -> hidden
   const cur = m.currency || "USD";
   $("#margin-note").textContent = m.rate_configured
-    ? `cost rate ${m.cost_rate_micro_minor_per_token} micro-minor/token${m.margin_multiplier_k ? ` · target k=${m.margin_multiplier_k}` : ""}`
+    ? `cost rate ${m.cost_rate_micro_minor_per_token} micro-minor/token` + (m.target_margin_set
+      ? " · target = cost ÷ (1 − target margin); the target margin is over metered AI cost only"
+      : (m.target_margin_issue ? ` · no target line: ${m.target_margin_issue}` : ""))
     : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
   const t = m.totals || {};
   $("#margin-totals").innerHTML =

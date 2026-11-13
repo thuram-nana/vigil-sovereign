@@ -5,6 +5,8 @@
     billing is metered, a pricing value the metering core refuses, and — when billing is metered — no target
     margin or no cancel-settlement policy are HARD issues; the margin's value is never printed;
   * with billing flat, the margin and the cancel policy are not required;
+  * a retired pricing setting (VIGIL_BILLING_MARKUP_K / VIGIL_MARGIN_MULTIPLIER_K) is a hard issue whatever the
+    flags say — the target margin (over metered AI cost only) is the one pricing input;
   * no daily ceiling, or an unanswering gateway while billing is still flat, is a note;
   * the line renders the mode, the gateway and the pricing in force.
 
@@ -43,7 +45,7 @@ def test_a_healthy_metered_setup_is_reported_and_rendered():
     assert section["cancel_settlement"] == "metered"
     out = d.render({"ok": True, "issues": [], "notes": [], "metering": section})
     assert "billing: metered; model gateway http://127.0.0.1:8742: answering; floor 25 credits; target margin " \
-           "set; cancelled runs: metered; daily ceiling $500" in out
+           "set (over metered AI cost); cancelled runs: metered; daily ceiling $500" in out
     assert _DECOY not in out and _DECOY not in repr(section)             # the owner's margin is never printed
 
 
@@ -65,6 +67,28 @@ def test_misconfigurations_are_hard_issues():
                        (mm.CANCEL_ENV, "free", "no cancellation policy")):
         section, issues, _ = d._metering_report({**ON, k: v}, probe=_alive)
         assert section["ok"] is False and len(issues) == 1 and says in issues[0], (k, v, issues)
+
+
+def test_a_retired_pricing_setting_is_a_hard_issue_whether_or_not_metering_is_on():
+    flat = {"VIGIL_MODEL_GATEWAY_ENABLED": "1", "SIGIL_ANTHROPIC_API_KEY": "sk", "VIGIL_GATEWAY_DAILY_LIMIT_USD": "9"}
+    for name in mm.OBSOLETE_PRICING_ENVS:
+        says = f"{name} is set: remove it; the only pricing input is VIGIL_BILLING_TARGET_MARGIN"
+        section, issues, notes = d._metering_report({name: ""}, probe=_alive)          # nothing else configured
+        assert section == {"configured": False, "ok": False} and notes == []
+        assert len(issues) == 1 and issues[0].startswith(says), issues
+        section, issues, _ = d._metering_report({**flat, name: "3"}, probe=_alive)       # flat billing
+        assert section["ok"] is False and len(issues) == 1 and issues[0].startswith(says), issues
+        section, issues, _ = d._metering_report({**ON, name: "3"}, probe=_alive)         # metered: reported once
+        assert section["ok"] is False and len(issues) == 1 and issues[0].startswith(says), issues
+        assert section["target_margin_set"] is True                                     # the margin itself is fine
+        assert _DECOY not in repr(section) + repr(issues)
+    both = {n: "1" for n in mm.OBSOLETE_PRICING_ENVS}
+    assert len(d._metering_report(both, probe=_alive)[1]) == 2
+    # the doctor surfaces it in the report it renders
+    report = {"ok": False, "issues": d._metering_report(both, probe=_alive)[1], "notes": [],
+              "metering": {"configured": False, "ok": False}}
+    out = d.render(report)
+    assert "VIGIL_MARGIN_MULTIPLIER_K is set: remove it" in out and "VIGIL_BILLING_MARKUP_K is set: remove it" in out
 
 
 def test_the_run_model_must_be_priced_and_concurrency_is_digits_only():

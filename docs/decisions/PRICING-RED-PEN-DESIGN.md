@@ -50,6 +50,11 @@ flag, so the owner can change any of them without a release. Nothing here is liv
   outside this public repository). It is applied through `VIGIL_BILLING_TARGET_MARGIN` at deploy, which has **no
   default in the code**: while it is unset or invalid, metered pricing stays off (every metered path fails closed).
   Calibration (M5) measures every direct cost (§1.2 c).
+- **One pricing number (2026-11-13):** the target margin is the margin over the run's **metered AI cost only** (the
+  model requests the gateway meters); payment fees, hosting and workers are outside it, so the all-in margin is
+  lower. It is the only pricing input: the margin dashboard's target line is drawn from it, and the earlier knobs
+  `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are refused while present (`vigil doctor` reports a hard
+  issue; metered launches refuse and metered charges wait).
 - **Seats:** $25 per seat (assumed per month). Whether a seat includes credits is open.
 - **Free trial:** a real scan that shows partial results; the full report unlocks once the organisation buys credits
   (any pack, from $5). One trial per verified email AND per verified domain. Ownership proof is still required
@@ -124,8 +129,8 @@ charge_credits = min(reservation, max(FLOOR, ceil(cost_usd / (1 − target_margi
 - `cost_usd` is computed on the sovereign side by the model gateway (§5) from the usage Anthropic reports on every
   response it forwards, priced with the cost table (§4.2). It is never an amount the offense plane reports, and never
   the agent runtime's client-side estimate.
-- `target_margin` (`VIGIL_BILLING_TARGET_MARGIN`, a decimal strictly between 0 and 1) is the owner's, set at deploy;
-  the code has no default and refuses to price without it. **FLOOR = 25 credits** ($0.25) per run, covering worker
+- `target_margin` (`VIGIL_BILLING_TARGET_MARGIN`, a decimal strictly between 0 and 1) is the owner's margin over the
+  metered AI cost only, set at deploy; the code has no default and refuses to price without it. **FLOOR = 25 credits** ($0.25) per run, covering worker
   start-up (`VIGIL_RUN_FLOOR_CREDITS`), is a **proposed default, not owner-confirmed** (§1.2 a).
 - `cost_usd` is today the AI cost only. Workers, storage and payment processing are direct costs too; until M5
   measures them per run, the price undercounts them (§1.2 c).

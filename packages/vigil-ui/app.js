@@ -12355,7 +12355,9 @@
       var t = d.totals || {};
       var note = d.rate_configured
         ? ("cost rate " + d.cost_rate_micro_minor_per_token + " micro-minor/token"
-          + (d.margin_multiplier_k ? (" · target k=" + d.margin_multiplier_k) : ""))
+          + (d.target_margin_set
+            ? " · target = cost ÷ (1 − target margin); the target margin is over metered AI cost only"
+            : (d.target_margin_issue ? (" · no target line: " + d.target_margin_issue) : "")))
         : "cost rate NOT CONFIGURED — committed tokens + billed revenue shown; no margin is fabricated.";
       var rows = d.tenants.map(function (x) {
         return h("tr", null, [
