@@ -123,6 +123,6 @@ def verify_credit_launch_lease(
         result = verify_threshold(
             credit_lease_signing_bytes(signed.document), signed.signatures, trust_root
         )
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         return False, f"credit-lease signature material is malformed or uses a weak key: {e}"
     return result.satisfied, result.reason

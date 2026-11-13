@@ -559,7 +559,7 @@ sovereign gateway's meter.
 
 | Setting | Value | Why / env |
 |---|---|---|
-| Target margin | **owner-set, private** — no committed default | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99 |
+| Target margin | owner-set in the private deploy environment from calibration (M5); no value is recorded here | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99; the markup is derived as 1/(1−m); no default, so metered paths fail closed while it is unset |
 | Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
 | Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
 | Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |

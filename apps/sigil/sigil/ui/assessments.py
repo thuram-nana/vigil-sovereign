@@ -131,11 +131,53 @@ def _newest_first(rows: list, limit: int) -> "tuple[list, int]":
     return [copy.deepcopy(j) for _s, j in rows[:n]], len(rows)
 
 
-def assessment_findings(store, org_id: str, *, now: float, limit: int = 200) -> dict[str, Any]:
+def _all_finding_rows(store, slug_set) -> "list[tuple[int, dict]]":
+    """Every (seq, projected row) for `slug_set` — deep copies on the cached path, fresh rows on the scan."""
+    if not slug_set:
+        return []
+    hit = _indexed(store, "findings", slug_set)
+    if hit is not _UNCACHED:
+        return [(s, copy.deepcopy(j)) for s, j in hit]
+    rows: list[tuple[int, dict]] = []
+    for r in store.iter_records():
+        if getattr(r, "kind", None) != _FINDING_KIND:
+            continue
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        cert = p.get("certificate")
+        if not isinstance(cert, dict) or cert.get("engagement_slug") not in slug_set:
+            continue
+        rows.append((int(getattr(r, "seq", 0)), _finding_json(p, cert)))
+    return rows
+
+
+def _preview_findings(store, org_id: str, *, now: float, limit: int, can_buy: bool) -> dict[str, Any]:
+    """The LOCKED (trial preview) findings read: every row projected by `finding_preview.apply_preview` BEFORE
+    pagination, so `count` stays the true total and exactly one finding is shown in full."""
+    from . import finding_preview as fp
+    from .target_authorization import _customer_slug
+    own = AssetOwnershipRegistry(store, owner_key=None)
+    current = {_customer_slug(org_id, h): h for h in own.proven_hosts(org_id, now=now)}
+    ever = {_customer_slug(org_id, h): h for h in own.ever_proven_hosts(org_id)}
+    revealed = fp.reveal_seq(_all_finding_rows(store, set(ever)), set(ever))
+    rows = fp.apply_preview(_all_finding_rows(store, set(current)), revealed=revealed, host_of={**ever, **current})
+    rows.sort(key=lambda t: t[0], reverse=True)
+    n = max(1, min(int(limit), 1000))
+    return {"org_id": org_id, "findings": [j for _s, j in rows[:n]], "count": len(rows),
+            "preview": fp.preview_block(can_buy=can_buy)}
+
+
+def assessment_findings(store, org_id: str, *, now: float, limit: int = 200, preview: bool = False,
+                        can_buy: bool = False) -> dict[str, Any]:
     """The oracle-confirmed findings for ONE org's authorized assessments, newest-first. PURE read; tenant-
     scoped by the org's server-derived slug set (the IDOR class — a line for another tenant is structurally
     never returned). Assumes the caller was already authorized for ``org_id`` by the route. ``count`` is the
-    true total so a client can page without ever seeing another tenant's findings."""
+    true total so a client can page without ever seeing another tenant's findings. ``preview=True`` (a locked
+    trial org, decided by the caller via ``finding_preview.preview_locked``) returns the partial-results
+    projection; False returns exactly today's output."""
+    if preview:
+        return _preview_findings(store, org_id, now=now, limit=limit, can_buy=can_buy)
     slug_set = _org_slug_set(store, org_id, now=now)
     if slug_set:
         hit = _indexed(store, "findings", slug_set)
@@ -200,7 +242,7 @@ def assessment_outcomes(store, org_id: str, *, now: float, limit: int = 200) -> 
     return {"org_id": org_id, "outcomes": [j for _s, j in rows[:n]], "count": len(rows)}
 
 
-def assessment_summary(store, org_id: str, *, now: float) -> dict[str, Any]:
+def assessment_summary(store, org_id: str, *, now: float, preview: bool = False) -> dict[str, Any]:
     """A coarse per-engagement roll-up for ONE org: for each of the org's proven hosts, its engagement slug,
     the host, whether a current owner-signed launch authority/proof backs it, and how many findings it carries.
     Tenant-scoped identically (the slug set is the org's own). The customer app lists assessments from this."""
@@ -225,5 +267,13 @@ def assessment_summary(store, org_id: str, *, now: float) -> dict[str, Any]:
             slug = cert.get("engagement_slug")
             if slug in counts:
                 counts[slug] += 1
-    return {"org_id": org_id,
-            "assessments": [{"slug": s, "host": h, "findings": counts[s]} for s, h in sorted(by_slug.items())]}
+    out: dict[str, Any] = {"org_id": org_id,
+                           "assessments": [{"slug": s, "host": h, "findings": counts[s]}
+                                           for s, h in sorted(by_slug.items())]}
+    if preview:                     # the teaser: per-host counts by derived severity, no detail
+        from . import finding_preview as fp
+        rows = _all_finding_rows(store, set(by_slug))
+        for a in out["assessments"]:
+            a["severity"] = fp.severity_counts(r for _s, r in rows if r.get("engagement_slug") == a["slug"])
+        out["preview"] = True
+    return out

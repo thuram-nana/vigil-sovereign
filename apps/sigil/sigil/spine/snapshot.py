@@ -51,7 +51,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 9   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 10  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
@@ -60,7 +60,9 @@ _MAX_SNAPSHOT_SCHEMA = 9   # refuse-newer gate (W5-3): a snapshot schema above t
 #                            ADDED governor.monitoring_subscription (monitoring_subscription_state/issued/row); v8 (PP-1)
 #                            ADDED governor.postpaid (postpaid_state/issued/row) + the postpaid arrears ledger
 #                            (postpaid_arrears_debited/credited/seen); v9 (EC-4) ADDED the per-tenant cost
-#                            envelope ledger (cost_reserved/cost_settled/cost_seen). Every bump is
+#                            envelope ledger (cost_reserved/cost_settled/cost_seen); v10 (pricing S2) ADDED the
+#                            governor.trial_claim claims (trial_claim_row) and the governor.report_unlock ledger
+#                            (report_unlock_billing/report_unlock_owner). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -72,12 +74,13 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 9   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    schema_version: int = 10  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
     #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
     #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
     #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
-    #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger).
-    #                           Every snapshot this build emits carries the v9 keys; a pre-bump build refuses it
+    #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger);
+    #                           9->10 pricing S2 (trial claims + report unlocks).
+    #                           Every snapshot this build emits carries the v10 keys; a pre-bump build refuses it
     #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
@@ -218,6 +221,11 @@ class SnapshotState(BaseModel):
     cost_reserved: list = []              # [[org_id, Σ tokens], ...] — governor.cost_reserve (reserved envelopes)
     cost_settled: list = []               # [[org_id, Σ tokens], ...] — governor.cost_settle (actual settled cost)
     cost_seen: list = []                  # [[signal, org_id, entry_id], ...] — consumed cost idempotency keys
+    # pricing S2 (schema v10): first-wins trial claims and the report-unlock ledger. Lifetime state, so both MUST
+    # cross a prune (a dropped claim would re-open a second trial; a dropped unlock would re-lock a paying org).
+    trial_claim_row: list = []        # [[key_kind, key_digest, org_id, issued_at], ...] — first verified claim wins
+    report_unlock_billing: list = []  # [[org_id, entry_id, source_kind, source_ref, issued_at], ...] — first wins
+    report_unlock_owner: list = []    # [[org_id, entry_id, action, source_ref, issued_at], ...] — latest wins
     invoice_row: list = []            # [[org_id, invoice_id, kind, price_id, amount_minor, currency, credits,
     #                                   period_start, period_end, issued_at], ...] — governor.invoice billing
     #                                   HISTORY (Slice H schema v4). ADDITIVE append-only (NOT LWW), idempotent
@@ -553,6 +561,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # fold below carries the ADDITIVE per-(org, invoice_id) history rows across a prune like the wallet seen-set.
     from ..governor.invoices import (INVOICE_SIGNAL as _INV_SIGNAL, _INVOICE_CORE as _INV_CORE,
                                      _as_nonneg_int as _inv_as_nonneg)
+    # pricing S2: the ONE fold step of each ledger, imported from the live module (never restated).
+    from ..governor.trial_claim import (TRIAL_CLAIM_SIGNAL as _TC_SIGNAL, apply_trial_claim as _tc_apply,
+                                        seed_rows as _tc_seed)
+    from ..governor.report_unlock import (REPORT_UNLOCK_SIGNAL as _RU_SIGNAL, apply_report_unlock as _ru_apply,
+                                          seed_state as _ru_seed)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -631,6 +644,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # issued_at]. ADDITIVE append-only (NOT LWW); the key presence IS the idempotency seen-set (mirror wallet).
     inv_rows: dict[tuple, list] = ({(r[0], r[1]): list(r[2:10]) for r in s.invoice_row
                                     if isinstance(r, (list, tuple)) and len(r) >= 10} if s else {})
+    tc_rows: dict = _tc_seed(s) if s else {}
+    ru_billing, ru_owner = _ru_seed(s) if s else ({}, {})
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -969,6 +984,12 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                       float(as_issued_at(p.get("period_start"))),
                                       float(as_issued_at(p.get("period_end"))),
                                       float(as_issued_at(p.get("issued_at")))]
+        # --- pricing S2: trial claims (first-wins) and report unlocks (billing first-wins, owner latest-wins),
+        #     through each module's own fold step under the key valid at the seq. ---
+        if sig == _TC_SIGNAL:
+            _tc_apply(p, vpk, tc_rows)
+        if sig == _RU_SIGNAL:
+            _ru_apply(p, vpk, ru_billing, ru_owner)
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -1055,6 +1076,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         cost_settled=[[o, t] for o, t in cl_settled.items()],
         cost_seen=[[sg, o, e] for (sg, o, e) in cl_seen],
         invoice_row=[[k[0], k[1], *r] for k, r in inv_rows.items()],
+        trial_claim_row=[[k[0], k[1], *r] for k, r in tc_rows.items()],
+        report_unlock_billing=[[o, *r] for o, r in ru_billing.items()],
+        report_unlock_owner=[[o, *r] for o, r in ru_owner.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

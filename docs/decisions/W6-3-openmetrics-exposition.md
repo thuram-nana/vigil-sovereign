@@ -49,6 +49,11 @@ where scrape-side authentication (mTLS / bearer) is applied. The response body c
 backend address** — only aggregate counters. An operator who wants to restrict the endpoint further scopes
 it at that reverse proxy / their network policy, exactly as for `/healthz`+`/readyz`.
 
+Because the route is unauthenticated, the sovereign plane's spine-folded refusals projection is rate-bounded:
+at most one fold per 10 s per server (counted from the end of the previous fold), never two at once, a scrape
+in between served the last value (`docs/OBSERVABILITY.md`, "Projection rate bound"). A scrape of `/metrics`
+therefore cannot make the cockpit re-fold the spine per request.
+
 ## Artifacts shipped with the product
 
 - `infra/observability/vigil-alerts.yml` — example Prometheus alert rules over these series (a request

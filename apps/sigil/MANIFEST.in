@@ -11,3 +11,6 @@ prune kernel/target
 # Housekeeping: never ship compiled Python or caches.
 global-exclude *.py[cod]
 global-exclude __pycache__
+
+# Vendored data files (sha256-pinned in code): the Public Suffix List (MPL-2.0).
+recursive-include sigil/governor/data *.dat *.conf

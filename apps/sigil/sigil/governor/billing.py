@@ -627,6 +627,17 @@ class FlutterwaveBillingProvider(BillingProvider):
         tx_ref = verified.get("tx_ref")
         if status == "successful":
             amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
+            if not ccy:
+                # A verified SUCCESSFUL charge must name its currency. Without one, BillingSigner.apply's underpay /
+                # wrong-currency cross-check is skipped (it keys on event.currency) and the catalog entitlement would
+                # mint on the price_id alone. Flutterwave populates the currency on every real charge, so its absence
+                # is a malformed verify object: mint nothing (fail-closed). With the alarm armed this is loud for ANY
+                # paid charge, not only payment_plan ones: returning here also skips apply()'s catalog-aware alarm
+                # for a plan price that arrived without payment_plan, which must not go quiet.
+                if self._alarm_unaccounted_plans:
+                    raise UnaccountedPayment(f"verified successful charge {event_id} for org {org!r} has no "
+                                             f"currency — paid but UN-MINTED; reconcile by hand")
+                return None
             if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
                 return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                                     price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
@@ -745,8 +756,12 @@ class BillingSigner:
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
-                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False):
+                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None):
         self.provider = provider
+        # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
+        # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
+        # billing unlock — decided once, here, at mint time. None keeps every record byte-identical to before.
+        self.report_unlocks = report_unlocks
         # AEGIS: a catalog MONITORING plan mints onto its OWN line (governor.monitoring_subscription), never the
         # credit-plan `subscriptions` record (which drives the plan-credit refill). None => monitoring plans mint
         # nothing (fail-closed). `on_monitoring_change(org_id, now)` is the sovereign provisioner hook that
@@ -851,6 +866,7 @@ class BillingSigner:
             seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
                                     entry_id=event.event_id, issued_at=event.created)
             if seq is not None:                       # record the history line only for a mint that took effect
+                self._maybe_unlock(oid, event, "topup")
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
             return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
@@ -870,11 +886,14 @@ class BillingSigner:
             # the subscribe above fresh -> the period advanced -> the bridge grants the new period's tranche (the
             # prior tranche simply expires: non-rollover).
             seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
-            # Red-pen FINDING 2: record the invoice ONLY when the plan refill actually GRANTED (seq is not None).
-            # An out-of-order / stale subscription event (a distinct event_id with a non-increasing `created`)
-            # makes subscribe a LWW no-op and refill a no-op -> seq is None -> NO invoice, so the billing history
-            # never shows a period/credits the plan ledger did not deliver (a true replay dedups by event_id).
-            if seq is not None:
+            # Red-pen FINDING 2, kept: the billing history never shows a period the plan ledger did not deliver.
+            # The refill returns None once the period's tranche exists, so gating ONLY on its seq would lose the
+            # invoice (and the unlock) for good if a crash fell between the refill and the invoice. So the record
+            # is also written on a re-drive that finds this event's period honoured, active and DELIVERED (its
+            # tranche granted) yet not invoiced under any event id — never for a stale event, an undelivered
+            # period, or a second distinct event for a period already invoiced.
+            if self._period_delivered_unrecorded(oid, event, ent, period_end):
+                self._maybe_unlock(oid, event, "subscription")
                 self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
                                      period_start=event.created, period_end=period_end)
             return seq
@@ -885,6 +904,13 @@ class BillingSigner:
         subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /
         replayed period is inert), then hand the change to the provisioner hook."""
         if self.monitoring_subscriptions is None:
+            # S1: the drain mints from the FULL catalog, so a paid monitoring period can reach here on a signer
+            # that has no monitoring line. Under the plan alarm that is a paid-but-un-minted charge -> loud
+            # quarantine, never a silent drop. Alarm off keeps the historical no-op.
+            if self._alarm_unaccounted_plans:
+                raise UnaccountedPayment(f"verified monitoring charge {event.event_id} for org {oid!r} "
+                                         f"(price {event.price_id!r}) reached a signer with no monitoring line "
+                                         f"— paid but UN-MINTED; reconcile by hand")
             return None
         period_end = event.created + float(ent.period_s)
         seq = self.monitoring_subscriptions.subscribe(oid, ent.plan_id, 0, period_start=event.created,
@@ -897,6 +923,43 @@ class BillingSigner:
         if self.on_monitoring_change is not None:
             self.on_monitoring_change(oid, event.created)
         return seq
+
+    def _period_delivered_unrecorded(self, oid: str, event: BillingEvent, ent: Entitlement,
+                                     period_end: float) -> bool:
+        """Whether this credit-plan event's record (invoice + unlock) is due: its period is the one the subscription
+        fold honours, the plan ledger holds a GRANTED tranche for that period (delivered — whatever the status has
+        become since), and no other event id has an invoice line for that period. Covers the first delivery and
+        the crash re-drive alike; a re-drive of the same event is harmless (first line per event id wins)."""
+        s = self.subscriptions.subscription(oid)
+        if s is None or (s.plan_id, s.period_start, s.period_end) != (
+                ent.plan_id, float(event.created), period_end):
+            return False
+        if not any(t.period_end == period_end and t.granted > 0 for t in self.plan.tranches(oid)):
+            return False
+        if self.invoices is not None and any(
+                i.kind == "subscription" and i.period_end == period_end and i.invoice_id != event.event_id
+                for i in self.invoices.invoices(oid)):
+            return False
+        return True
+
+    def _unlock_eligible(self, event: BillingEvent) -> bool:
+        """A verified, catalog-priced credit purchase whose amount AND currency were present and passed the
+        cross-check: the catalog prices it above 0, the verified currency is non-empty and equals the catalog's,
+        and the verified amount is at least the catalog's. Decided once at mint time (no read-time floor), so the
+        unlock never moves when the catalog changes later."""
+        exp = self._expected.get(event.price_id)
+        if exp is None or exp[0] <= 0:
+            return False
+        cur = str(event.currency or "").strip().upper()
+        return bool(cur) and cur == exp[1] and int(event.amount_minor) >= exp[0]
+
+    def _maybe_unlock(self, oid: str, event: BillingEvent, source_kind: str) -> None:
+        """Record the billing unlock for a credit purchase (top-up or an honoured credit-plan period) that is
+        eligible. Never called for monitoring, seats, refunds, the trial or postpaid/payment lines. The ledger
+        keeps the first billing unlock per org, so a re-drive is harmless."""
+        if self.report_unlocks is None or not self._unlock_eligible(event):
+            return
+        self.report_unlocks.unlock(oid, source_kind, source_ref=event.event_id, issued_at=event.created)
 
     def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
                         period_start: float = 0.0, period_end: float = 0.0) -> None:
