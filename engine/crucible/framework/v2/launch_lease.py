@@ -123,13 +123,20 @@ def _advance_floor(base: Any, safe_slug: str, seq: int) -> "tuple[bool, str]":
 
 
 def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
-                           base: Any, t: float, check_pause: bool = True) -> "tuple[bool, str, Any]":
+                           base: Any, t: float, check_pause: bool = True,
+                           expect_nonce: Optional[str] = None) -> "tuple[bool, str, Any]":
     """Owner-pinned VERIFY + BIND of the seam lease for ``slug`` — everything :func:`verify_customer_launch_lease`
     does EXCEPT the single-use consume. Returns ``(ok, reason, doc)``: on success ``(True, "ok", <lease doc>)``
     (so a caller can read ``doc.units_reserved``), else ``(False, <reason>, None)``. Fail-CLOSED; never raises.
     This is the ONE owner-pinned verify+bind shared by the arm (``verify_customer_launch_lease``) and the keyless
     ceiling read (:func:`read_verified_launch_units`), so they agree by construction — the ceiling a run arms is
-    read from the SAME verified lease the arm consumes, never from an unverified seam/wire value."""
+    read from the SAME verified lease the arm consumes, never from an unverified seam/wire value.
+
+    ``expect_nonce`` (the customer-launch worker passes its JOB's nonce) additionally binds the verified lease to
+    ONE launch: the seam holds one lease per slug, and a customer slug is reused by every launch of the same
+    (org, host), so the lease on the seam may be a LATER launch's. A lease whose nonce is not the expected one is
+    refused here — before any consume — so a job can never arm (and burn the single-use floor of) a lease that
+    belongs to another launch. ``None`` (every other caller) adds no conjunct: byte-identical."""
     safe = _safe_slug(slug)
     if not safe:
         return False, "unsafe engagement slug", None
@@ -161,6 +168,9 @@ def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
         return False, f"lease scope_host {doc.scope_host!r} != target host {host!r}", None
     if not tenant or doc.org_id != tenant:
         return False, f"lease org_id {doc.org_id!r} != this process tenant {tenant!r}", None
+    # The reason names no nonce (neither value reaches a log or an operator surface).
+    if expect_nonce is not None and str(getattr(doc, "nonce", "") or "") != str(expect_nonce):
+        return False, "the lease on the seam belongs to a different launch than the one being run", None
     try:
         nb, na = doc.not_before.timestamp(), doc.not_after.timestamp()
     except Exception as e:  # noqa: BLE001
@@ -206,15 +216,17 @@ def _verify_and_bind_lease(slug: str, host: str, tenant: Optional[str], *,
 
 def verify_customer_launch_lease(slug: str, host: str, tenant: Optional[str], *,
                                  base_dir: Any = None, now: Optional[float] = None,
-                                 consume: bool = True) -> "tuple[bool, str]":
+                                 consume: bool = True,
+                                 expect_nonce: Optional[str] = None) -> "tuple[bool, str]":
     """Return ``(ok, reason)``. True iff a current owner-signed lease on the seam for ``slug`` VERIFIES
     owner-pinned, BINDS (engagement_slug==slug, scope_host==host, org_id==tenant, window covers ``now``), AND
     (when ``consume``) passes+advances the strict single-use floor. Fail-CLOSED; never raises. ``consume`` is
     True at the engine ARM (the one authoritative consume); a driver-enqueue PRE-CHECK (K4) passes
-    ``consume=False`` so it does not burn the single use."""
+    ``consume=False`` so it does not burn the single use. ``expect_nonce`` (see :func:`_verify_and_bind_lease`)
+    refuses — before the consume — a lease that is not the expected launch's; ``None`` is byte-identical."""
     base = base_dir if base_dir is not None else _base_dir()
     t = time.time() if now is None else float(now)
-    ok, reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t)
+    ok, reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t, expect_nonce=expect_nonce)
     if not ok:
         return False, reason
     if consume:

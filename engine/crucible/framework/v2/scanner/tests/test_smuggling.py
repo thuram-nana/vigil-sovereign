@@ -122,13 +122,17 @@ def test_no_false_positive_on_fast_server() -> None:
 # resolve_and_pin fails closed for lack of the module — so the floor's resolve/pin cases are gated on
 # gateway being importable (same pattern as verify/tests/test_egress_pin.py). The loopback-literal
 # short-circuit and the layer check need no gateway and always run.
-_HAS_GATEWAY = True
-try:  # pragma: no cover - environment probe
-    import vigil_gateway  # noqa: F401
-except Exception:  # pragma: no cover
-    _HAS_GATEWAY = False
+#
+# The gate is `pytest.importorskip`, not a hand-rolled `try: import / except Exception: skip`: in the CI leg
+# that HAS the gateway (the P5 offense leg, VIGIL_REQUIRE_PLANES) importorskip of a required plane is a
+# FAILURE, so a broken or renamed gateway import is reported there instead of silently skipping these cases;
+# and a broken import (anything but ImportError) is no longer swallowed as "gateway absent" anywhere.
+@pytest.fixture
+def _gateway():
+    return pytest.importorskip("vigil_gateway", reason="floor L3/L4 denylist needs vigil_gateway")
 
-_requires_gateway = pytest.mark.skipif(not _HAS_GATEWAY, reason="floor L3/L4 denylist needs vigil_gateway")
+
+_requires_gateway = pytest.mark.usefixtures("_gateway")
 
 _SMUG_SLUG = "smug-egress-floor-test"
 
