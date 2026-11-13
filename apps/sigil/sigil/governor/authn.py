@@ -28,7 +28,7 @@ def as_issued_at(value) -> float:
     mapped to the bottom instead."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # OverflowError: an int too large for a float (10**400)
         return 0.0
     return f if math.isfinite(f) else 0.0
 

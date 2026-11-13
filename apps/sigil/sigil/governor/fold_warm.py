@@ -11,7 +11,8 @@ with that read's own fresh build and compared with the cached state (match / MIS
 `VIGIL_FOLD_CACHE_AUDIT_S` seconds (default 6 h; 0 = start-up warm-up only) and writes the result atomically to
 `config.FOLD_AUDIT_PATH`, which `vigil doctor` reads (a MISMATCH is a hard issue there) and `sigil verify` prints.
 A rebuild costs what a cold start costs, which is why the default interval is long; reads keep being served while
-it runs (the fresh fold is computed outside the entry lock). A MISMATCH discards that cache entry — the spine is
+the fresh fold is computed (outside the entry lock), but the final by-value compare runs UNDER that fold's entry
+lock, so its reads wait for it — O(the folded state; seconds at 1M customers, once per fold per audit). A MISMATCH discards that cache entry — the spine is
 the source of truth, so the next read rebuilds from it — and the report keeps the evidence. Nothing here writes
 the spine.
 
@@ -34,7 +35,7 @@ from . import fold_read
 
 assert_no_offense()
 
-__all__ = ["audit", "start_background", "warm_all", "write_report"]
+__all__ = ["audit", "report_is_live", "start_background", "supersede_dead_report", "warm_all", "write_report"]
 
 _log = logging.getLogger(__name__)
 _STARTED: "set[str]" = set()
@@ -151,10 +152,56 @@ def _run(store_factory: Callable[[], Any], interval: float, stop: threading.Even
             _log.exception("fold cache audit failed")
 
 
+def _pid_alive(pid: Any) -> bool:
+    """True iff `pid` names a running process (False for anything that is not a positive int)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                                # EPERM: it exists, under another user
+        return True
+    return True
+
+
+def report_is_live(report: dict) -> bool:
+    """A report describes the caches of the process that wrote it, and those die with it. True iff that process
+    is this one or is still running — only then does a recorded MISMATCH describe a cache that still serves."""
+    return _pid_alive(report.get("pid"))               # (this process is alive too)
+
+
+def supersede_dead_report(path: Optional[Path] = None) -> bool:
+    """At process start: if the last report was written by a process that is GONE, replace it with an empty one for
+    this process that keeps the old verdict under `superseded` (its caches died with it; this process rebuilds
+    from the spine). Without this a recorded MISMATCH outlived every restart and kept `vigil doctor` (a HARD issue)
+    and `sigil verify` failing until someone deleted the file by hand. A report from a LIVE process is left alone.
+    Returns True iff it replaced one."""
+    p = Path(path) if path is not None else config.FOLD_AUDIT_PATH
+    try:
+        old = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(old, dict) or report_is_live(old):
+        return False
+    folds = [f for f in old.get("folds", []) if isinstance(f, dict)]
+    write_report({"ok": True, "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+                  "pid": os.getpid(), "spine": old.get("spine", ""), "interval_s": config.fold_cache_audit_interval(),
+                  "folds": [], "cache_enabled": config.fold_cache_enabled(),
+                  "superseded": {"pid": old.get("pid"), "ts": old.get("ts"), "ok": old.get("ok"),
+                                 "mismatched": [f.get("fold") for f in folds if f.get("status") == "MISMATCH"]}}, p)
+    return True
+
+
 def start_background(store_factory: Callable[[], Any], *, name: str = "cockpit") -> Optional[threading.Event]:
     """Start the warm-up (+ periodic audit) daemon thread once per process and spine, iff the fold cache is on.
     `store_factory` returns a fresh `SpineStore` for the spine the process serves. Returns the stop event (tests),
-    or None when nothing was started (cache off, or already running for this spine)."""
+    or None when nothing was started (cache off, or already running for this spine). Either way it first
+    supersedes a report left by a process that is gone (`supersede_dead_report`)."""
+    try:
+        supersede_dead_report()
+    except Exception:  # noqa: BLE001 — never block a cockpit start on the report file
+        _log.exception("could not supersede the previous fold-cache audit report")
     if not config.fold_cache_enabled():
         return None
     try:

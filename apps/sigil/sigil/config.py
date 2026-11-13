@@ -546,7 +546,8 @@ def fold_cache_enabled() -> bool:
     (Front C S0a): every registry read runs its full signature-verifying fold, byte-identical to a build without
     the cache. When ON, a registry that supports it (S0a: `CustomerRegistry`) extends an in-memory fold over only
     the records appended since its last read, anchored to the chain (`spine/fold_cache.py`); on any doubt it
-    rebuilds from the spine. Read at call time, so an operator can turn it off without a restart."""
+    rebuilds from the spine. Read at call time (tests toggle it), but a running process keeps the caches it built and
+    the environment it started with: to turn the cache off in production, change the setting AND restart the process."""
     return (os.environ.get("VIGIL_FOLD_CACHE_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 

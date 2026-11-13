@@ -29,7 +29,7 @@ from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
-from .identity import owner_keypair, owner_pubkey
+from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey
 
 SIGNAL = "governor.killswitch"
 # `issued_at` MUST be inside the core: outside it, an attacker could rewrite a captured release's
@@ -45,7 +45,7 @@ _CORE = ("signal", "state", "issued_at")
 # bare `store.path.stat()` — which would raise/freeze once a migration renames spine.jsonl away and then
 # serve a STALE (un-halting) verdict indefinitely. Keyed on the pubkey too, so instances with different
 # trust roots never share an entry. Shared across ALL callers on a path.
-_STATE_CACHE: dict[tuple[str, Optional[str]], tuple[tuple, bool]] = {}
+_STATE_CACHE: dict[tuple[str, Optional[str], Optional[str]], tuple[tuple, bool]] = {}
 _CACHE_GUARD = threading.Lock()
 
 
@@ -121,7 +121,7 @@ class KillSwitch:
                           reader=lambda latch: latch.engaged)
         if hit is not _UNCACHED:
             return hit                          # Front C S0d: O(new records) even while the spine is appended to
-        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey)
+        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey, genesis_owner_pubkey())  # + a re-pin
         token = self.store.change_token()
         with _CACHE_GUARD:
             cached = _STATE_CACHE.get(key)

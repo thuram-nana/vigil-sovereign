@@ -14,10 +14,13 @@ and it is trusted only while it is provably a prefix of the current spine:
   * CHAIN ANCHOR — an entry remembers the `(seq, entry_hash)` of the last record it folded. Every read
     re-reads that record; if it is missing or its `entry_hash` differs (a restore, rollback, re-genesis,
     rewrite or reset spine) the entry is DISCARDED and the fold rebuilt from the spine. `entry_hash` links
-    `prev_hash`, so an equal anchor means an equal prefix for any chain that `SpineStore.verify()` accepts.
-    An in-place edit that BREAKS the chain before the anchor is not re-read here: it is what `verify()` and
-    the chain check exist to catch, and `audit()` (S0d) rebuilds every cached fold from the spine and
-    compares it with the cached state (`sigil verify --folds`, the cockpit's periodic audit, `vigil doctor`).
+    `prev_hash`, so an equal anchor means an equal prefix of CHAINED content (kind, source, actor, payload, parent
+    links) for any chain that `SpineStore.verify()` accepts. A record's `ts` and `schema_version` are outside the
+    content digest and `entry_hash`: an in-place edit of them before the anchor passes `verify()` AND the anchor
+    (the budget fold buckets agent spend by `ts`), and only `audit()` sees it. An in-place edit that BREAKS the
+    chain before the anchor is not re-read here either: it is what `verify()` and the chain check exist to catch.
+    `audit()` (S0d) rebuilds every cached fold from the spine and compares it with the cached state (`sigil verify
+    --folds`, the cockpit's periodic audit, `vigil doctor`).
     The anchor is proven, and the new records read, from the END of the active segment when the store offers
     `tail_after` (S0d — no seq index is built, so a per-request store pays O(new records), not O(segment)); an
     anchor that is the last record of the segment before the active one is proven against the manifest's
@@ -198,7 +201,8 @@ class FoldCache:
     seed), the per-build context (e.g. the owner-key resolver), the seq the full fold starts AFTER, and the
     last seq the context's history scan read. ``step(state, record, ctx)`` folds ONE record in place — the
     registry's own loop body, shared with its uncached fold. ``reader(state)`` derives the caller's answer
-    and runs under the entry lock."""
+    and runs under the entry lock; it must return an immutable value or a COPY, never a reference into the
+    state — the state is extended in place by later reads, outside any lock the caller holds."""
 
     def __init__(self, name: str, *, step: Callable[[Any, Any, Any], None]) -> None:
         self.name = name

@@ -1088,11 +1088,23 @@ def _verify_fold_caches(rebuild: bool) -> bool:
         print(f"folds --: unreadable audit report {config.FOLD_AUDIT_PATH}: {exc}")
         rep = None
     if isinstance(rep, dict):
+        from .governor import fold_warm
         bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        if bad and not fold_warm.report_is_live(rep):
+            # the caches that disagreed died with that process; this one would rebuild them from the spine
+            print(f"folds --: the cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) recorded {len(bad)} "
+                  f"MISMATCH, but that process is gone and its caches with it — not counted (rebuild-and-compare "
+                  f"now: VIGIL_FOLD_CACHE_ENABLED=1 sigil verify --folds)")
+            bad, rep = [], None
         ok = not bad
+    if isinstance(rep, dict):
+        rows = [f for f in rep.get("folds", []) if isinstance(f, dict)]
+        n_match = sum(1 for f in rows if f.get("status") == "match")
+        n_err = sum(1 for f in rows if f.get("status") == "error")
         print(("folds OK: " if ok else "folds FAIL: ") + f"cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) "
               + (f"— {len(bad)} MISMATCH: " + ", ".join(f"{f.get('fold')} at seq {f.get('seq')} ({f.get('difference')})"
-                                                      for f in bad) if bad else "— every cached fold equals a rebuild"))
+                                                      for f in bad) if bad else
+                 f"— {n_match} cached fold(s) equal a rebuild" + (f"; {n_err} could not be read" if n_err else "")))
     if rebuild:
         if not config.fold_cache_enabled():
             print("folds --: --folds needs VIGIL_FOLD_CACHE_ENABLED (the fold cache is off)")
