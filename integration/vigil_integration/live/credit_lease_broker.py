@@ -19,8 +19,8 @@ carries.
         "trust_root": { "threshold": 1, "authorizers": [{"key_id","name","public_key_b64"}] } }
 
 Public-safe: only PUBLIC keys + signatures + the (owner-authored) lease fields cross — no private key, ever
-(the lease itself carries no secret). FATAL-2 / import-clean: ``vigil_core`` + stdlib + relative imports
-only — safe to import on either plane (the offense reader holds no owner key).
+(the lease itself carries no secret). FATAL-2 / import-clean: ``vigil_core`` + stdlib + the stdlib-only
+``seam_lock`` only — safe to import on either plane (the offense reader holds no owner key).
 """
 
 from __future__ import annotations
@@ -34,11 +34,10 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from vigil_core import SignedCreditLaunchLease, TrustRoot
+from vigil_integration.live.seam_lock import locked_file
 
-try:
-    import fcntl  # POSIX advisory lock — serializes the settlement marker's read-merge-replace across processes
-except ImportError:  # pragma: no cover — non-POSIX: callers' own serialization only
-    fcntl = None  # type: ignore[assignment]
+#: How long a marker writer waits for another process's read-merge-replace of the same marker file.
+_MARKER_LOCK_WAIT_S = 5.0
 
 __all__ = [
     "CreditLeaseBundle",
@@ -246,16 +245,15 @@ def _read_settled_nonces(path: Path) -> list[str]:
 @contextmanager
 def _marker_lock(path: Path) -> Iterator[None]:
     """Exclusive CROSS-PROCESS lock for one marker file's read-merge-replace, on a sibling ``<name>.lock`` inode
-    (it survives the atomic replace of the marker; a ``*.lock`` is a transient the backups skip). Fail-closed: a
-    lockfile that cannot be opened/locked raises, so the caller records nothing (and settles nothing)."""
+    (it survives the atomic replace of the marker; a ``*.lock`` is a transient the backups skip, and the ``*.json``
+    globs of the seam readers never match it). Shared by the settlement marker here and the pause /
+    paused-past-expiry markers (``credit_lease_pause``). Hardened (``seam_lock.locked_file``): never follows a
+    symlink, refuses a non-regular lock file, waits at most ``_MARKER_LOCK_WAIT_S``. Fail-closed: a lock that
+    cannot be opened or taken raises, so the caller records nothing (and settles nothing). A LEAF lock: its holder
+    takes no other lock."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(path.parent / (path.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+    with locked_file(path.parent / (path.name + ".lock"), wait_s=_MARKER_LOCK_WAIT_S):
         yield
-    finally:
-        os.close(fd)
 
 
 def record_lease_settlement(base_dir: Any, slug: str, nonce: Any) -> Path:
