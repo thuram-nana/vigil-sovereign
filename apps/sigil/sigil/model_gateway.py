@@ -1285,8 +1285,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _release_ticket(self) -> None:
         """Release this request's reservation (a no-op once the response was metered, and idempotent) BEFORE a
         refusal is written: a client that sees the refusal and calls again must find its budget already free."""
-        if getattr(self, "_ticket", None) is not None:
-            self._ticket.release()
+        ticket = getattr(self, "_ticket", None)
+        if ticket is not None:
+            ticket.release()
 
     def do_POST(self) -> None:  # noqa: N802
         path, _, query = self.path.partition("?")
