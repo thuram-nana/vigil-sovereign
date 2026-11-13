@@ -38,6 +38,7 @@ an unsafe/unresolvable slug, or an existing-but-unreadable/corrupt/foreign marke
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,6 +57,8 @@ __all__ = [
     "record_lease_pause",
     "clear_lease_pause",
     "is_lease_paused",
+    "unreadable_pause_markers",
+    "pause_store_unreadable",
 ]
 
 _PAUSE_DIRNAME = "credit-lease-pauses"
@@ -68,10 +71,25 @@ _SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------------------------------
 
 
+def _seam_base(base_dir: Any) -> Any:
+    """``base_dir``, or — when it is ``None`` — the DEFAULT cross-plane seam base: ``VIGIL_BASE_DIR``, else
+    ``.vigil-live``. This is EXACTLY how the lease verify resolves a ``None`` base
+    (``framework.v2.launch_lease._base_dir``, used by ``verify_customer_launch_lease`` /
+    ``read_verified_launch_nonce``), so a pause is always looked up under the SAME seam the lease it halts was
+    read from. Resolved HERE, at the one path chokepoint every pause function goes through, so no caller can
+    reach a different base (or a ``TypeError``) by passing the ``None`` default the lease reader accepts — the
+    mismatch that made the launch gate mistake a paused lease for a terminal one and strand it. The engine module
+    cannot be imported from this both-plane module (FATAL-2), so the one-line convention is restated and PINNED
+    equal by ``integration/tests/test_launch_pause_redrive_gate.py``. Only ``None`` is defaulted (``""`` is left
+    as given), matching the lease reader's ``is not None`` test."""
+    return base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+
+
 def pauses_root(base_dir: Any) -> Path:
     """The pause-marker root ``<base>/credit-lease-pauses`` (a SIBLING of the leases and settlements dirs, so
-    a ``*.json`` glob of the leases dir never picks up a pause marker)."""
-    return Path(base_dir) / _PAUSE_DIRNAME
+    a ``*.json`` glob of the leases dir never picks up a pause marker). ``base_dir=None`` resolves to the default
+    seam base exactly as the lease verify does (:func:`_seam_base`)."""
+    return Path(_seam_base(base_dir)) / _PAUSE_DIRNAME
 
 
 def pause_path(base_dir: Any, slug: Any) -> Optional[Path]:
@@ -151,24 +169,28 @@ def clear_lease_pause(base_dir: Any, slug: Any, nonce: Any) -> Path:
 # ---------------------------------------------------------------------------------------------------
 
 
-def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:
-    """True iff the lease ``(slug, nonce)`` must be treated as PAUSED (halt). FAIL-CLOSED — the deliberate
-    inversion of ``is_lease_settled`` (which fails OPEN to False): the ONLY two states that return False are
-    (1) no marker file at all (DEFAULT-OFF — nothing was ever paused, no behaviour change) and (2) a
-    cleanly-read marker whose nonce set does NOT contain this nonce. Every other state returns True: an
-    unsafe/unresolvable slug, and an EXISTING-but-unreadable/corrupt/foreign/permission-denied marker — because
-    a pause reader that failed to False would let a run that should be paused proceed. Total; never raises."""
+def _marker_nonces(base_dir: Any, slug: Any) -> "Optional[list[str]]":
+    """The pause set recorded for ``slug``, in the three states the halt decision distinguishes:
+
+      * ``[]``        — NO marker file at all (DEFAULT-OFF: nothing was ever paused for this slug);
+      * ``[nonce..]`` — a CLEANLY-read marker's nonce set;
+      * ``None``      — the pause state CANNOT be read: an unsafe/unresolvable slug, or a marker that EXISTS but
+                        is unreadable / corrupt / foreign / permission-denied. The caller must HALT.
+
+    The ONE marker read shared by the fail-CLOSED halt reader (:func:`is_lease_paused`) and the doctor probe
+    (:func:`unreadable_pause_markers`), so "this marker halts every launch of its slug" and "doctor reports this
+    marker as unreadable" are the same predicate by construction. Never raises for a path-like ``base_dir``."""
     path = pause_path(base_dir, slug)
     if path is None:
-        return True            # unsafe / unresolvable slug: cannot read a pause state -> fail-CLOSED (halt)
+        return None            # unsafe / unresolvable slug: cannot read a pause state -> the caller halts
     try:
         # is_file() is INSIDE the fail-closed try: it swallows ENOENT (-> False, the default-OFF "no marker"
         # case) but NOT EACCES — on the keyless plane a sovereign-written marker under a different uid makes
         # stat() raise PermissionError. A fail-closed reader must HALT on "cannot tell", never propagate, so the
-        # probe lives here and any OSError from it (incl. EACCES) is caught below -> True (the ONLY False case
-        # is a positively-confirmed absent file).
+        # probe lives here and any OSError from it (incl. EACCES) is caught below -> None (the ONLY "no pause"
+        # answer is a positively-confirmed absent file).
         if not path.is_file():
-            return False       # DEFAULT-OFF: confirmed NO marker file -> not paused (substrate adds no behaviour)
+            return []          # DEFAULT-OFF: confirmed NO marker file -> nothing paused (substrate adds no behaviour)
         obj = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(obj, dict) or obj.get("kind") != _PAUSE_SCHEMA:
             raise ValueError("foreign or malformed pause marker")
@@ -176,8 +198,22 @@ def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:
         if not isinstance(nonces, list):
             raise ValueError("malformed pause-marker nonce set")
     except (OSError, ValueError):
-        return True            # is_file()/read raised (EACCES, ...) OR unreadable/corrupt/foreign -> fail-CLOSED
-    return str(nonce) in {str(n) for n in nonces}   # NONCE-SCOPED: only THIS nonce's pause halts THIS nonce
+        return None            # is_file()/read raised (EACCES, ...) OR unreadable/corrupt/foreign -> the caller halts
+    return [str(n) for n in nonces]
+
+
+def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:
+    """True iff the lease ``(slug, nonce)`` must be treated as PAUSED (halt). FAIL-CLOSED — the deliberate
+    inversion of ``is_lease_settled`` (which fails OPEN to False): the ONLY two states that return False are
+    (1) no marker file at all (DEFAULT-OFF — nothing was ever paused, no behaviour change) and (2) a
+    cleanly-read marker whose nonce set does NOT contain this nonce. Every other state returns True: an
+    unsafe/unresolvable slug, and an EXISTING-but-unreadable/corrupt/foreign/permission-denied marker — because
+    a pause reader that failed to False would let a run that should be paused proceed. Total; never raises.
+    ``base_dir=None`` reads the default seam base, exactly as the lease verify does (:func:`_seam_base`)."""
+    nonces = _marker_nonces(base_dir, slug)
+    if nonces is None:
+        return True            # the pause state cannot be positively read as "not paused" -> fail-CLOSED (halt)
+    return str(nonce) in nonces                     # NONCE-SCOPED: only THIS nonce's pause halts THIS nonce
 
 
 def paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
@@ -185,7 +221,9 @@ def paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
     every marker holding at least one paused nonce. READ-ONLY; TOTAL and fail-SAFE to ``[]`` (an absent /
     unreadable pauses dir, or an individual unreadable/corrupt/foreign marker, simply contributes nothing — a
     best-effort projection must never crash ``vigil doctor``; the fail-CLOSED halt decision stays in
-    ``is_lease_paused``). The slug is the marker's filename stem (the path-safe slug component). DEFAULT-OFF:
+    ``is_lease_paused``, and the markers this projection CANNOT read are reported separately by
+    :func:`unreadable_pause_markers`, because each one is a real hold). The slug is the marker's filename stem
+    (the path-safe slug component). DEFAULT-OFF:
     with no markers the result is ``[]``, so doctor is byte-identical until a pause is recorded. A paused launch
     is a POSITIVELY-recorded held reservation (expected), NOT a stuck/lost lease — callers surface it as an
     advisory, never an alarm."""
@@ -202,3 +240,67 @@ def paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
         if nonces:
             out.append((p.stem, nonces))
     return out
+
+
+def unreadable_pause_markers(base_dir: Any) -> "list[str]":
+    """The slugs whose pause marker EXISTS but cannot be read cleanly — the exact state in which the fail-CLOSED
+    :func:`is_lease_paused` answers True for EVERY nonce of that slug, so every launch of the slug (a future
+    re-lease included) is HELD although no pause was positively recorded. :func:`paused_launches` skips such a
+    marker (it only projects holds it can read), so without this the hold is invisible to ``vigil doctor``.
+
+    Each candidate is classified by the SAME :func:`_marker_nonces` read the halt reader uses, so every slug listed
+    here halts. READ-ONLY, total, never raises: an absent / unlistable pauses dir yields ``[]``. That is why this
+    list alone is not the whole picture: when the pauses DIRECTORY itself cannot be listed or searched, the halt
+    reader may hold slugs this list cannot see (every slug, when a lookup in it fails), and that state is reported
+    by :func:`pause_store_unreadable` instead. Only the slug (the marker's canonical, path-safe filename stem) is
+    returned — never a nonce, never marker content. A file whose stem is not a canonical safe slug component is
+    not any slug's marker (no lookup resolves to it), so it is not listed and its name is never echoed."""
+    out: "list[str]" = []
+    try:
+        entries = sorted(pauses_root(base_dir).glob("*.json"))
+    except OSError:
+        return out
+    for p in entries:
+        slug = p.stem
+        if _safe_component(slug) != slug:
+            continue                                 # not a canonical slug marker: halts nothing, name not echoed
+        if _marker_nonces(base_dir, slug) is None:
+            out.append(slug)                         # exists but unreadable/corrupt/foreign -> a real hold
+    return out
+
+
+#: A slug that is never any launch's (customer slugs are ``cust_<24hex>``) and is never written: the pause store
+#: probe looks it up exactly as the halt reader looks up a slug that has NO marker.
+_STORE_PROBE_SLUG = "vigil-pause-store-probe"
+
+#: :func:`pause_store_unreadable` answers.
+STORE_LOOKUP_FAILS = "lookup"
+STORE_LISTING_FAILS = "listing"
+
+
+def pause_store_unreadable(base_dir: Any) -> Optional[str]:
+    """Whether the pauses DIRECTORY itself cannot be read, as opposed to one marker file in it.
+
+      * ``None`` — the directory is absent (DEFAULT-OFF: nothing was ever paused) or can be listed and searched.
+      * ``"lookup"`` (:data:`STORE_LOOKUP_FAILS`) — a slug with NO marker cannot be read as "not paused" (for
+        example the directory is not searchable by this uid, after a restore under another owner). The halt
+        reader fails CLOSED on that, so EVERY customer launch of EVERY slug is held, and the per-file listings
+        (:func:`paused_launches`, :func:`unreadable_pause_markers`) see nothing because the glob swallows the
+        error.
+      * ``"listing"`` (:data:`STORE_LISTING_FAILS`) — lookups work but the directory cannot be enumerated, so the
+        per-file listings are blind: a corrupt marker in it would hold every launch of its slug unseen.
+
+    The lookup check is the halt reader's own :func:`_marker_nonces` on a slug that has no marker, so "lookup"
+    is reported exactly when the reader would hold a launch that was never paused. READ-ONLY, total, never raises.
+    It returns only one of these fixed words, never a slug, a nonce or marker content."""
+    try:
+        if _marker_nonces(base_dir, _STORE_PROBE_SLUG) is None:
+            return STORE_LOOKUP_FAILS
+        with os.scandir(pauses_root(base_dir)) as it:
+            for _ in it:
+                pass
+    except (FileNotFoundError, NotADirectoryError):
+        return None                                  # no pauses dir: nothing recorded, and lookups answer "not paused"
+    except Exception:  # noqa: BLE001 — any other failure to enumerate (EACCES, EIO, ...) is a blind store
+        return STORE_LISTING_FAILS
+    return None
