@@ -228,6 +228,17 @@ def _highwater_path(base_dir: Any, slug: str) -> Optional[Path]:
     return Path(d) / f"{safe}.json"
 
 
+def _shared_floor_path(base_dir: Any, slug: str) -> Optional[Path]:
+    """The SEAM-DIRECTORY rollback floor (``<base>/<floor dir>/<slug>.json``), resolved from ``base_dir`` alone so the
+    sovereign and the offense plane always name the same file. The sovereign raises it on every publish and every
+    withdrawal; the offense reader enforces it in addition to its own (possibly offense-private) floor. Without an
+    offense-private override the two are the same file."""
+    safe = _safe_component(slug)
+    if not safe:
+        return None
+    return Path(base_dir) / _HIGHWATER_DIRNAME / f"{safe}.json"
+
+
 def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[bool, str]":
     from types import SimpleNamespace
 
@@ -242,11 +253,31 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[b
     path = _highwater_path(base_dir, slug)
     if path is None:
         return False, "unsafe slug for the eval-capability-grant high-water floor"
+    # The sovereign's floor (raised with every publish and withdrawal) lives in the seam directory; a hardened
+    # deploy keeps the offense floor elsewhere. Both are ENFORCED; the offense floor only ever advances to a seq
+    # this reader verified (an unauthenticated seam-directory value is never copied into it).
+    shared_path = _shared_floor_path(base_dir, slug)
+    distinct = shared_path is not None and shared_path != path
+    shared = None
+    if distinct:
+        try:
+            shared = load_highwater(shared_path)
+        except HighWaterError as e:
+            return False, (f"eval-capability-grant publication floor in the seam directory is corrupt/tampered "
+                           f"(fail-closed): {e}")
     try:
         prior = load_highwater(path)
     except HighWaterError as e:
         return False, f"eval-capability-grant high-water floor is corrupt/tampered (fail-closed): {e}"
+    if distinct and shared is None and prior is not None:
+        return False, ("eval-capability-grant publication floor is missing from the seam directory while the offense "
+                       "floor exists (refused: every publication writes it, so its loss is a tamper or a restore; "
+                       "the sovereign's next publish of this engagement restores it)")
     head = SimpleNamespace(entry_count=int(seq), last_seq=int(seq))
+    if shared is not None:
+        ok, msg = check_highwater(head, shared)
+        if not ok:
+            return False, f"ROLLBACK refused — the sovereign withdrew or superseded this publication: {msg}"
     ok, msg = check_highwater(head, prior)
     if not ok:
         return False, f"ROLLBACK refused — replay of an older published state: {msg}"
@@ -257,6 +288,26 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[b
     except (OSError, HighWaterError) as e:
         return False, f"cannot persist the eval-capability-grant high-water floor (fail-closed): {e}"
     return True, "within the durable high-water floor"
+
+
+def advance_publication_floor(base_dir: Any, slug: str, seq: int) -> None:
+    """Raise the rollback floor for ``slug`` to ``seq`` (UPWARD-ONLY; a no-op when a higher floor is already
+    recorded). The sovereign calls this after every publish (``seq`` = the new seal seq, so every superseded
+    publication is refused at once) and when it WITHDRAWS a publication (``seq`` above the withdrawn file's seal
+    seq, so a replay of that file is refused). It writes the SEAM-DIRECTORY floor, which the offense reader always
+    enforces, whatever offense-private floor location the offense process is configured with. Raises on any
+    failure (unsafe slug, a corrupt or tampered floor, an unwritable floor) so the caller can fail loudly."""
+    from types import SimpleNamespace
+
+    from vigil_core.highwater import HighWaterDowngrade, advance_highwater
+
+    path = _shared_floor_path(base_dir, slug)   # the seam-directory floor BOTH planes resolve identically
+    if path is None:
+        raise ValueError(f"unsafe slug for the publication floor: {slug!r}")
+    try:
+        advance_highwater(path, SimpleNamespace(entry_count=int(seq), last_seq=int(seq)))
+    except HighWaterDowngrade:
+        return  # a higher floor is already recorded: already at least as strict
 
 
 # ---------------------------------------------------------------------------------------------------

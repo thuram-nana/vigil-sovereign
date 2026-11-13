@@ -1282,6 +1282,13 @@ class _Handler(BaseHTTPRequestHandler):
             _log.exception("model gateway: internal error")
             self._refuse(_Refusal(500, "api_error", "the VIGIL model gateway failed"))
 
+    def _release_ticket(self) -> None:
+        """Release this request's reservation (a no-op once the response was metered, and idempotent) BEFORE a
+        refusal is written: a client that sees the refusal and calls again must find its budget already free."""
+        ticket = getattr(self, "_ticket", None)
+        if ticket is not None:
+            ticket.release()
+
     def do_POST(self) -> None:  # noqa: N802
         path, _, query = self.path.partition("?")
         path_qs = path + (("?" + query) if query in _FORWARDED_QUERIES else "")   # never a client-chosen query
@@ -1328,12 +1335,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._forward_plain(path_qs, shaped, headers, grant=grant)
         except _Refusal as r:
             if not self._streaming:
+                self._release_ticket()            # before the refusal reaches the client, not after
                 self._refuse(r)
         except OSError:                           # the client went away or stalled past its deadline
             self.close_connection = True
         except Exception:  # noqa: BLE001 — fail closed: an internal error never forwards and never leaks detail
             _log.exception("model gateway: internal error")
             if not self._streaming:
+                self._release_ticket()
                 self._refuse(_Refusal(500, "api_error", "the VIGIL model gateway failed"))
             self.close_connection = True
         finally:

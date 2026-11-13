@@ -36,6 +36,7 @@ owner key — see ``vigil_integration.live.eval_attestation.verify_live_offense_
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -44,7 +45,14 @@ from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_on
 from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
-from .seam_publish import encodable_or_revoke, withdraw_publication
+from .seam_publish import (
+    encodable_or_revoke,
+    publish_lock,
+    published_slugs,
+    raise_close_alarm,
+    retract_for_revoke,
+    withdraw_publication,
+)
 
 assert_no_offense()
 
@@ -247,30 +255,97 @@ class EvalOffenseAttestation:
             **signed_payload(core, self.owner_key),
             "by": by, "reason": reason, "tier": "A0", "decision": "auto",
         }
+        slug = str(engagement_slug)
+        # Un-arm the offense plane BEFORE the spine append and again before any publish waits for the lock (always
+        # safe), and do the same for the covered grant (FIX C1) before EITHER publish waits: a revoke killed after
+        # its append, or while it waits, has already raised both floors and removed both stale publications.
+        self._retract(slug, ahead=True)
         seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        self._retract(slug)
+        cascade = self._begin_grant_cascade(slug, by=by, reason=reason)
+        att_error: Optional[BaseException] = None
         try:
-            self._publish(str(engagement_slug))
-        finally:
-            # FIX C1 (engagement-close site): revoking the covering attestation CLOSES the engagement's eval, so
-            # any EvalCapabilityGrant that rode inside it must not outlive it — publish a grant-revoke to the seam
-            # for this engagement too, so the keyless offense verifier (which, for TWIN/STAGING, does not consult
-            # this attestation) sees the void. A NO-OP when no grant was published. It runs even when the
-            # attestation's own publish failed, and if the cascade itself cannot complete (e.g. the spine cannot
-            # be read) the grant's publication is WITHDRAWN instead: fail-closed, never a stale grant.
-            try:
-                from .eval_capability_grant import EvalCapabilityGrant
-                _g = EvalCapabilityGrant(self.store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
-                if _g.state(engagement_slug=str(engagement_slug), now=0.0).granted:
-                    _g.revoke(engagement_slug=str(engagement_slug), by=by,
-                              reason=f"covering eval-offense attestation revoked: {reason}" if reason
-                              else "covering eval-offense attestation revoked")
-            except Exception as e:  # noqa: BLE001 — a grant-revoke failure must never prevent the attestation revoke
-                def _grant_path():
-                    from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
-                    return eval_capability_grant_path(self._base_dir(), str(engagement_slug))
-                withdraw_publication(_grant_path, what=f"eval-capability-grant {engagement_slug!r} (attestation "
-                                     f"revoke cascade)", cause=e)
+            self._publish(slug)
+        except BaseException as e:  # noqa: BLE001 - re-raised below, after the grant cascade has run
+            att_error = e
+            if self._seam_path(slug) is not None:
+                raise_close_alarm(f"a revoke of eval-offense attestation {slug!r} could not be confirmed on the seam",
+                                  cause="seam_unreconciled", failed=[f"attestation:{slug}"])
+        cascade_error = self._finish_grant_cascade(slug, cascade)
+        if att_error is not None:
+            raise att_error
+        if cascade_error is not None:
+            raise cascade_error
         return seq
+
+    def _retract(self, slug: str, *, ahead: bool = False) -> bool:
+        """Raise the floor and remove a publication sealed below it, without the publish lock (``ahead``: the
+        pre-append step, one above the next seq)."""
+        bump = 1 if ahead else 0
+        return retract_for_revoke(lambda: self._seam_path(slug), what=f"eval-offense-attestation {slug!r}",
+                                  floor_fn=lambda: self._raise_floor(slug, self.store.next_seq + bump))
+
+    def _begin_grant_cascade(self, slug: str, *, by: str, reason: str) -> dict:
+        """FIX C1 (engagement-close site), step 1, before any lock wait: revoking the covering attestation CLOSES the
+        engagement's eval, so a grant that rode inside it must not outlive it (the keyless offense verifier does not
+        consult this attestation for TWIN/STAGING). When the grant is live on the spine (structurally: a grant
+        record after the last revoke, signature unchecked) its revoke is appended and its publication retracted
+        here. Never raises; the outcome is finished by :meth:`_finish_grant_cascade`."""
+        out: dict = {"grant": None, "live": False, "error": None, "not_recorded": None}
+        try:
+            from .eval_capability_grant import EvalCapabilityGrant
+            g = EvalCapabilityGrant(self.store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
+            out["grant"] = g
+            if g.structurally_live(engagement_slug=slug):
+                out["live"] = True
+                g._retract(slug, ahead=True)
+                try:
+                    g._append_revoke(slug, by=by, reason=f"covering eval-offense attestation revoked: {reason}"
+                                     if reason else "covering eval-offense attestation revoked")
+                except Exception as e:  # noqa: BLE001 - finished in _finish_grant_cascade
+                    out["not_recorded"] = e
+                g._retract(slug)
+        except Exception as e:  # noqa: BLE001 — a grant-revoke failure must never prevent the attestation revoke
+            out["error"] = e
+        return out
+
+    def _finish_grant_cascade(self, slug: str, cascade: dict) -> Optional[BaseException]:
+        """Step 2: re-publish the grant from the spine whenever it was live, has a publication, or is named by the
+        alarm (a retry repairs an earlier failure). A grant whose revoke could not be appended, or a cascade that
+        could not run, is withdrawn directly (floor first, one above the next seq) and named by the durable alarm:
+        the spine still grants it, so the next publish of it would re-arm it. Never raises; returns the error the
+        caller raises, or ``None`` when the grant's seam is confirmed."""
+        from .seam_publish import read_close_alarm
+        g = cascade.get("grant")
+        err = cascade.get("error") or cascade.get("not_recorded")
+        name = f"grant:{slug}"
+        if err is not None:
+            def _path():
+                from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+                return eval_capability_grant_path(self._base_dir(), slug)
+
+            def _floor():
+                from vigil_integration.live.eval_capability_grant import advance_publication_floor
+                advance_publication_floor(self._base_dir(), slug, self.store.next_seq + 1)
+            withdrawn = withdraw_publication(_path, what=f"eval-capability-grant {slug!r} (attestation revoke cascade)",
+                                             cause=err, floor_fn=_floor)
+            raise_close_alarm(f"engagement close (attestation revoke) could not revoke the eval-capability grant for "
+                              f"{slug!r} on the spine ({type(err).__name__}); its publication was "
+                              f"{'withdrawn' if withdrawn else 'NOT withdrawn'}",
+                              cause="seam_unreconciled", failed=[name])
+            return err
+        if g is None:
+            return None
+        try:
+            path = g._seam_path(slug)
+            named = name in ((read_close_alarm() or {}).get("failed") or [])
+            if path is not None and (cascade.get("live") or os.path.lexists(path) or named):
+                g._publish(slug)
+            return None
+        except Exception as e:  # noqa: BLE001
+            raise_close_alarm(f"engagement close (attestation revoke) could not confirm the eval-capability grant for "
+                              f"{slug!r} on the seam ({type(e).__name__})", cause="seam_unreconciled", failed=[name])
+            return e
 
     # -- the fail-closed fold (NEVER cached — the verdict is time-dependent) ---------------------------
 
@@ -354,6 +429,24 @@ class EvalOffenseAttestation:
     def _base_dir(self) -> str:
         return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
 
+    def _seam_path(self, engagement_slug: str):
+        from vigil_integration.live.eval_attestation import eval_attestation_path
+        return eval_attestation_path(self._base_dir(), engagement_slug)
+
+    def _raise_floor(self, engagement_slug: str, seq: Optional[int] = None) -> int:
+        """Raise the seam-directory rollback floor for ``engagement_slug`` to ``seq`` (default: the spine's next
+        seq, above every publication already sealed) and return it. Raises on failure."""
+        from vigil_integration.live.eval_attestation import advance_publication_floor
+        floor = self.store.next_seq if seq is None else int(seq)
+        advance_publication_floor(self._base_dir(), engagement_slug, floor)
+        return floor
+
+    def _published_slugs(self) -> list:
+        """The engagement slugs that have a readable attestation publication on the seam (raises OSError when the
+        directory exists but cannot be listed)."""
+        from vigil_integration.live.eval_attestation import eval_attestations_root
+        return published_slugs(eval_attestations_root(self._base_dir()), self._seam_path)
+
     def _publish(self, engagement_slug: str) -> None:
         """Mirror every eval-offense-attestation record for ``engagement_slug`` (attestations AND revokes) to
         the shared seam, so the offense plane can READ+VERIFY the public signed material without importing
@@ -372,38 +465,48 @@ class EvalOffenseAttestation:
         the offense verifier re-derives it over the records it read (drop/reorder no longer verify) and enforces
         the monotonic ``seq`` against a durable high-water (a rollback is refused). The owner key signs ONLY
         here in SIGIL; the import-clean broker merely transports the public seal (FATAL-2)."""
-        try:
-            records = []
-            for record in self.store.iter_records():
-                p = record.payload if isinstance(record.payload, dict) else {}
-                if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
-                    records.append(dict(p))
-            records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
-            from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
-            seal = None
-            if self.owner_key is not None:
-                from ..reuse import sign
-                # The monotonic publish seq is the current spine head — strictly larger than any prior
-                # publish's (every attest/revoke appended to the spine before calling _publish), so a
-                # replayed older seam has a lower seq and is refused by the offense high-water. ``next_seq``
-                # is a property; fall back to the per-slug record count (also strictly growing per publish,
-                # since each attest/revoke appends exactly one record for this slug) for a store without it.
-                seq = getattr(self.store, "next_seq", None)
-                if not isinstance(seq, int):
-                    seq = len(records)
-                seal = build_seal(
-                    engagement_slug, seq, records,
-                    sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
-                    pubkey=self.owner_key.public_key_b64,
-                )
-            write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
-        except Exception as e:
-            def _path():
-                from vigil_integration.live.eval_attestation import eval_attestation_path
-                return eval_attestation_path(self._base_dir(), engagement_slug)
-            withdrawn = withdraw_publication(_path, what=f"eval-offense-attestation {engagement_slug!r}", cause=e)
-            if not withdrawn or not isinstance(e, (OSError, ValueError)):
-                raise   # never report success while a stale publication may still be honoured
+        with contextlib.ExitStack() as held:   # the lock is held through any withdrawal
+            try:
+                held.enter_context(publish_lock(self.store))   # one publish at a time
+                records = []
+                tip = -1                          # the snapshot's last seq (another process may have appended)
+                for record in self.store.iter_records():
+                    rseq = getattr(record, "seq", None)
+                    if isinstance(rseq, int):
+                        tip = max(tip, rseq)
+                    p = record.payload if isinstance(record.payload, dict) else {}
+                    if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
+                        records.append(dict(p))
+                records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
+                from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
+                seal = None
+                if self.owner_key is not None:
+                    from ..reuse import sign
+                    # The monotonic publish seq is the current spine head — strictly larger than any prior
+                    # publish's (every attest/revoke appended to the spine before calling _publish), so a
+                    # replayed older seam has a lower seq and is refused by the offense high-water. ``next_seq``
+                    # is a property; fall back to the per-slug record count (also strictly growing per publish,
+                    # since each attest/revoke appends exactly one record for this slug) for a store without it.
+                    seq = getattr(self.store, "next_seq", None)
+                    if not isinstance(seq, int):
+                        seq = len(records)
+                    seq = max(seq, tip + 1)       # never below the newest record this publish has seen
+                    seal = build_seal(
+                        engagement_slug, seq, records,
+                        sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
+                        pubkey=self.owner_key.public_key_b64,
+                    )
+                write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
+                if seal is not None:
+                    # Every superseded publication (an older seal seq) is refused from now on, not only once the
+                    # offense plane happens to read this one.
+                    self._raise_floor(engagement_slug, seal["seq"])
+            except Exception as e:
+                withdrawn = withdraw_publication(lambda: self._seam_path(engagement_slug),
+                                                 what=f"eval-offense-attestation {engagement_slug!r}", cause=e,
+                                                 floor_fn=lambda: self._raise_floor(engagement_slug))
+                if not withdrawn or not isinstance(e, (OSError, ValueError)):
+                    raise   # never report success while a stale publication may still be honoured
 
 
 def assert_eval_offense_attested(

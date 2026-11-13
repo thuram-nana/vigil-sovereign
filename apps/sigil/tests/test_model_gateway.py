@@ -774,6 +774,26 @@ def test_the_sovereignty_tier_can_refuse_egress(gateway, upstream):
     assert gateway.gateway.meter.pending(g.meter_id) == 0              # released
 
 
+def test_a_refusal_releases_the_reservation_before_the_client_sees_it(gateway, upstream, monkeypatch):
+    """The reservation is released BEFORE the refusal is written, so a client that sees the refusal and calls again
+    finds its budget free (deterministic: checked at the moment the refusal is written, not after)."""
+    from sigil import model_gateway as mg
+
+    def refuse(url):
+        raise RuntimeError("cloud egress is not permitted at this tier")
+    gateway.gateway.config.egress_check = refuse
+    g = _grant()
+    seen = []
+    real = mg._Handler._refuse
+
+    def _spy(self, r):
+        seen.append(gateway.gateway.meter.pending(g.meter_id))
+        return real(self, r)
+    monkeypatch.setattr(mg._Handler, "_refuse", _spy)
+    assert _call(gateway, BODY, _tok(g))[0] == 403
+    assert seen == [0]
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Key custody
 # ---------------------------------------------------------------------------------------------------------------

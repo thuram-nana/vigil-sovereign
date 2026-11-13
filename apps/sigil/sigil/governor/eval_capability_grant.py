@@ -40,7 +40,9 @@ SEAL signs under ``eval-capability-grant-seal``.
 
 from __future__ import annotations
 
+import contextlib
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -48,7 +50,15 @@ from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_on
 from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
-from .seam_publish import encodable_or_revoke, withdraw_publication
+from .seam_publish import (
+    encodable_or_revoke,
+    granted_after_last_revoke,
+    publish_lock,
+    published_slugs,
+    raise_close_alarm,
+    retract_for_revoke,
+    withdraw_publication,
+)
 
 assert_no_offense()
 
@@ -76,6 +86,18 @@ _CORE = (
     "signal", "state", "engagement_slug", "target", "allowed_gate_overrides", "issued_anchor",
     "max_covered_actions", "evaluator_pubkey",
 )
+
+
+class EvalGrantSeamUnreconciled(RuntimeError):
+    """A reconcile (offense close, or `sigil eval-grant reconcile`) could not confirm the seam for one or more
+    publications: they could be neither re-published from the spine nor withdrawn, or their revoke never reached
+    the spine, so they may still authorize. ``failed`` names them; ``alarm_recorded`` says whether the durable alarm
+    `vigil doctor` reports was written."""
+
+    def __init__(self, message: str, *, failed=(), alarm_recorded: bool = False):
+        super().__init__(message)
+        self.failed = list(failed)
+        self.alarm_recorded = bool(alarm_recorded)
 
 
 class EvalCapabilityGrantMissing(RuntimeError):
@@ -286,9 +308,40 @@ class EvalCapabilityGrant:
             **signed_payload(core, self.owner_key),
             "by": by, "reason": reason, "tier": "A0", "decision": "auto",
         }
+        slug = str(engagement_slug)
+        # Un-grant the offense plane BEFORE the spine append and again before waiting for the publish lock (always
+        # safe): a revoke killed after its append, or while it waits for the lock, has already raised the floor and
+        # removed the stale publication.
+        self._retract(slug, ahead=True)
         seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
-        self._publish(str(engagement_slug))
+        self._retract(slug)
+        try:
+            self._publish(slug)
+        except Exception:
+            if self._seam_path(slug) is not None:
+                raise_close_alarm(f"a revoke of eval-capability grant {slug!r} could not be confirmed on the seam",
+                                  cause="seam_unreconciled", failed=[f"grant:{slug}"])
+            raise
         return seq
+
+    def _append_revoke(self, slug: str, *, by: str, reason: str) -> int:
+        core = build_core(
+            engagement_slug=slug, target="", allowed_gate_overrides=[], issued_anchor=0.0,
+            max_covered_actions=0, evaluator_pubkey="", state="revoked",
+        )
+        payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason, "tier": "A0", "decision": "auto"}
+        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
+    def _retract(self, slug: str, *, ahead: bool = False) -> bool:
+        """Raise the floor and remove a publication sealed below it, without the publish lock. ``ahead`` is the
+        pre-append step: the floor goes one above the next seq, since the last seal can equal it."""
+        bump = 1 if ahead else 0
+        return retract_for_revoke(lambda: self._seam_path(slug), what=f"eval-capability-grant {slug!r}",
+                                  floor_fn=lambda: self._raise_floor(slug, self.store.next_seq + bump))
+
+    def structurally_live(self, *, engagement_slug: str) -> bool:
+        """A granted record after the last revoke, signature unchecked (see ``seam_publish``)."""
+        return granted_after_last_revoke(self.store, signal=SIGNAL, engagement_slug=engagement_slug)
 
     # -- the fail-closed fold (NEVER cached) -----------------------------------------------------------
 
@@ -356,10 +409,44 @@ class EvalCapabilityGrant:
     def is_granted(self, *, engagement_slug: str, target: Optional[str] = None, now: float) -> bool:
         return self.state(engagement_slug=engagement_slug, target=target, now=now).granted
 
+    def granted_targets(self, *, engagement_slug: str, now: float = 0.0) -> list:
+        """Every target a grant for ``engagement_slug`` currently covers. Each target is folded on its own, with
+        its own anti-replay high-water, exactly as the offense verifier folds the action's target; the
+        ``target=None`` fold shares ONE high-water across targets, so it can call a slug ungranted while a
+        per-target grant still authorizes on the offense plane. Revoke decisions and ``status`` use this."""
+        targets: list = []
+        for record in self.store.iter_records():
+            p = record.payload if isinstance(record.payload, dict) else {}
+            if (p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug
+                    and p.get("state") == "granted" and p.get("target") not in targets):
+                targets.append(p.get("target"))
+        return [t for t in targets if self.state(engagement_slug=engagement_slug, target=t, now=now).granted]
+
+    def is_granted_any_target(self, *, engagement_slug: str, now: float = 0.0) -> bool:
+        return bool(self.granted_targets(engagement_slug=engagement_slug, now=now))
+
     # -- seam publication (so the OFFENSE plane can verify the public signed material) -----------------
 
     def _base_dir(self) -> str:
         return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+
+    def _seam_path(self, engagement_slug: str) -> Optional[Path]:
+        from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+        return eval_capability_grant_path(self._base_dir(), engagement_slug)
+
+    def _raise_floor(self, engagement_slug: str, seq: Optional[int] = None) -> int:
+        """Raise the seam-directory rollback floor for ``engagement_slug`` to ``seq`` (default: the spine's next
+        seq, above every publication already sealed) and return it. Raises on failure."""
+        from vigil_integration.live.eval_capability_grant import advance_publication_floor
+        floor = self.store.next_seq if seq is None else int(seq)
+        advance_publication_floor(self._base_dir(), engagement_slug, floor)
+        return floor
+
+    def _published_slugs(self) -> list:
+        """The engagement slugs that have a readable publication on the seam (raises OSError when the directory
+        exists but cannot be listed)."""
+        from vigil_integration.live.eval_capability_grant import eval_capability_grants_root
+        return published_slugs(eval_capability_grants_root(self._base_dir()), self._seam_path)
 
     def _publish(self, engagement_slug: str) -> None:
         """Mirror every eval-capability-grant record for ``engagement_slug`` (grants AND revokes) to the
@@ -371,62 +458,226 @@ class EvalCapabilityGrant:
         an OSError / ValueError is absorbed (the spine record stands; the next publish re-sends the full list);
         anything else, or a publication that could not be withdrawn, re-raises. The owner key signs ONLY here in
         SIGIL (FATAL-2)."""
-        try:
-            records = []
-            for record in self.store.iter_records():
-                p = record.payload if isinstance(record.payload, dict) else {}
-                if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
-                    records.append(dict(p))
-            records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
-            from vigil_integration.live.eval_capability_grant import (
-                build_seal,
-                write_eval_capability_grants,
-            )
-            seal = None
-            if self.owner_key is not None:
-                from ..reuse import sign
-                seq = getattr(self.store, "next_seq", None)
-                if not isinstance(seq, int):
-                    seq = len(records)
-                seal = build_seal(
-                    engagement_slug, seq, records,
-                    sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
-                    pubkey=self.owner_key.public_key_b64,
+        with contextlib.ExitStack() as held:   # the lock is held through any withdrawal
+            try:
+                held.enter_context(publish_lock(self.store))   # one publish at a time
+                records = []
+                tip = -1                          # the snapshot's last seq (another process may have appended)
+                for record in self.store.iter_records():
+                    rseq = getattr(record, "seq", None)
+                    if isinstance(rseq, int):
+                        tip = max(tip, rseq)
+                    p = record.payload if isinstance(record.payload, dict) else {}
+                    if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
+                        records.append(dict(p))
+                records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
+                from vigil_integration.live.eval_capability_grant import (
+                    build_seal,
+                    write_eval_capability_grants,
                 )
-            write_eval_capability_grants(self._base_dir(), engagement_slug, records, seal=seal)
-        except Exception as e:
-            def _path():
-                from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
-                return eval_capability_grant_path(self._base_dir(), engagement_slug)
-            withdrawn = withdraw_publication(_path, what=f"eval-capability-grant {engagement_slug!r}", cause=e)
-            if not withdrawn or not isinstance(e, (OSError, ValueError)):
-                raise   # never report success while a stale publication may still be honoured
+                seal = None
+                if self.owner_key is not None:
+                    from ..reuse import sign
+                    seq = getattr(self.store, "next_seq", None)
+                    if not isinstance(seq, int):
+                        seq = len(records)
+                    seq = max(seq, tip + 1)       # never below the newest record this publish has seen
+                    seal = build_seal(
+                        engagement_slug, seq, records,
+                        sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
+                        pubkey=self.owner_key.public_key_b64,
+                    )
+                write_eval_capability_grants(self._base_dir(), engagement_slug, records, seal=seal)
+                if seal is not None:
+                    # Every superseded publication (an older seal seq) is refused from now on, not only once the
+                    # offense plane happens to read this one.
+                    self._raise_floor(engagement_slug, seal["seq"])
+            except Exception as e:
+                withdrawn = withdraw_publication(lambda: self._seam_path(engagement_slug),
+                                                 what=f"eval-capability-grant {engagement_slug!r}", cause=e,
+                                                 floor_fn=lambda: self._raise_floor(engagement_slug))
+                if not withdrawn or not isinstance(e, (OSError, ValueError)):
+                    raise   # never report success while a stale publication may still be honoured
 
 
 def revoke_grants_on_close(store, *, owner_key=None, trusted_pubkey: Optional[str] = None,
                            by: str = "owner", reason: str = "offense-gate/engagement close") -> list:
-    """FIX C1: publish a grant-REVOKE to the seam for EVERY engagement that currently has a published grant,
-    so the KEYLESS offense verifier — which cannot read sovereign OffenseGate/engagement state — sees the void
-    via the seam. Called from ``offense_gate.close_gate`` AND on engagement close. Enumerates distinct grant
-    engagement slugs on the spine and revokes each. With NO grant ever published this is a NO-OP (byte-
-    identical to today). Returns the list of revoked engagement slugs (empty when nothing was granted)."""
-    grant = EvalCapabilityGrant(store, owner_key=owner_key, trusted_pubkey=trusted_pubkey)
-    slugs: list = []
-    seen = set()
-    for record in store.iter_records():
-        p = record.payload if isinstance(record.payload, dict) else {}
-        if p.get("signal") != SIGNAL:
+    """FIX C1: on an offense close, revoke EVERY eval-capability grant that is live on the spine and confirm the
+    whole eval seam against the spine (:func:`reconcile_eval_seam` with ``revoke_live_grants=True``). Returns the
+    revoked engagement slugs; raises :class:`EvalGrantSeamUnreconciled` when a publication could not be confirmed
+    (the durable alarm names it). With NO grant ever published this is a NO-OP (byte-identical to today)."""
+    return reconcile_eval_seam(store, owner_key=owner_key, trusted_pubkey=trusted_pubkey, revoke_live_grants=True,
+                               by=by, reason=reason)["revoked"]
+
+
+def reconcile_eval_seam(store, *, owner_key=None, trusted_pubkey: Optional[str] = None,
+                        revoke_live_grants: bool, by: str = "owner",
+                        reason: str = "offense-gate/engagement close") -> dict:
+    """Make the eval seam say what the spine says, and confirm it. With ``revoke_live_grants`` (an offense close)
+    every grant that is live on the spine is revoked first; without it (`sigil eval-grant reconcile`) nothing is
+    revoked. In order:
+
+    1. every live grant's revoke is appended and its publication retracted (floor raised, stale file removed)
+       BEFORE any publish waits for the lock, so a close killed mid-way has already un-granted every one;
+    2. every grant that was revoked here, has a publication, or is named by the alarm is re-published from the
+       spine (a failed publish withdraws, floor first). A grant whose revoke could not be appended is withdrawn
+       directly and stays named: the spine still grants it, so its next publish would re-arm it;
+    3. every other grant on the spine that is not live gets its floor raised (a slug whose earlier floor raise
+       failed, with no file left to re-publish);
+    4. every published or alarm-named eval-offense attestation is re-published from the spine.
+
+    The alarm is cleared only when every name was confirmed; otherwise it names exactly what is still unconfirmed
+    and this raises :class:`EvalGrantSeamUnreconciled`. Liveness is structural (any grant record after the last
+    revoke, signature unchecked), so a key resolver that rejects every signature cannot make a grant look revoked.
+    Returns ``{"revoked": [...], "republished": [...]}``."""
+    from .seam_publish import IN_PROGRESS, read_close_alarm, settle_close_alarm
+    prior = read_close_alarm() or {}
+    prior_names = {str(n) for n in prior.get("failed") or [] if isinstance(n, str)}
+    try:
+        from .eval_offense_attestation import SIGNAL as ATT_SIGNAL
+        from .eval_offense_attestation import EvalOffenseAttestation
+        grant = EvalCapabilityGrant(store, owner_key=owner_key, trusted_pubkey=trusted_pubkey)
+        att = EvalOffenseAttestation(store, owner_key=owner_key, trusted_pubkey=trusted_pubkey)
+    except Exception as e:
+        rec = raise_close_alarm(f"the eval seam reconcile could not start ({type(e).__name__})",
+                                cause="seam_unreconciled", failed=["(reconcile did not run)"])
+        raise EvalGrantSeamUnreconciled("the eval seam reconcile could not start", failed=["(reconcile did not run)"],
+                                        alarm_recorded=rec) from e
+    try:
+        g_slugs: list = []
+        a_slugs: list = []
+        for record in store.iter_records():
+            p = record.payload if isinstance(record.payload, dict) else {}
+            slug = p.get("engagement_slug")
+            if not slug or not isinstance(slug, str):
+                continue
+            if p.get("signal") == SIGNAL and slug not in g_slugs:
+                g_slugs.append(slug)
+            elif p.get("signal") == ATT_SIGNAL and slug not in a_slugs:
+                a_slugs.append(slug)
+        live = {s for s in g_slugs if grant.structurally_live(engagement_slug=s)}
+    except Exception as e:
+        not_withdrawn = _withdraw_every_published_grant(grant, by=by, reason=reason, cause=e)
+        rec = raise_close_alarm(f"the eval seam reconcile could not read the spine ({type(e).__name__})",
+                                cause="seam_unreconciled" if not_withdrawn else "spine_unreadable",
+                                failed=not_withdrawn)
+        raise EvalGrantSeamUnreconciled("the eval seam reconcile could not read the spine", failed=not_withdrawn,
+                                        alarm_recorded=rec) from e
+    failed: dict = {}
+    try:
+        pub_g = set(grant._published_slugs())
+    except OSError as e:
+        pub_g = set()
+        failed["(grant seam directory unreadable)"] = type(e).__name__
+    try:
+        pub_a = set(att._published_slugs())
+    except OSError as e:
+        pub_a = set()
+        failed["(attestation seam directory unreadable)"] = type(e).__name__
+    alarm_g = {n[len("grant:"):] for n in prior_names if n.startswith("grant:")}
+    alarm_a = {n[len("attestation:"):] for n in prior_names if n.startswith("attestation:")}
+    to_revoke = sorted(live) if revoke_live_grants else []
+    work = bool(to_revoke or pub_g or pub_a or prior_names)
+    if work:
+        raise_close_alarm("an eval seam reconcile is in progress (a reconcile that stops here leaves this alarm)",
+                          cause="in_progress", failed=[IN_PROGRESS])
+    # 1) every revoke appended and retracted before any lock wait
+    revoked: list = []
+    not_recorded: set = set()
+    for s in to_revoke:
+        if grant._seam_path(s) is None:
+            continue                       # the offense plane cannot read this slug either
+        grant._retract(s, ahead=True)
+        try:
+            grant._append_revoke(s, by=by, reason=reason)
+        except Exception as e:  # noqa: BLE001 - handled in step 2
+            not_recorded.add(s)
+            failed[f"grant:{s}"] = f"revoke not recorded on the spine ({type(e).__name__})"
             continue
-        slug = p.get("engagement_slug")
-        if not slug or slug in seen:
+        grant._retract(s)
+        revoked.append(s)
+    # 2) re-publish (or, for an unrecorded revoke, withdraw) every grant revoked here, published, or alarm-named
+    republished: list = []
+    for s in sorted(set(to_revoke) | pub_g | alarm_g):
+        if grant._seam_path(s) is None:
             continue
-        seen.add(slug)
-        # Only revoke an engagement that is CURRENTLY granted (a NO-OP otherwise — avoids a revoke-storm and
-        # keeps the default/empty path byte-identical). ``now`` is irrelevant to a non-expiring grant fold.
-        if grant.state(engagement_slug=slug, now=0.0).granted:
-            grant.revoke(engagement_slug=slug, by=by, reason=reason)
-            slugs.append(slug)
-    return slugs
+        if s in not_recorded or (not revoke_live_grants and s in alarm_g and s in live):
+            # The spine still grants it although a revoke was attempted (its record never landed): re-publishing
+            # would re-arm what the owner revoked. Keep it withdrawn and named until a revoke reaches the spine.
+            failed.setdefault(f"grant:{s}", "a revoke of it never reached the spine; revoke it again "
+                                            "(`sigil eval-grant revoke`)")
+            if not _withdraw_above(grant, s, what=f"eval-capability-grant {s!r}"):
+                failed[f"grant:{s}"] += "; its publication could NOT be withdrawn"
+            continue
+        try:
+            grant._publish(s)
+            republished.append(s)
+        except Exception as e:  # noqa: BLE001
+            failed[f"grant:{s}"] = f"neither re-published nor withdrawn ({type(e).__name__})"
+    # 3) a floor for every other grant on the spine that is not live
+    handled = set(to_revoke) | pub_g | alarm_g
+    for s in g_slugs:
+        if s in handled or s in live or grant._seam_path(s) is None:
+            continue
+        try:
+            grant._raise_floor(s)
+        except Exception as e:  # noqa: BLE001
+            failed[f"grant:{s}"] = f"rollback floor not raised ({type(e).__name__})"
+    # 4) attestations: re-publish what is published or named
+    for s in sorted(pub_a | alarm_a):
+        if att._seam_path(s) is None:
+            continue
+        try:
+            att._publish(s)
+        except Exception as e:  # noqa: BLE001
+            failed[f"attestation:{s}"] = f"neither re-published nor withdrawn ({type(e).__name__})"
+    if not work and not failed:
+        return {"revoked": revoked, "republished": republished}
+    checked = prior_names | {f"grant:{s}" for s in handled} | {f"attestation:{s}" for s in pub_a | alarm_a}
+    checked |= {"(reconcile did not run)", "(grant seam directory unreadable)", "(attestation seam directory unreadable)"}
+    detail = (f"{len(failed)} eval seam publication(s) could not be confirmed: "
+              + "; ".join(f"{k}: {v}" for k, v in sorted(failed.items()))[:400])
+    rec = settle_close_alarm(failed, checked=checked, detail=detail)
+    if failed:
+        raise EvalGrantSeamUnreconciled(f"the eval seam could not be confirmed for {sorted(failed)}",
+                                        failed=sorted(failed), alarm_recorded=rec)
+    return {"revoked": revoked, "republished": republished}
+
+
+def _withdraw_above(grant: "EvalCapabilityGrant", slug: str, *, what: str,
+                    cause: Optional[BaseException] = None) -> bool:
+    """Withdraw ``slug``'s publication with its floor raised one above the next seq (above every seal so far)."""
+    def _path() -> Optional[Path]:
+        return grant._seam_path(slug)
+
+    def _floor() -> int:
+        return grant._raise_floor(slug, grant.store.next_seq + 1)
+    return withdraw_publication(_path, what=what, cause=cause, floor_fn=_floor)
+
+
+def _withdraw_every_published_grant(grant: "EvalCapabilityGrant", *, by: str, reason: str,
+                                    cause: BaseException) -> list:
+    """Fail-closed fallback when the spine cannot be read: for every grant that has a published seam file, append a
+    revoke (best-effort) and withdraw the publication (floor first, one above the next seq). Never raises (the
+    caller re-raises ``cause``); returns the alarm names of what could NOT be withdrawn."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        published = grant._published_slugs()
+    except OSError:
+        log.critical("eval seam: the eval-capability-grant seam cannot be listed, so the published grants could not "
+                     "be withdrawn", exc_info=True)
+        return ["(grant seam directory unreadable)"]
+    failed: list = []
+    for slug in published:
+        try:
+            grant._append_revoke(slug, by=by, reason=f"{reason} (spine unreadable: fail-closed)")
+        except Exception:  # noqa: BLE001 - the withdrawal below is the guarantee
+            pass
+        if not _withdraw_above(grant, slug, what=f"eval-capability-grant {slug!r} (spine unreadable)", cause=cause):
+            failed.append(f"grant:{slug}")
+    return failed
 
 
 def assert_eval_capability_granted(

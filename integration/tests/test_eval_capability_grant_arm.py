@@ -89,8 +89,11 @@ def _seal_for(owner, records, *, seq=1):
 
 
 def _write(base, records, *, seal_owner, seq=1, seal=None):
-    _ecg.write_eval_capability_grants(
-        base, _SLUG, records, seal=seal if seal is not None else _seal_for(seal_owner, records, seq=seq))
+    """Mirror governor._publish: the record list + an owner seal, then the seam-directory floor at the seal seq."""
+    seal = seal if seal is not None else _seal_for(seal_owner, records, seq=seq)
+    _ecg.write_eval_capability_grants(base, _SLUG, records, seal=seal)
+    if isinstance(seal, dict) and isinstance(seal.get("seq"), int):
+        _ecg.advance_publication_floor(base, _SLUG, seal["seq"])
 
 
 def _verify(base, owner, *, target=_TGT, actions_covered=None):
