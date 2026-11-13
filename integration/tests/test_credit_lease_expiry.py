@@ -10,6 +10,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * an unreadable pause marker counted as paused (fail-closed reader) -> test_only_a_positively_paused_or_expiry_held_lease_is_ever_due
   * the pause marker's mtime ignored (a late pause gets no grace)     -> test_a_pause_recorded_after_the_window_gets_the_whole_grace
   * the hold's resume time ignored                                    -> test_only_a_positively_paused_or_expiry_held_lease_is_ever_due
+  * a pause + a hold: only one of the two counted                     -> test_a_pause_and_a_hold_together_wait_for_the_later_of_the_two
+  * a vanished / unaddressable marker or an EACCES hold raises        -> test_the_predicate_never_raises_on_a_racing_or_odd_store
   * a settled lease still listed                                      -> test_a_settled_lease_is_never_due
   * re-recording a hold keeps the EARLIER resume                      -> test_re_recording_a_hold_keeps_the_later_resume
   * an unreadable / non-finite grace shortens it                      -> test_the_grace_comes_from_the_env_and_never_shrinks_on_garbage
@@ -85,6 +87,38 @@ def test_a_pause_recorded_after_the_window_gets_the_whole_grace(tmp_path):
     record_lease_pause(b, "cust_a", "n1")
     _set_mtime(pause_path(b, "cust_a"), na + 5 * G)
     assert settle_due_at(b, "cust_a", "n1", na, grace=G) == pytest.approx(na + 6 * G)
+
+
+def test_a_pause_and_a_hold_together_wait_for_the_later_of_the_two(tmp_path):
+    # an expired resume (the hold) followed by a fresh pause of the still-running launch, and the reverse order
+    b = str(tmp_path)
+    na = time.time() - 10 * G
+    record_expiry_hold(b, "cust_a", "n1", resumed_at=na + 300)
+    record_lease_pause(b, "cust_a", "n1")
+    _set_mtime(pause_path(b, "cust_a"), na + 5 * G)
+    assert settle_due_at(b, "cust_a", "n1", na, grace=G) == pytest.approx(na + 6 * G)
+    record_expiry_hold(b, "cust_a", "n1", resumed_at=na + 7 * G)
+    assert settle_due_at(b, "cust_a", "n1", na, grace=G) == pytest.approx(na + 8 * G)
+
+
+def test_the_predicate_never_raises_on_a_racing_or_odd_store(tmp_path, monkeypatch):
+    # a marker listed by the pause enumeration can be gone (or unaddressable) by the time its time is read, and a
+    # hold file can be unreadable by this uid: each is "no evidence", never an exception that sinks the drain or
+    # doctor
+    import pathlib
+
+    import vigil_integration.live.credit_lease_expiry as cle
+    b = str(tmp_path)
+    monkeypatch.setattr(cle, "paused_launches", lambda base: [("cust_gone", ["n1"]), ("a b", ["n1"])])
+    assert settle_due_at(b, "cust_gone", "n1", 0.0, grace=0.0) is None
+    assert settle_due_at(b, "a b", "n1", 0.0, grace=0.0) is None
+    record_expiry_hold(b, "cust_a", "n1", resumed_at=1.0)
+
+    def _eacces(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(pathlib.Path, "is_file", _eacces)
+    assert expiry_hold_at(b, "cust_a", "n1") is None
 
 
 def test_a_settled_lease_is_never_due(tmp_path):

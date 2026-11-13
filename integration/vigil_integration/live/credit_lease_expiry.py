@@ -183,15 +183,12 @@ class DueExpiredPause:
 
 def due_expired_pauses(base_dir: Any, *, now: float, grace: Optional[float] = None) -> "list[DueExpiredPause]":
     """Every lease on the seam that is an expired paused launch due to settle at ``now`` and not recorded settled.
-    The slug is the one the lease is signed for. Read-only, total: an unreadable lease or marker contributes
-    nothing."""
+    The slug is the one the lease is signed for. Read-only, total: an unreadable lease (``list_credit_leases``
+    skips it) or marker contributes nothing."""
     out: "list[DueExpiredPause]" = []
     for b in list_credit_leases(base_dir):
-        try:
-            doc = b.signed_lease.document
-            s, n, na = str(doc.engagement_slug), str(doc.nonce), float(doc.not_after.timestamp())
-        except Exception:  # noqa: BLE001 — a malformed bundle is no evidence
-            continue
+        doc = b.signed_lease.document
+        s, n, na = str(doc.engagement_slug), str(doc.nonce), float(doc.not_after.timestamp())
         if is_lease_settled(base_dir, s, n):
             continue
         at = settle_due_at(base_dir, s, n, na, grace=grace)

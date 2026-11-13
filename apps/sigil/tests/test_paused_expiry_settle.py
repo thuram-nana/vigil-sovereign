@@ -26,6 +26,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * one raising settle aborts the pass                    -> test_one_failing_settle_never_blocks_the_others
   * an expired resume records no hold (flag on)           -> test_a_a_halted_run_resumed_after_its_window_closed_settles_once_the_grace_from_the_resume_passed
   * an expired resume records a hold for a never-paused lease -> test_an_expired_resume_of_a_launch_that_was_not_paused_records_no_hold
+  * an IN-WINDOW resume records a hold too                -> test_an_in_window_resume_records_no_hold
+  * the expired-pause settle charges the reservation      -> test_b_a_queued_launch_paused_until_its_window_closed_is_refunded_exactly_once
   * the pause is lifted before the hold is written        -> test_an_expired_resume_that_cannot_record_its_hold_lifts_nothing
   * an expired resume is taken outside the settle lock    -> test_a_resume_in_another_process_is_serialized_with_the_settle
 """
@@ -324,6 +326,18 @@ def test_an_expired_resume_of_a_launch_that_was_not_paused_records_no_hold():
     assert not holds_root(_base()).exists()
     assert L.drain(L.not_after + 600 + GRACE + 60)["expired_settled"] == 0
     assert L.avail() == CREDITS - UNITS
+
+
+def test_an_in_window_resume_records_no_hold():
+    # Resumed inside its window, the launch re-drives and may legitimately run past not_after + grace: it is a
+    # normal, unpaused launch again, never one the expiry settle may refund.
+    from vigil_integration.live.credit_lease_expiry import holds_root
+    L = _Launch(_store())
+    L.pause()
+    r = L.resume(L.not_after - 60)
+    assert r["ok"] and "expired" not in r
+    assert not holds_root(_base()).exists()
+    assert L.drain(L.not_after + GRACE + 60)["expired_settled"] == 0 and L.avail() == CREDITS - UNITS
 
 
 def test_an_expired_resume_that_cannot_record_its_hold_lifts_nothing(monkeypatch):
