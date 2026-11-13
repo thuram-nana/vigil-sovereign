@@ -184,6 +184,7 @@ _STRIPE_NEW_PERIOD_REASONS = frozenset({"subscription_create", "subscription_cyc
 _STRIPE_TS_MAX = 10 ** 12
 
 StripeObjectFetcher = Callable[[str, str], Mapping[str, Any]]
+StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
 class StripeBillingProvider(BillingProvider):
@@ -217,7 +218,8 @@ class StripeBillingProvider(BillingProvider):
 
     def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
-                 alarm_unaccounted_plans: bool = False):
+                 alarm_unaccounted_plans: bool = False, checkout_creator: "Optional[StripeCheckoutCreator]" = None,
+                 plan_periods: "Optional[Mapping[str, float]]" = None):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
@@ -236,11 +238,110 @@ class StripeBillingProvider(BillingProvider):
         self._mode = expected_mode
         self._livemode = expected_mode == "live"
         self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
+        # The outbound Checkout Session poster (stripe_egress.make_checkout_creator). None => create_checkout
+        # refuses (never simulates a checkout). plan_periods: {catalog plan price_id: period seconds}, from the
+        # owner catalog — the recurring interval of a plan checkout.
+        self._checkout_creator = checkout_creator
+        self._plan_periods: "dict[str, float]" = dict(plan_periods or {})
 
     def capabilities(self) -> frozenset[str]:
-        # Webhook verification + the server-side object re-fetch. No CAP_UNATTENDED_TOPUP (off-session charging is
-        # approval-gated at the provider); refund / reconcile are not implemented, so never declared.
-        return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION})
+        # Webhook verification + the server-side object re-fetch, and hosted checkout (card, one-off or recurring)
+        # once a creator is injected. No CAP_UNATTENDED_TOPUP (off-session charging is approval-gated at the
+        # provider); refund / reconcile are not implemented, so never declared.
+        caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION}
+        if self._checkout_creator is not None:
+            caps |= {CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD, CAP_RECURRING_PLAN}
+        return frozenset(caps)
+
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+        """Create a tenant-bound Stripe Checkout Session for `price_id` — the same contract as the Flutterwave
+        adapter (the checkout endpoint authorizes first; this primitive BINDS).
+
+        The amount and currency come from the OWNER CATALOG (`expected[price_id]`) as inline `price_data`, never
+        from the caller; an unknown price is refused. The tenant is bound three ways that the inbound mapper
+        requires to agree: `client_reference_id = vigil:<org>:<nonce>` plus `metadata` org_id / price_id / tx_ref on
+        the session and on the PaymentIntent (one-off) or the Subscription (plan). A plan (`payment_plan`, which
+        must equal `price_id`) recurs every `plan_periods[price_id]` seconds as a whole number of days (at most
+        365). `redirect_url` is required: it becomes the success and cancel URLs, with `status=` appended to the
+        URL's query (in the hash when there is one, where the customer app reads it). The create carries the
+        Idempotency-Key `vigil-co-<nonce>`. The response must be a session echoing our reference, mode, mode
+        (test/live), catalog amount (one-off) and currency, with an https link on exactly `checkout.stripe.com`.
+        Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
+        self.require(CAP_HOSTED_CHECKOUT)
+        creator = self._checkout_creator
+        if creator is None:                            # unreachable once require() passed; kept for type narrowing
+            raise UnsupportedCapability("hosted checkout requires an injected checkout_creator")
+        try:
+            org = org_tenant_id(org_id)
+        except ValueError as exc:
+            raise ValueError(f"invalid org_id for checkout: {exc}") from None
+        exp = expected.get(price_id) if hasattr(expected, "get") else None
+        if exp is None:
+            raise ValueError(f"unknown price_id {price_id!r}: not in the owner catalog — checkout refused "
+                             "(the catalog, never the caller, decides what may be charged)")
+        amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
+        if amount_minor <= 0 or not currency:
+            raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        n = nonce or secrets.token_urlsafe(18)
+        if not isinstance(n, str) or ":" in n or not n or any(not (0x21 <= ord(c) <= 0x7e) for c in n):
+            raise ValueError("checkout nonce must be a non-empty printable string without ':' (the tx_ref "
+                             "delimiter)")
+        success_url, cancel_url = _stripe_return_urls(redirect_url)
+        tx_ref = checkout_tx_ref(org, n)
+        meta = {"org_id": org, "price_id": price_id, "tx_ref": tx_ref}
+        price_data: "dict[str, Any]" = {"currency": currency.lower(), "unit_amount": amount_minor,
+                                        "product_data": {"name": price_id}}
+        mode = "payment"
+        if payment_plan is not None:
+            if payment_plan != price_id:
+                raise ValueError("a Stripe plan checkout's payment_plan must be its catalog price_id")
+            price_data["recurring"] = {"interval": "day", "interval_count": _stripe_plan_days(
+                self._plan_periods.get(price_id), price_id)}
+            mode = "subscription"
+        params: "dict[str, Any]" = {
+            "mode": mode,
+            "line_items": [{"price_data": price_data, "quantity": 1}],
+            "client_reference_id": tx_ref,
+            "metadata": meta,
+            ("subscription_data" if mode == "subscription" else "payment_intent_data"): {"metadata": dict(meta)},
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+        }
+        if customer_email:
+            params["customer_email"] = str(customer_email)
+        try:
+            resp = creator(params, idempotency_key=f"vigil-co-{n}")
+        except Exception as exc:  # noqa: BLE001 — any outbound failure is a REFUSAL, re-raised as the contract type
+            raise UnsupportedCapability(f"checkout creation failed ({type(exc).__name__})") from None
+        link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
+        if not link:
+            raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
+                                        "an https checkout.stripe.com link")
+        return CheckoutSession(tx_ref=tx_ref, hosted_link=link, org_id=org, price_id=price_id,
+                               amount_minor=amount_minor, currency=currency)
+
+    def _checkout_link(self, resp: object, *, tx_ref: str, mode: str, amount_minor: int,
+                       currency: str) -> Optional[str]:
+        """The session's hosted link iff the response is the session we asked for, else None (fail-closed)."""
+        from .. import config
+        if not isinstance(resp, Mapping) or resp.get("object") != "checkout.session":
+            return None
+        sid = resp.get("id")
+        if not isinstance(sid, str) or not _STRIPE_CS_ID.fullmatch(sid):
+            return None
+        if resp.get("client_reference_id") != tx_ref or resp.get("mode") != mode \
+                or resp.get("livemode") is not self._livemode:
+            return None
+        echoed_ccy = resp.get("currency")
+        if not isinstance(echoed_ccy, str) or echoed_ccy.upper() != currency:
+            return None
+        if mode == "payment":
+            total = resp.get("amount_total")
+            if isinstance(total, bool) or total != amount_minor:
+                return None
+        return _https_link_on(resp.get("url"), exact_hosts=frozenset(config.STRIPE_CHECKOUT_LINK_HOSTS))
 
     def _verify_signature(self, raw_body: bytes, sig_header: str, now: float) -> bool:
         if not isinstance(sig_header, str) or not sig_header:
@@ -402,6 +503,32 @@ class StripeBillingProvider(BillingProvider):
             return None
         return BillingEvent(event_id=str(inv["id"]), kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
                             price_id=_stripe_meta(meta, "price_id"), data={"subscription": sub.get("id")})
+
+
+def _stripe_return_urls(redirect_url: object) -> "tuple[str, str]":
+    """(success_url, cancel_url) from the configured return URL: `status=successful&session_id={CHECKOUT_SESSION_ID}`
+    / `status=cancelled` appended to the query of the hash fragment (or of the URL when it has no fragment)."""
+    if not isinstance(redirect_url, str) or not redirect_url:
+        raise ValueError("a Stripe checkout needs a return URL (VIGIL_CUSTOMER_BILLING_RETURN_URL) for its success "
+                         "and cancel pages — refused")
+    u = urlsplit(redirect_url)
+    if u.scheme != "https" or not u.hostname or "@" in (u.netloc or "") \
+            or any(ord(c) < 0x21 or ord(c) == 0x7f for c in redirect_url):
+        raise ValueError("the Stripe checkout return URL must be an absolute https:// URL")
+    tail = redirect_url.split("#", 1)[1] if "#" in redirect_url else redirect_url
+    sep = "&" if "?" in tail else "?"
+    return (f"{redirect_url}{sep}status=successful&session_id={{CHECKOUT_SESSION_ID}}",
+            f"{redirect_url}{sep}status=cancelled")
+
+
+def _stripe_plan_days(period_s: object, price_id: str) -> int:
+    """A plan's recurring interval in whole days (1..365), from the catalog period; anything else is refused."""
+    if isinstance(period_s, bool) or not isinstance(period_s, (int, float)) or not math.isfinite(period_s):
+        raise ValueError(f"no catalog period for Stripe plan {price_id!r} — refused")
+    days, rem = divmod(float(period_s), 86400.0)
+    if rem != 0.0 or not 1 <= days <= 365:
+        raise ValueError(f"Stripe plan {price_id!r} period must be a whole number of days between 1 and 365")
+    return int(days)
 
 
 def _stripe_meta(meta: object, key: str) -> str:
