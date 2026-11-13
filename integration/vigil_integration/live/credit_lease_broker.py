@@ -19,8 +19,8 @@ carries.
         "trust_root": { "threshold": 1, "authorizers": [{"key_id","name","public_key_b64"}] } }
 
 Public-safe: only PUBLIC keys + signatures + the (owner-authored) lease fields cross — no private key, ever
-(the lease itself carries no secret). FATAL-2 / import-clean: ``vigil_core`` + stdlib + relative imports
-only — safe to import on either plane (the offense reader holds no owner key).
+(the lease itself carries no secret). FATAL-2 / import-clean: ``vigil_core`` + stdlib + the stdlib-only
+``seam_lock`` only — safe to import on either plane (the offense reader holds no owner key).
 """
 
 from __future__ import annotations
@@ -28,11 +28,16 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from vigil_core import SignedCreditLaunchLease, TrustRoot
+from vigil_integration.live.seam_lock import locked_file
+
+#: How long a marker writer waits for another process's read-merge-replace of the same marker file.
+_MARKER_LOCK_WAIT_S = 5.0
 
 __all__ = [
     "CreditLeaseBundle",
@@ -46,6 +51,7 @@ __all__ = [
     "record_lease_settlement",
     "is_lease_settled",
     "tombstone_credit_lease",
+    "unfinished_settlements",
 ]
 
 _LEASE_DIRNAME = "credit-launch-leases"
@@ -237,19 +243,39 @@ def _read_settled_nonces(path: Path) -> list[str]:
     return [str(n) for n in nonces] if isinstance(nonces, list) else []
 
 
+@contextmanager
+def _marker_lock(path: Path) -> Iterator[None]:
+    """Exclusive CROSS-PROCESS lock for one marker file's read-merge-replace, on a sibling ``<name>.lock`` inode
+    (it survives the atomic replace of the marker; a ``*.lock`` is a transient the backups skip, and the ``*.json``
+    globs of the seam readers never match it). Shared by the settlement marker here and the pause /
+    paused-past-expiry markers (``credit_lease_pause``). Hardened (``seam_lock.locked_file``): never follows a
+    symlink, refuses a non-regular lock file, waits at most ``_MARKER_LOCK_WAIT_S``. Fail-closed: a lock that
+    cannot be opened or taken raises, so the caller records nothing (and settles nothing). A LEAF lock: its holder
+    takes no other lock."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with locked_file(path.parent / (path.name + ".lock"), wait_s=_MARKER_LOCK_WAIT_S):
+        yield
+
+
 def record_lease_settlement(base_dir: Any, slug: str, nonce: Any) -> Path:
     """Durably mark the lease ``(slug, nonce)`` SETTLED — after this the arm (``verify_customer_launch_lease``)
     and ``publish_lease`` refuse that nonce. Idempotent: re-recording a nonce rewrites the same set. Raises
-    ValueError on an unsafe slug (never writes outside the settlements dir)."""
+    ValueError on an unsafe slug (never writes outside the settlements dir).
+
+    The marker is ONE file per slug holding every settled nonce, so the read-merge-replace runs under
+    ``_marker_lock``: two processes settling two leases of one slug can no longer each read the old set and
+    replace it with their own (a lost update that dropped the other lease's nonce — which, for a charged lease,
+    re-opened its refund)."""
     safe = _safe_component(slug)
     if not safe:
         raise ValueError(f"unsafe lease slug: {slug!r}")
     path = _contained_child(settlements_root(base_dir), f"{safe}.json")
     if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
         raise ValueError(f"unsafe lease slug (escapes settlements dir): {slug!r}")
-    merged = sorted(set(_read_settled_nonces(path) if path.is_file() else []) | {str(nonce)})
-    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _SETTLE_SCHEMA,
-                              "slug": safe, "nonces": merged})
+    with _marker_lock(path):
+        merged = sorted(set(_read_settled_nonces(path) if path.is_file() else []) | {str(nonce)})
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _SETTLE_SCHEMA,
+                                  "slug": safe, "nonces": merged})
     return path
 
 
@@ -263,6 +289,27 @@ def is_lease_settled(base_dir: Any, slug: str, nonce: Any) -> bool:
     if path is None or not path.is_file():
         return False
     return str(nonce) in _read_settled_nonces(path)
+
+
+def unfinished_settlements(base_dir: Any, *, now: float, grace: float) -> list[tuple[str, str]]:
+    """Every ``(slug, nonce)`` whose lease is still published on the seam although its settlement marker lists it,
+    with that marker last written more than ``grace`` seconds before ``now``. A settle records the marker BEFORE it
+    moves any money and retires (tombstones) the lease LAST, so such a lease is a settle that has not finished: its
+    refund may not have landed yet. Read-only and total: an unreadable lease or marker contributes nothing."""
+    out: list[tuple[str, str]] = []
+    for b in list_credit_leases(base_dir):
+        try:
+            doc = b.signed_lease.document
+            slug, nonce = str(doc.engagement_slug), str(doc.nonce)
+            if not is_lease_settled(base_dir, slug, nonce):
+                continue
+            path = settlement_path(base_dir, slug)
+            if path is None or now < path.stat().st_mtime + float(grace):
+                continue
+        except Exception:  # noqa: BLE001 — an odd or racing seam is no evidence
+            continue
+        out.append((slug, nonce))
+    return out
 
 
 def tombstone_credit_lease(base_dir: Any, slug: str, expect_nonce: Any = None) -> bool:

@@ -348,6 +348,19 @@ class CostEnvelopeLedger:
         _reserved, _settled, seen = self._fold()
         return key in seen
 
+    def was_settled(self, org_id: str, entry_id: str) -> bool:
+        """True iff a cost_settle for `(org_id, entry_id)` has been folded (the seeded seen-set, prune-durable;
+        mirrors `was_reserved`). The launch settle roll-forward writes a missing ``settle-cost:`` entry only when this
+        is False, so a re-settle never appends a duplicate. Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (COST_SETTLE_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        _reserved, _settled, seen = self._fold()
+        return key in seen
+
     def tenant_cost(self, org_id: str) -> TenantCost:
         """The full cost position for `org_id` (fail-closed: unknown/empty reads all-zero)."""
         if not isinstance(org_id, str) or not org_id:

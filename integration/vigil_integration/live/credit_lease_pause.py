@@ -17,8 +17,9 @@ DEFAULT-OFF + money-doctrine-neutral: the substrate adds NO behaviour until an o
 marker file ⇒ ``is_lease_paused`` is False ⇒ nothing changes), and the marker carries NO credit / amount /
 catalog / signature field — pausing moves NO money, it only sets a reversible halt flag for a nonce.
 
-FATAL-2 / import-clean: ``vigil_core`` + stdlib only at module scope (the three filesystem primitives are
-imported from the import-clean ``credit_lease_broker``, which itself imports only ``vigil_core`` + stdlib); no
+FATAL-2 / import-clean: ``vigil_core`` + stdlib only at module scope (the four filesystem primitives — atomic
+write, path containment, safe slug and the hardened per-file marker lock — are imported from the import-clean
+``credit_lease_broker``, which itself imports only ``vigil_core`` + stdlib + the stdlib-only ``seam_lock``); no
 ``framework`` / offense import, so it is safe to import on BOTH planes (sovereign writer, keyless reader).
 
 ----------------------------------------------------------------------------------------------------
@@ -48,6 +49,7 @@ from typing import Any, Optional
 from vigil_integration.live.credit_lease_broker import (
     _atomic_write_json,
     _contained_child,
+    _marker_lock,
     _safe_component,
 )
 
@@ -110,13 +112,17 @@ def pause_path(base_dir: Any, slug: Any) -> Optional[Path]:
 # ---------------------------------------------------------------------------------------------------
 # writers — record (pause) / clear (resume). Fail-OPEN read-modify-write, mirroring the broker's writers.
 #
-# CONCURRENCY CONTRACT (same as the broker's settlement writers): each write is atomic (temp+rename via
-# _atomic_write_json), so a reader never sees a torn file. But record/clear are a non-atomic READ-modify-WRITE
-# of the per-slug nonce set: two UNSERIALIZED concurrent writers on the SAME slug are last-write-wins, which
-# could DROP a concurrent pause. Callers MUST serialize writes per slug — the consumers (PR-2+: the sovereign
-# Provisioner) hold the per-store spine_lock across the verify -> pause/resume transaction, exactly as
-# settle_launch does, so the RMW is serialized at the one call site. This substrate is inert until then and
-# adds no lock of its own (matching the settlement marker); the fail-CLOSED reader is the backstop.
+# CONCURRENCY CONTRACT (E3bc, same as the broker's settlement writer): each writer's READ-modify-WRITE of its
+# per-slug nonce set runs under that file's own CROSS-PROCESS lock (`credit_lease_broker._marker_lock`, a hardened
+# flock on the sibling `<slug>.json.lock`), so two processes pausing / resuming two nonces of one slug can never
+# each read the old set and drop the other's nonce. A lock that cannot be taken (busy past its bounded wait, or an
+# unusable lock file) RAISES, so the caller records nothing and refuses (fail-closed). Each write is atomic
+# (temp+rename via _atomic_write_json), so the READERS (is_lease_paused, lease_pause_state, paused_past_expiry,
+# paused_launches, unreadable_pause_markers) stay lock-free and fail-closed and always see a consistent snapshot.
+#
+# READ / WRITE ORDER (pinned by a test): resume writes the paused-past-expiry record BEFORE it clears the pause,
+# and every settle-side reader reads the pause marker BEFORE the paused-past-expiry record — so a late resume
+# racing a settle-side read can never be read as "never paused" (the reader sees the pause, or the late record).
 # ---------------------------------------------------------------------------------------------------
 
 
@@ -147,9 +153,10 @@ def record_lease_pause(base_dir: Any, slug: Any, nonce: Any) -> Path:
     path = _contained_child(pauses_root(base_dir), f"{safe}.json")
     if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
         raise ValueError(f"unsafe lease slug (escapes pauses dir): {slug!r}")
-    merged = sorted(set(_current_paused_nonces(path) if path.is_file() else []) | {str(nonce)})
-    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAUSE_SCHEMA,
-                              "slug": safe, "nonces": merged})
+    with _marker_lock(path):
+        merged = sorted(set(_current_paused_nonces(path) if path.is_file() else []) | {str(nonce)})
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAUSE_SCHEMA,
+                                  "slug": safe, "nonces": merged})
     return path
 
 
@@ -164,9 +171,10 @@ def clear_lease_pause(base_dir: Any, slug: Any, nonce: Any) -> Path:
     path = _contained_child(pauses_root(base_dir), f"{safe}.json")
     if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
         raise ValueError(f"unsafe lease slug (escapes pauses dir): {slug!r}")
-    remaining = sorted(set(_current_paused_nonces(path) if path.is_file() else []) - {str(nonce)})
-    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAUSE_SCHEMA,
-                              "slug": safe, "nonces": remaining})
+    with _marker_lock(path):
+        remaining = sorted(set(_current_paused_nonces(path) if path.is_file() else []) - {str(nonce)})
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAUSE_SCHEMA,
+                                  "slug": safe, "nonces": remaining})
     return path
 
 
@@ -239,12 +247,13 @@ def record_paused_past_expiry(base_dir: Any, slug: Any, nonce: Any) -> Path:
     path = _past_expiry_path(base_dir, slug)
     if path is None:
         raise ValueError(f"unsafe lease slug: {slug!r}")
-    current = _past_expiry_nonces(path)
-    if current is None:
-        raise ValueError("the paused-past-expiry record exists but cannot be read; refusing to overwrite it")
-    merged = sorted(set(current) | {str(nonce)})
-    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAST_EXPIRY_SCHEMA,
-                              "slug": _safe_component(slug), "nonces": merged})
+    with _marker_lock(path):
+        current = _past_expiry_nonces(path)
+        if current is None:
+            raise ValueError("the paused-past-expiry record exists but cannot be read; refusing to overwrite it")
+        merged = sorted(set(current) | {str(nonce)})
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAST_EXPIRY_SCHEMA,
+                                  "slug": _safe_component(slug), "nonces": merged})
     return path
 
 

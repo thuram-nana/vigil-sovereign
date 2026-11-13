@@ -1272,21 +1272,50 @@ class Provisioner:
             _cdoc = SignedCreditLaunchLease.model_validate(signed_lease).document
         except Exception as e:  # noqa: BLE001 — a malformed lease is a clean refusal
             raise ProvisionDenied("launch cancel requires the signed launch lease from reserve_launch") from e
-        try:
-            from .target_authorization import _base_dir
-            from vigil_integration.live.credit_lease_broker import read_credit_lease
-            _pub = read_credit_lease(_base_dir(), str(_cdoc.engagement_slug))
-        except Exception:  # noqa: BLE001 — a seam-read failure must not DENY a legitimate pre-start cancel; the
-            _pub = None     # settle_launch is_lease_settled guard is the hard backstop against a double refund
-        if _pub is not None and str(_pub.signed_lease.document.nonce) == str(_cdoc.nonce):
+
+        gate = LaunchGate(self.store)
+
+        def _started() -> Optional[str]:
+            # the gate's own seam base (== _base_dir() for this cockpit gate), so the started-check reads exactly
+            # the tree the settle revokes in
+            try:
+                from vigil_integration.live.credit_lease_broker import read_credit_lease
+                _pub = read_credit_lease(gate._seam_base(), str(_cdoc.engagement_slug))
+            except Exception:  # noqa: BLE001 — a seam-read failure must not DENY a legitimate pre-start cancel;
+                _pub = None     # the settle's settled-check is the hard backstop against a double refund
+            if _pub is not None and str(_pub.signed_lease.document.nonce) == str(_cdoc.nonce):
+                return "started"
+            return None
+
+        # A fast refusal first (a started launch never reaches the settle at all), then the decisive check INSIDE
+        # the settle's cross-process critical section (``refuse_if``), which ``publish_lease`` (launch_start) also
+        # holds — so a start can never land between that check and the refund. A refused settle closes no meter.
+        if _started():
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refused_started")
             raise ProvisionDenied(
                 "this launch has been started and must settle through its completion; it cannot be cancelled")
-        r = LaunchGate(self.store).settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
-                                                 expect_org_id=requester_org_id)
+        r = gate.settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
+                               expect_org_id=requester_org_id, refuse_if=_started, basis="cancel")
+        if r.get("refused"):
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(_cdoc.engagement_slug), outcome="refused_started")
+            raise ProvisionDenied(
+                "this launch has been started and must settle through its completion; it cannot be cancelled")
         if not r.get("ok"):
-            raise ProvisionDenied(str(r.get("error") or "launch cancel refused"))
+            msg = str(r.get("error") or "launch cancel refused")
+            raise ProvisionDenied(msg + (" (retry)" if r.get("retry") else ""))
+        if r.get("action") == "launch_already_settled":
+            if r.get("rolled_forward"):
+                # this cancel FINISHED an earlier settle a crash interrupted — at that settle's RECORDED amounts
+                self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                            target=str(r.get("slug", "")), outcome="rolled_forward", critical=True)
+                return {"slug": r.get("slug"), "refunded": r.get("refunded")}
+            # a LOSING cancel (another settle already decided this launch): nothing moved, and nothing to audit as
+            # a cancel (OD-2)
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(r.get("slug", "")), outcome="already_settled")
+            return {"slug": r.get("slug"), "refunded": 0, "already_settled": True}
         self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="canceled", critical=True)
         return {"slug": r.get("slug"), "refunded": r.get("refunded")}

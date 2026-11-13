@@ -1292,6 +1292,14 @@ def cmd_settle_drain(a) -> None:
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped" + (f", {r['deferred']} deferred (retried next drain)" if r.get("deferred")
                                            else ""))
+        if r.get("settle_completed") or r.get("settle_unfinished") or r.get("settle_finish_error"):
+            # E3bc, only while VIGIL_SETTLE_SPINE_RECORD is on and a recorded settle needed finishing
+            print(f"  interrupted settles: {r.get('settle_completed', 0)} finished, {r.get('settle_unfinished', 0)} "
+                  f"left for the next pass"
+                  + (f" (not checked: {r['settle_finish_error']})" if r.get("settle_finish_error") else ""))
+        if "expired_settled" in r:              # E8, only while VIGIL_PAUSED_EXPIRY_SETTLE is on
+            print(f"  expired paused launches: {r['expired_settled']} settled, {r['expired_unsettled']} still held"
+                  + (f" (not checked: {r['expired_error']})" if r.get("expired_error") else ""))
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:
@@ -1306,6 +1314,16 @@ def cmd_settle_drain(a) -> None:
             print(f"  ALARM: {r['deferred_config']} metered settle(s) wait on the pricing configuration "
                   f"(VIGIL_BILLING_TARGET_MARGIN / VIGIL_BILLING_CANCEL_SETTLEMENT / the price table, in THIS unit's "
                   f"environment). Fix it; this unit stays FAILED until they settle.", file=sys.stderr)
+            sys.exit(1)
+        if r.get("settle_stuck"):
+            # E3bc: a recorded settle this drain has not been able to finish for longer than its grace (or a finish
+            # pass that keeps failing) holds that customer's refund and any relaunch on the host. Fail the unit.
+            print(f"  ALARM: {r['settle_stuck']} recorded settle(s) have not been finished for more than 10 minutes "
+                  f"(the reasons are on stderr above): the refund has not landed and a new launch on that host is "
+                  f"refused with a retry, or (tombstone_failed) the settled lease could not be retired from the "
+                  f"seam. Fix the cause (the seam / spine / spool must be writable by this unit's user); this unit "
+                  f"stays FAILED until they finish (a lease that could not be retired is retried every 10 "
+                  f"minutes). `vigil doctor` lists them.", file=sys.stderr)
             sys.exit(1)
 
 
@@ -1336,8 +1354,29 @@ def cmd_ops_sweep(a) -> None:
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
+        if a.apply:
+            # E3bc: a root --apply would create seam settlement markers + their locks, spine segments and meter state
+            # as root inside the services' directories, after which their settles fail. Fail fast instead.
+            from pathlib import Path
+
+            from . import config
+            from vigil_integration.live.credit_lease_broker import settlements_root
+            seam = gate._seam_base()
+            why = ops_sweeps.root_apply_refusal(
+                [("seam directory", seam), ("spine directory", Path(gate.store.path).parent)],
+                [("settlement-marker directory", settlements_root(seam)), ("completion spool", a.completion_spool),
+                 ("model meter directory", config.MODEL_METER_DIR)])
+            if why:
+                print(f"--apply refused: running as root, but {why}. A root sweep would leave files the services "
+                      f"cannot write. Run it as the service user that owns those directories (e.g. `sudo -u <user> "
+                      f"sigil ops-sweep reservations --apply ...`).", file=sys.stderr)
+                sys.exit(2)
         out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
                                                        completion_spool=(a.completion_spool or None))
+        # E7: reservations a later launch of the same target superseded on the seam — invisible to the seam
+        # listing above — under the same report-by-default / --apply gates (rows only when there are any).
+        out["items"].extend(ops_sweeps.sweep_superseded_reservations(
+            gate, now=now, ttl_s=a.ttl, apply=a.apply, completion_spool=(a.completion_spool or None))["items"])
     elif a.sweep_cmd == "reconcile":
         # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
         # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed

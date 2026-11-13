@@ -241,8 +241,12 @@ class PlanCreditLedger:
         The launch settle path uses this to re-derive how much a reservation debited from the PLAN bucket, and
         which period's tranche, so a refund restores the SAME expiring tranche rather than the permanent wallet
         — the amount comes from the owner-signed record, never a wire value (the plan-credit-laundering fix).
-        Verified under the owner key valid at the seq; fail-closed to None. A live scan is sound here: a
-        reservation is settled well within its lease window, so its debit record is never pruned."""
+        Verified under the owner key valid at the seq; fail-closed to None.
+
+        It is a LIVE scan (not prune-durable), so it is read ONLY to build a FRESH settle decision; a settle that
+        finishes an interrupted, recorded decision (E3bc) never reads it — it moves the RECORDED split. Residual
+        risk (E3bc R1): a fresh settle long after the reservation (the abandoned-lease sweep, past the lease
+        window + its TTL) can follow a hard prune of the debit record, which sends the plan share to the wallet."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return None
         hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)))
@@ -258,6 +262,19 @@ class PlanCreditLedger:
             if verify_signed(p, _PLAN_DEBIT_CORE, resolver.at(r.seq)):
                 return (_as_credits(p.get("credits")), _as_period(p.get("period_end")))
         return None
+
+    def has_grant_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed plan GRANT with this (org_id, entry_id) has been folded — membership of the
+        fold's own seen-set, so it survives a hard prune (the seen-set is part of the snapshot seed). Mirrors
+        ``WalletRegistry.has_grant_entry``; the settle roll-forward confirms a ``settle-plan:`` entry with it
+        before re-issuing one the live scan cannot see. Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (PLAN_GRANT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        return key in self._fold()[2]
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
