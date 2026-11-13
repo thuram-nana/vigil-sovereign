@@ -402,6 +402,24 @@ def test_named_mutant_classification_counts_only_assertions(rc, rows, verdict):
     assert named_mutants.classify(rc, rows, "tail")[0] == verdict
 
 
+def test_named_mutant_runner_turns_term_hangup_and_quit_into_a_restoring_interrupt():
+    """A CI cancel (SIGTERM), a closed terminal (SIGHUP) and SIGQUIT all become KeyboardInterrupt, so the restore
+    in run_file's ``finally`` runs instead of the process dying with a mutant in the source."""
+    import signal
+    names = ("SIGTERM", "SIGHUP", "SIGQUIT")
+    saved = {n: signal.getsignal(getattr(signal, n)) for n in names}
+    try:
+        named_mutants._install_signal_restore()
+        for n in names:
+            handler = signal.getsignal(getattr(signal, n))
+            assert callable(handler), n
+            with pytest.raises(KeyboardInterrupt):
+                handler(getattr(signal, n), None)
+    finally:
+        for n, h in saved.items():
+            signal.signal(getattr(signal, n), h)
+
+
 def test_named_mutant_children_get_their_own_vigil_base_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_BASE_DIR", "/somewhere/shared")
     env = named_mutants.plane_env(_corpus(), "sovereign", _REPO, tmp_path / "m0")
