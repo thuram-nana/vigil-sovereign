@@ -244,9 +244,7 @@ class PlanCreditLedger:
         Verified under the owner key valid at the seq; fail-closed to None.
 
         It is a LIVE scan (not prune-durable), so it is read ONLY to build a FRESH settle decision; a settle that
-        finishes an interrupted, recorded decision (E3bc) never reads it — it moves the RECORDED split. Residual
-        risk (E3bc R1): a fresh settle long after the reservation (the abandoned-lease sweep, past the lease
-        window + its TTL) can follow a hard prune of the debit record, which sends the plan share to the wallet."""
+        finishes an interrupted, recorded decision (E3bc) never reads it — it moves the RECORDED split."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return None
         hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)))
