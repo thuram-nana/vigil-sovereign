@@ -146,3 +146,98 @@ def test_oidc_finish_hands_the_client_ip_to_the_provisioning(monkeypatch):
     with pytest.raises(RuntimeError):
         p.oidc_finish(code="c", code_verifier="v", nonce="n", ip="4.3.2.1")
     assert seen["ip"] == "4.3.2.1"
+
+
+# --- review fold: retry resume, IPv6 /64, fail-closed limit, withheld reasons, the real client IP ---------------------
+
+def _withheld(s):
+    return [r.payload.get("reason") for r in s.iter_records()
+            if r.payload.get("signal") == "provision.audit" and r.payload.get("action") == "trial"
+            and r.payload.get("outcome") == "withheld"]
+
+
+def _claim_mailbox(p, org_id, email):
+    from sigil.governor.trial_claim import key_digest
+    from sigil.governor.trial_policy import canonical_email
+    p.trial_claims.claim("email", key_digest("email", canonical_email(email)), org_id, issued_at=p._next_issued())
+
+
+def test_a_retry_after_the_mailbox_claim_resumes_to_the_grant(monkeypatch):
+    """A sign-up that stopped between its mailbox claim and its grant resumes to the grant on retry, even when the
+    per-IP limit is now reached and the list is now unavailable; a NEW mailbox under the same conditions is refused."""
+    monkeypatch.setenv(_FLAG, "1")
+    p, s, wallet, tc = _prov()
+    _with_ip_limit(p, 1)
+    p.trial_ip_limiter.record_failure("trial:grant:ip:5.5.5.5", now=p._now())       # the IP is at its limit
+    _claim_mailbox(p, "org_retry", "founder@acme.io")
+    monkeypatch.setattr(de, "load_domains", lambda path=None, pin=None: None)        # and the list is now unavailable
+    with p._lock:
+        assert p._grant_signup_trial("org_retry", "founder@acme.io", source_ref="signup", ip="5.5.5.5") == "granted"
+        assert p._grant_signup_trial("org_new", "other@acme.io", source_ref="signup", ip="5.5.5.5") == "unavailable"
+    assert wallet.available("org_retry") == 100 and wallet.available("org_new") == 0
+
+
+@pytest.mark.parametrize("ip, bucket", [
+    ("5.5.5.5", "5.5.5.5"), (" 5.5.5.5 ", "5.5.5.5"), ("::ffff:5.5.5.5", "5.5.5.5"),
+    ("2001:db8::1", "2001:db8::/64"), ("2001:DB8:0:0:ffff::9", "2001:db8::/64"), ("2001:db8:0:1::1", "2001:db8:0:1::/64"),
+    ("", None), ("not-an-ip", None), ("5.5.5.5, 6.6.6.6", None),
+])
+def test_the_per_ip_bucket(ip, bucket):
+    from sigil.ui.provision import _trial_ip_bucket
+    assert _trial_ip_bucket(ip) == bucket
+
+
+def test_the_per_ip_limit_counts_an_ipv6_slash64_as_one_client(monkeypatch):
+    monkeypatch.setenv(_FLAG, "1")
+    p, s, wallet, tc = _prov()
+    _with_ip_limit(p, 1)
+    assert wallet.available(_signup(p, "a@acme.io", "2001:db8::1")["org_id"]) == 100
+    assert _signup(p, "b@acme.io", "2001:db8::2")["trial"] == "unavailable"           # same /64
+    assert wallet.available(_signup(p, "c@acme.io", "2001:db8:0:1::1")["org_id"]) == 100   # another /64
+    assert wallet.available(_signup(p, "d@acme.io", "9.9.9.9")["org_id"]) == 100
+    assert _signup(p, "e@acme.io", "::ffff:9.9.9.9")["trial"] == "unavailable"        # the same IPv4 client
+
+
+def test_a_zero_per_ip_limit_with_the_flag_on_withholds_every_trial(monkeypatch):
+    from sigil import config
+    from sigil.ui.provision import build_provisioner
+    monkeypatch.setenv("VIGIL_TRIAL_IP_LIMIT_ENABLED", "1")
+    monkeypatch.setattr(config, "TRIAL_IP_LIMIT_DIR", tempfile.mkdtemp())
+    for n in (0, -1):
+        monkeypatch.setattr(config, "TRIAL_GRANTS_PER_IP", n)
+        limiter = build_provisioner(__import__("sigil.spine.store", fromlist=["SpineStore"]).SpineStore(
+            tempfile.mktemp(suffix=".jsonl"))).trial_ip_limiter
+        assert limiter is not None and limiter.locked("trial:grant:ip:1.1.1.1") is not None
+        monkeypatch.setenv(_FLAG, "1")
+        p, s, wallet, tc = _prov()
+        p.trial_ip_limiter = limiter
+        out = _signup(p, f"n{n + 5}@acme.io", "1.1.1.1")
+        assert out["trial"] == "unavailable" and wallet.available(out["org_id"]) == 0
+
+
+def test_a_withheld_trial_records_why(monkeypatch):
+    monkeypatch.setenv(_FLAG, "1")
+    p, s, wallet, tc = _prov()
+    _signup(p, "a@mailinator.com", "1.1.1.1")
+    _with_ip_limit(p, 1)
+    _signup(p, "b@acme.io", "")
+    _signup(p, "c@acme.io", "2.2.2.2")
+    _signup(p, "d@acme.io", "2.2.2.2")
+    monkeypatch.setattr(de, "load_domains", lambda path=None, pin=None: None)
+    _signup(p, "e@acme.io", "3.3.3.3")
+    assert _withheld(s) == ["disposable", "ip_unknown", "ip_limit", "list_unavailable"]
+    assert all("@" not in r for r in _withheld(s))                                   # no mailbox in the audit
+
+
+def test_the_customer_vhost_restores_the_visitor_ip_from_cloudflare():
+    """Behind Cloudflare the per-IP limits must key on the visitor, not the Cloudflare edge: the customer vhost
+    trusts CF-Connecting-IP from exactly the ranges the public vhost trusts (one list, refreshed together)."""
+    from pathlib import Path
+    rp = Path(__file__).resolve().parents[1] / "deploy" / "reverse-proxy"
+
+    def cf(name):
+        text = (rp / name).read_text(encoding="utf-8")
+        ranges = [ln.split()[1].rstrip(";") for ln in text.splitlines() if ln.strip().startswith("set_real_ip_from")]
+        return ranges, any(ln.strip().startswith("real_ip_header CF-Connecting-IP;") for ln in text.splitlines())
+    public, customer = cf("vigil-public.nginx.conf"), cf("vigil-customer.nginx.conf")
+    assert public[0] and customer == public and customer[1] is True

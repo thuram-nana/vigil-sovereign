@@ -120,6 +120,33 @@ def _federated_org_id(iss: str, sub: str) -> str:
     return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
 
 
+def _trial_ip_bucket(ip) -> "Optional[str]":
+    """The per-IP trial-limit bucket for a client address: an IPv4 address as itself, an IPv6 address as its /64
+    (one host or VPS usually holds a whole /64, so per-address keys would not limit it), an IPv4-mapped IPv6
+    address as the IPv4 address. None when the address is missing or not an IP (the caller withholds the trial)."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return str(addr)
+
+
+class _WithholdAllTrialGrants:
+    """The per-IP trial limiter when the limit is ON but `VIGIL_TRIAL_GRANTS_PER_IP` is 0 or less: every preview
+    trial is withheld (fail closed), never an unlimited limit."""
+
+    def locked(self, key, *, now=None):
+        return 86400.0
+
+    def record_failure(self, key, *, now=None):
+        return None
+
+
 def _sign_monitoring(owner_key, grant):
     """Owner-sign the publishable ``SignedMonitoringAuthority`` for an ACTIVE registry grant. The private key
     is used only inside ``sign_monitoring_authority`` and never written anywhere."""
@@ -215,8 +242,10 @@ class Provisioner:
         # refused (the owner has not set a cap); paid launches never consult it.
         self.trial_launch_limiter = trial_launch_limiter
         # Pricing S3c — an OPT-IN per-client-IP soft limit on preview TRIAL GRANTS (VIGIL_TRIAL_IP_LIMIT_ENABLED).
-        # Keyed on the trusted client IP the edge resolves; the limiter stores only sha256(key). Over the limit
-        # means no trial (the account is still created). The IP is never an identity or a claim key.
+        # Keyed on the client IP the edge reports (IPv4 /32, IPv6 /64 — `_trial_ip_bucket`); behind Cloudflare
+        # that is only the VISITOR's IP when the customer vhost restores it from CF-Connecting-IP (it does, see
+        # vigil-customer.nginx.conf). The limiter stores only sha256(key). Over the limit means no trial (the
+        # account is still created). The IP is never an identity or a claim key.
         self.trial_ip_limiter = trial_ip_limiter
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
@@ -330,32 +359,48 @@ class Provisioner:
             return "granted"
         if self.wallet.has_grant_entry(org_id, preview):
             return "granted"                                    # an idempotent retry of THIS sign-up
-        if self.wallet.has_grant_entry(org_id, legacy) or self.trial_claims is None:
-            return "unavailable"
+        if self.wallet.has_grant_entry(org_id, legacy):
+            return self._trial_withheld(org_id, "legacy_trial")
+        if self.trial_claims is None:
+            return self._trial_withheld(org_id, "no_claim_ledger")
         from ..governor.trial_claim import key_digest
         from ..governor.trial_policy import canonical_email
         ekey = canonical_email(email)
         if not ekey:
-            return "unavailable"                                # no mailbox to key the one-per-mailbox limit on
-        # S3c: a disposable mailbox domain (vendored, sha-pinned list; unavailable list ⇒ no trial) gets no trial.
-        from ..governor.disposable_email import is_disposable
-        if is_disposable(ekey) is not False:
-            return "unavailable"
-        ip_key = f"trial:grant:ip:{str(ip or '').strip()}"
-        if self.trial_ip_limiter is not None and (
-                not str(ip or "").strip() or self.trial_ip_limiter.locked(ip_key, now=self._now()) is not None):
-            return "unavailable"                                # opt-in per-IP soft limit (unknown IP ⇒ no trial)
+            return self._trial_withheld(org_id, "no_mailbox")   # no mailbox to key the one-per-mailbox limit on
         digest = key_digest("email", ekey)
         holder = self.trial_claims.claimant("email", digest)
         if holder is not None and holder != org_id:
-            return "unavailable"
+            return self._trial_withheld(org_id, "mailbox_claimed")
+        ip_key = None
         if holder is None:
+            # S3c gates run only for a NEW claim. A mailbox this org already claimed is a retry of a sign-up that
+            # stopped between its claim and its grant: it resumes to the grant, whatever the list or the per-IP
+            # count says now (re-running them could strand the claim with no trial).
+            # A disposable mailbox domain (vendored, sha-pinned list; unavailable list ⇒ no trial) gets no trial.
+            from ..governor.disposable_email import is_disposable
+            verdict = is_disposable(ekey)
+            if verdict is not False:
+                return self._trial_withheld(org_id, "disposable" if verdict else "list_unavailable")
+            if self.trial_ip_limiter is not None:               # opt-in per-IP soft limit
+                bucket = _trial_ip_bucket(ip)
+                if bucket is None:
+                    return self._trial_withheld(org_id, "ip_unknown")
+                ip_key = f"trial:grant:ip:{bucket}"
+                if self.trial_ip_limiter.locked(ip_key, now=self._now()) is not None:
+                    return self._trial_withheld(org_id, "ip_limit")
             self.trial_claims.claim("email", digest, org_id, issued_at=self._next_issued())
         self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=preview, source_ref=source_ref,
                           issued_at=self._next_issued())
-        if self.trial_ip_limiter is not None:
+        if self.trial_ip_limiter is not None and ip_key is not None:
             self.trial_ip_limiter.record_failure(ip_key, now=self._now())
         return "granted"
+
+    def _trial_withheld(self, org_id: str, reason: str) -> str:
+        """Record why a preview trial was withheld (non-critical telemetry: the operator can see a broken list or
+        a mis-set limit instead of trials silently vanishing) and return "unavailable"."""
+        self._audit("trial", org_id=org_id, outcome="withheld", reason=reason)
+        return "unavailable"
 
     # -- signup (two-phase) ------------------------------------------------------------------------
     def request_signup(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
@@ -1822,9 +1867,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         trial_credits=config.TRIAL_CREDITS,
         trial_claims=TrialClaimRegistry(store),
         # Pricing S3c: the opt-in per-IP trial-grant soft limit (off unless VIGIL_TRIAL_IP_LIMIT_ENABLED).
-        trial_ip_limiter=(LoginRateLimiter(config.TRIAL_IP_LIMIT_DIR, max_fails=config.TRIAL_GRANTS_PER_IP,
-                                           window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
-                          if config.trial_ip_limit_enabled() and config.TRIAL_GRANTS_PER_IP > 0 else None),
+        # A limit of 0 or less with the flag ON withholds every preview trial (fail closed, like the S7 cap).
+        trial_ip_limiter=((LoginRateLimiter(config.TRIAL_IP_LIMIT_DIR, max_fails=config.TRIAL_GRANTS_PER_IP,
+                                            window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
+                           if config.TRIAL_GRANTS_PER_IP > 0 else _WithholdAllTrialGrants())
+                          if config.trial_ip_limit_enabled() else None),
         # Pricing S7: the global daily trial-launch cap; base_lock = window so it holds for the full day.
         trial_launch_limiter=(LoginRateLimiter(config.TRIAL_LAUNCH_CAP_DIR, max_fails=config.TRIAL_LAUNCH_DAILY_CAP,
                                                window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
