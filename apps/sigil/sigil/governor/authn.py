@@ -59,7 +59,9 @@ def verify_signed(payload: dict, core_fields: Sequence[str], trusted_pubkey: Opt
     core = {k: payload.get(k) for k in core_fields}
     try:
         return verify_one(trusted_pubkey, _canon(core), sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):
         # malformed base64 / wrong-length / non-decodable sig or key material → NOT authentic
         # (fail-closed contract; a hostile append-only event must never raise out of the fold).
+        # ValueError covers a core that cannot be canonicalised to UTF-8 at all: a lone surrogate in a
+        # string field (UnicodeEncodeError) can only come from a raw spine-file write, never from a signer.
         return False

@@ -170,7 +170,7 @@ def verify_engagement_authority(
         result = verify_threshold(
             authority_signing_bytes(signed.document), signed.signatures, trust_root
         )
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         # Malformed signature bytes, or a weak (low-order / non-canonical) key referenced by a submitted
         # signature, must be a fail-closed refusal that honours the (ok, reason) contract — never an
         # uncaught crash in the caller (e.g. framework's store.load_verified_authority / the launch gate).
