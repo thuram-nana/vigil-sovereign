@@ -3440,6 +3440,15 @@ def _sfx_status_set(statuses: Any) -> "frozenset[int]":
     return frozenset(out) if out else _SFX_DEFAULT_LOGGED_OUT_STATUSES
 
 
+def _sfx_strip_tags(raw: str) -> str:
+    """``_SFX_TAG_RE.sub(" ", raw)``, byte-identical, in linear time. No tag can start in, or extend past, the
+    text after the LAST ``>``, so only the prefix up to and including it is scanned; inside that prefix every
+    ``<`` reaches a ``>``. Run over the whole body, a response of ``<`` repeated to the transport cap with no
+    ``>`` made every ``<`` rescan to the end of the string (quadratic: ~2 s at 64 KB, ~half an hour at 2 MB)."""
+    cut = raw.rfind(">") + 1
+    return _SFX_TAG_RE.sub(" ", raw[:cut]) + raw[cut:]
+
+
 def _sfx_substantive_body(status: Any, body: str) -> bool:
     """A response usable in the differential — a real 2xx with a non-trivial body that is not itself an
     error/deny page. A response FAILING this proves NOTHING (it can neither score authenticated NOR serve as
@@ -3453,7 +3462,7 @@ def _sfx_substantive_body(status: Any, body: str) -> bool:
     raw = body or ""
     if len(raw.strip()) < _SFX_MIN_BODY:
         return False
-    text = _SFX_WS_RE.sub(" ", _SFX_TAG_RE.sub(" ", raw)).strip().lower()
+    text = _SFX_WS_RE.sub(" ", _sfx_strip_tags(raw)).strip().lower()
     if not text:
         return False
     if _SFX_ERROR_OPENER_RE.match(text):
@@ -7395,8 +7404,31 @@ _DMARC_SP_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=\s*(none|quarantine|reject)\s*(?
 # (the same error class as assuming a missing record means no policy). If sp= is present but unparseable we
 # REFUSE rather than fall through to `p=` and read the WRONG tag.
 _DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
-# One DNS TXT character-string in PRESENTATION form.
-_TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# The BODY of one DNS TXT character-string in PRESENTATION form (the text between its quotes): unescaped
+# characters other than `"` and `\`, or a `\` escape pair. A string is `"` + this + `"`; `_txt_string_spans`
+# finds them.
+_TXT_STRING_BODY_RE = re.compile(r'(?:[^"\\]|\\.)*')
+
+
+def _txt_string_spans(line: str) -> list[tuple[int, int, str]] | None:
+    """The ``(start, end, content)`` of each character-string ``"((?:[^"\\\\]|\\\\.)*)"`` matches in ``line``,
+    left to right, in ONE linear pass; ``None`` as soon as a quote opens a string that pattern cannot match
+    (it never closes, or it holds a backslash + LF, which ``.`` does not accept).
+
+    ``None`` is exactly what ``_resolve_txt_record`` always concluded for such a line: a quote that starts
+    no match can never lie inside a later one, so it was left as unquoted content ahead of, between or after
+    the strings, and the record was refused. Scanning with ``finditer`` instead retried that dead string from
+    every escaped quote inside it, each retry running on to its end — quadratic on a record a target can
+    publish (``"`` + ``\\"!`` x 21000 + backslash, LF, ``"`` cost ~23 s)."""
+    spans: list[tuple[int, int, str]] = []
+    start = line.find('"')
+    while start != -1:
+        close = _TXT_STRING_BODY_RE.match(line, start + 1).end()
+        if close >= len(line) or line[close] != '"':
+            return None
+        spans.append((start, close + 1, line[start + 1 : close]))
+        start = line.find('"', close + 1)
+    return spans
 
 
 def _decode_txt_escapes(s: str) -> str:
@@ -7436,7 +7468,10 @@ def _decode_txt_escapes(s: str) -> str:
 # precede a record's character-strings.
 # The owner name excludes `=` so a tag-value string can never be mistaken for an RR header and swallowed
 # as scaffolding; the TTL accepts BIND's unit suffixes (`1h`, `1D`, `1h30m`) as well as bare seconds.
-_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:(?:\d+[smhdw]?)+|IN|CH|CS|HS))*\s+TXT$")
+# The TTL token is digit-led with no two adjacent unit letters, written so each string has ONE parse: the
+# nested `(?:\d+[smhdw]?)+` accepted the same strings but split a run of n digits 2^(n-1) ways, so a
+# ~40-digit near-miss ahead of a target's published TXT string never returned.
+_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:\d+(?:[smhdw]\d+)*[smhdw]?|IN|CH|CS|HS))*\s+TXT$")
 # RFC 7489 §6.6.3 / RFC 7208 §4.5 record SELECTION: a record that does not begin with the version tag is
 # not a policy record at all and is discarded by receivers. Deliberately UNANCHORED: `.match()` anchors at
 # position 0 for the selection test, while the same pattern counts version tags across a whole record to
@@ -7464,21 +7499,21 @@ def _resolve_txt_record(line: str) -> str | None:
         # content. We cannot tell which without guessing, and guessing is the fault line — so REFUSE. (The
         # QUOTED branch below decodes, because there a backslash is unambiguously a §5.1 escape.)
         return None if "\\" in bare else bare
-    spans = list(_TXT_STRING_RE.finditer(line))
+    spans = _txt_string_spans(line)
     if not spans:
         return None                             # a quote opens a string that never closes
-    head = line[: spans[0].start()].strip()
+    head = line[: spans[0][0]].strip()
     if head and not _ZONE_RR_HEADER_RE.match(head):
         return None                             # unquoted content ahead of the record
-    prev = spans[0].end()
-    for span in spans[1:]:
-        if line[prev : span.start()].strip():
+    prev = spans[0][1]
+    for start, end, _content in spans[1:]:
+        if line[prev:start].strip():
             return None                         # unquoted content BETWEEN character-strings
-        prev = span.end()
+        prev = end
     if line[prev:].strip():
         return None                             # unquoted content trailing the record
     # §5.1 decode each string to wire octets, THEN §3.3.14 concatenate — so every tag regex reads wire bytes
-    return "".join(_decode_txt_escapes(span.group(1)) for span in spans).strip()
+    return "".join(_decode_txt_escapes(content) for _start, _end, content in spans).strip()
 
 
 def _txt_records(raw: Any) -> list[str] | None:
@@ -8605,8 +8640,11 @@ def dom_execution_csp_bypass_oracle(binding_calls: Any, canary: str, csp_control
 # and any SQL-looking token (`Don't drop the ball` -> tail `t drop the ball` has no structure at the
 # start). A tautology must be a genuine SELF-comparison (`X=X`) — a bare number or a distant `or 5`
 # is NOT a proof (that was the "5 or 6 options" false positive).
+# The optional paren is `\s*(?:\(\s*)?`, not `\s*\(?\s*`: the same strings and groups, but with no paren the
+# two adjacent `\s*` could split a whitespace run n ways, each split failing at the identifier — quadratic
+# on `'OR` + 8k spaces, a value any client of an AEGIS-protected app can send many times per request.
 _SQL_TAUT_RE = re.compile(
-    r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+    r"""(?i)^(OR|AND|XOR)\b\s*(?:\(\s*)?['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
 _SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
 # A stacked statement must have a real STATEMENT SHAPE — the leading keyword AND its required
 # companion (SELECT..FROM, INSERT..INTO, DROP TABLE, ...). SELECT/UPDATE/DELETE/DROP are also ordinary

@@ -46,6 +46,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -310,9 +311,42 @@ def parse_sitemap(xml: str) -> list[str]:
 # JS endpoint + secret mining
 # ---------------------------------------------------------------------------
 
-# Every single/double/backtick string literal (with escape handling), captured so
-# endpoints and quoted secret values can be examined without a JS parser.
-_JS_STRING = re.compile(r"""(['"`])((?:\\.|(?!\1).)*?)\1""", re.S)
+# Every single/double/backtick string literal (with escape handling), found so
+# endpoints and quoted secret values can be examined without a JS parser. The
+# literals are EXACTLY those ``(['"`])((?:\\.|(?!\1).)*?)\1`` (re.S) finds, but that
+# regex reads a backslash two ways (escape pair, or plain character), so k
+# backslash pairs after a quote that never closes cost 2^k: ``"`` + ``\a`` x 40 on
+# a crawled page stalled JS mining for good. ``_js_string_literals`` is the same
+# scan in one linear pass; a regex with a disjoint alternation would be linear
+# but would find different literals.
+_JS_QUOTE = re.compile(r"""['"`]""")
+# A literal's body up to its closing quote: escape pairs, or any char but ``\``
+# and the quote. Matched with ``endpos`` = the LAST occurrence of the quote.
+_JS_STRING_BODY = {q: re.compile(r"(?:\\.|[^\\" + q + r"])*", re.S) for q in "'\"`"}
+
+
+def _js_string_literals(src: str) -> Iterator[tuple[int, int, str, str]]:
+    """``(start, end, quote, content)`` of each literal ``finditer`` with the
+    regex above yields, in order, in linear time.
+
+    That regex's backtracking reduces to one rule: a backslash at ``i`` heads an
+    escape pair iff the literal's quote occurs again at an index >= ``i + 2`` (else
+    it is a plain character), and a quote opens a literal iff it occurs again later.
+    So the body is matched up to the LAST occurrence of its quote: it closes at the
+    first unescaped quote, or, when a backslash right before that last quote cannot
+    take it as its pair, at that last quote itself."""
+    last = {q: src.rfind(q) for q in "'\"`"}
+    m = _JS_QUOTE.search(src)
+    while m is not None:
+        start, q = m.start(), m.group()
+        if last[q] <= start:                     # the quote never occurs again: no literal opens here
+            m = _JS_QUOTE.search(src, start + 1)
+            continue
+        stop = _JS_STRING_BODY[q].match(src, start + 1, last[q]).end()
+        close = stop if src[stop] == q else last[q]
+        yield start, close + 1, q, src[start + 1 : close]
+        m = _JS_QUOTE.search(src, close + 1)
+
 
 # Endpoint-likeness tests applied to a literal's *content*.
 _ABS_URL = re.compile(r"""^https?://[^\s'"`<>]+$""", re.I)
@@ -376,8 +410,8 @@ def mine_js(js_source: str, *, base_url: str = "") -> JsFindings:
 def _mine_endpoints(js_source: str, base_url: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
-    for m in _JS_STRING.finditer(js_source):
-        content = _js_unescape(m.group(2))
+    for _start, _end, _quote, body in _js_string_literals(js_source):
+        content = _js_unescape(body)
         if not (_ABS_URL.match(content) or _PROTO_REL.match(content)
                 or _ABS_PATH.match(content)):
             continue

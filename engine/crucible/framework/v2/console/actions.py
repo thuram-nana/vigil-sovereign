@@ -2286,6 +2286,33 @@ def _clone_lock(wd: str) -> threading.Lock:
         return _CLONE_LOCKS.setdefault(wd, threading.Lock())
 
 
+_PATH_RUN_RE = re.compile(r"[A-Za-z0-9_./-]+")
+_PATH_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _path_tokens(text: str) -> list[str]:
+    """``re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\\.[A-Za-z0-9_]+", text)``, token for token, in linear time.
+
+    Within one maximal run of path characters that pattern finds at most ONE token: from the run's first word
+    character to the end of the word run after the LAST ``.`` that a word character follows, provided that
+    dot lies after the first word character. ``findall`` itself retried a run with no such dot from every
+    start position, scanning to the run's end each time — quadratic, so a 1 MiB dot-free paste (a base64
+    blob, a hash list) froze the console for ~17 minutes with the GIL held."""
+    out: list[str] = []
+    for run in _PATH_RUN_RE.finditer(text):
+        r = run.group()
+        dot = r.rfind(".")
+        while dot != -1:
+            tail = _PATH_WORD_RE.match(r, dot + 1)
+            if tail is not None:                 # the last dot a word character follows
+                head = _PATH_WORD_RE.search(r, 0, dot)
+                if head is not None:             # ... and a word character precedes it: the run's token
+                    out.append(r[head.start() : tail.end()])
+                break
+            dot = r.rfind(".", 0, dot)
+    return out
+
+
 def _files_in_instruction(workdir: str, instruction: str) -> list:
     """Repo-relative file paths the instruction names that ACTUALLY EXIST under ``workdir`` — so the model
     diffs against real content (red-pen LOW-2: without this the model never sees the code and its diff
@@ -2293,7 +2320,7 @@ def _files_in_instruction(workdir: str, instruction: str) -> list:
     is third-party controlled: a symlink it committed must not select a host file as model context); only
     existing regular files are returned, capped."""
     out: list = []
-    for tok in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+", str(instruction or "")):
+    for tok in _path_tokens(str(instruction or "")):
         tok = tok.strip(".,);]'\"")
         try:
             from vigil_integration.remediation.codefix import confined_repo_file

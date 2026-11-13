@@ -4220,7 +4220,7 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
 
 
 _SQL_TAUT_RE = re.compile(
-    r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+    r"""(?i)^(OR|AND|XOR)\b\s*(?:\(\s*)?['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
 
 
 _SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
@@ -4906,6 +4906,15 @@ def _sfx_status_set(statuses: Any) -> "frozenset[int]":
     return frozenset(out) if out else _SFX_DEFAULT_LOGGED_OUT_STATUSES
 
 
+def _sfx_strip_tags(raw: str) -> str:
+    """``_SFX_TAG_RE.sub(" ", raw)``, byte-identical, in linear time. No tag can start in, or extend past, the
+    text after the LAST ``>``, so only the prefix up to and including it is scanned; inside that prefix every
+    ``<`` reaches a ``>``. Run over the whole body, a response of ``<`` repeated to the transport cap with no
+    ``>`` made every ``<`` rescan to the end of the string (quadratic: ~2 s at 64 KB, ~half an hour at 2 MB)."""
+    cut = raw.rfind(">") + 1
+    return _SFX_TAG_RE.sub(" ", raw[:cut]) + raw[cut:]
+
+
 def _sfx_substantive_body(status: Any, body: str) -> bool:
     """A response usable in the differential — a real 2xx with a non-trivial body that is not itself an
     error/deny page. A response FAILING this proves NOTHING (it can neither score authenticated NOR serve as
@@ -4919,7 +4928,7 @@ def _sfx_substantive_body(status: Any, body: str) -> bool:
     raw = body or ""
     if len(raw.strip()) < _SFX_MIN_BODY:
         return False
-    text = _SFX_WS_RE.sub(" ", _SFX_TAG_RE.sub(" ", raw)).strip().lower()
+    text = _SFX_WS_RE.sub(" ", _sfx_strip_tags(raw)).strip().lower()
     if not text:
         return False
     if _SFX_ERROR_OPENER_RE.match(text):
@@ -6808,7 +6817,28 @@ _DMARC_SP_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=\s*(none|quarantine|reject)\s*(?
 _DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
 
 
-_TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_TXT_STRING_BODY_RE = re.compile(r'(?:[^"\\]|\\.)*')
+
+
+def _txt_string_spans(line: str) -> list[tuple[int, int, str]] | None:
+    """The ``(start, end, content)`` of each character-string ``"((?:[^"\\\\]|\\\\.)*)"`` matches in ``line``,
+    left to right, in ONE linear pass; ``None`` as soon as a quote opens a string that pattern cannot match
+    (it never closes, or it holds a backslash + LF, which ``.`` does not accept).
+
+    ``None`` is exactly what ``_resolve_txt_record`` always concluded for such a line: a quote that starts
+    no match can never lie inside a later one, so it was left as unquoted content ahead of, between or after
+    the strings, and the record was refused. Scanning with ``finditer`` instead retried that dead string from
+    every escaped quote inside it, each retry running on to its end — quadratic on a record a target can
+    publish (``"`` + ``\\"!`` x 21000 + backslash, LF, ``"`` cost ~23 s)."""
+    spans: list[tuple[int, int, str]] = []
+    start = line.find('"')
+    while start != -1:
+        close = _TXT_STRING_BODY_RE.match(line, start + 1).end()
+        if close >= len(line) or line[close] != '"':
+            return None
+        spans.append((start, close + 1, line[start + 1 : close]))
+        start = line.find('"', close + 1)
+    return spans
 
 
 def _decode_txt_escapes(s: str) -> str:
@@ -6846,7 +6876,7 @@ def _decode_txt_escapes(s: str) -> str:
     return "".join(out)
 
 
-_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:(?:\d+[smhdw]?)+|IN|CH|CS|HS))*\s+TXT$")
+_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:\d+(?:[smhdw]\d+)*[smhdw]?|IN|CH|CS|HS))*\s+TXT$")
 
 
 _DMARC_VERSION_RE = re.compile(r"(?i)v\s*=\s*DMARC1\s*(?:;|$)")
@@ -6873,21 +6903,21 @@ def _resolve_txt_record(line: str) -> str | None:
         # content. We cannot tell which without guessing, and guessing is the fault line — so REFUSE. (The
         # QUOTED branch below decodes, because there a backslash is unambiguously a §5.1 escape.)
         return None if "\\" in bare else bare
-    spans = list(_TXT_STRING_RE.finditer(line))
+    spans = _txt_string_spans(line)
     if not spans:
         return None                             # a quote opens a string that never closes
-    head = line[: spans[0].start()].strip()
+    head = line[: spans[0][0]].strip()
     if head and not _ZONE_RR_HEADER_RE.match(head):
         return None                             # unquoted content ahead of the record
-    prev = spans[0].end()
-    for span in spans[1:]:
-        if line[prev : span.start()].strip():
+    prev = spans[0][1]
+    for start, end, _content in spans[1:]:
+        if line[prev:start].strip():
             return None                         # unquoted content BETWEEN character-strings
-        prev = span.end()
+        prev = end
     if line[prev:].strip():
         return None                             # unquoted content trailing the record
     # §5.1 decode each string to wire octets, THEN §3.3.14 concatenate — so every tag regex reads wire bytes
-    return "".join(_decode_txt_escapes(span.group(1)) for span in spans).strip()
+    return "".join(_decode_txt_escapes(content) for _start, _end, content in spans).strip()
 
 
 def _txt_records(raw: Any) -> list[str] | None:
