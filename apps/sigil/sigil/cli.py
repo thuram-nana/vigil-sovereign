@@ -2007,6 +2007,10 @@ def cmd_spine(a) -> None:
         except PruneUnsafe as e:
             print(f"prune UNSAFE at K={a.boundary}: {e}", file=sys.stderr)
             sys.exit(2)
+        if rep.get("already_complete"):
+            print(f"the prune at {rep['base_seq']} was already committed (its head is signed); its cleanup is "
+                  f"complete — nothing more to do.")
+            return
         print(f"pruned [0..{rep['base_seq']}): archived {rep['archived_segments']} segment(s), deleted "
               f"{rep['files_deleted']} file(s), snapshot at seq {rep['snapshot_seq']}, head last_seq "
               f"{rep['head_last_seq']}. Re-attach anytime with `sigil spine verify-archive`.")
