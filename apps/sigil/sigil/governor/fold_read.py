@@ -66,12 +66,11 @@ def _maybe_audit(cache: FoldCache, store, key: tuple, build) -> None:
         results[cache.name] = cache.audit(store, key, build=build)
 
 
-def _window_key(store, live_window: bool) -> tuple:
-    """A live-window fold starts at the live window's first record (since -1), so the window itself keys its entry:
-    a prune's manifest rebase moves it (the head — and so the snapshot — can commit before the rebase, in the
-    prune's crash window), and an entry folded over the old window must not keep answering over the new one."""
-    if not live_window:
-        return ()
+def _window_key(store) -> tuple:
+    """The live window itself keys every entry: a fold that starts at the window's first record (a live-window fold,
+    or a seeded fold whose seed starts at -1) depends on it, and a prune's manifest rebase moves it (the head — and
+    so the snapshot — can commit before the rebase, in the prune's crash window). An entry folded over the old window
+    must not keep answering over the new one."""
     try:
         return (store._live_base_prev_hash(),)
     except Exception:  # noqa: BLE001 — undecidable: an entry that can never match (the full fold answers)
@@ -104,7 +103,7 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
     snap = _snapshot(store, live_window)
     if snap is None:
         return UNCACHED
-    key = (trusted_pubkey, genesis_owner_pubkey(), snap) + _window_key(store, live_window)
+    key = (trusted_pubkey, genesis_owner_pubkey(), snap) + _window_key(store)
 
     def build():
         resolver, horizon = _kh.key_resolver_with_horizon(store, current=trusted_pubkey)
@@ -140,7 +139,7 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
     def guarded(view):
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
-    key = (snap,) + _window_key(store, live_window)
+    key = (snap,) + _window_key(store)
     _maybe_audit(cache, store, key, build)
     try:
         return cache.read(store, key, build=build, reader=guarded)

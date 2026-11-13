@@ -38,6 +38,7 @@ def test_a_clean_audit_is_reported_and_rendered(tmp_path):
                        "matched": 1, "mismatched": 0, "skipped": 1}
     out = _doc.render({"ok": True, "issues": [], "notes": [], "fold_cache_audit": section})
     assert "OK fold cache audit (2026-11-11T11:00:00+00:00): 1 match, 0 MISMATCH, 1 skipped" in out
+    assert "could not be rebuilt" not in out
 
 
 def test_a_mismatch_is_a_hard_issue(tmp_path):

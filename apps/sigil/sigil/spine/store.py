@@ -1442,7 +1442,7 @@ class SpineStore:
             if name and "/" not in name:
                 if name not in names:
                     return False
-            elif not self._layout.seg_path(sg).exists():  # a segment outside the segments dir: stat it
+            elif not self._layout.seg_path(sg).is_file():  # a segment outside the segments dir: stat it
                 return False
         return True
 

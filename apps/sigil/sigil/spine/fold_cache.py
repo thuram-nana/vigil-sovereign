@@ -364,9 +364,9 @@ class FoldCache:
 
     def _audit_entry(self, store, ident: tuple, e: _Entry, build) -> dict:
         folded = e.seq                                     # what the entry had folded when the audit began
+        base = _live_base(store)                           # BEFORE the build: a rebase during it is then seen
         state, ctx, since, horizon = build()
         fseq, fhash = since, None
-        base = _live_base(store)
         for r in store.iter_records(since_seq=since):
             if fhash is not None and (r.seq != fseq + 1 or r.prev_hash != fhash):
                 return self._hole(store, ident, e, r.seq, fseq, folded, base)
@@ -405,5 +405,7 @@ class FoldCache:
             diff = _first_difference(e.state, state)
             if diff is None:
                 return {"fold": self.name, "status": "match", "seq": e.seq}
+            if _live_base(store) != base:                  # a hard prune rebased the live window mid-audit
+                return {"fold": self.name, "status": "skipped", "reason": "the live window moved during the audit"}
             self._discard(ident, e)
             return {"fold": self.name, "status": "MISMATCH", "seq": e.seq, "difference": diff}

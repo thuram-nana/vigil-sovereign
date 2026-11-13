@@ -866,5 +866,143 @@ def test_a_live_window_fold_is_keyed_by_the_live_window(tmp_path, monkeypatch):
     s._live_base_prev_hash = lambda: "h1"
     assert fold_read.cached_unsigned_read(c, s, seed=seed, reader=list, live_window=True) == [2, 3]
     s._live_base_prev_hash = lambda: (_ for _ in ()).throw(OSError("unreadable"))
-    assert fold_read._window_key(s, True) != fold_read._window_key(s, True)       # undecidable: never matches
-    assert fold_read._window_key(s, False) == ()
+    assert fold_read._window_key(s) != fold_read._window_key(s)       # undecidable: never matches
+
+
+# ======================================================================================================
+# review round 3
+# ======================================================================================================
+@pytest.mark.parametrize("live_window", [False, True])
+def test_a_signed_fold_that_starts_at_the_window_is_keyed_by_it(tmp_path, monkeypatch, live_window):
+    """A seeded fold whose seed starts at -1 (the pubkey bypass) scans the live window from its first record, just as
+    a live-window fold does: a rebase that moves the window must re-key it on the SIGNED path too."""
+    c = _counting_cache(f"test.cont.window.signed.{live_window}")
+
+    def seed(snap):
+        return [], -1
+
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    s.change_token = lambda: ("t",)
+    monkeypatch.setattr(fold_read, "_snapshot", lambda store, lw: "the same snapshot")
+    read = dict(trusted_pubkey=PUB, seed=seed, reader=list, live_window=live_window)
+    assert fold_read.cached_read(c, s, **read) == [0, 1, 2, 3]
+    s.recs = CHAIN[2:]                                       # the window now starts at seq 2, linking from h1
+    s._live_base_prev_hash = lambda: "h1"
+    assert fold_read.cached_read(c, s, **read) == [2, 3]
+
+
+def test_a_directory_is_not_a_present_segment_inside_or_outside_the_segments_dir(tmp_path):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p, seg_max_bytes=0, seg_max_records=0)
+    w.migrate()
+    _noise(w, 0)
+    act = read_manifest(w._layout).active()
+    (w._layout.segments_dir / "seg-dir.jsonl").mkdir()
+    assert w._segments_present([act, SimpleNamespace(file=f"{w._layout.segments_dir.name}/seg-dir.jsonl")]) is False
+    (tmp_path / "elsewhere" / "seg-d.jsonl").mkdir(parents=True)
+    assert w._segments_present([act, SimpleNamespace(file="elsewhere/seg-d.jsonl")]) is False
+
+
+def test_the_resolver_still_reads_the_records_after_a_tear(tmp_path, monkeypatch):
+    """The horizon stops at a tear; the resolver's history walk does not (it reads what the flag-OFF walk reads)."""
+    seen: list = []
+    real = kh._history_from_records
+
+    def spy(recs):
+        recs = list(recs)
+        seen.extend(r.seq for r in recs)
+        return real(iter(recs))
+
+    monkeypatch.setattr(kh, "_history_from_records", spy)
+    s = _Scripted(tmp_path, [CHAIN[0], CHAIN[1], CHAIN[3]])
+    s._live_base_prev_hash = lambda: "g"
+    assert kh.key_resolver_with_horizon(s, current=PUB)[1] == 1 and seen == [0, 1, 3]
+
+
+def _audit_catch_up_world(tmp_path, rebased):
+    """An entry at seq 3; the audit's fresh fold reads 0..3; the entry's own catch-up reaches seq 5; then the audit's
+    re-read of 4..5 meets a hole at 5 — below the CAUGHT-UP entry, though above where the audit began."""
+    c = _counting_cache(f"test.cont.audit.catchup.hole.{rebased}")
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    c.read(s, ("k",), build=_build, reader=list)
+    more = [_rec(4, "h3", "h4"), _rec(5, "h4", "h5")]
+    s.tail_after = lambda seq, h: list(more) if seq == 3 else []
+
+    def iter_records(*, since_seq=-1):
+        if since_seq < 3:
+            return iter([r for r in CHAIN if r.seq > since_seq])
+        if rebased:
+            s._live_base_prev_hash = lambda: "k"            # a prune rebased the window under the re-read
+        return iter([more[1]])
+
+    s.iter_records = iter_records
+    return c, s
+
+
+def test_a_hole_below_the_caught_up_entry_is_a_mismatch(tmp_path):
+    c, s = _audit_catch_up_world(tmp_path, rebased=False)
+    rep = c.audit(s, ("k",), build=_build)
+    assert rep["status"] == "MISMATCH" and "not contiguous at seq 5" in rep["difference"], rep
+    assert not c._entries
+
+
+def test_that_hole_met_while_a_prune_rebased_the_window_is_skipped(tmp_path):
+    c, s = _audit_catch_up_world(tmp_path, rebased=True)
+    assert c.audit(s, ("k",), build=_build)["status"] == "skipped"
+
+
+def test_a_window_rebased_while_the_audit_builds_is_skipped_never_a_mismatch(tmp_path):
+    """A hard prune's rebase that lands DURING the audit's build: the fresh fold then reads the new window and differs
+    from the entry folded over the old one — that is the prune, not an edit."""
+    c = _counting_cache("test.cont.audit.rebase.build")
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    c.read(s, ("k",), build=_build, reader=list)
+
+    def build_during_a_rebase():
+        s.recs = CHAIN[2:]
+        s._live_base_prev_hash = lambda: "h1"
+        return [], None, -1, float("inf")
+
+    s.tail_after = lambda seq, h: []
+    rep = c.audit(s, ("k",), build=build_during_a_rebase)
+    assert rep["status"] == "skipped", rep
+
+
+def test_a_long_lived_store_whose_spine_was_reset_under_it_re_reads_the_disk_tip(tmp_path):
+    p = tmp_path / "spine.jsonl"
+    w = SpineStore(p)
+    for i in range(5):
+        _noise(w, i)
+    other = SpineStore(p)
+    other.reset()
+    for i in range(3):
+        _noise(other, i)
+    assert w.next_seq - 1 == 4                              # the long-lived store's own tip is stale
+    c = _counting_cache("test.cont.disktip.real")
+    assert c.read(w, ("k",), build=_build, reader=list) == [0, 1, 2]
+    assert len(c._entries) == 1, "a pass that reached the disk's tip was treated as short"
+
+
+def test_a_seeded_audit_whose_build_saw_a_rebase_is_skipped_never_a_mismatch(tmp_path):
+    """A seeded fold reads the same records after its seed either side of a rebase, but what its build derived from
+    the window (the owner-key resolver) can differ: a difference that coincides with a moved window is skipped."""
+    def step(state, r, ctx):
+        state.append((r.seq, ctx))
+
+    c = fold_cache.FoldCache("test.cont.audit.rebase.seeded", step=step)
+    s = _Scripted(tmp_path, CHAIN)
+    s._live_base_prev_hash = lambda: "g"
+    s.tail_after = lambda seq, h: []
+    assert c.read(s, ("k",), build=lambda: ([], "g", 1, float("inf")), reader=list) == [(2, "g"), (3, "g")]
+
+    def build_during_a_rebase():
+        s._live_base_prev_hash = lambda: "h1"
+        return [], "h1", 1, float("inf")
+
+    assert c.audit(s, ("k",), build=build_during_a_rebase)["status"] == "skipped"
+    s._live_base_prev_hash = lambda: "g"
+    rep = c.audit(s, ("k",), build=lambda: ([], "other", 1, float("inf")))
+    assert rep["status"] == "MISMATCH", "a real difference with the window unmoved must still be reported"
