@@ -205,7 +205,8 @@ class UIServer(ThreadingHTTPServer):
 
 
 def _json_bytes(obj) -> bytes:
-    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    # A lone surrogate (only a tampered record carries one) has no UTF-8 form: emit it as its JSON \uXXXX escape.
+    return json.dumps(obj, ensure_ascii=False).encode("utf-8", "backslashreplace")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1353,7 +1354,7 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 sent = False
                 for ev in tailer.poll():
-                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
                     sent = True
                 self.wfile.write(b": hb\n\n")                    # heartbeat / flush
                 self.wfile.flush()
@@ -1397,7 +1398,7 @@ class Handler(BaseHTTPRequestHandler):
                     last_state = st
                     ev = {"t": "state", "state": str(st.get("state", "idle")),
                           "transcript": str(st.get("transcript", "")), "feedback": str(st.get("feedback", ""))}
-                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
                     sent = True
                 for r in store.iter_records(since_seq=cursor):
                     cursor = r.seq
@@ -1411,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
                             ev = {"t": "nav", "direction": direction, "seq": r.seq}
                         else:
                             continue
-                        self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                        self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
                         sent = True
                 self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
