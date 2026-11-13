@@ -1074,7 +1074,10 @@ class LaunchGate:
           (charged or refunded), so a missing settlement marker means the seam lost it — never release.
         * ``seam_inconsistent`` — a lease of this ``(org, slug)`` that the spine shows settled is missing from the
           seam settlement marker: the marker (the only record of a completed run's zero-refund settle while
-          ``VIGIL_SETTLE_SPINE_RECORD`` is off) was lost or rolled back, so nothing of this target is released."""
+          ``VIGIL_SETTLE_SPINE_RECORD`` is off) was lost or rolled back, so nothing of this target is released.
+        * ``metered`` — the launch was published metered (PRICING M1c): it is charged for what it used (owner
+          decisions 2026-11-13), so it settles through its completion or the customer's cancel, never through this
+          full refund; ``metered_unknown`` when its billing mode cannot be read."""
         from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
         base = self._seam_base()
         if not any(r.seq > res.seq for r in ix.of(oid, slug)):
@@ -1088,6 +1091,11 @@ class LaunchGate:
             return "outcome_recorded"
         if any(o == oid and s == slug and not is_lease_settled(base, slug, n) for (o, s, n) in ix.settled):
             return "seam_inconsistent"
+        try:
+            if self._launch_was_metered(slug, res.nonce):
+                return "metered"
+        except OSError:
+            return "metered_unknown"
         return None
 
     def interrupted_release(self, *, org_id: str, slug: str, nonce: str) -> Optional[dict]:
@@ -1117,9 +1125,10 @@ class LaunchGate:
         ``_settle_once``, under the cross-process settle lock): a reservation already settled by anyone, in any
         process, moves nothing and returns ``launch_already_settled``. Inside that critical section, before
         anything is written, ``_release_refusal`` (the reservation is superseded, not started, past its grace, the
-        seam is consistent) and then the caller's ``refuse_if`` must both pass; a refusal returns ``refused``. The
-        decision record (settle record on) names it ``sweep:refund``. ``finish_only`` only finishes a recorded
-        settlement a crash interrupted (``settle_launch``'s ``finish_only``): never a fresh refund."""
+        seam is consistent, never published metered) and then the caller's ``refuse_if`` must both pass; a refusal
+        returns ``refused``. The decision record (settle record on) names it ``sweep:refund``. ``finish_only`` only
+        finishes a recorded settlement a crash interrupted (``settle_launch``'s ``finish_only``): never a fresh
+        refund."""
         from ..governor.launch_reservations import scan_reservations
         kp = self.owner_key
         if kp is None:

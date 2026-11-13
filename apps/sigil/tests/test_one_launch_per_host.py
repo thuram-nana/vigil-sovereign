@@ -796,3 +796,34 @@ def test_a_reused_nonce_never_inflates_the_released_amount():
         (ORG, a["slug"], "n-a")].reserved == 30
     out = _sweep(s, apply=True)
     assert _statuses(out) == [("n-a", "released")] and out["items"][0]["refunded"] == 30 and _avail(s) == 70
+
+
+# ---- a launch published metered is charged for what it used: never released as a full refund -----------------
+def _mark_metered(r):
+    from sigil import config
+    from sigil.model_gateway import GrantMeter
+    from vigil_core.model_grant import meter_id
+    GrantMeter(config.MODEL_METER_DIR).mark_metered(meter_id(r["slug"], r["nonce"]))
+
+
+def test_a_superseded_reservation_published_metered_is_never_released(monkeypatch, tmp_path):
+    from sigil import config
+    monkeypatch.setattr(config, "MODEL_METER_DIR", tmp_path / "meters")
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    _mark_metered(a)                                      # its run was billed metered when it was published
+    assert _statuses(_sweep(s)) == [(a["nonce"], "metered")]
+    assert _statuses(_sweep(s, apply=True)) == [(a["nonce"], "metered")]
+    assert _release(s, a)["refused"] == "metered"
+    assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])
+
+
+def test_an_unreadable_billing_mode_is_never_released(monkeypatch):
+    s = _store()
+    _seat(s)
+    a, _b = _superseded(s)
+    monkeypatch.setattr(LaunchGate, "_launch_was_metered",
+                        staticmethod(lambda slug, nonce: (_ for _ in ()).throw(OSError("meter dir unreadable"))))
+    assert _statuses(_sweep(s, apply=True)) == [(a["nonce"], "metered_unknown")]
+    assert _avail(s) == 40 and not is_lease_settled(_base(), a["slug"], a["nonce"])
