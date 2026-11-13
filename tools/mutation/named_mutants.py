@@ -23,15 +23,24 @@ entry names, not every mutant a PR body may have reported:
   * a mutant is KILLED only when pytest exits 1 AND a named test failed by an ASSERTION (an
     ``AssertionError`` or a ``pytest.fail``, ``DID NOT RAISE`` included), recorded by a probe plugin in
     the child. A test that fails by any other exception (a ``NameError`` the mutant introduced, a
-    ``ValidationError`` from code past the broken guard) is CRASHED: reported, and never a kill. Exit 0
-    is SURVIVED; anything else (collection/usage error, setup error, no tests, timeout, a mutant that
-    does not compile) is ERROR. So a broken mutant can never pad the score;
+    ``ValidationError`` from code past the broken guard), or that fails in its setup or teardown phase
+    (an assertion in a fixture included), is CRASHED: reported, and never a kill. Exit 0 is SURVIVED;
+    anything else (collection/usage error, no tests, timeout, a mutant that does not compile) is ERROR.
+    So a broken mutant can never pad the score;
   * the original bytes are also kept in a sidecar (``<file>.named-mutant.orig``) while a mutant is
-    applied, and any sidecar left by an interrupted run is restored before the next run touches the file.
+    applied. It is written ATOMICALLY before the mutant touches the source (a temp file in the same
+    directory, fsynced, then renamed into place) and its header records the sha256 of the original;
+  * at startup, BEFORE the corpus is validated, the sidecar of every file the corpus names is restored
+    (a mutant a killed run left applied has removed its own ``old`` text, so the corpus would not validate
+    first). Only a sidecar that verifies is restored from; one that does not is refused, and the source
+    and the sidecar are left exactly as found. One run at a time holds the tree (an exclusive ``flock``),
+    so that restore never reverts a mutant a live run has applied.
 
 The output is a Markdown kill table (optionally appended to ``$GITHUB_STEP_SUMMARY``) and a JSON record.
 Exit status: 0 iff every selected mutant was KILLED over a green baseline; 1 otherwise; 2 if the corpus
-itself does not validate (a stale ``old`` string, an unknown test, a plane leak, ...). The same
+itself does not validate (a stale ``old`` string, an unknown test, a plane leak, ...); 3 if the runner
+refuses to touch the tree (another run holds it, or a sidecar an interrupted run left does not verify:
+nothing is restored, validated or run, and the source and the sidecar are left as found). The same
 ``validate_corpus`` runs on every PR in integration/tests/test_mutation_critical_set.py, so the corpus
 cannot silently rot between scheduled runs.
 
@@ -46,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import hashlib
 import json
 import os
@@ -55,9 +65,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — no flock on this platform: runs are not serialised
+    fcntl = None  # type: ignore[assignment]
 
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "tools" / "mutation" / "named-mutants.json"
@@ -70,6 +86,7 @@ CRASHED = "CRASHED"     # tests failed, but by an exception other than an assert
 ERROR = "ERROR"
 
 SIDECAR_SUFFIX = ".named-mutant.orig"
+SIDECAR_FORMAT = "named-mutants-sidecar/1"
 PROBE_MODULE = "_named_mutants_probe"
 # Loaded into every pytest child (-p): records, per failed test phase, whether it failed by an ASSERTION.
 PROBE_SOURCE = '''"""named_mutants probe: per failed test phase, the exception type and whether it is an assertion."""
@@ -362,18 +379,124 @@ def classify(rc: Optional[int], rows: Optional[list[dict]], tail: str) -> tuple[
     return ERROR, f"rc=1 with no failed test recorded (not a kill): {tail}"
 
 
+class SidecarError(RuntimeError):
+    """A sidecar that does not verify: nothing is restored from it, and the source and the sidecar stay as found."""
+
+
 def sidecar(src: Path) -> Path:
     return src.with_name(src.name + SIDECAR_SUFFIX)
 
 
+def _fsync_dir(d: Path) -> None:
+    """Make a rename in ``d`` durable (where a directory can be opened and fsynced at all)."""
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:  # pragma: no cover — a platform that cannot open a directory
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover — a filesystem that cannot fsync a directory
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_sidecar(src: Path, original: bytes, st: os.stat_result) -> Path:
+    """Keep ``original`` (what ``src`` holds before a mutant is applied) in its sidecar, ATOMICALLY: a one-line
+    JSON header recording the sha256 of the original (and its atime/mtime), then the original bytes, written to
+    a temp file in the sidecar's own directory, fsynced, and only then renamed into place. A crash at any point
+    leaves no sidecar or a whole one; run_file applies the mutant only after this returns."""
+    side = sidecar(src)
+    head = json.dumps({"format": SIDECAR_FORMAT, "sha256": _sha(original),
+                       "atime_ns": st.st_atime_ns, "mtime_ns": st.st_mtime_ns}, sort_keys=True)
+    fd, tmp = tempfile.mkstemp(prefix=side.name + ".", suffix=".tmp", dir=side.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(head.encode("ascii") + b"\n" + original)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, side)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    _fsync_dir(side.parent)
+    return side
+
+
+def read_sidecar(side: Path) -> tuple[bytes, int, int]:
+    """(original bytes, atime_ns, mtime_ns) from a sidecar whose header records the sha256 of exactly the bytes
+    that follow it. Anything else (cut short by a crash, altered, not this format) raises SidecarError."""
+    head, sep, body = side.read_bytes().partition(b"\n")
+    try:
+        meta = json.loads(head.decode("ascii")) if sep else None
+    except ValueError:
+        meta = None
+    if not isinstance(meta, dict) or meta.get("format") != SIDECAR_FORMAT:
+        raise SidecarError(f"{side}: not a {SIDECAR_FORMAT} sidecar (no valid header)")
+    atime_ns, mtime_ns = meta.get("atime_ns"), meta.get("mtime_ns")
+    if meta.get("sha256") != _sha(body) or not isinstance(atime_ns, int) or not isinstance(mtime_ns, int):
+        raise SidecarError(f"{side}: the {len(body)} bytes it holds do not match the sha256 its header records "
+                           "(cut short or altered)")
+    return body, atime_ns, mtime_ns
+
+
 def restore_interrupted(src: Path) -> bool:
-    """If an interrupted run left ``src`` mutated, its sidecar holds the original: put it back. True if restored."""
+    """If an interrupted run left ``src`` mutated, its sidecar holds the original: put it back (bytes and
+    mtime). True if restored. Only a sidecar that VERIFIES is restored from: one that does not raises
+    SidecarError and leaves the source and the sidecar exactly as found, for a hand to inspect. The sidecar is
+    removed only once the source holds the original again."""
     side = sidecar(src)
     if not side.is_file():
         return False
-    src.write_bytes(side.read_bytes())
+    original, atime_ns, mtime_ns = read_sidecar(side)
+    with open(src, "wb") as fh:
+        fh.write(original)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.utime(src, ns=(atime_ns, mtime_ns))
+    if _sha(src.read_bytes()) != _sha(original):  # pragma: no cover — a restore that did not land
+        raise SidecarError(f"FAILED TO RESTORE {src} from {side} (the sidecar is kept)")
     side.unlink()
     return True
+
+
+def restore_interrupted_files(corpus: dict, repo: Path) -> tuple[list[str], list[str]]:
+    """The interrupted-run restore for EVERY file the corpus names (both planes), run before the corpus is
+    validated or any source is read: a mutant a killed run left applied has removed its own ``old`` text, so
+    validating first would refuse the corpus as stale and leave the mutated source and its sidecar in place.
+    (restored paths, refusals); a refused file's source and sidecar are left as found."""
+    restored: list[str] = []
+    refused: list[str] = []
+    for entry in corpus.get("files") or []:
+        rel = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(rel, str) or not rel:
+            continue  # validate_corpus reports it
+        try:
+            if restore_interrupted(repo / rel):
+                restored.append(rel)
+        except (SidecarError, OSError) as e:
+            refused.append(f"{rel}: {e}")
+    return restored, refused
+
+
+@contextlib.contextmanager
+def _tree_lock(repo: Path) -> Iterator[bool]:
+    """An exclusive, non-blocking ``flock`` on the tree's root directory for the life of the run: True if this
+    run holds the tree, False if another run does (two runs in one tree would otherwise revert each other's
+    applied mutants at startup). The kernel drops it when the process dies, SIGKILL included."""
+    if fcntl is None:  # pragma: no cover
+        yield True
+        return
+    fd = os.open(repo, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
 
 
 def _abs_tests(nodes: list[str], repo: Path) -> list[str]:
@@ -441,7 +564,7 @@ def run_file(entry: dict, corpus: dict, repo: Path, *, python: str = sys.executa
                 continue
             env = plane_env(corpus, plane, repo, scratch / f"m{i}")
             try:
-                sidecar(src).write_bytes(original)
+                write_sidecar(src, original, st)
                 src.write_bytes(mutated.encode("utf-8"))
                 imported, why = _imports(module, cwd, env, python, timeout)
                 if imported:
@@ -510,7 +633,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--list", action="store_true", help="list the selected mutants and exit")
     args = ap.parse_args(argv)
 
+    with _tree_lock(REPO) as held:
+        if not held:
+            print(f"another named-mutants run holds {REPO}: refusing to touch its sources", file=sys.stderr)
+            return 3
+        return _run(args)
+
+
+def _run(args: argparse.Namespace) -> int:
     corpus = load_corpus(Path(args.corpus))
+    restored, refused = restore_interrupted_files(corpus, REPO)
+    for rel in restored:
+        print(f"[named-mutants] restored {rel} from the sidecar an interrupted run left", flush=True)
+    if refused:
+        print("named-mutants: a sidecar an interrupted run left does not verify, so nothing was restored from "
+              "it and nothing ran; the source and the sidecar are left as found, for a hand to inspect:",
+              file=sys.stderr)
+        for why in refused:
+            print(f"  - {why}", file=sys.stderr)
+        return 3
     problems = validate_corpus(corpus, REPO)
     if problems:
         print("named-mutant corpus does not validate:", file=sys.stderr)
