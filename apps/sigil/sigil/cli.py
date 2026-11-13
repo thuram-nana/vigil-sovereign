@@ -655,7 +655,11 @@ def cmd_eval_grant(a) -> None:
     from .governor.identity import ensure_owner_keypair, owner_keypair, owner_pubkey
     store = SpineStore()
 
+    if a.action != "reconcile" and not a.engagement:
+        print("refusing: --engagement is required for arm / revoke / status", file=sys.stderr)
+        sys.exit(2)
     if a.action == "status":
+        from .governor.seam_publish import IN_PROGRESS, read_close_alarm
         g = EvalCapabilityGrant(store)
         tgt = a.target or None
         if tgt is None:
@@ -664,9 +668,24 @@ def cmd_eval_grant(a) -> None:
             live = g.granted_targets(engagement_slug=a.engagement, now=_time.time())
             tgt = live[0] if live else None
         st = g.state(engagement_slug=a.engagement, target=tgt, now=_time.time())
+        alarm = read_close_alarm() or {}
+        named = set(alarm.get("failed") or [])
+        unconfirmed = bool(alarm) and (f"grant:{a.engagement}" in named or IN_PROGRESS in named
+                                       or any(str(n).startswith("(") for n in named))
+        unverified = (not st.granted) and g.structurally_live(engagement_slug=a.engagement)
+        notes = []
+        if unconfirmed:
+            notes.append("the seam is NOT confirmed for this engagement (see `vigil doctor`): a stale publication may "
+                         "still authorize on the offense plane; run `sigil eval-grant reconcile`")
+        if unverified:
+            notes.append("a grant record after the last revoke does not verify under the current owner keys: the "
+                         "offense plane may still honour it; revoke it with `sigil eval-grant revoke`")
         print(json.dumps({
             "engagement": a.engagement,
             "armed": st.granted,
+            "seam_unconfirmed": unconfirmed,
+            "unverified_grant_after_revoke": unverified,
+            "notes": notes,
             "reason": st.reason,
             "target": st.target,
             "allowed_gate_overrides": list(st.allowed_gate_overrides),
@@ -697,6 +716,17 @@ def cmd_eval_grant(a) -> None:
         owner = ensure_owner_keypair()
 
     g = EvalCapabilityGrant(store, owner_key=owner)
+
+    if a.action == "reconcile":
+        from .governor.eval_capability_grant import EvalGrantSeamUnreconciled, reconcile_eval_seam
+        try:
+            out = reconcile_eval_seam(store, owner_key=owner, revoke_live_grants=False, by="owner",
+                                      reason=(a.reason or "eval seam reconcile"))
+        except EvalGrantSeamUnreconciled as e:
+            print(json.dumps({"ok": False, "unconfirmed": e.failed, "alarm_recorded": e.alarm_recorded}, indent=2))
+            sys.exit(1)
+        print(json.dumps({"ok": True, **out}, indent=2))
+        return
 
     if a.action == "revoke":
         seq = g.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
@@ -3181,8 +3211,10 @@ def main(argv=None) -> None:
                          help="M-11 EvalCapabilityGrant (the eval button): arm/revoke/status the owner+"
                               "evaluator pre-authorization that lifts the opt-in witness_quorum/blast_veto/"
                               "containment_preview gate vetoes for one engagement/target")
-    peg.add_argument("action", choices=["arm", "revoke", "status"])
-    peg.add_argument("--engagement", required=True, help="the engagement slug the grant binds to")
+    peg.add_argument("action", choices=["arm", "revoke", "status", "reconcile"],
+                     help="reconcile: re-publish every eval grant / attestation publication from the spine and clear "
+                          "the `vigil doctor` revoke alarm once every one is confirmed (revokes nothing)")
+    peg.add_argument("--engagement", default=None, help="the engagement slug the grant binds to (arm/revoke/status)")
     peg.add_argument("--target", default=None, help="the target URL/host the grant binds to (arm; optional filter on status)")
     peg.add_argument("--overrides", default=None,
                      help="comma-list ⊆ {witness_quorum,blast_veto,containment_preview} to pre-authorize (arm)")

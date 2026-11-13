@@ -253,28 +253,31 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> "tuple[b
     path = _highwater_path(base_dir, slug)
     if path is None:
         return False, "unsafe slug for the eval-capability-grant high-water floor"
+    # The sovereign's floor (raised with every publish and withdrawal) lives in the seam directory; a hardened
+    # deploy keeps the offense floor elsewhere. Both are ENFORCED; the offense floor only ever advances to a seq
+    # this reader verified (an unauthenticated seam-directory value is never copied into it).
     shared_path = _shared_floor_path(base_dir, slug)
-    if shared_path is not None and shared_path != path:
-        # The sovereign's floor (raised on every publish and withdrawal) lives in the seam directory; a hardened
-        # deploy keeps the offense floor elsewhere. Enforce both: ratchet the private floor up to the shared one
-        # first, so deleting the shared file later cannot re-open a replay the sovereign already closed.
+    distinct = shared_path is not None and shared_path != path
+    shared = None
+    if distinct:
         try:
             shared = load_highwater(shared_path)
         except HighWaterError as e:
-            return False, f"eval-capability-grant publication floor in the seam directory is corrupt/tampered (fail-closed): {e}"
-        if shared is not None:
-            try:
-                advance_highwater(path, SimpleNamespace(entry_count=shared["entry_count"],
-                                                        last_seq=shared["last_seq"]))
-            except HighWaterDowngrade:
-                pass                                   # the private floor is already at least as high
-            except (OSError, HighWaterError) as e:
-                return False, f"cannot persist the eval-capability-grant high-water floor (fail-closed): {e}"
+            return False, (f"eval-capability-grant publication floor in the seam directory is corrupt/tampered "
+                           f"(fail-closed): {e}")
     try:
         prior = load_highwater(path)
     except HighWaterError as e:
         return False, f"eval-capability-grant high-water floor is corrupt/tampered (fail-closed): {e}"
+    if distinct and shared is None and prior is not None:
+        return False, ("eval-capability-grant publication floor is missing from the seam directory while the offense "
+                       "floor exists (refused: every publication writes it, so its loss is a tamper or a restore; "
+                       "the sovereign's next publish of this engagement restores it)")
     head = SimpleNamespace(entry_count=int(seq), last_seq=int(seq))
+    if shared is not None:
+        ok, msg = check_highwater(head, shared)
+        if not ok:
+            return False, f"ROLLBACK refused — the sovereign withdrew or superseded this publication: {msg}"
     ok, msg = check_highwater(head, prior)
     if not ok:
         return False, f"ROLLBACK refused — replay of an older published state: {msg}"

@@ -110,13 +110,15 @@ class OffenseGate:
             revoke_grants_on_close(self.store, owner_key=self.owner_key,
                                    trusted_pubkey=self.trusted_pubkey, by=by,
                                    reason=f"offense-gate close: {reason}" if reason else "offense-gate close")
-        except Exception:  # noqa: BLE001 — a grant-revoke failure must never prevent the fail-safe close
-            # Never silently: revoke_grants_on_close withdrew what it could (floor first) and recorded the durable
-            # alarm `vigil doctor` reports, naming any grant whose publication could not be confirmed and may
-            # therefore still authorize. The operator log carries the cause.
+        except Exception as e:  # noqa: BLE001 — a grant-revoke failure never undoes the fail-safe close (appended above)
+            # Never silently: the reconcile withdrew what it could (floor first) and recorded the durable alarm
+            # `vigil doctor` reports, naming every publication it could not confirm. When even that alarm could not
+            # be written, no durable signal would remain, so the failure is raised to the caller instead.
             import logging
             logging.getLogger(__name__).critical("offense close: the eval-capability grants could not all be "
                                                  "revoked on the seam; see `vigil doctor`", exc_info=True)
+            if not getattr(e, "alarm_recorded", False):
+                raise
         return seq
 
     # -- the fail-closed fold (never cached — the verdict is time-dependent) -------------------
