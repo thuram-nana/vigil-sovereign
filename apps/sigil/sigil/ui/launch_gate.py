@@ -979,11 +979,14 @@ class LaunchGate:
         window (held, re-admitted on resume). Verifies the lease owner-pinned + tenant-binds (``expect_org_id``);
         the record is done UNDER ``self._lock`` and the cross-process settle lock (a short bounded wait), so a pause
         is linearized with every settle; the marker's own read-modify-write is cross-process exclusive by its
-        per-file lock (E3bc). If the settle lock stays busy past its short wait the halt is still recorded and the
-        reply says ``linearized: False`` (OWNER DECISION OD-1: a pause must always be able to HALT). Pausing moves
-        NO money (no credit/amount/signature touched). A SETTLED/canceled lease is refused (it is no longer a
-        runnable launch, so there is nothing to pause) — settled per the seam marker, or, with the settle record
-        on, per the spine. Idempotent: re-pausing the same (slug, nonce) re-writes the same marker.
+        per-file lock (E3bc). If the settle lock stays busy past its short wait or cannot be used at all, or (settle
+        record on) the spine's settlement evidence cannot be read, the halt is still recorded — decided on the seam
+        marker alone — and the reply says ``linearized: False`` (OWNER DECISION OD-1: a pause must always be able to
+        HALT; a pause recorded on a lease that turns out settled is inert). Pausing moves NO money (no
+        credit/amount/signature touched). A SETTLED/canceled lease is refused (it is no longer a runnable launch, so
+        there is nothing to pause) — settled per the seam marker, or, with the settle record on and readable, per the
+        spine. Only a failure to write the pause marker itself refuses. Idempotent: re-pausing the same (slug, nonce)
+        re-writes the same marker.
 
         An EXPIRED lease is deliberately NOT refused (the validity window is not checked here): the same marker
         is the in-flight HALT, and a run that armed inside the window keeps sending traffic after ``not_after``
@@ -997,33 +1000,46 @@ class LaunchGate:
             return err
         s, non, oid = doc.engagement_slug, doc.nonce, doc.org_id
         linearized = True
+
+        def _unlinearized(what: str, e: BaseException) -> None:
+            # OD-1: the stop control is never taken away by the settle side. The halt is recorded anyway, decided on
+            # what can still be read (the seam marker), and the reply says it was not linearized with a settle.
+            nonlocal linearized
+            linearized = False
+            import logging
+            logging.getLogger(__name__).warning("%s (%s); recording the launch pause without it (not linearized "
+                                                "with a concurrent settle)", what, type(e).__name__)
+
         try:
             from .. import config
-            from ..governor.launch_settlement import SettleLockBusy, scan_settlement, settle_lock
+            from ..governor.launch_settlement import scan_settlement, settle_lock
             from vigil_integration.live.credit_lease_broker import is_lease_settled
             from vigil_integration.live.credit_lease_pause import record_lease_pause
             base = self._seam_base()
             pub = self.owner_key.public_key_b64 if self.owner_key is not None else None
             # E3bc: the spine's settlement evidence is consulted only with the settle record on (so default
             # deployments pay no spine scan on the customer's stop control); the scan runs before any lock.
-            ev0 = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non) if (
-                pub and config.settle_spine_record_enabled()) else None
+            ev0 = None
+            if pub and config.settle_spine_record_enabled():
+                try:
+                    ev0 = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non)
+                except Exception as e:  # noqa: BLE001 — an unreadable spine never refuses the halt (OD-1)
+                    _unlinearized("the spine's settlement evidence cannot be read", e)
             with self._lock:
                 held = contextlib.ExitStack()
                 try:
                     # LINEARIZE with every settle (the sweep / drain / cancel), so a pause either lands before a
                     # settle's in-lock pause re-read or is refused as settled. Bounded short (OD-7)...
                     held.enter_context(settle_lock(self.store, wait_s=min(2.0, config.settle_lock_wait_s())))
-                except SettleLockBusy:
-                    # ...and a busy lock never takes away the stop control: the halt is recorded anyway (OD-1).
-                    import logging
-                    logging.getLogger(__name__).warning("the settle lock is busy; recording the launch pause "
-                                                        "without it (not linearized with a concurrent settle)")
-                    linearized = False
+                except Exception as e:  # noqa: BLE001 — busy, or an unusable lock file: the halt still wins (OD-1)
+                    _unlinearized("the settle lock is busy or unusable", e)
                 with held:
-                    settled = is_lease_settled(base, s, non) or (
-                        ev0 is not None and scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non,
-                                                            since=ev0).settled)
+                    settled = is_lease_settled(base, s, non)
+                    if not settled and ev0 is not None:
+                        try:
+                            settled = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non, since=ev0).settled
+                        except Exception as e:  # noqa: BLE001 — an unreadable spine never refuses the halt (OD-1)
+                            _unlinearized("the spine's settlement evidence cannot be read", e)
                     if settled:
                         return {"ok": False,
                                 "error": "this lease has already been settled/canceled and cannot be paused"}

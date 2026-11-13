@@ -60,7 +60,9 @@ the spine** — never the source of truth.
   the settle lock waits `VIGIL_SETTLE_LOCK_WAIT_S` seconds (default 10, clamped to 0.1–120), then a
   settle answers "busy; retry" — the settle drain defers the completion (back to `incoming/`), the
   sweep reports `deferred`, a customer cancel / start is refused with a retry hint. A pause waits at
-  most 2 s and then records the halt anyway (`linearized: false`); a resume never takes the settle
+  most 2 s and then records the halt anyway (`linearized: false`) — as it also does when the settle
+  lock cannot be opened or, with the flag on, the spine cannot be read (only the seam settlement
+  marker then decides whether the launch is already settled); a resume never takes the settle
   lock. With the flag on, a start on a host whose previous launch has a recorded settlement with
   money still to land is refused with a retry until the settle drain or `ops-sweep reservations
   --apply` finishes that settlement: both finish it through the previous launch's lease on the

@@ -33,6 +33,10 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * that check refusing a settle whose money all landed     -> test_flag_on_a_relaunch_after_a_settle_whose_money_...
   * the earlier lease's unlocked scan continued for another nonce
                                                             -> test_flag_on_a_relaunch_rescans_in_full_when_...
+  * pause refusing on an unusable settle lock / a spine read error
+                                                            -> test_an_unusable_settle_lock_still_records_the_halt,
+                                                               test_flag_on_a_spine_scan_failure_still_records_...
+  * pause skipping the marker check without the settle lock -> test_an_unusable_settle_lock_still_refuses_to_pause_...
 
 Run: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -m pytest apps/sigil/tests/test_settle_fold_main.py
 """
@@ -946,6 +950,65 @@ def test_a_pause_during_a_stuck_settle_lock_still_records_the_halt(monkeypatch):
         os.close(fd)
     assert out["ok"] is True and out["linearized"] is False, out     # the halt wins (OD-1)
     assert is_lease_paused(_base(), r2["slug"], r2["nonce"])
+
+
+@pytest.mark.parametrize("fault", ["not_a_file", "permission", "no_path"])
+def test_an_unusable_settle_lock_still_records_the_halt(flag, fault, monkeypatch):
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    s = _store()
+    _seat(s)
+    r = _reserve(s, publish=True)
+    if fault == "not_a_file":                                        # e.g. a damaged spine directory
+        p = settle_lock_path(s)
+        p.unlink(missing_ok=True)
+        p.mkdir()
+    else:
+        exc = PermissionError(13, "Permission denied") if fault == "permission" else ValueError("no path")
+
+        def _unusable(*a, **k):
+            raise exc
+
+        monkeypatch.setattr(ls, "settle_lock", _unusable)
+    out = LaunchGate(s).pause_launch(signed_lease=r["lease"], expect_org_id=ORG)
+    assert out["ok"] is True and out["linearized"] is False, out     # the halt wins (OD-1)
+    assert is_lease_paused(_base(), r["slug"], r["nonce"])
+
+
+def test_an_unusable_settle_lock_still_refuses_to_pause_a_settled_lease(flag):
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    s = _store()
+    _seat(s)
+    r = _reserve(s, publish=True)
+    assert _settle(s, r, 30)["action"] == "launch_settled"
+    p = settle_lock_path(s)
+    p.unlink(missing_ok=True)
+    p.mkdir()
+    out = LaunchGate(s).pause_launch(signed_lease=r["lease"], expect_org_id=ORG)
+    assert out["ok"] is False and "settled" in out["error"], out
+    assert not is_lease_paused(_base(), r["slug"], r["nonce"])
+
+
+@pytest.mark.parametrize("which", ["unlocked", "in_lock"])
+def test_flag_on_a_spine_scan_failure_still_records_the_halt(record_on, which, monkeypatch):
+    from sigil.spine.store import SpineError
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    s = _store()
+    _seat(s)
+    r = _reserve(s, publish=True)
+    real = ls.scan_settlement
+    calls = {"n": 0}
+
+    def _scan(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == (1 if which == "unlocked" else 2):
+            raise SpineError("a referenced segment is missing")
+        return real(*a, **k)
+
+    monkeypatch.setattr(ls, "scan_settlement", _scan)
+    out = LaunchGate(s).pause_launch(signed_lease=r["lease"], expect_org_id=ORG)
+    assert out["ok"] is True and out["linearized"] is False, out     # decided on the seam marker alone
+    assert is_lease_paused(_base(), r["slug"], r["nonce"])
+    assert calls["n"] == (1 if which == "unlocked" else 2)
 
 
 def test_resume_never_takes_the_settle_lock(monkeypatch):
