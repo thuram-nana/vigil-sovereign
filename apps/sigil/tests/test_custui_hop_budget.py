@@ -23,10 +23,11 @@ def _default(fn, name):
 
 
 def test_each_slow_action_outwaits_its_own_downstream_worst_case():
-    from sigil.governor import flutterwave_egress
+    from sigil.governor import flutterwave_egress, stripe_egress
     from sigil.ui import email_channel, oidc, ownership_fetch
     t = custui._SLOW_HOP_TIMEOUTS_S
     assert t["billing_checkout"] > 2 * flutterwave_egress._DEFAULT_TIMEOUT_S          # connect + read
+    assert t["billing_checkout"] > 2 * stripe_egress._DEFAULT_TIMEOUT_S               # the same, when Stripe serves it
     assert t["oidc_finish"] > 2 * (_default(oidc._http_post_form, "timeout") + _default(oidc._http_get_json, "timeout"))
     assert t["target_verify"] > ownership_fetch._DEFAULT_TOTAL_TIMEOUT_S              # an ABSOLUTE budget
     smtp = _default(email_channel.SmtpEmailSender.__init__, "timeout")
