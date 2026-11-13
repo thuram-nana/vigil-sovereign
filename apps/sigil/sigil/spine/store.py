@@ -644,9 +644,10 @@ class SpineStore:
         m = read_manifest(self._layout)
         if m is None and self._complete_orphan_migration_locked():
             m = read_manifest(self._layout)
-        brk = _segment_run_break(m) if m is not None else None
-        if brk is not None:                         # the write path refuses a broken run exactly as the readers do
-            raise SpineError(f"spine manifest (generation {m.generation}) is not a contiguous segment run: {brk}")
+        if m is not None:                           # the write path refuses a broken run exactly as the readers do
+            brk = _segment_run_break(m)
+            if brk is not None:
+                raise SpineError(f"spine manifest (generation {m.generation}) is not a contiguous segment run: {brk}")
         if m is None:
             # WRITE path fails CLOSED too (mirrors the read guard): if a seg-1+ artifact exists with no
             # manifest, this is a manifest-REMOVED SEGMENTED spine — never fall back to (resurrect)
