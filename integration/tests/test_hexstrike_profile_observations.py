@@ -21,17 +21,23 @@ import json
 from types import SimpleNamespace
 
 import pytest
-import importlib.util
 
 # The FEED/SOURCE tests are framework-free and run in BOTH legs. The three tests that DRIVE the seam
 # (call BrainThink) lazily construct the canonical HexstrikeAgentBody, which imports
 # framework.v2.agent_body.interface (FATAL-2: offense leg only) — skip them where framework is absent
 # (the sovereign leg) and run them in the offense leg, where this file is on the run-list.
-_HAS_FRAMEWORK = importlib.util.find_spec("framework") is not None
-_needs_body = pytest.mark.skipif(
-    not _HAS_FRAMEWORK,
-    reason="drives BrainThink -> canonical HexstrikeAgentBody -> framework.v2.agent_body.interface "
-           "(offense leg only); the module-import + feed/source tests here stay sovereign-safe")
+# The gate is `pytest.importorskip`, not `skipif(find_spec(...) is None)`: in the offense leg the plane is
+# REQUIRED (VIGIL_REQUIRE_PLANES), where an importorskip that cannot import is a failure — so a renamed or
+# broken agent-body module turns these three seam tests red there instead of skipping them.
+@pytest.fixture
+def _agent_body():
+    return pytest.importorskip(
+        "framework.v2.agent_body.interface",
+        reason="drives BrainThink -> canonical HexstrikeAgentBody -> framework.v2.agent_body.interface "
+               "(offense leg only); the module-import + feed/source tests here stay sovereign-safe")
+
+
+_needs_body = pytest.mark.usefixtures("_agent_body")
 
 from vigil_integration.brains.engine_think import BrainThink
 from vigil_integration.brains.hexstrike_brain import HexstrikeBrain, TargetType, TechnologyStack
