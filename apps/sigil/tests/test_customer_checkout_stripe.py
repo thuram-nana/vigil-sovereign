@@ -46,9 +46,12 @@ class _FakeStripe:
         self.calls.append(copy.deepcopy(params))
         li = params["line_items"][0]["price_data"]
         sid = f"cs_test_{len(self.calls)}z"
-        return {"object": "checkout.session", "id": sid, "livemode": False, "mode": params["mode"],
+        sess = {"object": "checkout.session", "id": sid, "livemode": False, "mode": params["mode"],
                 "client_reference_id": params["client_reference_id"], "amount_total": li["unit_amount"],
                 "currency": li["currency"], "url": f"https://checkout.stripe.com/c/pay/{sid}"}
+        if "expires_at" in params:                     # Stripe echoes the session bound it was asked for
+            sess["expires_at"] = params["expires_at"]
+        return sess
 
 
 def _with_fake_stripe(monkeypatch):
@@ -163,3 +166,134 @@ def test_unset_or_flutterwave_is_the_flutterwave_provider(monkeypatch, value):
     monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "flw-" + "key")
     p, *_rest = _provisioner()
     assert isinstance(p._checkout_provider(), FlutterwaveBillingProvider)
+
+
+# ---- audit E1 on the Stripe lane: the shared checkout seam's pending plan-checkout guard ---------------------------
+def _stripe_guarded(monkeypatch, tmp_path, now=5000.0):
+    """A Stripe-served provisioner whose pending plan-checkout ledger reads the spools where production looks
+    (``billing_spool_dirs``), with the Stripe proxy spool pointed at ``tmp_path``; Stripe's clock is ``now``."""
+    from sigil.governor import billing
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.pending_checkout import PendingPlanCheckouts, billing_spool_dirs
+    _on(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED", "1")
+    _stripe_on(monkeypatch)
+    for k in ("VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_BILLING_SPOOL", "VIGIL_STRIPE_BILLING_SPOOL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VIGIL_STRIPE_WEBHOOK_SPOOL", str(tmp_path / "stripe-spool"))
+    monkeypatch.setattr(billing.time, "time", lambda: now)
+    fake = _with_fake_stripe(monkeypatch)
+    ensure_owner_keypair()
+    p, admin, _t, org, other, _w = _provisioner()
+    old = p.pending_checkouts
+    p.pending_checkouts = PendingPlanCheckouts(old.dir, owner_key=old.owner_key, trusted_pubkey=old.trusted_pubkey,
+                                               billing_spools=billing_spool_dirs())
+    return p, admin, org, other, fake, tmp_path / "stripe-spool"
+
+
+def _stripe_envelope(root, obj: dict, stage: str, n: int):
+    """What the proxy's /webhooks/stripe spools (``vigil.webhook.stripe.v1``) for an event about ``obj``."""
+    import base64
+    import json
+    body = {"id": f"evt_{n}", "type": "invoice.paid" if obj.get("object") == "invoice"
+            else "checkout.session.completed", "livemode": False, "data": {"object": obj}}
+    env = {"schema": "vigil.webhook.stripe.v1", "body_b64": base64.b64encode(json.dumps(body).encode()).decode(),
+           "stripe_signature": "t=1,v1=00", "received_at": 1.0}
+    d = root / stage
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{n:032x}.json").write_text(json.dumps(env))
+
+
+def _audits(p):
+    seen: list = []
+    real = p.store.append
+
+    def cap(**kw):
+        pl = kw.get("payload")
+        if isinstance(pl, dict) and pl.get("signal") == "provision.audit":
+            seen.append(pl)
+        return real(**kw)
+    p.store.append = cap
+    return seen
+
+
+def test_a_stripe_plan_link_dies_before_its_pending_record_and_a_topup_is_unbounded(monkeypatch, tmp_path):
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S, PLAN_LINK_SESSION_MIN
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, _root = _stripe_guarded(monkeypatch, tmp_path)
+    p.billing_checkout(admin, org, "vigil_topup_1k", now=5000.0)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    topup, plan = fake.calls
+    assert "expires_at" not in topup                                       # the top-up payload is unchanged
+    assert plan["mode"] == "subscription"
+    assert 5000 + PLAN_LINK_SESSION_MIN * 60 <= plan["expires_at"] < 5000 + DEFAULT_TTL_S
+    with pytest.raises(ProvisionDenied, match="already in progress"):     # the second Stripe plan is refused
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S - 1)
+    assert len(fake.calls) == 2
+
+
+def test_a_stripe_session_without_the_bound_is_refused_and_frees_the_claim(monkeypatch, tmp_path):
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, _root = _stripe_guarded(monkeypatch, tmp_path)
+    real = fake.create                     # (the patched creator factory reads fake.create at each checkout)
+    fake.create = lambda params, *, idempotency_key: {
+        k: v for k, v in real(params, idempotency_key=idempotency_key).items() if k != "expires_at"}
+    with pytest.raises(ProvisionDenied, match="checkout refused"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    fake.create = real
+    assert p.billing_checkout(admin, org, _PLAN, now=5001.0)["checkout_url"]   # no stale claim was left behind
+
+
+@pytest.mark.parametrize("shape", ["session_ref", "session_meta", "invoice_parent", "invoice_legacy"])
+@pytest.mark.parametrize("stage", ["incoming", "working", "retry", "rejected"])
+def test_an_undrained_stripe_webhook_holds_an_expired_window(monkeypatch, tmp_path, shape, stage):
+    """The Stripe twin of the Flutterwave case: the paid plan's webhook waits undrained in the STRIPE spool (any
+    stage), so the expired record must not lapse — and the refusal names that webhook, not an unreadable one."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
+    obj = {"session_ref": {"object": "checkout.session", "id": "cs_test_1z", "client_reference_id": first},
+           "session_meta": {"object": "checkout.session", "id": "cs_test_1z", "metadata": {"tx_ref": first}},
+           "invoice_parent": {"object": "invoice", "id": "in_1",
+                              "parent": {"subscription_details": {"metadata": {"tx_ref": first}}}},
+           "invoice_legacy": {"object": "invoice", "id": "in_1",
+                              "subscription_details": {"metadata": {"tx_ref": first}}}}[shape]
+    _stripe_envelope(root, obj, stage, 1)
+    seen = _audits(p)
+    later = 5000.0 + DEFAULT_TTL_S + 1
+    assert p.customer_billing_offers(admin, org, now=later)["plan_checkout_pending"] is True
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=later)
+    assert seen[-1]["outcome"] == "refused_pending_unconfirmed"
+    assert first in seen[-1]["reason"] and f"{stage}/" in seen[-1]["reason"]
+    assert len(fake.calls) == 1
+
+
+def test_a_stripe_webhook_for_another_checkout_does_not_hold_the_window(monkeypatch, tmp_path):
+    """Attribution is exact on the Stripe lane too: another org's quarantined invoice does not block this org."""
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    _stripe_envelope(root, {"object": "invoice", "id": "in_9",
+                            "parent": {"subscription_details": {"metadata": {"tx_ref": "vigil:org_other:n9"}}}},
+                     "rejected", 1)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)   # the abandoned checkout lapsed
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize("obj", [
+    {"object": "invoice", "id": "in_1"},                                                   # names no checkout
+    {"object": "checkout.session", "id": "cs_test_1z", "client_reference_id": "vigil:org_chk1:a",
+     "metadata": {"tx_ref": "vigil:org_chk1:b"}},                                           # two that disagree
+])
+def test_a_stripe_webhook_that_cannot_be_attributed_refuses(monkeypatch, tmp_path, obj):
+    from sigil.ui.pending_checkout import DEFAULT_TTL_S
+    from sigil.ui.provision import ProvisionDenied
+    p, admin, org, _other, fake, root = _stripe_guarded(monkeypatch, tmp_path)
+    p.billing_checkout(admin, org, _PLAN, now=5000.0)
+    _stripe_envelope(root, obj, "rejected", 1)
+    seen = _audits(p)
+    with pytest.raises(ProvisionDenied, match="has not been confirmed"):
+        p.billing_checkout(admin, org, _PLAN, now=5000.0 + DEFAULT_TTL_S + 1)
+    assert "cannot be attributed" in seen[-1]["reason"] and len(fake.calls) == 1

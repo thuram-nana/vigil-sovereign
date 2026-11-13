@@ -17,6 +17,18 @@ error, corruption, a hostile file), `locked()` DENIES (returns a lockout) rather
 attacker must never be able to bypass the limiter by corrupting its state. A genuinely ABSENT marker is the
 normal "no failures yet" case and is allowed (that is not an error).
 
+CONCURRENCY: every read-modify-write of a marker (`record_failure`, `admit`) runs under ONE exclusive
+cross-process `flock` on `<dir>/.limiter.lock`, so concurrent requests — in one process or several —
+can never lose an update (two failures read the same count and write one), and a marker is only ever REPLACED
+(temp + `os.replace`), never unlinked first, so `locked()` (a lock-free read) never sees a LOCKED key's marker
+absent and allows it. `record_failure` stays best-effort (if the flock cannot be taken it still records).
+
+GUARD-AND-COUNT (`admit`, used by the customer checkout limiter): `locked()` + `record_failure()` are two
+separate steps and `record_failure` is best-effort, which is right for a login FAILURE counter but not for a
+limiter that must count every ATTEMPT across concurrent requests and processes. `admit()` checks and records in
+ONE step under that flock, and is fail-closed on BOTH legs: if the state cannot be locked, read, parsed, or
+durably written, the attempt is refused.
+
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
 """
 from __future__ import annotations
@@ -29,6 +41,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+try:
+    import fcntl  # POSIX advisory lock: cross-PROCESS serialization of every marker read-modify-write
+except ImportError:  # pragma: no cover - non-POSIX: admit() then fails closed, record_failure() is unserialized
+    fcntl = None  # type: ignore[assignment]
+
 # Defaults (operator-tunable by the caller via config). A key is locked once it accumulates `max_fails`
 # failures within `window_s`; the lock lasts `base_lock_s`, DOUBLING on each subsequent lockout of the same
 # key up to `max_lock_s` (exponential backoff), so a persistent attacker is slowed geometrically while a
@@ -38,6 +55,7 @@ _DEFAULT_WINDOW_S = 15 * 60.0            # 15 minutes
 _DEFAULT_BASE_LOCK_S = 60.0             # first lockout: 1 minute
 _DEFAULT_MAX_LOCK_S = 60 * 60.0          # cap a single lockout at 1 hour
 _DEFAULT_MAX_KEYS = 65536               # directory bound (anti-exhaustion)
+_LOCK_NAME = ".limiter.lock"            # the marker dir's flock file (not a sha256 marker; never swept)
 
 
 class LoginRateLimiter:
@@ -105,8 +123,8 @@ class LoginRateLimiter:
         except OSError:
             return 0
         for entry in entries:
-            if entry.name.endswith(".tmp"):
-                continue
+            if entry.name.endswith(".tmp") or entry.name == _LOCK_NAME:
+                continue                               # in-flight temp / the flock file (reaping it would split the lock)
             try:
                 rec = json.loads(Path(entry.path).read_text(encoding="utf-8"))
                 assert isinstance(rec, dict)
@@ -123,6 +141,46 @@ class LoginRateLimiter:
             else:
                 self._unlink(entry.path)               # fully cold (lock lapsed + memory elapsed) → reap
         return live
+
+    def _lock(self) -> int:
+        """Open + exclusively `flock` `<dir>/.limiter.lock` (cross-PROCESS); closing the returned fd releases it.
+        Raises OSError when the lock cannot be taken (no flock on this platform, an unusable directory)."""
+        if fcntl is None:  # pragma: no cover - non-POSIX
+            raise OSError("no flock on this platform")
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(self.dir / _LOCK_NAME), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            raise
+        return fd
+
+    def _outlived(self, marker: Path, t: float) -> bool:
+        """True iff `marker` was last written longer ago than any lockout (`max_lock_s`) or in-window attempt
+        (`window_s`) it could encode — so whatever it holds is no longer live. False on any stat fault."""
+        try:
+            return t - os.stat(marker, follow_symlinks=False).st_mtime > self.window_s + self.max_lock_s
+        except OSError:
+            return False
+
+    def _next_record(self, rec: dict, t: float) -> "tuple[dict, Optional[float]]":
+        """The marker state after one more failure/attempt at `t`, and the lockout it arms (None if none)."""
+        fails = self._recent_fails(rec, t)
+        fails.append(t)
+        lock_count = rec.get("lock_count", 0)
+        lock_count = int(lock_count) if isinstance(lock_count, (int, float)) and not isinstance(lock_count, bool) else 0
+        prev_lu_raw = rec.get("lock_until")
+        prev_lu = float(prev_lu_raw) if isinstance(prev_lu_raw, (int, float)) and not isinstance(prev_lu_raw, bool) else 0.0
+        # carry the prior lock_until forward (even once lapsed) so `_sweep` keeps the escalation memory alive;
+        # it never falsely locks, because `locked()` only treats lock_until > now as an active lock.
+        new: dict = {"fails": fails, "lock_count": lock_count, "lock_until": prev_lu}
+        locked_for: "Optional[float]" = None
+        if len(fails) >= self.max_fails:
+            lock_count += 1
+            locked_for = min(self.base_lock_s * (2 ** (lock_count - 1)), self.max_lock_s)
+            new = {"fails": [], "lock_count": lock_count, "lock_until": t + locked_for}
+        return new, locked_for
 
     def locked(self, key: str, *, now: "Optional[float]" = None) -> "Optional[float]":
         """Seconds remaining on an active lockout for `key`, or None if the key may attempt. FAIL-CLOSED: an
@@ -158,42 +216,38 @@ class LoginRateLimiter:
         min(base * 2**(lock_count-1), max_lock)) and clears the window. Returns the new lockout seconds if a
         lock was (re)armed, else None. FAIL-CLOSED on a corrupt existing marker: it is reset to a single
         fresh failure rather than trusted. Best-effort under I/O error (the `locked` gate still denies on an
-        unreadable marker)."""
+        unreadable marker). Serialized under the directory flock (no lost update across processes); if the flock
+        cannot be taken the failure is still recorded, unserialized."""
         if not isinstance(key, str) or not key:
             return None
         t = time.time() if now is None else float(now)
-        if self._sweep(t) >= self.max_keys:
-            # directory full of live (locked/recent-fail) keys: we are already under attack and denying;
-            # do not grow the dir further — the existing locks hold, so this is safe.
-            return None
-        marker = self._marker(key)
-        rec: dict = {}
         try:
-            raw = marker.read_text(encoding="utf-8")
-            loaded = json.loads(raw)
-            if isinstance(loaded, dict):
-                rec = loaded
-        except (OSError, ValueError):
-            rec = {}                                   # absent/corrupt → start fresh (a corrupt marker is
-            #                                            never TRUSTED to lower the count)
-        fails = self._recent_fails(rec, t)
-        fails.append(t)
-        lock_count = rec.get("lock_count", 0)
-        lock_count = int(lock_count) if isinstance(lock_count, (int, float)) and not isinstance(lock_count, bool) else 0
-        prev_lu_raw = rec.get("lock_until")
-        prev_lu = float(prev_lu_raw) if isinstance(prev_lu_raw, (int, float)) and not isinstance(prev_lu_raw, bool) else 0.0
-        # carry the prior lock_until forward (even once lapsed) so `_sweep` keeps the escalation memory alive;
-        # it never falsely locks, because `locked()` only treats lock_until > now as an active lock.
-        new: dict = {"fails": fails, "lock_count": lock_count, "lock_until": prev_lu}
-        locked_for: "Optional[float]" = None
-        if len(fails) >= self.max_fails:
-            lock_count += 1
-            locked_for = min(self.base_lock_s * (2 ** (lock_count - 1)), self.max_lock_s)
-            new = {"fails": [], "lock_count": lock_count, "lock_until": t + locked_for}
-        # atomic replace: unlink any existing marker then exclusive-create the new one
-        self._unlink(marker)
-        self._write_atomic(marker, new)
-        return locked_for
+            fd: "Optional[int]" = self._lock()
+        except OSError:
+            fd = None                                  # best-effort: still count the failure, unserialized
+        try:
+            if self._sweep(t) >= self.max_keys:
+                # directory full of live (locked/recent-fail) keys: we are already under attack and denying;
+                # do not grow the dir further — the existing locks hold, so this is safe.
+                return None
+            marker = self._marker(key)
+            rec: dict = {}
+            try:
+                raw = marker.read_text(encoding="utf-8")
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    rec = loaded
+            except (OSError, ValueError):
+                rec = {}                               # absent/corrupt → start fresh (a corrupt marker is
+                #                                        never TRUSTED to lower the count)
+            new, locked_for = self._next_record(rec, t)
+            # atomic REPLACE (temp + os.replace) — never unlink first: a reader must never see the marker of a
+            # LOCKED key absent (that reads as "no failures yet" and allows the attempt).
+            self._write_atomic(marker, new)
+            return locked_for
+        finally:
+            if fd is not None:
+                os.close(fd)                           # releases the flock
 
     def record_success(self, key: str) -> None:
         """Clear all failure/lock state for `key` (a legitimate success resets the counter)."""
@@ -211,3 +265,54 @@ class LoginRateLimiter:
             if r is not None and (worst is None or r > worst):
                 worst = r
         return worst
+
+    def admit(self, *keys: str, now: "Optional[float]" = None) -> "Optional[float]":
+        """GUARD-AND-COUNT one attempt under EVERY key, atomically across threads AND processes. Returns None iff
+        no key is locked and the attempt was DURABLY recorded under every key (so the `max_fails`-th attempt in a
+        window is admitted and arms the lock for the next one); otherwise the seconds to wait.
+
+        FAIL-CLOSED on every leg (a limiter that guards an outbound money call must never open on a fault): no
+        key, no `flock` (non-POSIX), a lock/read/parse failure on an existing marker, a full directory, or a
+        marker write that does not land all refuse with `base_lock_s`. The read-check-write runs under the
+        directory's exclusive `flock`, so two concurrent requests (in one process or several) can never both read
+        the same count and both be admitted past the ceiling. A refused attempt is NOT counted."""
+        if not keys or any(not isinstance(k, str) or not k for k in keys):
+            return self.base_lock_s
+        t = time.time() if now is None else float(now)
+        try:
+            fd = self._lock()
+        except OSError:
+            return self.base_lock_s                    # no flock (non-POSIX / unusable dir) → refuse
+        try:
+            recs: "list[dict]" = []
+            worst: "Optional[float]" = None
+            for k in keys:                             # read EVERY key before recording ANY (all-or-nothing gate)
+                marker = self._marker(k)
+                try:
+                    rec = json.loads(marker.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    rec = {}                           # no attempts yet (NOT an error)
+                except (OSError, ValueError):
+                    rec = None
+                if not isinstance(rec, dict):
+                    # unreadable / corrupt / hostile marker → refuse, never reset — until the FILE is older than any
+                    # lock or in-window attempt it could still encode (a write torn by a crash must not lock the key
+                    # out for ever, and only `_sweep` on ANOTHER key's admit would otherwise ever reap it).
+                    if not self._outlived(marker, t):
+                        return self.base_lock_s
+                    rec = {}                           # nothing it held can still be live: count afresh
+                lu = rec.get("lock_until")
+                if isinstance(lu, (int, float)) and not isinstance(lu, bool) and float(lu) - t > 0:
+                    worst = max(worst or 0.0, float(lu) - t)
+                recs.append(rec)
+            if worst is not None:
+                return worst                           # a locked key refuses; the refused attempt is NOT counted
+            if self._sweep(t) >= self.max_keys:
+                return self.base_lock_s                # cannot record without growing past the bound → refuse
+            for k, rec in zip(keys, recs):
+                new, _locked_for = self._next_record(rec, t)
+                if not self._write_atomic(self._marker(k), new):   # temp + os.replace: no absent-marker window
+                    return self.base_lock_s            # the attempt could not be counted → refuse
+            return None
+        finally:
+            os.close(fd)                               # releases the flock

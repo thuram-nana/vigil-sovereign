@@ -40,6 +40,7 @@ import math
 import os
 import re
 import secrets
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -134,9 +135,12 @@ class BillingProvider(ABC):
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
-                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
+                        session_minutes: "Optional[int]" = None) -> "CheckoutSession":
         """Open a tenant-bound hosted checkout. The base adapter has none: it refuses with `UnsupportedCapability`
-        (an explicit refusal, never an AttributeError from a duck-typed call). Adapters that can override it."""
+        (an explicit refusal, never an AttributeError from a duck-typed call). Adapters that can override it.
+        `session_minutes` (plan checkouts only; None leaves the payload unchanged) bounds how long the hosted page
+        can be paid, so the provisioner's pending plan-checkout record cannot lapse while the link could bill."""
         raise UnsupportedCapability(f"{type(self).__name__} does not support capability {CAP_HOSTED_CHECKOUT!r}")
 
 
@@ -188,6 +192,11 @@ StripeObjectFetcher = Callable[[str, str], Mapping[str, Any]]
 # minor unit, so unit_amount and the inbound amount mean the same money. Extend only after checking Stripe's currency
 # notes (ISK, HUF, TWD, UGX and the three-decimal currencies have special rules; MGA is zero-decimal in Stripe).
 _STRIPE_CHECKOUT_CURRENCIES = frozenset({"USD"})
+# A bounded plan session: Stripe's Checkout `expires_at` must fall 30 min .. 24 h after Stripe creates the session.
+# Our clock is read before the create reaches Stripe, so the bound we send carries a little slack above the asked
+# minutes (never past the 24 h ceiling); the pending plan-checkout record's drain margin absorbs it.
+_STRIPE_SESSION_MIN_RANGE = (30, 1440)
+_STRIPE_SESSION_SLACK_S = 60
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -264,7 +273,8 @@ class StripeBillingProvider(BillingProvider):
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
-                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
+                        session_minutes: "Optional[int]" = None) -> "CheckoutSession":
         """Create a tenant-bound Stripe Checkout Session for `price_id` — the same contract as the Flutterwave
         adapter (the checkout endpoint authorizes first; this primitive BINDS).
 
@@ -277,7 +287,10 @@ class StripeBillingProvider(BillingProvider):
         URL's query (in the hash when there is one, where the customer app reads it). The create carries the
         Idempotency-Key `vigil-co-<nonce>`. The response must be a session echoing our reference, mode, mode
         (test/live), catalog amount (one-off) and currency, with an https link on exactly `checkout.stripe.com`.
-        Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
+        `session_minutes` (a plan checkout; None sends no bound, as before) sets the session's `expires_at` so the
+        link stops being payable before the provisioner's pending plan-checkout record lapses; the response must
+        then echo that same `expires_at`. Fail-closed throughout: any refusal raises `UnsupportedCapability` /
+        `ValueError`."""
         self.require(CAP_HOSTED_CHECKOUT)
         creator = self._checkout_creator
         if creator is None:                            # unreachable once require() passed; kept for type narrowing
@@ -323,12 +336,20 @@ class StripeBillingProvider(BillingProvider):
             # the charge must be in the catalog currency: never let Stripe localise it on this session
             "adaptive_pricing": {"enabled": False},
         }
+        if session_minutes is not None:
+            sm, (lo, hi) = session_minutes, _STRIPE_SESSION_MIN_RANGE
+            if not isinstance(sm, int) or not lo <= sm <= hi:      # (a bool is below the range's floor)
+                raise ValueError(f"session_minutes must be an int in [{lo}, {hi}] for a Stripe checkout")
+            params["expires_at"] = int(time.time()) + min(sm * 60 + _STRIPE_SESSION_SLACK_S, hi * 60)
         if customer_email:
             params["customer_email"] = str(customer_email)
         try:
             resp = creator(params, idempotency_key=f"vigil-co-{n}")
         except Exception as exc:  # noqa: BLE001 — any outbound failure is a REFUSAL, re-raised as the contract type
             raise UnsupportedCapability(f"checkout creation failed ({type(exc).__name__})") from None
+        if "expires_at" in params and (not isinstance(resp, Mapping) or resp.get("expires_at") != params["expires_at"]):
+            raise UnsupportedCapability("checkout creation failed: the provider did not confirm the bounded payment "
+                                        "session")
         link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
         if not link:
             raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
@@ -722,9 +743,14 @@ def _https_link_on(link: object, *, exact_hosts: "frozenset[str] | tuple[str, ..
     return None                                                # pin the provider's hosted-checkout domain
 
 
-def checkout_tx_ref(org: str, nonce: str) -> str:
+def checkout_tx_ref(org_id: str, nonce: str) -> str:
     """The tenant-binding checkout reference ``vigil:<org>:<nonce>`` every provider carries (Flutterwave ``tx_ref``,
-    Stripe ``client_reference_id``), so the inbound mint and the dangling-reference sweep read one format."""
+    Stripe ``client_reference_id``), so the inbound mint and the dangling-reference sweep read one format. It is
+    also the tx_ref ``create_checkout`` sets for ``(org_id, nonce)``, so a caller can record it BEFORE the outbound
+    call (the provisioner's pending plan-checkout record). Validates the org and the nonce (fail-closed)."""
+    org = org_tenant_id(org_id)
+    if not isinstance(nonce, str) or ":" in nonce or not nonce:
+        raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
     return f"{_TX_REF_PREFIX}:{org}:{nonce}"
 
 
@@ -979,7 +1005,8 @@ class FlutterwaveBillingProvider(BillingProvider):
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
-                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> CheckoutSession:
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
+                        session_minutes: "Optional[int]" = None) -> CheckoutSession:
         """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
 
         MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
@@ -1009,10 +1036,7 @@ class FlutterwaveBillingProvider(BillingProvider):
         amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
         if amount_minor <= 0 or not currency:
             raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
-        n = nonce or secrets.token_urlsafe(18)
-        if not isinstance(n, str) or ":" in n or not n:
-            raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
-        tx_ref = checkout_tx_ref(org, n)
+        tx_ref = checkout_tx_ref(org, nonce or secrets.token_urlsafe(18))   # validates the nonce (fail-closed)
         payload: "dict[str, Any]" = {
             "tx_ref": tx_ref,
             "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
@@ -1029,6 +1053,15 @@ class FlutterwaveBillingProvider(BillingProvider):
             if not pp or len(pp) > 128 or any(ord(c) < 0x21 or ord(c) == 0x7f for c in pp):
                 raise ValueError("payment_plan must be a non-empty printable id")
             payload["payment_plan"] = pp
+        if session_minutes is not None:
+            # Audit E1b: bound how long the hosted payment page can be paid (Flutterwave Standard `session_duration`,
+            # minutes, ceiling 1440: once it elapses the processor closes the page and fails any uncompleted
+            # transaction) — so the provisioner's pending plan-checkout record, which outlives this session, cannot
+            # lapse while its link could still bill.
+            sm = session_minutes
+            if isinstance(sm, bool) or not isinstance(sm, int) or not 1 <= sm <= 1440:
+                raise ValueError("session_minutes must be an int in [1, 1440]")
+            payload["configurations"] = {"session_duration": sm}
         if customer_email:
             payload["customer"] = {"email": str(customer_email)}
         try:

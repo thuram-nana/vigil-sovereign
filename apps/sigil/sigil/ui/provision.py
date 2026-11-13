@@ -193,6 +193,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
+                 checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
@@ -230,6 +231,15 @@ class Provisioner:
         # (so there is no "checked-but-never-incremented" dead gate — the review's finding); when injected,
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
         self.member_limiter = member_limiter
+        # The DURABLE per-org / per-requester checkout-creation limiter (a LoginRateLimiter, guard-and-count via
+        # `admit`). The HTTP transport builds a fresh Provisioner per request, so the limit MUST live on disk,
+        # not on this instance. None ⇒ checkout is REFUSED (fail-closed: an unwired limiter can never mean
+        # "unlimited" outbound processor calls). The factory wires `_CHECKOUT_MAX` per `_CHECKOUT_WINDOW_S`.
+        self.checkout_limiter = checkout_limiter
+        # Audit E1b — the owner-signed, expiring, cross-process-exclusive PENDING plan-checkout record (a
+        # `pending_checkout.PendingPlanCheckouts`) that bridges the gap before a paid plan's webhook drains. None ⇒
+        # PLAN checkout is refused (fail-closed); top-ups never touch it.
+        self.pending_checkouts = pending_checkouts
         self.email_sender = email_sender
         # The trial size is validated HERE (fail at boot): an out-of-range value would otherwise half-commit every
         # sign-up — the account/org/membership are appended before wallet.grant refuses it. 0 means "no trial".
@@ -270,7 +280,8 @@ class Provisioner:
         return nxt
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
-               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False) -> None:
+               outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
+               tx_ref: str = "", expires_at: float = 0.0) -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -284,6 +295,10 @@ class Provisioner:
             "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
             "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
             "reason": str(reason)[:160]}
+        if tx_ref:
+            payload["tx_ref"] = str(tx_ref)[:128]   # the processor reference this audit row is about (checkout)
+        if expires_at:
+            payload["expires_at"] = float(expires_at)   # a created PLAN checkout's pending window (E1b backstop)
         if attestation:
             # The customer's inline "I am authorized to test this asset" affirmation, recorded on the
             # owner-signed append-only spine as the tamper-evident legal attestation (control of a host is not
@@ -1068,23 +1083,20 @@ class Provisioner:
         self.trial_launch_limiter.record_failure("trial:launch:global", now=now)
 
     # CHK-1 red-pen MED: every checkout is an OUTBOUND POST signed with the owner's processor key (and the webhook
-    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER. In-memory
-    # (a restart resets the window) — a bound on abuse, not an accounting record.
+    # drain's /verify shares that key's quota), so creation is rate-limited per ORG and per REQUESTER: at most
+    # `_CHECKOUT_MAX` attempts per `_CHECKOUT_WINDOW_S`, then a lockout of (at least) one window. The state is the
+    # injected filesystem `checkout_limiter` (durable across requests, restarts and processes — the transport
+    # builds a fresh Provisioner per request, so instance state would limit nothing).
     _CHECKOUT_MAX = 10
     _CHECKOUT_WINDOW_S = 600.0
 
-    def _checkout_rate_ok(self, keys, now: float) -> bool:
-        """Sliding-window limiter (call under ``self._lock``). True + records the attempt iff EVERY key is under
-        ``_CHECKOUT_MAX`` attempts in the last ``_CHECKOUT_WINDOW_S`` seconds."""
-        win = self.__dict__.setdefault("_checkout_attempts", {})
-        cutoff = now - self._CHECKOUT_WINDOW_S
-        for k in keys:
-            win[k] = [t for t in win.get(k, []) if t > cutoff]
-        if any(len(win[k]) >= self._CHECKOUT_MAX for k in keys):
+    def _checkout_rate_ok(self, requester: str, org_id: str, now: float) -> bool:
+        """Guard-AND-COUNT one checkout attempt against the per-org AND per-requester keys. True iff admitted
+        (and durably recorded). FAIL-CLOSED: no limiter wired, or limiter state that cannot be locked / read /
+        written, refuses."""
+        if self.checkout_limiter is None:
             return False
-        for k in keys:
-            win[k].append(now)
-        return True
+        return self.checkout_limiter.admit(f"checkout:org:{org_id}", f"checkout:user:{requester}", now=now) is None
 
     def _checkout_provider(self):
         """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
@@ -1159,6 +1171,30 @@ class Provisioner:
         cur = SubscriptionRegistry(self.store).subscription(org_id)
         return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
 
+    def _spine_plan_checkouts(self, org_id: str, t: float) -> "tuple[str, list[str]]":
+        """Audit E1b backstop — the PLAN checkouts the spine audit shows CREATED for ``org_id`` (a created plan row
+        carries its pending window's ``expires_at``): ``(live, lapsed)`` — the tx_ref of one whose window is still
+        open at ``t`` (else ""), and the tx_refs of those whose window has ended. The pending record is a SIGIL_HOME
+        file a local writer could delete; these rows are on the tamper-evident spine, so a deleted record still
+        refuses the second plan while a window is open, or while a lapsed one's webhook waits undrained
+        (fail-closed). A spine read fault raises (caller refuses). A full scan, but only on a plan checkout (rare,
+        and rate-limited)."""
+        live, lapsed = "", []
+        for r in self.store.iter_records():
+            pl = r.payload
+            if not (isinstance(pl, dict) and pl.get("signal") == "provision.audit"
+                    and pl.get("action") == "billing_checkout" and pl.get("outcome") == "created"
+                    and pl.get("org_id") == str(org_id)[:64]):
+                continue
+            ea = pl.get("expires_at")
+            if not isinstance(ea, (int, float)) or isinstance(ea, bool):
+                continue                                  # a top-up row (no pending window)
+            if t < float(ea):
+                live = live or str(pl.get("tx_ref") or "?")
+            elif pl.get("tx_ref"):
+                lapsed.append(str(pl["tx_ref"]))
+        return live, lapsed
+
     def customer_billing_offers(self, requester: str, requester_org_id: str, *, ip: str = "",
                                 now: "Optional[float]" = None) -> dict:
         """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
@@ -1176,8 +1212,13 @@ class Provisioner:
             from ..governor import catalog
             offered, _ents = self._checkout_offered()
             items = [p for p in catalog.plans() if p.get("price_id") in offered]
+            plans_on = bool(config.customer_plan_checkout_enabled())
+            # E1b: a plan checkout already in progress (paid or not, not yet drained) refuses a second plan, so the
+            # UI must not offer one either. Fail-closed: an unwired / untrusted pending record reads as pending.
+            pending = plans_on and (self.pending_checkouts is None
+                                    or self.pending_checkouts.pending(org_id, now=t))
             return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
-                    "plans_enabled": bool(config.customer_plan_checkout_enabled())}
+                    "plans_enabled": plans_on, "plan_checkout_pending": bool(pending)}
         return self._customer_read(requester, requester_org_id, "manage_billing", project)
 
     def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
@@ -1205,7 +1246,7 @@ class Provisioner:
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage billing for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
-            if not self._checkout_rate_ok((("org", requester_org_id), ("user", requester)), t):
+            if not self._checkout_rate_ok(requester, requester_org_id, t):
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="rate_limited")
                 raise ProvisionDenied("too many checkout attempts — try again later")
         try:
@@ -1234,16 +1275,78 @@ class Provisioner:
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None
         email = getattr(acct, "email", None) or None
+        nonce: "Optional[str]" = None
+        pending_ref = pending_note = ""
+        pending_until = 0.0
+        if is_plan and str(price_id) in offered:
+            # Audit E1b: `_org_has_live_plan` sees only DRAINED plans, so a paid plan whose webhook has not drained
+            # yet (a drain tick, NET-2b parking, or a quarantine awaiting an operator) left room for a second
+            # processor subscription. Claim the org's owner-signed, expiring PENDING plan-checkout record BEFORE the
+            # outbound call (exclusive across processes); a live one — or an expired one whose webhook still waits
+            # undrained in the billing spool — refuses this checkout. The tx_ref is fixed up front so the record
+            # names it.
+            from ..governor.billing import checkout_tx_ref
+            from .pending_checkout import UNCONFIRMED_MESSAGE, PendingCheckoutRefused
+            nonce = secrets.token_urlsafe(18)
+            pending_ref = checkout_tx_ref(requester_org_id, nonce)   # the admitted org: validated like create_checkout
+            try:
+                if self.pending_checkouts is None:
+                    raise PendingCheckoutRefused("plan checkout is unavailable right now (contact support)",
+                                                 code="refused_pending_unwired",
+                                                 detail="no pending plan-checkout ledger is wired")
+                claimed = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref, now=t)
+                pending_note, pending_until = claimed.get("replaced", ""), float(claimed["record"]["expires_at"])
+                # the deletion-proof backstop: a CREATED plan checkout still inside its window on the spine audit
+                # refuses even if its pending record file is gone (a deleted record must not reopen the window).
+                lapsed: "list[str]" = []
+                try:
+                    live, lapsed = self._spine_plan_checkouts(requester_org_id, t)
+                except Exception as exc:  # noqa: BLE001 — a spine read fault is fail-CLOSED, never "no checkout"
+                    live, why = "?", f"the spine audit could not be read ({type(exc).__name__})"
+                else:
+                    why = f"pending record missing but the spine audit shows a live plan checkout {live}"
+                if live:
+                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    raise PendingCheckoutRefused(
+                        "a plan checkout for this workspace is already in progress — complete it, or wait for it to "
+                        "expire (contact support)", code="refused_pending_spine", detail=why[:160])
+                # ... and an EARLIER plan checkout whose window ended may still have been PAID: refuse while its
+                # webhook waits undrained in the billing spool (quarantine has no time bound), whatever the record.
+                unconfirmed = self.pending_checkouts.undrained(lapsed)
+                if unconfirmed:
+                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    raise PendingCheckoutRefused(UNCONFIRMED_MESSAGE, code="refused_pending_unconfirmed",
+                                                 detail=unconfirmed[:160])
+            except PendingCheckoutRefused as exc:
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome=exc.code, reason=exc.detail, tx_ref=pending_ref)
+                raise ProvisionDenied(str(exc)) from None
+            # The first plan may have DRAINED between the pre-claim check above and the claim (e.g. over a record
+            # that had just expired): re-check under the claim, so a plan that is now live still refuses.
+            if self._org_has_live_plan(requester_org_id, t):
+                self.pending_checkouts.release(requester_org_id, pending_ref)
+                self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
+                            target=str(price_id), outcome="refused_existing_plan", tx_ref=pending_ref)
+                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
+                                      "(contact support), so a second subscription is refused rather than billed")
+        from .pending_checkout import PLAN_LINK_SESSION_MIN
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
-                                            customer_email=email, redirect_url=return_url,
-                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None))
+                                            customer_email=email, redirect_url=return_url, nonce=nonce,
+                                            payment_plan=(str(price_id) if is_plan and price_id in offered else None),
+                                            # E1b: a plan link must stop being payable before its pending record
+                                            # lapses (top-ups pass None: their payload is unchanged)
+                                            session_minutes=(PLAN_LINK_SESSION_MIN if pending_ref else None))
         except (UnsupportedCapability, ValueError) as exc:
+            if pending_ref:
+                # the processor refused: the customer never received a link, so free the claim for a retry
+                self.pending_checkouts.release(requester_org_id, pending_ref)
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
-                        target=str(price_id or ""), outcome="refused")
+                        target=str(price_id or ""), outcome="refused", tx_ref=pending_ref)
             raise ProvisionDenied(f"checkout refused: {exc}") from None
         self._audit("billing_checkout", requester=requester, org_id=requester_org_id, target=sess.price_id,
-                    outcome="created", critical=True)
+                    outcome="created", reason=pending_note, critical=True, tx_ref=sess.tx_ref,
+                    expires_at=pending_until)
         return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
                 "amount_minor": sess.amount_minor, "currency": sess.currency}
 
@@ -1845,6 +1948,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
+    from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs
     from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
@@ -1867,10 +1971,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                 poster, fetcher = customer_oidc_http_post, customer_oidc_jwks_fetcher
             oidc_provider = GoogleOidcIdentityProvider(oidc_cfg, http_post=poster, jwks_fetcher=fetcher,
                                                        now_fn=now_fn)
+    orgs = OrgRegistry(store)          # resolves the deployment owner identity once (reused for the pending records)
     return Provisioner(
         store,
         customers=CustomerRegistry(store),
-        orgs=OrgRegistry(store),
+        orgs=orgs,
         wallet=WalletRegistry(store),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
@@ -1888,6 +1993,16 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                               if config.SIGNUP_EMAIL_PER_HOUR > 0 else None),   # default OFF (0)
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
+        # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key),
+        # reading the billing-webhook spool (read-only) before an expired one may lapse.
+        pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=orgs.owner_key,
+                                               trusted_pubkey=orgs.trusted_pubkey,
+                                               billing_spools=billing_spool_dirs()),
+        # the per-org / per-requester checkout-creation ceiling (its own marker dir; guard-and-count `admit`).
+        checkout_limiter=LoginRateLimiter(config.CHECKOUT_RATELIMIT_DIR, max_fails=Provisioner._CHECKOUT_MAX,
+                                          window_s=Provisioner._CHECKOUT_WINDOW_S,
+                                          base_lock_s=Provisioner._CHECKOUT_WINDOW_S,
+                                          max_lock_s=6 * Provisioner._CHECKOUT_WINDOW_S),
         # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
         # (config.ownership_fetcher() returns None otherwise ⇒ target_verify fail-closed). No surprise egress.
         target_fetcher=config.ownership_fetcher(),
