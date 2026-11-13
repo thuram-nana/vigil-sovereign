@@ -461,13 +461,45 @@ def cost_ledger_write_enabled() -> bool:
 
 
 def settle_spine_record_enabled() -> bool:
-    """True iff every launch settle FIRST appends an owner-signed ``governor.launch_settled`` record (the settle
-    decision, keyed on the lease ``(slug, nonce)``; `governor/launch_settlement.py`) — so a settle that moved no
-    money (a completed run, refund 0) is on the spine, not only in the seam settlement marker, and a later settle
-    can finish a decision a crash interrupted. OFF by default (`VIGIL_SETTLE_SPINE_RECORD` unset /
-    non-affirmative): no record is appended and settle_launch writes the same spine records as before. Set it
-    identically for every process that settles (cockpit, settle-drain, ops-sweep)."""
+    """True iff every FRESH launch settle appends an owner-signed ``governor.launch_settled`` v2 DECISION record
+    (``governor/launch_settlement.py``: mode, reserved, consumed and the exact plan / wallet / postpaid refund
+    split, keyed on the lease ``(slug, nonce)``) before it moves any money — so a settle that moved no money (a
+    completed run, refund 0) is on the spine and not only in the seam settlement marker, and a later settle can
+    finish a decision a crash interrupted at the RECORDED amounts. OFF by default (``VIGIL_SETTLE_SPINE_RECORD``
+    unset / non-affirmative): no record is appended and every settle path writes the same spine records as
+    before. Resolved at call time.
+
+    It gates ONLY: the decision-record append; the sweep's finish path for a marker-present lease
+    (``ops_sweeps``); the spine check of an earlier launch in ``_earlier_launch_in_flight``; and the spine check in
+    ``pause_launch``. Settle evidence already on the spine (a refund grant, a postpaid settle) is honoured either
+    way. OWNER DECISION OD-4: set it IDENTICALLY for every process that settles — the cockpit, the customer
+    server, the settle-drain and ``ops-sweep`` — or a process with it off settles without a record its crash
+    could be finished from."""
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+#: The default and the bounds of :func:`settle_lock_wait_s` (OWNER DECISION OD-7).
+SETTLE_LOCK_WAIT_DEFAULT_S = 10.0
+_SETTLE_LOCK_WAIT_BOUNDS = (0.1, 120.0)
+
+
+def settle_lock_wait_s() -> float:
+    """How long a settle / publish / pause waits for the cross-process settle lock before it answers "busy; retry"
+    (``VIGIL_SETTLE_LOCK_WAIT_S`` seconds, default 10, clamped to [0.1, 120]; an unparsable or non-finite value
+    reads as the default). Resolved at call time. A settle that times out moves nothing and is retryable: the
+    drain defers the completion, the sweep reports ``deferred``, a customer cancel / start is refused with a
+    retry hint."""
+    raw = (os.environ.get("VIGIL_SETTLE_LOCK_WAIT_S") or "").strip()
+    if not raw:
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    try:
+        v = float(raw)
+    except ValueError:
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    if v != v or v in (float("inf"), float("-inf")):
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    lo, hi = _SETTLE_LOCK_WAIT_BOUNDS
+    return min(hi, max(lo, v))
 
 
 def provision_hop_key() -> str:

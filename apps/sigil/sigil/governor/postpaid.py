@@ -465,6 +465,20 @@ class PostpaidArrearsLedger:
         _debited, _credited, seen = self._fold()
         return key in seen
 
+    def has_credit_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed postpaid CREDIT (a reverse or a launch settle) under (org_id, entry_id) has been
+        folded — the SnapshotState-seeded seen-set, so it survives a hard prune (mirrors `was_accrued`). The settle
+        roll-forward confirms a ``settle-postpaid:`` entry with it before re-issuing one the live scan cannot see.
+        Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (POSTPAID_CREDIT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        _debited, _credited, seen = self._fold()
+        return key in seen
+
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((debited, credited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
