@@ -47,7 +47,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -231,7 +231,7 @@ class InvoiceRegistry:
         """(rows, since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the trusted pubkey
         differs from the snapshot's (mirror wallet)."""
         rows: dict[tuple, Invoice] = {}
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return rows, -1                               # anchor mismatch ⇒ genesis full-scan (mirror wallet)
         for row in snap.invoice_row:                      # seed the pruned-prefix rows (prune durability)
             if isinstance(row, (list, tuple)) and len(row) >= 10:

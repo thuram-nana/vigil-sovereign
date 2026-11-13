@@ -44,7 +44,7 @@ assert_no_offense()
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors asset_ownership._fold_proofs)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors asset_ownership._fold_proofs)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -307,7 +307,7 @@ class CustomerCredentialRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((state, issued, rows), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
         trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         state = dict(snap.customer_credential_state_map())
         issued = dict(snap.customer_credential_issued_map())

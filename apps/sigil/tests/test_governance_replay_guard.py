@@ -53,7 +53,7 @@ from sigil.governor.promotion import PromotionPolicy
 from sigil.mesh.registry import (_CAP_CORE, _DEV_CORE, advertise_capability, authorize_device,
                                  authorized_devices, capability_map, revoke_device)
 from sigil.reuse import generate_keypair
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -467,19 +467,19 @@ def test_promotion_build_matches_the_live_scan_under_a_replay():
     assert p.is_promoted("SCHOLAR", "draft") is False
 
 
-def test_promotion_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkeypatch):
-    """HAZARD 7: the seeded high-water must follow the SAME pubkey-dependent bypass as the state it
-    guards. A snapshot folded under a foreign anchor is invalid — including its high-water — so the fold
-    must restart from the bottom, or a rotated key would resurrect grants (or refuse genuine ones)."""
+def test_promotion_pruned_foreign_pubkey_snapshot_fails_closed(monkeypatch):
+    """HAZARD 7: the seeded high-water follows the SAME pubkey rule as the state it guards. A PRUNED snapshot folded
+    under a foreign anchor is invalid — its rows AND its high-water — and an empty restart over the deleted prefix
+    is not an answer either: the read RAISES (never a resurrected grant, never a refused real one)."""
     s = _store()
     p = _pp(s)
     p.grant("SCHOLAR", "draft", issued_at=5.0)
-    poisoned = SnapshotState(base_seq=99, trusted_pubkey=generate_keypair().public_key_b64,
+    poisoned = SnapshotState(base_seq=99, snapshot_seq=98, trusted_pubkey=generate_keypair().public_key_b64,
                              promotion=[["SCHOLAR", "draft", "revoked"]],
                              promotion_issued=[["SCHOLAR", "draft", 1e12]])
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
-    assert p.is_promoted("SCHOLAR", "draft") is True, \
-        "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real grant"
+    with pytest.raises(SnapshotError, match="does not succeed"):
+        p.is_promoted("SCHOLAR", "draft")
 
 
 # =====================================================================================================
@@ -611,16 +611,16 @@ def test_device_build_matches_the_live_scan_under_a_replay():
     assert authorized_devices(s, OWNER_PUB) == set()
 
 
-def test_device_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkeypatch):
-    """HAZARD 7: the seeded high-water follows the SAME pubkey-dependent bypass as the state it guards."""
+def test_device_pruned_foreign_pubkey_snapshot_fails_closed(monkeypatch):
+    """HAZARD 7: the seeded high-water follows the SAME pubkey rule as the state it guards (see above)."""
     s = _store()
     dev = generate_keypair().public_key_b64
     authorize_device(s, "phone-1", dev, OWNER, issued_at=5.0)
-    poisoned = SnapshotState(base_seq=99, trusted_pubkey=generate_keypair().public_key_b64,
+    poisoned = SnapshotState(base_seq=99, snapshot_seq=98, trusted_pubkey=generate_keypair().public_key_b64,
                              mesh_dev_state=[[dev, "revoked"]], mesh_dev_issued=[[dev, 1e12]])
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
-    assert authorized_devices(s, OWNER_PUB) == {dev}, \
-        "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real authz"
+    with pytest.raises(SnapshotError, match="does not succeed"):
+        authorized_devices(s, OWNER_PUB)
 
 
 # =====================================================================================================

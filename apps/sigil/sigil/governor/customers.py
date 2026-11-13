@@ -45,7 +45,7 @@ assert_no_offense()
 # password hashing must be byte-identical to operators' so there is ONE KDF of record, and the decoy
 # gives customer login the same user-enumeration-timing defense.
 from .accounts import DECOY_PASSWORD_HASH, hash_password, verify_password  # noqa: E402,F401
-from ..spine.snapshot import SnapshotState  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
@@ -277,7 +277,7 @@ class CustomerRegistry:
     def _seed(self, snap) -> "tuple[dict, dict, dict, int]":
         """(state, custs, issued, since) — the fold's starting point: the HARD-PRUNE SEED from `snap`, or the
         empty genesis start when the trusted pubkey differs from the snapshot's (the pubkey-DEPENDENT bypass)."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return {}, {}, {}, -1
         state = dict(snap.customer_state_map())       # username -> "active"|"revoked" (LWW; keep revoked)
         issued = dict(snap.customer_issued_map())     # username -> per-username high-water

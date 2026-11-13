@@ -440,24 +440,37 @@ class SnapshotState(BaseModel):
         # state handed to the folds carries the head-verified seq.
         if st.base_seq != base_seq or st.snapshot_seq not in (-1, snapshot_seq):
             raise SnapshotError(f"snapshot record {snapshot_seq} base/seq disagree with the signed head")
-        return _bind_to_succession_tip(store, st.model_copy(update={"snapshot_seq": snapshot_seq}))
+        return st.model_copy(update={"snapshot_seq": snapshot_seq})
 
 
-def _bind_to_succession_tip(store, st: "SnapshotState") -> "SnapshotState":
-    """The seed was folded under the owner key of its time (`st.trusted_pubkey`). Every registry seeds from it
-    only when that equals the key IT trusts (else it starts from an empty seed — the "different trust anchor"
-    bypass), and production registries trust the CURRENT owner key. So after a routine owner-key ROTATION on a
-    pruned spine every seed would silently be dropped: the kill switch reads released, wallets zero. The boundary
-    has just verified under the current key (the succession tip), so a seed folded under the key the validated
-    succession made authoritative AT the snapshot's seq is the same owner's: re-bind it to the tip. Anything
-    else (a forked succession, a key outside it, a re-genesis) is left as it is."""
-    from .checkpoint import _owner_keys, owner_succession
-    if st.trusted_pubkey == _owner_keys()[1]:
-        return st                                         # no rotation since the prune: nothing to re-bind
-    succ = owner_succession(store)
-    if succ is None or succ.pubkey_valid_at(st.snapshot_seq) != st.trusted_pubkey:
-        return st                                         # forked, or the seed's key did not cover its seq
-    return st.model_copy(update={"trusted_pubkey": succ.current})
+def seed_applies(snap: "SnapshotState", reader_pubkey: "Optional[str]", store) -> bool:
+    """Whether a registry whose trust anchor is `reader_pubkey` may start its fold from `snap` — THE one rule every
+    seeded fold uses (each registry's `_seed`). True: seed from the folded prefix. False: start from the spine's
+    first record with an empty seed — returned ONLY when nothing is pruned, where that IS the whole fold (the
+    historic "different trust anchor" bypass, byte-identical for every un-pruned spine).
+
+    A seed is folded under the owner key of its time (`snap.trusted_pubkey`). It applies when that is the reader's
+    own key, or when the reader's owner-key succession (`key_history.key_resolver`, the same resolver the fold
+    verifies records with: walked from the pinned genesis, DENY-all when forked or when it does not end at the
+    reader's key) says that key was the owner's AT the snapshot's seq — a routine rotation after a prune.
+
+    On a PRUNED spine anything else RAISES `SnapshotError`: the folded prefix is gone, so an empty start would read a
+    short history — the kill switch released, wallets zero — for a reader holding a different key (a swapped
+    `owner.pub`, a forked succession, a re-genesis). Fail closed; never re-bind the seed to another key."""
+    if reader_pubkey == snap.trusted_pubkey:
+        return True
+    if snap.base_seq <= 0 and snap.snapshot_seq < 0:
+        return False                                      # nothing pruned: the genesis scan is the whole fold
+    if reader_pubkey:
+        from ..governor import key_history as _kh
+        if _kh.key_resolver(store, current=reader_pubkey).at(snap.snapshot_seq) == snap.trusted_pubkey:
+            return True
+    raise SnapshotError(
+        f"the spine is hard-pruned (live window from seq {snap.base_seq}) and its snapshot was folded under an owner "
+        f"key ({(snap.trusted_pubkey or '-')[:12]}…) that this reader's trust anchor "
+        f"({(reader_pubkey or '-')[:12]}…) does not succeed — a different or swapped owner key, a forked key "
+        f"succession, or a re-genesis. Refusing to fold the live window from an empty seed (the pruned prefix's "
+        f"state would be lost). Run `sigil verify` and `sigil key status`")
 
 
 _LIVE_START: "dict[str, tuple[tuple, int]]" = {}
@@ -501,8 +514,9 @@ def _refuse_unanchored_prune(store, why: str) -> None:
     if k > 0:
         raise SnapshotError(
             f"the live window starts at seq {k} (a hard-pruned spine) but {why} — refusing to read it as "
-            f"un-pruned (every seeded fold would start from an empty seed). Recover from a `sigil backup` taken "
-            f"after the prune (`sigil restore` into a fresh SIGIL_HOME), then `sigil verify`; do not re-sign")
+            f"un-pruned (every seeded fold would start from an empty seed). Do not re-sign: put back the "
+            f"`spine/head.json` this spine was pruned under (from a file-level copy of SIGIL_HOME), then `sigil "
+            f"verify`; `sigil restore` does not yet restore a hard-pruned spine")
 
 
 def _verified_prune_boundary(store) -> tuple[int, int]:

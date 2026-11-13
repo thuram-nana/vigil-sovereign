@@ -53,7 +53,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -296,7 +296,7 @@ class SubscriptionRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((status, issued, row), since): the HARD-PRUNE SEED of this line from `snap`, or the empty genesis
         start when the trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         status = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state")}
         issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued")}

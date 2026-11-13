@@ -33,7 +33,7 @@ from sigil.governor import postpaid as pp
 from sigil.governor.authn import signed_payload
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -135,6 +135,16 @@ def _entry_ids():
     return ([cl.RESERVE_COST_PREFIX + s for s in SUFFIXES] + [cl.SETTLE_COST_PREFIX + s for s in SUFFIXES]
             + [pp.RESERVE_ENTRY_PREFIX + s for s in SUFFIXES] + [pp.SETTLE_ENTRY_PREFIX + s for s in SUFFIXES]
             + ["direct-1", "odd-1"])
+
+
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
 
 
 @pytest.mark.parametrize("seed", [41, 42, 43])
@@ -322,15 +332,15 @@ def test_a_seeded_prune_keeps_totals_and_a_pruned_reserve_replayed_live_is_no_ph
     assert regs.cost.was_reserved("acme", cl.RESERVE_COST_PREFIX + "s:1") and regs.pp.is_postpaid("acme")
 
 
-def test_the_pubkey_bypass_folds_the_live_window_only(tmp_path, monkeypatch, no_full_scan):
+def test_a_foreign_key_reader_of_a_pruned_snapshot_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     store, regs, _snap, _captured = _pruned_ledgers(tmp_path, monkeypatch, snap_pub=OWNER_PUB)
     new_owner = generate_keypair()
     reader = _Regs(regs.inv.store, key=new_owner, pub=new_owner.public_key_b64)
-    reader.cost.reserve("acme", 9, entry_id=cl.RESERVE_COST_PREFIX + "s:3", issued_at=_iss())
-    _assert_equivalent(reader, _entry_ids(), monkeypatch, no_full_scan)
-    assert reader.cost.global_position() == cl.GlobalCostPosition(committed_tokens=0, in_flight_tokens=9)
-    assert reader.inv.all_invoices() == [] and reader.pp.account("acme") is None
-    assert reader.arr.accrued("acme") == 0
+    _fails_closed_both_ways(monkeypatch, reader.cost.global_position, reader.inv.all_invoices,
+                            lambda: reader.pp.account("acme"), lambda: reader.arr.accrued("acme"))
 
 
 @pytest.mark.parametrize("value", ["", "0", "off"])

@@ -39,7 +39,7 @@ from . import key_history as _kh  # noqa: E402
 from .asset_ownership import _SKIP, AssetOwnershipRegistry, KeyedGrantView, _check_host, _check_org_id  # noqa: E402
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
-from ..spine.snapshot import SnapshotState  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -202,7 +202,7 @@ class MonitoringAuthorityRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((state, issued, rows), since): the HARD-PRUNE SEED (SnapshotState v6), or the empty genesis start when
         the trusted anchor differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         state = dict(snap.monitoring_authority_state_map())
         issued = dict(snap.monitoring_authority_issued_map())

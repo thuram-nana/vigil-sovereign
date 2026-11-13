@@ -34,7 +34,7 @@ from sigil.governor import promotion as pr
 from sigil.governor.authn import signed_payload
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -162,6 +162,16 @@ def _agent_action(store, rng):
         payload["usage"] = usage
     return store.append(kind=rng.choice(["event", "draft"]), source="agent", actor=rng.choice(AGENTS + ["OTHER"]),
                         payload=payload, ts=rng.choice(DAYS[:2]) + "T0" + str(rng.randint(0, 9)) + ":00:00Z")
+
+
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
 
 
 @pytest.mark.parametrize("seed", [51, 52, 53])
@@ -345,14 +355,15 @@ def test_a_seeded_prune_keeps_the_proof_the_grant_and_the_promotion(tmp_path, mo
     assert regs.budget.spent("ALPHA", DAYS[1]).actions == 1
 
 
-def test_the_pubkey_bypass_folds_the_live_window_only(tmp_path, monkeypatch, no_full_scan):
+def test_a_foreign_key_reader_of_a_pruned_snapshot_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     _store, regs, _snap = _pruned(tmp_path, monkeypatch, snap_pub=OWNER_PUB)
     new_owner = generate_keypair()
     reader = _Regs(regs.store, key=new_owner, pub=new_owner.public_key_b64)
-    reader.promo.grant("BRAVO", "*", issued_at=_iss())
-    _assert_equivalent(reader, monkeypatch, no_full_scan)
-    assert reader.promo.is_promoted("BRAVO") and not reader.promo.is_promoted("ALPHA")
-    assert reader.own.proof("acme", HOSTS[0]) is None and reader.mon.grants("acme") == []
+    _fails_closed_both_ways(monkeypatch, lambda: reader.promo.is_promoted("ALPHA"),
+                            lambda: reader.own.proof("acme", HOSTS[0]), lambda: reader.mon.grants("acme"))
 
 
 @pytest.mark.parametrize("value", ["", "0", "off"])

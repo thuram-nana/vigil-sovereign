@@ -1270,6 +1270,21 @@ def test_checkpoint_after_a_prune_carries_the_boundary_forward(world, appended):
     assert counts == sorted(counts) and (counts[-1] - counts[0] == 3 * appended)
 
 
+def _rotate(world, *, issued_at=None, between=()):
+    """`sigil key rotate` exactly: validate the standing head under the key being retired, rotate, then re-sign
+    carrying THAT head forward (no later sign trusts the retired key). `between` runs after the rotation record
+    and before the re-sign (appends landing in that window)."""
+    import time
+
+    from sigil.governor import key_history as kh
+    standing = _cp.standing_pruned_head(world.store())
+    new_kp, seq = kh.rotate(world.store(), issued_at=time.time() if issued_at is None else issued_at)
+    if between:
+        world.apply(list(between))
+    _cp.checkpoint(world.store(), carry=standing)
+    return new_kp, seq
+
+
 def test_owner_key_rotation_on_a_pruned_spine_keeps_every_seed(world):
     """`sigil key rotate` = `key_history.rotate` + `checkpoint()`. The seed was folded under the key of its time;
     registries trust the CURRENT key. After a rotation (twice, so the snapshot's key is two epochs back) the head
@@ -1277,65 +1292,71 @@ def test_owner_key_rotation_on_a_pruned_spine_keeps_every_seed(world):
     read the seed: the kill switch engaged, the wallet funded."""
     import time
 
-    from sigil.governor import key_history as kh
     k = _pruned_killswitch_world(world)
     snap_key = SnapshotState.load(world.store()).trusted_pubkey
     assert snap_key == world.owner.public_key_b64
     assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
     keys = []
     for rnd in range(2):
-        new_kp, _seq = kh.rotate(world.store(), issued_at=time.time() + rnd)
+        new_kp, _seq = _rotate(world, issued_at=time.time() + rnd, between=[_noise(500 + rnd)])
         keys.append(new_kp.public_key_b64)
-        world.apply([_noise(500 + rnd)])
-        head = _cp.checkpoint(world.store())
+        head = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
         assert head.schema_version == 2 and head.base_seq == k
         ok, why = _cp.verify_checkpoint(world.store())
         assert ok and why.endswith("(current)"), (rnd, why)
         assert [a.public_key_b64 for a in _cp.trust_root(world.store()).authorizers] == [new_kp.public_key_b64]
         st = SnapshotState.load(world.store())
-        assert st.trusted_pubkey == new_kp.public_key_b64, "the seed is re-bound to the succession tip"
+        assert st.trusted_pubkey == snap_key, "the seed keeps the key it was folded under (never re-bound)"
+        assert _snap.seed_applies(st, new_kp.public_key_b64, world.store()) is True
         assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}, rnd
-    # a wallet grant signed by the CURRENT key after both rotations folds on top of the re-bound seed
+    # a wallet grant signed by the CURRENT key after both rotations folds on top of the seed
     cur = identity.owner_keypair()
     assert cur.public_key_b64 == keys[-1]
     wl.WalletRegistry(world.store()).grant("acme", 5, "topup", entry_id="g2", issued_at=9.0)
     assert _default_key_reads(world) == {"OFF": (True, 105), "ON": (True, 105)}
 
 
-def test_a_seed_is_rebound_only_along_the_validated_succession(world):
-    """The re-bind follows ONLY the validated cross-signed succession: a seed folded under the key that was
-    authoritative AT its snapshot seq moves to the tip; a stranger's key, or a retired key at a seq it no longer
-    covered, does not. Without a rotation nothing moves."""
+def test_a_seed_applies_only_to_its_own_key_or_along_the_validated_succession(world):
+    """`seed_applies`: the seed's own key, or the validated succession tip when the seed's key is the one the
+    succession says was the owner's AT the snapshot seq. Anything else on a pruned spine RAISES (fail closed) —
+    never an empty start over the deleted prefix. On an un-pruned spine a different key starts from genesis."""
     import time
 
-    from sigil.governor import key_history as kh
     from sigil.reuse import generate_keypair
     _pruned_killswitch_world(world)
     st = SnapshotState.load(world.store())
-    assert _snap._bind_to_succession_tip(world.store(), st) == st              # no rotation: identity
     old = world.owner.public_key_b64
-    new_kp, rot_seq = kh.rotate(world.store(), issued_at=time.time())
-    _cp.checkpoint(world.store())
     stranger = generate_keypair().public_key_b64
-    bind = _snap._bind_to_succession_tip
-    assert bind(world.store(), st).trusted_pubkey == new_kp.public_key_b64
-    assert bind(world.store(), st.model_copy(update={"trusted_pubkey": stranger})).trusted_pubkey == stranger
-    late = st.model_copy(update={"snapshot_seq": rot_seq + 1})                # the old key no longer covers it
-    assert bind(world.store(), late).trusted_pubkey == old
+    assert _snap.seed_applies(st, old, world.store()) is True                  # its own key
+    for who in (stranger, None, ""):
+        with pytest.raises(_snap.SnapshotError, match="does not succeed"):
+            _snap.seed_applies(st, who, world.store())
+    new_kp, rot_seq = _rotate(world, issued_at=time.time())
+    assert _snap.seed_applies(st, new_kp.public_key_b64, world.store()) is True   # the validated tip
+    assert _snap.seed_applies(st, old, world.store()) is True                     # still its own key
+    with pytest.raises(_snap.SnapshotError):
+        _snap.seed_applies(st, stranger, world.store())
+    late = st.model_copy(update={"snapshot_seq": rot_seq + 1})                     # the old key no longer covers it
+    with pytest.raises(_snap.SnapshotError):
+        _snap.seed_applies(late, new_kp.public_key_b64, world.store())
     tip = st.model_copy(update={"trusted_pubkey": new_kp.public_key_b64})
-    assert bind(world.store(), tip) == tip
+    assert _snap.seed_applies(tip, new_kp.public_key_b64, world.store()) is True
+    with pytest.raises(_snap.SnapshotError):
+        _snap.seed_applies(tip, old, world.store())     # a seed under the NEW key is not the old key's
+    assert _snap.seed_applies(SnapshotState.empty(), stranger, world.store()) is False   # nothing pruned
 
 
-def test_a_read_with_no_rotation_since_the_prune_never_walks_the_succession(world, monkeypatch):
-    """The re-bind is only needed after a rotation; without one, `load` must not pay a succession scan."""
+def test_a_read_whose_key_is_the_seeds_own_never_walks_the_succession(world, monkeypatch):
+    """The succession walk is only needed when the keys differ; an equal key must not pay for one."""
+    from sigil.governor import key_history as kh
     _pruned_killswitch_world(world)
 
     def boom(*a, **kw):
-        raise AssertionError("owner_succession called on a read with no rotation since the prune")
+        raise AssertionError("key_resolver called for a reader holding the seed's own key")
 
     st = SnapshotState.load(world.store())
-    monkeypatch.setattr(_cp, "owner_succession", boom)
-    assert _snap._bind_to_succession_tip(world.store(), st) == st
+    monkeypatch.setattr(kh, "key_resolver", boom)
+    assert _snap.seed_applies(st, st.trusted_pubkey, world.store()) is True
 
 
 def test_a_checkpoint_between_the_prune_commit_and_its_manifest_rebase(world):
@@ -1445,11 +1466,9 @@ def test_a_head_signed_by_a_retired_key_after_its_epoch_is_not_carried_forward(w
     — must not be laundered into a new-key head by the next re-anchor."""
     import time
 
-    from sigil.governor import key_history as kh
     _pruned_killswitch_world(world)
     old = world.owner
-    kh.rotate(world.store(), issued_at=time.time())
-    _cp.checkpoint(world.store())                          # legit: the new key re-signs the boundary
+    _rotate(world, issued_at=time.time())                  # legit: the new key re-signs the boundary
     world.apply([_noise(77)])
     standing = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
     _sign_pruned_as(world.store(), old.private_key_b64, standing)
@@ -1497,7 +1516,8 @@ def test_a_stale_concurrent_reanchor_returns_the_standing_longer_head(world, mon
 
     def fake():
         calls["n"] += 1
-        return real() if calls["n"] == 1 else longer       # 1st: the standing-head check; then the guard
+        return real() if calls["n"] <= 2 else longer       # the head checkpoint() judges + the standing-head
+        #                                                    check; then (another signer won) the guard
 
     monkeypatch.setattr(_cp, "_read_head_on_disk", fake)
     before = _head_bytes(world)
@@ -1631,7 +1651,7 @@ def test_sigil_sign_on_an_unanchored_pruned_spine_exits_2_with_the_recovery(worl
     with pytest.raises(SystemExit) as e:
         cli.main(["sign"])
     err = capsys.readouterr().err
-    assert e.value.code == 2 and "hard-pruned" in err and "sigil restore" in err
+    assert e.value.code == 2 and "hard-pruned" in err and "spine/head.json" in err
     assert not (world.root / "head.json").exists()
 
 
@@ -1715,3 +1735,409 @@ def test_consolidate_with_signing_refuses_before_promoting_on_an_unanchored_prun
         pipeline.run_consolidation(store=world.store(), since_seq=-1, sign=True, save_cursor=False)
     assert world.store().next_seq == n
     pipeline.run_consolidation(store=world.store(), since_seq=-1, sign=False, save_cursor=False, do_brief=False)
+
+
+def test_a_retired_keys_forgery_is_refused_without_the_floor_too(world):
+    """`sigil floor reset` (force=True) re-anchors WITHOUT the durable floor; the signer rule alone must still
+    refuse a pruned head forged with a key retired before the head's own last_seq."""
+    import time
+
+    _pruned_killswitch_world(world)
+    old = world.owner
+    _rotate(world, issued_at=time.time())
+    world.apply([_noise(78)])
+    standing = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    _sign_pruned_as(world.store(), old.private_key_b64, standing)
+    before = _head_bytes(world)
+    with pytest.raises(_cp.CheckpointRefused):
+        _cp.checkpoint(world.store(), force=True)
+    assert _head_bytes(world) == before
+
+
+def test_the_trust_root_is_the_succession_tip_not_a_swapped_in_owner_pub(world):
+    """An owner.pub swapped in WITHOUT a cross-signed succession record is not trusted (W9-1, unchanged by the
+    refactor onto `owner_succession`)."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    _pruned_killswitch_world(world)
+    new_kp, _ = kh.rotate(world.store(), issued_at=time.time())
+    (world.root.parent / "keys" / "owner.pub").write_text(generate_keypair().public_key_b64, encoding="utf-8")
+    assert [a.public_key_b64 for a in _cp.trust_root(world.store()).authorizers] == [new_kp.public_key_b64]
+
+
+def test_a_forked_succession_falls_back_to_the_on_disk_key_and_never_moves_a_seed(world, monkeypatch):
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    st = SnapshotState.load(world.store())
+
+    def forked(*a, **kw):
+        raise kh.SuccessionError("forked owner-key succession (test)")
+
+    monkeypatch.setattr(kh, "succession_from_store", forked)
+    assert _cp.owner_succession(world.store()) is None
+    pub = (world.root.parent / "keys" / "owner.pub").read_text(encoding="utf-8").strip()
+    assert [a.public_key_b64 for a in _cp.trust_root(world.store()).authorizers] == [pub]
+    assert _cp._incumbent_key(world.store()) is None
+    head = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    assert _cp.standing_pruned_head(world.store()) == head          # the on-disk key still carries its own head
+    assert _snap.seed_applies(st, pub, world.store()) is True
+    moved = st.model_copy(update={"trusted_pubkey": "an-older-key"})
+    with pytest.raises(_snap.SnapshotError):
+        _snap.seed_applies(moved, pub, world.store())
+
+
+def test_a_prune_committing_after_a_plain_sign_read_its_snapshot_record_is_never_overwritten(world, monkeypatch):
+    """The tighter race: the prune has ALREADY appended its snapshot record when `checkpoint()` reads the spine (so
+    the plain head it builds has the SAME entry_count as the pruned head), and the pruned head commits while it
+    signs. The monotonic guard cannot tell them apart; the prune guard must keep the pruned head."""
+    world.apply([lambda R: R.kill.engage(reason="incident"),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1), _noise(2)])
+    world.seal_with_tail(checkpoint=True)
+    s = world.store()
+    payload = prune.snapshot_payload(s, k)
+    prune.archive_copy(s, k, payload)
+    seq = prune._append_snapshot_idempotent(s, payload)      # phase 2 done; the head is still the plain one
+    real_sign_head = _cp.sign_head
+
+    def sign_head_then_the_prune_head_commits(*a, **kw):
+        out = real_sign_head(*a, **kw)
+        _cp.sign_pruned_head(world.store(), base_seq=k, base_prev_hash=payload["base_prev_hash"],
+                             cumulative_merkle_root=payload["cumulative_merkle_root"], snapshot_seq=seq)
+        return out
+
+    monkeypatch.setattr(_cp, "sign_head", sign_head_then_the_prune_head_commits)
+    _cp.checkpoint(world.store())
+    monkeypatch.setattr(_cp, "sign_head", real_sign_head)
+    on_disk = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    assert (on_disk.schema_version, on_disk.base_seq, on_disk.snapshot_seq) == (2, k, seq)
+    world.store().finish_prune()
+    assert _both_flags(world, lambda R: (R.kill.is_engaged(), R.wallet.available("acme"))) == {
+        "OFF": (True, 100), "ON": (True, 100)}
+
+
+# ======================================================================================================
+# The review of the cutover: a seed is never moved to another key, and a retired key's head is never laundered
+# ======================================================================================================
+def _forged_snapshot(world, key_b64: str, snapshot_seq: int) -> int:
+    """Append a `snapshot` record whose folded state releases the kill switch (a keyless file write)."""
+    real = world.store().get(snapshot_seq).payload["folded_state"]
+    forged = dict(real)
+    forged["killswitch_engaged"] = False
+    forged["trusted_pubkey"] = key_b64
+    return world.store().append(kind="snapshot", source="prune", actor="owner", payload={"folded_state": forged})
+
+
+def _sign_v2_as(store, priv: str, standing, *, upto: int, snapshot_seq: int) -> None:
+    from vigil_core.chain import _head_payload
+
+    from sigil.reuse import Signature, SignedChainHead, evidence_signing_bytes, sign
+    live = [e for e in store.entries() if standing.base_seq <= e.seq <= upto]
+    head = SignedChainHead(schema_version=2, engagement_slug=standing.engagement_slug, last_seq=live[-1].seq,
+                           entry_count=standing.base_seq + len(live), head_hash=live[-1].entry_hash,
+                           base_seq=standing.base_seq, base_prev_hash=standing.base_prev_hash,
+                           base_count=standing.base_seq, cumulative_merkle_root=standing.cumulative_merkle_root,
+                           snapshot_seq=snapshot_seq, prev_head_hash="")
+    msg = evidence_signing_bytes(_head_payload(head))
+    head = head.model_copy(update={"signatures": [Signature(key_id=cfg.OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
+    _cp.HEAD_PATH.write_text(head.model_dump_json(), encoding="utf-8")
+
+
+def _not_released(reads: dict) -> bool:
+    """The kill switch reads ENGAGED or the read fails closed (raises) — never released."""
+    return all(v[0] is True or isinstance(v[0], _Raised) for v in reads.values())
+
+
+@pytest.mark.parametrize("delete_floor", [False, True])
+def test_a_retired_keys_head_over_a_forged_snapshot_is_never_laundered_by_a_routine_sign(world, delete_floor):
+    """A holder of the RETIRED key signs a pruned head that stops just before the rotation (so "the key valid at
+    its last_seq" is the retired one) and names a forged snapshot that releases the kill switch; deleting the
+    floor is a keyless capability. No routine sign may carry that head forward under the current key."""
+    import time
+    _pruned_killswitch_world(world)
+    old = world.owner
+    new_kp, rot_seq = _rotate(world, issued_at=time.time())
+    standing = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    fseq = _forged_snapshot(world, new_kp.public_key_b64, standing.snapshot_seq)
+    if delete_floor:
+        (world.root / "floor.json").unlink()
+    _sign_v2_as(world.store(), old.private_key_b64, standing, upto=rot_seq - 1, snapshot_seq=fseq)
+    before = _head_bytes(world)
+    for force in (False, True):
+        with pytest.raises(_cp.CheckpointRefused):
+            _cp.checkpoint(world.store(), force=force)
+        assert _head_bytes(world) == before
+    assert _cp.verify_checkpoint(world.store())[0] is False
+    assert _not_released(_default_key_reads(world))
+
+
+def test_an_owner_pub_swapped_in_without_a_key_fails_closed_on_a_pruned_spine(world):
+    """A same-UID writer replaces `owner.pub` (no private key needed). The head still verifies (the trust root is
+    the succession tip), but no registry may seed from a key the succession does not reach: reads fail CLOSED —
+    the kill switch is never released (an un-pruned spine keeps it engaged the same way)."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    _pruned_killswitch_world(world)
+    _rotate(world, issued_at=time.time())
+    assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
+    identity._PUB.write_text(generate_keypair().public_key_b64, encoding="utf-8")
+    kh.clear_resolver_cache()
+    reads = _default_key_reads(world)
+    assert all(isinstance(v[0], _Raised) and "does not succeed" in str(v[0]) for v in reads.values()), reads
+
+
+def test_a_forked_succession_on_a_pruned_spine_fails_closed_and_never_releases(world):
+    """A holder of the retired key appends a second, validly cross-signed successor of it: the succession forks
+    (DENY-all). The seed is never dropped for an empty start: current-key reads fail closed."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    _pruned_killswitch_world(world)
+    old = world.owner
+    _rotate(world, issued_at=time.time())
+    rogue = generate_keypair()
+    payload = kh.cross_sign(old, rogue, epoch=1, prev_pubkey=old.public_key_b64, issued_at=time.time() + 5)
+    kh._append_history(world.store(), payload, reason="fork")
+    kh.clear_resolver_cache()
+    reads = _default_key_reads(world)
+    assert _not_released(reads), reads
+    assert all(isinstance(v[0], _Raised) for v in reads.values()), reads
+
+
+def test_a_reader_still_holding_the_pre_rotation_key_keeps_every_latch(world):
+    """Long-lived objects capture the owner key at construction. After a rotation on a pruned spine a reader that
+    still trusts the RETIRED key must read the seed it was folded under: the kill switch engaged, the gesture
+    capability still disabled — never released / re-enabled."""
+    import time
+    world.apply([lambda R: R.kill.engage(reason="incident"),
+                 lambda R: cap.CapabilityGate(R.store, owner_key=world.owner).disable("gesture", reason="x"),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1), _noise(2)])
+    world.seal_with_tail(checkpoint=True)
+    prune.commit_prune(world.store(), k, confirm=True)
+    old_pub = world.owner.public_key_b64
+    _rotate(world, issued_at=time.time())
+    for on in (False, True):
+        if on:
+            world.mp.setenv(FLAG, "1")
+        else:
+            world.mp.delenv(FLAG, raising=False)
+        fold_cache.clear_all()
+        assert ks.KillSwitch(world.store(), trusted_pubkey=old_pub).is_engaged() is True, on
+        assert cap.CapabilityGate(world.store(), trusted_pubkey=old_pub).is_disabled("gesture") is True, on
+        # ... and the CURRENT key (the validated tip) reads the same seed: never an empty start, re-enabled
+        assert ks.KillSwitch(world.store()).is_engaged() is True, on
+        assert cap.CapabilityGate(world.store()).is_disabled("gesture") is True, on
+    world.mp.delenv(FLAG, raising=False)
+    assert k > 0
+
+
+def test_an_interrupted_rotation_is_finished_only_by_the_owners_explicit_command(world, monkeypatch, capsys):
+    """`kh.rotate` appended the rotation record but the process died before the re-sign: the pruned head is still
+    under the retired key. A routine sign refuses (it cannot tell this from a retired-key forgery) and names the
+    deliberate path; `sigil key rotate --finish --yes` re-signs it under the current key."""
+    import time
+    from types import SimpleNamespace as NS
+
+    from sigil.governor import key_history as kh
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    kh.rotate(world.store(), issued_at=time.time())          # ... and the process dies here
+    before = _head_bytes(world)
+    with pytest.raises(_cp.CheckpointRefused, match="key rotate --finish --yes"):
+        _cp.checkpoint(world.store())
+    assert _head_bytes(world) == before
+    with pytest.raises(SystemExit):                          # the --yes confirmation is still required
+        cli.cmd_key(NS(key_cmd="rotate", yes=False, finish=True, i_understand=False))
+    assert _head_bytes(world) == before
+    cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False))
+    assert "rotation FINISHED" in capsys.readouterr().out
+    ok, why = _cp.verify_checkpoint(world.store())
+    assert ok and why.endswith("(current)"), why
+    assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
+
+
+def test_finish_never_carries_a_head_the_floor_does_not_back(world):
+    """`--finish` admits the retired key's head only within the durable floor: with the floor deleted (a keyless
+    capability) it still refuses."""
+    import time
+
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    kh.rotate(world.store(), issued_at=time.time())
+    (world.root / "floor.json").unlink()
+    with pytest.raises(_cp.CheckpointRefused):
+        _cp.checkpoint(world.store(), admit_incumbent=True)
+
+
+def test_a_reset_pruned_spine_is_re_anchored_only_by_a_deliberate_floor_reset(world, monkeypatch, capsys):
+    """`sigil ingest --reset` empties the spine but leaves the old pruned head: a routine sign refuses and names
+    the deliberate path; `sigil floor reset --yes` re-anchors the fresh spine as an un-pruned one."""
+    from types import SimpleNamespace as NS
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    world.store().reset()
+    s = world.store()
+    s.append(kind="event", source="t", actor="u", payload={"signal": "noise", "i": 1})
+    with pytest.raises(_cp.CheckpointRefused, match="floor reset --yes"):
+        _cp.checkpoint(s)
+    cli.cmd_floor(NS(action="reset", yes=True))
+    assert "RE-SEEDED" in capsys.readouterr().out
+    head = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    assert (head.schema_version, head.snapshot_seq) == (1, -1)
+    assert _cp.verify_checkpoint(world.store())[0] is True
+    assert SnapshotState.load(world.store()) == SnapshotState.empty()
+
+
+def test_floor_reset_on_a_pruned_spine_with_an_unreadable_floor_re_seeds_it(world, monkeypatch, capsys):
+    from types import SimpleNamespace as NS
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    (world.root / "floor.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(_cp.CheckpointRefused, match="floor reset --yes"):
+        _cp.checkpoint(world.store())
+    cli.cmd_floor(NS(action="reset", yes=True))
+    assert "RE-SEEDED" in capsys.readouterr().out
+    assert _fl.load_floor() is not None
+    ok, why = _cp.verify_checkpoint(world.store())
+    assert ok, why
+    assert _default_key_reads(world) == {"OFF": (True, 100), "ON": (True, 100)}
+
+
+def test_a_head_that_fails_only_the_floor_is_named_as_such(world):
+    """A standing pruned head that verifies under the owner key but is BEHIND the floor (a rolled-back head) is
+    refused with a message that says so and names the deliberate reset — not "does not verify under the key"."""
+    _pruned_killswitch_world(world)
+    old_head = _head_bytes(world)
+    world.apply([_noise(90)])
+    _cp.checkpoint(world.store())                           # the floor moves to the new head
+    world.apply([_noise(91)])
+    (world.root / "head.json").write_bytes(old_head)        # roll the head back
+    with pytest.raises(_cp.CheckpointRefused, match="anti-rollback floor") as ei:
+        _cp.checkpoint(world.store())
+    assert "floor reset --yes" in str(ei.value)
+
+
+def test_a_malformed_head_signature_is_a_refusal_never_a_crash(world):
+    _pruned_killswitch_world(world)
+    head = _cp.SignedChainHead.model_validate_json(_head_bytes(world))
+    sig = head.signatures[0].model_copy(update={"signature_b64": "!!not-base64!!"})
+    (world.root / "head.json").write_text(head.model_copy(update={"signatures": [sig]}).model_dump_json(),
+                                          encoding="utf-8")
+    with pytest.raises(_cp.CheckpointRefused, match="malformed signature material"):
+        _cp.checkpoint(world.store())
+
+
+def test_a_re_anchor_never_fails_on_a_floor_that_will_not_advance(world, monkeypatch, capsys):
+    """A re-anchor (`checkpoint()` of an already-pruned spine) advances the floor BEST-EFFORT, like every routine
+    sign: a floor that refuses to move never bricks signing (it only ever rejects more)."""
+    _pruned_killswitch_world(world)
+    world.apply([_noise(95)])
+
+    def refuse(*a, **kw):
+        raise _fl.FloorDowngrade("refused (test)")
+
+    monkeypatch.setattr(_cp, "advance_floor", refuse)
+    head = _cp.checkpoint(world.store())
+    assert head.schema_version == 2
+    assert "floor not advanced" in capsys.readouterr().err
+
+
+def test_re_genesis_is_refused_on_a_pruned_spine_even_with_its_head_gone(world, monkeypatch, capsys):
+    """The live-window half of the refusal: with the head gone nothing declares a prune, but the live window
+    still starts above seq 0."""
+    from types import SimpleNamespace as NS
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    (world.root / "head.json").unlink()
+    n = world.store().next_seq
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_key(NS(key_cmd="re-genesis", yes=True, i_understand=True))
+    assert e.value.code == 2 and "hard-pruned" in capsys.readouterr().err
+    assert _head_bytes(world) is None and world.store().next_seq == n
+
+
+def test_a_corrupt_head_on_a_pruned_spine_never_advises_a_re_sign(world):
+    _pruned_killswitch_world(world)
+    (world.root / "head.json").write_text("{not json", encoding="utf-8")
+    ok, why = _cp.verify_checkpoint(world.store())
+    assert ok is False and "do not re-sign" in why and "run `sigil sign`" not in why
+
+
+def test_key_status_never_prescribes_re_genesis_on_a_pruned_spine(world, monkeypatch, capsys):
+    import time
+    from types import SimpleNamespace as NS
+
+    from sigil.reuse import generate_keypair
+    cli = _cli(world, monkeypatch)
+    _pruned_killswitch_world(world)
+    _rotate(world, issued_at=time.time())
+    identity._PUB.write_text(generate_keypair().public_key_b64, encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_key(NS(key_cmd="status", yes=False, finish=False, i_understand=False))
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "re-genesis is refused on a hard-pruned spine" in err
+    assert "recover with `sigil key re-genesis`" not in err
+
+
+def test_a_pre_flight_on_an_unpruned_spine_decodes_no_records(world, monkeypatch):
+    world.apply([lambda R: R.kill.engage()] + [_noise(i) for i in range(3)])
+    _cp.checkpoint(world.store())
+
+    def boom(self):
+        raise AssertionError("store.entries() decoded the whole spine for a pre-flight")
+
+    monkeypatch.setattr(SpineStore, "entries", boom)
+    assert _cp.standing_pruned_head(world.store()) is None
+
+
+def test_the_rotation_carry_is_only_the_exact_head_it_validated(world):
+    """`key rotate` re-signs the head it validated before rotating. A head swapped in between (here: one the
+    retiring key signs over a forged snapshot) is not that head, so the carry does not cover it."""
+    import time
+
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    old = world.owner
+    standing = _cp.standing_pruned_head(world.store())
+    new_kp, rot_seq = kh.rotate(world.store(), issued_at=time.time())
+    fseq = _forged_snapshot(world, new_kp.public_key_b64, standing.snapshot_seq)
+    _sign_v2_as(world.store(), old.private_key_b64, standing, upto=rot_seq - 1, snapshot_seq=fseq)
+    before = _head_bytes(world)
+    with pytest.raises(_cp.CheckpointRefused):
+        _cp.checkpoint(world.store(), carry=standing)
+    assert _head_bytes(world) == before
+
+
+def test_a_half_pruned_snapshot_is_treated_as_pruned_and_an_anonymous_reader_walks_no_succession(world, monkeypatch):
+    """Only the EMPTY identity (no base, no snapshot) lets a different key start from genesis: a state that names a
+    base OR a snapshot seq is a prune. And a reader with no key at all is refused without walking the succession."""
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    _pruned_killswitch_world(world)
+    stranger = generate_keypair().public_key_b64
+    key = world.owner.public_key_b64
+    for half in (SnapshotState(base_seq=5, snapshot_seq=-1, trusted_pubkey=key),
+                 SnapshotState(base_seq=0, snapshot_seq=3, trusted_pubkey=key)):
+        with pytest.raises(_snap.SnapshotError, match="does not succeed"):
+            _snap.seed_applies(half, stranger, world.store())
+
+    def boom(*a, **kw):
+        raise AssertionError("key_resolver walked for a reader with no key")
+
+    monkeypatch.setattr(kh, "key_resolver", boom)
+    st = SnapshotState.load(world.store())
+    for anonymous in (None, ""):
+        with pytest.raises(_snap.SnapshotError):
+            _snap.seed_applies(st, anonymous, world.store())
