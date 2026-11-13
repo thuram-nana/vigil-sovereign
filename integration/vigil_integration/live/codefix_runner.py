@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -49,8 +50,13 @@ _MAX_CONTEXT_BYTES = 8192            # per sibling file
 _PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
 _MAX_CONTEXT_FILES = 10              # finding file + up to N related files (graph neighborhood or same-dir siblings)
 _MAX_TOTAL_CONTEXT_BYTES = 64000     # global budget across the repo-context set
-_PATCH_NAME = ".vigil-fix.patch"
+_PATCH_PREFIX = ".vigil-fix-"         # staged OUTSIDE the clone (mkstemp in base_dir) — see CodefixSession.build
 _DEPCACHE_BOX = "/vigil-depcache"   # read-only mount point for the offline dep cache/wheelhouse
+# Host-side git in the clone runs no repo-planted program: hooks are looked up in /dev/null (none) and
+# fsmonitor is off. The clone's own build/test code runs in the sandbox with the clone bound read-write,
+# so by the PR leg its .git/hooks may hold an executable that plain `git commit` / `git push` would run on
+# the host. Command-line `-c` outranks the repository's own config.
+_HOST_GIT_NO_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 
 
 @dataclass
@@ -304,11 +310,25 @@ class CodefixSession:
                 diffs.append(dt if dt.endswith("\n") else dt + "\n")
         if not diffs:
             return _Exec(False, reason="no diff text to apply")
-        patch_path = os.path.join(self.workdir, _PATCH_NAME)
+        # SECURITY: the patch is staged OUTSIDE the clone. Everything inside the clone is authored by the
+        # cloned repo, which can commit `.vigil-fix.patch -> <operator-writable host file>`; a plain
+        # open(..., "w") there follows the link and overwrites the target with the diff text. mkstemp in the
+        # clone's PARENT (base_dir — ours, not the repo's) creates a fresh 0600 file with O_EXCL under a
+        # random name, so no repo-planted entry can be opened; `git -C <clone> apply` takes the absolute path.
         try:
-            with open(patch_path, "w", encoding="utf-8") as fh:
+            os.makedirs(self.config.base_dir, exist_ok=True)
+            fd, patch_path = tempfile.mkstemp(prefix=_PATCH_PREFIX, suffix=".patch",
+                                              dir=os.path.abspath(self.config.base_dir))
+        except OSError as exc:
+            return _Exec(False, reason=f"could not stage patch file: {exc}")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(diffs))
         except OSError as exc:
+            try:
+                os.unlink(patch_path)
+            except OSError:
+                pass
             return _Exec(False, reason=f"could not stage patch file: {exc}")
         # An LLM-proposed unified diff often has imperfect hunk headers (wrong @@ line counts) or benign
         # whitespace drift — strict `git apply` rejects those as a "corrupt patch" even when the intent
@@ -415,12 +435,13 @@ class CodefixSession:
                 return _Exec(False, reason=f"refusing to stage unsafe path {p!r}: {why}")
         git = self.config.git_bin
         for p in paths:
-            r = subprocess_runner([git, "-C", self.workdir, "add", "--", p], timeout=self.config.apply_timeout)
+            r = subprocess_runner([git, "-C", self.workdir, *_HOST_GIT_NO_HOOKS, "add", "--", p],
+                                  timeout=self.config.apply_timeout)
             if r.exit_code != 0:
                 return _Exec(False, reason="git add failed: " + (r.stderr or "")[:160])
         title = (self.config.pr_title_prefix + str(getattr(request, "title", "") or "fix")).strip()
-        cm = subprocess_runner([git, "-C", self.workdir, "-c", "user.email=vigil@localhost",
-                                "-c", "user.name=VIGIL", "commit", "-m", title],
+        cm = subprocess_runner([git, "-C", self.workdir, *_HOST_GIT_NO_HOOKS, "-c", "user.email=vigil@localhost",
+                                "-c", "user.name=VIGIL", "commit", "--no-verify", "-m", title],
                                timeout=self.config.apply_timeout)
         if cm.exit_code != 0:
             return _Exec(False, reason="git commit failed: " + (cm.stderr or "")[:160])
@@ -429,8 +450,9 @@ class CodefixSession:
         child_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
         child_env.update({"GIT_TERMINAL_PROMPT": "0", "GH_TOKEN": token, "GITHUB_TOKEN": token})
         branch = getattr(request, "fix_branch", "") or "vigil-fix"
-        push = subprocess_runner([git, "-C", self.workdir, "push", "--set-upstream", self.config.push_remote,
-                                  branch], timeout=self.config.push_timeout, env=child_env)
+        push = subprocess_runner([git, "-C", self.workdir, *_HOST_GIT_NO_HOOKS, "push", "--no-verify",
+                                  "--set-upstream", self.config.push_remote, branch],
+                                 timeout=self.config.push_timeout, env=child_env)
         if push.exit_code != 0:
             return _Exec(False, reason="git push failed: " + (push.stderr or "")[:200])
         pr_argv = [self.config.gh_bin, "pr", "create", "--title", title, "--fill", "--head", branch]

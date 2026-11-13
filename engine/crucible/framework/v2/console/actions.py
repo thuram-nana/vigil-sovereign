@@ -2244,9 +2244,12 @@ def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -
 
 
 def _confined_clone_path(chat_id: str, path: str) -> str:
-    """The abspath of ``path`` IFF it sits strictly under THIS chat's clone area (``<live>/clones/<chat>/``),
+    """The abspath of ``path`` IFF it is a CLONE ROOT of THIS chat — a directory that is a DIRECT child of
+    the chat's clone area (``<live>/clones/<chat>/<name>``, exactly where ``clone_codebase`` creates one) —
     else ``""``. A dev-mode edit may only touch a codebase this chat itself cloned — never an arbitrary
-    directory named by the caller."""
+    directory named by the caller, and never a directory NESTED in a clone: with ``<clone>/.git`` as the
+    workdir, ``git apply``'s own ``.git`` protection is gone (the diff path is just ``hooks/post-checkout``)
+    and a reviewed diff would install an executable hook."""
     from . import sessions
     try:
         cid = sessions._safe_session_id(str(chat_id)) if chat_id else ""
@@ -2257,34 +2260,46 @@ def _confined_clone_path(chat_id: str, path: str) -> str:
     try:
         base = (Path(_live_base()) / "clones" / cid).resolve()
         p = Path(str(path)).resolve()
-        if os.path.commonpath([str(base), str(p)]) == str(base) and p != base and p.is_dir():
+        if p.parent == base and p != base and p.is_dir():
             return str(p)
     except (ValueError, OSError):
         return ""
     return ""
 
 
+# One lock per clone root. Running the clone's tests runs ITS code in the sandbox with the clone bound
+# read-write, and that code can swap a directory for a link at any moment; `git apply`'s own "beyond a
+# symbolic link" check is a check-then-use, so an apply that overlaps a test run on the same clone could
+# create a file in whatever directory the link points at. Applying an edit and running the tests therefore
+# never overlap on one clone: whichever comes second is refused (the box is reaped with its parent, so no
+# repo process outlives the test run that holds the lock).
+_CLONE_LOCKS: dict = {}
+_CLONE_LOCKS_GUARD = threading.Lock()
+
+
+def _clone_lock(wd: str) -> threading.Lock:
+    """The lock for the confined clone root ``wd`` (as returned by ``_confined_clone_path``)."""
+    with _CLONE_LOCKS_GUARD:
+        return _CLONE_LOCKS.setdefault(wd, threading.Lock())
+
+
 def _files_in_instruction(workdir: str, instruction: str) -> list:
     """Repo-relative file paths the instruction names that ACTUALLY EXIST under ``workdir`` — so the model
     diffs against real content (red-pen LOW-2: without this the model never sees the code and its diff
-    won't apply). Path-token candidates are confinement-checked; only existing files are returned, capped."""
+    won't apply). Path-token candidates are confinement-checked on their RESOLVED path (the clone's content
+    is third-party controlled: a symlink it committed must not select a host file as model context); only
+    existing regular files are returned, capped."""
     out: list = []
     for tok in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+", str(instruction or "")):
         tok = tok.strip(".,);]'\"")
         try:
-            from vigil_integration.remediation.codefix import is_safe_repo_path
+            from vigil_integration.remediation.codefix import confined_repo_file
         except Exception:  # noqa: BLE001
             return out
-        ok, _ = is_safe_repo_path(tok)
-        if not ok or tok in out:
+        if tok in out:
             continue
-        try:
-            p = os.path.join(workdir, tok)
-            if os.path.commonpath([os.path.abspath(workdir), os.path.abspath(p)]) == os.path.abspath(workdir) \
-                    and os.path.isfile(p):
-                out.append(tok)
-        except (OSError, ValueError):
-            continue
+        if confined_repo_file(workdir, tok):
+            out.append(tok)
         if len(out) >= 8:
             break
     return out
@@ -2340,8 +2355,15 @@ def apply_codebase_edit(chat_id: str, path: str, diff: str) -> dict:
         from vigil_integration.live.dev_edit import apply_dev_edit
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
-    # operator_present=True: an apply is only reachable from the operator's explicit review-and-click.
-    return apply_dev_edit(wd, str(diff or ""), operator_present=True)
+    lock = _clone_lock(wd)
+    if not lock.acquire(blocking=False):            # never git-apply while the clone's own code is running
+        return {"ok": False, "error": "refused: this clone is busy (its tests are running) — apply the edit "
+                                      "once they finish"}
+    try:
+        # operator_present=True: an apply is only reachable from the operator's explicit review-and-click.
+        return apply_dev_edit(wd, str(diff or ""), operator_present=True)
+    finally:
+        lock.release()
 
 
 def run_codebase_tests(chat_id: str, path: str, command: str = "pytest -q",
@@ -2373,10 +2395,16 @@ def run_codebase_tests(chat_id: str, path: str, command: str = "pytest -q",
     # (e.g. one an LLM proposed from repo content: `--approve`, `--workspace=/`) can never be parsed as one of
     # the sandbox's own options — the same end-of-options guard the terminal action already uses.
     argv += ["--", cmd]
+    lock = _clone_lock(wd)
+    if not lock.acquire(blocking=False):            # an edit is being applied, or tests already run here
+        return {"ok": False, "error": "refused: this clone is busy (an edit is being applied or its tests "
+                                      "are already running) — try again when that finishes"}
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=1800)  # noqa: S603
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"could not run the gated sandbox ({type(e).__name__})"}
+    finally:
+        lock.release()
     try:
         out = json.loads(proc.stdout or "{}")                # the verb prints the ExecResult as JSON
     except Exception:  # noqa: BLE001

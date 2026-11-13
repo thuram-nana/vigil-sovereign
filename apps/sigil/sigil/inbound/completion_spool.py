@@ -56,6 +56,17 @@ class CompletionSpoolError(RuntimeError):
     """A malformed/unverifiable completion envelope (a refusal; nothing is settled)."""
 
 
+class CompletionSpoolDeferred(CompletionSpoolError):
+    """The completion cannot be settled YET (PRICING M1c): the run's model meter has a request in flight or cannot
+    be written right now, or the metered pricing configuration is not set. Nothing is settled; the file goes back to
+    ``incoming/`` and the next drain retries it (never quarantined, never a guessed charge). ``config`` marks a wait
+    on the pricing configuration: no retry clears it until the owner fixes the deployment, so it is alarm-worthy."""
+
+    def __init__(self, msg: str, *, config: bool = False) -> None:
+        super().__init__(msg)
+        self.config = config
+
+
 class CompletionSpoolWatcher:
     """Drains an inbound engagement-completion settle spool through ``settle_launch``, fail-closed. The
     governance trust root is DERIVED from an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation — verified at
@@ -157,11 +168,13 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolError(
                 f"published lease (org={lease_doc.org_id!r}, host={lease_doc.scope_host!r}) does not hash to the "
                 f"completion slug {doc.engagement_slug!r} — refusing a tenant-mismatched settle")
-        consumed = self._consumed(doc.outcome.value, int(lease_doc.units_reserved))
+        consumed = self._consumed_for(doc.outcome.value, lease_doc)
         result = self._gate.settle_launch(
             signed_lease=bundle.signed_lease.model_dump(mode="json"), consumed_units=consumed,
             now=self._now(), expect_org_id=lease_doc.org_id)
         if not result.get("ok"):
+            if result.get("retry"):                    # a request still in flight, a meter not writable right now
+                raise CompletionSpoolDeferred(f"settle_launch deferred: {result.get('error')}")
             raise CompletionSpoolError(f"settle_launch refused: {result.get('error')}")
         # NTF-3: project the just-settled outcome to a tenant-visible notification record. ONLY on a FRESH
         # settle (``action == "launch_settled"``, NEVER ``launch_already_settled``) — an idempotent re-drive
@@ -196,6 +209,72 @@ class CompletionSpoolWatcher:
             import logging
             logging.getLogger(__name__).warning(
                 "NTF-3 assessment-outcome record append failed (advisory; settle unaffected)", exc_info=True)
+
+    def _consumed_for(self, outcome: str, lease_doc: Any) -> int:
+        """The billable units for ONE verified lease's terminal ``outcome``. The mode is the LAUNCH's, decided when it
+        was published (its grant, metered marker or meter on disk — ``LaunchGate._launch_was_metered``), never the
+        flag now: a launch published flat settles by the flat per-run rule (:meth:`_consumed`), byte-identical. A
+        launch published metered (PRICING M1c, design §4.3-§4.4) has its model gateway meter CLOSED first (no request
+        is admitted after it, from any process), then:
+
+          * ``completed`` ⇒ ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))`` — the customer pays
+            for what the run used, never more than the reservation they approved;
+          * ``canceled`` ⇒ the owner's named policy (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` as above, or
+            ``refund`` = 0;
+          * anything else (``failed``, VIGIL's side) ⇒ 0, except a launch the customer held paused through the end
+            of its window (lifted only after it closed, so the re-drive the window refuses ends as ``failed``): it
+            settles like a paused, abandoned launch — what it used, or 0 when it used nothing.
+
+        Only CONFIRMED spend is billed: unconfirmed spend (a lost record, the unreported part of a cut-off response)
+        is VIGIL's cost. The meter is keyed by the verified lease's own ``(engagement_slug, nonce)`` — never a wire
+        value. A request still in flight, a meter that cannot be written right now, or an unset pricing setting
+        DEFERS the settle (:class:`CompletionSpoolDeferred`, retried next drain); a meter whose hash chain is broken
+        REFUSES it (quarantined for a human) — never a guessed charge."""
+        from .. import config
+        reserved = int(lease_doc.units_reserved)
+        try:
+            metered = self._gate._launch_was_metered(str(lease_doc.engagement_slug), str(lease_doc.nonce))
+        except OSError as exc:
+            raise CompletionSpoolDeferred(f"the run's billing mode could not be read: {exc}") from exc
+        if not metered:
+            return self._consumed(outcome, reserved)
+        from vigil_core import model_metering as mm
+        from vigil_core.model_grant import meter_id
+        from ..model_gateway import GrantMeter, MeterBusy
+        try:
+            totals = GrantMeter(config.MODEL_METER_DIR).close(
+                meter_id(str(lease_doc.engagement_slug), str(lease_doc.nonce)), now=float(self._now()))
+        except MeterBusy as exc:
+            raise CompletionSpoolDeferred(str(exc)) from exc
+        except OSError as exc:
+            raise CompletionSpoolDeferred(f"the run's model meter could not be closed: {exc}") from exc
+        except ValueError as exc:
+            raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
+        if str(outcome) not in ("completed", "canceled"):
+            # A FAILED run is free (VIGIL's failure) — unless the customer held it paused through the end of its
+            # window and lifted the pause only afterwards: its re-drive is then refused by the window and ends here
+            # as FAILED, so it settles by the paused-and-abandoned rule (owner decision 2026-11-13: charged for what
+            # it used; nothing used -> nothing charged). An unreadable record defers rather than guessing.
+            held = self._paused_past_expiry(lease_doc)
+            if held is None:
+                raise CompletionSpoolDeferred("the launch's paused-past-expiry record could not be read")
+            if not held or (totals.requests == 0 and totals.cost_nano == 0):
+                return 0
+        try:
+            if str(outcome) == "canceled" and mm.cancel_settlement() == "refund":
+                return 0
+            return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
+                                       cap=reserved)
+        except mm.MeteringError as exc:
+            raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}",
+                                          config=True) from exc
+
+    def _paused_past_expiry(self, lease_doc: Any) -> "Optional[bool]":
+        try:
+            from vigil_integration.live.credit_lease_pause import paused_past_expiry
+            return paused_past_expiry(self._base_dir, str(lease_doc.engagement_slug), str(lease_doc.nonce))
+        except Exception:  # noqa: BLE001 — an import or read failure is "cannot tell", never an answer
+            return None
 
     @staticmethod
     def _consumed(outcome: str, reserved: int) -> int:
@@ -283,7 +362,7 @@ class CompletionSpoolWatcher:
             _sys.stderr.write("vigil settle-drain: WARNING offense-governance delegation is not currently valid "
                               "(expired / out-of-horizon) — settling nothing this drain (will retry on renewal)\n")
             return {"settled": 0, "noop": 0, "rejected": 0, "deduped": 0}
-        settled = noop = rejected = deduped = 0
+        settled = noop = rejected = deduped = deferred = deferred_config = 0
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
                 continue
@@ -308,6 +387,15 @@ class CompletionSpoolWatcher:
                 continue
             try:
                 result = self._settle_one(text, root)
+            except CompletionSpoolDeferred as exc:
+                try:
+                    os.replace(claimed, src)         # back to incoming/: the next drain retries it
+                except OSError:
+                    pass                             # left in working/: the next drain's reclaim returns it
+                _sys.stderr.write(f"vigil settle-drain: deferred {src.name}: {exc}\n")
+                deferred += 1
+                deferred_config += int(exc.config)
+                continue
             except CompletionSpoolError as exc:
                 self._quarantine(claimed, f"settle refused: {exc}")
                 rejected += 1
@@ -324,7 +412,12 @@ class CompletionSpoolWatcher:
                 os.replace(claimed, marker)          # archive as handled (dedup ledger)
             except OSError:
                 self._safe_unlink(claimed)
-        return {"settled": settled, "noop": noop, "rejected": rejected, "deduped": deduped}
+        out = {"settled": settled, "noop": noop, "rejected": rejected, "deduped": deduped}
+        if deferred:
+            out["deferred"] = deferred               # PRICING M1c only: the flat result shape is unchanged
+        if deferred_config:
+            out["deferred_config"] = deferred_config
+        return out
 
     def watch(self, *, interval: float = 2.0, sleep: Optional[Callable[[float], None]] = None) -> None:
         """Drain in a loop forever (Ctrl-C / SIGTERM to stop). A single bad drain NEVER kills the daemon: an

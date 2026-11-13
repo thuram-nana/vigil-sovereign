@@ -44,6 +44,7 @@ from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_on
 from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
+from .seam_publish import encodable_or_revoke, withdraw_publication
 
 assert_no_offense()
 
@@ -138,8 +139,9 @@ def _verify_pop(core: dict, evaluator_sig) -> bool:
         return False
     try:
         return verify_one(pk, pop_signing_bytes(core), evaluator_sig)
-    except (IntegrityError, TypeError):
-        # malformed base64 / wrong-length / non-decodable sig → NOT authentic (fail-closed contract)
+    except (IntegrityError, TypeError, ValueError):
+        # malformed base64 / wrong-length / non-decodable sig, or a core that cannot be UTF-8 canonicalised
+        # (a lone surrogate from a raw spine write) → NOT authentic (fail-closed contract)
         return False
 
 
@@ -246,20 +248,28 @@ class EvalOffenseAttestation:
             "by": by, "reason": reason, "tier": "A0", "decision": "auto",
         }
         seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
-        self._publish(str(engagement_slug))
-        # FIX C1 (engagement-close site): revoking the covering attestation CLOSES the engagement's eval, so
-        # any EvalCapabilityGrant that rode inside it must not outlive it — publish a grant-revoke to the seam
-        # for this engagement too, so the keyless offense verifier (which, for TWIN/STAGING, does not consult
-        # this attestation) sees the void. Best-effort + fail-safe: a NO-OP when no grant was published.
         try:
-            from .eval_capability_grant import EvalCapabilityGrant
-            _g = EvalCapabilityGrant(self.store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
-            if _g.state(engagement_slug=str(engagement_slug), now=0.0).granted:
-                _g.revoke(engagement_slug=str(engagement_slug), by=by,
-                          reason=f"covering eval-offense attestation revoked: {reason}" if reason
-                          else "covering eval-offense attestation revoked")
-        except Exception:  # noqa: BLE001 — a grant-revoke failure must never prevent the attestation revoke
-            pass
+            self._publish(str(engagement_slug))
+        finally:
+            # FIX C1 (engagement-close site): revoking the covering attestation CLOSES the engagement's eval, so
+            # any EvalCapabilityGrant that rode inside it must not outlive it — publish a grant-revoke to the seam
+            # for this engagement too, so the keyless offense verifier (which, for TWIN/STAGING, does not consult
+            # this attestation) sees the void. A NO-OP when no grant was published. It runs even when the
+            # attestation's own publish failed, and if the cascade itself cannot complete (e.g. the spine cannot
+            # be read) the grant's publication is WITHDRAWN instead: fail-closed, never a stale grant.
+            try:
+                from .eval_capability_grant import EvalCapabilityGrant
+                _g = EvalCapabilityGrant(self.store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
+                if _g.state(engagement_slug=str(engagement_slug), now=0.0).granted:
+                    _g.revoke(engagement_slug=str(engagement_slug), by=by,
+                              reason=f"covering eval-offense attestation revoked: {reason}" if reason
+                              else "covering eval-offense attestation revoked")
+            except Exception as e:  # noqa: BLE001 — a grant-revoke failure must never prevent the attestation revoke
+                def _grant_path():
+                    from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+                    return eval_capability_grant_path(self._base_dir(), str(engagement_slug))
+                withdraw_publication(_grant_path, what=f"eval-capability-grant {engagement_slug!r} (attestation "
+                                     f"revoke cascade)", cause=e)
         return seq
 
     # -- the fail-closed fold (NEVER cached — the verdict is time-dependent) ---------------------------
@@ -347,9 +357,12 @@ class EvalOffenseAttestation:
     def _publish(self, engagement_slug: str) -> None:
         """Mirror every eval-offense-attestation record for ``engagement_slug`` (attestations AND revokes) to
         the shared seam, so the offense plane can READ+VERIFY the public signed material without importing
-        this module or holding the owner key (FATAL-2). The spine stays the source of truth; a publish
-        failure merely leaves the offense plane UNARMED (fail-closed), never falsely armed. Best-effort over
-        an OSError (unwritable seam); a programming error propagates.
+        this module or holding the owner key (FATAL-2). The spine stays the source of truth. A publish is
+        FAIL-CLOSED on every failure (``seam_publish``): a record that cannot be canonicalised is published as an
+        unsigned revoke placeholder, and if the publish fails the previous publication is WITHDRAWN, so the
+        offense plane falls back to UNARMED, never a stale list a revoke never reached. An OSError / ValueError
+        is then absorbed (the next attest/revoke re-publishes the full list); anything else re-raises after
+        the withdrawal.
 
         The loose seam's record-LIST order/membership is unauthenticated on its own (each record is signed, but
         the list is not), so an off-seam DROP/REORDER/ROLLBACK of the revoke record could re-arm a revoked
@@ -359,12 +372,13 @@ class EvalOffenseAttestation:
         the offense verifier re-derives it over the records it read (drop/reorder no longer verify) and enforces
         the monotonic ``seq`` against a durable high-water (a rollback is refused). The owner key signs ONLY
         here in SIGIL; the import-clean broker merely transports the public seal (FATAL-2)."""
-        records = []
-        for record in self.store.iter_records():
-            p = record.payload if isinstance(record.payload, dict) else {}
-            if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
-                records.append(dict(p))
         try:
+            records = []
+            for record in self.store.iter_records():
+                p = record.payload if isinstance(record.payload, dict) else {}
+                if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
+                    records.append(dict(p))
+            records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
             from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
             seal = None
             if self.owner_key is not None:
@@ -383,10 +397,13 @@ class EvalOffenseAttestation:
                     pubkey=self.owner_key.public_key_b64,
                 )
             write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
-        except (OSError, ValueError):
-            # Unwritable / unsafe seam → the offense plane simply never arms (fail-closed). The spine record
-            # stands; a later attest/revoke re-publishes the full list.
-            pass
+        except Exception as e:
+            def _path():
+                from vigil_integration.live.eval_attestation import eval_attestation_path
+                return eval_attestation_path(self._base_dir(), engagement_slug)
+            withdrawn = withdraw_publication(_path, what=f"eval-offense-attestation {engagement_slug!r}", cause=e)
+            if not withdrawn or not isinstance(e, (OSError, ValueError)):
+                raise   # never report success while a stale publication may still be honoured
 
 
 def assert_eval_offense_attested(

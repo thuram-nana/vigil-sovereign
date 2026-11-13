@@ -83,6 +83,17 @@ def run_tier_for_units(units: int) -> str:
     return "quick" if u <= quick_max_units() else "deep"
 
 
+# run_tier → the model effort level a METERED run's grant pins (PRICING design §2.2): Quick = high, Deep = xhigh.
+# (Max = max arrives with the Max product, M3.)
+_EFFORT: dict[str, str] = {"quick": "high", "deep": "xhigh"}
+
+
+def effort_for(run_tier: str) -> str:
+    """The effort a run of ``run_tier`` is pinned to; an unknown tier resolves to the quick tier's (the cheaper,
+    smaller-impact default — never a silent escalation)."""
+    return _EFFORT.get(run_tier, _EFFORT["quick"])
+
+
 def engage_profile_for(run_tier: str) -> str:
     """The engagement profile (``surface|deep|full``) a run tier resolves to. Unknown ⇒ ``"surface"`` (the
     smallest-impact roster)."""

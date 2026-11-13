@@ -166,3 +166,72 @@ def test_zero_amount_is_allowed():
     r.record("acme", invoice_id="z", kind="topup", price_id="t", amount_minor=0, currency="", credits=0,
              issued_at=_issue())
     assert r.invoices("acme")[0].amount_minor == 0
+
+
+# --- has_purchased_credits: a PAID top-up, never a grant ---------------------------------
+def test_has_purchased_credits_needs_a_signed_topup_with_credits():
+    s = _store()
+    r = _reg(s)
+    assert r.has_purchased_credits("acme") is False                       # no history at all
+    for bad in ("", None, 7, b"acme"):
+        assert r.has_purchased_credits(bad) is False                      # fail-closed, never raises
+    r.record("acme", invoice_id="sub_1", kind="subscription", price_id="pro", amount_minor=4900, currency="USD",
+             credits=6000, period_start=1.0, period_end=2.0, issued_at=_issue())
+    r.record("acme", invoice_id="pp_1", kind="postpaid", price_id="pp", amount_minor=100, currency="USD",
+             credits=0, issued_at=_issue())
+    r.record("acme", invoice_id="pay_1", kind="payment", price_id="pp", amount_minor=100, currency="USD",
+             credits=0, issued_at=_issue())
+    r.record("acme", invoice_id="tu_0", kind="topup", price_id="t", amount_minor=500, currency="USD",
+             credits=0, issued_at=_issue())                               # a top-up line that granted nothing
+    assert r.has_purchased_credits("acme") is False, "only a top-up that granted credits is a credit purchase"
+    _forge(s, {"invoice_id": "forged", "kind": "topup", "credits": 500}, signer=ATTACKER)
+    assert r.has_purchased_credits("acme") is False, "a forged top-up line is inert"
+    r.record("acme", invoice_id="tu_1", kind="topup", price_id="t", amount_minor=0, currency="",
+             credits=500, issued_at=_issue())                             # catalog-unpriced: still a purchase
+    assert r.has_purchased_credits("acme") is True
+
+
+def test_has_purchased_credits_is_tenant_scoped():
+    s = _store()
+    r = _reg(s)
+    r.record("acme", invoice_id="tu_1", kind="topup", price_id="t", amount_minor=500, currency="USD",
+             credits=500, issued_at=_issue())
+    assert r.has_purchased_credits("acme") is True
+    for other in ("globex", "acm", "acme2", "ACME", " acme"):
+        assert r.has_purchased_credits(other) is False, f"{other!r} must not see acme's purchase"
+
+
+def test_has_purchased_credits_reads_the_same_through_the_fold_cache(monkeypatch):
+    s = _store()
+    r = _reg(s)
+    r.record("acme", invoice_id="tu_1", kind="topup", price_id="t", amount_minor=500, currency="USD",
+             credits=500, issued_at=_issue())
+    r.record("globex", invoice_id="sub_1", kind="subscription", price_id="pro", amount_minor=4900,
+             currency="USD", credits=6000, period_start=1.0, period_end=2.0, issued_at=_issue())
+    want = {o: r.has_purchased_credits(o) for o in ("acme", "globex", "initech")}
+    assert want == {"acme": True, "globex": False, "initech": False}
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    cached = _reg(s)
+    assert {o: cached.has_purchased_credits(o) for o in want} == want
+    cached.record("initech", invoice_id="tu_2", kind="topup", price_id="t", amount_minor=500, currency="USD",
+                  credits=100, issued_at=_issue())
+    assert cached.has_purchased_credits("initech") is True                # the cache picks up a new line
+
+
+def test_a_str_subclass_cannot_widen_the_tenant_match(monkeypatch):
+    class Sly(str):
+        __slots__ = ()
+
+        def __eq__(self, other):                    # matches every tenant on a naive `==` filter
+            return True
+
+        __hash__ = str.__hash__
+
+    s = _store()
+    r = _reg(s)
+    r.record("acme", invoice_id="tu_1", kind="topup", price_id="t", amount_minor=500, currency="USD",
+             credits=500, issued_at=_issue())
+    assert r.invoices(Sly("zzz")) == [] and r.has_purchased_credits(Sly("zzz")) is False
+    assert r.has_purchased_credits(Sly("acme")) is True                    # a well-behaved value still works
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    assert _reg(s).has_purchased_credits(Sly("zzz")) is False

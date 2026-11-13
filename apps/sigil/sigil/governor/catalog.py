@@ -59,6 +59,9 @@ class CatalogEntry:
     period_s: float = 0.0      # subscription period length in seconds
     monitor_hosts: int = 0     # AEGIS monitoring plan: protected-host slots included (0 = not a monitoring plan)
     monitor_respond: bool = False  # AEGIS monitoring plan tier includes respond (mode=block)
+    # No longer SOLD (absent from plans() / checkout), but STILL MINTABLE: a renewal or a late webhook for a
+    # price that was ever sold must mint (or alarm), never be silently dropped. See mintable_entitlements().
+    retired: bool = False
 
     def entitlement(self) -> Entitlement:
         """The sovereign Entitlement the signer mints for this price_id."""
@@ -127,6 +130,8 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
         seen.add(e.price_id)
         if e.kind not in _KNOWN_KINDS:
             raise ValueError(f"catalog entry {e.price_id!r}: unknown kind {e.kind!r}")
+        if not isinstance(e.retired, bool):
+            raise ValueError(f"catalog entry {e.price_id!r}: retired must be a bool")
         if not isinstance(e.amount_minor, int) or e.amount_minor < 0:
             raise ValueError(f"catalog entry {e.price_id!r}: amount_minor must be a non-negative int")
         if not (isinstance(e.currency, str) and len(e.currency) == 3 and e.currency.isalpha()
@@ -266,12 +271,27 @@ def monitoring_price_ids() -> frozenset[str]:
 
 
 def _offered() -> tuple[CatalogEntry, ...]:
-    """The entries ON SALE on this deployment: AEGIS monitoring plans only while VIGIL_CUSTOMER_MONITORING_ENABLED
-    is on (default OFF => the catalog is exactly the pre-AEGIS one: not priced, not listed, not mintable)."""
+    """The entries ON SALE on this deployment: never a retired entry, and AEGIS monitoring plans only while
+    VIGIL_CUSTOMER_MONITORING_ENABLED is on (default OFF => the sale surface is exactly the pre-AEGIS one).
+    SALE only: what the billing drain MINTS is the flag-independent mintable_*() view below."""
     from .. import config
-    if config.customer_monitoring_enabled():
-        return _CATALOG
-    return tuple(e for e in _CATALOG if not e.monitor_hosts)
+    monitoring = config.customer_monitoring_enabled()
+    return tuple(e for e in _CATALOG if not e.retired and (monitoring or not e.monitor_hosts))
+
+
+def mintable_entitlements() -> dict[str, Entitlement]:
+    """`{price_id: Entitlement}` over the FULL catalog, ignoring every sale flag and `retired` — what the billing
+    drain's signer consumes. A SKU that was ever sold keeps minting after its flag is turned off or it is
+    retired, so a renewal is never silently dropped; a signer holding no line for it raises UnaccountedPayment
+    under the plan alarm instead (BillingSigner). The money still comes only from this owner catalog."""
+    return {e.price_id: e.entitlement() for e in _CATALOG}
+
+
+def mintable_expected() -> dict[str, tuple[int, str]]:
+    """`{price_id: (amount_minor, currency)}` over the FULL catalog — the underpay / wrong-currency cross-check
+    paired with mintable_entitlements(), so every mintable price carries its expected amount into the signer's
+    existing cross-check (which applies when the verified event carries a currency)."""
+    return {e.price_id: (e.amount_minor, e.currency) for e in _CATALOG}
 
 
 def entitlements() -> dict[str, Entitlement]:
@@ -330,20 +350,20 @@ def postpaid_invoice_amount_minor(credits: int) -> "tuple[int, str]":
 # ==================================================================================================
 # EC-6 — OWNER-INPUT accessors for the billing<->cost MARGIN reconciliation (a READ-ONLY projection).
 #
-# These two numbers convert the EC-4 committed TOKEN cost into money (and, optionally, a target-margin line)
-# for the operator margin dashboard (ui/margin.py). They are OWNER INPUTS exactly like every other price in
-# this catalog — the margin view is only as real as the owner-ratified cost rate — so they default UNSET
+# This number converts the EC-4 committed TOKEN cost into money for the operator margin dashboard
+# (ui/margin.py); the dashboard's target line comes from the one pricing input, the target margin
+# (vigil_core.model_metering.target_margin), not from here. It is an OWNER INPUT exactly like every other price
+# in this catalog — the margin view is only as real as the owner-ratified cost rate — so it defaults UNSET
 # (None = "not configured"): until the owner ratifies the real per-token cost, the dashboard shows committed
 # tokens + billed revenue but NO cost/margin, and NEVER fabricates one. An env override lets the owner set
-# them ahead of the promote-to-owner-signed-catalog enhancement (the same convention as the placeholders).
+# it ahead of the promote-to-owner-signed-catalog enhancement (the same convention as the placeholders).
 #
 # PURELY ADDITIVE: disjoint names, no CatalogEntry/price touched, NOT consumed by the import-time _validate()
 # fail-closed contract, and NOT read by plans()/expected_amounts()/entitlements() — so the public pricing +
-# the mint path are byte-identical whether these are set or not. (Money-anchor doctrine: the cost rate lives
+# the mint path are byte-identical whether it is set or not. (Money-anchor doctrine: the cost rate lives
 # in the owner catalog, next to the prices it reconciles against, not in generic runtime config.)
 # ==================================================================================================
 _COST_RATE_ENV = "VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN"
-_MARGIN_K_ENV = "VIGIL_MARGIN_MULTIPLIER_K"
 
 
 def cost_rate_micro_minor_per_token() -> Optional[int]:
@@ -361,19 +381,3 @@ def cost_rate_micro_minor_per_token() -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return v if v >= 0 else None
-
-
-def margin_multiplier_k() -> Optional[float]:
-    """The owner-set DISPLAY-ONLY target margin multiplier k (a target revenue = cost * k), for the
-    dashboard's actual-vs-target line only. PLACEHOLDER default **None** (unset => no target line shown). It
-    NEVER affects the computed ACTUAL margin (= revenue - cost), only the informational target.
-    `VIGIL_MARGIN_MULTIPLIER_K` overrides with a POSITIVE finite float; empty / junk / <=0 / non-finite ->
-    None (fail-closed)."""
-    raw = os.environ.get(_MARGIN_K_ENV)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        v = float(raw.strip())
-    except (TypeError, ValueError):
-        return None
-    return v if (math.isfinite(v) and v > 0.0) else None

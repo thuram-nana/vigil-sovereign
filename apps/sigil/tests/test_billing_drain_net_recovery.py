@@ -48,7 +48,7 @@ OP = OWNER.public_key_b64
 _SECRET = "flw-verif-hash-net2b"
 _DUMMY = "dummy-not-a-real-key-DO-NOT-PRINT"
 _SCHEMA = "vigil.webhook.billing.v1"
-_OK = {"status": "success", "data": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
+_OK = {"status": "success", "data": {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1",
                                      "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
 _SCHEDULE = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 300.0, 300.0]     # the shared NET-2 defaults (8 retries)
 

@@ -566,7 +566,7 @@ def verify_build_integrity(manifest: "Optional[SignedBuildManifest]", *, tree_ro
 
     try:
         thr = verify_threshold(manifest.signing_bytes(), list(manifest.signatures), trust_root)
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         # A signature or authoriser key that parsed structurally but is malformed at the byte level
         # (non-canonical base64, wrong length, low-order/non-canonical pubkey) makes the crypto layer
         # raise. This state machine's contract is NEVER-RAISES: a material we cannot decode is a material

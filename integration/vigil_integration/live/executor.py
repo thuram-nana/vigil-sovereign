@@ -922,6 +922,9 @@ def _build_httpx(tool_args: Any, p: _Pinned) -> "_Build | str | None":
     # taking ffuf's report file over its `-json` stream, and it costs the POSITIVE case nothing —
     # `parse_httpx_export` drops every `failed: true` record, so a refused connection still mints no
     # observation and a host that refused the connection never enters the world-model as an asset.
+    # VERSION FLOOR: this holds from httpx v1.6.10. Up to v1.6.9 an errored result was skipped before
+    # the JSON writer, so `-json -probe` still wrote zero bytes for a refused connection (the nightly
+    # live-fire, pinned at v1.6.9, was red on exactly that). The live-fire workflow pins and proves it.
     # `-H User-Agent: …` — httpx's own `-random-agent` DEFAULTS TRUE (verified against the installed
     # binary's help text), so without this every probe goes out under a randomly-chosen browser
     # identity. That is the exact inversion of this system's doctrine: an authorised owner-test is

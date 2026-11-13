@@ -230,3 +230,24 @@ def test_referential_floor_detects_a_short_seed_row(tmp_path, monkeypatch):
     assert prune.stranded_invoices(s, _archived_below(s, 5), 5) == ["acme"]   # short row not counted carried
     with pytest.raises(prune.PruneUnsafe):
         prune.check_prune_safe(s, 5)
+
+
+# ---- (e) "has this org purchased credits?" survives the prune too --------------------------------------
+def test_a_purchase_survives_a_hard_prune(monkeypatch):
+    store = _store()
+    r = _reg(store)
+    r.record("acme", invoice_id="evt_1", kind="topup", price_id="t", amount_minor=999, credits=500,
+             issued_at=_iss())                                                                        # seq 0
+    r.record("globex", invoice_id="evt_2", kind="subscription", price_id="pro", amount_minor=4900,
+             currency="USD", credits=1000, period_start=1.0, period_end=2.0, issued_at=_iss())       # seq 1
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 2
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
+    pruned = PrunedView(store, k)
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    r2 = InvoiceRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert r2.has_purchased_credits("acme") is True, "a pruned purchase must still read as purchased"
+    assert r2.has_purchased_credits("globex") is False
+    # NEUTERED control: without the seed the pruned purchase is gone
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: SnapshotState.empty()))
+    assert InvoiceRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB).has_purchased_credits("acme") is False

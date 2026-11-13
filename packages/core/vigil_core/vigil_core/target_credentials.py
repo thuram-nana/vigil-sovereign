@@ -145,7 +145,7 @@ def verify_target_credentials(
         result = verify_threshold(
             target_credentials_signing_bytes(signed.document), signed.signatures, trust_root
         )
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         return False, f"test-credential signature material is malformed or uses a weak key: {e}"
     return result.satisfied, result.reason
 

@@ -19,10 +19,9 @@
 >
 > **HANDOVER (2026-11-11, end of session): read §10 FIRST.** The owner opened a new program the same day —
 > **pricing, metered billing on ONE VIGIL API key, and Red-Pen as a customer product** — and decided or delegated
-> every number. Its design and its first two slices are **built but not on `main`**: they are parked on branch
-> **`claude/cool-meitner-v9fq6d-pricing`** (commits `814e4cb4` = M1, done; `7285da34` = M1c-1, work in progress).
-> **Order for the next agent:** (1) merge #1076 when green; (2) ship M1 as its own PR; (3) finish + ship M1c-1;
-> (4) continue the pricing slices in §10.6; Front C S1→S4 (§4.4) and Gate 5 (§5) remain after/alongside.
+> the numbers recorded in §10.2 (the margin value is the owner's, set at deploy). The metering core and the model
+> gateway (M1) ship as their own PR; the sovereign wiring (M1c-1) follows; then the slices in §10.6. Front C S1→S4
+> (§4.4) and Gate 5 (§5) remain after/alongside.
 
 ---
 
@@ -181,8 +180,7 @@ ends with the session's attribution footer.
 | #1075 | `397e97c5` | **S0d-2c** — kill switch + capability gate (append-proof), customer assessments, margin settles, `challenge()` |
 | #1076 | (this PR) | **S0d-3** — fresh-store tail fast path, rebuild-and-compare audit, boot warm-up, `sigil verify` / `vigil doctor`; this handoff |
 
-**Not on `main` (parked on `claude/cool-meitner-v9fq6d-pricing`, no PR yet):** `814e4cb4` PRICING M1 and
-`7285da34` PRICING M1c-1 (WIP) — §10.
+**Pricing (§10):** PRICING M1 (metering core + model gateway) ships as its own PR; M1c-1 (sovereign wiring) next.
 
 ---
 
@@ -278,9 +276,9 @@ ends with the session's attribution footer.
 
 | Flag | Enables | Who flips |
 |---|---|---|
-| `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost × K (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
+| `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost / (1 − target margin) (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
 | `VIGIL_MODEL_GATEWAY_ENABLED` / `VIGIL_MODEL_GATEWAY_PORT` (8742) | the cockpit starts the sovereign model gateway (loopback) | owner / operator |
-| `VIGIL_BILLING_MARKUP_K` (6) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
+| `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` \| `refund`; unset = `metered`, the owner's decision of 2026-11-13: a cancelled run pays for what it used; an unrecognised value refuses metered launches) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
 | `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
 Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
@@ -430,9 +428,10 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
 - **Pricing go-live (§10):** the Anthropic API key in the sovereign secret store (`SIGIL_ANTHROPIC_API_KEY`), a
   dedicated Anthropic **workspace** for customer traffic with a monthly spend limit, Anthropic auto-reload with a
   cap, an Anthropic **admin key** for the daily reconciliation (O1), the calibration spend approval (M5),
-  confirming the Flutterwave fee schedule (the design assumes ≤ 4.8%; `flutterwave.com` was unreachable from the
-  sandbox), registering the customer-facing GitHub App (Red-Pen), and the sub-processor disclosure (Anthropic,
-  GDPR Art. 28) in the privacy policy.
+  confirming the payment processor's fee schedule (an input to calibration, §10.2 open item c), **choosing the
+  cancel-settlement policy** (§10.2 open item d — required before metered billing is enabled), registering the
+  customer-facing GitHub App (Red-Pen), and the sub-processor disclosure (Anthropic, GDPR Art. 28) in the privacy
+  policy.
 - The **AWS KMS key** for evidence-DEK escrow + KEK (#70 tail).
 - CodeQL: scope out the deliberately vulnerable benchmark fixtures (proposed `paths-ignore` lines in
   `docs/audit/CODEQL-TRIAGE.md`) and dismiss the by-design alerts with the recorded rationale.
@@ -495,20 +494,10 @@ Gate 5 and the owner's flips.
 ### 10.1 Where the work is
 | What | Where | State |
 |---|---|---|
-| Design + every decision, risk and source | `docs/decisions/PRICING-RED-PEN-DESIGN.md` — **inside commit `814e4cb4`** (lands on `main` with M1) | final for M1; its §4.5 prices are pre-calibration estimates |
-| **M1** — metering core + sovereign model gateway | `814e4cb4` on `claude/cool-meitner-v9fq6d-pricing` | done: tests green, **39/39 mutants**, ruff + mypy ratchet clean, docs/tests 443 ✓; **no PR yet** |
-| **M1c-1** — sovereign wiring (WIP) | `7285da34` on the same branch | tests green (299 across the touched suites), ruff clean; **mutation + red-pen NOT done** |
-| M1c-2 … A1 | — | not started (§10.6) |
-
-The parking branch = `1bee12cc` (S0d-3, #1076) + `814e4cb4` + `7285da34`. It is a **parking branch: never open a PR
-from it and never merge it**. Ship each commit as its own PR from your session branch:
-```bash
-git fetch origin main claude/cool-meitner-v9fq6d-pricing
-git merge --ff-only origin/main            # after #1076 has merged
-git cherry-pick 814e4cb4                    # M1; re-test (§10.8), push, PR, merge on green
-# later, once M1c-1 is finished (§10.5): cherry-pick 7285da34 (+ your fix-ups) the same way
-```
-Delete the parking branch once both commits are on `main`.
+| Design + every decision, risk and source | `docs/decisions/PRICING-RED-PEN-DESIGN.md` (on `main` with M1) | final for M1; its §4.5 budgets are pre-calibration proposals |
+| **M1** — metering core + sovereign model gateway | on `main` (its own PR) | three adversarial review rounds folded; mutation-verified |
+| **M1c-1** — sovereign wiring | its own PR after M1 | see §10.5 |
+| M1c-2 … A1 | — | §10.6 |
 
 ### 10.2 The owner's decisions (2026-11-11; verbatim intent)
 - **Credits:** 100 credits per $1 (1 credit = $0.01 at list). **Minimum purchase $5.** Six packs **$5 / $10 / $16 /
@@ -520,7 +509,7 @@ Delete the parking branch once both commits are on `main`.
 - **Customer-facing name: "VIGIL"** (the owner changed it from "VIGIL Agent"). Never name the model to a customer.
 - **One VIGIL Anthropic API key.** VIGIL buys the tokens; every tenant's runs draw on that key; **each tenant sees only
   their own bill**, in credits.
-- **Tenants must get the work they paid for, and VIGIL must make good money.**
+- **Tenants must get the work they paid for.**
 - **Not everyone tests code**: some customers test live deployed systems, some code, some both. **Not everyone wants
   fixes**: some only want to know their vulnerabilities — Fix is opt-in.
 - **Red-Pen** — the owner's "reopen" = this repo's red-pen reviewer (`engine/crucible/.claude/agents/red-pen.md` +
@@ -529,30 +518,67 @@ Delete the parking branch once both commits are on `main`.
 - Launch with PAYG credits + per-host AEGIS subscriptions + quoted enterprise contracts; discounted credit
   subscriptions only after costs are measured.
 - **Delegation:** "I will leave you to carry out research and answer all the other questions for me; remember we need
-  perfection." Every number below is the agent's researched answer, built as an env-overridable default.
-
-### 10.3 The numbers (design §4) — all env-overridable
-`charge_credits = min(reservation, max(FLOOR, ceil(cost_usd × K × 100)))`, where `cost_usd` comes ONLY from the
+  perfection." Every number below is the agent's researched answer, built as an env-overridable default —
+  **a proposal, NOT an owner decision** (see the open list below).
+- **Owner input since this handoff was first written (2026-11-11, coordinating session):**
+  - *Confirmed:* $1 = 100 credits; packs $5 / $10 / $16 / $25 / $50 / $100 → 500 / 1,000 / 1,600 / 2,500 / 5,000 /
+    10,000; custom amounts from $5 at dollars × 100; one conversion rate, no volume bonus; unused purchased credits
+    are retained.
+  - *In the owner's words:* "price scan consumption according to actual operating cost. This is a proposed pricing
+    model, not yet a validated profitable rate." Costs to count: AI usage, scan workers, storage, payment processing.
+    A credit must not promise a fixed number of raw tokens; deeper scans and more expensive models consume more.
+  - *Margin (decided later the same day):* every scan is priced at an **owner-set target margin over its direct
+    cost, recorded privately** (outside this public repo), applied via `VIGIL_BILLING_TARGET_MARGIN` at deploy
+    (`credits = metered AI cost / (1 − m) × 100`, `0 < m < 1`, **no committed default**: unset ⇒ metered pricing off).
+    **Never write the margin value, a markup-to-margin breakdown or any value-based analysis into this repo or a
+    commit message.** Doctor must flag metered billing without it (M1c-1). *(2026-11-13, one pricing number:)* `m`
+    is the margin over **metered AI cost only** (fees and hosting are outside it) and is the only pricing input; the
+    margin dashboard's target line is `cost / (1 − m)`, and `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are
+    refused while present (doctor hard issue; metered launches refuse, metered charges wait).
+  - *Seats:* $25 per seat (assume per month; whether a seat includes credits is open) — a public price, may go in
+    the catalog (M3).
+  - *Free trial:* a real scan with partial results, the full report unlocked once the org buys credits (any pack from
+    $5); one trial per verified email AND per verified domain; ownership proof still required. The coordinator is
+    designing the unlock (preview rules, leak inventory, unlock record, abuse controls) and the seat SKU — **do not
+    start the trial unlock before that spec arrives.**
+  - *Audience:* young startups first; no minimums; packs from $5.
+  - *Customer experience:* credits shown immediately when an amount is entered; before a scan the estimated
+    consumption and a customer-set maximum credit budget; during the scan consumption and remaining budget; at
+    completion charge metered usage and release unused reserved credits; optional auto top-up with a spending cap.
+  - *Launch offer:* PAYG credits, separate per-host AEGIS monitoring subscriptions, quoted enterprise / on-premise
+    contracts; discounted credit subscriptions only after real scan costs are measured.
+- **OPEN OWNER DECISIONS — do not ratify any of them** (design doc §1.2):
+  (a) the §10.3 numbers (the 25-credit floor, tier budgets 450 / 5,000 / 20,000, top-up limits, concurrency
+  4 / 32) are proposed defaults only; (b) the target margin (over metered AI cost; the only pricing input) is set at
+  deploy from the owner's private record; (c) the formula meters AI cost only, while the owner's profit target is
+  measured after all costs — M5 must report the measured fee and hosting fraction per run so the target margin can
+  be set to land the all-in margin on the target; (d)
+  **cancellation** (charge a cancelled run for usage vs. today's full refund) is unanswered — it must be a named
+  setting, and `vigil doctor` + the go-live notes must say it has to be chosen before metered billing is enabled.
+- **This repository is public.** Keep business-sensitive detail (margin rationale, cost structure beyond what a
+  default needs to be understood, market or competitor analysis, undecided product ideas) out of committed docs.
+### 10.3 The numbers (design §4) — all env-overridable, all PROPOSED (not owner-confirmed; §10.2 open list)
+`charge_credits = min(reservation, max(FLOOR, ceil(cost_usd / (1 − target_margin) × 100)))`, where `cost_usd` comes ONLY from the
 sovereign gateway's meter.
 
 | Setting | Value | Why / env |
 |---|---|---|
-| Markup K | **6** → AI = 16.7% of revenue → **≥ 73% gross margin** after ≤ 4.8% card fees + ~5% infra | `VIGIL_BILLING_MARKUP_K` (≥ 1, ≤ 100) |
+| Target margin | **owner-set, private** — no committed default; the margin over metered AI cost only | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99; the markup is derived as 1/(1−m); the only pricing input; no default, so metered paths fail closed while it is unset |
 | Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
 | Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
 | Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |
-| Outcomes | completed = metered; **canceled = metered** (today a cancel is a full refund — a run cancelled at 95% is free); budget reached = metered (= reservation) + findings delivered + "continue" (resume); **failed on VIGIL's side = 0 + one auto-retry** | `completion_spool._consumed_for` |
+| Outcomes | completed = metered; **canceled = OPEN OWNER DECISION** — proposed: metered (today a cancel is a full refund — a run cancelled at 95% is free); budget reached = metered (= reservation) + findings delivered + "continue" (resume); **failed on VIGIL's side = 0 + one auto-retry** | `completion_spool._consumed_for` |
 | Default budgets (pre-calibration) | Quick **450** (so the $5 pack always buys one), Deep 5,000, Max 20,000, Red-Pen · PR 300 per PR + a monthly cap per repo, Fix 2,000 per finding, Retest 200 per finding | M3 / M5 |
 | Fairness | free **preflight** before any reservation; **10% report reserve** (stop testing at 90%, write the report); continue = resume, never restart; only proven findings; an honest coverage map | design §3 (M2 / M4) |
 | Account protection | tenant concurrency **4**, global **32**, daily ceiling (unset = none) + an Anthropic workspace spend limit (owner) + daily Admin-API reconciliation | `VIGIL_GATEWAY_*` (§3) |
-| Rough prices | Quick ~$4.50 cap, Deep ~$47, Max ~$180 (assumed run sizes — calibration M5 replaces them) | design §4.5 |
+| Typical prices | from calibration (M5); a budget is only the cap | design §4.5 |
 
 **Two pre-existing defects the program replaces** (do not enable money paths until they are gone):
 `vigil_core/credit_lease.ENVELOPE_TOKENS_PER_CREDIT = 100_000` (sells 1M tokens for $0.10 vs ~$2 cost) and
 `vendor/strix/strix/report/anthropic_pricing.py` (matches `claude-opus-4-8` to the Opus 4 row $15/$75 = 3× the real
 price, so Strix budget caps stop a run at a third of what was paid for).
 
-### 10.4 What M1 built (`814e4cb4`) — the architecture
+### 10.4 What M1 built — the architecture
 **Why a gateway.** The settle signal deliberately carries NO amount (`vigil_core/engagement_completion.py`): the
 keyless offense plane must never set a charge. So metering is sovereign: every model request of a customer run goes
 through **`apps/sigil/sigil/model_gateway.py`**, a loopback Anthropic Messages API reverse proxy that holds the ONE
@@ -570,78 +596,164 @@ provider key. The offense plane only ever holds a per-run **model grant**.
   (`spine_domains.DOMAIN_TAGS`); `decode_token` is total (bad prefix / base64 / length / signature / schema /
   non-canonical body → `(None, reason)`); `meter_id(slug, nonce)` = 32 hex of sha256 — ONE meter per launch, so a
   re-minted grant cannot reset a run's budget and one tenant's spend cannot land on another launch.
-- **`apps/sigil/sigil/model_gateway.py`**
-  - Endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens` (forwarded, unmetered, model-pinned only),
-    `GET /v1/vigil/budget` (the run's cap / spent / pending / remaining / fraction_used / closed — for the engine's
-    90% wrap-up and the live meter; an expired grant may still read it). Anything else → 404. Query strings
-    (Claude Code's `?beta=true`) are forwarded.
-  - Auth: the grant in `x-api-key` or `Authorization: Bearer`; bad → 401 `authentication_error`; expired or an
-    unpriced model → 403 `permission_error`. The provider key is added upstream; the client's token never leaves.
-  - Pinning: the grant's model only (else 400); `output_config.effort` = the grant's effort (so `max` reaches the
-    API even from Strix, whose effort Literal stops at `xhigh`); thinking = `{"type": "adaptive"}` (dropped under a
-    forced `tool_choice`, which the API refuses with thinking); `temperature` / `top_p` / `top_k` dropped (Opus 4.8
-    rejects them); `speed` + `inference_geo` stripped, `fast-mode*` betas dropped, `service_tier` forced to
-    `standard_only`; the code-execution tool refused (container billing is not priced).
-  - Budget: before forwarding, the worst-case output cost (`max_tokens × output price`) is RESERVED against the cap
-    and `max_tokens` lowered to fit; < 1,024 affordable output tokens → 403 "budget is reached"; concurrent
-    requests cannot jointly pass the cap. Each request's reservation is a `_Ticket` settled exactly once (commit or
-    release). **Overshoot bound:** the input cost of the last in-flight request(s) — VIGIL's cost; settle clamps.
-  - Metering: JSON `usage`, or the stream's events (keeps reading the upstream after the client disconnects, so
-    billed tokens are metered; meters what arrived if the upstream dies mid-stream). An unreadable 200 is charged
-    its reservation, never free.
-  - Meter files: `$SIGIL_HOME/model_meter/<meter_id>.jsonl` (0600; lines `{n, ts, kind: usage|close, org_id,
-    model, request_id, usage, cost_nano, prev, h}`, `h = sha256(prev + canonical(line))`); every append is
-    `fcntl`-locked and chains onto the LAST LINE ON DISK; `close()` (from any process) appends a close line and
-    creates `<meter_id>.closed`, which the gateway checks before admitting each request; `verify()` re-reads and
-    checks the chain (edit / drop / reorder → `ValueError`). One gateway process meters a given launch.
-  - Account protection: per-tenant (org_id) and global `BoundedSemaphore`s, wait `concurrency_wait_s` (30 s) then
-    429 `rate_limit_error` + `retry-after: 5`; daily ceiling (spend of the UTC day + all pending reservations) →
-    529 `overloaded_error` (a VIGIL-side failure: never billed); the day's spend is re-seeded after a restart from
-    meter files modified that day.
-  - Upstream errors are relayed with `retry-after` / `request-id` / `x-should-retry`; unreachable → 502
-    `api_error`; any internal error → 500 `api_error`, nothing forwarded. Loopback bind only. Request lines are
-    never logged.
-  - Relationship to `vigil_core.ai_gateway`: that chokepoint covers VIGIL's OWN model calls (classify / redact /
-    audit); this gateway carries the customer-run agent traffic (Strix, Claude Code), which never went through
-    `ai_gateway`, and passes bodies unredacted (an agent's prompts are its working state).
-- Tests: `packages/core/vigil_core/tests/test_model_metering.py` (21), `test_model_grant.py` (15),
-  `apps/sigil/tests/test_model_gateway.py` (34, against a fake Anthropic upstream: JSON, SSE, disconnect, errors,
-  concurrency, ceiling, restart, tamper). Each file's docstring lists its "Mutation-verify targets".
+- **`apps/sigil/sigil/model_gateway.py`** (as merged, after TWO adversarial rounds — 29 + 23 verified findings, plus
+  a parallel 7-lens review, folded; the PR body lists them). The runner is treated as hostile (a scan target can
+  prompt-inject it):
+  - Endpoints: `POST /v1/messages`; `POST /v1/messages/count_tokens` (free, validated like a message, its own
+    concurrency bound, refused for a settled run); `GET /v1/vigil/budget` (cap / spent / pending / remaining /
+    `fraction_used` (spent + in flight) / `fraction_spent` (spent only — drives the 90% wrap-up) / closed; an
+    expired grant may still read it). Anything else → 404.
+  - Auth: the grant in `x-api-key` or `Authorization: Bearer`; bad → 401; expired, settled or an unpriced model →
+    403. The provider key is added upstream: https only (http to loopback), **no redirect is ever followed**, key
+    with a non-header character refused at start, `repr` hides it.
+  - **Allowlist, not denylist.** Top-level fields: `model messages system max_tokens tools tool_choice stream
+    stop_sequences metadata thinking output_config cache_control context_management service_tier`; sampling /
+    `speed` / `inference_geo` dropped; anything else → 400 by name. Tools: untyped / `custom` / `bash_*` /
+    `text_editor_*` by EXACT type (`bash_20250124`, `text_editor_20250124|20250429|20250728`) — every
+    server-executed tool (web search / fetch, code execution, advisor, MCP, tool search), computer use, memory and
+    any tool with a `model` key → 400. Content blocks: an allowlist (`text image document tool_use tool_result
+    thinking redacted_thinking search_result`), checked inside tool results / search results / inline documents;
+    images base64 only; documents inline text only; messages carry only `role` + `content`; system = text blocks.
+    `context_management`: `clear_*` edits only. Betas: a prefix allowlist, others DROPPED. Query string: only
+    `beta=true` is forwarded. **A run cannot use Anthropic web search through the gateway.**
+  - Pinning: `output_config.effort` = the grant's; thinking adaptive (dropped under a forced `tool_choice`);
+    `service_tier = standard_only`; `inference_geo = global` (the dedicated workspace must allow global inference);
+    every `cache_control.ttl` removed (5-minute writes only); no `cache_control` on a tool; a per-tenant text block
+    is PREPENDED to `system` (no cross-tenant prompt-cache hits).
+  - Budget: the request's worst case is reserved BEFORE forwarding — input (`body bytes + 6,000 per image +
+    the Anthropic tool allowances (bash 400, text editor 1,100, +500 preamble) + 1,000` tokens; when that does not
+    fit the headroom, the provider's `count_tokens` × 1.05 + 1,000) priced at `max(input, 5m-write)` EXCEPT the
+    prompt-cache prefix this launch wrote/read < 270 s ago that the request re-sends unchanged (same tools, system
+    and every earlier message, and a cache marker present), which is priced at the cache-read rate; plus output
+    (`max_tokens × output price`, `max_tokens` lowered to fit). < 1,024 affordable output tokens of real budget →
+    403 "budget is reached"; affordable but held by requests in flight → wait up to `concurrency_wait_s`, then 429
+    `retry-after: 5`; the count could not be had and the budget is not spent → 529 retryable.
+  - Meter file `$SIGIL_HOME/model_meter/<meter_id>.jsonl` (0600 in 0700; `n` = line number, `h = sha256(prev +
+    canonical(line))`). Kinds: `open` (WRITE-AHEAD, fsynced before the request is sent: `rid`, `reserved`,
+    `grant_id`), `usage` (`cost_nano`; `held_nano` when cut off), `release`, `orphan`, `close` (always last). A torn
+    final line is repaired on the next append. Writes are all-or-nothing.
+  - **Confirmed vs unconfirmed spend.** `MeterTotals.cost_nano` = usage Anthropic reported (what the customer's
+    charge is computed from). `unconfirmed_nano` = orphans (a crash between the call and its record), the unreported
+    rest of a cut-off stream's reservation, a request sent but never answered: counted against the cap and the
+    daily ceiling, NEVER billed. An unreadable 200 (or one reporting `usage.iterations` / an unpriced server tool /
+    priority tier / fast mode) is charged its reservation.
+  - **Close protocol.** `GrantMeter(dir).close(mid)` (the settle step): writes `<mid>.closed` first (admission
+    stops, re-checked by the gateway under the file lock), then raises **`MeterBusy`** while the LIVE gateway has an
+    `open` of that launch in flight (each `open` carries its gateway process's boot id, written into
+    `.gateway.lock`) — the settle must RETRY; opens written by any other (dead) process are recorded as orphans.
+    One gateway per meter dir (`.gateway.lock`, an exclusive flock held for the process lifetime, released in a
+    forked child; a second gateway refuses to start; the settle probes with a shared lock). A starting gateway
+    orphans every dead leftover in the directory. `server.server_close()` cuts connections that have not started a
+    request, refuses any that starts after it (529), waits up to `shutdown_drain_s` for the requests in flight and for
+    every owed record to be written, then releases the lock (it keeps it, and keeps retrying the records, if either
+    is still pending). A stopped meter admits nothing. A forked child closes every meter lock file it inherited.
+  - Failure handling: meter unreadable / unwritable before the call → 529, nothing forwarded; a record that fails
+    AFTER the call → spend counted in memory at ≥ the reservation, the record kept and retried every 5 s
+    (`flush_unwritten`), the launch refused and its settle `MeterBusy` until it is written.
+  - Account protection: per-tenant and global slots taken BEFORE the body is read; request bytes in memory bounded
+    per tenant (`tenant_body_bytes`, 32 MiB) and overall (`global_body_bytes`, 128 MiB) → 429; `max_connections`
+    (256), and when full the oldest connection that has not started a request is cut; `header_deadline_s` (5 s) for
+    the request line and headers; `client_timeout_s` (60 s) on every client socket — a stalled reader is treated as
+    gone and the upstream is still drained and metered; daily ceiling (day's confirmed + unconfirmed spend +
+    pending) → 529.
+  - Cached-prefix reservation: the read rate applies only with the same render state (every other request field,
+    the forwarded betas, the image count), the unchanged prefix, a breakpoint within 20 blocks of where the entry was
+    written, no `context_management` edits, and within 300 s less the worst admission delay (count + budget wait)
+    less 10 s. Cache markers are rebuilt as exactly `{"type": "ephemeral"}`; citations are refused.
+  - Known limits (documented, accepted): a file cut at a line boundary or deleted is not detectable from the chain
+    alone (the `close` line + the owner-signed settle anchor a finished run); the cap is per grant token, not per
+    launch (M1c mints one cap per launch); `_states` / tenant semaphores / cached-prefix memory are never evicted;
+    concurrency does not bound input tokens per minute; a cache read the provider does not make (early eviction,
+    an unmodelled rule) or a provider count below the real bill passes the cap by that difference (VIGIL's cost);
+    the startup sweep reads every meter file (fine until Front C scale). A grant lives at most 7 days + 1 h and is refused if issued > 5 min in the future.
+  - **For M1c-2 (runner configuration the gateway requires)** — Claude Code: point `ANTHROPIC_BASE_URL` at the
+    gateway, pass the grant as `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`), set `ANTHROPIC_MODEL`,
+    `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` (background requests) and the subagent model to
+    the grant's model (any other model → 400), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+    `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (a dropped beta whose fields are still sent → provider 400), and deny
+    the WebSearch / WebFetch tools. Requests with `context_management` edits get no cache-read reservation, so a run
+    that uses them reaches its cap sooner (it is still charged only what it spent). Strix (LiteLLM `anthropic/…`): no server tools; capture one real request in a
+    test and confirm the gateway accepts its shape (fields, tool types, thinking blocks echoed back).
+- `vigil_core.model_metering`: also refuses a `usage` with unpriced spend (`iterations` beyond one `message`,
+  unpriced `server_tool_use` counters, `service_tier: priority`, `speed: fast`), a zero input / output / cache-write
+  price, and a stream whose cache-write total goes down; a bare cache-write total never re-prices the TTL split.
+- `vigil_core.model_grant`: canonical base64url only (one grant = one token string); no control characters in
+  `engagement_slug` / `nonce`; `not_after > issued_at`.
+- Tests: `packages/core/vigil_core/tests/test_model_metering.py`, `test_model_grant.py`,
+  `apps/sigil/tests/test_model_gateway.py` (against fake upstreams). The mutation list is in the M1 PR body.
 
-### 10.5 M1c-1 (`7285da34`, WIP) — what it does, what is left
-**Done (all behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF, byte-identical off):**
+### 10.5 M1c-1 — sovereign wiring (what it does, its interim limits)
+All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF; with both off nothing changes.
 - `sigil/config.py`: `MODEL_METER_DIR`, `metered_billing_enabled`, `model_gateway_enabled/_port/_url`, `run_model`.
-- `model_gateway.config_from_env` + `start_from_env` (once per process + port; never raises; a misconfiguration is
-  logged and the cockpit carries on — runs then fail closed); `ui/server.py::serve` starts it beside the fold warm-up.
+- `model_gateway.config_from_env` + `start_from_env` (once per process + port; never raises — any failure is logged
+  and the cockpit carries on, metered runs then fail closed; refuses without the owner public key; concurrency settings
+  are digits only); `ui/server.py::serve` starts it.
 - `ui/launch_gate.py::publish_lease` → `_publish_model_grant`: mints the owner-signed grant from the VERIFIED lease
-  (cap = `usd_cap_nano_for_credits(units, K)`, effort = `run_tier.effort_for(run_tier_for_units(units))`, expiry =
-  the lease's) and writes it BEFORE the lease; a pricing config the core refuses refuses the publish (no lease, no
-  grant); a failed lease write removes the grant.
+  (cap = `usd_cap_nano_for_credits(units, markup)`, effort = `run_tier.effort_for(run_tier_for_units(units))`,
+  validity = the lease's `not_before`…`not_after`, id derived from (slug, nonce) — re-publishing mints the identical
+  grant) and writes it BEFORE the lease, after a per-launch **metered marker** (`MODEL_METER_DIR/<meter_id>.metered`)
+  that fixes the launch's billing mode. A pricing setting the core refuses — no target margin, an unrecognised cancel policy, a
+  run model (`VIGIL_RUN_MODEL`) with no price — refuses the publish (no lease, no grant); a failed lease write removes
+  only a grant that call created (a failed re-publish never removes a live run's grant). The grant is valid from the
+  lease's start for the longest grant lifetime (`MAX_GRANT_LIFETIME_S`, past the at-most-a-week lease window), so a
+  run armed late in its window, or resumed after it, keeps its model access; the settle closes the meter, after
+  which the grant spends nothing.
+- **One launch per org+host in flight while metering is involved:** `publish_lease` refuses a new launch while an
+  earlier, unsettled one holds the seam's single per-slug lease, when either is metered (a replaced lease would leave
+  the earlier run unable to settle, and a customer cancel would read it as never started). Flat-to-flat is unchanged
+  (that root cause predates metering; reported). Where metering is involved the check, the grant and the lease
+  write run under one per-org+host `flock` (`MODEL_METER_DIR/publish-<hash>.lock`, across threads and the cockpit and
+  customer servers), so two concurrent publishes cannot both pass; a flat-only publish takes no lock and writes no
+  file.
+- `ui/launch_gate.py::settle_launch`: EVERY settle (completion, customer cancel, abandoned-lease sweep) of a launch
+  published metered (its marker or meter on disk) first closes the run's meter, so a settled lease can spend nothing
+  more, and retires the grant. A request still in flight or a meter not writable right now refuses with `retry`
+  (the completion drain defers it); a broken meter refuses without it (quarantined).
 - `integration/vigil_integration/live/model_grant_broker.py`: `<base>/model-grants/<slug>.json` (0600 in 0700,
   atomic, nonce-bound via `expect_nonce`, loopback-URL-only, never follows a symlink, never prints the token).
-- `inbound/completion_spool.py::_consumed_for`: metered → close the meter, then completed / canceled = metered
-  (clamped), failed = 0; a broken meter / bad pricing refuses the settle (the spool retries); `_retire_model_grant`
-  removes the grant after settle.
+- **The billing mode is the launch's, never the flag's at settle time:** it is decided ONCE, at the launch's first
+  publish. A launch published flat settles flat — and a re-publish of it (a double-click after the owner turns
+  metering on) stays flat — and one published metered settles metered whatever `VIGIL_METERED_BILLING` says later. So turning metering OFF does not
+  change how already-published metered launches settle: keep the target margin and any cancel policy set (in the
+  settle drain's environment too) until they have all settled, or their settles defer.
+- `inbound/completion_spool.py::_consumed_for`: metered launch → close the meter, then completed = metered (clamped to
+  [floor, reservation]); canceled = `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` | `refund`; unset = `metered`); failed
+  = 0, except a launch the customer held paused through the end of its window (the pause lifted only after it closed,
+  so the window refuses its re-drive): charged what it used, like a paused, abandoned launch. Only confirmed spend is
+  billed. A request in flight, a transient meter error or an unset pricing setting
+  DEFERS the settle (back to `incoming/`, reported as `deferred`); a broken meter is quarantined. A wait on the
+  pricing configuration never clears by retrying, so it is also reported as `deferred_config` and `vigil settle-drain`
+  exits 1 (the unit FAILS, the dead-man alarms) until it is fixed — set the pricing settings in the drain's own
+  environment (`infra/systemd/vigil-settle-drain.env.example`).
+- `ops_sweeps.sweep_abandoned_reservations` (owner decision 2026-11-13: a scan paused and never resumed is charged
+  for what it used): an abandoned launch published metered that the CUSTOMER paused (a cleanly-read pause marker holds
+  its nonce) is charged its confirmed metered use, clamped to [floor, reservation] (`charged_paused`); one NOT paused
+  was lost on VIGIL's side and is refunded in full; one whose pause state cannot be read is not settled
+  (`pause_unknown`); a flat launch has no meter and is refunded. A paused launch that made no model request and has no
+  confirmed spend (it may never have started) is refunded: the floor covers a run's start-up. Lifting a pause after
+  the window closed re-admits nothing, so `LaunchGate.resume_launch` first records it
+  (`credit_lease_pause.record_paused_past_expiry`, add-only; an unreadable record refuses the resume) and the sweep
+  and the drain still charge that launch for what it used. Every metered row reports the meter's confirmed spend
+  (`metered_cost_nano`, `metered_requests`).
 - `vigil_core/run_tier.effort_for` (quick → high, deep → xhigh; unknown → high, never an escalation).
-- `backup.py`: `model_meter` captured (money data) — `test_backup_recovery_functional.py` restores it functionally
-  (`GrantMeter.verify` totals) and proves a dropped meter loses the charge.
-- `integration/vigil_integration/doctor.py::_metering_report` — HARD issues: metered without the gateway, gateway
-  without a provider key, gateway not answering while metered, a pricing value the core refuses; notes: no daily
-  ceiling, gateway down while billing is flat. Nothing rendered when neither flag is set.
-- Tests: `apps/sigil/tests/test_metered_billing.py` (12), `integration/tests/test_model_grant_broker.py`,
-  `integration/tests/test_doctor_metering.py`, `test_run_tier.py` (+1).
+- `backup.py`: `model_meter` captured (money data), restored functionally (`GrantMeter.verify` totals).
+- `integration/vigil_integration/doctor.py::_metering_report` — HARD issues (each blocks metered bring-up): metered
+  without the gateway (no run can reach a model); gateway without a provider key (it will not start); gateway not
+  answering, or something else answering on its port, while metered (runs fail); a pricing value the core refuses
+  (floor, price table, an unpriced run model, gateway limits); with metered billing, no target margin (launches and
+  charges refuse) and an unrecognised cancel policy (launches refuse, cancelled-run settles defer; unset = metered).
+  Notes: no daily ceiling; the
+  gateway down or replaced while billing is flat. The flags read `1/true/yes/on/enabled` exactly as the runtime does.
+  The margin value is never printed. Nothing is rendered when neither flag is set. Doctor reads the environment the
+  cockpit reads: its own, with `$SIGIL_HOME/sigil.env` layered under it (where the settings UI saves the provider
+  key), exactly as `sigil.config` does. A probe that breaks never hides the issues already found. A retired pricing
+  setting (`VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K`) is a hard issue even with both flags off.
 
-**Left before its PR:**
-1. **Mutation pass** — the intended mutants are listed in `test_metered_billing.py`'s docstring (mint with metering
-   off; cap = units instead of usd_cap; publish the lease when the grant fails; charge a failed run; leave the meter
-   open; drop the clamp; settle on a corrupt meter) — add the doctor / broker / backup / start_from_env ones.
-2. **Red-pen** the money path (who can make a grant, what a stolen grant can do, settle idempotency vs. the closed
-   meter, the restore of an unsettled meter).
-3. Re-test on top of M1 + main, then PR. State these interim limits in the PR:
-   - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
-     pre-metering placeholders), i.e. metered caps of ~$0.005 / ~$0.033 — runs would stop at once.
-   - The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
-   - The gateway must be enabled with metered billing (doctor HARD issue otherwise).
+**Interim limits (until later slices):**
+- **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
+  pre-metering placeholders), so metered caps would be a fraction of a dollar and runs would stop at once.
+- The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
+- The offense plane does not yet route its model calls through the gateway (M1c-2).
 
 ### 10.6 Remaining slices, in order (design §9)
 | Slice | What, with anchors |
@@ -679,9 +791,6 @@ provider key. The offense plane only ever holds a per-run **model grant**.
 - **Agent SDK terms**: a product for customers must use **API-key auth** (no claude.ai login / subscription limits);
   keep VIGIL's own branding — never "Claude Code" (or "ultracode") to customers.
 - **Anthropic credit tiers**: Tier 1 caps a single credit purchase at $500 and advances on cumulative purchases.
-- **Flutterwave** (third-party reports, unconfirmed): local cards ~1.4–2.9%, international ~3.8–4.8%.
-- **Market**: AI code review ~$18–30 / dev / month (Codacy, CodeRabbit, Snyk Team $25); AI pentests $4,000–8,000 per
-  test (XBOW, historical) — why PR Red-Pen defaults to Quick with a per-PR cap.
 
 ### 10.8 Re-testing and the mutation runner (the scratchpad does not survive)
 ```bash

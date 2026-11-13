@@ -84,7 +84,7 @@ def verify_authority_envelope(env: dict, *, trusted_owner_pubkey: str, engagemen
         raise AuthorityError("authority envelope is unsigned")
     try:
         ok = verify_one(str(trusted_owner_pubkey), _ENVELOPE_DOMAIN + canonical_json(_envelope_core(env)), str(sig))
-    except (IntegrityError, TypeError) as e:
+    except (IntegrityError, TypeError, ValueError, OverflowError) as e:   # non-UTF-8 / non-integer / infinite core
         raise AuthorityError(f"envelope signature malformed: {e}") from e
     if not ok:
         raise AuthorityError("authority envelope signature does not verify against the owner key")

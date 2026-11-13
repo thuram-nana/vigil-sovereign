@@ -99,6 +99,9 @@ CACHE_DIR = SIGIL_HOME / "cache"
 # `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower
 # it — a routine reset cannot roll the durable floor back. See spine/floor.py.
 FLOOR_PATH = SIGIL_HOME / "floor.json"
+# PRICING M1c: the model gateway's per-launch meters (hash-chained JSONL, one per (engagement, nonce)). MONEY data:
+# a run's charge is computed from its meter at settle, so the directory is in every backup.
+MODEL_METER_DIR = SIGIL_HOME / "model_meter"
 
 # The segment-rotation layout (manifest, lockfile, segments dir, …) is NOT named here: it is derived from
 # the spine data-file path — and NAMESPACED BY THAT FILE'S STEM — by `spine.manifest.SpineLayout.for_path`,
@@ -175,6 +178,9 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
+TRIAL_LAUNCH_CAP_DIR = _customer / "trial_launch_cap"   # the global daily trial-launch cap's markers
+TRIAL_IP_LIMIT_DIR = _customer / "trial_ip_limit"       # the opt-in per-IP trial-grant limiter's markers
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
@@ -204,6 +210,14 @@ def customer_stepup_required() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_STEPUP_REQUIRED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
+# sign-up requests per canonical mailbox per hour, counted only after the per-ip guard passed. 0 (the default)
+# leaves the per-mailbox limiter unwired; the trial-preview readiness check requires a positive owner-set value.
+SIGNUP_EMAIL_PER_HOUR = _int_env("VIGIL_SIGNUP_EMAIL_PER_HOUR", 0)
+# trial launches per rolling 24h, all trial orgs together (bounds daily trial spend at cap x trial reservation).
+# Owner-set; 0 (the default) means trial launches are off.
+TRIAL_LAUNCH_DAILY_CAP = _int_env("VIGIL_TRIAL_LAUNCH_DAILY_CAP", 0)
+# preview trial GRANTS per client IP per rolling 24h, when VIGIL_TRIAL_IP_LIMIT_ENABLED is on.
+TRIAL_GRANTS_PER_IP = _int_env("VIGIL_TRIAL_GRANTS_PER_IP", 3)
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
 # decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
 # later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
@@ -233,12 +247,34 @@ def customer_pause_resume_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def trial_preview_enabled() -> bool:
+    """True iff the free-trial PREVIEW is ON (`VIGIL_TRIAL_PREVIEW_ENABLED` affirmative). OFF by default: sign-up
+    grants the legacy trial exactly as before. ON: a sign-up grants the trial under the `trial-preview:<org>` entry
+    only when the org, its canonical mailbox and its trial entries are all unclaimed (one trial per org and per
+    mailbox), and later slices show that org partial results until it buys credits."""
+    return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def trial_ip_limit_enabled() -> bool:
+    """True iff the opt-in per-IP soft limit on preview trial grants is ON (`VIGIL_TRIAL_IP_LIMIT_ENABLED`
+    affirmative; default OFF)."""
+    return (os.environ.get("VIGIL_TRIAL_IP_LIMIT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def trial_product_id() -> str:
+    """The launch product a trial-preview org may run (`VIGIL_TRIAL_PRODUCT_ID`, an offered catalog launch
+    product). Owner-set; no default — while it is unset a locked trial org cannot launch at all."""
+    return (os.environ.get("VIGIL_TRIAL_PRODUCT_ID") or "").strip()
+
+
 def customer_checkout_enabled() -> bool:
     """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
     default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
     and nothing ever posts to the payment processor. Even when ON, checkout still refuses unless the owner has
-    provisioned the processor secrets (VIGIL_BILLING_WEBHOOK_SECRET + VIGIL_FLW_SECRET_KEY) — the amount is
-    always the OWNER CATALOG's, and credit is granted ONLY by the verified inbound webhook drain, never here."""
+    provisioned the processor named by VIGIL_BILLING_PROVIDER (unset = Flutterwave: VIGIL_BILLING_WEBHOOK_SECRET +
+    VIGIL_FLW_SECRET_KEY; stripe: the Stripe adapter opt-in, VIGIL_STRIPE_WEBHOOK_SECRET, VIGIL_STRIPE_SECRET_KEY and
+    VIGIL_STRIPE_API_VERSION; any other value: not configured) — the amount is always the OWNER CATALOG's, and
+    credit is granted ONLY by the verified inbound webhook drain, never here."""
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
@@ -544,6 +580,46 @@ def fold_cache_audit_interval() -> float:
     return v if v > 0 and v == v and v != float("inf") else 0.0
 
 
+def metered_billing_enabled() -> bool:
+    """True iff customer runs are billed METERED (PRICING M1c; design §4): a run's charge is its model gateway
+    meter's cost x K, clamped to [floor, reservation], instead of the flat full reservation. OFF by default
+    (`VIGIL_METERED_BILLING` unset): the launch mints no model grant and settle is byte-identical (flat). Turning it
+    on REQUIRES the model gateway (`model_gateway_enabled`), which `vigil doctor` checks. Read at call time."""
+    return (os.environ.get("VIGIL_METERED_BILLING") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def model_gateway_enabled() -> bool:
+    """True iff the cockpit starts the sovereign model gateway (`sigil.model_gateway`) at boot
+    (`VIGIL_MODEL_GATEWAY_ENABLED` affirmative). OFF by default: nothing listens."""
+    return (os.environ.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+_MODEL_GATEWAY_DEFAULT_PORT = 8742
+
+
+def model_gateway_port() -> int:
+    """The loopback port the model gateway listens on (`VIGIL_MODEL_GATEWAY_PORT`, default 8742). A junk or
+    out-of-range value falls back to the default (the gateway is loopback-only either way)."""
+    raw = (os.environ.get("VIGIL_MODEL_GATEWAY_PORT") or "").strip()
+    try:
+        port = int(raw) if raw else _MODEL_GATEWAY_DEFAULT_PORT
+    except ValueError:
+        return _MODEL_GATEWAY_DEFAULT_PORT
+    return port if 1 <= port <= 65535 else _MODEL_GATEWAY_DEFAULT_PORT
+
+
+def model_gateway_url() -> str:
+    """The base URL a customer run's engine uses for every model request (published with each grant)."""
+    return f"http://127.0.0.1:{model_gateway_port()}"
+
+
+def run_model() -> str:
+    """The one model every customer run uses (`VIGIL_RUN_MODEL`, default `claude-opus-4-8`, the owner's
+    decision). The model gateway refuses any other model for a run's grant."""
+    from vigil_core import model_metering as _mm
+    return _mm.run_model()
+
+
 def oidc_settings() -> dict:
     """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
     override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
@@ -603,6 +679,17 @@ CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
 # surface). An API base/endpoint steered off this host is REFUSED, so a misconfiguration (or a hostile
 # override) cannot turn the key-holding egress into an SSRF proxy. Pinned to Flutterwave's v3 API host.
 FLUTTERWAVE_EGRESS_ALLOWLIST = frozenset({"api.flutterwave.com"})
+
+
+# --- Stripe OUTBOUND billing egress (SHIPPED OFF BY DEFAULT) ----------------------------
+# The outbound host allowlist for the Stripe API calls in `governor.stripe_egress` (object re-fetch for an inbound
+# event, hosted-checkout create), enforced BEFORE any socket opens. Gated DEFAULT-OFF on `VIGIL_STRIPE_SECRET_KEY`:
+# unset ⇒ nothing is wired and no Stripe egress exists. There is no API-base override, so the key-holding egress
+# can only ever reach this host.
+STRIPE_EGRESS_ALLOWLIST = frozenset({"api.stripe.com"})
+# The ONLY host a Stripe hosted-checkout link may point at (`billing._https_link_on`, exact match). A link pin, never
+# fetched — it is deliberately NOT in the egress allowlist above.
+STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
 
 
 def customer_oidc_enabled() -> bool:

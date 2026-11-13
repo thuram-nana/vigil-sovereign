@@ -47,7 +47,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -175,9 +175,43 @@ jobs:
         # compared to the run before it.
         run: |
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.3.7 || echo "nuclei install failed"
-          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9   || echo "httpx install failed"
+          # httpx: v1.6.10 is the FLOOR, not a preference. The engine's driver passes `-json -probe` and
+          # the harness's closed-port control requires the `"failed":true` record that flag promises. Up
+          # to v1.6.9 httpx skipped every errored result BEFORE its JSON writer (`if resp.Err != nil {
+          # continue }` in runner.go), so the control leg returned exit 0 and ZERO bytes and the row
+          # failed closed — every nightly from 2026-10-29 to 2026-11-11 was red on exactly that, with the
+          # pin at v1.6.9. v1.6.10 removed the skip. integration/tests/test_ci_livefire_httpx_floor.py
+          # holds this pin at or above the floor; the step below proves the behaviour itself.
+          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.10  || echo "httpx install failed"
           go install github.com/ffuf/ffuf/v2@v2.1.0                        || echo "ffuf install failed"
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: the installed httpx records a refused probe
+        # The pin above is a version; what the table needs is a BEHAVIOUR. Probe a loopback port nothing
+        # listens on with the flags the engine's builder emits and require the failed-probe record. If it
+        # is missing, say so here, by name — not twenty minutes later as "the control produced NO output".
+        # A missing binary is not this step's finding: the table reports that itself, as UNPROVEN.
+        # stdin is closed on purpose: httpx also reads targets from stdin and waits on an open pipe.
+        run: |
+          bin="$HOME/go/bin/httpx"
+          if [ ! -x "$bin" ]; then
+            echo "::warning::httpx is not installed — the table will report the row as unproven"
+            exit 0
+          fi
+          port="$(python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          # `|| rc=$?`: under `bash -e` a failing command substitution would end the step on this line,
+          # before anything below could say what happened.
+          rc=0
+          out="$(timeout 120 "$bin" -u "http://127.0.0.1:${port}/" -silent -no-color -disable-update-check -json -probe </dev/null)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::httpx exited $rc on a refused loopback probe (124 = it hung past the timeout) — the closed-port control cannot be read as evidence"
+            exit 1
+          fi
+          if ! printf '%s' "$out" | tr -d ' ' | grep -q '"failed":true'; then
+            echo "::error::this httpx writes no record for a refused probe when asked for JSON and probe status (fixed upstream in v1.6.10) — the closed-port control cannot be read as evidence"
+            exit 1
+          fi
 
       - name: install the engine's python deps
         run: |
@@ -236,7 +270,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 
@@ -281,7 +315,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 
@@ -313,7 +347,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 

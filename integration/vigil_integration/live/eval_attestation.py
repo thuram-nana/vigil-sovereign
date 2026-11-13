@@ -235,7 +235,7 @@ def _verify_seal(seal: Any, slug: str, records: list[dict], pinned: frozenset) -
     # drop/reorder changes these bytes, so the owner signature (minted over the full ordered list) fails.
     try:
         ok = verify_one(pk, seal_signing_bytes(slug, seq_raw, records), sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):   # ValueError: a core that cannot be UTF-8 encoded
         return False, 0, "seal signature does not verify (malformed, or list dropped/reordered off-seam)"
     if not ok:
         return False, 0, "seal signature does not verify (record list dropped/reordered off-seam)"
@@ -395,7 +395,7 @@ def _verify_owner(payload: dict, trusted_owner_pubkeys: frozenset) -> bool:
     core = {k: payload.get(k) for k in _CORE}
     try:
         return verify_one(pk, _canon(core), sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):   # ValueError: a core that cannot be UTF-8 encoded
         return False
 
 
@@ -420,7 +420,7 @@ def _verify_pop(payload: dict, trusted_owner_pubkeys: frozenset) -> bool:
     core = {k: payload.get(k) for k in _CORE}
     try:
         return verify_one(pk, _pop_signing_bytes(core), sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):   # ValueError: a core that cannot be UTF-8 encoded
         return False
 
 

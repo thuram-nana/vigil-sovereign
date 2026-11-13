@@ -99,7 +99,10 @@ _CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "
 # Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
 # the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
 # recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
-_STATE_DIRS = ("qdrant", "graph")
+_STATE_DIRS = ("qdrant", "graph",
+               # PRICING M1c: the model gateway's per-launch meters — MONEY data (an unsettled run's charge is
+               # computed from its meter), hash-chained, packaged verbatim so a restored install settles it.
+               "model_meter")
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -117,6 +120,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
+    "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
@@ -166,6 +170,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
                      "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
                      "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "
                      "reconcilable from the processor)",
+    "stripe-billing-spool": "the Stripe lane's money-IN webhook spool (the vigil-billing-drain-stripe default) — "
+                            "EXCLUDED for the same reason as `billing-spool`: pending signals; losing them fails SAFE "
+                            "(Stripe redelivers, and the re-fetch makes a re-ingest idempotent)",
     "spool": "settle / finding / billing spools of PENDING signals. A capture that is not point-in-time "
              "consistent with the spine can tear exactly-once (a settle landing between the spine read and the "
              "spool read => a lost refund; the reverse => a double grant). Losing pending signals fails SAFE: "

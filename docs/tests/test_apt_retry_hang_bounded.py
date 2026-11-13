@@ -41,7 +41,8 @@ def test_a_hung_apt_get_is_killed_and_the_script_exits_quickly(tmp_path: Path):
     # `sudo` -> just exec the rest (no privilege needed in the test)
     _write_exe(bindir / "sudo", '#!/usr/bin/env bash\nexec "$@"\n')
     # `apt-get` -> hang for an hour (simulates the stuck-mirror update)
-    _write_exe(bindir / "apt-get", '#!/usr/bin/env bash\nsleep 3600\n')
+    calls_log = tmp_path / "calls.log"
+    _write_exe(bindir / "apt-get", f'#!/usr/bin/env bash\necho apt-get-called >> "{calls_log}"\nexec sleep 3600\n')
     env = dict(os.environ)
     env["PATH"] = f"{bindir}:{env['PATH']}"
     env["APT_RETRY_UPDATE_TIMEOUT"] = "1"   # kill the hang after 1s per attempt
@@ -58,5 +59,7 @@ def test_a_hung_apt_get_is_killed_and_the_script_exits_quickly(tmp_path: Path):
     # It must FAIL (persistent hang) but must NOT have hung past the outer timeout — reaching here proves it
     # returned. Non-zero because every attempt was killed.
     assert proc.returncode != 0, "a persistently-hanging apt-get should fail the step, not pass"
+    # Non-vacuous: apt-get really ran (and was killed), once per default attempt; the step was not skipped.
+    assert calls_log.read_text(encoding="utf-8").count("apt-get-called") == 2, calls_log.read_text()
     assert "hang-timeout" in (proc.stderr or "") or "124" in (proc.stderr or ""), \
         f"expected the hang to be reported as a timeout; stderr:\n{proc.stderr}"

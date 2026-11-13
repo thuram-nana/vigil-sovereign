@@ -98,6 +98,25 @@ def test_topup_emits_an_invoice_with_the_catalog_amount():
     assert len(inv.invoices("acme")) == 1, "a replayed webhook must not duplicate the invoice line"
 
 
+def test_only_a_paid_topup_counts_as_a_credit_purchase():
+    s, inv, mock, signer = _inv_rig()
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    # credits that were GRANTED, not bought: a trial, a plan refill, a settle refund, even a hand-made "topup"
+    # wallet grant — none writes an invoice, so none is a purchase
+    for i, kind in enumerate(("trial", "subscription_refill", "refund", "topup")):
+        w.grant("acme", 500, kind, entry_id=f"grant_{i}", issued_at=float(10 + i))
+    assert w.available("acme") == 2_000 and inv.has_purchased_credits("acme") is False
+    body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 50.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=50.0) is not None
+    assert inv.has_purchased_credits("acme") is False, "a plan subscription is not a credit purchase"
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None
+    assert inv.has_purchased_credits("acme") is True
+    assert inv.has_purchased_credits("globex") is False
+
+
 def test_subscription_emits_an_invoice_with_the_period():
     _s, inv, mock, signer = _inv_rig()
     body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
@@ -291,16 +310,33 @@ def test_mock_provider_rejects_malformed():
                                                        "created": 1.0}).encode()), now=1.0) is None  # unknown kind
 
 
-# ---- the Stripe provider: HMAC signature scheme -----------------------------------------------------
+# ---- the Stripe provider: HMAC signature scheme + server-side re-fetch ----------------------------------
 _SECRET = "whsec_test_123"
 
 
-def _stripe_body(etype="invoice.paid", org="acme", price="price_pro", eid="evt_s1", created=1000,
-                 billing_reason="subscription_cycle"):
-    obj = {"metadata": {"org_id": org}, "items": {"data": [{"price": {"id": price}}]}}
-    if etype in ("invoice.paid", "invoice.payment_failed"):
-        obj["billing_reason"] = billing_reason
-    return json.dumps({"id": eid, "type": etype, "created": created, "data": {"object": obj}}).encode()
+def _stripe_sub(org="acme", price="price_pro"):
+    return {"object": "subscription", "id": "sub_1", "livemode": False,
+            "metadata": {"org_id": org, "price_id": price}}
+
+
+def _stripe_invoice(billing_reason="subscription_cycle", status="paid", paid_at=1000):
+    return {"object": "invoice", "id": "in_1", "livemode": False, "status": status, "billing_reason": billing_reason,
+            "subscription": "sub_1", "amount_paid": 5000, "currency": "usd", "created": 990,
+            "status_transitions": {"paid_at": paid_at}}
+
+
+def _stripe(objs=None, **kw):
+    """The Stripe adapter with a fake fetcher serving `objs` (by id)."""
+    table = {"in_1": _stripe_invoice(), "sub_1": _stripe_sub()} if objs is None else objs
+
+    def fetch(kind, oid):
+        return table[oid]
+    return StripeBillingProvider(_SECRET, fetcher=fetch, expected_mode="test", enable_reference_adapter=True, **kw)
+
+
+def _stripe_body(etype="invoice.paid", oid="in_1", eid="evt_s1", created=1000):
+    return json.dumps({"id": eid, "type": etype, "created": created, "livemode": False,
+                       "data": {"object": {"id": oid}}}).encode()
 
 
 def _sig(secret, t, body):
@@ -309,15 +345,15 @@ def _sig(secret, t, body):
 
 
 def test_stripe_valid_signature_parses():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     ev = p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0)
     assert ev is not None and ev.kind == EVENT_SUBSCRIPTION_ACTIVE and ev.org_id == "acme" \
-        and ev.price_id == "price_pro" and ev.event_id == "evt_s1"
+        and ev.price_id == "price_pro" and ev.event_id == "in_1" and ev.amount_minor == 5000 and ev.currency == "USD"
 
 
 def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
-    p = StripeBillingProvider(_SECRET, tolerance_s=300.0, enable_reference_adapter=True)
+    p = _stripe(tolerance_s=300.0)
     body = _stripe_body()
     good = _sig(_SECRET, 1000, body)
     assert p.verify_and_parse(body, "t=1000,v1=deadbeef", now=1000.0) is None      # wrong MAC
@@ -331,7 +367,7 @@ def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
 
 
 def test_stripe_accepts_any_valid_v1_on_rotation():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body()
     mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
     hdr = f"t=1000,v1=deadbeef,v1={mac}"            # one bad + one good v1 (secret rotation) -> accepted
@@ -339,51 +375,100 @@ def test_stripe_accepts_any_valid_v1_on_rotation():
 
 
 def test_stripe_ignores_unmapped_and_missing_org():
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    p = _stripe()
     body = _stripe_body(etype="charge.updated")                 # not a minted type
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
-    body2 = json.dumps({"id": "e", "type": "invoice.paid", "created": 1000,
-                        "data": {"object": {"items": {"data": [{"price": {"id": "price_pro"}}]}}}}).encode()
-    assert p.verify_and_parse(body2, _sig(_SECRET, 1000, body2), now=1000.0) is None   # no org_id metadata
+    sub = _stripe_sub()
+    sub["metadata"] = {"price_id": "price_pro"}                 # the fetched subscription names no tenant
+    p2 = _stripe({"in_1": _stripe_invoice(), "sub_1": sub})
+    body2 = _stripe_body()
+    assert p2.verify_and_parse(body2, _sig(_SECRET, 1000, body2), now=1000.0) is None
 
 
 def test_stripe_ignores_mid_cycle_invoice_billing_reason():
     # Only subscription_create / subscription_cycle invoices advance the period; a mid-cycle proration/update
     # invoice (which Stripe genuinely emits) must be ignored, or it would mint a second overlapping allotment.
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
-    for reason in ("subscription_update", "manual", "subscription_threshold", ""):
-        body = _stripe_body(billing_reason=reason)
+    body = _stripe_body()
+    for reason in ("subscription_update", "manual", "subscription_threshold", "", None):
+        p = _stripe({"in_1": _stripe_invoice(billing_reason=reason), "sub_1": _stripe_sub()})
         assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, \
             f"invoice.paid with billing_reason={reason!r} must be ignored"
-    # the cycle/create reasons DO parse
     for reason in ("subscription_cycle", "subscription_create"):
-        body = _stripe_body(billing_reason=reason)
+        p = _stripe({"in_1": _stripe_invoice(billing_reason=reason), "sub_1": _stripe_sub()})
         assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is not None
 
 
 def test_stripe_subscription_mode_checkout_is_ignored():
-    # a checkout.session.completed in subscription mode is handled by invoice.paid, not as a top-up
-    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
-    body = json.dumps({"id": "cs1", "type": "checkout.session.completed", "created": 1000,
-                       "data": {"object": {"mode": "subscription", "metadata": {"org_id": "acme"}}}}).encode()
+    # a subscription-mode session is minted by its invoice.paid, never as a top-up
+    session = {"object": "checkout.session", "id": "cs_test_a1", "livemode": False, "mode": "subscription",
+               "status": "complete", "payment_status": "paid", "client_reference_id": "vigil:acme:n1",
+               "amount_total": 5000, "currency": "usd", "created": 1000}
+    p = _stripe({"cs_test_a1": session})
+    body = _stripe_body(etype="checkout.session.completed", oid="cs_test_a1")
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
 
 
-def test_stripe_secret_required():
+def test_stripe_timestamp_must_be_plain_ascii_digits():
+    """`t` is decimal ASCII digits only. Non-ASCII digits used to pass float() and then crash on encode("ascii");
+    exponent, sign, whitespace and nan/inf forms are refused too (all return None, never raise)."""
+    p = _stripe()
+    body = _stripe_body()
+    mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
+    for t in ("１０００", "١٠٠٠", "1e3", "+1000", " 1000", "nan", "inf", "-1000", "1000.0", "",
+              "1" * 13, "1" * 5000):
+        assert p.verify_and_parse(body, f"t={t},v1={mac}", now=1000.0) is None, t
+    assert p.verify_and_parse(body, f"t=1000,v1={mac}", now=1000.0) is not None      # negative control
+
+
+def test_stripe_tolerance_edge_is_inclusive():
+    p = _stripe(tolerance_s=300.0)
+    body = _stripe_body()
+    good = _sig(_SECRET, 1000, body)
+    assert p.verify_and_parse(body, good, now=1300.0) is not None and p.verify_and_parse(body, good, now=700.0)
+    assert p.verify_and_parse(body, good, now=1301.0) is None and p.verify_and_parse(body, good, now=699.0) is None
+
+
+def test_stripe_v1_must_be_lowercase_hex_sha256():
+    p = _stripe()
+    body = _stripe_body()
+    mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
+    for v1 in (mac.upper(), mac[:-1], mac + "0", "ｆ" * 64, " " + mac):
+        assert p.verify_and_parse(body, f"t=1000,v1={v1}", now=1000.0) is None, v1
+    assert p.verify_and_parse(body, f"t=1000,v1={mac}", now=1000.0) is not None
+
+
+def test_stripe_paid_invoice_without_a_stable_time_mints_nothing():
+    body = _stripe_body()
+    for paid_at in (None, 0, -5, "nan", "1000", 1000.5, True, 10 ** 13):
+        p = _stripe({"in_1": _stripe_invoice(paid_at=paid_at), "sub_1": _stripe_sub()})
+        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, paid_at
+
+
+def test_stripe_secret_fetcher_and_mode_required():
+    fetch = lambda kind, oid: {}                                                    # noqa: E731
     with pytest.raises(ValueError):
-        StripeBillingProvider("", enable_reference_adapter=True)
+        StripeBillingProvider("", fetcher=fetch, expected_mode="test", enable_reference_adapter=True)
+    with pytest.raises(ValueError):
+        StripeBillingProvider(_SECRET, fetcher=None, expected_mode="test",           # type: ignore[arg-type]
+                              enable_reference_adapter=True)
+    for mode in ("", "prod", "LIVE", None):
+        with pytest.raises(ValueError):
+            StripeBillingProvider(_SECRET, fetcher=fetch, expected_mode=mode,         # type: ignore[arg-type]
+                                  enable_reference_adapter=True)
 
 
 # ---- Stripe disabled-by-default guard ----------------------------------------------------------------
 def test_stripe_disabled_by_default():
+    fetch = lambda kind, oid: {}                                                    # noqa: E731
     with pytest.raises(UnsupportedCapability):
-        StripeBillingProvider("whsec_x")                            # no opt-in -> refuses
-    assert StripeBillingProvider("whsec_x", enable_reference_adapter=True) is not None   # explicit flag
+        StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test")       # no opt-in -> refuses
+    assert StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test",
+                                 enable_reference_adapter=True) is not None         # explicit flag
     import os
     _prev = os.environ.get("VIGIL_BILLING_ENABLE_STRIPE")
     os.environ["VIGIL_BILLING_ENABLE_STRIPE"] = "1"
     try:
-        assert StripeBillingProvider("whsec_x") is not None         # env opt-in
+        assert StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test") is not None   # env opt-in
     finally:
         if _prev is None:
             os.environ.pop("VIGIL_BILLING_ENABLE_STRIPE", None)
@@ -437,7 +522,7 @@ def test_flutterwave_idempotency_anchors_on_verified_id_not_the_body_spelling():
     # the body's id SPELLING. Two deliveries of ONE real tx under two body-id spellings that /verify collapses to
     # the same canonical id must grant ONCE — else a verif-hash holder double-credits a real payment by varying
     # the spelling (e.g. a leading zero) whenever the verify endpoint canonicalizes it.
-    canonical = {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    canonical = {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                  "meta": {"price_id": "price_topup_200"}}
 
     def verifier(txid):                                 # the endpoint canonicalizes "9911" and "09911" -> tx 9911
@@ -454,7 +539,7 @@ def test_flutterwave_idempotency_anchors_on_verified_id_not_the_body_spelling():
 
 def test_flutterwave_missing_verified_id_mints_nothing():
     # fail-closed: a verified object carrying no canonical id cannot be anchored idempotently -> mint nothing.
-    table = {"9911": {"status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    table = {"9911": {"status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                       "meta": {"price_id": "price_topup_200"}}}      # no "id" field on the verified object
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9911), _FLW_SECRET, now=100.0) is None
@@ -462,7 +547,7 @@ def test_flutterwave_missing_verified_id_mints_nothing():
 
 
 def test_flutterwave_forged_hash_mints_nothing():
-    table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
+    table = {"9911": {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1",
                       "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9911), "WRONG-HASH", now=100.0) is None
@@ -488,7 +573,7 @@ def test_flutterwave_only_the_reverify_grants_not_the_webhook_body():
 def test_flutterwave_subscription_active_then_lapses_at_period_end():
     # A re-verified successful PLAN charge subscribes + refills the period; non-rollover means the plan credits
     # simply VANISH at period_end (the meter's active-subscription + live-period check), with no webhook needed.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, _subs, _plan, meter, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0) is not None
@@ -500,7 +585,7 @@ def test_flutterwave_failed_recurring_charge_marks_past_due():
     # H4: a definitively-FAILED RECURRING (payment_plan) charge that RE-VERIFIES drives DUNNING -> past_due. The
     # tenant/status/timestamp are taken from the AUTHORITATIVE verify object (the tx_ref WE set at checkout), never
     # the body — so a verif-hash holder cannot name a victim: only a REAL failed charge on a tenant's own plan duns.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
                       "created_at": 200.0}}
@@ -514,7 +599,7 @@ def test_flutterwave_failed_recurring_charge_marks_past_due():
 def test_flutterwave_cancel_webhook_is_still_ignored():
     # H4 SCOPE BOUND: a bare `subscription.cancelled` webhook carries no transaction to re-verify, so there is no
     # authoritative subscription->org mapping — we must NOT cancel a victim named only in the unauthenticated body.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
@@ -544,7 +629,7 @@ def test_flutterwave_failed_charge_without_recoverable_org_is_noop():
 
 def test_flutterwave_pending_charge_does_not_dun():
     # A NON-DEFINITIVE status (pending) must NOT reduce access — we dun only on a definitively `failed` verify.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9922": {"id": 9922, "status": "pending", "tx_ref": "vigil:acme:n2", "payment_plan": "flwplan_pro",
                       "created_at": 200.0}}
@@ -559,11 +644,11 @@ def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
     # down-latch freshness key. After a tenant RECOVERS (a later successful renewal), a STALE / replayed /
     # out-of-order failed charge from BEFORE the recovery must NOT re-suspend them (at-least-once + unordered
     # webhook delivery make this real). A GENUINE current failure still duns (it post-dates its activation).
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
                       "created_at": 200.0},
-             "9914": {"id": 9914, "status": "successful", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
+             "9914": {"id": 9914, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)   # active @100
@@ -579,7 +664,7 @@ def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
 def test_flutterwave_org_comes_from_verified_not_the_body():
     # SECURITY (red-pen #2): the tenant must come from the AUTHORITATIVE verified object, never the body. The
     # verified tx belongs to 'honest'; the body smuggles a 'victim' tx_ref. The grant must land on 'honest'.
-    table = {"42": {"id": 42, "status": "successful", "tx_ref": "vigil:honest:n1", "created_at": 10.0,
+    table = {"42": {"id": 42, "status": "successful", "currency": "USD", "tx_ref": "vigil:honest:n1", "created_at": 10.0,
                     "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     liar = json.dumps({"event": "charge.completed",
@@ -589,7 +674,7 @@ def test_flutterwave_org_comes_from_verified_not_the_body():
     assert w.available("victim") == 0, "the body's smuggled tenant must get nothing"
     # and the exact old bug (`_flw_org_id(verified) or _flw_org_id(body)`): verified has NO recoverable org, the
     # body smuggles one -> must mint NOTHING (no body fallback for the tenant of a sovereign mint).
-    table2 = {"43": {"id": 43, "status": "successful", "tx_ref": "no-org", "created_at": 10.0,
+    table2 = {"43": {"id": 43, "status": "successful", "currency": "USD", "tx_ref": "no-org", "created_at": 10.0,
                      "meta": {"price_id": "price_topup_200"}}}      # verified: unrecoverable tenant
     _s2, w2, _s2b, _p2, _m2, _flw2, signer2 = _flw_rig(table2)
     smuggle = json.dumps({"event": "charge.completed",
@@ -601,7 +686,7 @@ def test_flutterwave_org_comes_from_verified_not_the_body():
 def test_flutterwave_body_injected_payment_plan_cannot_force_the_plan_path():
     # SECURITY (red-pen #3): plan-vs-topup is decided by the VERIFIED object only. The verified tx is a plain
     # top-up (no payment_plan); the body injects payment_plan. It must still be minted as a TOPUP, not a plan.
-    table = {"50": {"id": 50, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 10.0,
+    table = {"50": {"id": 50, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 10.0,
                     "meta": {"price_id": "price_topup_200"}}}
     _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     body = json.dumps({"event": "charge.completed",
@@ -616,7 +701,7 @@ def test_flutterwave_iso_created_at_and_replay_inertness():
     # duplicate delivery is inert (same derived period, no re-grant / period extension). period_s=1000.
     iso = "2024-01-02T03:04:05.000Z"                                # = 1704164645.0 UTC
     epoch = 1704164645.0
-    table = {"77": {"id": 77, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": iso,
+    table = {"77": {"id": 77, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": iso,
                     "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, meter, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 77), _FLW_SECRET, now=epoch) is not None
@@ -632,9 +717,9 @@ def test_flutterwave_iso_created_at_and_replay_inertness():
 def test_flutterwave_unparseable_created_at_mints_nothing():
     # red-pen #4 (fail-closed): a verified tx with no parseable timestamp must mint NOTHING — replay-safety needs a
     # stable period anchor, and a wall-clock fallback would let duplicates advance the period.
-    table = {"78": {"id": 78, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": "not-a-date",
+    table = {"78": {"id": 78, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": "not-a-date",
                     "payment_plan": "flwplan_pro"},
-             "79": {"id": 79, "status": "successful", "tx_ref": "vigil:acme:n2",
+             "79": {"id": 79, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2",
                     "meta": {"price_id": "price_topup_200"}}}      # created_at absent entirely
     _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 78), _FLW_SECRET, now=100.0) is None
@@ -643,7 +728,7 @@ def test_flutterwave_unparseable_created_at_mints_nothing():
 
 
 def test_flutterwave_unrecoverable_org_is_ignored():
-    table = {"7": {"id": 7, "status": "successful", "tx_ref": "no-org-here", "created_at": 1.0,
+    table = {"7": {"id": 7, "status": "successful", "currency": "USD", "tx_ref": "no-org-here", "created_at": 1.0,
                    "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 7), _FLW_SECRET, now=1.0) is None
@@ -665,7 +750,8 @@ def test_flutterwave_capabilities_and_noauth_gate():
 def _all_providers():
     return [
         ("mock", MockBillingProvider("sek")),
-        ("stripe", StripeBillingProvider("whsec_x", enable_reference_adapter=True)),
+        ("stripe", StripeBillingProvider("whsec_x", fetcher=lambda kind, oid: {}, expected_mode="test",
+                                         enable_reference_adapter=True)),
         ("flutterwave", FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))),
     ]
 
@@ -802,6 +888,24 @@ def test_inbound_cross_check_skipped_when_no_expected_configured():
     w, signer = _flw_rig_expected(table, None)                     # expected=None -> no cross-check
     assert signer.ingest(_flw_wh("charge.completed", 74), _FLW_SECRET, now=100.0) is not None
     assert w.available("acme") == 200
+
+
+_NO_CURRENCY = object()
+
+
+@pytest.mark.parametrize("currency", [_NO_CURRENCY, None, "", "   ", 840])
+@pytest.mark.parametrize("expected", [{"price_topup_200": (20000, "USD")}, None])
+def test_inbound_verified_charge_without_a_currency_mints_nothing(currency, expected):
+    # The signer's underpay / wrong-currency cross-check keys on the event's currency, so a verified "successful"
+    # charge with no (usable) currency would skip it and mint the catalog top-up on the price_id alone. The
+    # provider refuses it: no currency, no mint, whether or not an expected price is configured.
+    tx = {"id": 75, "status": "successful", "tx_ref": "vigil:acme:n", "amount": 200.00, "created_at": 100.0,
+          "meta": {"price_id": "price_topup_200"}}
+    if currency is not _NO_CURRENCY:
+        tx["currency"] = currency
+    w, signer = _flw_rig_expected({"75": tx}, expected)
+    assert signer.ingest(_flw_wh("charge.completed", 75), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
 
 
 # ---- Slice F red-pen fold (LOW hardening): link sanitizer, fail-closed creator, price guard, binding round-trip

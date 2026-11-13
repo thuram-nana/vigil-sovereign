@@ -29,6 +29,6 @@
 # under --require-hashes.
 hatchling
 editables
-setuptools>=61
+setuptools>=84.2.1
 wheel
 setuptools-rust>=1.9

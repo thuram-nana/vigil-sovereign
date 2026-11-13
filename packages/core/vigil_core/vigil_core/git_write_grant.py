@@ -129,6 +129,6 @@ def verify_git_write_grant(signed: SignedGitWriteGrant, trust_root: TrustRoot) -
         return False, "trust root has duplicate authorizer public keys (would collapse the m-of-n quorum)"
     try:
         result = verify_threshold(git_write_grant_signing_bytes(signed.document), signed.signatures, trust_root)
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         return False, f"git-write-grant signature material is malformed or uses a weak key: {e}"
     return result.satisfied, result.reason

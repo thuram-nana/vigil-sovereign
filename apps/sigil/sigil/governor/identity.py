@@ -5,9 +5,14 @@ against it. Reads are fail-closed: a missing key returns None, so nothing forged
 
 `owner_pubkey()`/`owner_keypair()` READ the anchor (never generate — verification must not mint
 trust). `ensure_owner_keypair()` is for owner-initiated SIGNING actions (CLI engage/grant/approve):
-it generates+persists the anchor once if absent, mirroring the checkpoint's `_owner_keys()`."""
+it generates+persists the anchor only on a fresh install (neither key file present) and otherwise REFUSES
+an incomplete or unreadable key (`OwnerKeyUnavailable`) — it never mints a new owner over an old one. The
+checkpoint's `_owner_keys()` uses the same loader."""
 from __future__ import annotations
 
+import base64
+import os
+from pathlib import Path
 from typing import Optional
 
 from ..config import KEYS_DIR
@@ -102,16 +107,84 @@ def delegate_offense_spine(owner_key, *, authorizers, scope: str, not_after: int
                            authorizers=authorizers, threshold=1, not_after=int(not_after))
 
 
-def ensure_owner_keypair() -> KeyPair:
-    """Return the persisted owner keypair, generating+persisting it once if absent (owner signing
-    path only). Same key material the checkpoint uses, so governance and the spine head share one
-    owner identity. The private key is sealed at rest when the vault is provisioned (audit G1)."""
-    kp = owner_keypair()
-    if kp is not None:
+class OwnerKeyUnavailable(RuntimeError):
+    """The owner key exists but cannot be used (a half-present pair, an unreadable or unsealable private
+    key, or a public key that is not the private key's). Signing REFUSES rather than minting a new owner
+    identity over the old one: a silent re-mint would replace the trust root every verifier pins, orphan
+    every grant the old key signed, and turn a recoverable fault (a lost TPM unseal, a permissions slip,
+    a half-restored backup) into an unrecoverable identity change."""
+
+
+def _path_present(p: Path) -> bool:
+    """True when ANYTHING occupies ``p`` (a regular file, a directory, a dangling symlink). A stat that fails
+    for any reason other than "no such file" counts as present: when we cannot tell, we must not mint."""
+    try:
+        os.lstat(p)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _public_of(private_key_b64: str) -> Optional[str]:
+    """The base64 Ed25519 public key for ``private_key_b64``, or None when it is not a valid 32-byte key."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        raw = base64.b64decode(private_key_b64.strip(), validate=True)
+        if len(raw) != 32:
+            return None
+        pub = Ed25519PrivateKey.from_private_bytes(raw).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    except Exception:  # noqa: BLE001 — any malformed key is simply "not a key"
+        return None
+    return base64.b64encode(pub).decode("ascii")
+
+
+def load_or_init_owner_keypair(priv_path: Path, pub_path: Path, keys_dir: Path) -> KeyPair:
+    """The ONE owner-key loader for every signing path (governance actions here, the spine checkpoint in
+    ``spine/checkpoint.py``). It generates a keypair ONLY on a genuinely fresh install, when NEITHER
+    ``owner.priv`` NOR ``owner.pub`` exists. Every other state that is not a complete, readable, matching
+    pair raises ``OwnerKeyUnavailable`` and writes nothing:
+
+      * ``owner.pub`` present but ``owner.priv`` missing, empty or unreadable;
+      * ``owner.priv`` sealed and the vault cannot unseal it (``VaultLocked``);
+      * ``owner.priv`` present but ``owner.pub`` missing or empty;
+      * ``owner.pub`` is not the public key of ``owner.priv`` (a swapped or stale public key)."""
+    from ..platform.vault import OWNER_PRIV_CONTEXT, VaultLocked, owner_vault
+    vault = owner_vault()
+    priv_present, pub_present = _path_present(priv_path), _path_present(pub_path)
+    if not priv_present and not pub_present:
+        keys_dir.mkdir(parents=True, exist_ok=True)
+        kp = generate_keypair()
+        vault.write_text_secret(priv_path, kp.private_key_b64, context=OWNER_PRIV_CONTEXT)
+        pub_path.write_text(kp.public_key_b64, encoding="utf-8")
         return kp
-    from ..platform.vault import OWNER_PRIV_CONTEXT, owner_vault
-    KEYS_DIR.mkdir(parents=True, exist_ok=True)
-    kp = generate_keypair()
-    owner_vault().write_text_secret(_PRIV, kp.private_key_b64, context=OWNER_PRIV_CONTEXT)
-    _PUB.write_text(kp.public_key_b64, encoding="utf-8")
-    return kp
+    advice = ("refusing to create a new owner key over the existing one. Restore owner.priv and owner.pub "
+              "from a backup (or fix the vault/TPM unseal), then retry; `vigil doctor` reports the state")
+    try:
+        pub = pub_path.read_text(encoding="utf-8").strip() if pub_present else ""
+    except (OSError, UnicodeDecodeError):
+        pub = ""
+    try:
+        priv = vault.read_text_secret(priv_path, context=OWNER_PRIV_CONTEXT) if priv_present else None
+    except VaultLocked as e:
+        raise OwnerKeyUnavailable(f"owner.priv is sealed and cannot be unsealed ({e}); {advice}") from e
+    except (OSError, UnicodeDecodeError, ValueError):
+        priv = None
+    if not priv:
+        raise OwnerKeyUnavailable(f"owner.priv is missing, empty or unreadable while owner.pub exists; {advice}")
+    if not pub:
+        raise OwnerKeyUnavailable(f"owner.pub is missing, empty or unreadable while owner.priv exists; {advice}")
+    if _public_of(priv) != pub:
+        raise OwnerKeyUnavailable(f"owner.pub is not the public key of owner.priv; {advice}")
+    return KeyPair(public_key_b64=pub, private_key_b64=priv)
+
+
+def ensure_owner_keypair() -> KeyPair:
+    """Return the persisted owner keypair for an owner SIGNING action, generating+persisting it ONLY on a
+    fresh install (neither key file present). A half-present, unreadable, unsealable or mismatched key
+    raises ``OwnerKeyUnavailable`` instead of minting a replacement (see ``load_or_init_owner_keypair``).
+    Same key material the checkpoint uses, so governance and the spine head share one owner identity. The
+    private key is sealed at rest when the vault is provisioned (audit G1)."""
+    return load_or_init_owner_keypair(_PRIV, _PUB, KEYS_DIR)

@@ -96,7 +96,7 @@ def test_catalog_drives_a_real_mint_end_to_end():
     subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
     meter = CreditMeter(w, plan, subs)
-    verified = {"42": {"id": 42, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    verified = {"42": {"id": 42, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                        "amount": 999999, "meta": {"price_id": "vigil_topup_1k"}}}   # wire amount is a lie
     signer = BillingSigner(FlutterwaveBillingProvider("flw-hash", lambda t: verified.get(str(t))),
                            wallet=w, subscriptions=subs, plan=plan, catalog=cat.entitlements())
@@ -113,7 +113,7 @@ def test_catalog_drives_a_subscription_mint():
     subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
     meter = CreditMeter(w, plan, subs)
-    verified = {"7": {"id": 7, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    verified = {"7": {"id": 7, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                       "payment_plan": "vigil_pro_monthly"}}
     signer = BillingSigner(FlutterwaveBillingProvider("flw-hash", lambda t: verified.get(str(t))),
                            wallet=w, subscriptions=subs, plan=plan, catalog=cat.entitlements())

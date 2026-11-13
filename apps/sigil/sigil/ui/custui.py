@@ -161,6 +161,15 @@ def _provisioner_ready_debounced(host: str, port: int) -> bool:
     return ok
 
 
+
+# The customer-plane READ routes relayed to the provisioner (module scope so a test can census every route that
+# can carry finding detail and run the preview leak scan over each). Flag-gated reads are routed separately.
+_READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
+          "/api/customer/assessments": "assessment_summary",
+          "/api/customer/assessments/findings": "assessment_findings",
+          "/api/customer/assets": "assets_overview",
+          "/api/customer/notifications": "notifications"}
+
 class CustomerServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -379,11 +388,6 @@ class CustomerHandler(BaseHTTPRequestHandler):
         # findings. org comes from the SERVER-side session, never the query; the provisioner admit_customer-
         # gates it. SameSite=Strict keeps the session cookie off cross-site GETs, so a cross-site read carries
         # no session -> 401 (no cross-origin data leak); same-origin reads (the customer SPA) carry the cookie.
-        _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
-                  "/api/customer/assessments": "assessment_summary",
-                  "/api/customer/assessments/findings": "assessment_findings",
-                  "/api/customer/assets": "assets_overview",
-                  "/api/customer/notifications": "notifications"}
         if path in _READS:
             return self._customer_read_relay(_READS[path])
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)

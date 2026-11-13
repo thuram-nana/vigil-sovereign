@@ -1136,8 +1136,14 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # an operator-visible money failure, so RED, not an advisory note. Like the others it is OPTIONAL (watched only
 # once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected; and `vigil ready`
 # only REPORTS (nothing Requires= it), so a RED here never holds the proxy that accepts new payments down.
-_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service")
-_BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
+_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service",
+                      "vigil-billing-drain-stripe.service")
+# The money-IN drains, one per processor lane: (unit, default spool, the drain command that re-runs it).
+_BILLING_DRAIN_UNITS = {
+    "vigil-billing-drain.service": ("~/.sigil/billing-spool", "sigil billing-drain drain --spool <spool>"),
+    "vigil-billing-drain-stripe.service": ("~/.sigil/stripe-billing-spool",
+                                           "sigil billing-drain drain --provider stripe --spool <spool>"),
+}
 
 
 # ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
@@ -1358,6 +1364,164 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
     except (TypeError, ValueError):
         pass
     return section, issues, notes
+
+
+_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.config's affirmative set (a test pins it)
+
+
+def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list, list]":
+    """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
+    (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
+
+    Neither ``VIGIL_METERED_BILLING`` nor ``VIGIL_MODEL_GATEWAY_ENABLED`` set, and no retired pricing setting ⇒
+    ``{"configured": False}`` and nothing else (default output unchanged). Otherwise HARD issues for a configuration that would bill wrongly or not at
+    all: metered billing without the gateway, a gateway that does not answer, a provider key missing from the
+    sovereign environment, a pricing setting the metering core refuses (floor, price table, the gateway limits),
+    and — with metered billing on — no target margin (the owner's, no default) or an unrecognised cancel-settlement
+    policy (unset means metered; a typo refuses metered launches and defers cancelled-run settles). The target margin is the margin over METERED
+    AI cost only (payment fees and hosting are outside it); its value is never printed. A retired pricing setting
+    (``VIGIL_BILLING_MARKUP_K`` / ``VIGIL_MARGIN_MULTIPLIER_K``) is a HARD issue whether or not either flag is on:
+    the margin is the only pricing input. ``probe(url) -> bool | None`` checks the gateway answers (tests inject
+    one); the default sends one unauthenticated request and expects the gateway's own 401."""
+    e = _runtime_env() if env is None else env
+    metered = (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE
+    gateway_on = (e.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _AFFIRMATIVE
+    issues: list = _obsolete_pricing_issues(e)
+    if not metered and not gateway_on:
+        if issues:
+            return {"configured": False, "ok": False}, issues, []
+        return {"configured": False}, [], []
+    notes: list = []
+    raw_port = (e.get("VIGIL_MODEL_GATEWAY_PORT") or "").strip()
+    try:
+        port = int(raw_port) if raw_port else 8742
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        port = 8742
+        notes.append(f"VIGIL_MODEL_GATEWAY_PORT={raw_port!r} is not a valid port; the gateway uses 8742.")
+    url = f"http://127.0.0.1:{port}"
+    section: dict = {"configured": True, "metered_billing": metered, "gateway_enabled": gateway_on, "url": url}
+    if metered and not gateway_on:
+        issues.append("VIGIL_METERED_BILLING is on but VIGIL_MODEL_GATEWAY_ENABLED is not: no customer run can reach "
+                      "a model gateway, so every metered launch fails. Enable the gateway in the cockpit's "
+                      "environment.")
+    if gateway_on and not ((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip()):
+        issues.append("the model gateway is enabled but no provider key (SIGIL_ANTHROPIC_API_KEY / "
+                      "ANTHROPIC_API_KEY) is in this environment, so it will not start.")
+    try:
+        from vigil_core import model_metering as _mm
+        if metered:
+            try:
+                # the retired settings are reported once, above; this checks the margin itself
+                _mm.billing_markup({k: v for k, v in e.items() if k not in _mm.OBSOLETE_PRICING_ENVS})
+                section["target_margin_set"] = True
+            except _mm.MeteringError as exc:
+                issues.append(f"metered billing cannot price a run: {exc}. Metered launches and settles refuse "
+                              f"until it is set.")
+            try:
+                section["cancel_settlement"] = _mm.cancel_settlement(e)
+            except _mm.MeteringError as exc:
+                issues.append(f"metered billing has an invalid cancellation policy: {exc}. Fix or unset it (unset "
+                              f"means metered: a cancelled run pays for what it used); metered launches and "
+                              f"cancelled-run settles refuse until then.")
+        floor = _mm.run_floor_credits(e)
+        prices = _mm.price_table(e)
+        model = _mm.run_model(e)
+        if model not in prices:
+            raise _mm.MeteringError(f"the run model {model!r} ({_mm.RUN_MODEL_ENV}) has no price in the table")
+        section["floor_credits"] = floor
+        for name in ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "VIGIL_GATEWAY_GLOBAL_CONCURRENCY"):
+            raw = (e.get(name) or "").strip()
+            if raw and (not raw.isdigit() or int(raw) < 1):
+                raise _mm.MeteringError(f"{name} must be a whole number of at least 1, got {raw!r}")
+        raw_limit = (e.get("VIGIL_GATEWAY_DAILY_LIMIT_USD") or "").strip()
+        if raw_limit:
+            from decimal import Decimal, InvalidOperation
+            try:
+                ok = Decimal(raw_limit).is_finite() and Decimal(raw_limit) > 0
+            except InvalidOperation:
+                ok = False
+            if not ok:
+                raise _mm.MeteringError(f"VIGIL_GATEWAY_DAILY_LIMIT_USD must be a positive amount, got {raw_limit!r}")
+            section["daily_limit_usd"] = raw_limit
+        else:
+            notes.append("no VIGIL_GATEWAY_DAILY_LIMIT_USD: the gateway has no account-wide daily spend ceiling "
+                         "(set one, and a spend limit on the Anthropic workspace, to protect the account).")
+    except ImportError:
+        notes.append("vigil_core is not importable here, so the pricing configuration was not checked.")
+    except ValueError as exc:                 # MeteringError is a ValueError
+        issues.append(f"metered pricing configuration refused: {exc}")
+    if gateway_on:
+        try:
+            alive = (probe or _probe_model_gateway)(url)
+        except Exception:  # noqa: BLE001 — a probe that breaks must never take the issues above with it
+            alive = None
+        section["reachable"] = alive
+        if alive is False:
+            (issues if metered else notes).append(
+                f"the model gateway at {url} does not answer (is the cockpit running with "
+                f"VIGIL_MODEL_GATEWAY_ENABLED and a provider key?).")
+        elif alive is None:
+            (issues if metered else notes).append(
+                f"something other than the model gateway answers at {url} (another service holds "
+                f"VIGIL_MODEL_GATEWAY_PORT?), so metered runs cannot reach the gateway.")
+    section["ok"] = not issues
+    return section, issues, notes
+
+
+def _runtime_env() -> dict:
+    """The environment the cockpit's metering reads: this process's, with ``$SIGIL_HOME/sigil.env`` layered UNDER
+    it exactly as ``sigil.config._load_env_file`` does at import (the real environment wins; ``\n``-only lines;
+    ``#`` comments). The cockpit's settings UI saves the provider key there, so reading ``os.environ`` alone would
+    report a key the gateway has as missing, and miss a metering flag set there. Stdlib mirror, no sigil import."""
+    e = dict(os.environ)
+    try:
+        raw = (_sigil_home() / "sigil.env").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return e
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        e.setdefault(k.strip(), v.strip())
+    return e
+
+
+def _obsolete_pricing_issues(e: dict) -> list:
+    """One hard issue per retired pricing setting present in ``e`` (``vigil_core.model_metering`` decides which and
+    words the refusal, so doctor and billing say the same thing)."""
+    try:
+        from vigil_core import model_metering as _mm
+    except ImportError:
+        return []
+    return [f"{_mm.obsolete_setting_refusal(name)}. It is no longer read; while it is set, metered launches and "
+            f"settles refuse." for name in _mm.obsolete_pricing_settings(e)]
+
+
+def _probe_model_gateway(url: str) -> "bool | None":
+    """True iff ``url`` answers an unauthenticated budget read with the gateway's own 401; False when nothing
+    listens; None when something else answers (any other status or body, or not HTTP at all)."""
+    import http.client
+    import json as _json
+    import urllib.error
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        opener.open(url + "/v1/vigil/budget", timeout=2)
+    except urllib.error.HTTPError as e:
+        try:
+            body = _json.loads(e.read() or b"{}")
+        except (ValueError, OSError, http.client.HTTPException):
+            return None
+        err = body.get("error") if isinstance(body, dict) else None
+        return True if e.code == 401 and isinstance(err, dict) and err.get("type") == "authentication_error" else None
+    except (urllib.error.URLError, OSError):
+        return False
+    except http.client.HTTPException:          # something that does not speak HTTP holds the port
+        return None
+    return None
 
 
 #: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
@@ -1646,12 +1810,13 @@ def collect(repo_root) -> dict:
                 # gap the ALL-ABSENT branch above handles. Make it a HARD issue so `vigil doctor` — the
                 # deploy preflight / production gate — goes RED until it is cleared. Non-money units stay
                 # advisory (`vigil alerts` owns the full dead-man).
-                if st.unit in _MONEY_DRAIN_UNITS and st.unit == _BILLING_DRAIN_UNIT:
+                if st.unit in _MONEY_DRAIN_UNITS and st.unit in _BILLING_DRAIN_UNITS:
+                    spool_default, rerun = _BILLING_DRAIN_UNITS[st.unit]
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"failed/stalled billing drain means paid webhooks are quarantined or not being "
                            f"drained: a customer PAID and has NOT been credited. Read each `.reason` in the billing "
-                           f"spool's rejected/ (default ~/.sigil/billing-spool), fix the cause, move the envelope "
-                           f"back to incoming/, and run `sigil billing-drain drain --spool <spool>` (or restart "
+                           f"spool's rejected/ (default {spool_default}), fix the cause, move the envelope "
+                           f"back to incoming/, and run `{rerun}` (or restart "
                            f"the unit) — re-ingest is idempotent, a payment is credited once.")
                 elif st.unit in _MONEY_DRAIN_UNITS:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
@@ -1782,6 +1947,18 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report
         report["fold_cache_audit"] = {"error": f"{type(exc).__name__}: {exc}", "present": False}
+
+    # PRICING M1c — metered billing + the model gateway. Neither flag set and no retired pricing setting ⇒ nothing
+    # added. Best-effort.
+    try:
+        _mt, _mt_issues, _mt_notes = _metering_report()
+        report["metering"] = _mt
+        for _m in _mt_issues:
+            _issue(_m)
+        for _m in _mt_notes:
+            _note(_m)
+    except Exception as exc:  # noqa: BLE001 — the metering probe must never crash the report
+        report["metering"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
     return report
 
 
@@ -1963,6 +2140,18 @@ def render(report: dict) -> str:
         lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
                      f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
                      + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
+
+    mt = report.get("metering")
+    if isinstance(mt, dict) and mt.get("configured") and "error" not in mt:
+        # PRICING M1c: rendered ONLY when metered billing or the gateway is configured (default output unchanged).
+        mode = "metered" if mt.get("metered_billing") else "flat (metering OFF)"
+        reach = ("not enabled" if not mt.get("gateway_enabled") else
+                 {True: "answering", False: "NOT answering"}.get(mt.get("reachable"), "something else answers"))
+        lines.append(f"\n{_mark(bool(mt.get('ok')))}billing: {mode}; model gateway {mt.get('url')}: {reach}"
+                     + (f"; floor {mt.get('floor_credits')} credits" if "floor_credits" in mt else "")
+                     + ("; target margin set (over metered AI cost)" if mt.get("target_margin_set") else "")
+                     + (f"; cancelled runs: {mt.get('cancel_settlement')}" if mt.get("cancel_settlement") else "")
+                     + (f"; daily ceiling ${mt.get('daily_limit_usd')}" if mt.get("daily_limit_usd") else ""))
 
     issues = report.get("issues", [])
     if issues:

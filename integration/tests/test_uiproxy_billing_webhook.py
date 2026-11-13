@@ -179,7 +179,7 @@ def test_end_to_end_proxy_spool_then_sovereign_drain_credits_once(monkeypatch, t
         w = WalletRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
         subs = SubscriptionRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
         plan = PlanCreditLedger(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
-        verified = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
+        verified = {"9911": {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1",
                              "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
         signer = BillingSigner(FlutterwaveBillingProvider(_SECRET, lambda t: verified.get(str(t))),
                                wallet=w, subscriptions=subs, plan=plan,

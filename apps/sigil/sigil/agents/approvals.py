@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from ..reuse import canonical_json, sha256_hex, sign, verify_one
+from ..reuse import IntegrityError, canonical_json, sha256_hex, sign, verify_one
 from ..spine.store import SpineStore
 
 SIGNAL = "governor.approval"
@@ -44,10 +44,18 @@ def verify_approval(record, trusted_pubkey_b64: Optional[str], *, extra_pubkeys=
         allowed.add(trusted_pubkey_b64)
     if extra_pubkeys:
         allowed.update(extra_pubkeys)
-    if not sig or not pub or pub not in allowed:
+    # A hostile spine record can carry any JSON type for pubkey (an unhashable list would raise on the set
+    # lookup), and a core string that cannot be UTF-8 canonicalised (a lone surrogate, only possible
+    # through a raw spine write) or malformed sig/key material raises out of the message build / verify_one.
+    # Every such record is simply NOT a valid approval: it must never raise out of pending() and so take
+    # down the whole approval queue and every gate that reads it.
+    if not sig or not isinstance(pub, str) or not pub or pub not in allowed:
         return False
-    msg = _approval_message(p.get("target_seq"), p.get("approval"), p.get("approver"))
-    return verify_one(pub, msg, sig)                # verify against the (owner-minted) claimed key
+    try:
+        msg = _approval_message(p.get("target_seq"), p.get("approval"), p.get("approver"))
+        return verify_one(pub, msg, sig)            # verify against the (owner-minted) claimed key
+    except (IntegrityError, TypeError, ValueError):
+        return False
 
 
 def pending(store: SpineStore, trusted_pubkey_b64: Optional[str] = None, *, extra_pubkeys=None) -> List:

@@ -36,6 +36,8 @@ Import-clean: pydantic + stdlib + the F1 safety seam (``wrap_untrusted`` / ``par
 
 from __future__ import annotations
 
+import os
+import stat
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -133,6 +135,85 @@ def is_safe_repo_path(path: Any) -> tuple[bool, str]:
     if any(seg in _BULK_TOKENS or seg.startswith("-") for seg in segments if seg):
         return False, "path segment is a flag/wildcard"
     return True, ""
+
+
+def confined_repo_file(root: str, rel: Any) -> str:
+    """The REAL path of the regular file ``rel`` names under the checkout ``root``, or ``""``. The content
+    of a cloned repository is third-party controlled, and ``is_safe_repo_path`` is purely LEXICAL: it stops
+    ``..``/absolute/flag paths but not a symlink the repo itself committed (``settings.py -> ~/.ssh/id_ed25519``,
+    ``conf -> /etc``). So a file is readable only when (a) its name is not itself a link, and (b) its fully
+    RESOLVED path still sits under the resolved ``root`` — which also covers a symlinked PARENT directory,
+    the case a final-component check misses. A directory link that stays inside the checkout is fine.
+    This is a CHECK on a path, so it only selects names: to READ the file use ``read_confined_repo_file``,
+    which re-checks the file it actually opened. Total — never raises."""
+    ok, _why = is_safe_repo_path(rel)
+    if not ok:
+        return ""
+    try:
+        local = os.path.join(root, rel.strip())
+        if os.path.islink(local):
+            return ""
+        real_root = os.path.realpath(root)
+        real_local = os.path.realpath(local)
+        if os.path.commonpath([real_root, real_local]) != real_root:
+            return ""
+        if not os.path.isfile(real_local):
+            return ""
+    except (OSError, ValueError):
+        return ""
+    return real_local
+
+
+def _opened_path(fd: int) -> str:
+    """The path the kernel reports for the open file ``fd`` (``/proc/self/fd`` on Linux, ``F_GETPATH`` on
+    macOS), or ``""`` when the platform cannot say — the caller then refuses. Never raises."""
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except (OSError, ValueError):
+        pass
+    try:
+        import fcntl
+        getpath = getattr(fcntl, "F_GETPATH", None)
+        if getpath is not None:
+            buf = fcntl.fcntl(fd, getpath, bytes(1024))
+            return os.fsdecode(bytes(buf).split(b"\0", 1)[0])
+    except (ImportError, OSError, ValueError):
+        pass
+    return ""
+
+
+def read_confined_repo_file(root: str, rel: Any, max_chars: int) -> Optional[str]:
+    """At most ``max_chars`` characters of the regular file ``rel`` names under the checkout ``root``, or
+    ``None``. ``confined_repo_file`` checks a PATH; a path can change between that check and an ``open()``
+    (code the cloned repo runs — its own test suite, bound read-write into the sandbox — can swap
+    ``settings.py`` or a parent directory for a link to a host file in that window). So the file is opened
+    once and the OPEN FILE is what gets checked: ``O_NOFOLLOW`` refuses a final-component link,
+    ``O_NONBLOCK`` keeps a swapped-in FIFO from hanging the open, ``fstat`` must report a regular file, and
+    the kernel's path for the open file must sit under the resolved ``root`` (this catches a parent
+    directory swapped for a link, which ``O_NOFOLLOW`` does not see). Only then is it read, from that same
+    descriptor. Total — never raises."""
+    real = confined_repo_file(root, rel)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not real or not nofollow:                      # no race-free open on this platform: refuse
+        return None
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        real_root = os.path.realpath(root)
+        fd = os.open(real, flags)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        opened = _opened_path(fd)
+        if not opened or os.path.commonpath([real_root, opened]) != real_root:
+            return None
+        with open(fd, encoding="utf-8", errors="replace", closefd=False) as fh:
+            return fh.read(max_chars)
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
 
 
 def parse_edit_blocks(text: str) -> list[EditBlock]:

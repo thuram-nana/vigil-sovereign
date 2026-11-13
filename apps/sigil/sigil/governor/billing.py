@@ -10,9 +10,10 @@ driven by an owner-controlled price→entitlement CATALOG.
     (each adapter declares the operations it supports, so an unsupported flow raises `UnsupportedCapability`
     rather than silently simulating success). `FlutterwaveBillingProvider` is the PRIMARY production adapter
     (Flutterwave v3: `verif-hash` constant-time compare + MANDATORY server-side transaction re-verify before any
-    mint; card + Francophone Mobile Money; Payment-Plan recurring). `StripeBillingProvider` is an optional
-    REFERENCE adapter, DISABLED BY DEFAULT (prohibited in production unless explicitly enabled), kept only to
-    prove the interface is genuinely swappable. `MockBillingProvider` is the deterministic sandbox for tests.
+    mint; card + Francophone Mobile Money; Payment-Plan recurring). `StripeBillingProvider` is the second
+    adapter, DISABLED BY DEFAULT (refused unless explicitly enabled): `Stripe-Signature` HMAC + a MANDATORY
+    server-side re-fetch of the Checkout Session / Invoice / Subscription, minting from the fetched objects only.
+    `MockBillingProvider` is the deterministic sandbox for tests.
     All adapters satisfy one contract: verify → return a normalised `BillingEvent`, or None (mint nothing).
   * `BillingSigner.ingest(raw_body, sig_header, now)` — the crux. It (1) VERIFIES the provider signature and
     REJECTS (mints nothing) on any failure — a forged/tampered/stale webhook cannot credit; (2) maps the verified
@@ -37,6 +38,7 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -130,6 +132,13 @@ class BillingProvider(ABC):
         if capability not in self.capabilities():
             raise UnsupportedCapability(f"{type(self).__name__} does not support capability {capability!r}")
 
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+        """Open a tenant-bound hosted checkout. The base adapter has none: it refuses with `UnsupportedCapability`
+        (an explicit refusal, never an AttributeError from a duck-typed call). Adapters that can override it."""
+        raise UnsupportedCapability(f"{type(self).__name__} does not support capability {CAP_HOSTED_CHECKOUT!r}")
+
 
 def _ct_equal(a: str, b: str) -> bool:
     """Constant-time string compare (never short-circuit on the first differing byte — no timing oracle on the
@@ -153,21 +162,68 @@ def _parse_org_id(obj: object) -> Optional[str]:
         return None
 
 
-class StripeBillingProvider(BillingProvider):
-    """Stripe webhook verification in the stdlib — no `stripe` SDK, no network. Implements the documented
-    `Stripe-Signature` scheme: header `t=<unix>,v1=<hex hmac>`; signed payload is `"{t}.{raw_body}"`; the MAC is
-    HMAC-SHA256 under the endpoint's `whsec_` secret; compared constant-time; and `|now - t|` must be within the
-    tolerance window (replay bound). Maps Stripe event `type`s onto the normalised kinds via the injected
-    price→entitlement catalog's knowledge of which price is a plan vs a top-up (the signer owns that mapping; the
-    provider only needs org_id + price_id + type)."""
+_STRIPE_TS_MAX_DIGITS = 12   # unix seconds (12 digits reaches year 33658); also keeps int() off a huge digit string
 
-    def __init__(self, signing_secret: str, *, tolerance_s: float = _DEFAULT_TOLERANCE_S,
-                 enable_reference_adapter: bool = False):
-        # Stripe is an OPTIONAL REFERENCE adapter: DISABLED BY DEFAULT and prohibited in production unless
-        # EXPLICITLY enabled (Flutterwave is the primary production provider). Enable only with an explicit
-        # opt-in — the `enable_reference_adapter=True` flag (contract/parity tests) or env
-        # VIGIL_BILLING_ENABLE_STRIPE in {1,true,yes}. This keeps the second adapter available to prove the
-        # interface is swappable without letting it serve production by accident.
+
+class StripeEventRefused(ValueError):
+    """A SIGNED Stripe event that must never be read as a no-op: it names a connected account, or it (or the object
+    fetched for it) belongs to the other mode (test vs live) than this endpoint serves. Raised so the drain
+    QUARANTINES it for an operator; nothing is minted."""
+
+
+# The only event types acted on. Everything else (customer.subscription.deleted included: a cancelled plan expires
+# at period_end, exactly as on Flutterwave) maps to nothing.
+_STRIPE_EVENT_TYPES = frozenset({"checkout.session.completed", "checkout.session.async_payment_succeeded",
+                                 "invoice.paid", "invoice.payment_failed"})
+_STRIPE_CS_ID = re.compile(r"cs_(?:test|live)_[A-Za-z0-9]{1,255}")
+_STRIPE_IN_ID = re.compile(r"in_[A-Za-z0-9]{1,255}")
+_STRIPE_SUB_ID = re.compile(r"sub_[A-Za-z0-9]{1,255}")
+# Only a NEW-PERIOD invoice advances the plan period; a mid-cycle one (an update / proration / manual invoice) must
+# never re-grant a full allotment for an overlapping window.
+_STRIPE_NEW_PERIOD_REASONS = frozenset({"subscription_create", "subscription_cycle"})
+_STRIPE_TS_MAX = 10 ** 12
+
+StripeObjectFetcher = Callable[[str, str], Mapping[str, Any]]
+# Currencies Stripe checkout may charge in: ones whose Stripe minor unit is confirmed to equal the catalog's (ISO 4217)
+# minor unit, so unit_amount and the inbound amount mean the same money. Extend only after checking Stripe's currency
+# notes (ISK, HUF, TWD, UGX and the three-decimal currencies have special rules; MGA is zero-decimal in Stripe).
+_STRIPE_CHECKOUT_CURRENCIES = frozenset({"USD"})
+StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
+
+
+class StripeBillingProvider(BillingProvider):
+    """Stripe webhook verification + server-side re-fetch, in the stdlib (no `stripe` SDK, no network here).
+
+    The `Stripe-Signature` header (`t=<unix>,v1=<hex hmac>` over `"{t}.{raw_body}"`, HMAC-SHA256 under the
+    endpoint's `whsec_` secret, constant-time, within the tolerance window) authenticates the delivery. Even so,
+    NOTHING that decides money or a tenant is read from the body: the body is trusted only for the event type and
+    the id of the object to go fetch. The injected `fetcher` (`stripe_egress.make_object_fetcher`) GETs that
+    Checkout Session / Invoice / Subscription with our own API key, and the tenant, price, amount, currency,
+    status and timestamp all come from the FETCHED objects. This is the Flutterwave re-verify doctrine.
+
+      * `checkout.session.completed` / `.async_payment_succeeded`: a `payment`-mode session that is `complete` and
+        `paid` -> TOPUP. Anchor: the session id, so both events for one session mint once. A subscription-mode
+        session -> nothing (its `invoice.paid` mints the period).
+      * `invoice.paid`: a `paid` invoice with billing_reason subscription_create / subscription_cycle ->
+        SUBSCRIPTION_ACTIVE at `status_transitions.paid_at`. Tenant + price from the fetched subscription's metadata
+        (set at our checkout). Anchor: the invoice id.
+      * `invoice.payment_failed`: a subscription invoice still `open` / `uncollectible` -> PAYMENT_FAILED with the
+        invoice's `created` as the down-latch freshness key (a failure later cured by payment is older than the
+        activation it would contradict, so it is inert).
+      * Anything else -> None.
+
+    Tenant: `client_reference_id` / `metadata.tx_ref` (`vigil:<org>:<nonce>`) and `metadata.org_id`; when more than
+    one is present they must name the same org. A connected-account event or a mode mismatch RAISES
+    `StripeEventRefused`; a fetch failure RAISES (transient or definitive, never a silent no-op). With
+    `alarm_unaccounted_plans`, a PAID object with no tenant, timestamp or currency raises `UnaccountedPayment`.
+
+    Stripe is an optional adapter, DISABLED BY DEFAULT (Flutterwave is the primary provider): it refuses to
+    construct without `enable_reference_adapter=True` or `VIGIL_BILLING_ENABLE_STRIPE=1`."""
+
+    def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
+                 tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
+                 alarm_unaccounted_plans: bool = False, checkout_creator: "Optional[StripeCheckoutCreator]" = None,
+                 plan_periods: "Optional[Mapping[str, float]]" = None, strict: bool = False):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
@@ -175,15 +231,131 @@ class StripeBillingProvider(BillingProvider):
                 "provider. Enable explicitly with enable_reference_adapter=True or VIGIL_BILLING_ENABLE_STRIPE=1.")
         if not isinstance(signing_secret, str) or not signing_secret:
             raise ValueError("Stripe signing secret (whsec_...) is required")
+        if not callable(fetcher):
+            raise ValueError("a server-side Stripe object fetcher is required — a signed webhook body is never "
+                             "trusted for money; inject stripe_egress.make_object_fetcher()")
+        if expected_mode not in ("live", "test"):
+            raise ValueError("expected_mode must be 'live' or 'test' (the mode of the API key and the endpoint)")
         self._secret = signing_secret.encode("utf-8")
         self._tolerance = float(tolerance_s)
+        self._fetch = fetcher
+        self._mode = expected_mode
+        self._livemode = expected_mode == "live"
+        self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
+        # The outbound Checkout Session poster (stripe_egress.make_checkout_creator). None => create_checkout
+        # refuses (never simulates a checkout). plan_periods: {catalog plan price_id: period seconds}, from the
+        # owner catalog — the recurring interval of a plan checkout.
+        self._checkout_creator = checkout_creator
+        self._plan_periods: "dict[str, float]" = dict(plan_periods or {})
+        # The drain lane sets strict: every envelope in its spool was already authenticated by the proxy, so a body
+        # that does not verify with the DRAIN's secret (the proxy and drain secrets differ, or the envelope was
+        # altered at rest), or that is not a JSON object, is an anomaly to QUARANTINE (unit FAILED, alarm), never a
+        # silent no-op that buries a paid charge.
+        self._strict = bool(strict)
 
     def capabilities(self) -> frozenset[str]:
-        # NOTE: no CAP_UNATTENDED_TOPUP — off-session recurring is approval-gated at the provider, so the reference
-        # adapter does not DECLARE it unconditionally (declaring it would let an outbound flow `require()` it and
-        # believe unattended charging is available when it has not been approved).
-        return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
-                          CAP_RECURRING_PLAN, CAP_REFUND, CAP_RECONCILE})
+        # Webhook verification + the server-side object re-fetch, and hosted checkout (card, one-off or recurring)
+        # once a creator is injected. No CAP_UNATTENDED_TOPUP (off-session charging is approval-gated at the
+        # provider); refund / reconcile are not implemented, so never declared.
+        caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION}
+        if self._checkout_creator is not None:
+            caps |= {CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD, CAP_RECURRING_PLAN}
+        return frozenset(caps)
+
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None) -> "CheckoutSession":
+        """Create a tenant-bound Stripe Checkout Session for `price_id` — the same contract as the Flutterwave
+        adapter (the checkout endpoint authorizes first; this primitive BINDS).
+
+        The amount and currency come from the OWNER CATALOG (`expected[price_id]`) as inline `price_data`, never
+        from the caller; an unknown price is refused. The tenant is bound three ways that the inbound mapper
+        requires to agree: `client_reference_id = vigil:<org>:<nonce>` plus `metadata` org_id / price_id / tx_ref on
+        the session and on the PaymentIntent (one-off) or the Subscription (plan). A plan (`payment_plan`, which
+        must equal `price_id`) recurs every `plan_periods[price_id]` seconds as a whole number of days (at most
+        365). `redirect_url` is required: it becomes the success and cancel URLs, with `status=` appended to the
+        URL's query (in the hash when there is one, where the customer app reads it). The create carries the
+        Idempotency-Key `vigil-co-<nonce>`. The response must be a session echoing our reference, mode, mode
+        (test/live), catalog amount (one-off) and currency, with an https link on exactly `checkout.stripe.com`.
+        Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
+        self.require(CAP_HOSTED_CHECKOUT)
+        creator = self._checkout_creator
+        if creator is None:                            # unreachable once require() passed; kept for type narrowing
+            raise UnsupportedCapability("hosted checkout requires an injected checkout_creator")
+        try:
+            org = org_tenant_id(org_id)
+        except ValueError as exc:
+            raise ValueError(f"invalid org_id for checkout: {exc}") from None
+        exp = expected.get(price_id) if hasattr(expected, "get") else None
+        if exp is None:
+            raise ValueError(f"unknown price_id {price_id!r}: not in the owner catalog — checkout refused "
+                             "(the catalog, never the caller, decides what may be charged)")
+        amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
+        if amount_minor <= 0 or not currency:
+            raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        if currency not in _STRIPE_CHECKOUT_CURRENCIES:
+            raise ValueError(f"Stripe checkout is not enabled for {currency}: its Stripe minor unit must first be "
+                             "confirmed to match the catalog's (ISK and MGA, for example, differ) — refused")
+        n = nonce or secrets.token_urlsafe(18)
+        if not isinstance(n, str) or ":" in n or not n or any(not (0x21 <= ord(c) <= 0x7e) for c in n):
+            raise ValueError("checkout nonce must be a non-empty printable string without ':' (the tx_ref "
+                             "delimiter)")
+        success_url, cancel_url = _stripe_return_urls(redirect_url)
+        tx_ref = checkout_tx_ref(org, n)
+        meta = {"org_id": org, "price_id": price_id, "tx_ref": tx_ref}
+        price_data: "dict[str, Any]" = {"currency": currency.lower(), "unit_amount": amount_minor,
+                                        "product_data": {"name": price_id}}
+        mode = "payment"
+        if payment_plan is not None:
+            if payment_plan != price_id:
+                raise ValueError("a Stripe plan checkout's payment_plan must be its catalog price_id")
+            price_data["recurring"] = {"interval": "day", "interval_count": _stripe_plan_days(
+                self._plan_periods.get(price_id), price_id)}
+            mode = "subscription"
+        params: "dict[str, Any]" = {
+            "mode": mode,
+            "line_items": [{"price_data": price_data, "quantity": 1}],
+            "client_reference_id": tx_ref,
+            "metadata": meta,
+            ("subscription_data" if mode == "subscription" else "payment_intent_data"): {"metadata": dict(meta)},
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            # the charge must be in the catalog currency: never let Stripe localise it on this session
+            "adaptive_pricing": {"enabled": False},
+        }
+        if customer_email:
+            params["customer_email"] = str(customer_email)
+        try:
+            resp = creator(params, idempotency_key=f"vigil-co-{n}")
+        except Exception as exc:  # noqa: BLE001 — any outbound failure is a REFUSAL, re-raised as the contract type
+            raise UnsupportedCapability(f"checkout creation failed ({type(exc).__name__})") from None
+        link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
+        if not link:
+            raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
+                                        "an https checkout.stripe.com link")
+        return CheckoutSession(tx_ref=tx_ref, hosted_link=link, org_id=org, price_id=price_id,
+                               amount_minor=amount_minor, currency=currency)
+
+    def _checkout_link(self, resp: object, *, tx_ref: str, mode: str, amount_minor: int,
+                       currency: str) -> Optional[str]:
+        """The session's hosted link iff the response is the session we asked for, else None (fail-closed)."""
+        from .. import config
+        if not isinstance(resp, Mapping) or resp.get("object") != "checkout.session":
+            return None
+        sid = resp.get("id")
+        if not isinstance(sid, str) or not _STRIPE_CS_ID.fullmatch(sid):
+            return None
+        if resp.get("client_reference_id") != tx_ref or resp.get("mode") != mode \
+                or resp.get("livemode") is not self._livemode:
+            return None
+        echoed_ccy = resp.get("currency")
+        if not isinstance(echoed_ccy, str) or echoed_ccy.upper() != currency:
+            return None
+        if mode == "payment":
+            total = resp.get("amount_total")
+            if isinstance(total, bool) or total != amount_minor:
+                return None
+        return _https_link_on(resp.get("url"), exact_hosts=frozenset(config.STRIPE_CHECKOUT_LINK_HOSTS))
 
     def _verify_signature(self, raw_body: bytes, sig_header: str, now: float) -> bool:
         if not isinstance(sig_header, str) or not sig_header:
@@ -198,29 +370,213 @@ class StripeBillingProvider(BillingProvider):
                 v1s.append(v)
         if ts is None or not v1s:
             return False
-        try:
-            t = float(ts)
-        except (TypeError, ValueError):
+        # The timestamp is plain ASCII decimal digits only. float() would also accept "1e3", "+1000", " 1000",
+        # "nan" and non-ASCII digits (which then made ts.encode("ascii") raise instead of refusing).
+        if not (ts.isascii() and ts.isdigit() and 1 <= len(ts) <= _STRIPE_TS_MAX_DIGITS):
             return False
+        t = int(ts)
         if abs(now - t) > self._tolerance:           # replay-window bound (stale or future-dated -> reject)
             return False
         signed = ts.encode("ascii") + b"." + raw_body
         expected = hmac.new(self._secret, signed, hashlib.sha256).hexdigest()
-        return any(_ct_equal(expected, v1) for v1 in v1s)   # any valid v1 (Stripe may send several on rotation)
+        # any valid v1 (Stripe may send several on rotation); _ct_equal is constant-time and returns False for a
+        # malformed (non-ASCII / wrong-length) candidate rather than raising
+        return any(_ct_equal(expected, v1) for v1 in v1s)
 
     def verify_and_parse(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[BillingEvent]:
         if not isinstance(raw_body, (bytes, bytearray)):
             return None
         raw_body = bytes(raw_body)
         if not self._verify_signature(raw_body, sig_header, now):
+            if self._strict:
+                raise StripeEventRefused("the Stripe-Signature does not verify with this drain's webhook secret (the "
+                                         "proxy and drain secrets differ, or the envelope was altered at rest)")
             return None                              # fail-CLOSED: unverified -> no event, no mint
         try:
             obj = json.loads(raw_body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            return None
+            obj = None
         if not isinstance(obj, dict):
+            if self._strict:
+                raise StripeEventRefused("a signed Stripe body is not a JSON object")
             return None
-        return _map_stripe_event(obj)
+        if "account" in obj:
+            raise StripeEventRefused("signed Stripe event names a connected account — refused (standard account "
+                                     "only)")
+        if obj.get("livemode") is not self._livemode:
+            raise StripeEventRefused(f"signed Stripe event is not a {self._mode}-mode event")
+        etype = obj.get("type")
+        if etype not in _STRIPE_EVENT_TYPES:
+            return None
+        data = obj.get("data")
+        body_obj = data.get("object") if isinstance(data, dict) else None
+        object_id = body_obj.get("id") if isinstance(body_obj, dict) else None
+        if not isinstance(object_id, str):
+            return None                              # the body is trusted ONLY for which object to fetch
+        if etype.startswith("checkout.session."):
+            if not _STRIPE_CS_ID.fullmatch(object_id):
+                return None
+            session = self._fetched("checkout_session", object_id, "checkout.session")
+            return None if session is None else self._map_checkout(session)
+        if not _STRIPE_IN_ID.fullmatch(object_id):
+            return None
+        invoice = self._fetched("invoice", object_id, "invoice")
+        if invoice is None:
+            return None
+        if etype == "invoice.paid":
+            return self._map_invoice_paid(invoice)
+        return self._map_invoice_failed(invoice)
+
+    # -- the authoritative objects ---------------------------------------------------------------------------
+    def _fetched(self, kind: str, object_id: str, object_type: str) -> "Optional[Mapping[str, Any]]":
+        """The AUTHORITATIVE object, fetched with our key. A fetch failure RAISES (the drain retries a transient
+        one and quarantines a definitive one); an object that is not the one asked for maps to nothing; one from
+        the other mode raises."""
+        obj = self._fetch(kind, object_id)
+        if not isinstance(obj, Mapping) or obj.get("object") != object_type or obj.get("id") != object_id:
+            return None
+        if obj.get("livemode") is not self._livemode:
+            raise StripeEventRefused(f"fetched Stripe {object_type} is not a {self._mode}-mode object")
+        return obj
+
+    def _invoice_subscription(self, invoice: "Mapping[str, Any]") -> "Optional[Mapping[str, Any]]":
+        """The fetched subscription an invoice belongs to. The id is read from `subscription` (older API versions)
+        and `parent.subscription_details.subscription` (newer ones); when both are present they must agree."""
+        ids: set = set()
+        top = invoice.get("subscription")
+        parent = invoice.get("parent")
+        details = parent.get("subscription_details") if isinstance(parent, Mapping) else None
+        nested = details.get("subscription") if isinstance(details, Mapping) else None
+        for ref in (top, nested):
+            if isinstance(ref, Mapping):
+                ref = ref.get("id")
+            if isinstance(ref, str):
+                ids.add(ref)
+        if len(ids) != 1:
+            return None
+        sub_id = ids.pop()
+        if not _STRIPE_SUB_ID.fullmatch(sub_id):
+            return None
+        return self._fetched("subscription", sub_id, "subscription")
+
+    def _unaccounted(self, what: str) -> Optional[BillingEvent]:
+        """A PAID object this adapter cannot account for: loud (quarantine + alarm) when the alarm is armed, else a
+        no-op. Mints nothing either way."""
+        if self._alarm_unaccounted_plans:
+            raise UnaccountedPayment(f"{what} — paid but UN-MINTED; reconcile by hand")
+        return None
+
+    # -- mapping (pure; every field from the fetched objects) -----------------------------------------------
+    def _map_checkout(self, s: "Mapping[str, Any]") -> Optional[BillingEvent]:
+        if s.get("mode") != "payment":
+            return None                              # a subscription session: its invoice.paid mints the period
+        if s.get("status") != "complete" or s.get("payment_status") != "paid":
+            return None                              # unpaid / async pending / expired -> nothing yet
+        sid = str(s["id"])
+        meta = s.get("metadata")
+        org = _stripe_tenant(s.get("client_reference_id"), meta)
+        if org is None:
+            return self._unaccounted(f"paid Stripe checkout session {sid} has no single recoverable tenant")
+        created = _stripe_ts(s.get("created"))
+        if created is None:
+            return self._unaccounted(f"paid Stripe checkout session {sid} has no usable timestamp")
+        amount, ccy = _stripe_amount(s.get("amount_total"), s.get("currency"))
+        if not ccy:
+            return self._unaccounted(f"paid Stripe checkout session {sid} for org {org!r} has no currency")
+        return BillingEvent(event_id=sid, kind=EVENT_TOPUP, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"tx_ref": s.get("client_reference_id")})
+
+    def _map_invoice_paid(self, inv: "Mapping[str, Any]") -> Optional[BillingEvent]:
+        if inv.get("status") != "paid" or inv.get("billing_reason") not in _STRIPE_NEW_PERIOD_REASONS:
+            return None
+        iid = str(inv["id"])
+        sub = self._invoice_subscription(inv)
+        if sub is None:
+            return self._unaccounted(f"paid Stripe subscription invoice {iid} has no readable subscription")
+        meta = sub.get("metadata")
+        org = _stripe_tenant(None, meta)
+        if org is None:
+            return self._unaccounted(f"paid Stripe invoice {iid} has no single recoverable tenant")
+        transitions = inv.get("status_transitions")
+        created = _stripe_ts(transitions.get("paid_at") if isinstance(transitions, Mapping) else None)
+        if created is None:
+            return self._unaccounted(f"paid Stripe invoice {iid} has no usable paid_at")
+        amount, ccy = _stripe_amount(inv.get("amount_paid"), inv.get("currency"))
+        if not ccy:
+            return self._unaccounted(f"paid Stripe invoice {iid} for org {org!r} has no currency")
+        return BillingEvent(event_id=iid, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"subscription": sub.get("id")})
+
+    def _map_invoice_failed(self, inv: "Mapping[str, Any]") -> Optional[BillingEvent]:
+        if inv.get("status") not in ("open", "uncollectible"):
+            return None                              # paid since (or void / draft): nothing to reduce
+        sub = self._invoice_subscription(inv)
+        if sub is None:
+            return None                              # a one-off invoice reduces nothing
+        meta = sub.get("metadata")
+        org = _stripe_tenant(None, meta)
+        created = _stripe_ts(inv.get("created"))
+        if org is None or created is None:
+            return None
+        return BillingEvent(event_id=str(inv["id"]), kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), data={"subscription": sub.get("id")})
+
+
+def _stripe_return_urls(redirect_url: object) -> "tuple[str, str]":
+    """(success_url, cancel_url) from the configured return URL: `status=successful&session_id={CHECKOUT_SESSION_ID}`
+    / `status=cancelled` appended to the query of the hash fragment (or of the URL when it has no fragment)."""
+    if not isinstance(redirect_url, str) or not redirect_url:
+        raise ValueError("a Stripe checkout needs a return URL (VIGIL_CUSTOMER_BILLING_RETURN_URL) for its success "
+                         "and cancel pages — refused")
+    u = urlsplit(redirect_url)
+    if u.scheme != "https" or not u.hostname or "@" in (u.netloc or "") \
+            or any(ord(c) < 0x21 or ord(c) == 0x7f for c in redirect_url):
+        raise ValueError("the Stripe checkout return URL must be an absolute https:// URL")
+    tail = redirect_url.split("#", 1)[1] if "#" in redirect_url else redirect_url
+    sep = "&" if "?" in tail else "?"
+    return (f"{redirect_url}{sep}status=successful&session_id={{CHECKOUT_SESSION_ID}}",
+            f"{redirect_url}{sep}status=cancelled")
+
+
+def _stripe_plan_days(period_s: object, price_id: str) -> int:
+    """A plan's recurring interval in whole days (1..365), from the catalog period; anything else is refused."""
+    if isinstance(period_s, bool) or not isinstance(period_s, (int, float)) or not math.isfinite(period_s):
+        raise ValueError(f"no catalog period for Stripe plan {price_id!r} — refused")
+    days, rem = divmod(float(period_s), 86400.0)
+    if rem != 0.0 or not 1 <= days <= 365:
+        raise ValueError(f"Stripe plan {price_id!r} period must be a whole number of days between 1 and 365")
+    return int(days)
+
+
+def _stripe_meta(meta: object, key: str) -> str:
+    v = meta.get(key) if isinstance(meta, Mapping) else None
+    return v if isinstance(v, str) else ""
+
+
+def _stripe_tenant(tx_ref: object, meta: object) -> Optional[str]:
+    """The ONE tenant named by the fetched object: `tx_ref` (client_reference_id) and `metadata.tx_ref` /
+    `metadata.org_id`, each validated. None when none is valid or when two of them disagree (never act on a guess)."""
+    found = {o for o in (_org_from_tx_ref(tx_ref), _org_from_tx_ref(_stripe_meta(meta, "tx_ref") or None),
+                         _parse_org_id(_stripe_meta(meta, "org_id") or None)) if o is not None}
+    return found.pop() if len(found) == 1 else None
+
+
+def _stripe_ts(v: object) -> Optional[float]:
+    """A Stripe unix timestamp (an integer) as a stable epoch float, or None. Never a wall-clock fallback."""
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 < v < _STRIPE_TS_MAX:
+        return None
+    return float(v)
+
+
+def _stripe_amount(amount: object, currency: object) -> "tuple[int, str]":
+    """(minor-unit amount, ISO-4217 upper) from a fetched object. The currency must be three ASCII letters (else
+    ""); the amount must be a non-negative integer (else 0, which the signer's underpay check refuses)."""
+    ccy = currency.upper() if isinstance(currency, str) and len(currency) == 3 and currency.isascii() \
+        and currency.isalpha() else ""
+    amt = amount if isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0 else 0
+    return amt, ccy
 
 
 def _as_float(v: object, default: float = 0.0) -> float:
@@ -230,69 +586,6 @@ def _as_float(v: object, default: float = 0.0) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     return f if math.isfinite(f) else default
-
-
-def _map_stripe_event(obj: Mapping[str, Any]) -> Optional[BillingEvent]:
-    """Map a verified Stripe event object onto a normalised BillingEvent, or None for an event type we do not mint
-    on. Pure + deterministic (no owner key, no catalog): it only normalises shape; the signer does the money
-    mapping via the catalog."""
-    etype = obj.get("type")
-    event_id = obj.get("id")
-    if not isinstance(etype, str) or not isinstance(event_id, str) or not event_id:
-        return None
-    created = _as_float(obj.get("created"))
-    data_obj = obj.get("data")
-    sub = data_obj.get("object") if isinstance(data_obj, dict) else None
-    sub = sub if isinstance(sub, dict) else {}
-    meta_raw = sub.get("metadata")
-    meta = meta_raw if isinstance(meta_raw, dict) else {}
-    org_id = _parse_org_id(meta.get("org_id"))
-    if org_id is None:
-        return None                                   # no validated tenant -> ignore (never mint on a guess)
-    price_id = _stripe_price_id(sub)
-    kind = {
-        "checkout.session.completed": EVENT_TOPUP,            # a one-off purchase (top-up); plan checkouts use
-        #                                                        customer.subscription.* below
-        "invoice.paid": EVENT_SUBSCRIPTION_ACTIVE,            # a paid (renewal) invoice -> active period
-        "customer.subscription.deleted": EVENT_SUBSCRIPTION_CANCELED,
-        # AEGIS routing: an invoice object carries no items.data[].price, so the subscription MUST set
-        # metadata.price_id for invoice.payment_failed to route to the monitoring line (else -> credit line).
-        "invoice.payment_failed": EVENT_PAYMENT_FAILED,
-    }.get(etype)
-    if kind is None:
-        return None
-    # A top-up checkout is distinguished from a subscription checkout by mode; a subscription-mode checkout is
-    # handled by the invoice.paid event, so a checkout.session in subscription mode is ignored here.
-    if kind == EVENT_TOPUP and sub.get("mode") == "subscription":
-        return None
-    # Only a NEW-PERIOD invoice advances the plan period: an invoice.paid with billing_reason subscription_create
-    # or subscription_cycle. A MID-CYCLE invoice (subscription_update / proration / a manual or one-off invoice)
-    # must NOT re-grant a full period — it would mint a second allotment for an overlapping window — so it is
-    # ignored here (the period it belongs to was already funded by its cycle invoice).
-    if kind == EVENT_SUBSCRIPTION_ACTIVE:
-        reason = sub.get("billing_reason")
-        if reason not in ("subscription_create", "subscription_cycle"):
-            return None
-    return BillingEvent(event_id=event_id, kind=kind, org_id=org_id, created=created, price_id=price_id,
-                        data={"raw_type": etype})
-
-
-def _stripe_price_id(sub: Mapping[str, Any]) -> str:
-    """Best-effort pull of the price id from a Stripe object (checkout line item or subscription item). Returns
-    "" when absent — the signer then treats the event as having no catalog entry (minted only if the catalog has
-    a default, else ignored)."""
-    # subscription object: items.data[0].price.id ; checkout: not expanded by default -> metadata.price_id
-    items = sub.get("items")
-    if isinstance(items, dict):
-        data = items.get("data")
-        if isinstance(data, list) and data and isinstance(data[0], dict):
-            price = data[0].get("price")
-            if isinstance(price, dict) and isinstance(price.get("id"), str):
-                return price["id"]
-    meta_raw = sub.get("metadata")
-    meta = meta_raw if isinstance(meta_raw, dict) else {}
-    pid = meta.get("price_id")
-    return pid if isinstance(pid, str) else ""
 
 
 class MockBillingProvider(BillingProvider):
@@ -398,6 +691,19 @@ def _flw_checkout_link(resp: object) -> Optional[str]:
         return None
     data = resp.get("data")
     link = data.get("link") if isinstance(data, Mapping) else None
+    return _https_link_on(link, suffix_domains=_FLW_CHECKOUT_DOMAINS)
+
+
+_FLW_CHECKOUT_DOMAINS = frozenset({"flutterwave.com"})
+
+
+def _https_link_on(link: object, *, exact_hosts: "frozenset[str] | tuple[str, ...]" = (),
+                   suffix_domains: "frozenset[str] | tuple[str, ...]" = ()) -> Optional[str]:
+    """``link`` if it is a safe hosted-checkout URL on a pinned host, else None (fail-closed). Safe means: an
+    ``https://`` URL with NO whitespace / control characters (a smuggled CR/LF can never split a later
+    ``Location:`` header), NO embedded credentials, a host, and a host that is EXACTLY one of ``exact_hosts`` or is
+    one of ``suffix_domains`` / a subdomain of one (``host == d or host.endswith("." + d)`` — never a bare suffix
+    match, so ``evilflutterwave.com`` is refused). Shared by every provider's checkout-link check."""
     if not isinstance(link, str) or not link.startswith("https://"):
         return None
     if any(ord(c) < 0x21 or ord(c) == 0x7f for c in link):     # whitespace / control chars (CRLF response-split)
@@ -409,9 +715,17 @@ def _flw_checkout_link(resp: object) -> Optional[str]:
     host = (u.hostname or "").lower()
     if u.scheme != "https" or "@" in (u.netloc or "") or not host:   # no userinfo; must have a host
         return None
-    if host != "flutterwave.com" and not host.endswith(".flutterwave.com"):
-        return None                                            # pin the provider's hosted-checkout domain
-    return link
+    if host in exact_hosts:
+        return link
+    if any(host == d or host.endswith("." + d) for d in suffix_domains):
+        return link
+    return None                                                # pin the provider's hosted-checkout domain
+
+
+def checkout_tx_ref(org: str, nonce: str) -> str:
+    """The tenant-binding checkout reference ``vigil:<org>:<nonce>`` every provider carries (Flutterwave ``tx_ref``,
+    Stripe ``client_reference_id``), so the inbound mint and the dangling-reference sweep read one format."""
+    return f"{_TX_REF_PREFIX}:{org}:{nonce}"
 
 
 @dataclass(frozen=True)
@@ -627,6 +941,17 @@ class FlutterwaveBillingProvider(BillingProvider):
         tx_ref = verified.get("tx_ref")
         if status == "successful":
             amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
+            if not ccy:
+                # A verified SUCCESSFUL charge must name its currency. Without one, BillingSigner.apply's underpay /
+                # wrong-currency cross-check is skipped (it keys on event.currency) and the catalog entitlement would
+                # mint on the price_id alone. Flutterwave populates the currency on every real charge, so its absence
+                # is a malformed verify object: mint nothing (fail-closed). With the alarm armed this is loud for ANY
+                # paid charge, not only payment_plan ones: returning here also skips apply()'s catalog-aware alarm
+                # for a plan price that arrived without payment_plan, which must not go quiet.
+                if self._alarm_unaccounted_plans:
+                    raise UnaccountedPayment(f"verified successful charge {event_id} for org {org!r} has no "
+                                             f"currency — paid but UN-MINTED; reconcile by hand")
+                return None
             if verified.get("payment_plan"):          # plan-vs-topup decided by the VERIFIED object only
                 return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                                     price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
@@ -687,7 +1012,7 @@ class FlutterwaveBillingProvider(BillingProvider):
         n = nonce or secrets.token_urlsafe(18)
         if not isinstance(n, str) or ":" in n or not n:
             raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
-        tx_ref = f"{_TX_REF_PREFIX}:{org}:{n}"
+        tx_ref = checkout_tx_ref(org, n)
         payload: "dict[str, Any]" = {
             "tx_ref": tx_ref,
             "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
@@ -745,8 +1070,13 @@ class BillingSigner:
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
-                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False):
+                 on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None,
+                 require_verified_amount: bool = False):
         self.provider = provider
+        # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
+        # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
+        # billing unlock — decided once, here, at mint time. None keeps every record byte-identical to before.
+        self.report_unlocks = report_unlocks
         # AEGIS: a catalog MONITORING plan mints onto its OWN line (governor.monitoring_subscription), never the
         # credit-plan `subscriptions` record (which drives the plan-credit refill). None => monitoring plans mint
         # nothing (fail-closed). `on_monitoring_change(org_id, now)` is the sovereign provisioner hook that
@@ -772,6 +1102,11 @@ class BillingSigner:
         # a paid-but-uncredited charge -> raise UnaccountedPayment (quarantine + alarm). Default OFF ⇒ byte-identical
         # (the deliberate top-up "unknown price is a safe no-op" decision is untouched either way).
         self._alarm_unaccounted_plans = bool(alarm_unaccounted_plans)
+        # Opt-in (default OFF => byte-identical): a priced TOPUP / plan ACTIVE event must carry a verified currency,
+        # or it mints nothing (a plan raises UnaccountedPayment when the alarm is on); the underpay check then
+        # bounds the amount. The Flutterwave adapter already enforces this itself (#1093); a signer serving another
+        # provider sets it.
+        self._require_verified_amount = bool(require_verified_amount)
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
@@ -823,6 +1158,13 @@ class BillingSigner:
         # amount is still bound by the price_id -> entitlement mapping, not silently refused here.
         if event.kind in (EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE):
             exp = self._expected.get(event.price_id)
+            # (an amount below the catalog price, including 0, is refused by the underpay check just below)
+            if exp is not None and self._require_verified_amount and not event.currency:
+                if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
+                    raise UnaccountedPayment(
+                        f"verified plan charge {event.event_id} for org {oid!r} carries no verified amount/currency "
+                        f"for {event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
+                return None                           # no verified amount/currency -> mint nothing (fail-closed)
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
                     if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
@@ -851,6 +1193,7 @@ class BillingSigner:
             seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
                                     entry_id=event.event_id, issued_at=event.created)
             if seq is not None:                       # record the history line only for a mint that took effect
+                self._maybe_unlock(oid, event, "topup")
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
             return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
@@ -870,11 +1213,14 @@ class BillingSigner:
             # the subscribe above fresh -> the period advanced -> the bridge grants the new period's tranche (the
             # prior tranche simply expires: non-rollover).
             seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
-            # Red-pen FINDING 2: record the invoice ONLY when the plan refill actually GRANTED (seq is not None).
-            # An out-of-order / stale subscription event (a distinct event_id with a non-increasing `created`)
-            # makes subscribe a LWW no-op and refill a no-op -> seq is None -> NO invoice, so the billing history
-            # never shows a period/credits the plan ledger did not deliver (a true replay dedups by event_id).
-            if seq is not None:
+            # Red-pen FINDING 2, kept: the billing history never shows a period the plan ledger did not deliver.
+            # The refill returns None once the period's tranche exists, so gating ONLY on its seq would lose the
+            # invoice (and the unlock) for good if a crash fell between the refill and the invoice. So the record
+            # is also written on a re-drive that finds this event's period honoured, active and DELIVERED (its
+            # tranche granted) yet not invoiced under any event id — never for a stale event, an undelivered
+            # period, or a second distinct event for a period already invoiced.
+            if self._period_delivered_unrecorded(oid, event, ent, period_end):
+                self._maybe_unlock(oid, event, "subscription")
                 self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
                                      period_start=event.created, period_end=period_end)
             return seq
@@ -885,6 +1231,13 @@ class BillingSigner:
         subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /
         replayed period is inert), then hand the change to the provisioner hook."""
         if self.monitoring_subscriptions is None:
+            # S1: the drain mints from the FULL catalog, so a paid monitoring period can reach here on a signer
+            # that has no monitoring line. Under the plan alarm that is a paid-but-un-minted charge -> loud
+            # quarantine, never a silent drop. Alarm off keeps the historical no-op.
+            if self._alarm_unaccounted_plans:
+                raise UnaccountedPayment(f"verified monitoring charge {event.event_id} for org {oid!r} "
+                                         f"(price {event.price_id!r}) reached a signer with no monitoring line "
+                                         f"— paid but UN-MINTED; reconcile by hand")
             return None
         period_end = event.created + float(ent.period_s)
         seq = self.monitoring_subscriptions.subscribe(oid, ent.plan_id, 0, period_start=event.created,
@@ -897,6 +1250,43 @@ class BillingSigner:
         if self.on_monitoring_change is not None:
             self.on_monitoring_change(oid, event.created)
         return seq
+
+    def _period_delivered_unrecorded(self, oid: str, event: BillingEvent, ent: Entitlement,
+                                     period_end: float) -> bool:
+        """Whether this credit-plan event's record (invoice + unlock) is due: its period is the one the subscription
+        fold honours, the plan ledger holds a GRANTED tranche for that period (delivered — whatever the status has
+        become since), and no other event id has an invoice line for that period. Covers the first delivery and
+        the crash re-drive alike; a re-drive of the same event is harmless (first line per event id wins)."""
+        s = self.subscriptions.subscription(oid)
+        if s is None or (s.plan_id, s.period_start, s.period_end) != (
+                ent.plan_id, float(event.created), period_end):
+            return False
+        if not any(t.period_end == period_end and t.granted > 0 for t in self.plan.tranches(oid)):
+            return False
+        if self.invoices is not None and any(
+                i.kind == "subscription" and i.period_end == period_end and i.invoice_id != event.event_id
+                for i in self.invoices.invoices(oid)):
+            return False
+        return True
+
+    def _unlock_eligible(self, event: BillingEvent) -> bool:
+        """A verified, catalog-priced credit purchase whose amount AND currency were present and passed the
+        cross-check: the catalog prices it above 0, the verified currency is non-empty and equals the catalog's,
+        and the verified amount is at least the catalog's. Decided once at mint time (no read-time floor), so the
+        unlock never moves when the catalog changes later."""
+        exp = self._expected.get(event.price_id)
+        if exp is None or exp[0] <= 0:
+            return False
+        cur = str(event.currency or "").strip().upper()
+        return bool(cur) and cur == exp[1] and int(event.amount_minor) >= exp[0]
+
+    def _maybe_unlock(self, oid: str, event: BillingEvent, source_kind: str) -> None:
+        """Record the billing unlock for a credit purchase (top-up or an honoured credit-plan period) that is
+        eligible. Never called for monitoring, seats, refunds, the trial or postpaid/payment lines. The ledger
+        keeps the first billing unlock per org, so a re-drive is harmless."""
+        if self.report_unlocks is None or not self._unlock_eligible(event):
+            return
+        self.report_unlocks.unlock(oid, source_kind, source_ref=event.event_id, issued_at=event.created)
 
     def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
                         period_start: float = 0.0, period_end: float = 0.0) -> None:

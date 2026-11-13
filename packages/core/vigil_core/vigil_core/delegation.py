@@ -134,7 +134,7 @@ def verify_delegation(cert: DelegationCert, *, trusted_owner_pubkey: str, now: i
         raise DelegationError("delegation is unsigned")
     try:
         ok = verify_one(trusted_owner_pubkey, _msg(cert._core()), cert.sig)
-    except (IntegrityError, TypeError) as e:   # malformed sig/key material → fail-closed
+    except (IntegrityError, TypeError, ValueError) as e:   # bad sig/key, or a non-UTF-8 core → fail-closed
         raise DelegationError(f"delegation signature is malformed: {e}") from e
     if not ok:
         raise DelegationError("delegation signature does not verify against the owner key")

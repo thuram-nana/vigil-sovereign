@@ -39,9 +39,12 @@ sovereign-side, ``assert_no_offense`` at import; the authority broker (integrati
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Iterator, Optional
 
 from ..reuse import assert_no_offense
 
@@ -55,9 +58,10 @@ _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reserv
 _DEFAULT_LEASE_HOURS = 8.0
 _MAX_LEASE_HOURS = 24.0 * 7     # a launch lease caps at a week; a longer engagement re-leases
 #: What ``resume_launch`` tells the customer when it lifts the pause of a lease whose window has closed.
-_RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run already in "
-                           "progress continues and settles normally, but a launch that has not started will not "
-                           "start")
+_RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run still in "
+                           "progress continues and settles normally, but a launch that has not started, or a run "
+                           "that stopped for the pause, will not start again. Because it was paused when its window "
+                           "closed, it is charged for what it used")
 
 
 def _refusal(refuse_if: Optional[Callable[[], Optional[str]]]) -> Optional[str]:
@@ -393,6 +397,12 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        # PRICING M1c: EVERY settle (completion, customer cancel, abandoned-lease sweep) first closes the run's model
+        # meter and retires its grant, so a settled lease can spend nothing more through the gateway. Refused while
+        # a request is in flight.
+        meter_refusal = self._close_model_meter(s, non, now_ts)
+        if meter_refusal is not None:
+            return meter_refusal
         # POSTPAID (PP-1) settle. Detect a postpaid reservation by its PRUNE-DURABLE arrears debit marker —
         # `arrears.was_accrued(reserve-postpaid:{slug}:{nonce})`, which reads the SnapshotState-seeded seen-set,
         # NOT a live scan of the individual debit record (a hard prune can drop that record while carrying only
@@ -574,24 +584,207 @@ class LaunchGate:
         if expect_org_id is not None and doc.org_id != expect_org_id:
             return {"ok": False, "error": "this lease belongs to a different org"}
         try:
-            from vigil_integration.live.credit_lease_broker import is_lease_settled, write_credit_lease
-            from ..governor.launch_settlement import scan_settlement, settle_lock
-            s, non = doc.engagement_slug, doc.nonce
-            ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=s, nonce=non)
+            from vigil_integration.live.credit_lease_broker import is_lease_settled
+            from ..governor.launch_settlement import scan_settlement
             # K4-1: never re-publish a lease whose (slug, nonce) was already settled/canceled — else a settled
-            # bearer capability is resurrected on the seam. Settled = the seam marker OR the spine's settlement
-            # evidence (a lost / stale-restored seam must not resurrect it either), checked and written under the
-            # settle critical section, so a publish can never land between a settle's check and its tombstone.
-            with self._lock, settle_lock(self.store):
-                ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=s, nonce=non, since=ev)
-                if ev.settled or is_lease_settled(self._seam_base(), s, non):
-                    return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
-                            "re-published"}
-                write_credit_lease(self._seam_base(), s, signed, owner_root)
+            # bearer capability is resurrected on the seam. (A fast refusal here; the decisive check — the seam
+            # marker OR the spine's settlement evidence — re-runs under the settle critical section below.)
+            if is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
+                return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
+                        "re-published"}
+            ev0 = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
+                                  nonce=doc.nonce)                              # the full scan, unlocked
+        except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        from .. import config
+        from ..governor.launch_settlement import settle_lock
+        guard = contextlib.ExitStack()
+        try:
+            was_metered = self._launch_was_metered(doc.engagement_slug, doc.nonce)
+            involved = was_metered or config.metered_billing_enabled()
+            # PRICING M1c: where metering is involved, the one-launch-per-host check, the grant and the lease write
+            # are one step per org+host — across threads and across the cockpit and customer servers — so two
+            # concurrent publishes can never both pass the check. A flat-only deployment takes no lock and writes
+            # no file (default-OFF unchanged).
+            # E3c: then the per-process spine lock and the cross-process settle lock, in that order (the global lock
+            # order: _publish_lock -> spine_lock -> settle_lock), so a publish can never land between a settle's
+            # settled-check and its tombstone, nor a settle between this publish's check and its write.
+            if involved:
+                guard.enter_context(self._publish_lock(doc.engagement_slug))
+            guard.enter_context(self._lock)
+            guard.enter_context(settle_lock(self.store))
+        except Exception as e:  # noqa: BLE001 — a seam/meter-read failure is a clean refusal, never a half-publish
+            guard.close()
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        with guard:
+            return self._publish_checked(doc, signed, owner_root, kp, was_metered, ev0)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _publish_lock(slug: str) -> "Iterator[None]":
+        """An exclusive per-org+host lock (``flock`` on a file beside the meters, so it holds across processes)."""
+        import fcntl
+        import hashlib
+        from .. import config
+        d = Path(config.MODEL_METER_DIR)
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        name = "publish-" + hashlib.sha256(str(slug).encode("utf-8")).hexdigest()[:32] + ".lock"
+        fd = os.open(d / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def _publish_checked(self, doc: Any, signed: Any, owner_root: Any, kp: Any, was_metered: bool,
+                         ev0: Any) -> dict:
+        """The rest of :meth:`publish_lease`, under the spine + settle locks (and its per-host lock where metering is
+        involved). ``ev0`` is the unlocked settlement scan, continued here over what was appended since."""
+        from .. import config
+        from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease, write_credit_lease
+        from ..governor.launch_settlement import scan_settlement
+        try:
+            # Settled = the seam marker OR the spine's settlement evidence (a lost / stale-restored seam must not
+            # resurrect a settled bearer capability either), decided under the settle critical section BEFORE any
+            # grant is minted.
+            ev = scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
+                                 nonce=doc.nonce, since=ev0)
+            if ev.settled or is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
+                return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
+                        "re-published"}
+        except Exception as e:  # noqa: BLE001 — a spine/seam-read failure is a clean refusal, never a half-publish
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        try:
+            cur = read_credit_lease(self._seam_base(), doc.engagement_slug)
+        except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        # The billing mode is decided ONCE, at the launch's first publish, and a re-publish keeps it whatever the
+        # flag says now: a launch already marked metered is re-published with its grant, and one already on the seam
+        # without a mark (published flat — its run is under way unmetered) is re-published flat, never switched.
+        published_flat = (not was_metered and cur is not None
+                          and str(cur.signed_lease.document.nonce) == str(doc.nonce))
+        metered = was_metered or (config.metered_billing_enabled() and not published_flat)
+        # PRICING M1c: the seam holds one lease per org+host, so a newer launch's lease would replace one still
+        # running — its completion could then never settle, and a customer cancel would read it as never started.
+        # Where metering is involved (this launch, or the one on the seam), one launch per host is in flight at a time.
+        try:
+            refusal = self._earlier_launch_in_flight(doc, metered, cur)
+        except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        if refusal is not None:
+            return refusal
+        # With metered billing on, the run's model grant is minted and published BEFORE the lease, so a lease is never
+        # on the seam without the grant its run must meter through. A grant that cannot be minted (bad pricing config)
+        # refuses the publish — a run never starts unmetered.
+        minted = False
+        if metered:
+            try:
+                minted = self._publish_model_grant(doc, kp)
+            except Exception as e:  # noqa: BLE001 — fail closed: no grant, no published lease
+                return {"ok": False, "error": f"could not mint this run's metered model grant: {type(e).__name__}"}
+        try:
+            write_credit_lease(self._seam_base(), doc.engagement_slug, signed, owner_root)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-publish
+            if minted:          # only a grant THIS call created: a re-publish never removes a live run's grant
+                try:
+                    from vigil_integration.live.model_grant_broker import remove_model_grant
+                    remove_model_grant(self._seam_base(), doc.engagement_slug, expect_nonce=doc.nonce)
+                except OSError:
+                    pass        # its run never starts without the lease; the settle retires it
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         return {"ok": True, "action": "launch_published", "org_id": doc.org_id, "slug": doc.engagement_slug,
                 "scope_host": doc.scope_host}
+
+    @staticmethod
+    def _launch_was_metered(slug: str, nonce: str) -> bool:
+        """Whether launch ``(slug, nonce)`` is billed metered: its metered marker (written before its grant, at
+        publish) or its meter is on disk — never the current flag, which may have changed since."""
+        from .. import config
+        from vigil_core.model_grant import meter_id
+        from ..model_gateway import GrantMeter
+        return GrantMeter(config.MODEL_METER_DIR).was_metered(meter_id(str(slug), str(nonce)))
+
+    def _close_model_meter(self, slug: str, nonce: str, now_ts: float) -> Optional[dict]:
+        """Close the launch's model meter and retire its grant before its lease settles (PRICING M1c). Applies to a
+        launch published metered (:meth:`_launch_was_metered`), whatever the flag says now; a no-op otherwise, so a
+        flat launch's settle is unchanged. Returns the refusal to settle with: ``retry`` when the live gateway still
+        has a request of this run in flight or the meter cannot be written right now; a broken meter refuses
+        without ``retry`` (fail closed). The grant is removed only once the meter is closed; removing it is
+        best-effort, as a grant whose meter is closed can spend nothing."""
+        from .. import config
+        from vigil_core.model_grant import meter_id
+        from vigil_integration.live.model_grant_broker import remove_model_grant
+        from ..model_gateway import GrantMeter, MeterBusy
+        try:
+            if not self._launch_was_metered(slug, nonce):
+                return None
+            GrantMeter(config.MODEL_METER_DIR).close(meter_id(str(slug), str(nonce)), now=float(now_ts))
+        except MeterBusy:
+            return {"ok": False, "retry": True, "error": "the run still has a model request in flight; retry the settle"}
+        except OSError as e:
+            return {"ok": False, "retry": True,
+                    "error": f"the run's model meter cannot be written right now; retry the settle: {type(e).__name__}"}
+        except ValueError as e:
+            return {"ok": False, "error": f"could not close the run's model meter (fail-closed): {type(e).__name__}"}
+        try:
+            remove_model_grant(self._seam_base(), str(slug), expect_nonce=str(nonce))
+        except OSError:
+            import logging
+            logging.getLogger(__name__).warning("could not remove a settled run's model grant", exc_info=True)
+        return None
+
+    def _earlier_launch_in_flight(self, doc: Any, metered: bool, cur: Any) -> Optional[dict]:
+        """The refusal when an earlier, unsettled launch of the same org+host holds the seam (``cur``, the lease on it)
+        and metering is involved (``metered`` for this launch, or the earlier one was published metered); None
+        otherwise."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+        if cur is None:
+            return None
+        earlier = str(cur.signed_lease.document.nonce)
+        if earlier == str(doc.nonce) or is_lease_settled(self._seam_base(), doc.engagement_slug, earlier):
+            return None
+        if not (metered or self._launch_was_metered(doc.engagement_slug, earlier)):
+            return None
+        return {"ok": False, "error": "an earlier launch on this host has not settled yet; it must finish (or be "
+                "settled) before another starts"}
+
+    def _publish_model_grant(self, doc: Any, owner_key: Any) -> bool:
+        """Mint the owner-signed model grant for ONE verified lease and publish its token on the seam (design
+        §5.1). Every field comes from the verified lease or the owner's pricing config — never a wire value or the
+        clock: the cap is the most AI spend whose marked-up charge fits the reservation, the effort is the run
+        tier's, the grant is valid from the lease's start for the longest grant lifetime (a run armed inside the
+        lease window may outlive it — a late start, a resume — and must keep its model access; the settle closes the
+        meter, after which the grant spends nothing), and the grant id is derived from the lease — so re-publishing a
+        lease mints the identical grant. The launch is marked metered (beside its meter) before its grant is
+        written, so its settle bills it metered whatever the flag says later. Returns whether this call wrote the
+        grant (False: the same grant was already on the seam). Raises on any failure (the caller refuses the
+        publish), including no cancel-settlement policy (a metered run cannot start before the owner has chosen how a
+        cancel settles) and a run model the price table cannot price."""
+        import hashlib
+        from vigil_core import model_metering as mm
+        from vigil_core import run_tier
+        from vigil_core.model_grant import MAX_GRANT_LIFETIME_S, ModelGrant, encode_token
+        from vigil_integration.live.model_grant_broker import read_model_grant, write_model_grant
+        from .. import config
+        from ..model_gateway import GrantMeter
+        units = int(doc.units_reserved)
+        mm.cancel_settlement()
+        model = config.run_model()
+        if model not in mm.price_table():
+            raise mm.MeteringError(f"the run model {model!r} has no price ({mm.PRICES_ENV})")
+        slug, nonce = str(doc.engagement_slug), str(doc.nonce)
+        grant = ModelGrant(
+            grant_id=hashlib.sha256(f"model-grant\0{slug}\0{nonce}".encode()).hexdigest()[:32],
+            org_id=str(doc.org_id), engagement_slug=slug, nonce=nonce, model=model,
+            effort=run_tier.effort_for(run_tier.run_tier_for_units(units)),
+            cap_nano_usd=mm.usd_cap_nano_for_credits(units, markup=mm.billing_markup()),
+            not_after=float(doc.not_before.timestamp()) + MAX_GRANT_LIFETIME_S,
+            issued_at=float(doc.not_before.timestamp()))
+        token = encode_token(grant, owner_key.private_key_b64)
+        GrantMeter(config.MODEL_METER_DIR).mark_metered(grant.meter_id)
+        existed = read_model_grant(self._seam_base(), slug, expect_nonce=nonce) is not None
+        write_model_grant(self._seam_base(), grant.engagement_slug, grant.nonce, token, config.model_gateway_url())
+        return not existed
 
     def _verify_lease_for_pause(self, signed_lease: Any, expect_org_id: Optional[str]):
         """Owner-pinned verify + tenant-bind for a pause/resume request (same guarantee as publish/settle): the
@@ -676,9 +869,17 @@ class LaunchGate:
         except (TypeError, ValueError, OSError, OverflowError, AttributeError):
             return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
         try:
-            from vigil_integration.live.credit_lease_pause import clear_lease_pause
+            from vigil_integration.live.credit_lease_pause import (clear_lease_pause, lease_pause_state,
+                                                                   record_paused_past_expiry)
             with self._lock:
-                clear_lease_pause(self._seam_base(), s, non)
+                base = self._seam_base()
+                # Owner decision 2026-11-13 (a launch paused and never resumed is charged for what it used): lifting a
+                # pause after the window closed re-admits nothing, so it must not erase that the customer held the
+                # launch paused through the end of its window. Record that first (a failed record refuses the resume
+                # and clears nothing), then lift the halt as before so a run still in flight is never stranded.
+                if expired and lease_pause_state(base, s, non) is True:
+                    record_paused_past_expiry(base, s, non)
+                clear_lease_pause(base, s, non)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
             return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
         out = {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}
