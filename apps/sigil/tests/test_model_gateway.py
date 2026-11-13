@@ -1800,4 +1800,3 @@ def test_a_record_that_lands_after_its_orphan_counts_the_request_once(tmp_path):
     t = gw.GrantMeter(d).verify(g.meter_id)
     assert [ln["kind"] for ln in _lines(d, g)] == ["open", "orphan", "usage"]
     assert (t.cost_nano, t.unconfirmed_nano) == (100 * OUT, 0)          # what it really cost, counted once
-
