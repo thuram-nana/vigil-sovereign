@@ -514,7 +514,14 @@ def live_window_start(store) -> int:
     if hit is not None and hit[0] == sig:
         return hit[1]
     from .manifest import read_manifest
+    from .store import SpineError, _segment_run_break
     m = read_manifest(layout)
+    if m is not None:
+        # A manifest that is not one contiguous run is refused here exactly as every store reader refuses it, so
+        # a damaged manifest is never mistaken for a pruned one (its first listed segment would not be K).
+        brk = _segment_run_break(m)
+        if brk is not None:
+            raise SpineError(f"spine manifest (generation {m.generation}) is not a contiguous segment run: {brk}")
     segs = m.ordered() if m is not None else []
     first = segs[0].first_seq if segs else 0
     _LIVE_START[str(path)] = (sig, first)
