@@ -74,6 +74,9 @@ class CompletionSpoolWatcher:
     the current clock on every ``drain()`` (so an expired delegation stops admitting mid-lifetime; no settle is
     ever driven under an un-owner-delegated or lapsed key)."""
 
+    #: How long a reverse move waits for the sweep's shared hold of the spool lock (E3bc).
+    _SPOOL_LOCK_WAIT_S = 5.0
+
     def __init__(self, store: SpineStore, *, spool_dir: "str | os.PathLike", owner_pubkey: str,
                  delegation: Any, scope: str, base_dir: Optional[str] = None,
                  now_fn: Callable[[], float] = time.time) -> None:
@@ -136,7 +139,7 @@ class CompletionSpoolWatcher:
         settle (so the drain and the sweep can never deadlock on it and the settle lock). A leaf lock: bounded wait,
         fail-closed (``seam_lock.locked_file``)."""
         from vigil_integration.live.seam_lock import locked_file
-        return locked_file(self.spool / ".spool.lock", shared=False, wait_s=5.0)
+        return locked_file(self.spool / ".spool.lock", shared=False, wait_s=self._SPOOL_LOCK_WAIT_S)
 
     # -- one envelope → settle (fail-closed) -------------------------------------------------------
     def _settle_one(self, text: str, root: Any) -> Optional[dict]:

@@ -65,15 +65,22 @@ def _worker_main(argv: list) -> int:
     cur = {"i": -1}
     widen = float(os.environ.get("SETTLE_RACE_WIDEN_S") or 0.0)
     if widen > 0:                       # TEST-ONLY: hold the window open inside this child's own seam writer
-        name = os.environ.get("SETTLE_RACE_WIDEN_AT") or "record_lease_settlement"
-        orig = getattr(broker, name)
+        # SETTLE_RACE_WIDEN_AT: a broker function name, or ``module:function``; SETTLE_RACE_WIDEN_MODE=after holds
+        # the window open AFTER the call instead of before it.
+        import importlib
+        at = os.environ.get("SETTLE_RACE_WIDEN_AT") or "record_lease_settlement"
+        mod = importlib.import_module(at.split(":", 1)[0]) if ":" in at else broker
+        name = at.split(":", 1)[1] if ":" in at else at
+        after = os.environ.get("SETTLE_RACE_WIDEN_MODE") == "after"
+        orig = getattr(mod, name)
 
         def _slow(*a, **k):
+            out = orig(*a, **k) if after else None
             (workdir / f"inwin-{cur['i']}-{role}").write_text("1", encoding="utf-8")
             time.sleep(widen)
-            return orig(*a, **k)
+            return out if after else orig(*a, **k)
 
-        setattr(broker, name, _slow)
+        setattr(mod, name, _slow)
     store = SpineStore(spine_path)
     gate = LaunchGate(store)                            # seam base = $VIGIL_BASE_DIR, exactly like the cockpit
     (workdir / f"ready-{role}").write_text("1", encoding="utf-8")
@@ -92,6 +99,20 @@ def _worker_main(argv: list) -> int:
             out = gate.publish_lease(signed_lease=job["lease"], expect_org_id=ORG)
         elif job["op"] == "mark":                       # the settlement marker primitive itself
             out = str(broker.record_lease_settlement(os.environ["VIGIL_BASE_DIR"], job["slug"], job["nonce"]))
+        elif job["op"] in ("pausemark", "clearmark"):   # the pause marker primitives themselves
+            from vigil_integration.live import credit_lease_pause as P
+            fn = P.record_lease_pause if job["op"] == "pausemark" else P.clear_lease_pause
+            out = str(fn(os.environ["VIGIL_BASE_DIR"], job["slug"], job["nonce"]))
+        elif job["op"] == "pause":                      # launch_pause
+            out = gate.pause_launch(signed_lease=job["lease"], expect_org_id=ORG)
+        elif job["op"] == "resume":                     # launch_resume
+            out = gate.resume_launch(signed_lease=job["lease"], expect_org_id=ORG, now=NOW + 60)
+        elif job["op"] == "cancel":                     # the cockpit's launch_cancel
+            from sigil.ui.provision import ProvisionDenied, build_provisioner
+            try:
+                out = build_provisioner(store).launch_cancel("u", ORG, job["lease"], now=NOW + 60)
+            except ProvisionDenied as e:
+                out = {"denied": str(e)}
         elif job["op"] == "sweep":                      # the real `ops-sweep reservations --apply` body
             from sigil import ops_sweeps
             out = ops_sweeps.sweep_abandoned_reservations(gate, now=LATE, ttl_s=50, apply=True,
@@ -253,6 +274,13 @@ def rig(monkeypatch):
         r.close()
 
 
+@pytest.fixture(params=["", "1"], ids=["flag_off", "flag_on"])
+def flag(request, monkeypatch):
+    """VIGIL_SETTLE_SPINE_RECORD for the parent AND (inherited through the environment) every worker."""
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", request.param)
+    return bool(request.param)
+
+
 def _fresh(out) -> bool:
     return isinstance(out, dict) and bool(out.get("ok")) and out.get("action") == "launch_settled"
 
@@ -276,16 +304,16 @@ def _charge_vs_refund(r, n: int) -> None:
     assert r.store.verify()[0]
 
 
-def test_charge_vs_refund_widened_exactly_one_takes_effect(rig):
+def test_charge_vs_refund_widened_exactly_one_takes_effect(rig, flag):
     _charge_vs_refund(rig(["charge", "refund"], SETTLE_RACE_WIDEN_S=0.2), 3)
 
 
-def test_charge_vs_refund_unwidened_exactly_one_takes_effect(rig):
+def test_charge_vs_refund_unwidened_exactly_one_takes_effect(rig, flag):
     _charge_vs_refund(rig(["charge", "refund"]), _iters())
 
 
 # ---- refund vs refund: one lease, one refund grant record ------------------------------------------------------
-def test_refund_vs_refund_widened_writes_one_grant(rig):
+def test_refund_vs_refund_widened_writes_one_grant(rig, flag):
     r = rig(["r1", "r2"], SETTLE_RACE_WIDEN_S=0.2)
     for _ in range(2):
         lease = r.reserve()
@@ -319,7 +347,7 @@ def test_two_leases_of_one_slug_unwidened_neither_marker_is_lost(rig):
 
 
 # ---- the real callers: ops-sweep --apply vs the settle-drain ------------------------------------------------------
-def test_real_sweep_vs_real_drain_widened_never_both(rig):
+def test_real_sweep_vs_real_drain_widened_never_both(rig, flag):
     """The sweep (process 1) is inside its settle when the worker's `completed` signal lands and the settle-drain
     (process 2) runs. Whichever settles first decides; the run is never both refunded and charged."""
     from sigil.ui.launch_governance import provision_launch_governance
@@ -350,7 +378,7 @@ def test_real_sweep_vs_real_drain_widened_never_both(rig):
 
 
 # ---- launch_start (publish) vs a settle in another process -------------------------------------------------------
-def test_publish_vs_settle_widened_never_both(rig):
+def test_publish_vs_settle_widened_never_both(rig, flag):
     """A cancel (process 1) is inside its settle when a publish of the same lease (process 2) runs: the lease is
     never both refunded and published."""
     from vigil_integration.live.credit_lease_broker import read_credit_lease
@@ -360,6 +388,93 @@ def test_publish_vs_settle_widened_never_both(rig):
                        ("pub", {"op": "publish", "lease": lease["lease"]}))
     assert _fresh(out["cancel"]) and out["pub"]["ok"] is False, out
     assert read_credit_lease(r.base, lease["slug"]) is None
+
+
+# ---- the pause marker: per-file cross-process lock; pause linearized with settles ------------------------------
+_PAUSE_WRITE = "vigil_integration.live.credit_lease_pause:_atomic_write_json"
+
+
+def test_two_processes_pausing_two_nonces_of_one_slug_lose_neither(rig):
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    r = rig(["p1", "p2"], SETTLE_RACE_WIDEN_S=0.3, SETTLE_RACE_WIDEN_AT=_PAUSE_WRITE)
+    out = r.first_then(("p1", {"op": "pausemark", "slug": "cust_x", "nonce": "n1"}),
+                       ("p2", {"op": "pausemark", "slug": "cust_x", "nonce": "n2"}))
+    assert all(isinstance(v, str) for v in out.values()), out
+    assert is_lease_paused(r.base, "cust_x", "n1") and is_lease_paused(r.base, "cust_x", "n2")
+
+
+def test_a_resume_and_a_pause_of_one_slug_in_two_processes_lose_neither(rig):
+    from vigil_integration.live.credit_lease_pause import is_lease_paused, record_lease_pause
+    r = rig(["p1", "c2"], SETTLE_RACE_WIDEN_S=0.3, SETTLE_RACE_WIDEN_AT=_PAUSE_WRITE)
+    record_lease_pause(r.base, "cust_x", "n2")
+    out = r.first_then(("p1", {"op": "pausemark", "slug": "cust_x", "nonce": "n1"}),
+                       ("c2", {"op": "clearmark", "slug": "cust_x", "nonce": "n2"}))
+    assert all(isinstance(v, str) for v in out.values()), out
+    assert is_lease_paused(r.base, "cust_x", "n1") and not is_lease_paused(r.base, "cust_x", "n2")
+
+
+def test_a_pause_waits_for_a_settle_in_another_process_and_is_refused(rig, flag):
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    r = rig(["cancel", "pause"], SETTLE_RACE_WIDEN_S=0.3)            # the settle held inside its marker write
+    lease = r.reserve()
+    out = r.first_then(("cancel", {"op": "settle", "lease": lease["lease"], "consumed": 0}),
+                       ("pause", {"op": "pause", "lease": lease["lease"]}))
+    assert _fresh(out["cancel"]), out
+    assert out["pause"]["ok"] is False and "settled" in out["pause"]["error"], out
+    assert not is_lease_paused(r.base, lease["slug"], lease["nonce"])
+
+
+# ---- a metered launch_start vs a customer cancel: never both; a refused cancel leaves the meter open -------------
+def _metered_env(monkeypatch) -> None:
+    from vigil_core import model_metering as mm
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    monkeypatch.setenv(mm.MARGIN_ENV, "0.5")                       # the meter tests' fixture input
+    monkeypatch.setenv(mm.CANCEL_ENV, "metered")
+
+
+def test_metered_publish_vs_cancel_widened_cross_process_never_both(rig, flag, monkeypatch):
+    from sigil import config
+    from sigil import model_gateway as gw
+    from vigil_core.model_grant import ModelGrant
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    from vigil_integration.live.model_grant_broker import read_model_grant
+    _metered_env(monkeypatch)
+    r = rig(["pub", "cancel"], credits=1_000, SETTLE_RACE_WIDEN_S=0.3,
+            SETTLE_RACE_WIDEN_AT="vigil_integration.live.credit_lease_broker:write_credit_lease")
+    lease = r.reserve()                                              # reserved, not started
+    out = r.first_then(("pub", {"op": "publish", "lease": lease["lease"]}),     # held inside its lease write
+                       ("cancel", {"op": "cancel", "lease": lease["lease"]}))
+    assert out["pub"]["ok"] is True, out
+    assert "has been started" in out["cancel"].get("denied", ""), out
+    assert read_credit_lease(r.base, lease["slug"]) is not None and read_model_grant(r.base, lease["slug"]) is not None
+    assert r.avail() == 1_000 - UNITS
+    g = ModelGrant(grant_id="9" * 32, org_id=ORG, engagement_slug=lease["slug"], nonce=lease["nonce"],
+                   model="claude-opus-4-8", effort="high", cap_nano_usd=10 ** 12, not_after=NOW + 86_400,
+                   issued_at=NOW - 60)
+    assert gw.GrantMeter(config.MODEL_METER_DIR).reserve(g, 10 ** 6, 25_000, now=NOW)[2] != "closed"
+
+
+def test_metered_publish_cancel_pause_and_resume_cross_process_never_deadlock(rig, flag, monkeypatch):
+    """Four roles on one lease at once, unwidened: every role answers (no deadlock), and a launch is never both
+    started and refunded."""
+    _metered_env(monkeypatch)
+    r = rig(["pub", "cancel", "pause", "resume"], credits=1_000_000)
+    for _ in range(max(3, _iters() // 3)):
+        lease = r.reserve()
+        before = r.avail()
+        out = r.race({"pub": {"op": "publish", "lease": lease["lease"]},
+                      "cancel": {"op": "cancel", "lease": lease["lease"]},
+                      "pause": {"op": "pause", "lease": lease["lease"]},
+                      "resume": {"op": "resume", "lease": lease["lease"]}})
+        started = bool(out["pub"].get("ok"))
+        refunded = "refunded" in out["cancel"] and out["cancel"]["refunded"] == UNITS
+        assert started != refunded, out                              # exactly one: started xor refunded
+        assert r.avail() - before == (UNITS if refunded else 0), out
+        assert out["resume"].get("ok") is True, out                  # a pause can always be lifted
+        if started:                                                  # settle it so the next launch may start
+            done = r.gate.settle_launch(signed_lease=lease["lease"], consumed_units=UNITS, now=NOW + 60)
+            assert done["ok"], done
+    assert r.store.verify()[0]
 
 
 # ---- the property the lock relies on: concurrent cross-process appends keep one chain -----------------------------

@@ -47,15 +47,26 @@ LATE = NOW + 3600.0 + 100.0                    # past a 1h lease's not_after + t
 
 
 @pytest.fixture(autouse=True)
-def _iso(monkeypatch):
+def _iso(monkeypatch, tmp_path):
+    from sigil import config
+    from vigil_core import model_metering as mm
     monkeypatch.setenv("VIGIL_BASE_DIR", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
-    monkeypatch.delenv("VIGIL_SETTLE_SPINE_RECORD", raising=False)
+    monkeypatch.setattr(config, "MODEL_METER_DIR", tmp_path / "model_meter")
+    for k in ("VIGIL_SETTLE_SPINE_RECORD", "VIGIL_SETTLE_LOCK_WAIT_S", "VIGIL_METERED_BILLING", "VIGIL_COST_LEDGER_WRITE",
+              mm.MARGIN_ENV, mm.CANCEL_ENV, "VIGIL_RUN_FLOOR_CREDITS", "VIGIL_MODEL_PRICES", *mm.OBSOLETE_PRICING_ENVS):
+        monkeypatch.delenv(k, raising=False)
 
 
 @pytest.fixture
 def record_on(monkeypatch):
     monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", "1")
+
+
+@pytest.fixture(params=["", "1"], ids=["flag_off", "flag_on"])
+def flag(request, monkeypatch):
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", request.param)
+    return bool(request.param)
 
 
 def _base() -> str:
@@ -113,7 +124,8 @@ def _settle(store, r, consumed, now=NOW + 60, **kw):
     return LaunchGate(store).settle_launch(signed_lease=r["lease"], consumed_units=consumed, now=now, **kw)
 
 
-# ---- flag OFF: the spine records a settle writes are unchanged ---------------------------------------------------
+# ---- flag OFF: the spine records a settle writes are unchanged (every path, metered and postpaid included, is pinned
+# against origin/main in test_settle_flag_off_golden.py) ------------------------------------------------------------
 def test_flag_off_a_settle_appends_exactly_the_records_it_always_did():
     s = _store()
     _seat(s)
@@ -398,7 +410,7 @@ def test_a_competing_decision_landing_after_the_unlocked_scan_is_honoured(record
 
 
 # ---- E3c in-process: preconditions inside the critical section, fail-closed lock ----------------------------------
-def test_the_sweep_rechecks_the_completion_spool_inside_the_settle(monkeypatch):
+def test_the_sweep_rechecks_the_completion_spool_inside_the_settle(flag, monkeypatch):
     """A completion landing AFTER the sweep's up-front spool snapshot but before it settles blocks the refund;
     the drain then charges the run."""
     from sigil.inbound.completion_spool import CompletionSpoolWatcher
@@ -427,6 +439,7 @@ def test_the_sweep_rechecks_the_completion_spool_inside_the_settle(monkeypatch):
     out = ops_sweeps.sweep_abandoned_reservations(gate, now=LATE, ttl_s=50, apply=True, completion_spool=spool)
     assert [i["status"] for i in out["items"]] == ["completion_pending"] and _avail(s) == 70
     assert not is_lease_settled(_base(), r["slug"], r["nonce"])      # nothing was written
+    assert LAUNCH_SETTLED_SIGNAL not in _signals(s)
     deleg = DelegationCert.model_validate_json(Path(deleg_path).read_text(encoding="utf-8"))
     drained = CompletionSpoolWatcher(s, spool_dir=spool, owner_pubkey=ensure_owner_keypair().public_key_b64,
                                      delegation=deleg, scope=r["slug"], base_dir=_base(),
@@ -434,7 +447,7 @@ def test_the_sweep_rechecks_the_completion_spool_inside_the_settle(monkeypatch):
     assert drained["settled"] == 1 and _avail(s) == 70               # charged by the drain, never refunded
 
 
-def test_a_precondition_that_cannot_answer_refuses_the_settle():
+def test_a_precondition_that_cannot_answer_refuses_the_settle(flag):
     s = _store()
     _seat(s)
     r = _reserve(s)
@@ -446,19 +459,21 @@ def test_a_precondition_that_cannot_answer_refuses_the_settle():
     st = _settle(s, r, 0, refuse_if=_boom)
     assert st["ok"] is False and st["refused"].startswith("precondition check failed"), st
     assert _avail(s) == 70 and _signals(s, tip) == [] and not is_lease_settled(_base(), r["slug"], r["nonce"])
+    assert _settle(s, r, 30)["action"] == "launch_settled" and _avail(s) == 70     # a later charge is FRESH
 
 
-def test_a_settle_lock_that_cannot_be_taken_fails_closed():
+def test_a_settle_lock_that_cannot_be_taken_fails_closed(flag):
     s = _store()
     _seat(s)
     r = _reserve(s)
     settle_lock_path(s).mkdir()                                      # the lockfile path is unusable
     st = _settle(s, r, 0)
-    assert st["ok"] is False and "settle lock" in st["error"], st
+    assert st["ok"] is False and "settle lock" in st["error"] and st.get("retry") is True, st
     assert _avail(s) == 70 and not is_lease_settled(_base(), r["slug"], r["nonce"])
+    assert LAUNCH_SETTLED_SIGNAL not in _signals(s)
 
 
-def test_a_marker_lock_that_cannot_be_taken_fails_closed():
+def test_a_marker_lock_that_cannot_be_taken_fails_closed(flag):
     s = _store()
     _seat(s)
     r = _reserve(s)
@@ -467,9 +482,10 @@ def test_a_marker_lock_that_cannot_be_taken_fails_closed():
     (root / f"{r['slug']}.json.lock").mkdir()                        # the marker's lockfile path is unusable
     st = _settle(s, r, 0)
     assert st["ok"] is False and "fail-closed" in st["error"] and _avail(s) == 70, st
+    assert st.get("retry") is True                                   # the record (flag on) is finished by a retry
 
 
-def test_launch_cancel_rechecks_started_inside_the_settle(monkeypatch):
+def test_launch_cancel_rechecks_started_inside_the_settle(flag, monkeypatch):
     """A launch_start landing between launch_cancel's up-front "started?" check and its settle: the re-check
     inside the settle's critical section refuses the full refund of a now-started launch."""
     from sigil.ui import launch_gate as lg
@@ -487,4 +503,4 @@ def test_launch_cancel_rechecks_started_inside_the_settle(monkeypatch):
     with pytest.raises(ProvisionDenied, match="has been started and must settle"):
         build_provisioner(s).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
     assert _avail(s) == 70 and read_credit_lease(_base(), r["slug"]) is not None
-    assert not is_lease_settled(_base(), r["slug"], r["nonce"])
+    assert not is_lease_settled(_base(), r["slug"], r["nonce"]) and LAUNCH_SETTLED_SIGNAL not in _signals(s)
