@@ -34,6 +34,7 @@ offense leg AND in the local validate env — parity is never silently skipped.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -409,12 +410,23 @@ _VERIFY_VF = _REPO / "docs" / "proof-carrying-finding" / "verify_vf.py"
 def _load(name, path):
     if not path.exists():
         pytest.skip(f"kernel not present on this ref: {path}")
+    # Registered in sys.modules BEFORE exec, as importlib's own machinery does: a kernel that declares a
+    # @dataclass resolves its annotations through sys.modules[cls.__module__], and without the entry the
+    # load dies with "'NoneType' object has no attribute '__dict__'".
+    #
+    # A kernel that is PRESENT but does not load is a FAILURE, not a skip. It used to be caught and
+    # skipped ("not importable standalone here") — and exactly that missing registration made verify_vf.py
+    # fail to load in every environment, so all 260 parity cases against it skipped in every CI leg while
+    # the file read as a covered proof. Standalone-loadable is the property under test; a kernel that
+    # stops being so must turn this red.
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
     try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-    except Exception as e:  # noqa: BLE001 — a kernel that cannot load standalone here is a clean skip
-        pytest.skip(f"kernel {path.name} not importable standalone here: {e}")
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
     return mod
 
 

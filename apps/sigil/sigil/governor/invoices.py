@@ -279,11 +279,42 @@ class InvoiceRegistry:
         never names another org)."""
         if not isinstance(org_id, str) or not org_id:
             return []
+        org_id = str.__str__(org_id)            # an exact str: a str subclass's own __eq__ / __hash__ never decide
         hit = self._cached(lambda v: v.of_org(org_id))
         if hit is not _UNCACHED:
             return sorted(hit, key=self._sort_key)
         rows = self._fold()
         return sorted((inv for (o, _i), inv in rows.items() if o == org_id), key=self._sort_key)
+
+    def has_purchased_credits(self, org_id: str) -> bool:
+        """True iff ``org_id`` has completed at least one PURCHASE of credits (a credit pack or a custom top-up): an
+        owner-signed billing-history line of kind ``topup`` that granted ``credits > 0``. The one producer of such a
+        line is ``BillingSigner.apply``'s ``EVENT_TOPUP`` branch (``governor/billing.py``), after a provider-VERIFIED
+        top-up payment mapped through the owner catalog, right after its wallet grant was written. So credits that
+        were not bought as a top-up never count: a trial grant, a settle refund or any other ``WalletRegistry.grant``
+        writes no invoice, and plan subscriptions, AEGIS monitoring subscriptions and postpaid lines are other kinds.
+        Tenant-scoped by the owner-signed ``org_id`` (the caller resolves it server-side; a customer never names
+        another org). Fail-closed on the input: an empty / non-string / unknown org reads as False. Store or
+        snapshot errors are NOT swallowed: like every snapshot-seeded read (``invoices``, the wallet) this raises
+        when the spine's committed snapshot cannot be read, so a caller gating access on it must treat an exception
+        as False.
+
+        Known gaps, all deliberate:
+
+          * **A paying subscriber or postpaid customer who never bought a top-up reads False.** The question is
+            "has this org bought credits", not "has this org ever paid VIGIL".
+          * **A failure between the wallet grant and its invoice line reads as "not purchased".** ``BillingSigner``
+            grants first and records the invoice second. The provider does NOT redeliver (the webhook proxy already
+            answered 202 when it spooled the event). If the invoice write raises, the billing drain quarantines the
+            envelope to ``rejected/`` (``inbound/billing_spool.py``) and alarms until an operator re-admits it; a hard
+            crash between the two writes is instead reclaimed from ``working/`` on the next drain. Re-ingesting
+            re-runs the same ``event_id``-idempotent mint, so the wallet is not credited twice and the missing line
+            is written — provided the charge still re-verifies as successful and still matches the CURRENT catalog
+            price; otherwise the re-ingest is archived as a no-op and this stays False for that payment.
+          * **A purchase is never revoked.** There is no chargeback or purchase-refund record in this ledger, so a
+            payment the provider later reverses still reads as purchased. Whatever was unlocked on it stays
+            unlocked (an owner-accepted risk, not a guarantee)."""
+        return any(inv.kind == "topup" and inv.credits > 0 for inv in self.invoices(org_id))
 
     def all_invoices(self) -> list[Invoice]:
         """Every invoice across all tenants (the owner/operator billing view), newest-first then org-stable."""

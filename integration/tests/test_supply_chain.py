@@ -152,9 +152,30 @@ def _load_native_locks():
     return mod
 
 
-def _pyproject_build_requires() -> dict[str, list[str]]:
-    """Every ``[build-system].requires`` backend declared across the repo's first-party pyprojects,
-    as {relpath: [names]}. Loaded with tomllib; extras/version specifiers stripped to the bare name."""
+_PLANE_FILES = ("envs/sovereign.txt", "envs/offense.txt")
+_EDITABLE_MEMBER = re.compile(r"^-e\s+(\S+)")
+
+
+def _plane_member_pyprojects() -> list[str]:
+    """The pyproject of every ``-e <path>`` member of every plane file — the single source of membership
+    envs/build_envs.sh builds from (its ``members_of``), each with ``--no-build-isolation`` against the
+    build-backends lock — as repo-relative paths, in file order, de-duplicated."""
+    out: list[str] = []
+    for plane in _PLANE_FILES:
+        for line in (REPO_ROOT / plane).read_text(encoding="utf-8").splitlines():
+            m = _EDITABLE_MEMBER.match(line)
+            if m:
+                rel = m.group(1).removeprefix("./").rstrip("/") + "/pyproject.toml"
+                if rel not in out:
+                    out.append(rel)
+    return out
+
+
+def _pyproject_build_requirements() -> dict[str, list[str]]:
+    """Every ``[build-system].requires`` entry declared across the repo's first-party pyprojects, as
+    {relpath: [requirement strings]} exactly as written (version specifiers kept). Loaded with tomllib.
+    The members are the known first-party packages PLUS every plane-file member, so a member added to
+    envs/<plane>.txt is scanned without anyone editing this list."""
     import tomllib
 
     out: dict[str, list[str]] = {}
@@ -166,13 +187,21 @@ def _pyproject_build_requires() -> dict[str, list[str]]:
         "apps/sigil/pyproject.toml",
         "vendor/strix/pyproject.toml",
     )
-    for rel in members:
+    for rel in dict.fromkeys(members + tuple(_plane_member_pyprojects())):
         p = REPO_ROOT / rel
         if not p.is_file():
             continue
         data = tomllib.loads(p.read_text(encoding="utf-8"))
         reqs = data.get("build-system", {}).get("requires", []) or []
-        names = [re.split(r"[<>=!~;\[\s]", r, maxsplit=1)[0] for r in reqs if r.strip()]
+        out[rel] = [r for r in reqs if r.strip()]
+    return out
+
+
+def _pyproject_build_requires() -> dict[str, list[str]]:
+    """The same declarations as {relpath: [names]}: extras/version specifiers stripped to the bare name."""
+    out: dict[str, list[str]] = {}
+    for rel, reqs in _pyproject_build_requirements().items():
+        names = [re.split(r"[<>=!~;\[\s]", r, maxsplit=1)[0] for r in reqs]
         out[rel] = [n for n in names if n]
     return out
 
@@ -2103,6 +2132,83 @@ def test_build_backends_lock_covers_every_declared_backend() -> None:
     # guard against a vacuous declared-set: the backends we KNOW are used must be present.
     for expected in ("hatchling", "setuptools", "wheel", "setuptools-rust"):
         assert _canon(expected) in locked, f"{expected} is not pinned in {lock.name}"
+
+
+def build_backend_floor_problems(declared: dict[str, list[str]], locked: dict[str, str]) -> tuple[list[str], int]:
+    """Each declared ``[build-system].requires`` entry whose version specifier the LOCKED version of that
+    backend does not satisfy, plus how many declared entries were compared (anti-vacuous count).
+
+    Being pinned is not enough: build_envs.sh pre-installs exactly the locked version and then builds
+    ``--no-build-isolation``, and in that mode neither uv nor pip checks ``[build-system].requires``. So a
+    pyproject floor ABOVE the lock (``setuptools>=84.2.1`` against a locked ``setuptools==84.0.0``) is
+    silently ignored and the member is built with an older backend than it declares; this is the guard.
+    Markers are not evaluated — every entry must be satisfiable by the one locked closure, whatever
+    interpreter runs this test. A backend missing from the lock is the coverage test's failure; this
+    helper only skips it (the caller's anti-vacuous count then fails too)."""
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    problems: list[str] = []
+    compared = 0
+    for rel, reqs in sorted(declared.items()):
+        for raw in reqs:
+            req = Requirement(raw)
+            pinned = locked.get(_canon(req.name))
+            if pinned is None:
+                continue
+            compared += 1
+            if not req.specifier.contains(Version(pinned), prereleases=True):
+                problems.append(f"{rel}: {raw!r} is not satisfied by the locked {req.name}=={pinned}")
+    return problems, compared
+
+
+def test_build_backends_lock_satisfies_every_declared_floor() -> None:
+    """The locked version of every build backend satisfies EVERY pyproject's ``[build-system].requires``
+    specifier for it — so raising a floor without moving the lock (or the reverse) fails here."""
+    _, lock = LOCKS["build-backends"]
+    _require_lock("build-backends", lock)
+    locked = {_canon(m.group(1)): m.group(2) for m in map(_PINNED_LINE.match, lock.read_text().splitlines()) if m}
+    declared = _pyproject_build_requirements()
+    problems, compared = build_backend_floor_problems(declared, locked)
+    assert not problems, (
+        f"a pyproject [build-system].requires is not satisfied by {lock.name}:\n  " + "\n  ".join(problems)
+        + "\nMove the lock and the floor together: raise the floor in build-backends.in and regenerate "
+        "(--allow-unsafe --upgrade-package <name>==<version>)."
+    )
+    # anti-vacuous: every declared entry names a locked backend, so every one of them was compared.
+    assert compared == sum(len(r) for r in declared.values()) and compared >= 4, (
+        f"compared only {compared} declared build requirements — the floor check is not reaching them"
+    )
+
+
+def test_build_requirement_scan_covers_every_plane_member() -> None:
+    """Both build-backend checks above read ``_pyproject_build_requirements``; it must include every member
+    build_envs.sh builds — the ``-e`` lines of envs/<plane>.txt — or a member's floor (or an unlocked
+    backend) is never compared. ``range`` is named explicitly: it joined a plane after the hard-coded
+    list was written, and was the member the scan missed."""
+    members = _plane_member_pyprojects()
+    assert "range/pyproject.toml" in members and "apps/sigil/pyproject.toml" in members, members
+    scanned = _pyproject_build_requirements()
+    missing = [rel for rel in members if rel not in scanned]
+    assert not missing, f"plane members whose [build-system].requires is never scanned: {missing}"
+
+
+def test_build_backend_floor_check_is_not_a_no_op() -> None:
+    """NEGATIVE CONTROL: a floor above the lock, a ceiling below it and an exact pin that differs are each
+    flagged; a satisfied floor and a bare name are not."""
+    locked = {"setuptools": "84.0.0", "wheel": "0.48.0", "setuptools-rust": "1.13.0"}
+    declared = {
+        "a/pyproject.toml": ["setuptools>=84.2.1", "wheel"],
+        "b/pyproject.toml": ["setuptools-rust<1.10", "wheel==0.47.0"],
+        "c/pyproject.toml": ["setuptools>=84.0.0", "setuptools_rust>=1.13.0"],
+    }
+    problems, compared = build_backend_floor_problems(declared, locked)
+    assert compared == 6
+    assert len(problems) == 3, problems
+    assert any("a/pyproject.toml" in p and "setuptools>=84.2.1" in p for p in problems)
+    assert any("b/pyproject.toml" in p and "setuptools-rust<1.10" in p for p in problems)
+    assert any("b/pyproject.toml" in p and "wheel==0.47.0" in p for p in problems)
+    assert not any("c/pyproject.toml" in p for p in problems)
 
 
 def test_build_envs_installs_backends_hashed_and_builds_without_isolation() -> None:

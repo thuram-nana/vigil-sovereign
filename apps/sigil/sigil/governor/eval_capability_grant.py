@@ -173,7 +173,7 @@ def _verify_pop(core: dict, evaluator_sig) -> bool:
         return False
     try:
         return verify_one(pk, pop_signing_bytes(core), evaluator_sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):   # ValueError: a core that cannot be UTF-8 canonicalised
         return False
 
 
