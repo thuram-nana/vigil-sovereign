@@ -689,3 +689,39 @@ def test_a_re_run_advances_the_floor_only_to_the_head_it_verified(world, monkeyp
     with pytest.raises(prune.PruneUnsafe, match="floor was not brought up to its head"):
         prune.commit_prune(_store_of(world), 4, confirm=True)
     assert (world / "floor.json").read_bytes() == floor_before
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_the_verifier_refuses_an_archive_row_that_is_not_a_regular_file(world, kind):
+    """A directory or a FIFO in place of an archived segment is refused as such — never read (a FIFO would block the
+    verifier, a directory would raise) — and a re-run keeps every pruned file the archive replaces."""
+    import os
+    import threading
+    import time
+    _crashed_prune(world, 4, "prune_after_head")
+    files = _seg_files(world)
+    _m, row = _archived_seg0(world)
+    held = world / "archive" / row["file"]
+    held.unlink()
+    stop = threading.Event()
+    if kind == "directory":
+        held.mkdir()
+    else:
+        os.mkfifo(held)
+
+        def close_on_open():                                # any reader that opens it gets EOF, never a hang
+            while not stop.is_set():
+                try:
+                    os.close(os.open(held, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    time.sleep(0.02)
+
+        threading.Thread(target=close_on_open, daemon=True).start()
+    try:
+        ok, why = prune.verify_with_archive(_store_of(world))
+        assert ok is False and "is not a regular file" in why, why
+        with pytest.raises(prune.PruneUnsafe, match="is not a regular file"):
+            prune.commit_prune(_store_of(world), 4, confirm=True)
+        assert _seg_files(world) == files
+    finally:
+        stop.set()

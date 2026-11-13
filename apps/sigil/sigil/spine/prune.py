@@ -1439,6 +1439,8 @@ def _verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optiona
             return False, f"archived segment {row['file']} is not a file in the archive's segments directory"
         if not p.exists():
             return False, f"archived segment {row['file']} is missing (pruned prefix unrecoverable)"
+        if not p.is_file():                                # a directory or a special file is never read as a copy
+            return False, f"archived segment {row['file']} is not a regular file"
         if _sha256_file(p) != row["sha256"]:
             return False, f"archived segment {row['file']} sha256 mismatch (at-rest tamper/corruption)"
         st = p.stat()
