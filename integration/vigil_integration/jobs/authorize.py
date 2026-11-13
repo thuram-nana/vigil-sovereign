@@ -24,10 +24,11 @@ from typing import Any, Callable, Optional
 from .model import SecurityJob
 
 #: pause/resume PR-4 — the denial code the customer-launch gate returns for a REVERSIBLE paused-lease refusal
-#: (as opposed to a TERMINAL ``"no_lease"``). ``JobRunner.run_one`` keys the delivery RELEASE on it so a launch
-#: paused after it was enqueued RE-DRIVES on resume instead of stranding its paid lease. One source of truth,
-#: shared by the gate (producer) and the runner (consumer); the pause substrate is default-OFF, so this code is
-#: never produced until pause recording ships.
+#: (as opposed to a TERMINAL ``"no_lease"``): the lease itself still verifies, and only its reversible PAUSE
+#: conjunct refused it (paused, or the pause state could not be read). ``JobRunner.run_one`` keys the delivery
+#: RELEASE on it so a launch paused after it was enqueued RE-DRIVES on resume instead of stranding its paid
+#: lease. One source of truth, shared by the gate (producer) and the runner (consumer); the pause substrate is
+#: default-OFF, so this code is never produced until pause recording ships.
 LEASE_PAUSED_DENIAL = "lease_paused"
 
 
@@ -198,20 +199,32 @@ def build_repo_gate(
 
 def _lease_refusal_is_pause(slug: str, host: str, tenant: Optional[str], *,
                            base_dir: Any = None, now: Any = None) -> bool:
-    """pause/resume PR-4 — True iff the credit-launch lease for ``slug`` verifies + binds (owner-pin / slug /
-    host / tenant / window / NOT settled) but is REVERSIBLY PAUSED — the one lease-refusal class that must
-    RE-DRIVE on resume rather than strand. Reuses the PR-3 ``read_verified_launch_nonce`` (which skips ONLY the
-    pause conjunct) + ``is_lease_paused``. FATAL-2: both imports are function-local. FAIL-SAFE toward TERMINAL
-    (returns False) on ANY error — the money-dangerous misclassification is a false POSITIVE (a terminal
-    refusal marked re-driveable would re-enqueue forever), which this direction cannot produce."""
+    """pause/resume PR-4 — True iff a REFUSED credit-launch lease for ``slug`` is a live, paid, runnable launch
+    that only its reversible PAUSE conjunct is holding — the one lease-refusal class that must RE-DRIVE rather
+    than strand.
+
+    The decision is the PR-3 ``read_verified_launch_nonce`` alone: it runs the SAME owner-pinned verify + bind
+    (owner-pin / slug / host / tenant / window / NOT settled) as the gate's ``verify_customer_launch_lease``
+    with ONLY the pause conjunct skipped. So when the gate's verify refused but this read still yields a nonce,
+    the pause conjunct is the only thing that can have refused it — whether the lease is positively paused, its
+    pause state is UNDETERMINABLE (an unreadable pause store: the verify fails closed on that too), or the pause
+    was cleared in the instant between the two reads. All three are the SAME money case: a lease that still
+    verifies must be RELEASED for re-drive, never classified terminal (which keeps the delivery marker, so the
+    paid launch can never be re-admitted) and never refunded here.
+
+    This deliberately does NOT re-read the pause marker to "confirm" the pause. That second read is what turned
+    an unanswerable pause state into a TERMINAL ``no_lease`` (it raised on the default ``base_dir=None`` and the
+    error was swallowed as "not paused"), stranding a queued paused launch; it adds nothing the nonce read does
+    not already prove. Re-driving cannot spin: the seam poller re-produces a launch ONLY once the full verify
+    (pause conjunct included) passes, so a still-held lease is simply not re-enqueued.
+
+    FAIL-SAFE toward TERMINAL (returns False) only when the lease CANNOT be shown to verify: no nonce (forged /
+    settled / expired / wrong-host / wrong-tenant / absent), or the read itself errors. A genuinely terminal
+    refusal is therefore never marked re-driveable. FATAL-2: the import is function-local."""
     try:
         from framework.v2.launch_lease import read_verified_launch_nonce
-        nonce = read_verified_launch_nonce(slug, host, tenant, base_dir=base_dir, now=now)
-        if not nonce:
-            return False
-        from vigil_integration.live.credit_lease_pause import is_lease_paused
-        return bool(is_lease_paused(base_dir, slug, nonce))
-    except Exception:  # noqa: BLE001 — classify-failure ⇒ TERMINAL ("no_lease"), the safe direction here
+        return bool(read_verified_launch_nonce(slug, host, tenant, base_dir=base_dir, now=now))
+    except Exception:  # noqa: BLE001 — cannot show the lease verifies ⇒ TERMINAL ("no_lease"), never re-driveable
         return False
 
 
@@ -284,14 +297,15 @@ def build_customer_launch_gate(
         if not ok:
             # pause/resume PR-4: distinguish a REVERSIBLE paused-lease refusal (the launch must RE-DRIVE on
             # resume, never strand its paid reservation) from a TERMINAL one (forged / settled / expired /
-            # wrong-host / absent). A paused lease verifies+binds EXCEPT for the recorded pause, so the PR-3
-            # non-consuming nonce read (owner-pin + bind + window + settled; pause SKIPPED) yields a nonce and
-            # is_lease_paused confirms it. FAIL-SAFE toward TERMINAL: any classification error ⇒ "no_lease" (a
-            # missed pause merely keeps today's behaviour; it NEVER marks a genuinely terminal refusal
-            # re-driveable, which would re-enqueue forever).
+            # wrong-host / absent). A held lease verifies+binds EXCEPT for its pause conjunct, so the PR-3
+            # non-consuming nonce read (owner-pin + bind + window + settled; pause SKIPPED) still yields a nonce
+            # — and that alone classifies it (see _lease_refusal_is_pause): paused, pause state unreadable, or
+            # resumed mid-check all RELEASE the delivery for re-drive. FAIL-SAFE toward TERMINAL only when the
+            # lease cannot be shown to verify ⇒ "no_lease", so a genuinely terminal refusal is never marked
+            # re-driveable (which would re-enqueue forever).
             if _lease_refusal_is_pause(job.slug, host, (job.tenant_id or None), base_dir=base_dir, now=now):
-                return GateOutcome(False, f"credit-launch lease paused (reversible — resume re-admits): {reason}",
-                                   LEASE_PAUSED_DENIAL)
+                return GateOutcome(False, f"credit-launch lease held (reversible — the lease verifies; resume "
+                                   f"re-admits): {reason}", LEASE_PAUSED_DENIAL)
             return GateOutcome(False, f"credit-launch lease refused: {reason}", "no_lease")
         # (4) authority scope + window + kill-switch over the EXACT-host target. ``now`` is the POSIX-float
         # lease convention (what verify_customer_launch_lease takes); authorize_action wants a datetime, so

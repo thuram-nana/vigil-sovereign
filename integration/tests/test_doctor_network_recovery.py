@@ -168,9 +168,18 @@ def test_a_hanging_probe_is_bounded_by_an_overall_deadline(exporter_installed):
     "http://127.0.0.1:4318#token=SECRET",
     "https://c.corp/?token=SECRET",
     "https://admin:SECRET@collector.corp:4318",
+    # an `@` AFTER the host used to print whatever followed it as "host:port" on every surface below
+    "http://127.0.0.1:4318/v1/traces?user=ops@corp.example&token=SECRET",
+    "http://127.0.0.1:4318/v1/traces?api_key=abc@SECRET",
+    "http://127.0.0.1:4318/v1/traces#a@SECRET",
+    "http://127.0.0.1:4318/a@SECRET",
+    "https://admin:SECRET/SECRET@collector.corp:4318",    # ...and a password with an unencoded `/` stays hidden
+    "https://SECRET:98765/x@collector.corp:4318",         # ...even when its head is host:port-shaped
+    "http://127.0.0.1:4318&token=SECRET",                 # a "host:port" that is not one is never echoed
 ])
 def test_no_secret_on_any_surface(exporter_installed, raw):
     import json
+    assert "SECRET" in raw                         # else the check below cannot fail, whatever the redactor does
     sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": raw}, probe=_probe(False), clock=Clock(0.01))
     text = _doc.render({"network_recovery": sec, "notes": notes, "issues": []})
     for surface in (json.dumps(sec), " ".join(notes), text):
@@ -217,6 +226,72 @@ def test_doctor_probe_does_not_duplicate_its_finding_as_a_stderr_warning(exporte
         sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": "http://127.0.0.1:1"})   # real probe
     assert sec["collector"]["reachable"] is False and any("did not answer" in n for n in notes)
     assert not [r for r in caplog.records if "preflight" in r.getMessage()]   # reported once, as a doctor note
+
+
+def _reflecting_listener():
+    """A loopback port that is not an OTLP collector: it answers the probe's request by sending the request back
+    (an echo service on a mistyped port). http.client then raises BadStatusLine CARRYING that line — the
+    endpoint's path, raw CR/LF included."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                conn.sendall(b"\x00\x07" + data)
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_a_listener_that_reflects_the_request_never_puts_the_path_on_any_surface(exporter_installed, caplog):
+    """The preflight's detail appended the exception's MESSAGE — text the peer controls — to the redacted
+    endpoint, so a listener that echoed the request line put ``/ingest/SECRET/v1/traces`` (and raw control bytes)
+    into ``vigil doctor --json``, the console API that serves the same report, and the engage WARNING."""
+    import json
+    import logging
+
+    from vigil_integration.live.otel_export import probe_collector
+    srv = _reflecting_listener()
+    try:
+        ep = f"http://127.0.0.1:{srv.getsockname()[1]}/ingest/SECRET/v1/traces"
+        sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": ep})          # the real probe
+        with caplog.at_level(logging.WARNING):
+            probe = probe_collector(ep)                                                  # the engage preflight
+    finally:
+        srv.close()
+    assert sec["collector"]["reachable"] is False and probe.reachable is False
+    assert probe.detail.endswith("is UNREACHABLE: BadStatusLine")                        # the failure, by kind
+    text = _doc.render({"network_recovery": sec, "notes": notes, "issues": []})
+    surfaces = [json.dumps(sec), " ".join(notes), text, probe.detail] + [r.getMessage() for r in caplog.records]
+    assert caplog.records
+    for surface in surfaces:
+        assert "SECRET" not in surface and "ingest" not in surface
+        assert not any(ord(ch) < 32 and ch != "\n" for ch in surface)                   # nothing can forge a line
+
+
+@pytest.mark.parametrize("raw", ["http://127.0.0.1:43l8", "http://127.0.0.1:99999", "http://127.0.0.1:4318&token=SECRET"])
+def test_a_port_that_is_not_a_number_is_reported_as_such_never_a_probe_crash(exporter_installed, raw):
+    """The pin accepts these (the host is loopback), but the preflight raised ValueError on them — a message that
+    quotes the raw "port" (``4318&token=SECRET``) — so doctor could say only ``probe error: ValueError`` and the
+    redacted endpoint showed nothing of what was wrong. The preflight now says so, without the text."""
+    sec, notes = _doc._network_recovery_report({"VIGIL_OTLP_ENDPOINT": raw})              # the real probe
+    assert sec["otlp_loopback"] is True
+    col = sec["collector"]
+    assert col["reachable"] is False and "has no usable port (not a number from 0 to 65535)" in col["detail"]
+    assert "SECRET" not in col["detail"] and "43l8" not in col["detail"]
 
 
 def test_a_clock_fault_is_unknown_not_a_crash(exporter_installed):
