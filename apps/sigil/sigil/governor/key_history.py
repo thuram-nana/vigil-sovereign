@@ -55,9 +55,11 @@ never `framework`/`strix`.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 from ..reuse import (
     IntegrityError,
@@ -377,6 +379,30 @@ def key_resolver_with_horizon(store, *, current: Optional[str]) -> "tuple[KeyRes
 def clear_resolver_cache() -> None:
     """Drop the memoized resolvers (tests that relocate SIGIL_HOME / re-pin the genesis)."""
     _RESOLVER_CACHE.clear()
+
+
+# The resolver a fold-cache build verifies its records with (`fold_read.cached_read`), pinned for that build so the
+# registry's seed decision (`snapshot.seed_applies`) uses the very same walk — same history, same horizon — instead
+# of a second scan of the spine.
+_PINNED: "contextvars.ContextVar[Optional[tuple]]" = contextvars.ContextVar("pinned_key_resolver", default=None)
+
+
+@contextlib.contextmanager
+def pinned_resolver(store, *, current: Optional[str], resolver: KeyResolver) -> "Iterator[None]":
+    """Within this block `resolver_for(store, current=current)` is `resolver` (same store object, same key)."""
+    token = _PINNED.set((store, current, resolver))
+    try:
+        yield
+    finally:
+        _PINNED.reset(token)
+
+
+def resolver_for(store, *, current: Optional[str]) -> KeyResolver:
+    """The resolver pinned for `store` and `current` by the enclosing fold-cache build, else `key_resolver`."""
+    pinned = _PINNED.get()
+    if pinned is not None and pinned[0] is store and pinned[1] == current:
+        return pinned[2]
+    return key_resolver(store, current=current)
 
 
 # --- high-level rotation orchestration (the `sigil key` verbs) ---------------------------------------

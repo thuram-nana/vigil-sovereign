@@ -1154,6 +1154,12 @@ def snapshot_payload(store, K: int, *, prior: Optional[dict] = None,
     from ..governor.identity import owner_pubkey
     tp = trusted_pubkey if trusted_pubkey is not None else (owner_pubkey() or "")
     resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
+    if tp and not resolver.at(K):
+        # A forked or broken owner-key succession places no key anywhere (every fold DENY-alls): a seed folded with
+        # it would carry none of the owner-signed state of the prefix this prune deletes. Never prune under it.
+        raise PruneUnsafe(f"the owner-key succession places no owner key at seq {K} (forked or broken — see `sigil "
+                          f"key status`): a snapshot folded now would carry none of the owner-signed state of the "
+                          f"pruned prefix; nothing was pruned")
     archived = check_prune_safe(store, K)
     k_prev = int(prior["base_seq"]) if prior else 0
     prior_cumulative = str(prior["cumulative_merkle_root"]) if prior else ""
@@ -1215,10 +1221,11 @@ def archive_copy(store, K: int, snap_payload: dict, *, adir: Optional[Path] = No
     # Serialize the whole read-modify-write of archive.manifest.json + the segment copies, so two concurrent
     # archive_copy() calls cannot lose a manifest update or race on a segment file.
     with floor_lock(manifest_path):
-        existing: dict[str, Any] = (json.loads(manifest_path.read_text(encoding="utf-8"))
-                                    if manifest_path.exists()
-                                    else {"scope": SCOPE, "schema_version": 1, "segments": [], "snapshots": []})
         try:
+            # inside the refusal: a manifest that is not JSON at all is malformed like one missing a key
+            existing: dict[str, Any] = (json.loads(manifest_path.read_text(encoding="utf-8"))
+                                        if manifest_path.exists()
+                                        else {"scope": SCOPE, "schema_version": 1, "segments": [], "snapshots": []})
             have = {row["id"] for row in existing["segments"]}
             copied = _copy_segments(store, archived, existing, have, segdir, ad)
             existing["segments"].sort(key=lambda r: r["first_seq"])
@@ -1588,19 +1595,27 @@ def _prior_snapshot(store) -> Optional[dict]:
     return {**rec.payload, "snapshot_seq": rec.seq}
 
 
-def _floor_up_to_committed(head) -> bool:
+def _floor_up_to_committed(store, head) -> bool:
     """The prune commit moves the durable floor WITH its head; one interrupted between the two (a crash, an IO
     error) leaves the floor on the pre-prune head. A re-run completes that half: the floor is advanced (owner-signed,
-    monotonic, under the floor lock) to the verified committed head. True iff it moved."""
+    monotonic, under the floor lock) to the committed head. The head the floor is advanced to is the one read and
+    verified under that lock (owner signature over the live window, against the current floor) — never a head
+    read before it, so the owner key signs a floor only over a head it verified. True iff it moved."""
     from ..reuse import KeyPair
-    from .checkpoint import _owner_keys
+    from .checkpoint import _owner_keys, _read_head_on_disk, classify_head, trust_root
     from .floor import advance_floor, floor_lock, load_floor
     with floor_lock():
         fl = load_floor()
         if fl is not None and fl.base_seq >= head.base_seq:
             return False
+        disk = _read_head_on_disk()
+        ok, why = ((False, "no signed head stands") if disk is None
+                   else classify_head(disk, store.entries(), trust_root(store), floor=fl))
+        if not ok:
+            raise PruneUnsafe(f"the prune at {head.base_seq} is committed, but its durable anti-rollback floor was "
+                              f"not brought up to its head: {why} — run `sigil verify`")
         priv, pub = _owner_keys()
-        advance_floor(head, owner_key=KeyPair(public_key_b64=pub, private_key_b64=priv), _locked=True)
+        advance_floor(disk, owner_key=KeyPair(public_key_b64=pub, private_key_b64=priv), _locked=True)
     return True
 
 
@@ -1660,7 +1675,7 @@ def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
                               f"the archive; any pruned segment files still on disk are kept until it verifies")
         return {"base_seq": K, "snapshot_seq": committed.snapshot_seq, "head_last_seq": committed.last_seq,
                 "archived_segments": 0, "files_deleted": 0, "already_complete": True,
-                "floor_advanced": _floor_up_to_committed(committed),
+                "floor_advanced": _floor_up_to_committed(store, committed),
                 "cumulative_merkle_root": committed.cumulative_merkle_root}
     if K <= committed_base:
         raise PruneUnsafe(f"the spine is already pruned at {committed_base}; a prune at {K} is not past it")

@@ -479,7 +479,7 @@ def seed_applies(snap: "SnapshotState", reader_pubkey: "Optional[str]", store) -
         return reader_pubkey == snap.trusted_pubkey       # nothing pruned: the genesis scan is the whole fold
     if reader_pubkey:
         from ..governor import key_history as _kh
-        res = _kh.key_resolver(store, current=reader_pubkey)     # memoized: the same walk the fold itself uses
+        res = _kh.resolver_for(store, current=reader_pubkey)     # the same walk the fold itself verifies with
         base_key = snap._base_pubkey or snap.trusted_pubkey      # a state written before the field: the prune key
         if res.at(snap.snapshot_seq) == snap.trusted_pubkey and res.at(snap.base_seq) == base_key:
             return True

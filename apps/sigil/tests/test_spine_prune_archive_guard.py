@@ -15,6 +15,7 @@ Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:integration:packages/core/vig
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace as NS
 
 import pytest
@@ -509,3 +510,182 @@ def test_a_partition_refusal_names_the_way_out_when_no_prune_is_committed(world)
     with pytest.raises(prune.PruneUnsafe, match=r"do not partition .*move .*archive aside \(no prune is committed"):
         prune.commit_prune(_store_of(world), 4, confirm=True)
     assert _first_seq(world) == 0 and _head(world).snapshot_seq < 0
+
+
+# ---- a malformed manifest, a held copy that is not a plain archived file, the orphan GC, a duplicate row ----------
+
+@pytest.mark.parametrize("bad", ["not json", "a segment row without its id", "a segment row naming no file"])
+def test_a_malformed_archive_manifest_is_a_refusal_before_any_copy(world, capsys, monkeypatch, bad):
+    """However the manifest is malformed — not JSON at all, or a segment row missing what the copy step reads — the
+    prune refuses (exit 2) with nothing pruned and the manifest left as it was, never a traceback."""
+    from sigil import cli
+    _crashed_prune(world, 4, "prune_after_archive")
+    m = _manifest(world)
+    if bad == "not json":
+        _mpath(world).write_text("{not json", encoding="utf-8")
+    elif bad == "a segment row without its id":
+        del m["segments"][0]["id"]
+        _mpath(world).write_text(json.dumps(m), encoding="utf-8")
+    else:
+        m["segments"][0]["file"] = None
+        _mpath(world).write_text(json.dumps(m), encoding="utf-8")
+    before = _mpath(world).read_bytes()
+    with pytest.raises(prune.PruneUnsafe, match="malformed .*nothing was pruned"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: _store_of(world))
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_spine(NS(action="prune", boundary=4, yes=True, archive=None))
+    assert ei.value.code == 2 and "prune UNSAFE" in capsys.readouterr().err
+    assert _mpath(world).read_bytes() == before
+    assert _first_seq(world) == 0 and _head(world).snapshot_seq < 0
+
+
+def _identical_copy_at(root, where: str):
+    """Replace the archived copy of seg 0 with one at `where` that has the very same bytes: a symlink to an identical
+    copy beside it in the archive's segments directory, or the manifest row naming an identical regular file outside
+    that directory."""
+    import os
+    m, row = _archived_seg0(root)
+    held = root / "archive" / row["file"]
+    if where == "symlink inside the archive":
+        twin = held.with_name("twin-" + held.name)
+        twin.write_bytes(held.read_bytes())
+        held.unlink()
+        os.symlink(twin, held)
+    else:
+        outside = root / "archive" / "elsewhere"
+        outside.mkdir()
+        (outside / held.name).write_bytes(held.read_bytes())
+        held.unlink()
+        row["file"] = f"elsewhere/{held.name}"
+        _mpath(root).write_text(json.dumps(m), encoding="utf-8")
+
+
+@pytest.mark.parametrize("where", ["symlink inside the archive", "regular file outside its segments directory"])
+def test_a_prune_copies_again_a_held_copy_that_is_not_a_plain_file_of_the_archive(world, where):
+    """An archived copy with the right bytes that is a symlink, or that lies outside the archive's segments
+    directory, is not relied on while its segment is still live: the prune copies the segment again and the row
+    names that plain file."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    _identical_copy_at(world, where)
+    assert prune.commit_prune(_store_of(world), 4, confirm=True)["base_seq"] == 4
+    _verified(world)
+    _m, row = _archived_seg0(world)
+    held = world / "archive" / row["file"]
+    assert row["file"].startswith("segments/") and held.parent == world / "archive" / "segments"
+    assert held.is_file() and not held.is_symlink()
+
+
+@pytest.mark.parametrize("where", ["symlink inside the archive", "regular file outside its segments directory"])
+def test_the_verifier_refuses_a_committed_archive_row_that_is_not_a_plain_file_of_the_archive(world, where):
+    """Once the prune is committed the archive is the only copy: a row naming a symlink, or a file outside the
+    archive's segments directory, does not verify — even with the right bytes."""
+    prune.commit_prune(_store_of(world), 4, confirm=True)
+    _verified(world)
+    _identical_copy_at(world, where)
+    ok, why = prune.verify_with_archive(_store_of(world))
+    assert ok is False and "not a file in the archive's segments directory" in why
+
+
+def test_a_held_copy_that_is_a_special_file_is_never_relied_on(world):
+    """A FIFO in place of the archived copy is not a copy — even when something feeds it the recorded bytes — and
+    is judged without reading from it."""
+    import os
+    import threading
+    import time
+    _crashed_prune(world, 4, "prune_after_archive")
+    _m, row = _archived_seg0(world)
+    held = world / "archive" / row["file"]
+    data = held.read_bytes()
+    held.unlink()
+    os.mkfifo(held)
+    stop = threading.Event()
+
+    def feed():                                             # serves the recorded bytes to any reader that opens it
+        deadline = time.monotonic() + 10
+        while not stop.is_set() and time.monotonic() < deadline:
+            try:
+                fd = os.open(held, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                time.sleep(0.02)
+                continue
+            try:
+                os.set_blocking(fd, True)
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            return
+
+    t = threading.Thread(target=feed, daemon=True)
+    t.start()
+    try:
+        src = world / "spine.segments" / held.name
+        assert prune._held_copy_ok(held, held.parent, src, row["sha256"]) is False
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+
+def test_the_orphan_gc_never_deletes_a_file_the_manifest_still_references(world):
+    """A committed prune whose manifest is not yet rebased still references the pruned segments: the orphan GC
+    deletes only files the current manifest does not reference, so running it then removes nothing."""
+    _crashed_prune(world, 4, "prune_after_head")
+    files = _seg_files(world)
+    s = _store_of(world)
+    assert s._delete_orphan_segment_files_below(4) == 0
+    assert _seg_files(world) == files
+    assert [r.seq for r in _store_of(world).iter_records()][0] == 0
+
+
+def test_a_duplicate_row_at_the_same_boundary_names_it_and_is_superseded_by_its_own_prune(world):
+    """Two uncommitted rows at the same boundary (one this prune would write, one chained differently by an older
+    build) do not lock every boundary: a prune elsewhere names that boundary (and, with no prune committed, moving the
+    archive aside), and the prune at that boundary replaces both with its own row once the candidate verifies."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    m = _manifest(world)
+    m["snapshots"].append(dict(m["snapshots"][0], delta_merkle_root="e" * 64, cumulative_merkle_root="f" * 64))
+    _mpath(world).write_text(json.dumps(m, indent=2), encoding="utf-8")
+    before = _mpath(world).read_bytes()
+    with pytest.raises(prune.PruneUnsafe, match=r"uncommitted prune at 4 .*-K 4 --yes.*move .*archive aside"):
+        prune.commit_prune(_store_of(world), 6, confirm=True)
+    assert _mpath(world).read_bytes() == before and _first_seq(world) == 0
+    rep = prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert rep["base_seq"] == 4 and _first_seq(world) == 4
+    rows = _manifest(world)["snapshots"]
+    assert [r["base_seq"] for r in rows] == [4]
+    assert rows[0]["cumulative_merkle_root"] == _head(world).cumulative_merkle_root
+    _verified(world)
+
+
+def test_a_re_run_advances_the_floor_only_to_the_head_it_verified(world, monkeypatch):
+    """The floor a re-run brings up is owner-signed: it is advanced only to the head read and verified under the
+    floor lock. A head swapped in after the prune's own verification (here: re-signed by a stranger) is refused —
+    the floor is left where it was and the prune is not reported complete."""
+    from sigil.reuse import generate_keypair
+    with monkeypatch.context() as m:
+        m.setattr(_cp, "advance_floor", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full (test)")))
+        with pytest.raises(OSError):
+            prune.commit_prune(_store_of(world), 4, confirm=True)
+    head = _head(world)
+    floor_before = (world / "floor.json").read_bytes()
+    assert _fl.load_floor().base_seq == 0
+    from vigil_core.chain import _head_payload
+
+    from sigil.reuse import Signature, evidence_signing_bytes, sign
+    stranger = generate_keypair()
+    swapped = head.model_copy(update={"signatures": []})
+    swapped = swapped.model_copy(update={"signatures": [Signature(
+        key_id=head.signatures[0].key_id,
+        signature_b64=sign(stranger.private_key_b64, evidence_signing_bytes(_head_payload(swapped))))]})
+    real_verify = prune.verify_with_archive
+
+    def verify_then_swap(store, **kw):
+        out = real_verify(store, **kw)
+        if sys._getframe(1).f_code.co_name == "commit_prune":     # the re-run's own archive check, after it
+            (world / "head.json").write_text(swapped.model_dump_json(), encoding="utf-8")   # verified the head
+        return out
+
+    monkeypatch.setattr(prune, "verify_with_archive", verify_then_swap)
+    with pytest.raises(prune.PruneUnsafe, match="floor was not brought up to its head"):
+        prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert (world / "floor.json").read_bytes() == floor_before

@@ -2618,3 +2618,95 @@ def test_finish_reports_failure_when_the_head_still_does_not_verify(world, monke
         cli.cmd_key(NS(key_cmd="rotate", yes=True, finish=True, i_understand=False))
     captured = capsys.readouterr()
     assert e.value.code == 2 and "NOT finished" in captured.err and "rotation FINISHED" not in captured.out
+
+
+def test_a_head_naming_a_snapshot_below_its_own_base_is_refused_in_the_prune_crash_window(world):
+    """In a prune's crash window the pruned prefix is still on disk, so a record below the boundary can still be
+    read. A pruned head naming a `snapshot` record there — one appended before the boundary, folding a released kill
+    switch — is refused even when the owner key signs it: no prune appends its snapshot record below its own base."""
+    world.apply([lambda R: R.kill.engage(reason="incident"),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    f = world.store().next_seq
+    forged = SnapshotState(base_seq=f + 1, trusted_pubkey=world.owner.public_key_b64).model_dump()
+    assert forged["killswitch_engaged"] is False
+    assert world.store().append(kind="snapshot", source="prune", actor="owner",
+                                payload={"folded_state": forged}) == f
+    k = world.seal()
+    assert k == f + 1
+    world.apply([_noise(1)])
+    world.seal_with_tail(checkpoint=True)
+    s = world.store()
+    payload = prune.snapshot_payload(s, k)
+    prune.archive_copy(s, k, payload)
+    seq = prune._append_snapshot_idempotent(s, payload)
+    standing = _cp.sign_pruned_head(s, base_seq=k, base_prev_hash=payload["base_prev_hash"],
+                                    cumulative_merkle_root=payload["cumulative_merkle_root"], snapshot_seq=seq)
+    assert world.store().get(f).kind == "snapshot", "the prefix is still on disk"
+    (world.root / "floor.json").unlink()
+    _sign_v2_as(world.store(), world.owner.private_key_b64, standing, upto=standing.last_seq, snapshot_seq=f)
+    assert _cp.verify_checkpoint(world.store())[0]
+    with pytest.raises(SnapshotError, match="outside its own signed window"):
+        SnapshotState.load(world.store())
+    assert _not_released(_default_key_reads(world))
+
+
+def test_a_prune_under_a_forked_owner_key_succession_is_refused_and_prunes_nothing(world):
+    """A forked succession (two validly cross-signed successors of one key) places no owner key anywhere: a snapshot
+    folded under it would verify none of the owner-signed records of the prefix it replaces. The prune is refused
+    before anything is archived, appended, signed or deleted."""
+    import time
+
+    from sigil.governor import key_history as kh
+    from sigil.reuse import generate_keypair
+    world.apply([lambda R: R.kill.engage(reason="incident"),
+                 lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])
+    world.seal()
+    world.apply([_noise(0)])
+    k = world.seal()
+    world.apply([_noise(1)])
+    world.seal_with_tail(checkpoint=True)
+    old = world.owner
+    kh.rotate(world.store(), issued_at=time.time())
+    _cp.checkpoint(world.store())
+    rogue = generate_keypair()
+    kh._append_history(world.store(), kh.cross_sign(old, rogue, epoch=1, prev_pubkey=old.public_key_b64,
+                                                    issued_at=time.time() + 5), reason="fork")
+    kh.clear_resolver_cache()
+    world.seal_with_tail(checkpoint=True)
+    assert _cp.verify_checkpoint(world.store())[0], "the head itself still verifies (on-disk key fallback)"
+    before = _head_bytes(world)
+    with pytest.raises(prune.PruneUnsafe, match="places no owner key at seq"):
+        prune.commit_prune(world.store(), k, confirm=True)
+    assert [r.seq for r in world.store().iter_records()][0] == 0
+    assert not [r for r in world.store().iter_records() if r.kind == "snapshot"]
+    assert _head_bytes(world) == before and not (world.root / "archive" / "archive.manifest.json").exists()
+
+
+def test_a_cached_build_judges_its_seed_with_the_resolver_it_folds_with(world, monkeypatch):
+    """A fold-cache build verifies its records with a fresh resolver (with its scan horizon); the seed decision inside
+    that build uses that very resolver — never a second walk of the spine — and only for the same store and key."""
+    from sigil.governor import key_history as kh
+    _pruned_killswitch_world(world)
+    world.mp.setenv(FLAG, "1")
+    fold_cache.clear_all()
+    kh.clear_resolver_cache()
+    calls = {"n": 0}
+    real = kh.key_resolver
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kh, "key_resolver", counting)
+    assert wl.WalletRegistry(world.store()).available("acme") == 100
+    assert calls["n"] == 0, "the cached build walked the succession a second time for its seed"
+    world.mp.delenv(FLAG, raising=False)
+    store, other = world.store(), world.store()
+    res = kh.KeyResolver([("k", 0, float("inf"))], "k")
+    with kh.pinned_resolver(store, current="k", resolver=res):
+        assert kh.resolver_for(store, current="k") is res
+        assert kh.resolver_for(store, current="other") is not res
+        assert kh.resolver_for(other, current="k") is not res
+    assert kh.resolver_for(store, current="k") is not res
