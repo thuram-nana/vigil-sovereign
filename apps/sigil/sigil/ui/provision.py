@@ -43,6 +43,10 @@ from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
+_LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
+                        "in Billing to unlock it.")
+_LOCKED_COMPLETED_BODY = ("An assessment run completed. Every finding is listed in your assessments; buy credits in "
+                          "Billing to unlock the full proof and fix.")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
 # The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` (which carries
@@ -1469,17 +1473,30 @@ class Provisioner:
 
         # 1) Assessment findings — each confirmed FACT is a notification. admit_customer returns bool (no raise),
         #    so a denied source is simply skipped. Tenant-scoped inside the projector by the org's own slug set.
+        locked = self._preview_locked(requester_org_id)
         if self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
             from . import assessments as _assess
-            found = _assess.assessment_findings(self.store, requester_org_id, now=t)
+            found = _assess.assessment_findings(self.store, requester_org_id, now=t, preview=locked)
             for f in found.get("findings", []):
                 ref = str(f.get("finding_ref") or "").strip()
                 if not ref:
                     continue
                 sev = str(f.get("severity") or "medium").strip().lower() or "medium"
+                # Pricing S5: a locked finding's body is fixed copy pointing at Billing (never its summary).
+                body = (_LOCKED_FINDING_BODY if f.get("locked") else str(f.get("summary") or ""))
                 items.append({"id": "finding:" + ref, "kind": "finding", "severity": sev,
-                              "title": str(f.get("title") or ref),
-                              "body": str(f.get("summary") or ""), "ts": None})
+                              "title": str(f.get("title") or ref), "body": body, "ts": None})
+        # Pricing S5: a one-time notice when a trial-preview org's reports are unlocked (stable id, so the
+        # per-viewer seen-set shows it once). Only for orgs that received the preview trial.
+        from .. import config as _cfg
+        if (_cfg.trial_preview_enabled() and not locked
+                and self.wallet.has_grant_entry(requester_org_id, f"trial-preview:{requester_org_id}")
+                and self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                             permission="view_assessments")):
+            items.append({"id": "billing:reports_unlocked", "kind": "billing", "severity": "info",
+                          "title": "Full results unlocked",
+                          "body": "Your full assessment results, with proof and fix, are now available.",
+                          "ts": None})
 
         # 2) Billing standing — dunning / lapsed / exhausted, from owner-signed STATES only (no money number
         #    decides a notification). past_due (dunning) is the sharpest; a canceled subscription and an
@@ -1559,6 +1576,7 @@ class Provisioner:
                                        "An assessment run was canceled. You were not charged for this run.")
                 else:  # completed (the only remaining signed outcome; flat-per-run consumed, no refund)
                     sev, head, body = ("info", "Assessment completed",
+                                       _LOCKED_COMPLETED_BODY if locked else
                                        "An assessment run completed. View any findings in your assessments.")
                 items.append({"id": "outcome:" + slug + ":" + nonce, "kind": "assessment",
                               "severity": sev, "title": head, "body": body, "ts": o.get("ts")})

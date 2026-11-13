@@ -494,9 +494,14 @@ class Handler(BaseHTTPRequestHandler):
                                             org_id=org, permission="view_assessments"):
                 return self._deny(403, "not authorized for this org's assessments")
             import time as _t
+            # Pricing S5: full detail only when the principal's GLOBAL role carries view_assessments (staff); a
+            # per-org member admitted through the composed gate gets the trial preview when the org is locked.
+            from ..governor.accounts import role_can as _role_can
+            from .finding_preview import preview_locked as _preview_locked
+            locked = (not _role_can(principal.role, "view_assessments")) and _preview_locked(store, org)
             if path == "/api/assessments":
-                return self._json(_assess.assessment_summary(store, org, now=_t.time()))
-            return self._json(_assess.assessment_findings(store, org, now=_t.time()))
+                return self._json(_assess.assessment_summary(store, org, now=_t.time(), preview=locked))
+            return self._json(_assess.assessment_findings(store, org, now=_t.time(), preview=locked))
         if path == "/api/billing/orgs":
             # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
             # tenant is a global-owner action, distinct from the per-org overview above.
