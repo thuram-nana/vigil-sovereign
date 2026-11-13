@@ -462,12 +462,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 run_q = (q.get("run") or [None])[0]
                 slug_q = (q.get("slug") or [None])[0]
-                # Replay (from_start OR a Last-Event-ID resume) is honoured for a RUN only. `run` is
-                # validated (_safe_run_id) whereas `slug` indexes straight into targets_root(), so a replay
-                # there would emit the whole contents of a file addressed by an unvalidated name — and put
-                # a ROTATING log into cursor mode, whose counter cannot survive the rotation. Gating only
-                # the query flag left the header as a second, ungated door. No caller needs it: the UI only
-                # ever replays `run=`, and the legacy SPA's `slug=` stream is a live tail.
+                # Both selectors are confined before any header is sent: `run` by _safe_run_id (run_dir) and
+                # `slug` by common.paths' one-component rule — an unsafe value raises ValueError inside
+                # stream_path, i.e. the 404 below, never a stream.
+                # Replay (from_start OR a Last-Event-ID resume) is honoured for a RUN only: the engagement
+                # log ROTATES, and a replay would put it into cursor mode, whose counter cannot survive the
+                # rotation. Gating only the query flag left the header as a second, ungated door. No caller
+                # needs it: the UI only ever replays `run=`, and the legacy SPA's `slug=` stream is a live
+                # tail.
                 # bool(run_q), not `is not None`: stream_path's own predicate is `if run:`, so matching it
                 # exactly keeps the gate and the path selection from ever disagreeing (today they
                 # agree only because parse_qs drops blank values).

@@ -388,6 +388,25 @@ def test_safe_target_dir_and_enumeration_refuse_a_symlink_escape(tmp_path, monke
     assert "evil" not in slugs and "real" in slugs
 
 
+@pytest.mark.parametrize("odd", ["odd\\name", "tab\there", "nl\n", "del\x7fchar"])
+def test_a_directory_name_that_is_not_a_safe_slug_is_skipped_not_fatal(tmp_path, monkeypatch, odd) -> None:
+    """paths.target_dir refuses a slug with a backslash or a control character (ValueError). Such a directory
+    is still a legal POSIX name under targets/, so one of them next to real engagements must be skipped,
+    and the rest of the org's corpus must still be built (list_engagements / query / show included)."""
+    a = tmp_path / "orgA" / "targets"
+    _write_report_json(a, "acme", active=[_active("ACME-1", "xss", severity="High")])
+    (a / odd).mkdir(parents=True)
+    _scope_to(monkeypatch, a, "orgA")
+    assert kb._safe_target_dir(odd) is None
+    assert kb._engagement_slugs() == ["acme"]
+    c = kb.corpus()                                                  # must not raise
+    assert c.slugs() == ["acme"]
+    assert "ACME-1" in {f.ref for f in c.findings}
+    assert [e.slug for e in kb.list_engagements()] == ["acme"]
+    assert [f.ref for f in kb.query(slug="acme")] == ["ACME-1"]
+    assert kb.show(odd)["engagement"] is None
+
+
 def test_schema_drift_non_iterable_findings_degrade_not_crash(tmp_path, monkeypatch) -> None:
     """red-pen LOW: a valid-JSON report.json whose active/passive_findings is a truthy NON-iterable scalar must
     NOT crash the whole-org corpus — it degrades to no findings for that slug."""
