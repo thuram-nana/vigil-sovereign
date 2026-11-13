@@ -126,6 +126,7 @@ def test_a_topup_checkout_posts_catalog_priced_tenant_bound_params():
         "payment_intent_data": {"metadata": meta},
         "success_url": _RETURN + "?status=successful&session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": _RETURN + "?status=cancelled",
+        "adaptive_pricing": {"enabled": False},                         # never localised away from the catalog currency
         "customer_email": "a@example.test",
     }
     assert ikey == "vigil-co-n1"
@@ -136,10 +137,18 @@ def test_a_topup_checkout_posts_catalog_priced_tenant_bound_params():
 
 def test_the_amount_follows_the_catalog_never_the_caller():
     api = _Stripe()
-    _provider(api).create_checkout("acme", "price_topup_200", expected={"price_topup_200": (31337, "EUR")},
+    _provider(api).create_checkout("acme", "price_topup_200", expected={"price_topup_200": (31337, "USD")},
                                    redirect_url=_RETURN, nonce="n1")
     pd = api.calls[0][0]["line_items"][0]["price_data"]
-    assert (pd["unit_amount"], pd["currency"]) == (31337, "eur")
+    assert (pd["unit_amount"], pd["currency"]) == (31337, "usd")
+
+
+@pytest.mark.parametrize("ccy", ["ISK", "MGA", "HUF", "KWD", "EUR", "XAF"])
+def test_a_currency_not_confirmed_for_stripe_is_refused_before_calling_stripe(ccy):
+    api = _Stripe()
+    with pytest.raises(ValueError, match="not enabled for"):
+        _provider(api).create_checkout("acme", "p", expected={"p": (5000, ccy)}, redirect_url=_RETURN, nonce="n1")
+    assert api.calls == []
 
 
 def test_a_plan_checkout_is_a_subscription_recurring_in_days_with_subscription_metadata():

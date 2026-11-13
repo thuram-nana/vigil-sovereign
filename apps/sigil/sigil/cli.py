@@ -1428,7 +1428,10 @@ def _stripe_billing_watcher(a):
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET is not set")
     if secret == os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", ""):
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET must differ from VIGIL_BILLING_WEBHOOK_SECRET (one secret per provider)")
-    if any(_same_dir(a.spool, os.environ.get(k, "")) for k in ("VIGIL_BILLING_SPOOL", "VIGIL_BILLING_WEBHOOK_SPOOL")):
+    from . import config
+    flw_default = os.path.join(os.environ.get("SIGIL_HOME") or str(config.SIGIL_HOME), "billing-spool")
+    if any(_same_dir(a.spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
+                                            os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
         refuse("--spool is the Flutterwave billing spool (VIGIL_BILLING_SPOOL / VIGIL_BILLING_WEBHOOK_SPOOL); "
                "the Stripe lane drains its own spool")
     fetcher = _stripe_object_fetcher()
@@ -1441,9 +1444,12 @@ def _stripe_billing_watcher(a):
         se._api_version()
     except se.StripeEgressError:
         refuse("VIGIL_STRIPE_API_VERSION is unset or malformed")
-    from .config import billing_plan_alarm_enabled
-    alarm = billing_plan_alarm_enabled()
-    provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm)
+    # The Stripe lane is always loud: a paid Stripe object it cannot credit (no tenant, time or currency, an
+    # off-catalog or underpaid plan, a monitoring price with no line) quarantines and alarms, never a silent no-op —
+    # whatever the plan-checkout flag in this unit's environment says.
+    alarm = True
+    provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm,
+                                     strict=True)
     del secret
     signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True)
     return BillingSpoolWatcher(signer, spool_dir=a.spool, envelope_reader=StripeEnvelopeV1())

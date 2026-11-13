@@ -242,3 +242,46 @@ def test_a_missing_fetcher_is_refused_even_with_a_valid_key(home, capsys, monkey
     monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: None)
     code, text = _run(["billing-drain", "--provider", "stripe", "--spool", tempfile.mkdtemp()], capsys)
     assert code == 2 and "object fetcher" in text
+
+
+# ---- review fold: the Stripe lane never buries a paid charge -----------------------------------------------------------
+def test_a_secret_mismatch_between_proxy_and_drain_is_quarantined_and_alarms(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool, secret="whsec_" + "the-proxy-had-another")       # what the proxy accepted
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_billing_drain(_ns(spool))
+    assert ei.value.code == 1 and "ALARM" in capsys.readouterr().err
+    assert list((spool / "rejected").glob("*.json")) and not list((spool / "processed").glob("*.json"))
+    assert "does not verify" in "".join(p.read_text() for p in (spool / "rejected").glob("*.reason"))
+
+
+def test_a_paid_session_with_no_tenant_alarms_without_any_plan_flag(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    monkeypatch.delenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_BILLING_PLAN_ALARM", raising=False)
+    base = _session_fetcher(pid)
+
+    def no_tenant(kind, oid):
+        obj = dict(base(kind, oid))
+        obj["client_reference_id"] = None
+        obj["metadata"] = {"price_id": pid}
+        return obj
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: no_tenant)
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_billing_drain(_ns(spool))
+    assert ei.value.code == 1
+    assert "UN-MINTED" in "".join(p.read_text() for p in (spool / "rejected").glob("*.reason"))
+
+
+def test_the_stripe_lane_refuses_the_default_flutterwave_spool(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    import os
+    flw_default = os.path.join(os.environ["SIGIL_HOME"], "billing-spool")
+    os.makedirs(flw_default, exist_ok=True)
+    code, text = _run(["billing-drain", "--provider", "stripe", "--spool", flw_default], capsys)
+    assert code == 2 and "Flutterwave billing spool" in text
