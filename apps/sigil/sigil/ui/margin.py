@@ -12,7 +12,10 @@ MONEY ANCHOR: billed revenue is the Sum of owner-signed ``Invoice.amount_minor``
 a recomputed / on-the-wire amount; the cost rate is an OWNER catalog input (``catalog.cost_rate_micro_minor_per_token``)
 and the display TARGET line comes from the one pricing input, the target margin
 (``vigil_core.model_metering.target_margin`` — a margin over METERED AI cost only; payment fees and hosting are
-outside it), as ``target revenue = cost / (1 - target margin)`` — never numbers invented here. REVENUE
+outside it), as ``target revenue = cost / (1 - target margin)`` — never numbers invented here. The cost the target
+line divides is this view's cost column, today the per-token rate ESTIMATE (committed tokens × the owner's cost
+rate), not each run's metered AI cost; the payload says so (``cost_basis``) until per-run metered cost is recorded and
+replaces it. REVENUE
 BASIS excludes the ``payment`` kind (a PP-2b receipt against postpaid arrears — money IN, not a charge):
 ``billed_revenue = Sum over {subscription, topup, postpaid}``; ``payment`` rows are the COLLECTED axis (the
 billed-vs-collected AR gap), never added to revenue (the double-count guard). NOT-CONFIGURED FAIL-CLOSED: a
@@ -332,6 +335,7 @@ def margin_overview(store, *, cost_rate: Any = _UNSET, target_margin: Any = _UNS
         "target_margin_set": m is not None,
         "target_margin_basis": "metered AI cost only (payment fees and hosting are outside it)",
         "target_margin_issue": m_issue,
+        "cost_basis": "per-token rate estimate (committed tokens x the owner's cost rate), not metered AI cost",
         "currency": (next(iter(all_currencies)) if len(all_currencies) == 1
                      else ("mixed" if all_currencies else "")),
         "tenants": tenants,

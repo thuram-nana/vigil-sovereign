@@ -1367,8 +1367,8 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
     (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
 
-    Neither ``VIGIL_METERED_BILLING`` nor ``VIGIL_MODEL_GATEWAY_ENABLED`` set ⇒ ``{"configured": False}`` and nothing
-    else (default output unchanged). Otherwise HARD issues for a configuration that would bill wrongly or not at
+    Neither ``VIGIL_METERED_BILLING`` nor ``VIGIL_MODEL_GATEWAY_ENABLED`` set, and no retired pricing setting ⇒
+    ``{"configured": False}`` and nothing else (default output unchanged). Otherwise HARD issues for a configuration that would bill wrongly or not at
     all: metered billing without the gateway, a gateway that does not answer, a provider key missing from the
     sovereign environment, a pricing setting the metering core refuses (floor, price table, the gateway limits),
     and — with metered billing on — no target margin or no cancel-settlement policy (both owner decisions with no
@@ -1941,7 +1941,8 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report
         report["fold_cache_audit"] = {"error": f"{type(exc).__name__}: {exc}", "present": False}
 
-    # PRICING M1c — metered billing + the model gateway. Neither flag set ⇒ nothing added. Best-effort.
+    # PRICING M1c — metered billing + the model gateway. Neither flag set and no retired pricing setting ⇒ nothing
+    # added. Best-effort.
     try:
         _mt, _mt_issues, _mt_notes = _metering_report()
         report["metering"] = _mt

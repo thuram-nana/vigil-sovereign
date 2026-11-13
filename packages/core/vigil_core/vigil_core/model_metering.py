@@ -418,7 +418,7 @@ def target_margin(env: Optional[Mapping[str, str]] = None) -> Fraction:
 
 
 def billing_markup(env: Optional[Mapping[str, str]] = None) -> Fraction:
-    """The markup ``1 / (1 − target_margin)`` as an exact fraction (> 1): credits charged = direct cost × markup ×
+    """The markup ``1 / (1 − target_margin)`` as an exact fraction (> 1): credits charged = metered AI cost × markup ×
     100. Raises when the margin is unset or invalid (:func:`target_margin`)."""
     return 1 / (1 - target_margin(env))
 

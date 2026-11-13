@@ -224,6 +224,9 @@ def test_target_revenue_is_cost_over_one_minus_margin_rounded_up():
     # 1003 / (2/3) = 1504.5 -> 1505: rounded UP (the charge's direction), not to even and not down.
     assert margin._target_revenue(1003, Fraction(1, 3)) == 1505
     assert margin._target_revenue(1200, TEST_M) == 1400                  # exact: no rounding
+    # a small fractional part still rounds up (half-up rounding would give the lower value here)
+    exact = Fraction(1201) / (1 - TEST_M)
+    assert exact - int(exact) < Fraction(1, 2) and margin._target_revenue(1201, TEST_M) == int(exact) + 1
     assert margin._target_revenue(0, TEST_M) == 0
 
 
@@ -239,6 +242,13 @@ def test_target_line_reads_the_deploy_margin_and_never_carries_its_value():
     assert t["target_revenue_minor"] == math.ceil(Fraction(1200) / (1 - Fraction(decoy)))
     body = json.dumps(ov)                                       # a Fraction in the payload would not serialise
     assert decoy not in body and "1" * 6 not in body
+    m = Fraction(decoy)                                         # nor any other form of it: percent, markup
+    for form in (str(float(m * 100)), str(float(1 / (1 - m))), str(1 / (1 - m)), str(m)):
+        assert form not in body, form
+    # the payload's shape is pinned: a new margin-derived field cannot appear unnoticed
+    assert set(ov) == {"rate_configured", "cost_status", "cost_rate_micro_minor_per_token", "target_margin_set",
+                       "target_margin_basis", "target_margin_issue", "cost_basis", "currency", "tenants", "totals"}
+    assert "estimate" in ov["cost_basis"] and "not metered AI cost" in ov["cost_basis"]
 
 
 def test_a_retired_pricing_setting_removes_the_target_line_with_the_billing_refusal():

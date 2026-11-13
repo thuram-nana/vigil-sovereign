@@ -645,6 +645,17 @@ def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeyp
 
 
 @pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
+def test_flat_billing_ignores_a_retired_pricing_setting(monkeypatch, name):
+    # the refusal guards metered pricing only: the default (flat) launch and settle never read a pricing setting
+    monkeypatch.setenv(name, "2")
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, pub = _reserve(s)
+    assert pub["ok"] and read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"]) is None
+    assert _settle(s, owner, r, "completed")["settled"] == 1 and _avail(s) == 100
+    assert not config.MODEL_METER_DIR.exists()
+
+
+@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
 def test_a_retired_pricing_setting_at_settle_defers_a_charge(monkeypatch, name):
     # the margin is the only pricing input: a stale second knob refuses to price, so the charge waits (it is not
     # settled on a guess) until the setting is removed
