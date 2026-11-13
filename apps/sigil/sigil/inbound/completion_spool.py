@@ -176,6 +176,13 @@ class CompletionSpoolWatcher:
         # NONCE BIND: the completion must name THIS lease's launch, so a completion for an old lease can never
         # settle a newer re-lease of the same slug.
         if str(lease_doc.nonce) != str(doc.nonce):
+            if self._already_settled(doc.engagement_slug, str(doc.nonce), lease_doc):
+                # E3bc: the completion's OWN launch is already settled (its settle finished — e.g. by the drain's
+                # finish pass while this completion waited for a retry — and a later launch now holds the seam).
+                # Nothing is left for it to settle: archived as a safe no-op, never quarantined as a money alarm.
+                _sys.stderr.write(f"vigil settle-drain: a completion for {doc.engagement_slug} names a launch that is "
+                                  f"already settled (the seam now holds a later launch); archived as a no-op\n")
+                return None
             raise CompletionSpoolError(
                 f"completion nonce {doc.nonce!r} != published lease nonce {lease_doc.nonce!r} (stale/mismatched)")
         # (C) NON-TAUTOLOGICAL TENANT CROSS-CHECK: the owner-signed lease's OWN (org_id, scope_host) must hash
@@ -215,6 +222,22 @@ class CompletionSpoolWatcher:
         elif result.get("rolled_forward") and basis.startswith("completion:"):
             self._record_outcome(lease_doc, doc, outcome=basis.split(":", 1)[1])   # the RECORDED outcome
         return result
+
+    def _already_settled(self, slug: str, nonce: str, published: Any) -> bool:
+        """Whether launch ``(slug, nonce)`` — not the one the seam holds now (``published``) — is SETTLED: its seam
+        settlement marker lists it, or the spine carries its owner-signed settlement evidence (a decision record or a
+        settle entry) for ``(slug, nonce)`` under ``published``'s org (a slug is one org's: it hashes the org and the
+        host). Anything that cannot be read is False (the completion is then quarantined, as for any other
+        mismatch)."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+        try:
+            if is_lease_settled(self._base_dir, slug, nonce):
+                return True
+            from ..governor.launch_settlement import scan_settlement
+            return scan_settlement(self.store, self._owner_pubkey, org_id=str(published.org_id), slug=str(slug),
+                                   nonce=str(nonce)).settled
+        except Exception:  # noqa: BLE001 — cannot tell: never archived on a guess
+            return False
 
     def _record_outcome(self, lease_doc: Any, completion: Any, *, outcome: Optional[str] = None) -> None:
         """Best-effort tenant-scoped ``assessment_outcome`` projection for the customer notification centre

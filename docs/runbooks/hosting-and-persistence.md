@@ -84,7 +84,9 @@ the spine** — never the source of truth.
   `settle_completed` (with the amounts moved) when a settle finished a recorded decision a crash
   interrupted, and — with the flag on — `settle_interrupted` (report only) for a listed lease whose
   recorded decision has entries not yet landed; `--apply` finishes it. Do **not** move files from the
-  completion spool's `rejected/` back to `incoming/` by hand while a `sweep --apply` is running.
+  completion spool's `rejected/` back to `incoming/` by hand while a `sweep --apply` is running. A
+  completion whose own launch is already settled while a later launch holds the seam is archived as a
+  no‑op (a stderr line names it), not quarantined.
 
   **One launch per host, superseded reservations.** With `VIGIL_ONE_LAUNCH_PER_HOST=1` (default off) a
   customer holds at most one outstanding launch per (org, host): a second reserve is refused while an
