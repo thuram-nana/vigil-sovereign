@@ -10,6 +10,10 @@ AUDIT. `audit(store)` makes the same reads under `fold_read.auditing()`: every c
 with that read's own fresh build and compared with the cached state (match / MISMATCH / skipped / empty). The background thread re-runs it every
 `VIGIL_FOLD_CACHE_AUDIT_S` seconds (default 6 h; 0 = start-up warm-up only) and writes the result atomically to
 `config.FOLD_AUDIT_PATH`, which `vigil doctor` reads (a MISMATCH is a hard issue there) and `sigil verify` prints.
+A report describes the caches of the process that wrote it, named by a per-process `instance` nonce (a PID is not a
+name: a container's cockpit is PID 1 on every start). The cockpit holds an exclusive lock on the sibling
+`fold_cache_audit.lock` while it runs, so another process (`sigil verify` in an init container, a restarted cockpit)
+can tell whether that writer is still running from the lock alone, across PID namespaces on a shared SIGIL_HOME.
 A rebuild costs what a cold start costs, which is why the default interval is long; reads keep being served while
 the fresh fold is computed (outside the entry lock), but the final by-value compare runs UNDER that fold's entry
 lock, so its reads wait for it — O(the folded state; seconds at 1M customers, once per fold per audit). A MISMATCH discards that cache entry — the spine is
@@ -21,9 +25,11 @@ Everything here is a no-op unless `VIGIL_FOLD_CACHE_ENABLED` is on. FATAL-2: sov
 from __future__ import annotations
 
 import datetime as _dt
+import fcntl
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -35,11 +41,112 @@ from . import fold_read
 
 assert_no_offense()
 
-__all__ = ["audit", "report_is_live", "start_background", "supersede_dead_report", "warm_all", "write_report"]
+__all__ = ["audit", "hold_report_lock", "instance_id", "report_is_live", "start_background", "supersede_dead_report",
+           "warm_all", "write_report"]
 
 _log = logging.getLogger(__name__)
 _STARTED: "set[str]" = set()
 _STARTED_LOCK = threading.Lock()
+_INSTANCE: "list[str]" = [""]              # this process's report identity, drawn on first use
+_HELD: "dict[str, int]" = {}               # resolved lock path -> the fd that holds it, kept open for life
+_HELD_LOCK = threading.Lock()
+_LOCK_TRIES = 20                           # a prober holds the lock for microseconds; retry it briefly
+_LOCK_RETRY_S = 0.05
+
+
+def instance_id() -> str:
+    """This process's audit-report identity: a random nonce drawn once per process (a forked child draws its own).
+    It names the writer of a report where its PID cannot: a container's cockpit has the same PID on every start."""
+    if not _INSTANCE[0]:
+        _INSTANCE[0] = secrets.token_hex(16)
+    return _INSTANCE[0]
+
+
+def _forget_in_child() -> None:
+    """After a fork the child is another process: it draws its own instance and closes its inherited copies of the
+    report lock WITHOUT unlocking them (the parent still holds the lock), so a child that outlives the cockpit never
+    keeps the cockpit's report live."""
+    _INSTANCE[0] = ""
+    fds = list(_HELD.values())
+    _HELD.clear()
+    _HELD_LOCK.release()
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+os.register_at_fork(before=_HELD_LOCK.acquire, after_in_parent=_HELD_LOCK.release, after_in_child=_forget_in_child)
+
+
+def _lock_path(path: Optional[Path] = None) -> Path:
+    """The lock beside the report (`fold_cache_audit.json` -> `fold_cache_audit.lock`)."""
+    return (Path(path) if path is not None else config.FOLD_AUDIT_PATH).with_suffix(".lock")
+
+
+def _holds_lock(path: Optional[Path] = None) -> bool:
+    with _HELD_LOCK:
+        return str(_lock_path(path).resolve()) in _HELD
+
+
+def hold_report_lock(path: Optional[Path] = None) -> bool:
+    """Take the exclusive lock beside the audit report and keep it for the life of this process (the kernel drops it
+    when the process dies, in any PID namespace). The process that holds it is the running cockpit, so a report's
+    writer is still running iff the lock is held. Returns True iff this process holds it (False when another
+    running process does, or the lock cannot be taken)."""
+    lp = _lock_path(path)
+    key = str(lp.resolve())
+    with _HELD_LOCK:
+        if key in _HELD:
+            return True
+        try:
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lp, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            _log.warning("fold cache: cannot open the audit report lock %s: %s", lp, exc)
+            return False
+        for attempt in range(_LOCK_TRIES):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if attempt + 1 < _LOCK_TRIES:
+                    time.sleep(_LOCK_RETRY_S)        # a probe (shared, momentary) or another running cockpit
+                continue
+            except OSError as exc:
+                _log.warning("fold cache: cannot lock the audit report lock %s: %s", lp, exc)
+                break
+            _HELD[key] = fd
+            return True
+        os.close(fd)
+        return False
+
+
+def _release_report_lock(path: Optional[Path] = None) -> None:
+    """Drop this process's hold on the report lock (tests; a cockpit keeps it until it exits)."""
+    with _HELD_LOCK:
+        fd = _HELD.pop(str(_lock_path(path).resolve()), None)
+    if fd is not None:
+        os.close(fd)
+
+
+def _lock_held_elsewhere(path: Optional[Path] = None) -> bool:
+    """Whether ANOTHER running process holds the report lock. Probes with a shared, non-blocking lock it releases at
+    once, and never creates the file. When it cannot tell (the lock cannot be opened or probed) it answers True:
+    the report then stays live, so a recorded MISMATCH keeps counting (fail closed)."""
+    try:
+        fd = os.open(_lock_path(path), os.O_RDONLY)
+    except FileNotFoundError:
+        return False                               # never taken: no cockpit has run with this report
+    except OSError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:                                # EWOULDBLOCK: held; anything else: cannot tell
+        return True
+    finally:
+        os.close(fd)                               # releases the probe's own shared lock
+    return False
 
 
 def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
@@ -115,7 +222,7 @@ def audit(store) -> dict:
     results = [found[k] for k in sorted(found)] + errors
     return {"ok": not any(r.get("status") == "MISMATCH" for r in results),
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-            "pid": os.getpid(), "spine": str(getattr(store, "path", "")),
+            "pid": os.getpid(), "instance": instance_id(), "spine": str(getattr(store, "path", "")),
             "interval_s": config.fold_cache_audit_interval(), "folds": results}
 
 
@@ -165,10 +272,24 @@ def _pid_alive(pid: Any) -> bool:
     return True
 
 
-def report_is_live(report: dict) -> bool:
+def report_is_live(report: dict, path: Optional[Path] = None) -> bool:
     """A report describes the caches of the process that wrote it, and those die with it. True iff that process
-    is this one or is still running — only then does a recorded MISMATCH describe a cache that still serves."""
-    return _pid_alive(report.get("pid"))               # (this process is alive too)
+    is this one or is still running — only then does a recorded MISMATCH describe a cache that still serves.
+
+    The writer is named by its `instance` nonce, never by its PID alone. This process wrote it iff the nonce is
+    ours. Otherwise its writer is running iff the report lock (`hold_report_lock`) is held by another process: when
+    THIS process holds that exclusive lock, no other cockpit is running, so the writer is gone. A report written
+    before reports carried an instance falls back to its PID, but this process's own PID never makes it live (this
+    process would have written its instance)."""
+    inst = report.get("instance")
+    if not isinstance(inst, str) or not inst:
+        pid = report.get("pid")
+        return pid != os.getpid() and _pid_alive(pid)
+    if inst == instance_id():
+        return True
+    if _holds_lock(path):
+        return False
+    return _lock_held_elsewhere(path)
 
 
 def supersede_dead_report(path: Optional[Path] = None) -> bool:
@@ -176,20 +297,29 @@ def supersede_dead_report(path: Optional[Path] = None) -> bool:
     this process that keeps the old verdict under `superseded` (its caches died with it; this process rebuilds
     from the spine). Without this a recorded MISMATCH outlived every restart and kept `vigil doctor` (a HARD issue)
     and `sigil verify` failing until someone deleted the file by hand. A report from a LIVE process is left alone.
-    Returns True iff it replaced one."""
+    `vigil doctor` and `sigil verify` show a superseded MISMATCH as a note; a report that itself only carries one
+    (a restart before any audit) hands it on, so a run of restarts does not drop it. This process takes the report
+    lock first, so the report it writes is live. Returns True iff it replaced one."""
     p = Path(path) if path is not None else config.FOLD_AUDIT_PATH
     try:
         old = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if not isinstance(old, dict) or report_is_live(old):
+    if not isinstance(old, dict):
+        return False
+    hold_report_lock(p)
+    if report_is_live(old, p):
         return False
     folds = [f for f in old.get("folds", []) if isinstance(f, dict)]
+    verdict = {"pid": old.get("pid"), "ts": old.get("ts"), "ok": old.get("ok"),
+               "mismatched": [f.get("fold") for f in folds if f.get("status") == "MISMATCH"]}
+    earlier = old.get("superseded")
+    if not verdict["mismatched"] and isinstance(earlier, dict) and earlier.get("mismatched"):
+        verdict = earlier
     write_report({"ok": True, "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-                  "pid": os.getpid(), "spine": old.get("spine", ""), "interval_s": config.fold_cache_audit_interval(),
-                  "folds": [], "cache_enabled": config.fold_cache_enabled(),
-                  "superseded": {"pid": old.get("pid"), "ts": old.get("ts"), "ok": old.get("ok"),
-                                 "mismatched": [f.get("fold") for f in folds if f.get("status") == "MISMATCH"]}}, p)
+                  "pid": os.getpid(), "instance": instance_id(), "spine": old.get("spine", ""),
+                  "interval_s": config.fold_cache_audit_interval(), "folds": [],
+                  "cache_enabled": config.fold_cache_enabled(), "superseded": verdict}, p)
     return True
 
 
@@ -197,13 +327,15 @@ def start_background(store_factory: Callable[[], Any], *, name: str = "cockpit")
     """Start the warm-up (+ periodic audit) daemon thread once per process and spine, iff the fold cache is on.
     `store_factory` returns a fresh `SpineStore` for the spine the process serves. Returns the stop event (tests),
     or None when nothing was started (cache off, or already running for this spine). Either way it first
-    supersedes a report left by a process that is gone (`supersede_dead_report`)."""
+    supersedes a report left by a process that is gone (`supersede_dead_report`). With the cache on it holds the
+    report lock for the life of the process (`hold_report_lock`): the reports it writes are live while it runs."""
     try:
         supersede_dead_report()
     except Exception:  # noqa: BLE001 — never block a cockpit start on the report file
         _log.exception("could not supersede the previous fold-cache audit report")
     if not config.fold_cache_enabled():
         return None
+    hold_report_lock()
     try:
         ident = str(Path(store_factory().path).resolve())
     except Exception:  # noqa: BLE001 — an unresolvable store: nothing to warm

@@ -1075,9 +1075,10 @@ def cmd_verify(a) -> None:
 
 def _verify_fold_caches(rebuild: bool) -> bool:
     """Front C S0d — the fold-cache line(s) of `sigil verify`. Always: the cockpit's last background audit
-    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify. With `--folds` (and the
-    cache on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns
-    False iff a mismatch was found."""
+    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify; one a previous cockpit
+    recorded (superseded at the running cockpit's start) is printed, not counted. With `--folds` (and the cache
+    on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns False
+    iff a mismatch was found."""
     from . import config
     ok = True
     try:
@@ -1089,6 +1090,12 @@ def _verify_fold_caches(rebuild: bool) -> bool:
         rep = None
     if isinstance(rep, dict):
         from .governor import fold_warm
+        sup = rep.get("superseded")
+        sup_bad = sup.get("mismatched") if isinstance(sup, dict) else None
+        if isinstance(sup_bad, list) and sup_bad:
+            print(f"folds --: a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
+                  f"{', '.join(str(f) for f in sup_bad)}; its caches died with it, but investigate a possible spine "
+                  f"edit.")
         bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
         if bad and not fold_warm.report_is_live(rep):
             # the caches that disagreed died with that process; this one would rebuild them from the spine

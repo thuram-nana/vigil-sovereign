@@ -6,6 +6,7 @@
   * a report older than twice its own interval (+1 h) is a NOTE (the audit thread is not running);
   * a fold whose rebuild from the spine RAISED during the audit is counted and noted (never hidden);
   * an unreadable / malformed report is a note, never a crash.
+  * a MISMATCH a previous cockpit recorded (superseded at the running cockpit's start) is a NOTE naming it.
 
 Integration leg (doctor only — framework-free).
 """
@@ -87,3 +88,30 @@ def test_a_fold_that_could_not_be_rebuilt_is_counted_and_noted(tmp_path):
     assert "sigil verify" in notes[0]
     out = _doc.render({"ok": True, "issues": [], "notes": notes, "fold_cache_audit": section})
     assert "1 match, 0 MISMATCH, 0 skipped, 2 could not be rebuilt" in out
+
+
+def test_a_superseded_mismatch_is_a_note_naming_the_previous_cockpit(tmp_path):
+    """The running cockpit superseded, at its start, a report in which a previous cockpit recorded a MISMATCH: those
+    caches are gone, but the evidence of a possible spine edit is not — a NOTE (never a hard issue) naming that
+    cockpit's pid and audit time."""
+    (tmp_path / "fold_cache_audit.json").write_text(json.dumps(
+        {"ok": True, "ts": "2026-11-11T11:00:00+00:00", "pid": 1, "interval_s": 21600.0, "folds": [],
+         "superseded": {"pid": 1, "ts": "2026-11-10T09:00:00+00:00", "ok": False,
+                        "mismatched": ["governor.budget", "governor.wallet"]}}))
+    section, issues, notes = _doc._fold_cache_audit_report(tmp_path, now=NOW)
+    assert issues == [] and section["ok"] is True and section["superseded_mismatched"] == 2
+    assert notes == ["a previous cockpit (pid 1, audit 2026-11-10T09:00:00+00:00) recorded a MISMATCH in "
+                     "governor.budget, governor.wallet; its caches died with it, but investigate a possible spine "
+                     "edit."]
+    out = _doc.render({"ok": True, "issues": [], "notes": notes, "fold_cache_audit": section})
+    assert "a previous cockpit (pid 1" in out
+
+
+def test_a_superseded_verdict_without_a_mismatch_adds_nothing(tmp_path):
+    for sup in ({"pid": 1, "ts": "t", "ok": True, "mismatched": []}, {"pid": 1, "mismatched": "governor.wallet"},
+                "not a dict", {"pid": 1}):
+        (tmp_path / "fold_cache_audit.json").write_text(json.dumps(
+            {"ok": True, "ts": "2026-11-11T11:00:00+00:00", "pid": 2, "interval_s": 21600.0, "folds": [],
+             "superseded": sup}))
+        section, issues, notes = _doc._fold_cache_audit_report(tmp_path, now=NOW)
+        assert (issues, notes) == ([], []) and "superseded_mismatched" not in section, sup
