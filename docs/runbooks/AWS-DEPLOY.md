@@ -231,8 +231,9 @@ Finish with `GO-LIVE-quickstart.md` §9–§11 / `hosting-and-persistence.md` §
 
 ### Operational notes
 
-- **Cloudflare IP ranges change.** When they do, refresh both the nginx `set_real_ip_from` block
-  (`vigil-public.nginx.conf`) and the security group (re-run `provision.sh`, which pulls the current list).
+- **Cloudflare IP ranges change.** When they do, refresh the nginx `set_real_ip_from` block in BOTH
+  `vigil-public.nginx.conf` and `vigil-customer.nginx.conf` (they must stay identical; a test pins it) and the
+  security group (re-run `provision.sh`, which pulls the current list).
 - **Rotating the owner KEK's CMK:** `sigil key rotate-kek` re-wraps the KEK under a fresh KEK; to move to a
   new CMK, set the new `VIGIL_KMS_KEY_ID` and re-provision on a staging home first. The spine + every owner
   signature are untouched by a KEK rotation (only the wrapping key moves).

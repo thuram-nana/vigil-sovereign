@@ -120,6 +120,33 @@ def _federated_org_id(iss: str, sub: str) -> str:
     return _ORG_ID_PREFIX + hashlib.sha256(("fo:" + str(iss) + "\x00" + str(sub)).encode("utf-8")).hexdigest()[:24]
 
 
+def _trial_ip_bucket(ip) -> "Optional[str]":
+    """The per-IP trial-limit bucket for a client address: an IPv4 address as itself, an IPv6 address as its /64
+    (one host or VPS usually holds a whole /64, so per-address keys would not limit it), an IPv4-mapped IPv6
+    address as the IPv4 address. None when the address is missing or not an IP (the caller withholds the trial)."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return str(addr)
+
+
+class _WithholdAllTrialGrants:
+    """The per-IP trial limiter when the limit is ON but `VIGIL_TRIAL_GRANTS_PER_IP` is 0 or less: every preview
+    trial is withheld (fail closed), never an unlimited limit."""
+
+    def locked(self, key, *, now=None):
+        return 86400.0
+
+    def record_failure(self, key, *, now=None):
+        return None
+
+
 def _sign_monitoring(owner_key, grant):
     """Owner-sign the publishable ``SignedMonitoringAuthority`` for an ACTIVE registry grant. The private key
     is used only inside ``sign_monitoring_authority`` and never written anywhere."""
@@ -167,6 +194,7 @@ class Provisioner:
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
+                 trial_ip_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -213,6 +241,12 @@ class Provisioner:
         # Pricing S7 — the GLOBAL daily trial-launch cap (VIGIL_TRIAL_LAUNCH_DAILY_CAP). None ⇒ trial launches are
         # refused (the owner has not set a cap); paid launches never consult it.
         self.trial_launch_limiter = trial_launch_limiter
+        # Pricing S3c — an OPT-IN per-client-IP soft limit on preview TRIAL GRANTS (VIGIL_TRIAL_IP_LIMIT_ENABLED).
+        # Keyed on the client IP the edge reports (IPv4 /32, IPv6 /64 — `_trial_ip_bucket`); behind Cloudflare
+        # that is only the VISITOR's IP when the customer vhost restores it from CF-Connecting-IP (it does, see
+        # vigil-customer.nginx.conf). The limiter stores only sha256(key). Over the limit means no trial (the
+        # account is still created). The IP is never an identity or a claim key.
+        self.trial_ip_limiter = trial_ip_limiter
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -303,7 +337,7 @@ class Provisioner:
         nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
         return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
 
-    def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str) -> str:
+    def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str, ip: str = "") -> str:
         """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
         append is idempotent, so a retry re-applies it safely. Returns "granted", "none" (trial size 0) or
         "unavailable" (preview on and this org / mailbox already had a trial).
@@ -325,22 +359,48 @@ class Provisioner:
             return "granted"
         if self.wallet.has_grant_entry(org_id, preview):
             return "granted"                                    # an idempotent retry of THIS sign-up
-        if self.wallet.has_grant_entry(org_id, legacy) or self.trial_claims is None:
-            return "unavailable"
+        if self.wallet.has_grant_entry(org_id, legacy):
+            return self._trial_withheld(org_id, "legacy_trial")
+        if self.trial_claims is None:
+            return self._trial_withheld(org_id, "no_claim_ledger")
         from ..governor.trial_claim import key_digest
         from ..governor.trial_policy import canonical_email
         ekey = canonical_email(email)
         if not ekey:
-            return "unavailable"                                # no mailbox to key the one-per-mailbox limit on
+            return self._trial_withheld(org_id, "no_mailbox")   # no mailbox to key the one-per-mailbox limit on
         digest = key_digest("email", ekey)
         holder = self.trial_claims.claimant("email", digest)
         if holder is not None and holder != org_id:
-            return "unavailable"
+            return self._trial_withheld(org_id, "mailbox_claimed")
+        ip_key = None
         if holder is None:
+            # S3c gates run only for a NEW claim. A mailbox this org already claimed is a retry of a sign-up that
+            # stopped between its claim and its grant: it resumes to the grant, whatever the list or the per-IP
+            # count says now (re-running them could strand the claim with no trial).
+            # A disposable mailbox domain (vendored, sha-pinned list; unavailable list ⇒ no trial) gets no trial.
+            from ..governor.disposable_email import is_disposable
+            verdict = is_disposable(ekey)
+            if verdict is not False:
+                return self._trial_withheld(org_id, "disposable" if verdict else "list_unavailable")
+            if self.trial_ip_limiter is not None:               # opt-in per-IP soft limit
+                bucket = _trial_ip_bucket(ip)
+                if bucket is None:
+                    return self._trial_withheld(org_id, "ip_unknown")
+                ip_key = f"trial:grant:ip:{bucket}"
+                if self.trial_ip_limiter.locked(ip_key, now=self._now()) is not None:
+                    return self._trial_withheld(org_id, "ip_limit")
             self.trial_claims.claim("email", digest, org_id, issued_at=self._next_issued())
         self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=preview, source_ref=source_ref,
                           issued_at=self._next_issued())
+        if self.trial_ip_limiter is not None and ip_key is not None:
+            self.trial_ip_limiter.record_failure(ip_key, now=self._now())
         return "granted"
+
+    def _trial_withheld(self, org_id: str, reason: str) -> str:
+        """Record why a preview trial was withheld (non-critical telemetry: the operator can see a broken list or
+        a mis-set limit instead of trials silently vanishing) and return "unavailable"."""
+        self._audit("trial", org_id=org_id, outcome="withheld", reason=reason)
+        return "unavailable"
 
     # -- signup (two-phase) ------------------------------------------------------------------------
     def request_signup(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
@@ -423,7 +483,7 @@ class Provisioner:
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
             self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-            trial = self._grant_signup_trial(org_id, email, source_ref="signup")
+            trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
@@ -538,12 +598,12 @@ class Provisioner:
             # concurrent first-sign-ins can't double-mint. An existing binding is a straight login; a missing
             # one auto-provisions (the anti-takeover email-collision gate lives inside).
             if self.customer_credentials.by_federated(iss, sub) is None:
-                self._link_or_provision_federated(identity, now=t)
+                self._link_or_provision_federated(identity, now=t, ip=ip)
         result = self.finish_login(identity)                # re-resolves by (iss,sub) live; role-free tail
         self._audit("oidc_login", requester=result["username"], target=result["username"], outcome="ok")
         return result
 
-    def _link_or_provision_federated(self, identity: CustomerIdentity, *, now: float) -> str:
+    def _link_or_provision_federated(self, identity: CustomerIdentity, *, now: float, ip: str = "") -> str:
         """Caller holds the lock and has confirmed NO existing `(iss, sub)` binding. AUTO-PROVISION a fresh
         passwordless customer + org + trial for this verified Google identity and owner-sign the `(iss, sub)`
         binding — OR reconcile an in-flight retry (the deterministic federated account already exists, e.g. a
@@ -578,7 +638,7 @@ class Provisioner:
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
         self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
-        self._grant_signup_trial(org_id, email, source_ref="signup-google")
+        self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
@@ -1840,6 +1900,12 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         trial_claims=TrialClaimRegistry(store),
+        # Pricing S3c: the opt-in per-IP trial-grant soft limit (off unless VIGIL_TRIAL_IP_LIMIT_ENABLED).
+        # A limit of 0 or less with the flag ON withholds every preview trial (fail closed, like the S7 cap).
+        trial_ip_limiter=((LoginRateLimiter(config.TRIAL_IP_LIMIT_DIR, max_fails=config.TRIAL_GRANTS_PER_IP,
+                                            window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
+                           if config.TRIAL_GRANTS_PER_IP > 0 else _WithholdAllTrialGrants())
+                          if config.trial_ip_limit_enabled() else None),
         # Pricing S7: the global daily trial-launch cap; base_lock = window so it holds for the full day.
         trial_launch_limiter=(LoginRateLimiter(config.TRIAL_LAUNCH_CAP_DIR, max_fails=config.TRIAL_LAUNCH_DAILY_CAP,
                                                window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0)
