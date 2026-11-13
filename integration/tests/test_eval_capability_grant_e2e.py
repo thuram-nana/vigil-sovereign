@@ -131,11 +131,13 @@ def _revoke_record(owner, *, slug=_SLUG):
 
 
 def _publish(base, slug, records, *, seal_owner, seq):
-    """Mirror governor._publish: write the ordered record list + an owner SEAL over it."""
+    """Mirror governor._publish: write the ordered record list + an owner SEAL over it, then the seam-directory
+    floor at the seal seq (the sovereign raises it with every publication)."""
     seal = _ecg.build_seal(slug, seq, records,
                            sign_fn=lambda b: sign(seal_owner.private_key_b64, b),
                            pubkey=seal_owner.public_key_b64)
     _ecg.write_eval_capability_grants(base, slug, records, seal=seal)
+    _ecg.advance_publication_floor(base, slug, seq)
 
 
 def _verify(base, owner, *, slug=_SLUG, target=_TGT, actions_covered=None):
