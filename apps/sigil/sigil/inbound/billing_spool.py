@@ -63,6 +63,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import stat
 import time
@@ -77,6 +78,9 @@ from ..governor.billing import BillingSigner  # noqa: E402  (the EVIDENCE->owner
 
 _MAX_BYTES = 256 * 1024                     # mirror the proxy's envelope cap; a larger file is rejected unread
 _ENVELOPE_SCHEMA = "vigil.webhook.billing.v1"
+_STRIPE_ENVELOPE_SCHEMA = "vigil.webhook.stripe.v1"
+_STRIPE_SIG_MAX = 2048                      # mirrors the proxy's Stripe-Signature cap
+_RECEIVED_AT_FUTURE_SKEW_S = 300.0          # a receive time later than the drain's clock by more than this is refused
 _MAX_DECODED_BODY = 192 * 1024              # decoded-body cap: the proxy caps the raw body at 128K, whose base64
 #                                             envelope stays under the 256K read cap above; 192K is the ceiling a
 #                                             256K envelope can decode to (defense-in-depth, fail-closed).
@@ -126,6 +130,27 @@ class FlutterwaveEnvelopeV1(EnvelopeReader):
 
     def read(self, obj: "dict[str, Any]", *, drain_now: float) -> "tuple[bytes, str, float]":
         return decode_envelope_body(obj), self._secret, drain_now
+
+
+class StripeEnvelopeV1(EnvelopeReader):
+    """The ``vigil.webhook.stripe.v1`` envelope the proxy's ``/webhooks/stripe`` writes: ``{schema, body_b64,
+    stripe_signature, received_at}``. Stripe signs each delivery with its time, so the drain re-verifies that HMAC
+    AT THE RECEIVE TIME (a run that drains later than the 300 s tolerance still verifies, and a body cannot be
+    re-signed at rest without the secret). The receive time must be a positive finite number no later than the
+    drain's clock plus a small skew; the header must be an ASCII string within the proxy's cap."""
+
+    schema = _STRIPE_ENVELOPE_SCHEMA
+
+    def read(self, obj: "dict[str, Any]", *, drain_now: float) -> "tuple[bytes, str, float]":
+        raw = decode_envelope_body(obj)
+        sig = obj.get("stripe_signature")
+        if not isinstance(sig, str) or not sig or len(sig) > _STRIPE_SIG_MAX or not sig.isascii():
+            raise BillingSpoolError("envelope missing or malformed stripe_signature")
+        received = obj.get("received_at")
+        if isinstance(received, bool) or not isinstance(received, (int, float)) or not math.isfinite(received) \
+                or received <= 0 or received > float(drain_now) + _RECEIVED_AT_FUTURE_SKEW_S:
+            raise BillingSpoolError("envelope missing or implausible received_at")
+        return raw, sig, float(received)
 
 
 class BillingSpoolWatcher:
@@ -270,7 +295,8 @@ class BillingSpoolWatcher:
         """True ONLY for a failure the outbound egress explicitly marked retry-curable. Anything else — a raw
         ``OSError`` from a spine write, ``UnaccountedPayment`` (the plan alarm), a guard refusal — is NOT."""
         from ..governor.flutterwave_egress import FlutterwaveEgressError
-        return isinstance(exc, FlutterwaveEgressError) and exc.transient is True
+        from ..governor.stripe_egress import StripeEgressError
+        return isinstance(exc, (FlutterwaveEgressError, StripeEgressError)) and exc.transient is True
 
     def _state_path(self, name: str) -> Path:
         return self.retry / (name + ".state")

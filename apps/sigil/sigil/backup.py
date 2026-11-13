@@ -170,6 +170,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
                      "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
                      "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "
                      "reconcilable from the processor)",
+    "stripe-billing-spool": "the Stripe lane's money-IN webhook spool (the vigil-billing-drain-stripe default) — "
+                            "EXCLUDED for the same reason as `billing-spool`: pending signals; losing them fails SAFE "
+                            "(Stripe redelivers, and the re-fetch makes a re-ingest idempotent)",
     "spool": "settle / finding / billing spools of PENDING signals. A capture that is not point-in-time "
              "consistent with the spine can tear exactly-once (a settle landing between the spine read and the "
              "spool read => a lost refund; the reverse => a double grant). Losing pending signals fails SAFE: "

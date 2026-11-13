@@ -1334,7 +1334,8 @@ def cmd_ops_sweep(a) -> None:
             print("tx-refs requires --checkouts and --spool", file=sys.stderr)
             sys.exit(2)
         out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(a.checkouts), spool_dir=a.spool,
-                                                now=now, ttl_s=a.ttl)
+                                                now=now, ttl_s=a.ttl,
+                                                provider=getattr(a, "provider", "flutterwave"))
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
@@ -1362,14 +1363,118 @@ def _billing_checkout_creator():
     return fe.make_checkout_creator()
 
 
+def _stripe_object_fetcher():
+    """The server-side Stripe object re-fetch (Checkout Session / Invoice / Subscription) the Stripe drain lane MUST
+    use. DEFAULT-OFF on ``VIGIL_STRIPE_SECRET_KEY``: unset returns None and the Stripe lane refuses to run."""
+    from .governor import stripe_egress as se
+    if not se.stripe_secret_configured():
+        return None
+    return se.make_object_fetcher()
+
+
+def _stripe_checkout_creator():
+    """The outbound Stripe Checkout Session poster, DEFAULT-OFF on ``VIGIL_STRIPE_SECRET_KEY`` (None when unset, so
+    ``create_checkout`` keeps refusing)."""
+    from .governor import stripe_egress as se
+    if not se.stripe_secret_configured():
+        return None
+    return se.make_checkout_creator()
+
+
+def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bool = False):
+    """The ONE billing signer both drain lanes use: the owner catalog (mintable view), the expected amounts, the
+    owner-signed registries and the plan alarm. Only the provider differs between lanes."""
+    from .governor import catalog
+    from .governor.billing import BillingSigner
+    from .governor.invoices import InvoiceRegistry
+    from .governor.metering import PlanCreditLedger
+    from .governor.report_unlock import ReportUnlockRegistry
+    from .governor.subscription import SubscriptionRegistry
+    from .governor.wallet import WalletRegistry
+    return BillingSigner(provider, alarm_unaccounted_plans=alarm,
+                         wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
+                         plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
+                         expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
+                         # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
+                         # unlock is recorded whatever the preview flag says; the records stay inert until read.
+                         report_unlocks=ReportUnlockRegistry(store),
+                         require_verified_amount=require_verified_amount)
+
+
+def _same_dir(a: str, b: str) -> bool:
+    import os
+    try:
+        return bool(b) and os.path.realpath(a) == os.path.realpath(b)
+    except (OSError, ValueError):
+        return True                                      # cannot tell -> treat as the same (refuse)
+
+
+def _stripe_billing_watcher(a):
+    """The Stripe lane of ``billing-drain`` (``--provider stripe``): every refusal exits 2 and names env vars only.
+    Its own enable flag, the Stripe adapter opt-in, its own webhook secret (never the Flutterwave one), the
+    server-side object fetcher, a recognisable key mode, a pinned API version, and its own spool (never the
+    Flutterwave lane's). The signer requires a verified currency on every priced event."""
+    import os
+
+    from .governor import stripe_egress as se
+    from .governor.billing import StripeBillingProvider
+    from .inbound.billing_spool import BillingSpoolWatcher, StripeEnvelopeV1
+
+    def refuse(msg: str) -> None:
+        print(f"billing-drain --provider stripe: {msg} — refusing (fail-closed)", file=sys.stderr)
+        sys.exit(2)
+
+    if os.environ.get("VIGIL_STRIPE_BILLING_DRAIN_ENABLED", "") != "1":
+        print("billing-drain --provider stripe is disabled (set VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1 to enable)",
+              file=sys.stderr)
+        sys.exit(2)
+    if os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
+        refuse("the Stripe adapter is not enabled (VIGIL_BILLING_ENABLE_STRIPE)")
+    _require_expanded_path(a.spool, "--spool", required=True)
+    secret = os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET", "")
+    if not secret:
+        refuse("VIGIL_STRIPE_WEBHOOK_SECRET is not set")
+    if secret == os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", ""):
+        refuse("VIGIL_STRIPE_WEBHOOK_SECRET must differ from VIGIL_BILLING_WEBHOOK_SECRET (one secret per provider)")
+    from . import config
+    flw_default = os.path.join(os.environ.get("SIGIL_HOME") or str(config.SIGIL_HOME), "billing-spool")
+    if any(_same_dir(a.spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
+                                            os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
+        refuse("--spool is the Flutterwave billing spool (VIGIL_BILLING_SPOOL / VIGIL_BILLING_WEBHOOK_SPOOL); "
+               "the Stripe lane drains its own spool")
+    fetcher = _stripe_object_fetcher()
+    if not callable(fetcher):
+        refuse("no server-side Stripe object fetcher is configured (VIGIL_STRIPE_SECRET_KEY)")
+    mode = se.stripe_key_mode()
+    if mode is None:
+        refuse("VIGIL_STRIPE_SECRET_KEY is not a recognisable live or test key")
+    try:
+        se._api_version()
+    except se.StripeEgressError:
+        refuse("VIGIL_STRIPE_API_VERSION is unset or malformed")
+    # The Stripe lane is always loud: a paid Stripe object it cannot credit (no tenant, time or currency, an
+    # off-catalog or underpaid plan, a monitoring price with no line) quarantines and alarms, never a silent no-op —
+    # whatever the plan-checkout flag in this unit's environment says.
+    alarm = True
+    provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm,
+                                     strict=True)
+    del secret
+    signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True)
+    return BillingSpoolWatcher(signer, spool_dir=a.spool, envelope_reader=StripeEnvelopeV1())
+
+
 def cmd_billing_drain(a) -> None:
     """Drain / watch the inbound BILLING-webhook spool (SaaS Slice C) through ``BillingSigner.ingest``:
     ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
     CATALOG decides the entitlement -> one owner-signed mint. Default-OFF (``VIGIL_BILLING_DRAIN_ENABLED=1``)
     and fail-closed: the verif-hash secret comes ONLY from ``VIGIL_BILLING_WEBHOOK_SECRET`` (never argv, never
-    printed) and the drain refuses to run without a server-side transaction verifier."""
+    printed) and the drain refuses to run without a server-side transaction verifier. ``--provider stripe`` drains
+    the Stripe spool instead (``_stripe_billing_watcher``); the default Flutterwave lane is unchanged."""
     import os
 
+    if getattr(a, "provider", "flutterwave") == "stripe":
+        _run_billing_watcher(a, _stripe_billing_watcher(a))
+        return
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
@@ -1387,13 +1492,7 @@ def cmd_billing_drain(a) -> None:
               "verif-hash alone never grants value)", file=sys.stderr)
         sys.exit(2)
 
-    from .governor import catalog
-    from .governor.billing import BillingSigner, FlutterwaveBillingProvider
-    from .governor.invoices import InvoiceRegistry
-    from .governor.report_unlock import ReportUnlockRegistry
-    from .governor.metering import PlanCreditLedger
-    from .governor.subscription import SubscriptionRegistry
-    from .governor.wallet import WalletRegistry
+    from .governor.billing import FlutterwaveBillingProvider
     from .inbound.billing_spool import BillingSpoolWatcher
 
     store = SpineStore()
@@ -1402,18 +1501,17 @@ def cmd_billing_drain(a) -> None:
     # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
     from .config import billing_plan_alarm_enabled
     alarm = billing_plan_alarm_enabled()         # CHK-1b: an unaccountable paid plan charge ALARMS (quarantine)
-    signer = BillingSigner(FlutterwaveBillingProvider(secret, verifier,
-                                                      checkout_creator=_billing_checkout_creator(),
-                                                      alarm_unaccounted_plans=alarm),
-                           alarm_unaccounted_plans=alarm,
-                           wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
-                           plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
-                           expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
-                           # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
-                           # unlock is recorded whatever the preview flag says; the records stay inert until read.
-                           report_unlocks=ReportUnlockRegistry(store))
+    signer = _billing_signer(FlutterwaveBillingProvider(secret, verifier,
+                                                        checkout_creator=_billing_checkout_creator(),
+                                                        alarm_unaccounted_plans=alarm), store, alarm=alarm)
     watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
     del secret
+    _run_billing_watcher(a, watcher)
+
+
+def _run_billing_watcher(a, watcher) -> None:
+    """Run one billing drain pass (or watch), with the shared reporting: NET-2b parked count, and a FAILED exit
+    (the dead-man alarms) while anything sits in quarantine."""
     if getattr(a, "billing_cmd", "drain") == "watch":
         print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
         try:
@@ -2867,6 +2965,8 @@ def main(argv=None) -> None:
                           "are never refunded (required with --apply)")
     pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
     pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
+    pos.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
+                     help="(tx-refs) which processor's webhook spool --spool is")
     pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
     pos.set_defaults(fn=cmd_ops_sweep)
     pbd = sub.add_parser("billing-drain",
@@ -2876,6 +2976,8 @@ def main(argv=None) -> None:
     pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
     pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pbd.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
+                     help="which provider's spool this drains (stripe: default-OFF, VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
     pbd.set_defaults(fn=cmd_billing_drain)
     ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "
                                           "owner-signed account mode an enterprise tenant draws against in "

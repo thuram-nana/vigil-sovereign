@@ -364,3 +364,32 @@ def test_a_body_signed_with_another_secret_or_shaped_for_flutterwave_mints_nothi
     mac = hmac.new(_WHSEC.encode(), b"1000." + raw, hashlib.sha256).hexdigest()
     assert r.signer.ingest(raw, f"t=1000,v1={mac}", now=1000.0) is None
     assert r.fetched == [] and r.wallet.available("acme") == 0
+
+
+# ---- strict (drain-lane) mode: what the proxy already authenticated never fails silently ------------------------------
+def _strict_rig(objects):
+    r = _Rig(objects=objects)
+    r.provider._strict = True
+    return r
+
+
+def test_strict_mode_quarantines_a_body_the_drain_secret_does_not_verify():
+    r = _Rig(objects=[_session()])
+    assert r.send("checkout.session.completed", "cs_test_a1", secret="whsec_" + "rolled") is None   # lenient: no-op
+    s = _strict_rig([_session()])
+    with pytest.raises(StripeEventRefused, match="does not verify"):
+        s.send("checkout.session.completed", "cs_test_a1", secret="whsec_" + "rolled")
+    assert s.fetched == [] and s.wallet.available("acme") == 0
+
+
+def test_strict_mode_quarantines_a_signed_body_that_is_not_a_json_object():
+    for raw in (b"not json", b"[1, 2]", b"\xff\xfe"):
+        s = _strict_rig([])
+        mac = hmac.new(_WHSEC.encode(), b"1000." + raw, hashlib.sha256).hexdigest()
+        with pytest.raises(StripeEventRefused, match="not a JSON object"):
+            s.signer.ingest(raw, f"t=1000,v1={mac}", now=1000.0)
+
+
+def test_strict_mode_changes_nothing_for_a_good_delivery():
+    s = _strict_rig([_session()])
+    assert s.send("checkout.session.completed", "cs_test_a1") is not None and s.wallet.available("acme") == 200

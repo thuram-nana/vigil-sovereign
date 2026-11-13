@@ -306,9 +306,20 @@ def _iter_spool_bodies(d: Path) -> Iterable[dict]:
             yield body
 
 
-def _body_tx_ref(body: dict) -> Optional[str]:
+def _body_tx_ref(body: dict, provider: str = "flutterwave") -> Optional[str]:
+    """The checkout reference a spooled webhook body carries (report-only matching, never a money decision):
+    Flutterwave's ``data.tx_ref``; Stripe's ``data.object.client_reference_id``, else ``data.object.metadata.tx_ref``."""
     data = body.get("data")
-    ref = data.get("tx_ref") if isinstance(data, dict) else None
+    if provider == "stripe":
+        obj = data.get("object") if isinstance(data, dict) else None
+        if not isinstance(obj, dict):
+            return None
+        ref = obj.get("client_reference_id")
+        if not (isinstance(ref, str) and ref):
+            meta = obj.get("metadata")
+            ref = meta.get("tx_ref") if isinstance(meta, dict) else None
+    else:
+        ref = data.get("tx_ref") if isinstance(data, dict) else None
     return ref if isinstance(ref, str) and ref else None
 
 
@@ -327,13 +338,16 @@ def load_checkouts(path: "str | os.PathLike") -> list[dict]:
 
 
 def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLike", now: float,
-                           ttl_s: float) -> dict:
-    """REPORT-ONLY: classify each started checkout older than ``ttl_s`` against the billing spool."""
+                           ttl_s: float, provider: str = "flutterwave") -> dict:
+    """REPORT-ONLY: classify each started checkout older than ``ttl_s`` against the billing spool of ``provider``
+    (``flutterwave``, the default, or ``stripe``)."""
+    if provider not in ("flutterwave", "stripe"):
+        raise ValueError(f"unknown billing provider {provider!r}")
     spool = Path(spool_dir)
-    handled = {r for b in _iter_spool_bodies(spool / "processed") if (r := _body_tx_ref(b))}
-    quarantined = {r for b in _iter_spool_bodies(spool / "rejected") if (r := _body_tx_ref(b))}
+    handled = {r for b in _iter_spool_bodies(spool / "processed") if (r := _body_tx_ref(b, provider))}
+    quarantined = {r for b in _iter_spool_bodies(spool / "rejected") if (r := _body_tx_ref(b, provider))}
     # NET-2b: a webhook parked for a bounded transient-verify retry is PENDING, not missing (no retry/ ⇒ unchanged)
-    retrying = {r for b in _iter_spool_bodies(spool / "retry") if (r := _body_tx_ref(b))}
+    retrying = {r for b in _iter_spool_bodies(spool / "retry") if (r := _body_tx_ref(b, provider))}
     rows: list[dict] = []
     seen: set[str] = set()
     for c in checkouts:

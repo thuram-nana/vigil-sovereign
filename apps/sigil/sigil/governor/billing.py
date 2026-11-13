@@ -184,6 +184,10 @@ _STRIPE_NEW_PERIOD_REASONS = frozenset({"subscription_create", "subscription_cyc
 _STRIPE_TS_MAX = 10 ** 12
 
 StripeObjectFetcher = Callable[[str, str], Mapping[str, Any]]
+# Currencies Stripe checkout may charge in: ones whose Stripe minor unit is confirmed to equal the catalog's (ISO 4217)
+# minor unit, so unit_amount and the inbound amount mean the same money. Extend only after checking Stripe's currency
+# notes (ISK, HUF, TWD, UGX and the three-decimal currencies have special rules; MGA is zero-decimal in Stripe).
+_STRIPE_CHECKOUT_CURRENCIES = frozenset({"USD"})
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -219,7 +223,7 @@ class StripeBillingProvider(BillingProvider):
     def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
                  alarm_unaccounted_plans: bool = False, checkout_creator: "Optional[StripeCheckoutCreator]" = None,
-                 plan_periods: "Optional[Mapping[str, float]]" = None):
+                 plan_periods: "Optional[Mapping[str, float]]" = None, strict: bool = False):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
@@ -243,6 +247,11 @@ class StripeBillingProvider(BillingProvider):
         # owner catalog — the recurring interval of a plan checkout.
         self._checkout_creator = checkout_creator
         self._plan_periods: "dict[str, float]" = dict(plan_periods or {})
+        # The drain lane sets strict: every envelope in its spool was already authenticated by the proxy, so a body
+        # that does not verify with the DRAIN's secret (the proxy and drain secrets differ, or the envelope was
+        # altered at rest), or that is not a JSON object, is an anomaly to QUARANTINE (unit FAILED, alarm), never a
+        # silent no-op that buries a paid charge.
+        self._strict = bool(strict)
 
     def capabilities(self) -> frozenset[str]:
         # Webhook verification + the server-side object re-fetch, and hosted checkout (card, one-off or recurring)
@@ -284,6 +293,9 @@ class StripeBillingProvider(BillingProvider):
         amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
         if amount_minor <= 0 or not currency:
             raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        if currency not in _STRIPE_CHECKOUT_CURRENCIES:
+            raise ValueError(f"Stripe checkout is not enabled for {currency}: its Stripe minor unit must first be "
+                             "confirmed to match the catalog's (ISK and MGA, for example, differ) — refused")
         n = nonce or secrets.token_urlsafe(18)
         if not isinstance(n, str) or ":" in n or not n or any(not (0x21 <= ord(c) <= 0x7e) for c in n):
             raise ValueError("checkout nonce must be a non-empty printable string without ':' (the tx_ref "
@@ -308,6 +320,8 @@ class StripeBillingProvider(BillingProvider):
             ("subscription_data" if mode == "subscription" else "payment_intent_data"): {"metadata": dict(meta)},
             "success_url": success_url,
             "cancel_url": cancel_url,
+            # the charge must be in the catalog currency: never let Stripe localise it on this session
+            "adaptive_pricing": {"enabled": False},
         }
         if customer_email:
             params["customer_email"] = str(customer_email)
@@ -374,12 +388,17 @@ class StripeBillingProvider(BillingProvider):
             return None
         raw_body = bytes(raw_body)
         if not self._verify_signature(raw_body, sig_header, now):
+            if self._strict:
+                raise StripeEventRefused("the Stripe-Signature does not verify with this drain's webhook secret (the "
+                                         "proxy and drain secrets differ, or the envelope was altered at rest)")
             return None                              # fail-CLOSED: unverified -> no event, no mint
         try:
             obj = json.loads(raw_body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            return None
+            obj = None
         if not isinstance(obj, dict):
+            if self._strict:
+                raise StripeEventRefused("a signed Stripe body is not a JSON object")
             return None
         if "account" in obj:
             raise StripeEventRefused("signed Stripe event names a connected account — refused (standard account "

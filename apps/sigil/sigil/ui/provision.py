@@ -1029,8 +1029,17 @@ class Provisioner:
     def _checkout_provider(self):
         """The outbound hosted-checkout provider (Front B CHK-1), or None when the owner has not provisioned the
         processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
-        verif-hash secret and the processor key are read from the environment and never logged or returned."""
+        verif-hash secret and the processor key are read from the environment and never logged or returned.
+
+        ``VIGIL_BILLING_PROVIDER`` picks the processor: unset or ``flutterwave`` is the Flutterwave provider below;
+        ``stripe`` is :meth:`_stripe_checkout_provider`; any other value is "not configured" (None) — never a
+        fallback to the other processor, which would take a payment the configured drain does not credit."""
         import os as _os
+        choice = (_os.environ.get("VIGIL_BILLING_PROVIDER") or "").strip().lower()
+        if choice == "stripe":
+            return self._stripe_checkout_provider()
+        if choice not in ("", "flutterwave"):
+            return None
         secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
         if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
             return None
@@ -1038,6 +1047,31 @@ class Provisioner:
         from ..governor.billing import FlutterwaveBillingProvider
         return FlutterwaveBillingProvider(secret, fe.make_transaction_verifier(),
                                           checkout_creator=fe.make_checkout_creator())
+
+    @staticmethod
+    def _stripe_checkout_provider():
+        """The Stripe hosted-checkout provider, or None unless every precondition of the Stripe lane holds: the
+        adapter opt-in (``VIGIL_BILLING_ENABLE_STRIPE``), the Stripe webhook secret (the drain that credits these
+        payments needs it), the API key with a recognisable live/test mode, and a pinned API version. Plan
+        periods come from the owner catalog. Secrets are read from the environment and never logged or returned."""
+        import os as _os
+        if (_os.environ.get("VIGIL_BILLING_ENABLE_STRIPE") or "").strip().lower() not in ("1", "true", "yes"):
+            return None
+        whsec = (_os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET") or "").strip()
+        from ..governor import stripe_egress as se
+        mode = se.stripe_key_mode()
+        if not whsec or not se.stripe_secret_configured() or mode is None:
+            return None
+        try:
+            se._api_version()
+        except se.StripeEgressError:
+            return None
+        from ..governor import catalog
+        from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, StripeBillingProvider
+        periods = {pid: ent.period_s for pid, ent in catalog.entitlements().items()
+                   if ent.kind == EVENT_SUBSCRIPTION_ACTIVE}
+        return StripeBillingProvider(whsec, fetcher=se.make_object_fetcher(), expected_mode=mode,
+                                     checkout_creator=se.make_checkout_creator(), plan_periods=periods)
 
     @staticmethod
     def _checkout_offered() -> "tuple[dict, dict]":
