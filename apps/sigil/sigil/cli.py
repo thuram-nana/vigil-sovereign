@@ -1256,6 +1256,11 @@ def cmd_settle_drain(a) -> None:
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped" + (f", {r['deferred']} deferred (retried next drain)" if r.get("deferred")
                                            else ""))
+        if r.get("settle_completed") or r.get("settle_unfinished") or r.get("settle_finish_error"):
+            # E3bc, only while VIGIL_SETTLE_SPINE_RECORD is on and a recorded settle needed finishing
+            print(f"  interrupted settles: {r.get('settle_completed', 0)} finished, {r.get('settle_unfinished', 0)} "
+                  f"left for the next pass"
+                  + (f" (not checked: {r['settle_finish_error']})" if r.get("settle_finish_error") else ""))
         if "expired_settled" in r:              # E8, only while VIGIL_PAUSED_EXPIRY_SETTLE is on
             print(f"  expired paused launches: {r['expired_settled']} settled, {r['expired_unsettled']} still held"
                   + (f" (not checked: {r['expired_error']})" if r.get("expired_error") else ""))

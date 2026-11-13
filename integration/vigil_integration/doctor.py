@@ -1524,6 +1524,11 @@ def _probe_model_gateway(url: str) -> "bool | None":
     return None
 
 
+#: How long a lease may stay published after its settlement marker was written before ``vigil doctor`` reports the
+#: settle as unfinished (E3bc): a settle retires its lease within moments, and the settle drain (every ~60 s) finishes
+#: an interrupted one, so a lasting one is an issue, a settle in progress is not.
+_UNFINISHED_SETTLE_GRACE_S = 600.0
+
 #: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
 #: (the full list is in ``report["paused_launches"]["unreadable"]``) — keeps one bad directory from flooding it.
 _UNREADABLE_PAUSE_SLUGS_SHOWN = 10
@@ -1926,6 +1931,32 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the paused-launch probe must never crash the report
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")
+
+    # E3bc — a customer launch whose settle was recorded but has not finished. A settle writes the lease's settlement
+    # marker BEFORE it moves any money and retires the lease LAST, so a lease still published although its marker
+    # lists it (past a short grace) is a settle whose refund may not have landed — and while its recorded money has
+    # not landed, a new launch on that host is refused with a retry. With VIGIL_SETTLE_SPINE_RECORD on the settle
+    # drain finishes it on its next pass, so a lasting one is a HARD issue (`launch_settlements["unfinished"]`, slugs
+    # only, added only when non-empty). Off (default): nothing records the decision to finish it from, nothing is
+    # added. Best-effort: never raises.
+    try:
+        if (_runtime_env().get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _AFFIRMATIVE:
+            import time as _time
+
+            from .live.credit_lease_broker import unfinished_settlements
+            _sbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+            _unf = unfinished_settlements(_sbase, now=_time.time(), grace=_UNFINISHED_SETTLE_GRACE_S)
+            if _unf:
+                report["launch_settlements"] = {"unfinished": sorted({s for s, _n in _unf})}
+                _issue(f"{len(_unf)} customer launch settle(s) were recorded but have not finished (the lease is still "
+                       f"published after its settlement was recorded): the refund may not have landed, and while it "
+                       f"has not, a new launch on that host is refused with a retry. The settle drain finishes it on "
+                       f"its next pass (VIGIL_SETTLE_SPINE_RECORD on, in the drain's environment too); if it stays "
+                       f"listed, check the settle drain unit (`vigil alerts --status`) and run "
+                       f"`sigil ops-sweep reservations` to see what is pending.")
+    except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
+        report["launch_settlements"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the launch-settlement probe could not run: {exc}")
 
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.

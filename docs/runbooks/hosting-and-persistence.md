@@ -64,12 +64,18 @@ the spine** — never the source of truth.
   lock cannot be opened or, with the flag on, the spine cannot be read (only the seam settlement
   marker then decides whether the launch is already settled); a resume never takes the settle
   lock. With the flag on, a start on a host whose previous launch has a recorded settlement with
-  money still to land is refused with a retry until the settle drain or `ops-sweep reservations
-  --apply` finishes that settlement: both finish it through the previous launch's lease on the
-  seam, which a start would otherwise replace. The lock files are transients that both backup legs
-  skip: `<stem>.settle.lock` beside the spine, the settlement, pause and paused‑past‑expiry
-  `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the completion spool
-  (created by the settle drain; a root `ops-sweep` that must create it hands it to the spool
+  money still to land is refused with a retry until that settlement is finished through the previous
+  launch's lease on the seam, which a start would otherwise replace. The settle drain finishes it on
+  its next pass, with no operator: with the flag on, every pass finishes each recorded settle of a
+  lease in its scope that was interrupted — whatever decided it (a completion, a cancel, a sweep, an
+  expired pause) — moving only the recorded decision, exactly once, then retires the lease, and prints
+  `interrupted settles: N finished, M left for the next pass` when it acted. `ops-sweep reservations
+  --apply` finishes it too. `vigil doctor` (with the flag on in its environment or `sigil.env`) reports a
+  lease still published more than 10 minutes after its settlement was recorded as a hard issue
+  (`launch_settlements.unfinished`), so such a hold is never silent. The lock files are transients that
+  both backup legs skip: `<stem>.settle.lock` beside the spine, the settlement, pause and
+  paused‑past‑expiry `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the
+  completion spool (created by the settle drain; a root `ops-sweep` that must create it hands it to the spool
   directory's owner).
 
   **`ops-sweep reservations` statuses** added by this: `completion_pending` / `completion_unknown` /

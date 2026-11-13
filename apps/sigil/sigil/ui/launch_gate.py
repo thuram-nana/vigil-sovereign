@@ -971,11 +971,12 @@ class LaunchGate:
             return None
         ev_e = None
         if config.settle_spine_record_enabled() and self.owner_key is not None:
-            # E3bc: the seam holds ONE lease per org+host, and the drain's re-drive and the sweep finish an interrupted
-            # settle only through that lease. So while the earlier launch's recorded decision has an entry that has not
-            # landed, its lease stays on the seam: this publish is refused with a retry until the drain or the sweep
-            # has finished it — the recorded refund always lands, exactly once. Its marker alone says nothing about
-            # the money (it is written before the money moves).
+            # E3bc: the seam holds ONE lease per org+host, and the settle drain (its re-drive, and its pass that
+            # finishes every recorded settle of a lease on the seam) and the sweep finish an interrupted settle only
+            # through that lease. So while the earlier launch's recorded decision has an entry that has not landed, its
+            # lease stays on the seam: this publish is refused with a retry until the drain or the sweep has finished
+            # it — the recorded refund always lands, exactly once. Its marker alone says nothing about the money (it
+            # is written before the money moves).
             from ..governor.launch_settlement import scan_settlement
             since = prior[1] if prior is not None and prior[0] == earlier else None
             ev_e = scan_settlement(self.store, self.owner_key.public_key_b64, org_id=doc.org_id,

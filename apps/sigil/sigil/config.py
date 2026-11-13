@@ -469,9 +469,10 @@ def settle_spine_record_enabled() -> bool:
     unset / non-affirmative): no record is appended and every settle path writes the same spine records as
     before. Resolved at call time.
 
-    It gates ONLY: the decision-record append; the sweep's finish path for a marker-present lease
-    (``ops_sweeps``); the spine check of an earlier launch in ``_earlier_launch_in_flight``; and the spine check in
-    ``pause_launch``. Settle evidence already on the spine (a refund grant, a postpaid settle) is honoured either
+    It gates ONLY: the decision-record append; the sweeps' finish paths for a recorded settle (``ops_sweeps``); the
+    settle drain's pass that finishes every recorded settle of a lease still on the seam
+    (``ops_sweeps.finish_interrupted_settles`` — it only rolls forward a recorded decision); the spine check of an
+    earlier launch in ``_earlier_launch_in_flight``; and the spine check in ``pause_launch``. Settle evidence already on the spine (a refund grant, a postpaid settle) is honoured either
     way. OWNER DECISION OD-4: set it IDENTICALLY for every process that settles — the cockpit, the customer
     server, the settle-drain and ``ops-sweep`` — or a process with it off settles without a record its crash
     could be finished from."""

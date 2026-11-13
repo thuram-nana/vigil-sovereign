@@ -400,14 +400,53 @@ class CompletionSpoolWatcher:
             return                                   # left in working/: the sweep reads it as pending; retried next drain
 
     def drain(self) -> dict:
-        """One settle pass: :meth:`_drain_completions`, then — only while ``config.paused_expiry_settle_enabled()``
-        (E8, default OFF; off => byte-identical) — :meth:`_settle_expired_pauses`, whose counts are added as
-        ``expired_settled`` / ``expired_unsettled``. Completions go FIRST, so a run that finished is charged before
-        an expired paused launch of the same lease could be considered."""
+        """One settle pass: :meth:`_drain_completions`; then — only while ``config.settle_spine_record_enabled()``
+        — :meth:`_finish_interrupted_settles`, which adds ``settle_completed`` / ``settle_unfinished`` only when it
+        acted; then — only while ``config.paused_expiry_settle_enabled()`` (E8, default OFF) —
+        :meth:`_settle_expired_pauses`, whose counts are added as ``expired_settled`` / ``expired_unsettled``. With
+        both flags off the pass is byte-identical. Completions go FIRST, so a run that finished is charged (and a
+        completion's own interrupted settle finished, with its notification) before anything else of its lease."""
         out = self._drain_completions()
         from .. import config
+        if config.settle_spine_record_enabled():
+            out.update(self._finish_interrupted_settles())
         if config.paused_expiry_settle_enabled():
             out.update(self._settle_expired_pauses())
+        return out
+
+    def _finish_interrupted_settles(self) -> dict:
+        """E3bc: finish every RECORDED settle of a lease on this drain's seam (in its scope) that a crash or an
+        error interrupted, whatever decided it — a completion, a cancel, a sweep or an expired pause
+        (``ops_sweeps.finish_interrupted_settles``: ``settle_launch(finish_only=True)``, which moves only the recorded
+        decision, exactly once). Without this an expired-pause settle interrupted after its settlement marker would
+        wait for an operator's sweep, and a relaunch on that host would be refused until then. A roll-forward of a
+        completion's settle writes that completion's notification (NTF-3), as the re-drive does. Returns
+        ``settle_completed`` (finished this pass) and ``settle_unfinished`` (left for the next pass, reported on
+        stderr), each only when non-zero; ``settle_finish_error`` when the pass itself could not run."""
+        import types
+
+        from ..ops_sweeps import finish_interrupted_settles
+        try:
+            rows = finish_interrupted_settles(self._gate, now=float(self._now()), scope=self.scope)
+        except Exception as exc:  # noqa: BLE001 — this pass never sinks the completion drain
+            _sys.stderr.write(f"vigil settle-drain: WARNING interrupted settles not checked: "
+                              f"{type(exc).__name__}: {exc}\n")
+            return {"settle_finish_error": type(exc).__name__}
+        done = [r for r in rows if r["status"] == "settle_completed"]
+        left = [r for r in rows if r["status"] in ("deferred", "settle_failed")]
+        for r in done:
+            basis = str(r.get("basis") or "")
+            if basis.startswith("completion:"):
+                lease_doc = types.SimpleNamespace(engagement_slug=r["slug"], org_id=r["org_id"], nonce=r["nonce"])
+                self._record_outcome(lease_doc, None, outcome=basis.split(":", 1)[1])   # the RECORDED outcome
+        for r in left:
+            _sys.stderr.write(f"vigil settle-drain: a recorded settle of {r['slug']} is not finished yet: "
+                              f"{r['status']}{' (' + str(r['error']) + ')' if r.get('error') else ''}\n")
+        out: dict = {}
+        if done:
+            out["settle_completed"] = len(done)
+        if left:
+            out["settle_unfinished"] = len(left)
         return out
 
     def _settle_expired_pauses(self) -> dict:

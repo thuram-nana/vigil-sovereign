@@ -51,6 +51,7 @@ __all__ = [
     "record_lease_settlement",
     "is_lease_settled",
     "tombstone_credit_lease",
+    "unfinished_settlements",
 ]
 
 _LEASE_DIRNAME = "credit-launch-leases"
@@ -288,6 +289,27 @@ def is_lease_settled(base_dir: Any, slug: str, nonce: Any) -> bool:
     if path is None or not path.is_file():
         return False
     return str(nonce) in _read_settled_nonces(path)
+
+
+def unfinished_settlements(base_dir: Any, *, now: float, grace: float) -> list[tuple[str, str]]:
+    """Every ``(slug, nonce)`` whose lease is still published on the seam although its settlement marker lists it,
+    with that marker last written more than ``grace`` seconds before ``now``. A settle records the marker BEFORE it
+    moves any money and retires (tombstones) the lease LAST, so such a lease is a settle that has not finished: its
+    refund may not have landed yet. Read-only and total: an unreadable lease or marker contributes nothing."""
+    out: list[tuple[str, str]] = []
+    for b in list_credit_leases(base_dir):
+        try:
+            doc = b.signed_lease.document
+            slug, nonce = str(doc.engagement_slug), str(doc.nonce)
+            if not is_lease_settled(base_dir, slug, nonce):
+                continue
+            path = settlement_path(base_dir, slug)
+            if path is None or now < path.stat().st_mtime + float(grace):
+                continue
+        except Exception:  # noqa: BLE001 — an odd or racing seam is no evidence
+            continue
+        out.append((slug, nonce))
+    return out
 
 
 def tombstone_credit_lease(base_dir: Any, slug: str, expect_nonce: Any = None) -> bool:

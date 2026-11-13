@@ -16,7 +16,10 @@
    ``retry/`` for a bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``. REPORT
    ONLY: this sweep never mints, never calls the provider, and never moves a file.
 
-Both reservation sweeps read the spine's settlement evidence in ONE pass for all the launches they list.
+3. INTERRUPTED RECORDED SETTLES (``finish_interrupted_settles``, run by the settle drain on every pass while
+   ``VIGIL_SETTLE_SPINE_RECORD`` is on): finishes, from its RECORDED decision only, every settle of a lease still on
+   the seam that a crash or an error interrupted. Every sweep and that pass read the spine's settlement evidence
+   in ONE pass for all the launches they list.
 
 SOVEREIGN plane: imports ``sigil`` + ``vigil_core`` + the import-clean credit-lease seam; no framework/offense.
 """
@@ -318,6 +321,74 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
                          **_metered_spend(gate, slug_, nonce_)})
     return {"applied": bool(apply), "items": rows}
+
+
+def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*") -> "list[dict]":
+    """FINISH every recorded settle of a lease still on ``gate``'s seam (only ``scope``'s, unless ``*``) that a crash
+    or an error interrupted — whatever decided it (a completion, a cancel, a sweep, an expired pause) — so a recorded
+    refund never waits for an operator and a relaunch on that host is never held back by it. The settle drain runs
+    this on every pass while ``VIGIL_SETTLE_SPINE_RECORD`` is on; with it off this returns ``[]`` and reads nothing.
+
+    A lease is finished when its RECORDED decision has an entry that has not landed (``LaunchGate.
+    interrupted_settlements``: every listed lease's evidence read in ONE pass over the spine, the prune-durable
+    seen-sets consulted only for an entry the scan did not find), or when its settlement marker is present while the
+    lease is still published (a settle stopped before its last step). It goes through ``settle_launch(finish_only=
+    True)`` — the exactly-once settle under the cross-process settle lock, which only rolls forward the recorded
+    decision (never a fresh one, never this caller's amounts) and then retires the lease — so this moves no money
+    that was not already decided.
+
+    One row per lease it acted on: ``settle_completed`` (the moved amounts and the recorded ``basis``),
+    ``already_settled`` (nothing was left to move; the lease is retired), ``deferred`` (a busy lock or ledger: the
+    next pass retries) or ``settle_failed`` (with ``error``). Never raises for one lease."""
+    from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
+    from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
+
+    from . import config
+
+    if not config.settle_spine_record_enabled():
+        return []
+    kp = gate.owner_key
+    if kp is None:
+        return []
+    root = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+    base = gate._seam_base()
+    leases = []
+    for b in list_credit_leases(base):
+        try:
+            doc = b.signed_lease.document
+            if scope != "*" and doc.engagement_slug != scope:
+                continue
+            if doc.engagement_slug != b.slug or not verify_credit_launch_lease(b.signed_lease, root)[0]:
+                continue                                   # a lease that does not verify is never acted on
+        except Exception:  # noqa: BLE001 — an unreadable bundle is skipped
+            continue
+        leases.append(b)
+    if not leases:
+        return []                                          # nothing on the seam: the spine is not read
+    pending = gate.interrupted_settlements([b.signed_lease for b in leases])
+    rows: "list[dict]" = []
+    for b in leases:
+        doc = b.signed_lease.document
+        oid, slug, nonce = str(doc.org_id), str(doc.engagement_slug), str(doc.nonce)
+        if (oid, slug, nonce) not in pending and not is_lease_settled(base, slug, nonce):
+            continue                                       # no recorded settle of it is left unfinished
+        row: dict = {"slug": slug, "org_id": oid, "nonce": nonce}
+        try:
+            r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
+                                   basis="sweep:refund", finish_only=True)
+        except Exception as e:  # noqa: BLE001 — one bad lease never sinks the pass (a settle is atomic)
+            rows.append({**row, "status": "settle_failed", "error": f"{type(e).__name__}: {e}"})
+            continue
+        if r.get("rolled_forward"):
+            rows.append({**row, "status": "settle_completed", "basis": str(r.get("basis") or ""), **_moved(r)})
+        elif not r.get("ok") and r.get("retry"):
+            rows.append({**row, "status": "deferred", "error": str(r.get("error", ""))})
+        elif not r.get("ok"):
+            rows.append({**row, "status": "settle_failed", "error": str(r.get("error", ""))})
+        elif r.get("action") == "launch_already_settled":
+            rows.append({**row, "status": "already_settled"})
+    return rows
 
 
 _REFUND_OUTCOMES = frozenset({"failed", "canceled"})     # a completion whose settle is the full refund anyway
