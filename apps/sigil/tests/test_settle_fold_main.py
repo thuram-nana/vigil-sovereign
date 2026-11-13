@@ -40,6 +40,7 @@ Mutation-verify targets (each neuter turns a NAMED test red):
   * the sweep's in-lock pause_unknown check removed         -> test_the_sweeps_in_lock_pause_unknown_branch_...
   * the drain's in-lock past-expiry guard passing a None    -> test_a_failed_completion_whose_past_expiry_record_...
   * the postpaid mover ignores the seen-set                 -> test_a_pruned_landed_postpaid_settle_is_not_reissued_...
+  * the relaunch gate's _unlanded ignores a seen-set        -> test_flag_on_a_relaunch_over_a_landed_settle_the_live_...
 
 Run: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -m pytest apps/sigil/tests/test_settle_fold_main.py
 """
@@ -1501,6 +1502,50 @@ def test_flag_on_a_relaunch_after_a_settle_whose_money_landed_is_not_held_back(r
         _settle(s, rA, 0, basis="completion:failed")
     restore()
     assert _avail(s) == 1_000 and read_credit_lease(_base(), rA["slug"]) is not None
+    _, out = _relaunch(s, 100, "B" * 16)
+    assert out["ok"] is True, out                                    # nothing of A's is left to land
+    assert read_credit_lease(_base(), rA["slug"]).signed_lease.document.nonce == "B" * 16
+
+
+@pytest.mark.parametrize("mode", ["prepaid", "plan", "postpaid"])
+def test_flag_on_a_relaunch_over_a_landed_settle_the_live_scan_no_longer_sees_publishes(record_on, mode,
+                                                                                        monkeypatch):
+    """The relaunch gate confirms a recorded entry the LIVE scan misses against the prune-durable seen-sets (plan /
+    wallet ``has_grant_entry``, ``has_credit_entry``) before it calls it unlanded: a settle whose money landed never
+    holds a relaunch back, and ``interrupted_settlement`` reports nothing for it."""
+    import vigil_integration.live.credit_lease_broker as B
+    s = _store()
+    if mode == "postpaid":
+        _seat(s, credits=0, postpaid=(5000, 30))
+    elif mode == "plan":
+        _seat(s, credits=0, plan=1_000)
+    else:
+        _seat(s, credits=1_000)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    restore = _kill(monkeypatch, B, "tombstone_credit_lease")        # the money landed; only the tombstone is left
+    with pytest.raises(SystemExit):
+        _settle(s, rA, 0, basis="completion:failed")
+    restore()
+    landed = scan_settlement(s, ensure_owner_keypair().public_key_b64, org_id=ORG, slug=rA["slug"],
+                             nonce=rA["nonce"]).landed
+    assert landed == ({"postpaid"} if mode == "postpaid" else {"plan"} if mode == "plan" else {"wallet"})
+    real, real_many = ls.scan_settlement, ls.scan_settlements
+
+    def _live_miss(*a, **k):                                         # the settle entries left the live scan (a prune)
+        ev = real(*a, **k)
+        ev.landed.clear()
+        return ev
+
+    def _live_miss_many(*a, **k):
+        evs = real_many(*a, **k)
+        for ev in evs.values():
+            ev.landed.clear()
+        return evs
+
+    monkeypatch.setattr(ls, "scan_settlement", _live_miss)
+    monkeypatch.setattr(ls, "scan_settlements", _live_miss_many)
+    assert LaunchGate(s).interrupted_settlement(rA["lease"]) is None  # the seen-sets confirm it landed
+    assert LaunchGate(s).interrupted_settlements([rA["lease"]]) == {}
     _, out = _relaunch(s, 100, "B" * 16)
     assert out["ok"] is True, out                                    # nothing of A's is left to land
     assert read_credit_lease(_base(), rA["slug"]).signed_lease.document.nonce == "B" * 16
