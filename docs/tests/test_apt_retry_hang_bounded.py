@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-import tempfile
 from pathlib import Path
 
 _SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "apt-retry.sh"
@@ -47,7 +46,13 @@ def test_a_hung_apt_get_is_killed_and_the_script_exits_quickly(tmp_path: Path):
     env["PATH"] = f"{bindir}:{env['PATH']}"
     env["APT_RETRY_UPDATE_TIMEOUT"] = "1"   # kill the hang after 1s per attempt
     env["APT_RETRY_INSTALL_TIMEOUT"] = "1"
-    # 4 attempts * ~1s + backoffs(5+15+45=65s) ~= 70s worst case; give a safe outer bound.
+    # HERMETIC: probe no real apt sources (an empty file names no mirror host, so no DNS lookup runs) and
+    # disable the mirror fallback, so only the default-mirror retry loop is exercised.
+    empty_sources = tmp_path / "empty.sources"
+    empty_sources.write_text("", encoding="utf-8")
+    env["APT_RETRY_SOURCES_FILES"] = str(empty_sources)
+    env["APT_RETRY_FALLBACK_MIRRORS"] = ""
+    # 2 default attempts * ~1s + one 5s backoff ~= 7s; give a safe outer bound.
     proc = subprocess.run(["bash", str(_SCRIPT), "nftables"], env=env,
                           capture_output=True, text=True, timeout=120)
     # It must FAIL (persistent hang) but must NOT have hung past the outer timeout — reaching here proves it
