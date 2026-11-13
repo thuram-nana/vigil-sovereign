@@ -99,6 +99,9 @@ CACHE_DIR = SIGIL_HOME / "cache"
 # `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower
 # it — a routine reset cannot roll the durable floor back. See spine/floor.py.
 FLOOR_PATH = SIGIL_HOME / "floor.json"
+# PRICING M1c: the model gateway's per-launch meters (hash-chained JSONL, one per (engagement, nonce)). MONEY data:
+# a run's charge is computed from its meter at settle, so the directory is in every backup.
+MODEL_METER_DIR = SIGIL_HOME / "model_meter"
 
 # The segment-rotation layout (manifest, lockfile, segments dir, …) is NOT named here: it is derived from
 # the spine data-file path — and NAMESPACED BY THAT FILE'S STEM — by `spine.manifest.SpineLayout.for_path`,
@@ -556,6 +559,46 @@ def fold_cache_audit_interval() -> float:
     return v if v > 0 and v == v and v != float("inf") else 0.0
 
 
+def metered_billing_enabled() -> bool:
+    """True iff customer runs are billed METERED (PRICING M1c; design §4): a run's charge is its model gateway
+    meter's cost x K, clamped to [floor, reservation], instead of the flat full reservation. OFF by default
+    (`VIGIL_METERED_BILLING` unset): the launch mints no model grant and settle is byte-identical (flat). Turning it
+    on REQUIRES the model gateway (`model_gateway_enabled`), which `vigil doctor` checks. Read at call time."""
+    return (os.environ.get("VIGIL_METERED_BILLING") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def model_gateway_enabled() -> bool:
+    """True iff the cockpit starts the sovereign model gateway (`sigil.model_gateway`) at boot
+    (`VIGIL_MODEL_GATEWAY_ENABLED` affirmative). OFF by default: nothing listens."""
+    return (os.environ.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+_MODEL_GATEWAY_DEFAULT_PORT = 8742
+
+
+def model_gateway_port() -> int:
+    """The loopback port the model gateway listens on (`VIGIL_MODEL_GATEWAY_PORT`, default 8742). A junk or
+    out-of-range value falls back to the default (the gateway is loopback-only either way)."""
+    raw = (os.environ.get("VIGIL_MODEL_GATEWAY_PORT") or "").strip()
+    try:
+        port = int(raw) if raw else _MODEL_GATEWAY_DEFAULT_PORT
+    except ValueError:
+        return _MODEL_GATEWAY_DEFAULT_PORT
+    return port if 1 <= port <= 65535 else _MODEL_GATEWAY_DEFAULT_PORT
+
+
+def model_gateway_url() -> str:
+    """The base URL a customer run's engine uses for every model request (published with each grant)."""
+    return f"http://127.0.0.1:{model_gateway_port()}"
+
+
+def run_model() -> str:
+    """The one model every customer run uses (`VIGIL_RUN_MODEL`, default `claude-opus-4-8`, the owner's
+    decision). The model gateway refuses any other model for a run's grant."""
+    from vigil_core import model_metering as _mm
+    return _mm.run_model()
+
+
 def oidc_settings() -> dict:
     """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
     override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
@@ -615,6 +658,17 @@ CUSTOMER_OIDC_EGRESS_ALLOWLIST = frozenset({
 # surface). An API base/endpoint steered off this host is REFUSED, so a misconfiguration (or a hostile
 # override) cannot turn the key-holding egress into an SSRF proxy. Pinned to Flutterwave's v3 API host.
 FLUTTERWAVE_EGRESS_ALLOWLIST = frozenset({"api.flutterwave.com"})
+
+
+# --- Stripe OUTBOUND billing egress (SHIPPED OFF BY DEFAULT) ----------------------------
+# The outbound host allowlist for the Stripe API calls in `governor.stripe_egress` (object re-fetch for an inbound
+# event, hosted-checkout create), enforced BEFORE any socket opens. Gated DEFAULT-OFF on `VIGIL_STRIPE_SECRET_KEY`:
+# unset ⇒ nothing is wired and no Stripe egress exists. There is no API-base override, so the key-holding egress
+# can only ever reach this host.
+STRIPE_EGRESS_ALLOWLIST = frozenset({"api.stripe.com"})
+# The ONLY host a Stripe hosted-checkout link may point at (`billing._https_link_on`, exact match). A link pin, never
+# fetched — it is deliberately NOT in the egress allowlist above.
+STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
 
 
 def customer_oidc_enabled() -> bool:

@@ -97,6 +97,7 @@ import urllib.request
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
@@ -108,7 +109,8 @@ assert_no_offense()
 from vigil_core import model_metering as mm  # noqa: E402
 from vigil_core.model_grant import ModelGrant, decode_token  # noqa: E402
 
-__all__ = ["GatewayConfig", "GrantMeter", "MeterBusy", "MeterTotals", "ModelGateway", "start"]
+__all__ = ["GatewayConfig", "GrantMeter", "MeterBusy", "MeterTotals", "ModelGateway", "config_from_env", "start",
+           "start_from_env"]
 
 _log = logging.getLogger(__name__)
 
@@ -507,6 +509,26 @@ class GrantMeter:
 
     def _closed_elsewhere(self, mid: str) -> bool:
         return self._path(mid, ".closed").exists()
+
+    def mark_metered(self, mid: str) -> None:
+        """Record, durably, that launch ``mid`` is billed metered (written when its grant is minted, before its lease
+        is published). The settle decides flat or metered from this, never from a flag that may have changed since.
+        Raises ``OSError`` if it cannot be written (the publish then refuses)."""
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self._path(mid, ".metered"), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        dfd = os.open(self.dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+
+    def was_metered(self, mid: str) -> bool:
+        """True iff launch ``mid`` was published metered or ever metered (its marker or its meter is on disk)."""
+        return self._path(mid, ".metered").exists() or self._path(mid).exists()
 
     def is_closed(self, mid: str) -> bool:
         st = self._state(mid)
@@ -1711,3 +1733,88 @@ def start(config: GatewayConfig, *, host: str = "127.0.0.1", port: int = 0) -> "
                          daemon=True)
     t.start()
     return server, t
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Starting it in the cockpit (PRICING M1c)
+# ---------------------------------------------------------------------------------------------------------------
+
+_RUNNING: "dict[str, _Server]" = {}
+_RUNNING_LOCK = threading.Lock()
+
+
+def _int_env(name: str, default: int) -> int:
+    """A whole-number setting, digits only, the same rule ``vigil doctor`` checks (the gateway refuses a limit below 1
+    itself)."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    if not raw.isdigit():
+        raise ValueError(f"{name} must be a whole number, got {raw!r}")
+    return int(raw)
+
+
+def _daily_limit_nano() -> Optional[int]:
+    """``VIGIL_GATEWAY_DAILY_LIMIT_USD`` (a decimal number of dollars) as nano-USD, or None when unset."""
+    raw = (os.environ.get("VIGIL_GATEWAY_DAILY_LIMIT_USD") or "").strip()
+    if not raw:
+        return None
+    try:
+        usd = Decimal(raw)
+    except InvalidOperation:
+        raise ValueError(f"VIGIL_GATEWAY_DAILY_LIMIT_USD is not a number: {raw!r}") from None
+    if not usd.is_finite() or usd <= 0:
+        raise ValueError(f"VIGIL_GATEWAY_DAILY_LIMIT_USD must be a positive amount, got {raw!r}")
+    return int(usd * 1_000_000_000)
+
+
+def config_from_env() -> GatewayConfig:
+    """The gateway's configuration from the sovereign environment: the ONE provider key
+    (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``), the owner public key, the meter directory, the
+    sovereignty tier as the egress check, and the account protections (design §5.2):
+    ``VIGIL_GATEWAY_TENANT_CONCURRENCY`` (default 4), ``VIGIL_GATEWAY_GLOBAL_CONCURRENCY`` (default 32) and
+    ``VIGIL_GATEWAY_DAILY_LIMIT_USD`` (unset = no ceiling). Raises ``ValueError`` on a missing key, no owner key or
+    a bad value."""
+    from . import config, sovereignty
+    from .governor.identity import owner_pubkey
+    key = (os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("the model gateway needs the provider key (SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY)")
+
+    owner = owner_pubkey()
+    if not owner:
+        raise ValueError("the model gateway needs the owner public key to verify grants (no owner keypair)")
+
+    def egress_check(url: str) -> None:
+        sovereignty.assert_endpoint_permitted(url, purpose="customer-run model call")
+
+    return GatewayConfig(api_key=key, owner_pubkey=owner, meter_dir=config.MODEL_METER_DIR,
+                         egress_check=egress_check, prices=mm.price_table(),
+                         tenant_concurrency=_int_env("VIGIL_GATEWAY_TENANT_CONCURRENCY", 4),
+                         global_concurrency=_int_env("VIGIL_GATEWAY_GLOBAL_CONCURRENCY", 32),
+                         daily_limit_nano=_daily_limit_nano())
+
+
+def start_from_env() -> "Optional[_Server]":
+    """Start the gateway once per process iff ``VIGIL_MODEL_GATEWAY_ENABLED``, on ``VIGIL_MODEL_GATEWAY_PORT``
+    (loopback). Returns the running server, or None when disabled or misconfigured — a misconfiguration is
+    logged and the cockpit carries on; customer runs then fail closed (they cannot reach a gateway), and
+    ``vigil doctor`` reports why. Never raises."""
+    from . import config
+    if not config.model_gateway_enabled():
+        return None
+    port = config.model_gateway_port()
+    with _RUNNING_LOCK:
+        running = _RUNNING.get(str(port))
+        if running is not None:
+            return running
+        try:
+            server, _t = start(config_from_env(), port=port)
+        except (ValueError, OSError, mm.MeteringError) as exc:          # a misconfiguration: one line, no traceback
+            _log.error("model gateway not started: %s", exc)
+            return None
+        except Exception:  # noqa: BLE001 — the cockpit must come up whatever the gateway's state; runs fail closed
+            _log.exception("model gateway not started")
+            return None
+        _RUNNING[str(port)] = server
+        return server

@@ -113,6 +113,8 @@ def _make_full_source(tmp_path, *, provision=True):
     (src / "qdrant" / "collection" / "storage.bin").write_bytes(b"QDRANT-VECTORS-\x00\x01\x02")
     (src / "graph" / "current").mkdir(parents=True)
     (src / "graph" / "current" / "kuzu.db").write_bytes(b"KUZU-GRAPH-MIRROR")
+    # PRICING M1c: a real hash-chained model-gateway meter (money data: an unsettled run's charge comes from it).
+    _write_meter(src / "model_meter")
     # #70: the unit EnvironmentFiles the shipped sovereign units read from SIGIL_HOME (captured).
     for env in ("bridge.env", "cockpit.env", "customer.env", "public.env"):
         (src / env).write_text(f"# {env}\n")
@@ -212,6 +214,23 @@ def _assert_functional(new, rv, owner):
     assert (new / "sigil.env").read_text() == "SIGIL_QDRANT_URL=http://127.0.0.1:6333\n"
     assert (new / "qdrant" / "collection" / "storage.bin").read_bytes() == b"QDRANT-VECTORS-\x00\x01\x02"
     assert (new / "graph" / "current" / "kuzu.db").read_bytes() == b"KUZU-GRAPH-MIRROR"
+    # 7. the model meter restores FUNCTIONALLY: its hash chain verifies and the settle-relevant total is intact
+    from sigil.model_gateway import GrantMeter
+    t = GrantMeter(new / "model_meter").verify(_METER_ID)
+    assert (t.requests, t.cost_nano) == (1, 88_750_000)
+
+
+def _write_meter(meter_dir):
+    """One metered response on the meter of the launch ``(cust_x, n)``, written through the gateway's own API."""
+    from sigil.model_gateway import GrantMeter
+    from vigil_core import model_metering as mm
+    from vigil_core.model_grant import ModelGrant
+    g = ModelGrant(grant_id="0" * 32, org_id="org_a", engagement_slug="cust_x", nonce="n", model="claude-opus-4-8",
+                   effort="high", cap_nano_usd=10 ** 12, not_after=86_400.0, issued_at=1.0)
+    meter = GrantMeter(meter_dir)
+    rid, _reserved, reason = meter.reserve(g, 10 ** 6, 25_000, now=1.0)
+    assert reason == "", reason
+    meter.commit(g, rid, mm.Usage(1_000, 2_000, 10_000, 3_000, 1_000), 88_750_000, request_id="r", now=1.0)
 
 
 def test_restore_is_functional(tmp_path):
@@ -255,6 +274,10 @@ def _rewrite_backup(dest, owner, *, drop_files=(), drop_secret=None):
 
 
 # (item label, files-to-drop, secret-to-drop, functional-check that must now RAISE/return-empty)
+from vigil_core.model_grant import meter_id as _meter_id  # noqa: E402
+
+_METER_ID = _meter_id("cust_x", "n")
+
 _DROP_CASES = [
     ("witness.trust.json", ("witness.trust.json",), None,
      lambda new, rv, owner: load_roster(new / "witness.trust.json", owner_pub=owner.public_key_b64, scope=SCOPE)),
@@ -263,6 +286,7 @@ _DROP_CASES = [
     ("secrets.sealed", (), "secrets_kv_b64", None),
     ("qdrant", ("qdrant/collection/storage.bin",), None, None),
     ("graph", ("graph/current/kuzu.db",), None, None),
+    ("model_meter", (f"model_meter/{_METER_ID}.jsonl",), None, None),
 ]
 
 
@@ -300,6 +324,9 @@ def test_dropping_a_covered_item_breaks_its_functional_check(tmp_path, label, dr
         assert not (bad / "qdrant" / "collection" / "storage.bin").exists()
     elif label == "graph":
         assert not (bad / "graph" / "current" / "kuzu.db").exists()
+    elif label == "model_meter":
+        from sigil.model_gateway import GrantMeter
+        assert GrantMeter(bad / "model_meter").verify(_METER_ID).requests == 0   # the run's charge is gone
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -113,3 +113,10 @@ def test_tiered_products_enabled_reads_process_env_by_default(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_each_tier_pins_its_effort_and_an_unknown_tier_never_escalates():
+    """PRICING M1c: Quick = high, Deep = xhigh (design §2.2); an unknown tier gets the quick tier's effort."""
+    assert rt.effort_for("quick") == "high" and rt.effort_for("deep") == "xhigh"
+    assert rt.effort_for("bogus") == "high" and rt.effort_for("") == "high"
+    assert set(rt.RUN_TIERS) <= set(rt._EFFORT)

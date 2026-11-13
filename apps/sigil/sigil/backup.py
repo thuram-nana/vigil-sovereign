@@ -99,7 +99,10 @@ _CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "
 # Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
 # the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
 # recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
-_STATE_DIRS = ("qdrant", "graph")
+_STATE_DIRS = ("qdrant", "graph",
+               # PRICING M1c: the model gateway's per-launch meters — MONEY data (an unsettled run's charge is
+               # computed from its meter), hash-chained, packaged verbatim so a restored install settles it.
+               "model_meter")
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -117,6 +120,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
+    "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",

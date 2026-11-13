@@ -165,6 +165,20 @@ def test_the_target_margin_is_required_exact_and_bounded():
                                floor=0, cap=99) == 5
 
 
+def test_the_cancel_settlement_defaults_to_metered_and_refuses_an_unknown_value():
+    # owner decision 2026-11-13: a cancelled scan pays for what it already used, so unset/empty means metered
+    for env in ({}, {mm.CANCEL_ENV: ""}, {mm.CANCEL_ENV: "  "}):
+        assert mm.cancel_settlement(env) == "metered"
+    assert mm.DEFAULT_CANCEL_SETTLEMENT == "metered"
+    # a value that is set but not recognised is a typo: refuse rather than silently pick a policy
+    for env in ({mm.CANCEL_ENV: "free"}, {mm.CANCEL_ENV: "1"}, {mm.CANCEL_ENV: "metered,refund"}):
+        with pytest.raises(mm.MeteringError, match="must be one of"):
+            mm.cancel_settlement(env)
+    assert mm.cancel_settlement({mm.CANCEL_ENV: "metered"}) == "metered"
+    assert mm.cancel_settlement({mm.CANCEL_ENV: " Refund "}) == "refund"
+    assert mm.CANCEL_POLICIES == ("metered", "refund")
+
+
 def test_the_floor_parses_and_refuses_junk():
     assert mm.run_floor_credits({}) == 25 and mm.run_floor_credits({mm.FLOOR_ENV: "0"}) == 0
     for bad in ("-1", "2.5", "x"):

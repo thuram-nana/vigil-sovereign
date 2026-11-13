@@ -66,11 +66,88 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     return pairs, unreadable
 
 
+def _metered_spend(gate: Any, slug: str, nonce: str) -> dict:
+    """For a launch published metered (PRICING M1c), its meter's confirmed spend — what a full refund leaves VIGIL
+    paying — so the sweep never refunds metered spend silently. ``{}`` for a flat launch."""
+    try:
+        if not gate._launch_was_metered(slug, nonce):
+            return {}
+        from vigil_core.model_grant import meter_id
+        from . import config
+        from .model_gateway import GrantMeter
+        t = GrantMeter(config.MODEL_METER_DIR).totals(meter_id(str(slug), str(nonce)))
+        return {"metered_cost_nano": int(t.cost_nano), "metered_requests": int(t.requests)}
+    except (OSError, ValueError):
+        return {"metered_cost": "unreadable"}
+
+
+class _SweepDefer(Exception):
+    """A settle the sweep must leave for its next pass (a request in flight, a meter not writable right now, or an
+    unset pricing setting). ``status`` is the row status to report."""
+
+    def __init__(self, status: str, error: str) -> None:
+        super().__init__(error)
+        self.status = status
+
+
+def _pause_state(base: Any, slug: str, nonce: str) -> "Optional[bool]":
+    """True when the CUSTOMER paused this launch (a cleanly-read pause marker holds its nonce, or the customer lifted
+    the pause only after the lease window had closed), False when it was not paused, None when either record cannot
+    be read (never guessed either way)."""
+    try:
+        from vigil_integration.live.credit_lease_pause import lease_pause_state, paused_past_expiry
+        held_past_expiry = paused_past_expiry(base, slug, nonce)
+        paused_now = lease_pause_state(base, slug, nonce)
+    except Exception:  # noqa: BLE001 — an import or read failure is "cannot tell", never an answer
+        return None
+    if held_past_expiry is True or paused_now is True:
+        return True                                    # positive evidence either way: still paused, or lifted late
+    if held_past_expiry is None or paused_now is None:
+        return None
+    return False
+
+
+def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now: float) -> int:
+    """What a metered launch the customer paused and never resumed used, in credits (owner decision 2026-11-13: it
+    is CHARGED for what it used, like a completed or customer-cancelled metered run): the run's meter is CLOSED
+    first, then ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))``. Only confirmed spend is
+    billed, and a launch with no recorded model request and no confirmed spend is charged nothing (it may never have
+    started; the floor covers a run's start-up). Raises :class:`_SweepDefer` when the settle must wait; a broken
+    meter raises ``ValueError``."""
+    from vigil_core import model_metering as mm
+    from vigil_core.model_grant import meter_id
+    from . import config
+    from .model_gateway import GrantMeter, MeterBusy
+    try:
+        totals = GrantMeter(config.MODEL_METER_DIR).close(meter_id(str(slug), str(nonce)), now=float(now))
+    except MeterBusy as e:
+        raise _SweepDefer("deferred", str(e)) from e
+    except OSError as e:
+        raise _SweepDefer("deferred", f"the run's model meter cannot be written right now: {type(e).__name__}") from e
+    if totals.requests == 0 and totals.cost_nano == 0:
+        return 0                                       # nothing was used (it may never have started): refunded
+    try:
+        return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
+                                   cap=int(reserved))
+    except mm.MeteringError as e:
+        raise _SweepDefer("deferred_config", f"the charge waits on its pricing configuration: {e}") from e
+
+
 def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
                                  completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
-    """Report (and with ``apply`` full-refund via ``settle_launch``) every abandoned published lease. A lease
-    with a completion still pending/quarantined in ``completion_spool`` is reported ``completion_pending`` and
-    never refunded (its run finished; the drain must charge it). ``apply`` REQUIRES ``completion_spool``."""
+    """Report (and with ``apply`` settle via ``settle_launch``) every abandoned published lease. A lease with a
+    completion still pending/quarantined in ``completion_spool`` is reported ``completion_pending`` and never
+    settled here (its run finished; the drain must charge it). ``apply`` REQUIRES ``completion_spool``.
+
+    How an abandoned launch settles (owner decision 2026-11-13: a scan the customer paused and never resumed is
+    charged for what it used):
+      * published METERED and PAUSED by the customer (a cleanly-read pause marker holds its nonce, or the pause was
+        lifted only after the window closed) -> CHARGED its confirmed metered use, clamped to [floor, reservation]
+        (``charged_paused``); a paused launch that made no model request and has no confirmed spend is refunded;
+      * published metered, NOT paused -> a run VIGIL lost: refunded in full (``refunded``);
+      * published metered, pause state UNREADABLE -> not settled (``pause_unknown``): never guessed either way;
+      * published FLAT -> refunded in full: a flat launch has no meter, so what it used cannot be measured.
+    Every metered row carries the meter's confirmed spend (``metered_cost_nano``)."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
 
@@ -105,16 +182,40 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         if spool_unreadable:
             rows.append({**row, "status": "completion_unknown"})
             continue
-        if not apply:
-            rows.append({**row, "status": "abandoned"})
+        slug_, nonce_ = str(doc.engagement_slug), str(doc.nonce)
+        try:
+            metered = bool(gate._launch_was_metered(slug_, nonce_))
+        except OSError as e:
+            rows.append({**row, "status": "deferred", "error": f"billing mode unreadable: {type(e).__name__}"})
             continue
-        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now)
+        paused = _pause_state(base, slug_, nonce_) if metered else False
+        if not apply:
+            rows.append({**row, "status": "abandoned", "paused": paused, **_metered_spend(gate, slug_, nonce_)})
+            continue
+        if metered and paused is None:
+            rows.append({**row, "status": "pause_unknown", **_metered_spend(gate, slug_, nonce_)})
+            continue
+        consumed = 0
+        if metered and paused:
+            try:
+                consumed = _paused_metered_charge(gate, slug_, nonce_, int(doc.units_reserved), now)
+            except _SweepDefer as e:
+                rows.append({**row, "status": e.status, "error": str(e)})
+                continue
+            except ValueError as e:
+                rows.append({**row, "status": "settle_failed", "error": f"the run's model meter is broken: {e}"})
+                continue
+        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=consumed, now=now)
         if not r.get("ok"):
             rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
+        elif consumed > 0:
+            rows.append({**row, "status": "charged_paused", "charged": consumed, "refunded": int(r.get("refunded", 0)),
+                         **_metered_spend(gate, slug_, nonce_)})
         else:
-            rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0))})
+            rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
+                         **_metered_spend(gate, slug_, nonce_)})
     return {"applied": bool(apply), "items": rows}
 
 
