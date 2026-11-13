@@ -359,15 +359,28 @@ def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
 
 
 def key_resolver_with_horizon(store, *, current: Optional[str]) -> "tuple[KeyResolver, int]":
-    """A FRESH (never memoized) resolver plus its HORIZON: the last spine seq its history scan read (-1 for an
-    empty spine). Used by the incremental fold cache (`spine/fold_cache.py`), which must know exactly which
+    """A FRESH (never memoized) resolver plus its HORIZON: the last spine seq its history scan read CONTIGUOUSLY (-1
+    for an empty spine; the scan stops advancing it at the first record that does not chain from its predecessor). Used by the incremental fold cache (`spine/fold_cache.py`), which must know exactly which
     owner-key-history records the resolver reflects: a history record it later folds ABOVE the horizon was not
     seen, so that build is not cached. Same walk as `key_resolver` (`_resolver_from_history`)."""
     horizon = [-1]
+    last: list = [None]                                # entry_hash of the last record in the CONTIGUOUS prefix
+    try:
+        base = store._live_base_prev_hash()            # the first record must link from the live window's base
+    except Exception:  # noqa: BLE001 — a store that cannot say: the first record is not checked
+        base = None
 
     def _tracked():
         for r in store.iter_records():
-            horizon[0] = r.seq
+            if last[0] is None and base is not None and getattr(r, "prev_hash", None) != base:
+                last[0] = False                        # the scan's FIRST record is not the spine's first: torn
+            if last[0] is not None and last[0] is not False and (
+                    r.seq != horizon[0] + 1 or getattr(r, "prev_hash", None) != last[0]):
+                last[0] = False                        # a torn / non-contiguous read: the horizon stops here, so a
+            if last[0] is False:                       # history record the walk may have missed is above it and the
+                yield r                                # build that folds it is not cached
+                continue
+            horizon[0], last[0] = r.seq, r.entry_hash
             yield r
 
     res = _resolver_from_history(_history_from_records(_tracked()), current)

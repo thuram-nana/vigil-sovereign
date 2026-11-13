@@ -4,6 +4,7 @@
   * no report (the cache is off, or no audit yet) adds nothing — default output unchanged;
   * a recorded MISMATCH is a HARD issue (flips `ok`, `vigil doctor` exits 1);
   * a report older than twice its own interval (+1 h) is a NOTE (the audit thread is not running);
+  * a fold whose rebuild from the spine RAISED during the audit is counted and noted (never hidden);
   * an unreadable / malformed report is a note, never a crash.
 
 Integration leg (doctor only — framework-free).
@@ -37,6 +38,7 @@ def test_a_clean_audit_is_reported_and_rendered(tmp_path):
                        "matched": 1, "mismatched": 0, "skipped": 1}
     out = _doc.render({"ok": True, "issues": [], "notes": [], "fold_cache_audit": section})
     assert "OK fold cache audit (2026-11-11T11:00:00+00:00): 1 match, 0 MISMATCH, 1 skipped" in out
+    assert "could not be rebuilt" not in out
 
 
 def test_a_mismatch_is_a_hard_issue(tmp_path):
@@ -73,3 +75,15 @@ def test_collect_wires_the_section_in(tmp_path, monkeypatch):
     _write(tmp_path, [{"fold": "governor.wallet", "status": "MISMATCH", "seq": 3, "difference": "d"}])
     section, issues, _ = _doc._fold_cache_audit_report()
     assert section["mismatched"] == 1 and issues
+
+
+def test_a_fold_that_could_not_be_rebuilt_is_counted_and_noted(tmp_path):
+    _write(tmp_path, [{"fold": "governor.customer", "status": "match", "seq": 9},
+                      {"fold": "governor.wallet", "status": "error", "error": "SpineError: missing segment"},
+                      {"fold": "governor.orgs", "status": "error", "error": "SpineError: missing segment"}])
+    section, issues, notes = _doc._fold_cache_audit_report(tmp_path, now=NOW)
+    assert section["errored"] == 2 and section["ok"] is True and issues == []
+    assert len(notes) == 1 and "governor.wallet, governor.orgs" in notes[0] and "missing segment" in notes[0]
+    assert "sigil verify" in notes[0]
+    out = _doc.render({"ok": True, "issues": [], "notes": notes, "fold_cache_audit": section})
+    assert "1 match, 0 MISMATCH, 0 skipped, 2 could not be rebuilt" in out

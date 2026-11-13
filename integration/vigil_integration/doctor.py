@@ -1353,6 +1353,12 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
               f"({f.get('difference')}). The entry was dropped (the next read rebuilds); run `sigil verify` "
               f"and treat it as a defect or an in-place spine edit." for f in bad]
     notes: list = []
+    errored = [f for f in folds if f.get("status") == "error"]
+    if errored:                    # the rebuild from the spine RAISED: reads of these folds fail closed
+        section["errored"] = len(errored)
+        notes.append(f"the fold-cache audit could not rebuild {len(errored)} fold(s) from the spine "
+                     f"({', '.join(str(f.get('fold')) for f in errored)}: {errored[0].get('error')}); "
+                     f"run `sigil verify`.")
     try:
         ts = _dt.datetime.fromisoformat(str(rep.get("ts"))).timestamp()
         interval = float(rep.get("interval_s") or 0)
@@ -2172,6 +2178,7 @@ def render(report: dict) -> str:
         # Front C S0d: rendered ONLY when the cockpit has written an audit (default output byte-identical).
         lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
                      f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
+                     + (f", {fc['errored']} could not be rebuilt" if fc.get("errored") else "")
                      + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
 
     mt = report.get("metering")
