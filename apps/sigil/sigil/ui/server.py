@@ -1804,6 +1804,12 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     from ..governor import fold_warm
     if fold_warm.start_background(srv.store, name="cockpit") is not None:
         print("  (fold cache: warming in the background; periodic audit → `vigil doctor`)")
+    # PRICING M1c: with VIGIL_MODEL_GATEWAY_ENABLED, the sovereign model gateway every metered customer run's
+    # model requests go through (loopback; holds the provider key; meters per launch). A no-op when disabled.
+    from .. import model_gateway
+    gw = model_gateway.start_from_env()
+    if gw is not None:
+        print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

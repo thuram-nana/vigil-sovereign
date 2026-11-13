@@ -36,7 +36,8 @@ from typing import Any, Mapping, Optional
 
 __all__ = [
     "CREDIT_NANO_USD", "DEFAULT_PRICES", "MeteringError", "PriceRow", "StreamMeter", "Usage",
-    "MARGIN_ENV", "billing_markup", "cost_nano_usd", "credits_for_cost", "format_usd", "price_table", "run_floor_credits",
+    "CANCEL_ENV", "CANCEL_POLICIES", "DEFAULT_RUN_MODEL", "MARGIN_ENV", "RUN_MODEL_ENV", "billing_markup",
+    "cancel_settlement", "cost_nano_usd", "run_model", "credits_for_cost", "format_usd", "price_table", "run_floor_credits",
     "usage_from_api", "usd_cap_nano_for_credits",
 ]
 
@@ -46,6 +47,10 @@ CREDIT_NANO_USD = 10_000_000
 PRICES_ENV = "VIGIL_MODEL_PRICES"
 MARGIN_ENV = "VIGIL_BILLING_TARGET_MARGIN"
 FLOOR_ENV = "VIGIL_RUN_FLOOR_CREDITS"
+CANCEL_ENV = "VIGIL_BILLING_CANCEL_SETTLEMENT"
+RUN_MODEL_ENV = "VIGIL_RUN_MODEL"
+DEFAULT_RUN_MODEL = "claude-opus-4-8"
+CANCEL_POLICIES = ("metered", "refund")
 DEFAULT_FLOOR_CREDITS = 25
 _MAX_MARKUP = Fraction(100)               # a sanity bound: the margin is at most 0.99, so the markup at most 100
 _MAX_TOKENS_PER_FIELD = 10 ** 12          # far above any real response; bounds a hostile / corrupt count
@@ -392,6 +397,25 @@ def billing_markup(env: Optional[Mapping[str, str]] = None) -> Fraction:
     """The markup ``1 / (1 − target_margin)`` as an exact fraction (> 1): credits charged = direct cost × markup ×
     100. Raises when the margin is unset or invalid (:func:`target_margin`)."""
     return 1 / (1 - target_margin(env))
+
+
+def run_model(env: Optional[Mapping[str, str]] = None) -> str:
+    """The one model every metered customer run uses (``VIGIL_RUN_MODEL``; default ``claude-opus-4-8``, the owner's
+    decision). A run can only be metered if this model has a row in :func:`price_table`."""
+    env = os.environ if env is None else env
+    return (env.get(RUN_MODEL_ENV) or "").strip() or DEFAULT_RUN_MODEL
+
+
+def cancel_settlement(env: Optional[Mapping[str, str]] = None) -> str:
+    """How a metered run the customer cancels settles (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` (charged
+    for what it used, at least the floor) or ``refund`` (charged nothing). An owner decision with NO default: an
+    unset or unknown value RAISES, so metered billing refuses to launch or settle a run until the owner chooses."""
+    env = os.environ if env is None else env
+    raw = (env.get(CANCEL_ENV) or "").strip().lower()
+    if raw not in CANCEL_POLICIES:
+        raise MeteringError(f"{CANCEL_ENV} must be one of {', '.join(CANCEL_POLICIES)} (the owner's choice; it has "
+                            f"no default)")
+    return raw
 
 
 def run_floor_credits(env: Optional[Mapping[str, str]] = None) -> int:

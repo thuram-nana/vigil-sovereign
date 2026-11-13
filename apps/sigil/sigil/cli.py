@@ -1254,7 +1254,8 @@ def cmd_settle_drain(a) -> None:
     else:
         r = watcher.drain()
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
-              f"{r['deduped']} deduped")
+              f"{r['deduped']} deduped" + (f", {r['deferred']} deferred (retried next drain)" if r.get("deferred")
+                                           else ""))
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:

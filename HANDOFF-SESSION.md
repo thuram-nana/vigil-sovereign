@@ -278,7 +278,7 @@ ends with the session's attribution footer.
 |---|---|---|
 | `VIGIL_METERED_BILLING` | settle = the run's gateway meter cost / (1 − target margin) (clamped), and the launch mints a model grant | **owner — and NOT before M3 re-budgets the launch products (§10.5)** |
 | `VIGIL_MODEL_GATEWAY_ENABLED` / `VIGIL_MODEL_GATEWAY_PORT` (8742) | the cockpit starts the sovereign model gateway (loopback) | owner / operator |
-| `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
+| `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` \| `refund`, **no default**: the owner's choice; unset = metered launches refused) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
 | `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
 Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
@@ -678,40 +678,52 @@ provider key. The offense plane only ever holds a per-run **model grant**.
 - Tests: `packages/core/vigil_core/tests/test_model_metering.py`, `test_model_grant.py`,
   `apps/sigil/tests/test_model_gateway.py` (against fake upstreams). The mutation list is in the M1 PR body.
 
-### 10.5 M1c-1 (`7285da34`, WIP) — what it does, what is left
-**Done (all behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF, byte-identical off):**
+### 10.5 M1c-1 — sovereign wiring (what it does, its interim limits)
+All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF; with both off nothing changes.
 - `sigil/config.py`: `MODEL_METER_DIR`, `metered_billing_enabled`, `model_gateway_enabled/_port/_url`, `run_model`.
-- `model_gateway.config_from_env` + `start_from_env` (once per process + port; never raises; a misconfiguration is
-  logged and the cockpit carries on — runs then fail closed); `ui/server.py::serve` starts it beside the fold warm-up.
+- `model_gateway.config_from_env` + `start_from_env` (once per process + port; never raises — any failure is logged
+  and the cockpit carries on, metered runs then fail closed; refuses without the owner public key; concurrency settings
+  are digits only); `ui/server.py::serve` starts it.
 - `ui/launch_gate.py::publish_lease` → `_publish_model_grant`: mints the owner-signed grant from the VERIFIED lease
-  (cap = `usd_cap_nano_for_credits(units, K)`, effort = `run_tier.effort_for(run_tier_for_units(units))`, expiry =
-  the lease's) and writes it BEFORE the lease; a pricing config the core refuses refuses the publish (no lease, no
-  grant); a failed lease write removes the grant.
+  (cap = `usd_cap_nano_for_credits(units, markup)`, effort = `run_tier.effort_for(run_tier_for_units(units))`,
+  validity = the lease's `not_before`…`not_after`, id derived from (slug, nonce) — re-publishing mints the identical
+  grant) and writes it BEFORE the lease, after a per-launch **metered marker** (`MODEL_METER_DIR/<meter_id>.metered`)
+  that fixes the launch's billing mode. A pricing setting the core refuses — no target margin, no cancel policy, a
+  run model (`VIGIL_RUN_MODEL`) with no price — refuses the publish (no lease, no grant); a failed lease write removes
+  only a grant that call created (a failed re-publish never removes a live run's grant).
+- **One launch per org+host in flight while metering is involved:** `publish_lease` refuses a new launch while an
+  earlier, unsettled one holds the seam's single per-slug lease, when either is metered (a replaced lease would leave
+  the earlier run unable to settle, and a customer cancel would read it as never started). Flat-to-flat is unchanged
+  (that root cause predates metering; reported).
+- `ui/launch_gate.py::settle_launch`: EVERY settle (completion, customer cancel, abandoned-lease sweep) of a launch
+  published metered (its marker or meter on disk) first closes the run's meter, so a settled lease can spend nothing
+  more, and retires the grant. A request still in flight or a meter not writable right now refuses with `retry`
+  (the completion drain defers it); a broken meter refuses without it (quarantined).
 - `integration/vigil_integration/live/model_grant_broker.py`: `<base>/model-grants/<slug>.json` (0600 in 0700,
   atomic, nonce-bound via `expect_nonce`, loopback-URL-only, never follows a symlink, never prints the token).
-- `inbound/completion_spool.py::_consumed_for`: metered → close the meter, then completed / canceled = metered
-  (clamped), failed = 0; a broken meter / bad pricing refuses the settle (the spool retries); `_retire_model_grant`
-  removes the grant after settle.
+- **The billing mode is the launch's, never the flag's at settle time:** a launch published flat settles flat and
+  one published metered settles metered whatever `VIGIL_METERED_BILLING` says later. So turning metering OFF does not
+  change how already-published metered launches settle: keep the target margin and the cancel policy set (in the
+  settle drain's environment too) until they have all settled, or their settles defer.
+- `inbound/completion_spool.py::_consumed_for`: metered launch → close the meter, then completed = metered (clamped to
+  [floor, reservation]); canceled = `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` | `refund`, no default); failed
+  = 0. Only confirmed spend is billed. A request in flight, a transient meter error or an unset pricing setting
+  DEFERS the settle (back to `incoming/`, reported as `deferred`); a broken meter is quarantined.
 - `vigil_core/run_tier.effort_for` (quick → high, deep → xhigh; unknown → high, never an escalation).
-- `backup.py`: `model_meter` captured (money data) — `test_backup_recovery_functional.py` restores it functionally
-  (`GrantMeter.verify` totals) and proves a dropped meter loses the charge.
-- `integration/vigil_integration/doctor.py::_metering_report` — HARD issues: metered without the gateway, gateway
-  without a provider key, gateway not answering while metered, a pricing value the core refuses; notes: no daily
-  ceiling, gateway down while billing is flat. Nothing rendered when neither flag is set.
-- Tests: `apps/sigil/tests/test_metered_billing.py` (12), `integration/tests/test_model_grant_broker.py`,
-  `integration/tests/test_doctor_metering.py`, `test_run_tier.py` (+1).
+- `backup.py`: `model_meter` captured (money data), restored functionally (`GrantMeter.verify` totals).
+- `integration/vigil_integration/doctor.py::_metering_report` — HARD issues (each blocks metered bring-up): metered
+  without the gateway (no run can reach a model); gateway without a provider key (it will not start); gateway not
+  answering, or something else answering on its port, while metered (runs fail); a pricing value the core refuses
+  (floor, price table, an unpriced run model, gateway limits); with metered billing, no target margin (launches and
+  charges refuse) and no cancel policy (launches and cancelled-run settles refuse). Notes: no daily ceiling; the
+  gateway down or replaced while billing is flat. The flags read `1/true/yes/on/enabled` exactly as the runtime does.
+  The margin value is never printed. Nothing is rendered when neither flag is set.
 
-**Left before its PR:**
-1. **Mutation pass** — the intended mutants are listed in `test_metered_billing.py`'s docstring (mint with metering
-   off; cap = units instead of usd_cap; publish the lease when the grant fails; charge a failed run; leave the meter
-   open; drop the clamp; settle on a corrupt meter) — add the doctor / broker / backup / start_from_env ones.
-2. **Red-pen** the money path (who can make a grant, what a stolen grant can do, settle idempotency vs. the closed
-   meter, the restore of an unsettled meter).
-3. Re-test on top of M1 + main, then PR. State these interim limits in the PR:
-   - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
-     pre-metering placeholders), i.e. metered caps of ~$0.005 / ~$0.033 — runs would stop at once.
-   - The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
-   - The gateway must be enabled with metered billing (doctor HARD issue otherwise).
+**Interim limits (until later slices):**
+- **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the
+  pre-metering placeholders), so metered caps would be a fraction of a dollar and runs would stop at once.
+- The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
+- The offense plane does not yet route its model calls through the gateway (M1c-2).
 
 ### 10.6 Remaining slices, in order (design §9)
 | Slice | What, with anchors |
