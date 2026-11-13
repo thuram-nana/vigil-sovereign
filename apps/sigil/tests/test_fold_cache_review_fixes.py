@@ -11,7 +11,8 @@ raise. Each test below reproduces a case where it did not, and requires equality
     answers;
   * a fold-cache MISMATCH report outlived the process whose caches disagreed, so `vigil doctor` / `sigil verify`
     kept failing after every restart; the writer is named by a per-process instance and the report lock, never by
-    its PID alone (a container's cockpit has the same PID on every start), and a superseded MISMATCH stays visible;
+    its PID alone (a container's cockpit has the same PID on every start), and a superseded MISMATCH stays visible
+    — across restarts and audits — until an operator acknowledges it (`sigil fold-cache ack`, recorded);
   * the assessments index kept rows no reader can ask for (no slug, a non-str slug).
 """
 from __future__ import annotations
@@ -512,6 +513,237 @@ def test_sigil_verify_prints_no_previous_cockpit_line_without_a_superseded_misma
     assert _verify_fold_caches(False) is True
     out = capsys.readouterr().out
     assert "previous cockpit" not in out and "folds OK" in out
+
+
+# ---- an operator acknowledges a superseded MISMATCH: recorded, and no later report carries it forward -----------
+def _superseded(path) -> dict:
+    """The report a restart wrote over a gone cockpit's MISMATCH (this process holds the report lock)."""
+    path.write_text(json.dumps(dict(_mismatch_report(_dead_pid()), instance="gone")), encoding="utf-8")
+    assert fold_warm.supersede_dead_report(path) is True
+    rep = _own(path)
+    assert rep["superseded"]["mismatched"] == ["governor.wallet"]
+    return rep
+
+
+def _ack_log(path) -> list:
+    log = fold_warm.ack_log_path(path)
+    return [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+
+
+def _cli(tmp_path, monkeypatch):
+    """`sigil` itself, gated (as every run is) against a spine of this test's own, never the session's shared one."""
+    from sigil import cli
+    monkeypatch.setattr(config, "SPINE_PATH", tmp_path / "cli-home" / "spine" / "spine.jsonl")
+    return cli
+
+
+def _doctor_notes(path) -> list:
+    from vigil_integration import doctor
+    return doctor._fold_cache_audit_report(path.parent)[2]
+
+
+def test_an_acknowledgement_is_recorded_and_removes_only_the_superseded_note(tmp_path, monkeypatch, capsys):
+    from sigil.cli import _verify_fold_caches
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = _superseded(path)
+    assert _verify_fold_caches(False) is True
+    assert "investigate a possible spine edit. Once investigated, acknowledge it: `sigil fold-cache ack`." in (
+        capsys.readouterr().out)
+    assert any("acknowledge it: `sigil fold-cache ack`" in n for n in _doctor_notes(path))
+    entry = fold_warm.acknowledge_superseded("alice", path)
+    assert entry["by"] == "alice" and entry["superseded"] == rep["superseded"] and entry["uid"] == os.getuid()
+    assert entry["pid"] == os.getpid() and isinstance(entry["at"], str)
+    assert entry["report"] == {"ts": rep["ts"], "pid": rep["pid"], "instance": rep["instance"]}
+    assert _own(path) == {k: v for k, v in rep.items() if k != "superseded"}       # only the note is gone
+    assert _ack_log(path) == [entry] and (fold_warm.ack_log_path(path).stat().st_mode & 0o777) == 0o600
+    assert _verify_fold_caches(False) is True and "previous cockpit" not in capsys.readouterr().out
+    assert _doctor_notes(path) == []
+    assert fold_warm.acknowledge_superseded("alice", path) is None and len(_ack_log(path)) == 1
+    path.write_text(json.dumps(dict(_own(path), instance="restarted")), encoding="utf-8")
+    assert fold_warm.supersede_dead_report(path) is True                          # the next restart: no note
+    assert fold_warm.superseded_mismatch(_own(path)) is None and _doctor_notes(path) == []
+
+
+def test_an_acknowledged_verdict_is_carried_forward_by_no_later_report(tmp_path, monkeypatch):
+    """The log records the acknowledgement before the report loses its block: if the block is still there (the
+    acknowledging process died in between), neither a restart nor an audit carries it forward."""
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = _superseded(path)
+    fold_warm.acknowledge_superseded("alice", path)
+    path.write_text(json.dumps(dict(rep, instance="gone-again")), encoding="utf-8")
+    assert fold_warm.supersede_dead_report(path) is True
+    assert _own(path)["superseded"]["mismatched"] == []
+    path.write_text(json.dumps(rep), encoding="utf-8")
+    fold_warm._publish_audit({"ok": True, "ts": "t", "folds": []}, path)
+    assert "superseded" not in _own(path)
+
+
+def test_an_audit_keeps_a_superseded_mismatch_until_it_is_acknowledged(tmp_path, monkeypatch):
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = _superseded(path)
+    audited = {"ok": True, "ts": "2026-11-12T00:00:00+00:00", "pid": os.getpid(), "instance": fold_warm.instance_id(),
+               "spine": "x", "interval_s": 1.0, "folds": [{"fold": "governor.wallet", "status": "match", "seq": 5}]}
+    fold_warm._publish_audit(audited, path)
+    assert _own(path) == dict(audited, superseded=rep["superseded"])
+    fold_warm._publish_audit(audited, path)
+    assert _own(path) == dict(audited, superseded=rep["superseded"])
+    fold_warm.acknowledge_superseded("bob", path)
+    assert _own(path) == audited
+    fold_warm._publish_audit(audited, path)
+    assert _own(path) == audited
+
+
+def test_the_audit_thread_keeps_a_superseded_mismatch(tmp_path, monkeypatch):
+    """The cockpit's own audit thread writes through the same path: a clean audit of THIS process's caches leaves the
+    previous cockpit's MISMATCH note in place."""
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    path.write_text(json.dumps(dict(_mismatch_report(_dead_pid()), instance="gone")), encoding="utf-8")
+    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_AUDIT_S", "0.2")
+    monkeypatch.setattr(fold_warm, "_STARTED", set())
+    stop = fold_warm.start_background(lambda: SpineStore(tmp_path / "spine.jsonl"), name="test")
+    try:
+        assert stop is not None
+        deadline = time.monotonic() + 60
+        while "cache_enabled" in _own(path) and time.monotonic() < deadline:     # the start's report, not an audit
+            time.sleep(0.05)
+        audited = _own(path)
+        assert "cache_enabled" not in audited and audited["instance"] == fold_warm.instance_id()
+        assert audited["superseded"]["mismatched"] == ["governor.wallet"]
+    finally:
+        stop.set()
+        stop.thread.join(timeout=60)
+        fold_warm._release_report_lock(path)
+    assert not stop.thread.is_alive()
+
+
+def test_an_acknowledgement_is_refused_while_the_report_records_its_own_mismatch(tmp_path, monkeypatch, capsys):
+    cli = _cli(tmp_path, monkeypatch)
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = dict(_mismatch_report(4242), superseded={"pid": 1, "ts": "t", "ok": False, "mismatched": ["governor.orgs"]})
+    path.write_text(json.dumps(rep), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="records a MISMATCH of its own"):
+        fold_warm.acknowledge_superseded("alice", path)
+    with pytest.raises(SystemExit) as ex:
+        cli.main(["fold-cache", "ack", "--by", "alice"])
+    assert ex.value.code == 2 and "records a MISMATCH of its own (governor.wallet)" in capsys.readouterr().err
+    assert path.read_bytes() == before and _ack_log(path) == []
+
+
+@pytest.mark.parametrize("body", ["{ torn", "[1, 2]", json.dumps({"folds": "governor.wallet", "superseded": {
+    "pid": 1, "ts": "t", "mismatched": ["governor.wallet"]}})])
+def test_an_acknowledgement_refuses_a_report_it_cannot_read(tmp_path, body):
+    path = tmp_path / "fold_cache_audit.json"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError, match="fold-cache audit report"):
+        fold_warm.acknowledge_superseded("alice", path)
+    assert path.read_text(encoding="utf-8") == body and _ack_log(path) == []
+
+
+@pytest.mark.parametrize("by", ["", "   ", "a\nb", "x\x1b[2J", "z" * 201, None, 5])
+def test_an_acknowledgement_names_who_makes_it(tmp_path, by):
+    path = tmp_path / "fold_cache_audit.json"
+    rep = {"ok": True, "folds": [], "superseded": {"pid": 1, "ts": "t", "ok": False, "mismatched": ["governor.orgs"]}}
+    path.write_text(json.dumps(rep), encoding="utf-8")
+    with pytest.raises(ValueError, match="names who makes it"):
+        fold_warm.acknowledge_superseded(by, path)
+    assert _own(path) == rep and _ack_log(path) == []
+
+
+def test_with_no_report_or_no_superseded_mismatch_there_is_nothing_to_acknowledge(tmp_path, monkeypatch, capsys):
+    cli = _cli(tmp_path, monkeypatch)
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    assert fold_warm.acknowledge_superseded("alice", path) is None
+    assert sorted(p.name for p in tmp_path.iterdir()) == []                      # no lock file, no log
+    rep = {"ok": True, "folds": [], "superseded": {"pid": 1, "ts": "t", "ok": True, "mismatched": []}}
+    path.write_text(json.dumps(rep), encoding="utf-8")
+    cli.main(["fold-cache", "ack", "--by", "alice"])
+    assert "nothing to acknowledge" in capsys.readouterr().out
+    assert _own(path) == rep and _ack_log(path) == []
+
+
+def test_sigil_fold_cache_ack_records_the_login_name(tmp_path, monkeypatch, capsys):
+    import getpass
+    cli = _cli(tmp_path, monkeypatch)
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = _superseded(path)
+    monkeypatch.setattr(getpass, "getuser", lambda: "carol")
+    cli.main(["fold-cache", "ack"])
+    out = capsys.readouterr().out
+    assert (f"carol acknowledged the MISMATCH a previous cockpit (pid {rep['superseded']['pid']}, audit "
+            f"{rep['superseded']['ts']}) recorded in governor.wallet") in out
+    assert str(fold_warm.ack_log_path(path)) in out
+    assert [e["by"] for e in _ack_log(path)] == ["carol"] and "superseded" not in _own(path)
+
+
+def test_an_acknowledgement_waits_for_another_writer_of_the_report(tmp_path):
+    """Every read-modify-write of the report holds its write lock: an acknowledgement that starts while an audit
+    write is in progress reads the report that write leaves — here one with a MISMATCH of its own, which it refuses
+    — and never puts back the report it read before."""
+    import threading
+    path = tmp_path / "fold_cache_audit.json"
+    sup = {"pid": 1, "ts": "t", "ok": False, "mismatched": ["governor.orgs"]}
+    path.write_text(json.dumps({"ok": True, "folds": [], "superseded": sup}), encoding="utf-8")
+    result = {}
+
+    def ack():
+        try:
+            result["entry"] = fold_warm.acknowledge_superseded("alice", path)
+        except ValueError as e:
+            result["refused"] = str(e)
+
+    with fold_warm._report_write_lock(path) as p:
+        t = threading.Thread(target=ack)
+        t.start()
+        t.join(0.5)
+        assert t.is_alive(), "the acknowledgement did not wait for the write lock"
+        fold_warm._write_report_locked(dict(_mismatch_report(7), superseded=sup), p)
+    t.join(30)
+    assert "records a MISMATCH of its own" in result.get("refused", "")
+    assert _own(path) == dict(_mismatch_report(7), superseded=sup) and _ack_log(path) == []
+
+
+@pytest.mark.parametrize("writer", ["supersede", "audit", "write"])
+def test_every_writer_of_the_report_waits_for_its_write_lock(tmp_path, monkeypatch, writer):
+    """A restart's supersede and the audit thread's write read the report under the write lock too: one that starts
+    while an acknowledgement holds it reads what the acknowledgement left (here: no superseded block), never the
+    report from before it."""
+    import threading
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    rep = _superseded(path)
+    path.write_text(json.dumps(dict(rep, instance="gone")), encoding="utf-8")
+    write = {"supersede": lambda: fold_warm.supersede_dead_report(path),
+             "audit": lambda: fold_warm._publish_audit({"ok": True, "ts": "t", "folds": []}, path),
+             "write": lambda: fold_warm.write_report({"ok": True, "ts": "t", "folds": []}, path)}[writer]
+    with fold_warm._report_write_lock(path) as p:
+        t = threading.Thread(target=write)
+        t.start()
+        t.join(0.5)
+        assert t.is_alive(), f"{writer} did not wait for the write lock"
+        fold_warm._write_report_locked({k: v for k, v in rep.items() if k != "superseded"}, p)
+    t.join(30)
+    assert fold_warm.superseded_mismatch(_own(path)) is None
+
+
+def test_what_an_acknowledgement_leaves_in_sigil_home_is_classified_for_backup(tmp_path, monkeypatch):
+    from sigil import backup
+    path = tmp_path / "fold_cache_audit.json"
+    monkeypatch.setattr(config, "FOLD_AUDIT_PATH", path)
+    _superseded(path)
+    fold_warm.acknowledge_superseded("alice", path)
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert "fold_cache_audit.ack.jsonl" in names and "fold_cache_audit.write.lock" in names
+    assert [n for n in names if backup.classify_top_level(n) == "unclassified"] == []
+    assert backup.classify_top_level("fold_cache_audit.ack.jsonl") == "excluded"
 
 
 # ======================================================================================================

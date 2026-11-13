@@ -20,6 +20,12 @@ lock, so its reads wait for it — O(the folded state; seconds at 1M customers, 
 the source of truth, so the next read rebuilds from it — and the report keeps the evidence. Nothing here writes
 the spine.
 
+SUPERSEDED. A restarted cockpit replaces a report whose writer is gone (`supersede_dead_report`) and keeps that
+writer's MISMATCH under `superseded`; every later report — a restart's or an audit's — keeps it, until an operator
+acknowledges it (`sigil fold-cache ack` -> `acknowledge_superseded`), which is recorded (who, when, which verdict)
+in the acknowledgement log beside the report and removes only that block. Every read-modify-write of the report
+holds the short write lock beside it (`fold_cache_audit.write.lock`), so none of them loses another's change.
+
 Everything here is a no-op unless `VIGIL_FOLD_CACHE_ENABLED` is on. FATAL-2: sovereign-side.
 """
 from __future__ import annotations
@@ -32,8 +38,9 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from .. import config
 from ..reuse import assert_no_offense
@@ -41,8 +48,8 @@ from . import fold_read
 
 assert_no_offense()
 
-__all__ = ["audit", "hold_report_lock", "instance_id", "report_is_live", "start_background", "supersede_dead_report",
-           "warm_all", "write_report"]
+__all__ = ["ack_log_path", "acknowledge_superseded", "audit", "hold_report_lock", "instance_id", "report_is_live",
+           "start_background", "supersede_dead_report", "superseded_mismatch", "warm_all", "write_report"]
 
 _log = logging.getLogger(__name__)
 _STARTED: "set[str]" = set()
@@ -52,6 +59,7 @@ _HELD: "dict[str, int]" = {}               # resolved lock path -> the fd that h
 _HELD_LOCK = threading.Lock()
 _LOCK_TRIES = 20                           # a prober holds the lock for microseconds; retry it briefly
 _LOCK_RETRY_S = 0.05
+_WRITE_LOCK_TRIES = 200                    # x _LOCK_RETRY_S: a writer holds it for one small read + atomic replace
 
 
 def instance_id() -> str:
@@ -226,9 +234,90 @@ def audit(store) -> dict:
             "interval_s": config.fold_cache_audit_interval(), "folds": results}
 
 
-def write_report(report: dict, path: Optional[Path] = None) -> Path:
-    """Write `report` atomically (0600) for `vigil doctor` / `sigil verify` to read."""
-    p = Path(path) if path is not None else config.FOLD_AUDIT_PATH
+def _report_path(path: Optional[Path] = None) -> Path:
+    return Path(path) if path is not None else config.FOLD_AUDIT_PATH
+
+
+def _write_lock_path(path: Optional[Path] = None) -> Path:
+    """The write lock beside the report (`fold_cache_audit.json` -> `fold_cache_audit.write.lock`)."""
+    p = _report_path(path)
+    return p.with_name(p.stem + ".write.lock")
+
+
+def ack_log_path(path: Optional[Path] = None) -> Path:
+    """The acknowledgement log beside the report (`fold_cache_audit.json` -> `fold_cache_audit.ack.jsonl`)."""
+    p = _report_path(path)
+    return p.with_name(p.stem + ".ack.jsonl")
+
+
+@contextmanager
+def _report_write_lock(path: Optional[Path] = None) -> Iterator[Path]:
+    """Hold the write lock beside the report for one read-modify-write of it: the audit thread's write, a start's
+    supersede and an operator's acknowledgement each read the report and replace it, and none may lose another's
+    change. An exclusive flock, across threads and processes; raises TimeoutError when another writer keeps it
+    longer than a few seconds (a writer holds it for one small read and one atomic replace)."""
+    p = _report_path(path)
+    lp = _write_lock_path(p)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lp, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        for attempt in range(_WRITE_LOCK_TRIES):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if attempt + 1 < _WRITE_LOCK_TRIES:
+                    time.sleep(_LOCK_RETRY_S)
+        else:
+            raise TimeoutError(f"another process keeps the fold-cache audit report's write lock {lp}")
+        yield p
+    finally:
+        os.close(fd)                               # releases the lock
+
+
+def _read_report(p: Path) -> Optional[dict]:
+    """The report at `p` as a dict, or None when it is missing, unreadable or not a JSON object."""
+    try:
+        rep = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rep if isinstance(rep, dict) else None
+
+
+def superseded_mismatch(report: Optional[dict]) -> Optional[dict]:
+    """The report's `superseded` block when it names a MISMATCH (a dict whose `mismatched` is a non-empty list — the
+    shape `vigil doctor` and `sigil verify` show as a note), else None."""
+    sup = report.get("superseded") if isinstance(report, dict) else None
+    if isinstance(sup, dict) and isinstance(sup.get("mismatched"), list) and sup["mismatched"]:
+        return sup
+    return None
+
+
+def _acknowledged(sup: dict, path: Optional[Path] = None) -> bool:
+    """Whether an operator acknowledged exactly this superseded verdict (the acknowledgement log names it). A log that
+    cannot be read, or a line that is not an entry, acknowledges nothing: the note stays (fail closed)."""
+    try:
+        lines = ack_log_path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return False
+    for ln in lines:
+        try:
+            entry = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("superseded") == sup:
+            return True
+    return False
+
+
+def _carried_superseded(report: Optional[dict], path: Optional[Path] = None) -> Optional[dict]:
+    """The superseded MISMATCH a new report keeps from `report`: its block, unless an operator acknowledged it."""
+    sup = superseded_mismatch(report)
+    return sup if sup is not None and not _acknowledged(sup, path) else None
+
+
+def _write_report_locked(report: dict, p: Path) -> Path:
+    """MUST hold `_report_write_lock`. Write `report` atomically (0600)."""
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -237,6 +326,21 @@ def write_report(report: dict, path: Optional[Path] = None) -> Path:
         f.write("\n")
     os.replace(tmp, p)
     return p
+
+
+def write_report(report: dict, path: Optional[Path] = None) -> Path:
+    """Write `report` atomically (0600) for `vigil doctor` / `sigil verify` to read, under the report write lock."""
+    with _report_write_lock(path) as p:
+        return _write_report_locked(report, p)
+
+
+def _publish_audit(report: dict, path: Optional[Path] = None) -> Path:
+    """Write an audit report, keeping the superseded MISMATCH the current report carries unless an operator
+    acknowledged it: an audit of THIS process's caches says nothing about the spine edit a previous cockpit's audit
+    may have seen."""
+    with _report_write_lock(path) as p:
+        carried = _carried_superseded(_read_report(p), p)
+        return _write_report_locked(dict(report, superseded=carried) if carried is not None else report, p)
 
 
 def _run(store_factory: Callable[[], Any], interval: float, stop: threading.Event) -> None:
@@ -251,7 +355,7 @@ def _run(store_factory: Callable[[], Any], interval: float, stop: threading.Even
             report = audit(store_factory())
             if stop.is_set():
                 return                            # stopped mid-audit: never write after the owner stopped us
-            write_report(report)
+            _publish_audit(report)
             if not report["ok"]:
                 _log.error("fold cache audit MISMATCH: %s",
                            [r for r in report["folds"] if r.get("status") == "MISMATCH"])
@@ -298,29 +402,77 @@ def supersede_dead_report(path: Optional[Path] = None) -> bool:
     from the spine). Without this a recorded MISMATCH outlived every restart and kept `vigil doctor` (a HARD issue)
     and `sigil verify` failing until someone deleted the file by hand. A report from a LIVE process is left alone.
     `vigil doctor` and `sigil verify` show a superseded MISMATCH as a note; a report that itself only carries one
-    (a restart before any audit) hands it on, so a run of restarts does not drop it. This process takes the report
-    lock first, so the report it writes is live. Returns True iff it replaced one."""
-    p = Path(path) if path is not None else config.FOLD_AUDIT_PATH
-    try:
-        old = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if not isinstance(old, dict):
-        return False
+    (a restart before any audit) hands it on, so a run of restarts does not drop it — unless an operator acknowledged
+    it (`acknowledge_superseded`). This process takes the report lock first, so the report it writes is live, and
+    reads and replaces the report under its write lock. Returns True iff it replaced one."""
+    p = _report_path(path)
+    if _read_report(p) is None:
+        return False                               # nothing to supersede: no lock taken, no lock file made
     hold_report_lock(p)
-    if report_is_live(old, p):
-        return False
-    folds = [f for f in old.get("folds", []) if isinstance(f, dict)]
-    verdict = {"pid": old.get("pid"), "ts": old.get("ts"), "ok": old.get("ok"),
-               "mismatched": [f.get("fold") for f in folds if f.get("status") == "MISMATCH"]}
-    earlier = old.get("superseded")
-    if not verdict["mismatched"] and isinstance(earlier, dict) and earlier.get("mismatched"):
-        verdict = earlier
-    write_report({"ok": True, "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-                  "pid": os.getpid(), "instance": instance_id(), "spine": old.get("spine", ""),
-                  "interval_s": config.fold_cache_audit_interval(), "folds": [],
-                  "cache_enabled": config.fold_cache_enabled(), "superseded": verdict}, p)
+    with _report_write_lock(p):
+        old = _read_report(p)                      # again, under the write lock: an acknowledgement may have run
+        if old is None or report_is_live(old, p):
+            return False
+        folds = [f for f in old.get("folds", []) if isinstance(f, dict)]
+        verdict = {"pid": old.get("pid"), "ts": old.get("ts"), "ok": old.get("ok"),
+                   "mismatched": [f.get("fold") for f in folds if f.get("status") == "MISMATCH"]}
+        if not verdict["mismatched"]:
+            verdict = _carried_superseded(old, p) or verdict
+        _write_report_locked({"ok": True, "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+                              "pid": os.getpid(), "instance": instance_id(), "spine": old.get("spine", ""),
+                              "interval_s": config.fold_cache_audit_interval(), "folds": [],
+                              "cache_enabled": config.fold_cache_enabled(), "superseded": verdict}, p)
     return True
+
+
+def acknowledge_superseded(by: str, path: Optional[Path] = None) -> Optional[dict]:
+    """An operator's acknowledgement of the superseded MISMATCH note (`sigil fold-cache ack`), once investigated.
+
+    Under the report write lock: refuses (ValueError) a report it cannot read, or one that records a MISMATCH of its
+    own — that is not a superseded verdict, and `sigil verify` / `vigil doctor` report it as one. Returns None when
+    there is nothing to acknowledge (no report, or no superseded MISMATCH in it). Otherwise it appends the entry
+    `{at, by, uid, pid, superseded, report: {ts, pid, instance}}` to the acknowledgement log (`ack_log_path`, 0600,
+    fsync'd) and only then replaces the report with the same report minus its `superseded` block; no later report
+    carries that verdict forward. Returns the entry."""
+    if not isinstance(by, str) or not by.strip() or len(by) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in by):
+        raise ValueError("an acknowledgement names who makes it (a printable name of at most 200 characters)")
+    p = _report_path(path)
+    if not p.exists():
+        return None
+    with _report_write_lock(p):
+        try:
+            rep = json.loads(p.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"the fold-cache audit report {p} is unreadable ({type(exc).__name__})") from None
+        if not isinstance(rep, dict):
+            raise ValueError(f"the fold-cache audit report {p} is not a JSON object")
+        folds = rep.get("folds", [])
+        if not isinstance(folds, list):
+            raise ValueError(f"the fold-cache audit report {p} has no list of folds: cannot tell whether it records "
+                             f"a MISMATCH of its own")
+        own = [f.get("fold") for f in folds if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        if own:
+            raise ValueError(f"the current fold-cache audit report records a MISMATCH of its own "
+                             f"({', '.join(str(f) for f in own)}); that is not a superseded verdict — run "
+                             f"`sigil verify`")
+        sup = superseded_mismatch(rep)
+        if sup is None:
+            return None
+        entry = {"at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "by": by.strip(),
+                 "uid": os.getuid(), "pid": os.getpid(), "superseded": sup,
+                 "report": {"ts": rep.get("ts"), "pid": rep.get("pid"), "instance": rep.get("instance")}}
+        log = ack_log_path(p)
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "ab") as f:
+            f.write((json.dumps(entry, sort_keys=True) + "\n").encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        _write_report_locked({k: v for k, v in rep.items() if k != "superseded"}, p)
+    _log.warning("fold cache: %s acknowledged the superseded MISMATCH in %s (pid %s, audit %s); recorded in %s",
+                 entry["by"], ", ".join(str(f) for f in sup["mismatched"]), sup.get("pid"), sup.get("ts"), log)
+    return entry
 
 
 def start_background(store_factory: Callable[[], Any], *, name: str = "cockpit") -> Optional[threading.Event]:

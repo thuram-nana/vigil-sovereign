@@ -6,7 +6,8 @@
   * a report older than twice its own interval (+1 h) is a NOTE (the audit thread is not running);
   * a fold whose rebuild from the spine RAISED during the audit is counted and noted (never hidden);
   * an unreadable / malformed report is a note, never a crash.
-  * a MISMATCH a previous cockpit recorded (superseded at the running cockpit's start) is a NOTE naming it.
+  * a MISMATCH a previous cockpit recorded (superseded at the running cockpit's start) is a NOTE naming it and the
+    command that acknowledges it (`sigil fold-cache ack`).
 
 Integration leg (doctor only — framework-free).
 """
@@ -102,7 +103,7 @@ def test_a_superseded_mismatch_is_a_note_naming_the_previous_cockpit(tmp_path):
     assert issues == [] and section["ok"] is True and section["superseded_mismatched"] == 2
     assert notes == [("a previous cockpit (pid 1, audit 2026-11-10T09:00:00+00:00) recorded a MISMATCH in "
                       "governor.budget, governor.wallet; its caches died with it, but investigate a possible spine "
-                      "edit.")]
+                      "edit. Once investigated, acknowledge it: `sigil fold-cache ack`.")]
     out = _doc.render({"ok": True, "issues": [], "notes": notes, "fold_cache_audit": section})
     assert "a previous cockpit (pid 1" in out
 
