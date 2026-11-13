@@ -49,3 +49,12 @@ target/
 /range/.target-live/
 /engine/crucible/targets/acme/
 /engine/crucible/targets/loopback/
+
+# Runtime state a CLI run leaves in its base dir (default: the current directory). A test that forgot
+# to redirect it once wrote these into the checkout and a blanket `git add` committed them. The test is
+# fixed (integration/tests/test_plan_only.py); this is the backstop. Root-anchored on purpose.
+/operator.key
+/offense-governance.key
+/offense-spine.key
+/usage-ledger.jsonl
+/*.spine
