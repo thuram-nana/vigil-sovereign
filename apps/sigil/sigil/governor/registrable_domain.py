@@ -120,7 +120,8 @@ def load_rules(path: Path = PSL_PATH, pin: str = PSL_SHA256) -> Optional[_Rules]
         rules = None
     else:
         rules = parse(data.decode("utf-8")) if hashlib.sha256(data).hexdigest() == pin else None
-    _CACHE[key] = rules
+    if rules is not None:              # cache only a good load: a restored file is picked up on the next call
+        _CACHE[key] = rules
     return rules
 
 

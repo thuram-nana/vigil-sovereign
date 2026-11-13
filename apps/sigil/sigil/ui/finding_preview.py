@@ -82,7 +82,12 @@ def preview_locked(store, org_id: str, *, wallet=None, unlocks=None) -> bool:
     if unlocks is None:
         from ..governor.report_unlock import ReportUnlockRegistry
         unlocks = ReportUnlockRegistry(store, owner_key=None)
-    return not unlocks.is_unlocked(org_id)
+    if unlocks.is_unlocked(org_id):
+        return False
+    # An org the owner moved to a postpaid (enterprise) account is a paying customer, whatever it started as:
+    # never locked, never held to the trial launch rules.
+    from ..governor.postpaid import PostpaidRegistry
+    return not PostpaidRegistry(store, owner_key=None).is_postpaid(org_id)
 
 
 def derived_severity(row: dict) -> "tuple[str, str]":

@@ -277,3 +277,27 @@ def test_checks_and_reserve_run_under_one_lock_hold(monkeypatch):
     monkeypatch.setattr("sigil.ui.launch_gate.LaunchGate.reserve_launch", _cap)
     _launch(p, "org_a", "acme.io")
     assert held["owned"] is True
+
+
+def test_a_postpaid_org_that_started_on_the_trial_is_never_gated(monkeypatch):
+    from sigil.governor.postpaid import PostpaidRegistry
+    from sigil.ui.finding_preview import preview_locked
+    seen = _capture(monkeypatch)
+    p, s = _prov(monkeypatch, cap=0)
+    _trial(s, "org_a")
+    assert preview_locked(s, "org_a")
+    PostpaidRegistry(s).set_account("org_a", 100000, 30, issued_at=float(next(_it)))
+    assert not preview_locked(s, "org_a")
+    _prove(s, "org_a", "acme.io")
+    _prove(s, "org_a", "other.io")
+    _launch(p, "org_a", "acme.io", product="vigil_launch_deep")
+    _launch(p, "org_a", "other.io", product="vigil_launch_deep")
+    assert len(seen) == 2
+
+
+def test_a_restored_suffix_list_is_picked_up(tmp_path):
+    f = tmp_path / "psl.dat"
+    f.write_bytes(b"tampered")
+    assert load_rules(f) is None
+    f.write_bytes(PSL_PATH.read_bytes())
+    assert load_rules(f) is not None
