@@ -299,10 +299,17 @@ def _shifted_first_seq(m):
     next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["first_seq"] = 4
 
 
+def _unsealed_in_the_middle(m):
+    """Exactly one unsealed segment, but it is not the last one."""
+    next(g for g in m["segments"] if g["sealed"] and g["first_seq"] == 3)["sealed"] = False
+    next(g for g in m["segments"] if g["first_seq"] == 9)["sealed"] = True
+
+
 @pytest.mark.parametrize("edit", [_omit_middle, _omit_last_sealed, _two_unsealed, _extra_unsealed, _overlapping,
-                                  _wrong_link, _sealed_without_last, _shifted_first_seq])
+                                  _wrong_link, _sealed_without_last, _shifted_first_seq, _unsealed_in_the_middle])
 def test_every_reader_refuses_a_manifest_that_is_not_a_contiguous_run(tmp_path, edit):
     s = _segmented(tmp_path)
+    tip = list(s.iter_records())[-1]
     mp = s._layout.manifest_path
     m = json.loads(mp.read_text())
     edit(m)
@@ -313,6 +320,7 @@ def test_every_reader_refuses_a_manifest_that_is_not_a_contiguous_run(tmp_path, 
     for read in (lambda: list(fresh.iter_records()), fresh.count, lambda: fresh.get(10), fresh.verify):
         with pytest.raises(SpineError, match="not a contiguous segment run"):
             read()
+    assert fresh.tail_after(tip.seq, tip.entry_hash) is None        # the fold cache's tail path: undecidable
 
 
 def test_a_contiguous_manifest_reads_as_before(tmp_path):
@@ -507,6 +515,18 @@ def test_an_append_after_a_rotation_refuses_a_sealed_tail_that_is_not_the_record
         SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": "x"})
 
 
+def test_an_append_after_a_rotation_refuses_a_sealed_tail_with_the_boundary_seq_but_another_hash(tmp_path):
+    s = _segmented(tmp_path)
+    s.rotate()                                                      # the active is empty: the seam decides
+    sealed = sorted(s._layout.segments_dir.glob("seg-*.jsonl"))[-2]
+    lines = sealed.read_bytes().splitlines(keepends=True)
+    rec = json.loads(lines[-1])
+    rec["entry_hash"] = "0" * 64                                    # the boundary's seq, not its hash
+    _write_raw(sealed, lines[:-1] + [(json.dumps(rec) + "\n").encode()])
+    with pytest.raises(SpineError, match="not at the boundary the manifest records"):
+        SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
 def test_a_rotation_refuses_to_seal_a_tail_an_append_would_refuse(tmp_path):
     s = _segmented(tmp_path)
     with s._active.open("ab") as f:
@@ -544,6 +564,8 @@ def test_a_line_of_the_wrong_shape_is_skipped_by_every_reader_never_a_crash(tmp_
     assert fresh.get(3).seq == 3 and fresh.count() == 6 and fresh.verify()[0]
     t = SpineTailer(fresh, since_seq=2)
     assert [e["seq"] for e in t.poll()] == [3, 4, 5]
+    two = fresh.get(2)
+    assert [r.seq for r in fresh.tail_after(two.seq, two.entry_hash)] == [3, 4, 5]      # the fold cache's tail path
     assert fresh.append(kind="message", source="t", actor="u", payload={"text": "x"}) == 6   # not chained from it
 
 
