@@ -310,6 +310,119 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     return {"applied": bool(apply), "items": rows}
 
 
+_REFUND_OUTCOMES = frozenset({"failed", "canceled"})     # a completion whose settle is the full refund anyway
+
+
+def _charging_completions(spool: Path) -> tuple[set, bool]:
+    """E7 — ``(slug, nonce)`` of every completion anywhere in the completion spool (waiting, claimed, ARCHIVED in
+    ``processed/`` or quarantined) whose outcome could CHARGE its launch: any outcome but ``failed`` /
+    ``canceled``, whose settle is the same full refund a release makes. (A superseded launch's own refused job
+    ends in a quarantined FAILED, which must not block its release; a COMPLETED, even one the drain archived as a
+    no-op, must.) Signatures are not checked: any such claim blocks. Returns ``(pairs, unreadable)`` with the same
+    fail-closed reading as ``_pending_completions``: an unparseable file, or a spool with none of the drain's
+    subdirs, makes the completion state UNKNOWN."""
+    pairs: set = set()
+    unreadable = False
+    saw_subdir = False
+    for sub in ("incoming", "working", "processed", "rejected"):
+        d = spool / sub
+        if not d.is_dir():
+            continue
+        saw_subdir = True
+        for fp in sorted(d.glob("*.json*")):
+            if fp.name.endswith(".reason"):
+                continue
+            try:
+                if fp.is_symlink() or not fp.is_file() or fp.stat().st_size > _MAX_ENVELOPE:
+                    raise ValueError("not a bounded regular file")
+                doc = json.loads(fp.read_text(encoding="utf-8"))["document"]
+                pair = (str(doc["engagement_slug"]), str(doc["nonce"]))
+                outcome = doc.get("outcome")
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                unreadable = True
+                continue
+            if outcome not in _REFUND_OUTCOMES:
+                pairs.add(pair)
+    return pairs, unreadable or not saw_subdir
+
+
+def _release_block(spool: Path, pair: tuple) -> "Callable[[], Optional[str]]":
+    """The superseded-release precondition, re-read from the spool when called (inside the settle critical
+    section): ``completion_pending`` if a charging completion for ``pair`` exists, ``completion_unknown`` if the
+    spool cannot be fully read, else None."""
+    def _check() -> Optional[str]:
+        charging, unreadable = _charging_completions(spool)
+        if pair in charging:
+            return "completion_pending"
+        return "completion_unknown" if unreadable else None
+    return _check
+
+
+def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
+                                  completion_spool: "Optional[str | os.PathLike]" = None) -> dict:
+    """E7 — report (and with ``apply`` release, i.e. full-refund via ``LaunchGate.release_superseded_reservation``)
+    every unsettled credit RESERVATION that a later launch of the same (org, host) superseded on the seam.
+
+    It reads the RESERVATIONS from the spine (``scan_reservations``), not the leases on the seam: the seam holds one
+    lease per (org, host), so a launch whose lease a later one replaced is not in the seam listing
+    ``sweep_abandoned_reservations`` reads (its job is refused at the arm and its completion quarantined), and this
+    sweep is what settles it. A reservation is listed when it is unsettled (no settlement evidence on the spine, no
+    seam settlement marker) and ``LaunchGate._release_refusal`` finds it superseded (a later reservation of the same
+    target exists and the seam lease is not its own) and past its grace (its longest lease window + ``ttl_s`` since
+    the reserve); one whose evidence is contradictory is listed as ``outcome_recorded`` / ``seam_inconsistent`` and
+    never released. A charging completion for it anywhere in ``completion_spool`` reports ``completion_pending`` (an
+    unreadable spool: ``completion_unknown``) and is never refunded. ``apply`` REQUIRES ``completion_spool``; the
+    gate re-decides everything inside the settle critical section, exactly once per (slug, nonce)."""
+    from vigil_integration.live.credit_lease_broker import is_lease_settled
+
+    from .governor.launch_reservations import scan_reservations
+
+    if ttl_s < 0:
+        raise ValueError("ttl_s must be non-negative")
+    if apply and completion_spool is None:
+        raise ValueError("apply requires completion_spool — a refund could erase a pending charge (fail-closed)")
+    kp = gate.owner_key
+    if kp is None:
+        raise ValueError("no owner key — the sweep cannot verify reservations (fail-closed)")
+    spool = Path(completion_spool) if completion_spool is not None else None
+    charging, spool_unreadable = _charging_completions(spool) if spool is not None else (set(), False)
+    base = gate._seam_base()
+    ix = scan_reservations(gate.store, kp.public_key_b64)
+    rows: list[dict] = []
+    for res in sorted(ix.reservations.values(), key=lambda r: r.seq):
+        oid, slug, nonce = res.key
+        if res.key in ix.settled or is_lease_settled(base, slug, nonce):
+            continue                                       # settled — nothing held
+        why = gate._release_refusal(oid, slug, res, ix, now, ttl_s)
+        if why in ("not_superseded", "started", "in_grace"):
+            continue                                       # not (yet) a superseded reservation
+        row = {"slug": slug, "org_id": oid, "nonce": nonce, "units_reserved": res.reserved,
+               "reserved_at": res.issued_at}
+        if why is not None:
+            rows.append({**row, "status": why})
+            continue
+        if (slug, nonce) in charging:
+            rows.append({**row, "status": "completion_pending"})
+            continue
+        if spool_unreadable:
+            rows.append({**row, "status": "completion_unknown"})
+            continue
+        if not apply:
+            rows.append({**row, "status": "superseded"})
+            continue
+        r = gate.release_superseded_reservation(org_id=oid, slug=slug, nonce=nonce, now=now, grace_s=ttl_s,
+                                                refuse_if=_release_block(cast(Path, spool), (slug, nonce)))
+        if r.get("refused"):
+            rows.append({**row, "status": str(r["refused"])})
+        elif not r.get("ok"):
+            rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
+        elif r.get("action") == "launch_already_settled":
+            rows.append({**row, "status": "already_settled"})
+        else:
+            rows.append({**row, "status": "released", "refunded": int(r.get("refunded", 0))})
+    return {"applied": bool(apply), "items": rows}
+
+
 def sweep_postpaid_reconciliation(postpaid: Any, arrears: Any, invoices: Any, *, now: float,
                                   orgs: "Optional[Iterable[str]]" = None) -> dict:
     """REPORT-ONLY reconciliation of each postpaid org: invoiced-vs-paid vs real consumption.

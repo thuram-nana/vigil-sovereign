@@ -1302,6 +1302,10 @@ def cmd_ops_sweep(a) -> None:
             sys.exit(2)
         out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
                                                        completion_spool=(a.completion_spool or None))
+        # E7: reservations a later launch of the same target superseded on the seam — invisible to the seam
+        # listing above — under the same report-by-default / --apply gates (rows only when there are any).
+        out["items"].extend(ops_sweeps.sweep_superseded_reservations(
+            gate, now=now, ttl_s=a.ttl, apply=a.apply, completion_spool=(a.completion_spool or None))["items"])
     elif a.sweep_cmd == "reconcile":
         # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
         # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed

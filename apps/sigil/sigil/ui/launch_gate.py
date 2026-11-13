@@ -304,8 +304,18 @@ class LaunchGate:
         pre = _gated()                                   # cheap pre-check outside the lock (fast refusal)
         if pre is not None:
             return {"ok": False, "error": pre}
-        with self._lock:
+        from contextlib import ExitStack
+        from .. import config
+        # E7 ONE OUTSTANDING LAUNCH PER (org, host) — `config.one_launch_per_host_enabled()`, default OFF (no scan,
+        # no extra lock: byte-identical). Decided inside the CROSS-PROCESS settle lock, held from the check through
+        # the debit, so two reserves in two processes cannot both pass (`_one_launch_locked`).
+        one = config.one_launch_per_host_enabled()
+        ix = self._reservation_prescan(kp.public_key_b64, oid, slug) if one else None
+        with ExitStack() as held:
+            held.enter_context(self._lock)
             re = _gated()                                # TOCTOU: re-check every conjunct inside the lock
+            if re is None and one:
+                re = self._one_launch_locked(held, kp.public_key_b64, oid, h, slug, non, ix, now_ts=now_ts)
             if re is not None:
                 return {"ok": False, "error": re}
             acct = self.postpaid.account(oid)
@@ -375,7 +385,6 @@ class LaunchGate:
         load-bearing on this refund path, and K4-5 settle-on-completion asserts net-spend ==
         metered-consumption end-to-end."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
-        from ..governor.launch_settlement import SettlementDecision
         kp = self.owner_key
         if kp is None:
             return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
@@ -405,6 +414,17 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only)
+
+    def _settle_reservation(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float,
+                            refuse_if: Optional[Callable[[], Optional[str]]], basis: str,
+                            finish_only: bool = False) -> dict:
+        """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
+        used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
+        bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
+        fields; ``release_superseded_reservation`` (E7) with ``reserved`` taken from the owner-signed reserve
+        records."""
+        from ..governor.launch_settlement import SettlementDecision
         # PRICING M1c: every FRESH settle (completion, customer cancel, abandoned-lease sweep) closes the run's model
         # meter and retires its grant — inside the settle critical section, after the caller's precondition, before
         # the decision is recorded (``_settle_once``) — so a settled lease can spend nothing more through the
@@ -728,6 +748,10 @@ class LaunchGate:
                 if earlier0 and earlier0 != str(doc.nonce):
                     prior = (earlier0, scan_settlement(self.store, kp.public_key_b64, org_id=doc.org_id,
                                                        slug=doc.engagement_slug, nonce=earlier0))
+            # E7 (VIGIL_ONE_LAUNCH_PER_HOST, default OFF: no scan): this target's reservations, read the same way —
+            # the full scan here, unlocked (None when it fails: the locked check then scans in full).
+            one = config.one_launch_per_host_enabled()
+            ix0 = self._reservation_prescan(kp.public_key_b64, doc.org_id, doc.engagement_slug) if one else None
         except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         from ..governor.launch_settlement import SettleLockBusy, settle_lock
@@ -754,7 +778,7 @@ class LaunchGate:
             guard.close()
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         with guard:
-            return self._publish_checked(doc, signed, owner_root, kp, ev0, prior)
+            return self._publish_checked(doc, signed, owner_root, kp, ev0, prior, one=one, ix0=ix0)
 
     @staticmethod
     @contextlib.contextmanager
@@ -774,10 +798,11 @@ class LaunchGate:
             os.close(fd)
 
     def _publish_checked(self, doc: Any, signed: Any, owner_root: Any, kp: Any, ev0: Any,
-                         prior: "Optional[tuple[str, Any]]" = None) -> dict:
+                         prior: "Optional[tuple[str, Any]]" = None, *, one: bool = False, ix0: Any = None) -> dict:
         """The rest of :meth:`publish_lease`, under the spine + settle locks (and its per-host lock where metering is
         involved). ``ev0`` is the unlocked settlement scan, continued here over what was appended since; ``prior`` is
-        ``(nonce, its unlocked scan)`` of the lease this publish would replace (settle record on), or None."""
+        ``(nonce, its unlocked scan)`` of the lease this publish would replace (settle record on), or None. ``one`` is
+        the E7 one-launch flag and ``ix0`` its unlocked reservation scan (or None)."""
         from .. import config
         from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease, write_credit_lease
         from ..governor.launch_settlement import scan_settlement
@@ -810,6 +835,22 @@ class LaunchGate:
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         if refusal is not None:
             return refusal
+        if one:
+            # E7 ONE OUTSTANDING LAUNCH PER (org, host) (``one``: the flag, read once by publish_lease): the seam holds
+            # one lease per slug, so this lease never replaces ANOTHER launch's unsettled owner-signed lease, whatever
+            # either launch's billing mode (that launch's job would be refused and its reservation left held).
+            # Decided here, under the settle lock, before any grant is minted; an unanswerable check refuses.
+            try:
+                from ..governor.launch_reservations import scan_reservations
+                ix = scan_reservations(self.store, kp.public_key_b64, org_id=doc.org_id, slug=doc.engagement_slug,
+                                       since=ix0)
+                busy = self._one_launch_refusal(doc.org_id, doc.scope_host, doc.engagement_slug, str(doc.nonce), ix,
+                                                now_ts=None)
+            except Exception as e:  # noqa: BLE001 — an unanswerable check never lets a second launch through
+                return {"ok": False, "error": f"could not check for a launch already in progress (fail-closed): "
+                        f"{type(e).__name__}"}
+            if busy is not None:
+                return {"ok": False, "error": busy}
         # With metered billing on, the run's model grant is minted and published BEFORE the lease, so a lease is never
         # on the seam without the grant its run must meter through. A grant that cannot be minted (bad pricing config)
         # refuses the publish — a run never starts unmetered.
@@ -949,6 +990,146 @@ class LaunchGate:
         existed = read_model_grant(self._seam_base(), slug, expect_nonce=nonce) is not None
         write_model_grant(self._seam_base(), grant.engagement_slug, grant.nonce, token, config.model_gateway_url())
         return not existed
+
+    # -- E7: one outstanding launch per (org, host) + the release of a superseded reservation -----------------
+    def _reservation_prescan(self, pub: str, oid: str, slug: str):
+        """The full, UNLOCKED reservation scan of ``(oid, slug)`` that the locked check then continues (``since``),
+        or None when it fails (the locked check then scans in full, and refuses if that fails too)."""
+        from ..governor.launch_reservations import scan_reservations
+        try:
+            return scan_reservations(self.store, pub, org_id=oid, slug=slug)
+        except Exception:  # noqa: BLE001 — retried in full under the lock, which is fail-closed
+            return None
+
+    def _one_launch_locked(self, held: Any, pub: str, oid: str, host: str, slug: str, nonce: str, ix: Any, *,
+                           now_ts: float) -> Optional[str]:
+        """``reserve_launch``'s E7 check: take the cross-process settle lock into ``held`` (kept until the debit and
+        the mint are done), continue the scan inside it, and return ``_one_launch_refusal``'s answer. Fail-closed:
+        a lock or scan failure refuses the reservation."""
+        from ..governor.launch_reservations import scan_reservations
+        from ..governor.launch_settlement import settle_lock
+        try:
+            held.enter_context(settle_lock(self.store))
+            ix = scan_reservations(self.store, pub, org_id=oid, slug=slug, since=ix)
+            return self._one_launch_refusal(oid, host, slug, nonce, ix, now_ts=now_ts)
+        except Exception as e:  # noqa: BLE001 — an unanswerable check never lets a second launch through
+            return f"could not check for a launch already in progress (fail-closed): {type(e).__name__}"
+
+    def _seam_lease_nonce(self, slug: str) -> Optional[str]:
+        """The nonce of the lease the seam holds for ``slug`` if it verifies under OUR owner key, else None (a lease
+        that does not verify can never arm, so it is no launch in progress)."""
+        from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
+        from vigil_integration.live.credit_lease_broker import read_credit_lease
+        kp = self.owner_key
+        b = read_credit_lease(self._seam_base(), slug)
+        if kp is None or b is None:
+            return None
+        root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, _ = verify_credit_launch_lease(b.signed_lease, root)
+        return str(b.signed_lease.document.nonce) if ok else None
+
+    def _one_launch_refusal(self, oid: str, host: str, slug: str, nonce: str, ix: Any, *,
+                            now_ts: Optional[float]) -> Optional[str]:
+        """E7 — call under the settle lock, with ``ix`` (``scan_reservations`` of ``(oid, slug)``) continued inside
+        it. The customer-facing refusal when ANOTHER launch of this ``(org, host)`` is still outstanding, else None.
+
+        Outstanding = unsettled (no settlement evidence on the spine — ``ix.settled``, the evidence
+        ``scan_settlement`` reads — and no seam settlement marker) AND still able to run or to be running: its lease
+        is the one on the seam (queued, paused or running — or past ``not_after`` but possibly still running), or,
+        for a new RESERVATION (``now_ts`` given), its lease window may still be open. A lease ends at most
+        ``_MAX_LEASE_HOURS`` after its reserve, so an older reservation that is not on the seam can never start
+        (``launch_cancel`` or ``ops-sweep reservations`` releases it); it does not block a new launch. ``now_ts``
+        None is ``publish_lease``: only the lease on the seam matters there, as only it would be replaced."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+        base = self._seam_base()
+
+        def unsettled(n: str) -> bool:
+            return (oid, slug, n) not in ix.settled and not is_lease_settled(base, slug, n)
+
+        seam = self._seam_lease_nonce(slug)
+        busy = seam is not None and seam != nonce and unsettled(seam)
+        if not busy and now_ts is not None:
+            window = _MAX_LEASE_HOURS * 3600.0
+            busy = any(r.nonce != nonce and now_ts < r.issued_at + window and unsettled(r.nonce)
+                       for r in ix.of(oid, slug))
+        if not busy:
+            return None
+        return (f"another launch against {host} is not settled yet — finish or cancel the launch already in "
+                f"progress before {'reserving a new one' if now_ts is not None else 'starting this one'}")
+
+    def _release_refusal(self, oid: str, slug: str, res: Any, ix: Any, now_ts: float,
+                         grace_s: float) -> Optional[str]:
+        """Why the reservation ``res`` (of ``ix``, a ``scan_reservations`` index) may NOT be released as superseded
+        at ``now_ts``, or None. Shared by ``release_superseded_reservation`` (authoritative, inside the settle lock)
+        and the sweep's dry-run report.
+
+        * ``not_superseded`` — no LATER reservation of the same ``(org, slug)`` exists (this is the target's newest
+          launch: its customer can still start or cancel it).
+        * ``started`` — the lease on the seam is this one (the abandoned-lease sweep owns a started lease).
+        * ``in_grace`` — less than ``_MAX_LEASE_HOURS`` + ``grace_s`` since the reserve: its lease may still be
+          open, or a run that armed before it was superseded may still be finishing (the same grace the
+          abandoned-lease sweep gives a run past ``not_after``).
+        * ``outcome_recorded`` — a settle-drain ``assessment_outcome`` record names this launch: it WAS settled
+          (charged or refunded), so a missing settlement marker means the seam lost it — never release.
+        * ``seam_inconsistent`` — a lease of this ``(org, slug)`` that the spine shows settled is missing from the
+          seam settlement marker: the marker (the only record of a completed run's zero-refund settle while
+          ``VIGIL_SETTLE_SPINE_RECORD`` is off) was lost or rolled back, so nothing of this target is released."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
+        base = self._seam_base()
+        if not any(r.seq > res.seq for r in ix.of(oid, slug)):
+            return "not_superseded"
+        b = read_credit_lease(base, slug)
+        if b is not None and str(b.signed_lease.document.nonce) == res.nonce:
+            return "started"
+        if now_ts < res.issued_at + _MAX_LEASE_HOURS * 3600.0 + grace_s:
+            return "in_grace"
+        if res.key in ix.outcomes:
+            return "outcome_recorded"
+        if any(o == oid and s == slug and not is_lease_settled(base, slug, n) for (o, s, n) in ix.settled):
+            return "seam_inconsistent"
+        return None
+
+    def release_superseded_reservation(self, *, org_id: str, slug: str, nonce: str, now: Any, grace_s: float = 0.0,
+                                       refuse_if: Optional[Callable[[], Optional[str]]] = None) -> dict:
+        """E7 — FULL-REFUND one reservation that a later launch of the same ``(org, host)`` superseded on the seam
+        (that later lease replaced its lease, so the engine refuses its job, the settle-drain quarantines its
+        completion and no seam listing shows it: nothing else would ever settle it). There is no signed lease to
+        present, so the amount is the reservation's OWN owner-signed reserve records (``scan_reservations``: the
+        plan + wallet debits, or the postpaid draw, under ``reserve-*:{slug}:{nonce}``) — never a caller's number —
+        and the refund is the SAME exactly-once transaction as ``settle_launch`` (``_settle_reservation`` ->
+        ``_settle_once``, under the cross-process settle lock): a reservation already settled by anyone, in any
+        process, moves nothing and returns ``launch_already_settled``. Inside that critical section, before
+        anything is written, ``_release_refusal`` (the reservation is superseded, not started, past its grace, the
+        seam is consistent) and then the caller's ``refuse_if`` must both pass; a refusal returns ``refused``. The
+        decision record (settle record on) names it ``sweep:refund``."""
+        from ..governor.launch_reservations import scan_reservations
+        kp = self.owner_key
+        if kp is None:
+            return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
+        try:
+            now_ts = self._as_dt(now).timestamp()
+            grace = float(grace_s)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp and grace_s a number"}
+        if not grace >= 0.0:
+            return {"ok": False, "error": "grace_s must be a non-negative number"}
+        oid, s, non = str(org_id), str(slug), str(nonce)
+        ix = scan_reservations(self.store, kp.public_key_b64, org_id=oid, slug=s)
+        res = ix.reservations.get((oid, s, non))
+        if res is None:
+            return {"ok": False, "error": "no owner-signed reservation for this launch"}
+        # The bucket(s) it drew from must be the ones its settle path refunds: the postpaid draw for a postpaid
+        # reservation (detected exactly as settle_launch does), the plan + wallet debits otherwise.
+        postpaid = self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}")
+        if set(res.units) - ({"postpaid"} if postpaid else {"plan", "wallet"}) or res.reserved <= 0:
+            return {"ok": False, "error": "the reservation's records are inconsistent (fail-closed)"}
+
+        def _precondition() -> Optional[str]:
+            live = scan_reservations(self.store, kp.public_key_b64, org_id=oid, slug=s, since=ix)
+            return self._release_refusal(oid, s, res, live, now_ts, grace) or _refusal(refuse_if)
+
+        return self._settle_reservation(oid, s, non, res.reserved, 0, now_ts, _precondition, "sweep:refund")
 
     def _verify_lease_for_pause(self, signed_lease: Any, expect_org_id: Optional[str]):
         """Owner-pinned verify + tenant-bind for a pause/resume request (same guarantee as publish/settle): the
