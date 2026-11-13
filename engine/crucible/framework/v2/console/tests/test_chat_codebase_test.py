@@ -99,3 +99,42 @@ def test_the_command_is_positional_after_end_of_options(monkeypatch, tmp_path):
         argv = seen["argv"]
         assert argv[-2:] == ["--", "--approve"]
         assert ("--approve" in argv[:-2]) is present          # only the operator leg ever adds the real flag
+
+
+# --- an edit is never applied while the clone's own code runs (one lock per clone) ------------------------
+
+def test_the_clone_is_locked_while_its_tests_run_and_released_after(monkeypatch, tmp_path):
+    wd, seen = _wire(monkeypatch, tmp_path, {"ran": True, "exit_code": 0, "stdout": "", "stderr": ""})
+    real_run = actions_mod.subprocess.run
+
+    def _run(argv, **kw):
+        seen["locked_during_run"] = actions_mod._clone_lock(wd).locked()
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(actions_mod.subprocess, "run", _run)
+    assert actions_mod.run_codebase_tests(CHAT, wd, "pytest -q", operator_present=True)["ok"] is True
+    assert seen["locked_during_run"] is True, "the clone's tests ran without holding the clone lock"
+    assert actions_mod._clone_lock(wd).locked() is False, "the clone lock was not released"
+
+
+def test_the_clone_lock_is_released_when_the_sandbox_cannot_run(monkeypatch, tmp_path):
+    wd, _seen = _wire(monkeypatch, tmp_path, {})
+
+    def _boom(argv, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(actions_mod.subprocess, "run", _boom)
+    assert actions_mod.run_codebase_tests(CHAT, wd, "pytest -q", operator_present=True)["ok"] is False
+    assert actions_mod._clone_lock(wd).locked() is False
+
+
+def test_tests_are_refused_while_the_clone_is_busy(monkeypatch, tmp_path):
+    wd, seen = _wire(monkeypatch, tmp_path, {"ran": True, "exit_code": 0, "stdout": "", "stderr": ""})
+    lock = actions_mod._clone_lock(wd)
+    assert lock.acquire(blocking=False)                  # an apply (or another test run) holds this clone
+    try:
+        out = actions_mod.run_codebase_tests(CHAT, wd, "pytest -q", operator_present=True)
+    finally:
+        lock.release()
+    assert out["ok"] is False and "busy" in out["error"]
+    assert "argv" not in seen, "the sandbox was launched on a busy clone"

@@ -98,6 +98,25 @@ def test_topup_emits_an_invoice_with_the_catalog_amount():
     assert len(inv.invoices("acme")) == 1, "a replayed webhook must not duplicate the invoice line"
 
 
+def test_only_a_paid_topup_counts_as_a_credit_purchase():
+    s, inv, mock, signer = _inv_rig()
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    # credits that were GRANTED, not bought: a trial, a plan refill, a settle refund, even a hand-made "topup"
+    # wallet grant — none writes an invoice, so none is a purchase
+    for i, kind in enumerate(("trial", "subscription_refill", "refund", "topup")):
+        w.grant("acme", 500, kind, entry_id=f"grant_{i}", issued_at=float(10 + i))
+    assert w.available("acme") == 2_000 and inv.has_purchased_credits("acme") is False
+    body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 50.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=50.0) is not None
+    assert inv.has_purchased_credits("acme") is False, "a plan subscription is not a credit purchase"
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None
+    assert inv.has_purchased_credits("acme") is True
+    assert inv.has_purchased_credits("globex") is False
+
+
 def test_subscription_emits_an_invoice_with_the_period():
     _s, inv, mock, signer = _inv_rig()
     body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
@@ -437,7 +456,7 @@ def test_flutterwave_idempotency_anchors_on_verified_id_not_the_body_spelling():
     # the body's id SPELLING. Two deliveries of ONE real tx under two body-id spellings that /verify collapses to
     # the same canonical id must grant ONCE — else a verif-hash holder double-credits a real payment by varying
     # the spelling (e.g. a leading zero) whenever the verify endpoint canonicalizes it.
-    canonical = {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    canonical = {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                  "meta": {"price_id": "price_topup_200"}}
 
     def verifier(txid):                                 # the endpoint canonicalizes "9911" and "09911" -> tx 9911
@@ -454,7 +473,7 @@ def test_flutterwave_idempotency_anchors_on_verified_id_not_the_body_spelling():
 
 def test_flutterwave_missing_verified_id_mints_nothing():
     # fail-closed: a verified object carrying no canonical id cannot be anchored idempotently -> mint nothing.
-    table = {"9911": {"status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    table = {"9911": {"status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                       "meta": {"price_id": "price_topup_200"}}}      # no "id" field on the verified object
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9911), _FLW_SECRET, now=100.0) is None
@@ -462,7 +481,7 @@ def test_flutterwave_missing_verified_id_mints_nothing():
 
 
 def test_flutterwave_forged_hash_mints_nothing():
-    table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
+    table = {"9911": {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1",
                       "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9911), "WRONG-HASH", now=100.0) is None
@@ -488,7 +507,7 @@ def test_flutterwave_only_the_reverify_grants_not_the_webhook_body():
 def test_flutterwave_subscription_active_then_lapses_at_period_end():
     # A re-verified successful PLAN charge subscribes + refills the period; non-rollover means the plan credits
     # simply VANISH at period_end (the meter's active-subscription + live-period check), with no webhook needed.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, _subs, _plan, meter, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0) is not None
@@ -500,7 +519,7 @@ def test_flutterwave_failed_recurring_charge_marks_past_due():
     # H4: a definitively-FAILED RECURRING (payment_plan) charge that RE-VERIFIES drives DUNNING -> past_due. The
     # tenant/status/timestamp are taken from the AUTHORITATIVE verify object (the tx_ref WE set at checkout), never
     # the body — so a verif-hash holder cannot name a victim: only a REAL failed charge on a tenant's own plan duns.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
                       "created_at": 200.0}}
@@ -514,7 +533,7 @@ def test_flutterwave_failed_recurring_charge_marks_past_due():
 def test_flutterwave_cancel_webhook_is_still_ignored():
     # H4 SCOPE BOUND: a bare `subscription.cancelled` webhook carries no transaction to re-verify, so there is no
     # authoritative subscription->org mapping — we must NOT cancel a victim named only in the unauthenticated body.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
@@ -544,7 +563,7 @@ def test_flutterwave_failed_charge_without_recoverable_org_is_noop():
 
 def test_flutterwave_pending_charge_does_not_dun():
     # A NON-DEFINITIVE status (pending) must NOT reduce access — we dun only on a definitively `failed` verify.
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9922": {"id": 9922, "status": "pending", "tx_ref": "vigil:acme:n2", "payment_plan": "flwplan_pro",
                       "created_at": 200.0}}
@@ -559,11 +578,11 @@ def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
     # down-latch freshness key. After a tenant RECOVERS (a later successful renewal), a STALE / replayed /
     # out-of-order failed charge from BEFORE the recovery must NOT re-suspend them (at-least-once + unordered
     # webhook delivery make this real). A GENUINE current failure still duns (it post-dates its activation).
-    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+    table = {"9912": {"id": 9912, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
                       "created_at": 200.0},
-             "9914": {"id": 9914, "status": "successful", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
+             "9914": {"id": 9914, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n4", "created_at": 300.0,
                       "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)   # active @100
@@ -579,7 +598,7 @@ def test_flutterwave_stale_failed_charge_after_recovery_does_not_resuspend():
 def test_flutterwave_org_comes_from_verified_not_the_body():
     # SECURITY (red-pen #2): the tenant must come from the AUTHORITATIVE verified object, never the body. The
     # verified tx belongs to 'honest'; the body smuggles a 'victim' tx_ref. The grant must land on 'honest'.
-    table = {"42": {"id": 42, "status": "successful", "tx_ref": "vigil:honest:n1", "created_at": 10.0,
+    table = {"42": {"id": 42, "status": "successful", "currency": "USD", "tx_ref": "vigil:honest:n1", "created_at": 10.0,
                     "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     liar = json.dumps({"event": "charge.completed",
@@ -589,7 +608,7 @@ def test_flutterwave_org_comes_from_verified_not_the_body():
     assert w.available("victim") == 0, "the body's smuggled tenant must get nothing"
     # and the exact old bug (`_flw_org_id(verified) or _flw_org_id(body)`): verified has NO recoverable org, the
     # body smuggles one -> must mint NOTHING (no body fallback for the tenant of a sovereign mint).
-    table2 = {"43": {"id": 43, "status": "successful", "tx_ref": "no-org", "created_at": 10.0,
+    table2 = {"43": {"id": 43, "status": "successful", "currency": "USD", "tx_ref": "no-org", "created_at": 10.0,
                      "meta": {"price_id": "price_topup_200"}}}      # verified: unrecoverable tenant
     _s2, w2, _s2b, _p2, _m2, _flw2, signer2 = _flw_rig(table2)
     smuggle = json.dumps({"event": "charge.completed",
@@ -601,7 +620,7 @@ def test_flutterwave_org_comes_from_verified_not_the_body():
 def test_flutterwave_body_injected_payment_plan_cannot_force_the_plan_path():
     # SECURITY (red-pen #3): plan-vs-topup is decided by the VERIFIED object only. The verified tx is a plain
     # top-up (no payment_plan); the body injects payment_plan. It must still be minted as a TOPUP, not a plan.
-    table = {"50": {"id": 50, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 10.0,
+    table = {"50": {"id": 50, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 10.0,
                     "meta": {"price_id": "price_topup_200"}}}
     _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     body = json.dumps({"event": "charge.completed",
@@ -616,7 +635,7 @@ def test_flutterwave_iso_created_at_and_replay_inertness():
     # duplicate delivery is inert (same derived period, no re-grant / period extension). period_s=1000.
     iso = "2024-01-02T03:04:05.000Z"                                # = 1704164645.0 UTC
     epoch = 1704164645.0
-    table = {"77": {"id": 77, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": iso,
+    table = {"77": {"id": 77, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": iso,
                     "payment_plan": "flwplan_pro"}}
     _s, _w, subs, _plan, meter, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 77), _FLW_SECRET, now=epoch) is not None
@@ -632,9 +651,9 @@ def test_flutterwave_iso_created_at_and_replay_inertness():
 def test_flutterwave_unparseable_created_at_mints_nothing():
     # red-pen #4 (fail-closed): a verified tx with no parseable timestamp must mint NOTHING — replay-safety needs a
     # stable period anchor, and a wall-clock fallback would let duplicates advance the period.
-    table = {"78": {"id": 78, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": "not-a-date",
+    table = {"78": {"id": 78, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": "not-a-date",
                     "payment_plan": "flwplan_pro"},
-             "79": {"id": 79, "status": "successful", "tx_ref": "vigil:acme:n2",
+             "79": {"id": 79, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n2",
                     "meta": {"price_id": "price_topup_200"}}}      # created_at absent entirely
     _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 78), _FLW_SECRET, now=100.0) is None
@@ -643,7 +662,7 @@ def test_flutterwave_unparseable_created_at_mints_nothing():
 
 
 def test_flutterwave_unrecoverable_org_is_ignored():
-    table = {"7": {"id": 7, "status": "successful", "tx_ref": "no-org-here", "created_at": 1.0,
+    table = {"7": {"id": 7, "status": "successful", "currency": "USD", "tx_ref": "no-org-here", "created_at": 1.0,
                    "meta": {"price_id": "price_topup_200"}}}
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
     assert signer.ingest(_flw_wh("charge.completed", 7), _FLW_SECRET, now=1.0) is None
@@ -802,6 +821,24 @@ def test_inbound_cross_check_skipped_when_no_expected_configured():
     w, signer = _flw_rig_expected(table, None)                     # expected=None -> no cross-check
     assert signer.ingest(_flw_wh("charge.completed", 74), _FLW_SECRET, now=100.0) is not None
     assert w.available("acme") == 200
+
+
+_NO_CURRENCY = object()
+
+
+@pytest.mark.parametrize("currency", [_NO_CURRENCY, None, "", "   ", 840])
+@pytest.mark.parametrize("expected", [{"price_topup_200": (20000, "USD")}, None])
+def test_inbound_verified_charge_without_a_currency_mints_nothing(currency, expected):
+    # The signer's underpay / wrong-currency cross-check keys on the event's currency, so a verified "successful"
+    # charge with no (usable) currency would skip it and mint the catalog top-up on the price_id alone. The
+    # provider refuses it: no currency, no mint, whether or not an expected price is configured.
+    tx = {"id": 75, "status": "successful", "tx_ref": "vigil:acme:n", "amount": 200.00, "created_at": 100.0,
+          "meta": {"price_id": "price_topup_200"}}
+    if currency is not _NO_CURRENCY:
+        tx["currency"] = currency
+    w, signer = _flw_rig_expected({"75": tx}, expected)
+    assert signer.ingest(_flw_wh("charge.completed", 75), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
 
 
 # ---- Slice F red-pen fold (LOW hardening): link sanitizer, fail-closed creator, price guard, binding round-trip

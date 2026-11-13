@@ -107,6 +107,6 @@ def verify_engagement_completion(
         result = verify_threshold(
             engagement_completion_signing_bytes(signed.document), signed.signatures, trust_root
         )
-    except IntegrityError as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a document that cannot be UTF-8 encoded
         return False, f"engagement-completion signature material is malformed or uses a weak key: {e}"
     return result.satisfied, result.reason

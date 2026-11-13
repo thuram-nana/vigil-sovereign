@@ -48,6 +48,7 @@ from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_on
 from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
+from .seam_publish import encodable_or_revoke, withdraw_publication
 
 assert_no_offense()
 
@@ -173,7 +174,7 @@ def _verify_pop(core: dict, evaluator_sig) -> bool:
         return False
     try:
         return verify_one(pk, pop_signing_bytes(core), evaluator_sig)
-    except (IntegrityError, TypeError):
+    except (IntegrityError, TypeError, ValueError):   # ValueError: a core that cannot be UTF-8 canonicalised
         return False
 
 
@@ -364,14 +365,19 @@ class EvalCapabilityGrant:
         """Mirror every eval-capability-grant record for ``engagement_slug`` (grants AND revokes) to the
         shared seam, plus an OWNER SEAL over the WHOLE ordered record list + a monotonic publish seq (so an
         off-seam DROP/REORDER/ROLLBACK of the revoke cannot re-arm a revoked grant on the keyless offense
-        plane). Best-effort over an OSError/ValueError (an unwritable/unsafe seam leaves the offense plane
-        UNGRANTED — fail-closed — never falsely granted). The owner key signs ONLY here in SIGIL (FATAL-2)."""
-        records = []
-        for record in self.store.iter_records():
-            p = record.payload if isinstance(record.payload, dict) else {}
-            if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
-                records.append(dict(p))
+        plane). FAIL-CLOSED on every failure (``seam_publish``): a record that cannot be canonicalised is published
+        as an unsigned revoke placeholder, and if the publish fails the previous publication is WITHDRAWN, so the
+        offense plane falls back to default-ungranted, never a stale list a revoke never reached. Once withdrawn,
+        an OSError / ValueError is absorbed (the spine record stands; the next publish re-sends the full list);
+        anything else, or a publication that could not be withdrawn, re-raises. The owner key signs ONLY here in
+        SIGIL (FATAL-2)."""
         try:
+            records = []
+            for record in self.store.iter_records():
+                p = record.payload if isinstance(record.payload, dict) else {}
+                if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
+                    records.append(dict(p))
+            records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
             from vigil_integration.live.eval_capability_grant import (
                 build_seal,
                 write_eval_capability_grants,
@@ -388,8 +394,13 @@ class EvalCapabilityGrant:
                     pubkey=self.owner_key.public_key_b64,
                 )
             write_eval_capability_grants(self._base_dir(), engagement_slug, records, seal=seal)
-        except (OSError, ValueError):
-            pass
+        except Exception as e:
+            def _path():
+                from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+                return eval_capability_grant_path(self._base_dir(), engagement_slug)
+            withdrawn = withdraw_publication(_path, what=f"eval-capability-grant {engagement_slug!r}", cause=e)
+            if not withdrawn or not isinstance(e, (OSError, ValueError)):
+                raise   # never report success while a stale publication may still be honoured
 
 
 def revoke_grants_on_close(store, *, owner_key=None, trusted_pubkey: Optional[str] = None,

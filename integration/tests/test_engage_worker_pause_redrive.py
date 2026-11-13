@@ -22,10 +22,19 @@ END TO END (the last section — the REAL engine under the REAL worker, on the R
   * the re-scans pauses can cause one launch are bounded; past the bound the launch ends refunded, never charged.
 
 The mock engine (injected ``run``) lets us drive pause/crash/success deterministically without a live scan.
+
+Audit fold (the DEFAULT ``base_dir``): the worker factory defaults ``base_dir=None``, and the engine's arm reads
+the lease + pause under ``VIGIL_BASE_DIR``. The worker's own HARD #2 pause check passed that None to a pause
+reader that raised on it, the error was swallowed as "not paused", and a gate→arm-window pause was then handled
+as a GENUINE failure — burning crash budget and, at the terminal attempt, emitting a refunding FAILED for a launch
+that was only paused. ``test_e2e_arm_window_pause_...`` pins the window END TO END with the REAL engine arm
+(``EngagementRefused`` from the real ``verify_customer_launch_lease``) under the DEFAULT ``base_dir``.
+
 Mutation-verify targets (each neuter reds a NAMED test here):
   * drop the EngagementPaused branch (pause falls into the FAILED path)   -> test_pause_halt_does_not_settle_and_rolls_back_attempt
   * drop _record_resume_required (re-drive re-burns ⇒ resume=False)        -> test_pause_then_resume_re_drives_resume_true_and_settles_once
   * drop _release_attempt (pauses consume crash budget)                    -> test_repeat_pause_preserves_full_crash_budget
+  * pause substrate stops resolving base_dir=None (raises again)           -> test_e2e_arm_window_pause_with_the_real_arm_never_refunds_and_arms_fresh_on_resume[default-base_dir]
   * engine records a pause-cut scan as completed (resume reloads it)       -> test_e2e_resume_after_in_flight_pause_rescans_and_settles_once_on_the_whole_report
   * engine leaves the resume state unbound from the launch                 -> test_e2e_redrive_of_a_later_launch_never_settles_on_an_earlier_launchs_report
   * worker stops passing its job's nonce (launch_nonce) to the engine     -> test_e2e_a_job_never_runs_on_a_later_launchs_lease_so_each_launch_pays_only_for_its_own_scan
@@ -304,6 +313,130 @@ def test_crash_does_not_set_resume_required(monkeypatch):
         w(_job(nonce="n1"))
     assert not os.path.exists(_resume_marker(base, "n1"))  # NOT a pause → no resume-required
     assert os.path.exists(_slot(base, "n1", 1))            # the crash DID consume its attempt slot
+
+
+# ---------------------------------------------------------------------------------------------------
+# gate→arm window, END TO END: the REAL engine arm + JobRunner + LaunchSeamDrain, DEFAULT base_dir
+# ---------------------------------------------------------------------------------------------------
+@pytest.fixture
+def hermetic_engine(tmp_path, monkeypatch):
+    """Run the REAL ``run_engagement`` hermetically: a throwaway ``CRUCIBLE_ROOT`` (with its sentinel, and the
+    ``lru_cache``d root cleared around the test) plus a per-test blackboard, so nothing touches the repo tree —
+    and the engagement-log binding the run sets is restored afterwards, so a LATER test's log line is not routed
+    into this slug's ``targets/`` dir under the real root. Only the network-facing pieces are stubbed (preflight
+    + the scan campaign) — the launch-lease PRECONDITION, i.e. the single-use arm, is the real one. Returns the
+    list the stub campaign appends each scan to."""
+    from framework.v2 import engage as engage_mod
+    from framework.v2.agents import blackboard as _bb
+    from framework.v2.common import logging as _log
+    from framework.v2.common import paths as _paths
+    from framework.v2.scanner.campaign import ScanReport
+    root = tmp_path / "crucible-root"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CLAUDE.md").write_text("# hermetic test root (CRUCIBLE_ROOT sentinel)\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(root))
+    db = tmp_path / "bb-isolated.sqlite"
+    monkeypatch.setattr(_bb, "open_blackboard", lambda **_kw: _bb.Blackboard(db_path=db))
+    scans: list = []
+
+    class _Campaign:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def run(self, seed):
+            scans.append(seed)
+            return ScanReport(target=seed, pages_crawled=1)
+
+    monkeypatch.setattr(engage_mod, "preflight", lambda slug, seed_url: None)
+    monkeypatch.setattr(engage_mod, "WebScanCampaign", _Campaign)
+    bound_before = _log.current_engagement()
+    _paths.crucible_root.cache_clear()
+    try:
+        yield scans
+    finally:
+        _log.bind_engagement(bound_before)
+        _paths.crucible_root.cache_clear()
+
+
+@pytest.mark.parametrize("explicit_base", [True, False], ids=["explicit-base_dir", "default-base_dir"])
+def test_e2e_arm_window_pause_with_the_real_arm_never_refunds_and_arms_fresh_on_resume(
+        monkeypatch, tmp_path, hermetic_engine, explicit_base):
+    # The pause lands AFTER the pickup gate passed and BEFORE the arm, on every attempt, for MORE attempts than
+    # the crash budget allows. The REAL arm refuses each one (EngagementRefused — the lease is paused) WITHOUT
+    # burning the single-use floor. Money contract: never a refunding FAILED (the launch is only paused), no
+    # crash budget consumed, the delivery re-admitted every time; then on resume the launch arms FRESH (the floor
+    # is consumed exactly once), runs once and settles COMPLETED once.
+    from framework.v2 import engage as engage_mod
+    from framework.v2.authority import store as authz_store
+    from framework.v2.launch_lease import verify_customer_launch_lease
+    from vigil_integration.jobs.launch_runner import make_engage_scan_runner
+    from vigil_integration.launch_drain import LaunchSeamDrain
+    scans = hermetic_engine
+    owner = generate_keypair()
+    base = str(tmp_path / "seam")
+    now = time.time()
+    monkeypatch.setenv("VIGIL_BASE_DIR", base)                 # the ONE seam both planes agree on
+    monkeypatch.setenv("CRUCIBLE_TENANT", ORG)
+    write_credit_lease(base, SLUG, _lease(owner, issued=now), _owner_root(owner))
+    monkeypatch.setattr(authz_store, "load_authority_root", lambda path=None: _owner_root(owner))
+    monkeypatch.setattr(authz_store, "load_verified_authority",
+                        lambda slug, root, path=None: _customer_authority(slug, [HOST], now=now))
+    emits: list = []
+    monkeypatch.setattr("vigil_integration.jobs.completion_signal.emit_completion_signal",
+                        lambda **kw: emits.append(kw["outcome"]))
+    seen_resume: list = []
+    window = {"pause": True}
+
+    def _run(*, slug, seed_url, **kw):
+        seen_resume.append(kw["resume"])
+        if window["pause"]:
+            record_lease_pause(base, SLUG, "n1")               # the gate→arm window: gate passed, arm not yet
+        return engage_mod.run_engagement(slug, seed_url, **kw)  # the REAL engine (real precondition / arm)
+
+    kwargs = {"base_dir": base} if explicit_base else {}
+    runner = make_engage_scan_runner(str(tmp_path / "queue"), trust_root=object(), assert_tenant=lambda: None,
+                                     run=_run, profile_kwargs={"enable_chaining": False}, **kwargs)
+    drain = LaunchSeamDrain(base_dir=base, queue=runner.queue)
+    floor = os.path.join(base, ".credit-lease-highwater", f"{SLUG}.json")
+
+    for i in range(_MAX_ARM_ATTEMPTS + 1):                     # one more than the crash budget
+        assert drain.drain()["enqueued"] == 1, f"cycle {i + 1}: the launch was not (re-)admitted"
+        out = runner.run_one()
+        assert out.state == "failed" and "EngagementRefused" in out.reason and "paused" in out.reason, out.reason
+        assert emits == [], f"cycle {i + 1}: a paused launch was settled {emits}"   # never a FAILED refund
+        assert drain.drain() == {"enqueued": 0, "duplicate": 0, "deferred": 0}       # HELD while paused
+        clear_lease_pause(base, SLUG, "n1")                    # resume ... and the next cycle pauses in the window again
+    assert scans == []                                         # no traffic phase ever started while paused
+    assert not os.path.exists(floor)                           # the single-use floor was never burned
+    assert not any(os.path.exists(_slot(base, "n1", n)) for n in range(1, _MAX_ARM_ATTEMPTS + 2))  # no crash budget used
+    assert not os.path.exists(_resume_marker(base, "n1"))      # and NO resume-required (the floor was not burned)
+
+    window["pause"] = False                                    # this time the resume sticks
+    assert drain.drain()["enqueued"] == 1
+    assert runner.run_one().state == "done"
+    assert seen_resume == [False] * (_MAX_ARM_ATTEMPTS + 2)    # EVERY arm fresh — a resume=True here would skip the burn
+    assert len(scans) == 1 and emits == ["completed"]          # ran once, charged once, never refunded
+    assert os.path.exists(floor)                               # the real arm CONSUMED the lease ...
+    ok, why = verify_customer_launch_lease(SLUG, HOST, ORG, consume=True)
+    assert ok is False and "replay" in why                     # ... so it is single-use: a second arm is refused
+
+
+
+def test_in_flight_halt_reads_only_the_marker_so_a_pause_after_lease_expiry_still_halts(monkeypatch):
+    # The cross-plane fact the sovereign ``LaunchGate.pause_launch`` relies on when it keeps RECORDING a pause on
+    # an EXPIRED lease instead of refusing it: the engine's in-flight halt predicate consults ONLY the pause
+    # marker, never the lease window (the window is checked once, at the arm). So a run that armed in-window and
+    # is still sending traffic after ``not_after`` is stopped by a pause recorded then — and would have no stop
+    # control at all if the sovereign plane refused to record it.
+    from framework.v2 import engage as engage_mod
+    from framework.v2.launch_lease import verify_customer_launch_lease
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner)                        # the lease window sits around t=1000: long expired NOW
+    ok, why = verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, consume=False)
+    assert ok is False and "validity window" in why        # expired on the real clock: it can no longer ARM
+    assert engage_mod._lease_is_paused(base, SLUG, "n1") is False
+    record_lease_pause(base, SLUG, "n1")                   # the customer pauses AFTER expiry
+    assert engage_mod._lease_is_paused(base, SLUG, "n1") is True   # ... and the running engagement still halts
 
 
 # ===================================================================================================

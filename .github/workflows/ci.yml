@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install vigil_core (hash-locked runtime + pinned pytest) — W3-2
@@ -74,7 +74,7 @@ jobs:
     # the system behind the code once, and prose cannot promise not to do that again.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       # W3-2: even a reads-only job installs its harness from the committed hash lock, so nothing
@@ -89,7 +89,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install engine deps + vigil_core
@@ -129,6 +129,9 @@ jobs:
           #     these 4 tests only pass when scanner's test_claim_discipline happens to run first and inserts
           #     integration/ onto sys.path — a fragile cross-suite ordering the wholesale (filesystem-order)
           #     run does not provide. Excluded so this job stays order-independent.
+          #     It RUNS in the "integration two-env boundary (P5)" job's offense leg, which has both planes;
+          #     integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py fails the build if a
+          #     file --ignore'd here is not listed there.
           pytest framework/v2 \
                  --ignore=framework/v2/eval \
                  --ignore=framework/v2/console/tests/test_chat_inject.py -q
@@ -154,7 +157,7 @@ jobs:
       CRUCIBLE_EVAL_SUITES: framework/v2/eval
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install engine deps + vigil_core
@@ -224,7 +227,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: _clean-reverify
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install the engine's python deps + vigil_core
@@ -258,7 +261,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install nftables
@@ -301,7 +304,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install vigil_core + CRUCIBLE deps (for the oracle-adapter test)
@@ -521,8 +524,32 @@ jobs:
             # every one of those floored proofs would only ever SKIP (a skipped proof is not a passing proof).
             # (They are not integration/tests files, so the test_ci_framework_tests_run_in_offense_leg guard
             # neither requires nor counts them; listing them here is the coverage fix.)
+            #
+            # CROSS-PLANE TESTS THAT LIVE OUTSIDE integration/tests (the last block of this list). A test
+            # under engine/crucible that needs vigil_integration or vigil_gateway importorskips it, and
+            # SKIPS in "CRUCIBLE core on vigil_core" (which installs neither, by design). Unless it is
+            # also listed HERE it runs in no leg at all — which is where 21 of them were, among them
+            # framework/v2/tests/test_engage_pause_halt.py and test_launch_lease_pause.py (the pause /
+            # halt money path): green on every PR, never once executed. The same holds for
+            # console/tests/test_chat_inject.py (--ignore'd in crucible-core, listed nowhere), for
+            # docs/tests/test_verifier_provenance.py (skips in briefing-completeness, which has no
+            # engine), and for docs/proof-carrying-finding/tests and range/tests (run by no job at all).
+            # gateway/tests/test_scope_source.py is here because its charter tests import the engine
+            # (framework.v2.common.ethics), which the gateway job does not put on its path: there they only
+            # ran because an earlier test happened to resolve engine/crucible from the checkout.
+            #
+            # Two things keep it that way, and neither is a promise:
+            #   * integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py FAILS the build if a
+            #     test file outside integration/tests references a plane its home leg lacks and is not
+            #     in this list; and
+            #   * VIGIL_REQUIRE_PLANES + `-p pytest_require_planes` (.github/scripts) make a skip for
+            #     one of these planes a FAILURE in this process. This leg HAS every plane it names, so
+            #     here "could not import vigil_integration.x" can only mean a rename, a broken import or
+            #     a wrong path — exactly what importorskip would otherwise hide as a skip.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
-            PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+            VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
+            PYTHONPATH=integration:engine/crucible:gateway:.github/scripts python -m pytest \
+              -p pytest_require_planes -rs \
               docs/tests/test_out_of_scope_is_honest.py \
               integration/tests/test_tool_intake.py \
               integration/tests/test_fuzz_corpus_replay.py \
@@ -705,7 +732,45 @@ jobs:
               engine/crucible/framework/v2/scanner/tests/test_race.py \
               engine/crucible/framework/v2/scanner/tests/test_race_bizlogic_benchmark.py \
               engine/crucible/framework/v2/scanner/tests/test_arsenal_wiring.py \
-              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py -q -m "not volume"
+              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py \
+              engine/crucible/framework/v2/agents/tests/test_egress_guard_floor.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_signed_authority.py \
+              engine/crucible/framework/v2/common/tests/test_egress_backstop.py \
+              engine/crucible/framework/v2/console/tests/test_approvals_screen.py \
+              engine/crucible/framework/v2/console/tests/test_chat_clone.py \
+              engine/crucible/framework/v2/console/tests/test_chat_codebase_edit.py \
+              engine/crucible/framework/v2/console/tests/test_chat_inject.py \
+              engine/crucible/framework/v2/console/tests/test_engagement_library.py \
+              engine/crucible/framework/v2/console/tests/test_fixes_apply_local.py \
+              engine/crucible/framework/v2/console/tests/test_system_screen.py \
+              engine/crucible/framework/v2/console/tests/test_target_authorization_install.py \
+              engine/crucible/framework/v2/evidence/tests/test_l3_parity_hardening.py \
+              engine/crucible/framework/v2/scanner/tests/test_claim_discipline.py \
+              engine/crucible/framework/v2/scanner/tests/test_forgery_acceptance.py \
+              engine/crucible/framework/v2/scanner/tests/test_rawhttp_reader.py \
+              engine/crucible/framework/v2/tests/test_engage_pause_halt.py \
+              engine/crucible/framework/v2/tests/test_launch_lease.py \
+              engine/crucible/framework/v2/tests/test_launch_lease_pause.py \
+              engine/crucible/framework/v2/tests/test_run_budget_hard_stop.py \
+              engine/crucible/framework/v2/veracity/tests/test_witness_quorum.py \
+              engine/crucible/framework/v2/verify/tests/test_static_rule_class_binding_m3.py \
+              docs/tests/test_verifier_provenance.py \
+              docs/proof-carrying-finding/tests \
+              gateway/tests/test_scope_source.py \
+              range/tests -q -m "not volume"
+            # The engine tests that need vendor/strix as well (they importorskip("strix…")). Its own
+            # process, so strix being importable changes nothing for the list above. NOTE: one of them,
+            # test_strix_model_sovereignty.py's loader test, still skips here — strix.config.loader needs
+            # pydantic_settings, which is in strix's own lock and not in this job's. That is a
+            # third-party dependency this job does not install, not a missing plane; it is recorded in
+            # the guard's docstring rather than hidden.
+            VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
+            PYTHONPATH=integration:engine/crucible:gateway:vendor/strix:.github/scripts python -m pytest \
+              -p pytest_require_planes -rs \
+              engine/crucible/framework/v2/console/tests/test_run_control.py \
+              engine/crucible/framework/v2/console/tests/test_strix_model_sovereignty.py \
+              engine/crucible/framework/v2/console/tests/test_tool_profile.py \
+              engine/crucible/framework/v2/console/tests/test_tool_research.py -q -m "not volume"
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
@@ -780,7 +845,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install pytest (hash-locked) + best-effort SDK (so reasoning/dedup tests run, not just skip)
@@ -808,7 +873,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install vigil_core + SIGIL deps (hash-locked) — W3-2 (governor tests are pure-Python)
@@ -902,7 +967,10 @@ jobs:
     # modules are burned down over time; the list can never silently grow back.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Full history: the money-hygiene step reads the PR's own commit messages (base..head).
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: install ruff + mypy (hash-locked) + sigil deps — W3-2
@@ -913,6 +981,20 @@ jobs:
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      - name: public-repo money hygiene (tracked files + commit, PR and branch text)
+        # The repo is PUBLIC. The markup and target-margin VALUES live only in the private deploy
+        # environment; this blocks a value in any tracked text file, in the PR's own commit messages
+        # (base..head, so main's history is not re-judged), in the PR title/body and in the branch
+        # name. Findings print location + pattern id only, never the matched text. Suite:
+        # apps/sigil/tests/test_public_repo_money_hygiene.py. Stdlib only.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python tools/governance/money_hygiene.py tree
+          if [ -n "$BASE_SHA" ]; then
+            python tools/governance/money_hygiene.py ci --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
       - name: ruff (BLOCKING — E9/F/B real bug classes)
         working-directory: apps/sigil
         run: ruff check sigil
@@ -931,7 +1013,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: "21"
@@ -1002,7 +1084,7 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: install pytest (universal-wheel subset of the CI toolchain lock, hash-pinned)

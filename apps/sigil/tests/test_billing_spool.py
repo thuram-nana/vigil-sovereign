@@ -68,7 +68,7 @@ def _spool(spool_root: Path, raw: bytes, *, name=None):
 
 
 def _ok_tx(txid=9911):
-    return {str(txid): {"id": txid, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    return {str(txid): {"id": txid, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                         "meta": {"price_id": "price_topup_200"}}}
 
 
@@ -142,7 +142,7 @@ def test_transient_verify_failure_is_quarantined_not_buried():
 
 
 def test_unknown_price_is_a_safe_noop():
-    table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+    table = {"9911": {"id": 9911, "status": "successful", "currency": "USD", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                       "meta": {"price_id": "price_NOT_in_catalog"}}}
     _s, w, watcher, root = _rig(table)
     _spool(root, _body(9911))

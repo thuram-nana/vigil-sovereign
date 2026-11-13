@@ -145,7 +145,7 @@ def verify_identity_attestation(att: IdentityAttestation, *, trusted_owner_pubke
         raise CapabilityError("identity attestation is unsigned")
     try:
         ok = verify_one(trusted_owner_pubkey, _msg(_IDENTITY_DOMAIN, att._core()), att.sig)
-    except (IntegrityError, TypeError) as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a core that cannot be UTF-8 encoded
         raise CapabilityError(f"identity signature is malformed: {e}") from e
     if not ok:
         raise CapabilityError("identity signature does not verify against the owner key")
@@ -376,7 +376,7 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
         raise CapabilityError("capability is unsigned")
     try:
         ok = verify_one(trusted_owner_pubkey, _msg(_CAPABILITY_DOMAIN, cap._core()), cap.sig)
-    except (IntegrityError, TypeError) as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a core that cannot be UTF-8 encoded
         raise CapabilityError(f"capability signature is malformed: {e}") from e
     if not ok:
         raise CapabilityError("capability signature does not verify against the owner key")
@@ -400,7 +400,7 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
             raise CapabilityError(f"attenuation #{i} is unsigned")
         try:
             ok = verify_one(att.signer_pubkey, _msg(_ATTENUATION_DOMAIN, att._core()), att.sig)
-        except (IntegrityError, TypeError) as e:
+        except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a core that cannot be UTF-8 encoded
             raise CapabilityError(f"attenuation #{i} signature is malformed: {e}") from e
         if not ok:
             raise CapabilityError(f"attenuation #{i} signature does not verify")
@@ -508,7 +508,7 @@ def _verify_wielder_proof(proof: WielderProof | None, *, expected_audience: str,
         raise CapabilityError("wielder proof is unsigned")
     try:
         ok = verify_one(expected_audience, _msg(_WIELDER_POP_DOMAIN, proof._core()), proof.sig)
-    except (IntegrityError, TypeError) as e:
+    except (IntegrityError, TypeError, ValueError) as e:   # ValueError: a core that cannot be UTF-8 encoded
         raise CapabilityError(f"wielder proof signature is malformed: {e}") from e
     if not ok:
         raise CapabilityError("wielder proof does not verify against the capability's audience key")
@@ -521,5 +521,8 @@ def verify_wielder_proof(proof: "WielderProof | None", *, expected_audience: str
     PoP failure need not cost a live probe. ``expected_audience`` should be the EFFECTIVE (post-attenuation)
     audience from :func:`verify_capability`; a bearer (``"*"``) audience has no key to prove and MUST be handled
     by the caller's policy, not here."""
-    _verify_wielder_proof(proof, expected_audience=expected_audience, challenge=challenge,
-                          cap_digest=capability._digest())
+    try:
+        cap_digest = capability._digest()
+    except (TypeError, ValueError) as e:   # a capability whose core cannot be UTF-8 canonicalised
+        raise CapabilityError(f"capability is malformed: {e}") from e
+    _verify_wielder_proof(proof, expected_audience=expected_audience, challenge=challenge, cap_digest=cap_digest)
