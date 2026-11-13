@@ -87,8 +87,9 @@ def verify_hop_assertion(hop_key: str, principal: str, role: str, method: str, p
     ``max_skew_s`` of ``now`` (default: the wall clock) AND the recomputed HMAC equals ``sig``.
 
     Fail-closed at every branch: a blank hop key (nothing to verify with), a missing field, a
-    non-numeric/stale ``ts``, or a mismatching MAC each return False. This is the SAME predicate the
-    offense console has always used — lifted here verbatim so the offense api verifies byte-identically."""
+    non-numeric/stale ``ts``, a non-ASCII (hostile) ``sig``, or a mismatching MAC each return False. This
+    is the SAME predicate the offense console has always used — lifted here verbatim so the offense api
+    verifies byte-identically."""
     if not (hop_key and role and ts and sig):
         return False
     try:
@@ -105,7 +106,12 @@ def verify_hop_assertion(hop_key: str, principal: str, role: str, method: str, p
     if abs(reference - ts_f) > max_skew_s:
         return False
     expected = stamp_hop_assertion(hop_key, principal, role, method, path, ts)
-    return hmac.compare_digest(expected, sig)
+    try:
+        # compare_digest over two str requires BOTH ASCII; a non-ASCII (hostile) sig must fail closed — a
+        # clean, attributed refusal — never raise TypeError and drop the request before it is recorded.
+        return hmac.compare_digest(expected.encode("ascii"), sig.encode("ascii"))
+    except UnicodeEncodeError:
+        return False
 
 
 def verify_github_signature(raw_body: bytes, header: str, secret: str) -> bool:

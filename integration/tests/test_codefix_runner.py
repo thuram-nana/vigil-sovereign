@@ -380,6 +380,39 @@ def _fake_gh(tmp_path):
     return str(p)
 
 
+def test_open_pr_runs_no_hook_planted_in_the_clone(repo_and_diff, tmp_path, monkeypatch):
+    """The clone's own build/test code runs in the sandbox with the clone bound read-write, .git included,
+    so by the PR leg ``.git/hooks`` (and the fsmonitor setting) may name a program the repo planted. The
+    host-side add / commit / push must run none of them — and the PR still opens."""
+    from vigil_integration.live.codefix_runner import CodefixSession
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    repo, _diff = repo_and_diff
+    sess = CodefixSession(CodefixConfig(target_repo=repo, base_dir=str(tmp_path / "work"), pr_enabled=True,
+                                        github_token="ghp_TESTTOKEN", gh_bin=_fake_gh(tmp_path)))
+    req = type("R", (), {"remediation_id": "hooks", "fix_branch": "vigil-fix/hooks", "title": "fix",
+                         "target_repo": repo})
+    assert sess.clone(req).ok
+    ran = tmp_path / "ran"
+    ran.mkdir()
+    hooks = os.path.join(sess.workdir, ".git", "hooks")
+    for name in ("pre-commit", "commit-msg", "post-commit", "pre-push", "reference-transaction"):
+        hook = os.path.join(hooks, name)
+        with open(hook, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\ntouch {ran}/{name}\nexit 0\n")
+        os.chmod(hook, 0o755)
+    fsmon = tmp_path / "fsmonitor.sh"
+    fsmon.write_text(f"#!/bin/sh\ntouch {ran}/fsmonitor\nexit 1\n", encoding="utf-8")
+    fsmon.chmod(0o755)
+    assert _git("config", "core.fsmonitor", str(fsmon), cwd=sess.workdir).returncode == 0
+    with open(os.path.join(sess.workdir, "app.py"), "w", encoding="utf-8") as fh:
+        fh.write(_FIXED)                                                  # the approved fix
+    res = sess.open_pr(req, ["app.py"])
+    assert res.ok is True, res.reason
+    assert sorted(os.listdir(ran)) == [], "host-side git ran a program planted in the clone"
+    assert "vigil-fix/hooks" in _git("branch", "--list", "vigil-fix/*", cwd=repo).stdout
+
+
 def test_full_pr_path_opens_when_provisioned_and_quorum_passes(repo_and_diff, tmp_path, monkeypatch):
     # END-TO-END destructive path: propose → clone → apply → PR gate → m-of-n quorum → push + (fake) gh PR.
     # target_repo is the real repo; the fix branch is pushed to it (a NEW branch, allowed on a non-bare repo).

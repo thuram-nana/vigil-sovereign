@@ -67,6 +67,30 @@ def _pk_prefix(pubkey) -> str:
     """A short, non-reversible tag for a device pubkey (prefix only — NEVER the full key in a log)."""
     s = str(pubkey) if pubkey else ""
     return (s[:_PUBKEY_LOG_PREFIX] + "…") if s else "?"
+
+
+_LOG_FIELD_MAX = 200                              # chars of one peer-influenced value we put in a log line
+
+
+def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
+    """The LOGGED copy of a peer-influenced value: every character that is not `str.isprintable()`
+    (C0/C1 controls incl. ESC/NUL/DEL, every line breaker `splitlines` honours, bidi/zero-width formats,
+    lone surrogates) AND the backslash itself becomes a visible `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN` escape,
+    so the encoding is injective (a real ESC logs `\\x1b`; a typed backslash-x-1-b logs `\\x5cx1b`), and
+    the value is capped at `limit` characters. So a request cannot drive the operator's terminal, forge or
+    split an audit record, plant look-alike escaped "evidence", or flood the log. Any other printable text
+    (spaces, non-ASCII letters) is returned unchanged."""
+    s = value if isinstance(value, str) else str(value)
+    out = []
+    for ch in s[:limit]:
+        if ch.isprintable() and ch != "\\":
+            out.append(ch)
+        else:
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp <= 0xFF else f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
+    if len(s) > limit:
+        out.append(f"...[+{len(s) - limit} chars]")
+    return "".join(out)
 _TS_WINDOW = 120.0                               # ± seconds a request timestamp may differ from the server clock
 
 # Each network endpoint declares the ONE envelope action that authorizes it. Binding the
@@ -248,9 +272,11 @@ class Handler(BaseHTTPRequestHandler):
     def _deny(self, code=403, msg="forbidden"):
         # WARNING-level audit of every denial: method, PATH ONLY (never the query — an envelope can ride
         # in `?env=`), status, and the developer-controlled reason. `msg` is a fixed reason string, never
-        # the envelope/signature/token/secret/body.
+        # the envelope/signature/token/secret/body. The path comes from a peer that has NOT authenticated
+        # yet, so the LOGGED copy is escaped + capped (`_log_safe`); the response body is not rewritten.
         _log.warning("bridge denied: %s %s -> %d (%s)",
-                     getattr(self, "command", "?"), urlparse(self.path).path, code, msg)
+                     getattr(self, "command", "?"), _log_safe(urlparse(self.path).path), code,
+                     _log_safe(msg, 2 * _LOG_FIELD_MAX))
         self._json({"error": msg}, code)
 
     # --- health / readiness (probe surface) -------------------------------------------------------
@@ -323,7 +349,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_static(self, sub: str):
         base = _WEBAPP.resolve()
-        target = (base / sub).resolve()
+        try:
+            target = (base / sub).resolve()
+        except (OSError, ValueError):                            # e.g. an embedded NUL: refuse AND audit it,
+            return self._deny(404, "not found")                  # never drop the connection unrecorded
         if base != target and base not in target.parents:        # traversal guard (allowlist by containment)
             return self._deny(404, "not found")
         if not target.is_file():

@@ -6,7 +6,7 @@
 # Building from source therefore requires a Rust toolchain (rustc/cargo) — expected for this repo, which
 # already carries the kernel crate. See [[tool.setuptools-rust.bins]] below.
 [build-system]
-requires = ["setuptools>=84.0.0", "wheel", "setuptools-rust>=1.13.0"]
+requires = ["setuptools>=84.2.1", "wheel", "setuptools-rust>=1.13.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,7 +37,7 @@ dynamic = ["version"]
 # fastembed was removed because every release hard-pins pillow<13, which carries unpatched CVEs.
 dependencies = [
     "cryptography==50.0.2",
-    "huggingface-hub==1.27.0",
+    "huggingface-hub==2.4.0",
     "kuzu==0.11.3",
     "mcp==2.3.0",
     "numpy>=2.4.6,<3",
