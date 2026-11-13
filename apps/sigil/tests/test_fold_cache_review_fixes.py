@@ -220,6 +220,19 @@ def test_only_a_positive_int_pid_can_be_alive(pid, alive):
     assert fold_warm._pid_alive(pid) is alive
 
 
+@pytest.mark.parametrize("err,alive", [(PermissionError(1, "Operation not permitted"), True),
+                                       (ProcessLookupError(3, "No such process"), False)])
+def test_a_process_running_under_another_user_is_alive(monkeypatch, err, alive):
+    """`kill(pid, 0)` refused with EPERM: the process exists (another user's), so its report still describes caches
+    that serve — a MISMATCH it recorded is not superseded."""
+    def probe(pid, sig):
+        raise err
+
+    monkeypatch.setattr(fold_warm.os, "kill", probe)
+    assert fold_warm._pid_alive(4242) is alive
+    assert fold_warm.report_is_live(_mismatch_report(4242)) is alive
+
+
 def test_sigil_verify_does_not_count_a_dead_processs_mismatch(tmp_path, monkeypatch, capsys):
     from sigil.cli import _verify_fold_caches
     path = tmp_path / "fold_cache_audit.json"
