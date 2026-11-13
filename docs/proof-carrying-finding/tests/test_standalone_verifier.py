@@ -24,7 +24,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -56,12 +55,18 @@ def _load_standalone():
 
 
 def _mint_a_fact(run_dir: Path) -> None:
-    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme")
+    # The mint contract for an error-signature FACT (proof.run.build_report_mint) requires, beyond the
+    # datastore error in the RESPONSE: (inv 6/8) the exploit REQUEST bytes bound to the observed exchange,
+    # and (S6) a benign CONTROL of the same endpoint that does NOT carry the error, fetched over the
+    # observed transport scheme. Same shape as integration/tests/test_proof_bundle.py::_mint_a_fact.
+    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme",
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
     report = {
         "id": "errsqli-001", "bug_class": "error_based_sqli", "poc_script_code": "print('benign repro')",
         CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
-                                     "response_bytes_ref": "resp", "bug_class": "error_based_sqli"}],
-                      "blobs": {"resp": _SQL_ERROR}},
+                                     "response_bytes_ref": "resp", "request_bytes_ref": "req",
+                                     "bug_class": "error_based_sqli", "observed_scheme": "http"}],
+                      "blobs": {"resp": _SQL_ERROR, "req": b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"}},
     }
     res = mint(report)
     assert res is not None and res.is_fact, "the SQL-error response must mint a FACT"

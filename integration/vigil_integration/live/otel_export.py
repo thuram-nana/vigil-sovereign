@@ -27,7 +27,9 @@ attacks exactly that:
     free-string fields derived from record content — the span/observation NAME (``ReadableSpan.name``)
     and the STATUS message (``Status.description``) — are routed through the SAME ``_redact_str``
     scrubber at that boundary too, so NO free-form string leaves unscrubbed — a secret can never reach
-    the collector even if ``OTLPSink`` is handed a hand-built (un-redacted) record.
+    the collector even if ``OTLPSink`` is handed a hand-built (un-redacted) record. The ENDPOINT is never
+    shown raw either: VIGIL prints it through ``redact_endpoint``, and the exporter stack's own log lines
+    (which it builds from the raw url) are scrubbed of its path / query by ``_EndpointLogScrub``.
   * **DETERMINISTIC IDENTITY.** The OTel trace/span ids are derived from the record's already-derived
     spine identity (``spine_hash``/``seq`` via ``observability.identity``) — NO wallclock, NO RNG. Re-
     exporting a byte-identical record yields byte-identical ids.
@@ -53,9 +55,11 @@ Import-clean: stdlib + the F11 observability seam + the F3 redactor; ``opentelem
 
 from __future__ import annotations
 
+import errno
 import http.client
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Any, Optional
@@ -104,13 +108,30 @@ _ENDPOINT_SAFE = re.compile(r"\A[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]+\Z")
 
 
 _SCHEME = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]{0,15})://(.*)\Z", re.S)
+# RFC 3986: the authority ends at the FIRST ``/``, ``?`` or ``#`` (a backslash ends it too — urllib3/requests
+# treat it as ``/``). Everything after that is path / query / fragment, where an ``?api_key=`` lives.
+_AUTHORITY_END = re.compile(r"[/?#\\]")
+# The ONLY text ever echoed after ``scheme://``: a hostname / IPv4 run or a bracketed IPv6 literal, plus an
+# optional all-digit port. An "authority" that is anything else (whitespace, ``&token=…``, a non-numeric port) is
+# not an address and is never shown.
+_HOSTPORT = re.compile(r"(?:\[[0-9A-Fa-f:.]{1,64}\]|[A-Za-z0-9._-]{1,253})(?::[0-9]{0,5})?")
 
 
 def redact_endpoint(endpoint: Any) -> str:
     """A display-safe form of ``endpoint`` for refusals, diagnostics and logs: ONLY ``scheme://host:port`` is
-    kept. Userinfo (even one whose password contains ``/ ? #``) becomes ``***@``; any path / query / fragment —
-    where an ``?api_key=`` would live — becomes ``/…``; non-printable characters (newline / ANSI escapes that
-    could forge diagnostic lines) become ``?``; the result is length-capped. Total — never raises."""
+    kept, and nothing else from the input. The AUTHORITY is isolated first (cut at the first ``/ ? #`` or
+    backslash) and only then searched for userinfo, which becomes ``***@``; any path / query / fragment — where
+    an ``?api_key=`` would live — becomes ``/…``. Two cases show NO part of the authority (``scheme://***``):
+
+      * an ``@`` AFTER the authority. It is ambiguous: RFC 3986 reads it as path / query / fragment text, but an
+        operator who pasted a password containing an unencoded ``/ ? #`` means everything before the LAST ``@`` as
+        userinfo. Under one reading the text after that ``@`` is a secret, under the other the text before the
+        first ``/`` is — so neither side is echoed (splitting at the last ``@`` of the whole string used to print
+        ``?user=ops@corp.example&token=SECRET`` as ``***@corp.example&token=SECRET``);
+      * a "host:port" that is not host:port-shaped (whitespace, ``&token=…``, control characters that could forge
+        a diagnostic line).
+
+    The result is printable and length-capped. Total — never raises."""
     try:
         s = coerce_str(endpoint)
         if not s:
@@ -119,12 +140,14 @@ def redact_endpoint(endpoint: Any) -> str:
         if not m:
             return "<endpoint>"
         scheme, rest = m.group(1), m.group(2)
-        cred = "@" in rest
-        if cred:
-            rest = rest.rsplit("@", 1)[1]
-        hostport = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
-        tail = rest[len(hostport):]
-        out = f"{scheme}://{'***@' if cred else ''}{hostport}{'/…' if tail.strip('/') else ''}"
+        authority = _AUTHORITY_END.split(rest, maxsplit=1)[0]
+        tail = rest[len(authority):]
+        hostport = authority.rsplit("@", 1)[-1]
+        if "@" in tail or not _HOSTPORT.fullmatch(hostport):
+            shown = "***"
+        else:
+            shown = ("***@" if "@" in authority else "") + hostport
+        out = f"{scheme}://{shown}{'/…' if tail.strip('/') else ''}"
         return "".join(ch if ch.isprintable() else "?" for ch in out)[:200]
     except Exception:  # noqa: BLE001
         return "<unprintable endpoint>"
@@ -174,6 +197,122 @@ def _traces_url(endpoint: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------------
+# third-party log scrub — the exporter stack's OWN log lines never carry the endpoint's path / query
+# ---------------------------------------------------------------------------------------------------
+
+# Every line VIGIL writes shows the endpoint through ``redact_endpoint``. The pinned OTLP/HTTP exporter stack
+# (infra/supply-chain/otel.lock.txt) also logs, and it builds that text itself from the RAW url: ``Transient error
+# … Max retries exceeded with url: /v1/traces?api_key=…`` (WARNING), ``Failed to parse: '127.0.0.1:4318&token=…'
+# is not a valid host or port`` (ERROR), urllib3's ``"POST /v1/traces?api_key=… HTTP/1.1" 200`` (DEBUG). With no
+# logging configured, ``logging.lastResort`` prints WARNING and above to stderr. These are the loggers that stack
+# writes those lines to; a filter on a logger sees only records logged on it, so each is named.
+_EXPORTER_LOGGERS = (
+    "opentelemetry.exporter.otlp.proto.http.trace_exporter",  # the exporter and its HTTP client (it passes this one)
+    "opentelemetry.exporter.otlp.common.http",                # that HTTP client's own default logger
+    "urllib3.connectionpool",                                 # the request line (DEBUG) and retry warnings
+    "urllib3.connection",                                     # "Failed to parse headers (url=…)" (WARNING)
+    "urllib3.util.retry",                                     # "Incremented Retry for (url=…)" (DEBUG)
+)
+_WITHHELD = "OTLP exporter log line withheld (it could not be checked for the endpoint's path or query)"
+
+
+def _endpoint_log_texts(endpoint: str) -> dict[str, str]:
+    """The texts of ``endpoint`` a library prints, other than ``scheme://host:port``, mapped to what replaces
+    them — so a scrubbed line reads exactly as ``redact_endpoint`` would show the url: everything after the
+    authority (``/v1/traces?api_key=…#…``) and the request target without its fragment (what goes on the wire)
+    become ``/…``; an authority that is not host:port-shaped (the ``127.0.0.1:4318&token=…`` a client-side parse
+    error quotes) becomes ``***``. Taken from the raw endpoint, the url with the traces path appended, and that url
+    as ``requests`` re-quotes it for the wire (``%53`` is sent — and printed — as ``S``). Total."""
+    out: dict[str, str] = {}
+    forms = {endpoint, _traces_url(endpoint)}
+    try:
+        import requests                      # what the exporter actually sends (and its errors quote)
+
+        prepared = requests.Request("POST", _traces_url(endpoint)).prepare().url
+        if isinstance(prepared, str):
+            forms.add(prepared)
+    except Exception:  # noqa: BLE001 — an unpreparable url fails client-side, quoting its raw text (covered)
+        pass
+    for form in forms:
+        m = _SCHEME.match(form) if isinstance(form, str) else None
+        if not m:
+            continue
+        rest = m.group(2)
+        authority = _AUTHORITY_END.split(rest, maxsplit=1)[0]
+        tail = rest[len(authority):]
+        if "@" in authority or not _HOSTPORT.fullmatch(authority):
+            out[authority] = "***"
+        for piece in (tail, tail.partition("#")[0]):
+            if piece.strip("/?#"):           # a bare "/" or "?" is no secret, and replacing it would mangle lines
+                out[piece] = "/…"
+    return out
+
+
+class _EndpointLogScrub(logging.Filter):
+    """A filter for the exporter stack's loggers that rewrites, IN the record, every text of an armed sink's
+    endpoint other than ``scheme://host:port`` (see ``_endpoint_log_texts``). Narrow: a record that contains
+    none of those texts is left exactly as it was, and no record is ever dropped (an export failure stays
+    visible, just without the path / query). The message, a formatted traceback and a stack are all scrubbed.
+    Fail-closed: a record that cannot be checked is replaced by a fixed line. Never raises into the caller."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # (pattern, replacements) swapped as ONE reference, so a concurrent ``filter`` sees the old or the new;
+        # the lock only keeps two sinks built at once from dropping each other's texts
+        self._state: tuple[Optional[re.Pattern[str]], dict[str, str]] = (None, {})
+        self._add_lock = threading.Lock()
+
+    def add(self, endpoint: str) -> None:
+        with self._add_lock:
+            texts = dict(self._state[1])
+            texts.update(_endpoint_log_texts(endpoint))
+            # longest first: at any position the full tail wins over the request target it starts with
+            ordered = sorted(texts, key=len, reverse=True)
+            pattern = re.compile("|".join(re.escape(t) for t in ordered)) if texts else None
+            self._state = (pattern, texts)
+
+    def _clean(self, text: str) -> str:
+        pattern, texts = self._state
+        if pattern is None or not text:
+            return text
+        return pattern.sub(lambda m: texts[m.group(0)], text)   # one pass: a replacement is never re-scanned
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            clean = self._clean(msg)
+            if clean != msg:
+                record.msg, record.args = clean, None
+            if record.exc_info:
+                tb = logging.Formatter().formatException(record.exc_info)
+                clean_tb = self._clean(tb)
+                if clean_tb != tb:
+                    record.exc_info, record.exc_text = None, clean_tb   # the formatter prints exc_text as is
+            elif record.exc_text:
+                record.exc_text = self._clean(record.exc_text)
+            if record.stack_info:
+                record.stack_info = self._clean(record.stack_info)
+        except Exception:  # noqa: BLE001 — a record that cannot be checked is never let through as written
+            record.msg, record.args = _WITHHELD, None
+            record.exc_info = record.exc_text = record.stack_info = None
+        return True
+
+
+_LOG_SCRUB = _EndpointLogScrub()
+
+
+def _scrub_exporter_logs(endpoint: str) -> None:
+    """Register ``endpoint``'s texts with the scrub and attach it (once) to every exporter-stack logger. Called
+    BEFORE the real exporter is built, so its very first line is already scrubbed. May raise; the caller then
+    builds no exporter (fail-closed: no scrub, no egress)."""
+    _LOG_SCRUB.add(endpoint)
+    for name in _EXPORTER_LOGGERS:
+        logger = logging.getLogger(name)
+        if _LOG_SCRUB not in logger.filters:
+            logger.addFilter(_LOG_SCRUB)
+
+
+# ---------------------------------------------------------------------------------------------------
 # reachability preflight — the VISIBLE-error surface for a down/unreachable collector (W6-4 / #455)
 # ---------------------------------------------------------------------------------------------------
 
@@ -192,6 +331,23 @@ class CollectorProbe:
 
     def __bool__(self) -> bool:
         return self.reachable
+
+
+def _failure_kind(exc: BaseException) -> str:
+    """How the preflight names a failed probe: the exception's TYPE, plus the symbolic errno of a socket error
+    (``ConnectionRefusedError (ECONNREFUSED)``) — never its MESSAGE. The message is not VIGIL's text: for
+    ``http.client.BadStatusLine`` it is whatever first line the listener sent back, so a listener that reflects
+    the request line echoes the endpoint's path (raw control bytes included) into doctor and the engage log.
+    An ``ssl`` error's errno is an OpenSSL code, not a POSIX one, so it is not named. Total."""
+    try:
+        kind = type(exc).__name__
+        code = getattr(exc, "errno", None)
+        if (isinstance(exc, OSError) and type(exc).__module__ != "ssl" and isinstance(code, int)
+                and code in errno.errorcode):
+            kind += f" ({errno.errorcode[code]})"
+        return kind
+    except Exception:  # noqa: BLE001
+        return "error"
 
 
 def probe_collector(endpoint: Any, *, timeout: float = 2.0,
@@ -231,7 +387,15 @@ def probe_collector(endpoint: Any, *, timeout: float = 2.0,
 
     host = parsed.hostname
     is_https = parsed.scheme.lower() == "https"
-    port = parsed.port or (443 if is_https else 80)
+    try:
+        port = parsed.port or (443 if is_https else 80)
+    except ValueError:
+        # The pin accepts ``http://127.0.0.1:43l8`` (its host is loopback), but ``parsed.port`` raises — and its
+        # message quotes the raw "port", which may be ``4318&token=…``. Say WHAT is wrong, never the text.
+        detail = (f"OTLP endpoint {redact_endpoint(ep)!r} has no usable port (not a number from 0 to 65535) — "
+                  f"unreachable")
+        log.warning("OTLP collector preflight failed: %s", detail)
+        return CollectorProbe(ep, False, detail)
     path = parsed.path or _TRACES_PATH
     conn: Any = None
     try:
@@ -244,7 +408,7 @@ def probe_collector(endpoint: Any, *, timeout: float = 2.0,
         # reachable. A 4xx to an empty body still proves reachability (we are probing transport, not a payload).
         return CollectorProbe(ep, True, "")
     except Exception as exc:  # noqa: BLE001 — OSError / ConnectionRefused / timeout / protocol error → DOWN
-        detail = f"OTLP collector at {redact_endpoint(url)} is UNREACHABLE: {type(exc).__name__}: {exc}"
+        detail = f"OTLP collector at {redact_endpoint(url)} is UNREACHABLE: {_failure_kind(exc)}"
         # VISIBLE, not silent: an operator running an engagement with telemetry configured sees this at start.
         log.warning("OTLP collector preflight failed — spans will be dropped until it recovers: %s", detail)
         return CollectorProbe(ep, False, detail)
@@ -419,6 +583,12 @@ class OTLPSink:
         try:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         except Exception:  # noqa: BLE001 — no otlp exporter installed → inert sink
+            return None
+        try:
+            # The exporter (and urllib3 under it) log failures with the RAW url — its path / query can carry an
+            # ``?api_key=``. Scrub those loggers BEFORE the exporter exists; if that cannot be done, no exporter.
+            _scrub_exporter_logs(endpoint)
+        except Exception:  # noqa: BLE001 — fail-closed: an unscrubbed exporter is never built (inert sink)
             return None
         try:
             # NET-2b red-pen MED: the exporter is requests-based. A default Session honours ambient
