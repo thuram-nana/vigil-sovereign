@@ -244,7 +244,8 @@ def test_a_stripe_session_without_the_bound_is_refused_and_frees_the_claim(monke
     assert p.billing_checkout(admin, org, _PLAN, now=5001.0)["checkout_url"]   # no stale claim was left behind
 
 
-@pytest.mark.parametrize("shape", ["session_ref", "session_meta", "invoice_parent", "invoice_legacy"])
+@pytest.mark.parametrize("shape", ["session_ref", "session_meta", "session_blank_ref", "invoice_parent",
+                                   "invoice_legacy"])
 @pytest.mark.parametrize("stage", ["incoming", "working", "retry", "rejected"])
 def test_an_undrained_stripe_webhook_holds_an_expired_window(monkeypatch, tmp_path, shape, stage):
     """The Stripe twin of the Flutterwave case: the paid plan's webhook waits undrained in the STRIPE spool (any
@@ -255,6 +256,9 @@ def test_an_undrained_stripe_webhook_holds_an_expired_window(monkeypatch, tmp_pa
     first = p.billing_checkout(admin, org, _PLAN, now=5000.0)["tx_ref"]
     obj = {"session_ref": {"object": "checkout.session", "id": "cs_test_1z", "client_reference_id": first},
            "session_meta": {"object": "checkout.session", "id": "cs_test_1z", "metadata": {"tx_ref": first}},
+           # an empty reference is no reference: the session is attributed by its metadata alone
+           "session_blank_ref": {"object": "checkout.session", "id": "cs_test_1z", "client_reference_id": "",
+                                 "metadata": {"tx_ref": first}},
            "invoice_parent": {"object": "invoice", "id": "in_1",
                               "parent": {"subscription_details": {"metadata": {"tx_ref": first}}}},
            "invoice_legacy": {"object": "invoice", "id": "in_1",
