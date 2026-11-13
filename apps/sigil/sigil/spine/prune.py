@@ -1139,7 +1139,11 @@ def archive_copy(store, K: int, snap_payload: dict, *, adir: Optional[Path] = No
     seg-0.first_prev_hash==GENESIS, each boundary_hash==next.first_prev_hash, last boundary_hash==
     base_prev_hash). Additive + idempotent (re-copying an already-archived segment is a no-op on identical
     bytes). Returns a report. Raises PruneUnsafe on any verification failure — leaving the live spine
-    untouched (nothing is dropped here in any case)."""
+    untouched (nothing is dropped here in any case).
+
+    The CANDIDATE manifest must verify for exactly this prune (`verify_with_archive(pending=snap_payload)`)
+    before it is written: a refused attempt leaves no row behind, so no later prune relies on a row that no
+    owner-signed head commits."""
     from .floor import floor_lock                            # a generic sibling-lockfile flock (reused)
     ad = adir if adir is not None else archive_dir()
     segdir = ad / "segments"
@@ -1162,9 +1166,14 @@ def archive_copy(store, K: int, snap_payload: dict, *, adir: Optional[Path] = No
         if not any(s.get("cumulative_merkle_root") == srow["cumulative_merkle_root"]
                    for s in existing["snapshots"]):
             existing["snapshots"].append(srow)
+        # Verify the CANDIDATE before it is persisted: a refused attempt must leave no row behind (a stale row
+        # would make every later prune's archive inconsistent with what the owner commits).
+        vok, vwhy = verify_with_archive(store, adir=ad, pending=snap_payload, manifest=existing)
+        if not vok:
+            raise PruneUnsafe(f"the archive does not verify for a prune at {K} ({vwhy}) — nothing was pruned")
+        _verify_archive_shape(existing, base_prev_hash=snap_payload["base_prev_hash"])
         atomic_write_text(manifest_path, json.dumps(existing, indent=2), prefix=".amanifest-")
         fsync_dir(ad)
-        _verify_archive_shape(existing, base_prev_hash=snap_payload["base_prev_hash"])
     return {"copied": copied, "archived_segments": len(existing["segments"]),
             "archive_dir": str(ad), "verified": True}
 
@@ -1232,7 +1241,8 @@ def _verify_archive_shape(manifest: dict, *, base_prev_hash: str) -> None:
 
 
 # ---- re-attach verifier (`sigil spine verify --with-archive`) ------------------------------------------
-def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, str]:
+def verify_with_archive(store, *, adir: Optional[Path] = None, pending: Optional[dict] = None,
+                        manifest: Optional[dict] = None) -> tuple[bool, str]:
     """Prove the archived pruned prefix is AUTHENTIC — anchored to the OWNER SIGNATURE, never to the
     (attacker-controllable) archive manifest. Read-only; returns (ok, message). Checks, in order:
       (1) at-rest sha256 of every archived file;
@@ -1249,7 +1259,13 @@ def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, st
             exactly [0..base_seq), its tail entry_hash must equal the owner-signed head.base_prev_hash, and
             the re-derived cumulative_merkle_root must equal the owner-signed head.cumulative_merkle_root;
             then [archive ‖ live] re-attaches into one genesis chain.
-    Only after (5) is the manifest-vs-manifest Merkle re-derivation (6) a meaningful cross-check."""
+    Only after (5) is the manifest-vs-manifest Merkle re-derivation (6) a meaningful cross-check.
+
+    `pending` (a `snapshot_payload` not yet committed — `commit_prune` before it signs the pruned head) checks the
+    archive against THAT prune instead: it must cover exactly [0..pending.base_seq), end at its base_prev_hash and
+    re-derive its cumulative root; the part still on the live spine ([head.base_seq..pending.base_seq)) must equal
+    the owner-signed live records; and the prefix the CURRENT head commits must re-derive the head's cumulative.
+    `manifest` checks a candidate manifest (not yet written) in place of the one on disk."""
     from ..config import HEAD_PATH
     from ..reuse.models import SignedChainHead
     from .checkpoint import verify_checkpoint
@@ -1257,9 +1273,9 @@ def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, st
 
     ad = adir if adir is not None else archive_dir()
     manifest_path = ad / "archive.manifest.json"
-    if not manifest_path.exists():
+    if manifest is None and not manifest_path.exists():
         return False, f"no archive manifest at {manifest_path}"
-    am = json.loads(manifest_path.read_text(encoding="utf-8"))
+    am = manifest if manifest is not None else json.loads(manifest_path.read_text(encoding="utf-8"))
     segrows = sorted(am["segments"], key=lambda r: r["first_seq"])
 
     # (1) at-rest integrity + (2) per-record content BINDING (not just chain linkage).
@@ -1285,6 +1301,14 @@ def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, st
     base_seq = head.base_seq if head else 0
     base_prev_hash = head.base_prev_hash if head else _GENESIS_PREV
     committed_cumulative = head.cumulative_merkle_root if head else ""
+    if pending is not None:
+        head_base = base_seq
+        head_cumulative = committed_cumulative
+        base_seq = int(pending["base_seq"])
+        base_prev_hash = str(pending["base_prev_hash"])
+        committed_cumulative = str(pending["cumulative_merkle_root"])
+        if base_seq <= head_base:
+            return False, f"the pending prune at {base_seq} is not past the committed prune at {head_base}"
 
     # (4) the archived prefix is a genesis-rooted contiguous chain on its own.
     aentries = [ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest, entry_hash=r.entry_hash)
@@ -1294,7 +1318,31 @@ def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, st
         return False, f"archived prefix chain does not verify: {amsg}"
 
     # (5) OWNER anchor.
-    if base_seq == 0:
+    if pending is not None:
+        snap_bases = sorted(int(s["base_seq"]) for s in am["snapshots"])
+        stray = [b for b in snap_bases if head_base < b != base_seq]
+        if stray:
+            return False, (f"the archive holds a row for an uncommitted prune at {stray[0]} (an interrupted "
+                           f"earlier attempt) — complete that one first: `sigil spine prune -K {stray[0]} --yes`")
+        if not arch or arch[0].seq != 0 or arch[-1].seq != base_seq - 1 or len(arch) != base_seq:
+            return False, f"archive does not cover exactly [0..{base_seq}) as the pending prune declares"
+        if arch[-1].entry_hash != base_prev_hash:
+            return False, "archive tail entry_hash != the pending prune's base_prev_hash"
+        if (not snap_bases or snap_bases[-1] != base_seq or snap_bases[0] <= 0
+                or len(set(snap_bases)) != len(snap_bases)):
+            return False, "archive snapshot boundaries do not partition [0..pending.base_seq)"
+        live_hash = {r.seq: r.entry_hash for r in store.iter_records() if head_base <= r.seq < base_seq}
+        for r in arch:
+            if r.seq >= head_base and live_hash.get(r.seq) != r.entry_hash:
+                return False, (f"archived record seq {r.seq} does not match the owner-signed live spine (the archive "
+                               f"is not a verified copy of what this prune deletes)")
+        if head_base > 0 and _cumulative_over(arch, am, upto=head_base) != head_cumulative:
+            return False, ("the archived prefix the current head commits does not re-derive its "
+                           "cumulative_merkle_root")
+        if _cumulative_over(arch, am) != committed_cumulative:
+            return False, "re-derived cumulative_merkle_root != the pending prune's cumulative_merkle_root"
+        anchor = "against the owner-signed live spine for the pending prune"
+    elif base_seq == 0:
         # no prune committed: the live spine STILL holds the archived prefix. ONE iter_records() pass builds
         # {seq: entry_hash} (never per-record store.get — that would emit .idx sidecars; this stays read-only
         # w.r.t. spine data), then cross-check every archived record against the owner-signed live record.
@@ -1343,7 +1391,7 @@ def verify_with_archive(store, *, adir: Optional[Path] = None) -> tuple[bool, st
                   f"chained from genesis; {len(am['snapshots'])} Merkle root(s) re-derived")
 
 
-def _cumulative_over(arch: list[SpineRecord], am: dict) -> str:
+def _cumulative_over(arch: list[SpineRecord], am: dict, *, upto: Optional[int] = None) -> str:
     """The running cumulative over the full archived prefix, re-derived per committed snapshot boundary.
     Defensive: a snapshot boundary that indexes a leaf the archive does not hold returns a non-matching
     sentinel (never a KeyError) — the caller's `!= committed_cumulative` then fails closed."""
@@ -1351,6 +1399,8 @@ def _cumulative_over(arch: list[SpineRecord], am: dict) -> str:
     cumulative, k_prev = "", 0
     for srow in sorted(am["snapshots"], key=lambda s: s["base_seq"]):
         K = int(srow["base_seq"])
+        if upto is not None and K > upto:
+            break
         if any(s not in by_seq for s in range(k_prev, K)):
             return "MISSING-LEAF"                           # -> != any real cumulative -> caller fails closed
         cumulative = chain_cumulative(cumulative, merkle_root([by_seq[s].entry_hash for s in range(k_prev, K)]))
@@ -1365,16 +1415,21 @@ def recompute_entry_hash(r: SpineRecord) -> str:
 
 # ---- Slice E: the crash-safe cutover that DELETES (behind the owner gates) ------------------------------
 def _prior_snapshot(store) -> Optional[dict]:
-    """The most-recent committed `kind="snapshot"` record's payload (with its OWN seq stamped into
-    `snapshot_seq`, so the next snapshot chains `prev_snapshot_seq` correctly), or None for the first prune.
-    The snapshot payload is plaintext (no sealed content field), so the raw record payload is the fold."""
-    last_snap = None
-    for r in store.iter_records():
-        if r.kind == "snapshot":
-            last_snap = r
-    if last_snap is None:
+    """The payload of the snapshot the owner-signed head COMMITS (with its OWN seq stamped into `snapshot_seq`, so
+    the next snapshot chains `prev_snapshot_seq` correctly), or None for the first prune. Never merely the newest
+    `kind="snapshot"` record: one appended by a prune that crashed before its head was signed is not committed,
+    and chaining from it would make the next prune's cumulative root disagree with its archive. The caller has
+    verified the head. The snapshot payload is plaintext (no sealed content field), so the raw record payload is
+    the fold."""
+    from .checkpoint import _read_head_on_disk
+    head = _read_head_on_disk()
+    if head is None or head.snapshot_seq < 0:
         return None
-    return {**last_snap.payload, "snapshot_seq": last_snap.seq}
+    rec = store.get(head.snapshot_seq)
+    if rec is None or rec.kind != "snapshot" or not isinstance(rec.payload, dict):
+        raise PruneUnsafe(f"the signed head commits snapshot seq {head.snapshot_seq} but no snapshot record is "
+                          f"there — refusing to chain a new prune from it")
+    return {**rec.payload, "snapshot_seq": rec.seq}
 
 
 def _append_snapshot_idempotent(store, snap_payload: dict) -> int:
@@ -1421,12 +1476,24 @@ def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
     ok, why = verify_checkpoint(store)
     if not ok:
         raise PruneUnsafe(f"refuse to prune a spine that is not anchored by a valid signed head: {why}")
+    from .checkpoint import _read_head_on_disk
+    committed = _read_head_on_disk()
+    committed_base = committed.base_seq if committed is not None else 0
+    if committed is not None and committed.snapshot_seq >= 0 and committed_base == K:
+        # A re-run of a prune whose head already committed (GATE 0 just finished its GC): it is done.
+        return {"base_seq": K, "snapshot_seq": committed.snapshot_seq, "head_last_seq": committed.last_seq,
+                "archived_segments": 0, "files_deleted": 0, "already_complete": True,
+                "cumulative_merkle_root": committed.cumulative_merkle_root}
+    if K <= committed_base:
+        raise PruneUnsafe(f"the spine is already pruned at {committed_base}; a prune at {K} is not past it")
 
     archived = check_prune_safe(store, K)                  # GATE 3: §7 referential floors (read-only)
     prior = _prior_snapshot(store)
     snap_payload = snapshot_payload(store, K, prior=prior)
 
-    # 1) durable, owner-anchored ARCHIVE of [0..K) BEFORE any live drop (copy → verify).
+    # 1) durable, owner-anchored ARCHIVE of [0..K) BEFORE any live drop (copy → verify). archive_copy refuses
+    #    unless the archive VERIFIES for exactly this prune — every row it relies on re-derived from the archived
+    #    bytes and tied to the owner-signed spine — before anything is appended, signed or deleted.
     archive_copy(store, K, snap_payload)
     _maybe_crash("prune_after_archive")
 
