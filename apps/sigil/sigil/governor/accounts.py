@@ -428,8 +428,10 @@ class AccountsRegistry:
         if self.owner_key is None:
             raise ValueError("account creation requires the owner signing key")
         u, r = _check_username(username), _check_role(role)
-        if not isinstance(bearer_token, str) or len(bearer_token) < 16:
-            raise ValueError("bearer_token must be a >=16-char string")
+        if not (isinstance(bearer_token, str) and 16 <= len(bearer_token) <= 512 and bearer_token.isascii()
+                and bearer_token.isprintable() and " " not in bearer_token):
+            # The cockpit refuses any other shape before it folds the accounts (`ui.server.bearer_shape_ok`).
+            raise ValueError("bearer_token must be 16..512 printable, non-space ASCII characters")
         pk = _check_user_pubkey(user_pubkey) if user_pubkey else None
         expires_at = _derive_expires_at(float(issued_at), ttl_seconds)
         salt = secrets.token_hex(16)

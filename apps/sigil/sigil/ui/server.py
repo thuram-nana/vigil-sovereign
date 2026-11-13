@@ -33,7 +33,9 @@ import ipaddress
 import json
 import secrets
 import socket
+import threading
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -52,6 +54,55 @@ from ..spine.verify import verify_record
 from . import actions as _actions
 
 _STATIC = Path(__file__).parent / "static"
+
+# A per-user bearer is minted as `secrets.token_urlsafe(32)` and `AccountsRegistry.create` refuses one that is not
+# 16..512 printable, non-space ASCII characters, so anything else cannot resolve: it is refused BEFORE the account
+# fold (a full spine read with the fold cache off) instead of costing one. The check looks only at the presented
+# token, so it reveals nothing about any valid one.
+_BEARER_MIN, _BEARER_MAX = 16, 512
+
+
+def _token_equal(presented: str, expected: str) -> bool:
+    """Constant-time equality of two tokens, compared as UTF-8 bytes: `hmac.compare_digest` RAISES on a str with a
+    non-ASCII character, so a presented `?token=` like that must not crash the request."""
+    return hmac.compare_digest(str(presented).encode("utf-8", "surrogatepass"),
+                               str(expected).encode("utf-8", "surrogatepass"))
+
+
+def bearer_shape_ok(tok: str) -> bool:
+    return (isinstance(tok, str) and _BEARER_MIN <= len(tok) <= _BEARER_MAX and tok.isascii()
+            and tok.isprintable() and " " not in tok)
+
+
+class FailedTokenCache:
+    """Bounded, short-TTL memory of bearer tokens that just FAILED to resolve (by SHA-256 digest), so repeating one
+    costs no account fold. FAILURES ONLY — a successful resolution is never remembered, so a revocation takes
+    effect on the very next request. A token that fails now and is minted within the TTL (never the case for a
+    random `token_urlsafe(32)`) is refused for at most `ttl_s`."""
+
+    def __init__(self, *, ttl_s: float = 5.0, max_entries: int = 4096, clock=time.monotonic) -> None:
+        self.ttl_s, self.max_entries, self.clock = float(ttl_s), int(max_entries), clock
+        self._lock = threading.Lock()
+        self._seen: "OrderedDict[str, float]" = OrderedDict()   # digest -> when it failed
+
+    def hit(self, digest: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            t = self._seen.get(digest)
+            if t is None:
+                return False
+            if now - t >= self.ttl_s:
+                del self._seen[digest]
+                return False
+            return True
+
+    def add(self, digest: str) -> None:
+        now = self.clock()
+        with self._lock:
+            self._seen.pop(digest, None)
+            self._seen[digest] = now
+            while len(self._seen) > self.max_entries:
+                self._seen.popitem(last=False)
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
@@ -99,6 +150,9 @@ class UIServer(ThreadingHTTPServer):
         super().__init__(addr, handler)
         self.token = token
         self.spine_path = spine_path
+        from .authn_audit import FailedAuthnCoalescer
+        self.failed_tokens = FailedTokenCache()                 # anonymous-cost bounds (see their docstrings)
+        self.authn_failures = FailedAuthnCoalescer()
         # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled for the plane.
         self.metrics = set_plane("sovereign")
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
@@ -163,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
         # — so `/api/ask` (the only caller, an owner-only KERNEL dispatch) is fail-closed, no per-user path
         # silently opened.
         return (bool(tok) and legacy_owner_token_grants_owner()
-                and hmac.compare_digest(tok, self.server.token))
+                and _token_equal(tok, self.server.token))
 
     def _principal_for_token(self, tok: str):
         """Map a presented token to its `accounts.Principal`, or None (fail-closed). FAIL-OPEN is restricted
@@ -181,12 +235,44 @@ class Handler(BaseHTTPRequestHandler):
         from ..governor.accounts import OWNER_PRINCIPAL, AccountsRegistry
         if not tok:
             return None
-        if legacy_owner_token_grants_owner() and hmac.compare_digest(tok, self.server.token):
+        if legacy_owner_token_grants_owner() and _token_equal(tok, self.server.token):
             return OWNER_PRINCIPAL
+        if not bearer_shape_ok(tok):
+            return None                                     # cannot be a per-user bearer: no fold for it
+        digest = hashlib.sha256(tok.encode("utf-8")).hexdigest()
+        if self.server.failed_tokens.hit(digest):
+            return None                                     # failed moments ago: no second fold for it
         try:
-            return AccountsRegistry(self.server.store()).resolve(tok)
+            p = AccountsRegistry(self.server.store()).resolve(tok)
         except Exception:  # noqa: BLE001 — a hostile/corrupt spine must never crash auth → fail-closed None
-            return None
+            return None                                     # (not remembered: the spine, not the token, failed)
+        if p is None:
+            self.server.failed_tokens.add(digest)
+        return p
+
+    def _client_source(self) -> str:
+        """The client a request came from: the peer address, or — when the peer is a loopback reverse proxy —
+        the address that proxy forwarded (the last `X-Forwarded-For` hop, else `X-Real-IP`). Used only to GROUP
+        failed-authentication audit records; it never authorizes anything."""
+        peer = str(self.client_address[0]) if self.client_address else ""
+        try:
+            behind_proxy = ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            behind_proxy = False
+        if behind_proxy:
+            fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[-1].strip()
+            for cand in (fwd, (self.headers.get("X-Real-IP") or "").strip()):
+                try:
+                    return str(ipaddress.ip_address(cand))
+                except ValueError:
+                    continue
+        return peer
+
+    def _authn_failure(self, store, *, username: str = "", method: str = "", reason: str = "") -> None:
+        """Audit one FAILED login: the first of its (client, method, reason) group in a window is recorded at
+        once, the rest are counted into one summary (`FailedAuthnCoalescer`)."""
+        self.server.authn_failures.record(store, "authn.login.failure", source=self._client_source(),
+                                          username=username, method=method, reason=reason)
 
     def _principal(self):
         """The authenticated principal for THIS request, or None. Resolution order (either carrier works, so
@@ -375,6 +461,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send = _send
         try:
+            self.server.authn_failures.flush(self.server.store)   # due failed-authn summaries (cheap when none)
             return fn()
         finally:
             self._send = orig
@@ -809,8 +896,7 @@ class Handler(BaseHTTPRequestHandler):
         from .authn_audit import record_authn
         store = self.server.store()
         if p is None:
-            record_authn(store, "authn.login.failure", method="bearer", outcome="failure",
-                         reason="invalid_token")
+            self._authn_failure(store, method="bearer", reason="invalid_token")
             return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
         # S4 second factor (bearer branch, W17-1): a bearer is itself a possession credential and the SPA
         # login gate posts `{token}` with no code, so a TOTP enrolment must NOT be able to brick this path —
@@ -819,8 +905,7 @@ class Handler(BaseHTTPRequestHandler):
         # carrier and every downstream call site are UNCHANGED — the gate lives only at /api/login.
         terr = self._check_totp(p.username, body, require=False)
         if terr is not None:
-            record_authn(store, "authn.login.failure", username=p.username, method="bearer",
-                         outcome="failure", reason="totp")
+            self._authn_failure(store, username=p.username, method="bearer", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         record_authn(store, "authn.login.success", username=p.username, method="bearer", outcome="success")
         self._json({"ok": True, **self._principal_json(p)})
@@ -839,8 +924,11 @@ class Handler(BaseHTTPRequestHandler):
         if sid:
             self._session_ledger().revoke(sid)     # true server-side invalidation of the cookie session
         self._clear_session_cookie()
-        record_authn(self.server.store(), "authn.logout",
-                     username=(p.username if p else ""), method="logout", outcome="success")
+        if p is not None or sid:
+            # A logout by nobody (no principal, no session) changes nothing and is not recorded: an anonymous
+            # client could otherwise append to the spine at will.
+            record_authn(self.server.store(), "authn.logout",
+                         username=(p.username if p else ""), method="logout", outcome="success")
         self._json({"ok": True})
 
     def _login_pop(self, username: str, challenge: str, signature: str, body: dict):
@@ -862,15 +950,13 @@ class Handler(BaseHTTPRequestHandler):
         if acct is None or not acct.user_pubkey:
             # No cryptographic identity bound for this account → refuse (fail-closed, never fall back to a
             # weaker check). Same 401 shape whether the account is unknown, revoked, or bearer-only.
-            record_authn(store, "authn.login.failure", username=username, method="pop",
-                         outcome="failure", reason="no_identity")
+            self._authn_failure(store, username=username, method="pop", reason="no_identity")
             return self._json({"ok": False, "authenticated": False,
                                "error": "no cryptographic identity bound for this account"}, 401)
         # Consume the challenge FIRST (single-use + TTL). A replay of a captured triple finds it already
         # spent → refused here, before any signature work.
         if not self._challenge_ledger().consume(challenge):
-            record_authn(store, "authn.login.failure", username=username, method="pop",
-                         outcome="failure", reason="challenge")
+            self._authn_failure(store, username=username, method="pop", reason="challenge")
             return self._json({"ok": False, "authenticated": False,
                                "error": "unknown, expired, or already-used challenge"}, 401)
         message = _LOGIN_POP_DOMAIN_TAG + challenge.encode("utf-8")
@@ -879,16 +965,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — malformed sig/key material is a fail-closed refusal, not a crash
             sig_ok = False
         if not sig_ok:
-            record_authn(store, "authn.login.failure", username=username, method="pop",
-                         outcome="failure", reason="signature")
+            self._authn_failure(store, username=username, method="pop", reason="signature")
             return self._json({"ok": False, "authenticated": False,
                                "error": "proof-of-possession signature invalid"}, 401)
         # S4 second factor (if enrolled) — required BEFORE a bearer is minted, so no session token is ever
         # handed out on the first factor alone.
         terr = self._check_totp(username, body)
         if terr is not None:
-            record_authn(store, "authn.login.failure", username=username, method="pop",
-                         outcome="failure", reason="totp")
+            self._authn_failure(store, username=username, method="pop", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         # Proven. Mint a fresh owner-signed session bearer for this account (owner is the sole signer; the
         # user proved possession, the server re-binds). Returned through the same X-SIGIL-Token carrier.
@@ -927,14 +1011,12 @@ class Handler(BaseHTTPRequestHandler):
         stored = acct.password_hash if (acct is not None and acct.password_hash) else DECOY_PASSWORD_HASH
         password_ok = verify_password(password, stored)
         if acct is None or not acct.password_hash or not password_ok:
-            record_authn(store, "authn.login.failure", username=username, method="password",
-                         outcome="failure", reason="bad_credentials")
+            self._authn_failure(store, username=username, method="password", reason="bad_credentials")
             return self._json({"ok": False, "authenticated": False,
                                "error": "invalid username or password"}, 401)
         terr = self._check_totp(username, body)
         if terr is not None:
-            record_authn(store, "authn.login.failure", username=username, method="password",
-                         outcome="failure", reason="totp")
+            self._authn_failure(store, username=username, method="password", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
@@ -959,9 +1041,7 @@ class Handler(BaseHTTPRequestHandler):
         return host
 
     def _webauthn_fail(self, store, reason: str):
-        from .authn_audit import record_authn
-        record_authn(store, "authn.login.failure", username="owner", method="webauthn",
-                     outcome="failure", reason=str(reason)[:32])
+        self._authn_failure(store, username="owner", method="webauthn", reason=str(reason)[:32])
         return self._json({"ok": False, "authenticated": False, "error": "passkey assertion refused"}, 401)
 
     def _webauthn_assert(self):
