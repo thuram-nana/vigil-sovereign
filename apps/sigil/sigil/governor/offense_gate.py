@@ -111,7 +111,11 @@ class OffenseGate:
                                    trusted_pubkey=self.trusted_pubkey, by=by,
                                    reason=f"offense-gate close: {reason}" if reason else "offense-gate close")
         except Exception:  # noqa: BLE001 — a grant-revoke failure must never prevent the fail-safe close
-            pass
+            # Never silently: revoke_grants_on_close has already withdrawn every published grant (fail-closed)
+            # and raised the durable alarm `vigil doctor` reports; the operator log carries the cause.
+            import logging
+            logging.getLogger(__name__).error("offense close: revoking the eval-capability grants failed; the "
+                                              "published grants were withdrawn instead", exc_info=True)
         return seq
 
     # -- the fail-closed fold (never cached — the verdict is time-dependent) -------------------

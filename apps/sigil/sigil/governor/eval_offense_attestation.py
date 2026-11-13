@@ -36,6 +36,7 @@ owner key — see ``vigil_integration.live.eval_attestation.verify_live_offense_
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -44,7 +45,7 @@ from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_on
 from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
-from .seam_publish import encodable_or_revoke, withdraw_publication
+from .seam_publish import encodable_or_revoke, publish_lock, withdraw_publication
 
 assert_no_offense()
 
@@ -267,8 +268,11 @@ class EvalOffenseAttestation:
                 def _grant_path():
                     from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
                     return eval_capability_grant_path(self._base_dir(), str(engagement_slug))
+                def _grant_floor():
+                    from vigil_integration.live.eval_capability_grant import advance_publication_floor
+                    advance_publication_floor(self._base_dir(), str(engagement_slug), self.store.next_seq)
                 withdraw_publication(_grant_path, what=f"eval-capability-grant {engagement_slug!r} (attestation "
-                                     f"revoke cascade)", cause=e)
+                                     f"revoke cascade)", cause=e, floor_fn=_grant_floor)
         return seq
 
     # -- the fail-closed fold (NEVER cached — the verdict is time-dependent) ---------------------------
@@ -371,38 +375,44 @@ class EvalOffenseAttestation:
         the offense verifier re-derives it over the records it read (drop/reorder no longer verify) and enforces
         the monotonic ``seq`` against a durable high-water (a rollback is refused). The owner key signs ONLY
         here in SIGIL; the import-clean broker merely transports the public seal (FATAL-2)."""
-        try:
-            records = []
-            for record in self.store.iter_records():
-                p = record.payload if isinstance(record.payload, dict) else {}
-                if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
-                    records.append(dict(p))
-            records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
-            from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
-            seal = None
-            if self.owner_key is not None:
-                from ..reuse import sign
-                # The monotonic publish seq is the current spine head — strictly larger than any prior
-                # publish's (every attest/revoke appended to the spine before calling _publish), so a
-                # replayed older seam has a lower seq and is refused by the offense high-water. ``next_seq``
-                # is a property; fall back to the per-slug record count (also strictly growing per publish,
-                # since each attest/revoke appends exactly one record for this slug) for a store without it.
-                seq = getattr(self.store, "next_seq", None)
-                if not isinstance(seq, int):
-                    seq = len(records)
-                seal = build_seal(
-                    engagement_slug, seq, records,
-                    sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
-                    pubkey=self.owner_key.public_key_b64,
-                )
-            write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
-        except Exception as e:
-            def _path():
-                from vigil_integration.live.eval_attestation import eval_attestation_path
-                return eval_attestation_path(self._base_dir(), engagement_slug)
-            withdrawn = withdraw_publication(_path, what=f"eval-offense-attestation {engagement_slug!r}", cause=e)
-            if not withdrawn or not isinstance(e, (OSError, ValueError)):
-                raise   # never report success while a stale publication may still be honoured
+        with contextlib.ExitStack() as held:   # the lock is held through any withdrawal
+            try:
+                held.enter_context(publish_lock(self.store))   # one publish at a time
+                records = []
+                for record in self.store.iter_records():
+                    p = record.payload if isinstance(record.payload, dict) else {}
+                    if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
+                        records.append(dict(p))
+                records = encodable_or_revoke(records, signal=SIGNAL, engagement_slug=engagement_slug)
+                from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
+                seal = None
+                if self.owner_key is not None:
+                    from ..reuse import sign
+                    # The monotonic publish seq is the current spine head — strictly larger than any prior
+                    # publish's (every attest/revoke appended to the spine before calling _publish), so a
+                    # replayed older seam has a lower seq and is refused by the offense high-water. ``next_seq``
+                    # is a property; fall back to the per-slug record count (also strictly growing per publish,
+                    # since each attest/revoke appends exactly one record for this slug) for a store without it.
+                    seq = getattr(self.store, "next_seq", None)
+                    if not isinstance(seq, int):
+                        seq = len(records)
+                    seal = build_seal(
+                        engagement_slug, seq, records,
+                        sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
+                        pubkey=self.owner_key.public_key_b64,
+                    )
+                write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
+            except Exception as e:
+                def _path():
+                    from vigil_integration.live.eval_attestation import eval_attestation_path
+                    return eval_attestation_path(self._base_dir(), engagement_slug)
+                def _floor():
+                    from vigil_integration.live.eval_attestation import advance_publication_floor
+                    advance_publication_floor(self._base_dir(), engagement_slug, self.store.next_seq)
+                withdrawn = withdraw_publication(_path, what=f"eval-offense-attestation {engagement_slug!r}", cause=e,
+                                                 floor_fn=_floor)
+                if not withdrawn or not isinstance(e, (OSError, ValueError)):
+                    raise   # never report success while a stale publication may still be honoured
 
 
 def assert_eval_offense_attested(

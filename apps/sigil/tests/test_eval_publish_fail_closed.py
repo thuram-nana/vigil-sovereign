@@ -273,12 +273,175 @@ def test_a_publication_that_cannot_be_withdrawn_fails_the_revoke_loudly(rig, mon
     monkeypatch.setattr(Path, "unlink", _unlink_denied)
 
     class _ReadOnlyOs:
-        O_WRONLY, O_TRUNC, O_NOFOLLOW = os.O_WRONLY, os.O_TRUNC, getattr(os, "O_NOFOLLOW", 0)
-        open = staticmethod(_unlink_denied)
-        close = staticmethod(os.close)
+        """The real os module, except that emptying a file in place is refused too."""
+        def __getattr__(self, name):
+            return getattr(os, name)
 
-    monkeypatch.setattr(seam_publish, "os", _ReadOnlyOs)
+        def open(self, path, flags, *a):
+            if flags & os.O_TRUNC:
+                _unlink_denied()
+            return os.open(path, flags, *a)
+
+    monkeypatch.setattr(seam_publish, "os", _ReadOnlyOs())
     with caplog.at_level(logging.ERROR, logger="sigil.governor.seam_publish"):
         with pytest.raises(PermissionError):
             rig.revoke()                                      # never reported as a successful revoke
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+# ==== revocation fail-closed: anti-rollback after a withdrawal, publish atomicity, offense close ==============
+def _fail_writes(rig, monkeypatch):
+    live = rig.live_module()
+    name = "write_eval_capability_grants" if rig.kind == "grant" else "write_eval_attestations"
+
+    def _fail(*_a, **_kw):
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(live, name, _fail)
+
+
+def test_a_withdrawn_publication_cannot_be_replayed_onto_the_seam(rig, monkeypatch):
+    assert rig.offense_ok() is True                 # the offense plane read it: its floor is at that seq
+    saved = rig.seam_path().read_bytes()
+    _fail_writes(rig, monkeypatch)
+    rig.revoke()                                    # publish fails -> withdrawn + rollback floor raised
+    assert not rig.seam_path().exists()
+    rig.seam_path().write_bytes(saved)              # someone puts the withdrawn file back
+    assert rig.offense_ok() is False                # refused as a rollback, never re-armed
+
+
+def test_a_later_publication_after_a_withdrawal_still_arms(rig, monkeypatch):
+    """The raised floor never blocks the owner's NEXT legitimate publication."""
+    with monkeypatch.context() as m:
+        _fail_writes(rig, m)
+        rig.revoke()
+    rig.arm()
+    assert rig.offense_ok() is True
+
+
+def test_a_withdrawal_whose_rollback_floor_cannot_be_raised_fails_loudly(rig, monkeypatch):
+    _fail_writes(rig, monkeypatch)
+
+    def _no_floor(*_a, **_kw):
+        raise PermissionError("floor not writable")
+
+    monkeypatch.setattr(rig.live_module(), "advance_publication_floor", _no_floor)
+    with pytest.raises(OSError, match="ENOSPC"):
+        rig.revoke()
+    assert not rig.seam_path().exists()
+
+
+def test_publishes_are_serialized_so_a_stale_list_never_overwrites_a_revoke(rig, monkeypatch):
+    """Forced interleaving: publish A snapshots the record list (no revoke yet) and stalls; meanwhile a revoke
+    appends and publishes B. B must not complete before A, so the LAST write carries the revoke."""
+    import threading
+
+    from sigil.governor import eval_capability_grant as g_mod
+    from sigil.governor import eval_offense_attestation as a_mod
+    mod = g_mod if rig.kind == "grant" else a_mod
+    real = mod.encodable_or_revoke
+    stalled, go = threading.Event(), threading.Event()
+
+    def _stall_first(records, **kw):
+        out = real(records, **kw)
+        if threading.current_thread().name == "publisher-A":
+            stalled.set()
+            go.wait(5)
+        return out
+
+    monkeypatch.setattr(mod, "encodable_or_revoke", _stall_first)
+    pub = rig.grant if rig.kind == "grant" else rig.att
+    a = threading.Thread(target=pub._publish, args=(SLUG,), name="publisher-A")
+    a.start()
+    assert stalled.wait(5)
+    b = threading.Thread(target=rig.revoke, name="revoker-B")
+    b.start()
+    b.join(0.5)                                     # without serialization B finishes here, then A overwrites
+    go.set()
+    a.join(5)
+    b.join(5)
+    assert not a.is_alive() and not b.is_alive()
+    assert rig.offense_ok() is False                # the final publication carries the revoke
+
+
+def test_the_publish_lock_holds_across_processes(rig):
+    """A second process holding the publish lock blocks a publish until it lets go."""
+    import subprocess
+    import sys
+    import time
+    lock = str(rig.store.path) + ".seam-publish.lock"
+    child = subprocess.Popen([sys.executable, "-c",
+                              "import fcntl,os,sys,time\n"
+                              "fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600)\n"
+                              "fcntl.flock(fd,fcntl.LOCK_EX)\nprint('held',flush=True)\ntime.sleep(1.5)\n", lock],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "held"
+        t0 = time.monotonic()
+        rig.revoke()
+        waited = time.monotonic() - t0
+    finally:
+        child.wait(10)
+    assert waited >= 1.0, waited                    # it waited for the other process instead of racing it
+    assert rig.offense_ok() is False
+
+
+def _close_offense(rig):
+    from sigil.governor.offense_gate import OffenseGate
+    return OffenseGate(rig.store, owner_key=rig.owner).close_gate(reason="test")
+
+
+def test_an_offense_close_that_cannot_read_the_spine_still_ungrants_and_raises_the_alarm(monkeypatch, caplog):
+    from sigil.governor.seam_publish import close_alarm_path
+    rig = _Rig("grant")
+    assert rig.offense_ok() is True
+
+    def _unreadable(*_a, **_kw):
+        raise RecursionError("spine line too deeply nested")
+
+    monkeypatch.setattr(rig.store, "iter_records", _unreadable)       # a PERSISTENT read fault
+    with caplog.at_level(logging.ERROR):
+        _close_offense(rig)                                            # the fail-safe close still completes
+    assert not rig.seam_path().exists()
+    assert rig.offense_ok() is False                                   # ungranted, never the stale grant
+    assert close_alarm_path().is_file()                                # doctor will name it
+    assert any(r.name == "sigil.governor.offense_gate" and r.levelno == logging.ERROR and r.exc_info
+               for r in caplog.records)                                # close_gate never swallows it silently
+
+
+def test_a_later_close_from_a_readable_spine_clears_the_alarm(monkeypatch):
+    from sigil.governor.seam_publish import close_alarm_path
+    rig = _Rig("grant")
+    with monkeypatch.context() as m:
+        m.setattr(rig.store, "iter_records", lambda *a, **k: (_ for _ in ()).throw(RecursionError("x")))
+        _close_offense(rig)
+    assert close_alarm_path().is_file()
+    _close_offense(rig)
+    assert not close_alarm_path().exists()
+
+
+def test_doctor_reports_the_offense_close_alarm_as_a_hard_issue(tmp_path, monkeypatch):
+    from pathlib import Path as _P
+
+    from sigil.governor.seam_publish import raise_close_alarm
+    from vigil_integration import doctor as _doc
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "base"))
+    repo = _P(_doc.__file__).resolve().parents[2]
+    clean = _doc.collect(repo)
+    raise_close_alarm("RecursionError")
+    report = _doc.collect(repo)
+    new = [i for i in report["issues"] if i not in clean["issues"]]
+    assert len(new) == 1 and "offense close could not revoke" in new[0] and "RecursionError" in new[0]
+
+
+def test_a_grant_withdrawn_by_the_attestation_cascade_cannot_be_replayed(monkeypatch):
+    rig = _Rig("grant")
+    assert rig.offense_ok() is True
+    saved = rig.seam_path().read_bytes()
+    with monkeypatch.context() as m:
+        m.setattr(rig.store, "iter_records", lambda *a, **k: (_ for _ in ()).throw(OSError("EIO")))
+        rig.att.revoke(engagement_slug=SLUG)          # the cascade cannot run -> the grant is withdrawn
+    assert not rig.seam_path().exists()
+    rig.seam_path().write_bytes(saved)
+    assert rig.offense_ok() is False

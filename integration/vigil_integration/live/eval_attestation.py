@@ -290,6 +290,25 @@ def _check_and_advance_highwater(base_dir: Any, slug: str, seq: int) -> tuple[bo
         return False, f"cannot persist the eval-offense high-water floor (fail-closed): {e}"
     return True, "within the durable high-water floor"
 
+def advance_publication_floor(base_dir: Any, slug: str, seq: int) -> None:
+    """Raise the offense-side rollback floor for ``slug`` to ``seq`` WITHOUT a publication (UPWARD-ONLY; a
+    no-op when a higher floor is already recorded). The sovereign calls this when it WITHDRAWS a failed
+    publication: the withdrawn file's seal seq is below ``seq``, so a later replay of that file is refused as a
+    rollback instead of re-arming what the spine has revoked. Raises on any failure (unsafe slug, a corrupt or
+    tampered floor, an unwritable floor) so the caller can fail loudly."""
+    from types import SimpleNamespace
+
+    from vigil_core.highwater import HighWaterDowngrade, advance_highwater
+
+    path = _highwater_path(base_dir, slug)
+    if path is None:
+        raise ValueError(f"unsafe slug for the publication floor: {slug!r}")
+    try:
+        advance_highwater(path, SimpleNamespace(entry_count=int(seq), last_seq=int(seq)))
+    except HighWaterDowngrade:
+        return  # a higher floor is already recorded: already at least as strict
+
+
 
 # ---------------------------------------------------------------------------------------------------
 # the seam (public-safe signed record list + owner-signed seal)

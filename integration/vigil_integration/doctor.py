@@ -1561,6 +1561,19 @@ def collect(repo_root) -> dict:
         if ce_hold is not None:
             report["customer_execution_hold"] = {"state": "ENABLED", "detail": _CUSTOMER_EXECUTION_FLIP_CRITERIA}
             _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {ce_hold}")
+    # 9c) An offense close that could not read the spine to revoke the published eval-capability grants
+    #     withdrew them all (fail-closed) and left this durable alarm: a HARD issue until a close succeeds from a
+    #     readable spine. Absent alarm => nothing is added (byte-identical report).
+    _close_alarm = home / "alarms" / "eval-grant-close-revoke.json"
+    if _close_alarm.exists():
+        try:
+            import json as _json
+            _detail = str(_json.loads(_close_alarm.read_text(encoding="utf-8")).get("detail", ""))[:300]
+        except (OSError, ValueError, AttributeError):
+            _detail = "the alarm record is unreadable"
+        _issue(f"offense close could not revoke the eval-capability grants because the SPINE could not be read "
+               f"({_detail}). Every published grant was withdrawn, so the offense plane is ungranted. Repair the "
+               f"spine (`sigil verify`), then close offense again to revoke on the spine and clear this alarm.")
     # 10) Integrity (W6-7) — continuously verify the property the product EXISTS to guarantee: the spine
     #    hash-chain / attestation. Runs the boundary-safe integrity verifier over the sovereign spine home
     #    (SIGIL_HOME): chain integrity, signed-head freshness, the anti-rollback floor, clock skew, plus the
