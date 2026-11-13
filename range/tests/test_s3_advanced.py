@@ -10,7 +10,7 @@ import http.server
 import threading
 
 import pytest
-from conftest import free_port
+from range_testsupport import free_port
 
 
 @pytest.fixture()

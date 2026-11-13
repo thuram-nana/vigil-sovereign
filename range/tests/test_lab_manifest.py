@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from conftest import REPO_ROOT
+from range_testsupport import REPO_ROOT
 
 from vigil_range.meridian import theme
 
