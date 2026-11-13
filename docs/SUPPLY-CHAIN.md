@@ -21,7 +21,7 @@ signal. A digest is content-addressed: the daemon verifies it, or the pull fails
 | File | Image |
 |---|---|
 | `gateway/Dockerfile` (stage `pinned-python`, the default of `ARG PYTHON_BASE`) | `python:3.13-slim@sha256:881d8073…` |
-| `engine/crucible/framework/v2/aegis/Dockerfile` | `python:3.13-slim@sha256:881d8073…` |
+| `engine/crucible/framework/v2/aegis/Dockerfile` | `python:3.13-slim@sha256:e48f59cd…` |
 | `engine/crucible/framework/v2/eval/corpus_apps/_smoke/Dockerfile` | `node:22-bookworm@sha256:0557ac14…` |
 | `engine/crucible/framework/v2/eval/corpus_apps/_cve/st-2014-3744/Dockerfile` | `node:22-bookworm@sha256:0557ac14…` |
 | `vendor/strix/containers/Dockerfile` | `kalilinux/kali-rolling:latest@sha256:f4912486…` |
