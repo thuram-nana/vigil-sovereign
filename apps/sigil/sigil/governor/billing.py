@@ -153,6 +153,9 @@ def _parse_org_id(obj: object) -> Optional[str]:
         return None
 
 
+_STRIPE_TS_MAX_DIGITS = 12   # unix seconds (12 digits reaches year 33658); also keeps int() off a huge digit string
+
+
 class StripeBillingProvider(BillingProvider):
     """Stripe webhook verification in the stdlib — no `stripe` SDK, no network. Implements the documented
     `Stripe-Signature` scheme: header `t=<unix>,v1=<hex hmac>`; signed payload is `"{t}.{raw_body}"`; the MAC is
@@ -198,15 +201,18 @@ class StripeBillingProvider(BillingProvider):
                 v1s.append(v)
         if ts is None or not v1s:
             return False
-        try:
-            t = float(ts)
-        except (TypeError, ValueError):
+        # The timestamp is plain ASCII decimal digits only. float() would also accept "1e3", "+1000", " 1000",
+        # "nan" and non-ASCII digits (which then made ts.encode("ascii") raise instead of refusing).
+        if not (ts.isascii() and ts.isdigit() and 1 <= len(ts) <= _STRIPE_TS_MAX_DIGITS):
             return False
+        t = int(ts)
         if abs(now - t) > self._tolerance:           # replay-window bound (stale or future-dated -> reject)
             return False
         signed = ts.encode("ascii") + b"." + raw_body
         expected = hmac.new(self._secret, signed, hashlib.sha256).hexdigest()
-        return any(_ct_equal(expected, v1) for v1 in v1s)   # any valid v1 (Stripe may send several on rotation)
+        # any valid v1 (Stripe may send several on rotation); _ct_equal is constant-time and returns False for a
+        # malformed (non-ASCII / wrong-length) candidate rather than raising
+        return any(_ct_equal(expected, v1) for v1 in v1s)
 
     def verify_and_parse(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[BillingEvent]:
         if not isinstance(raw_body, (bytes, bytearray)):
@@ -241,6 +247,8 @@ def _map_stripe_event(obj: Mapping[str, Any]) -> Optional[BillingEvent]:
     if not isinstance(etype, str) or not isinstance(event_id, str) or not event_id:
         return None
     created = _as_float(obj.get("created"))
+    if created <= 0.0:
+        return None                                   # no stable event time -> never mint on a 0.0 default
     data_obj = obj.get("data")
     sub = data_obj.get("object") if isinstance(data_obj, dict) else None
     sub = sub if isinstance(sub, dict) else {}

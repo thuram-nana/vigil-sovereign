@@ -388,6 +388,47 @@ def test_stripe_subscription_mode_checkout_is_ignored():
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
 
 
+def test_stripe_timestamp_must_be_plain_ascii_digits():
+    """`t` is decimal ASCII digits only. Non-ASCII digits used to pass float() and then crash on encode("ascii");
+    exponent, sign, whitespace and nan/inf forms are refused too (all return None, never raise)."""
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    body = _stripe_body()
+    mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
+    for t in ("１０００", "١٠٠٠", "1e3", "+1000", " 1000", "nan", "inf", "-1000", "1000.0", "",
+              "1" * 13, "1" * 5000):
+        assert p.verify_and_parse(body, f"t={t},v1={mac}", now=1000.0) is None, t
+    assert p.verify_and_parse(body, f"t=1000,v1={mac}", now=1000.0) is not None      # negative control
+
+
+def test_stripe_tolerance_edge_is_inclusive():
+    p = StripeBillingProvider(_SECRET, tolerance_s=300.0, enable_reference_adapter=True)
+    body = _stripe_body()
+    good = _sig(_SECRET, 1000, body)
+    assert p.verify_and_parse(body, good, now=1300.0) is not None and p.verify_and_parse(body, good, now=700.0)
+    assert p.verify_and_parse(body, good, now=1301.0) is None and p.verify_and_parse(body, good, now=699.0) is None
+
+
+def test_stripe_v1_must_be_lowercase_hex_sha256():
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    body = _stripe_body()
+    mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
+    for v1 in (mac.upper(), mac[:-1], mac + "0", "ｆ" * 64, " " + mac):
+        assert p.verify_and_parse(body, f"t=1000,v1={v1}", now=1000.0) is None, v1
+    assert p.verify_and_parse(body, f"t=1000,v1={mac}", now=1000.0) is not None
+
+
+def test_stripe_event_without_a_stable_time_mints_nothing():
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
+    for created in (None, 0, -5, "nan", "soon"):
+        obj = {"id": "evt_t", "type": "invoice.paid",
+               "data": {"object": {"metadata": {"org_id": "acme"}, "billing_reason": "subscription_cycle",
+                                   "items": {"data": [{"price": {"id": "price_pro"}}]}}}}
+        if created is not None:
+            obj["created"] = created
+        body = json.dumps(obj).encode()
+        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, created
+
+
 def test_stripe_secret_required():
     with pytest.raises(ValueError):
         StripeBillingProvider("", enable_reference_adapter=True)
