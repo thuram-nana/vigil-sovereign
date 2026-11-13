@@ -14,6 +14,14 @@ version.
 A bump is a **one-way door for data**. Once a newer build has written a vN+1 snapshot, older builds can no
 longer read that `SIGIL_HOME`.
 
+### Recorded bumps
+
+| Version | Adds | Rollback past it |
+|---|---|---|
+| v10 | `trial_claim_row` (governor.trial_claim: first-wins trial claims per canonical mailbox / registrable domain) and `report_unlock_billing` / `report_unlock_owner` (governor.report_unlock) | A v9 build refuses a v10 `SIGIL_HOME` (`SchemaTooNew`). Restore a pre-upgrade backup, or stay on v10. |
+
+Earlier versions are described inline at `_MAX_SNAPSHOT_SCHEMA`.
+
 ## Refuse-newer behaviour (fail closed)
 
 All versioned spine artifacts go through the shared gate in

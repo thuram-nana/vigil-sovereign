@@ -240,6 +240,17 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand invoice(s) for tenant(s) {stranded_invs}: a below-K billing-history "
                           f"line would not be carried into the snapshot seed (losing the invoice or re-opening "
                           f"invoice replay); lower K or resolve")
+    # (c, pricing S2) the SAME floor for the trial claims and the report-unlock ledger: a prune must carry every
+    # below-K claim / unlock into the seed, or it would re-open a second trial for a claimed mailbox or domain, or
+    # silently re-lock (or un-relock) an org's reports. Fail-closed.
+    stranded_tc = stranded_trial_claims(store, archived, K)
+    if stranded_tc:
+        raise PruneUnsafe(f"K={K} would strand trial claim(s) held by tenant(s) {stranded_tc}: a below-K claim would "
+                          f"not be carried into the snapshot seed (re-opening a second trial); lower K or resolve")
+    stranded_ru = stranded_report_unlocks(store, archived, K)
+    if stranded_ru:
+        raise PruneUnsafe(f"K={K} would strand report unlock(s) for tenant(s) {stranded_ru}: a below-K unlock or "
+                          f"relock would not be carried into the snapshot seed; lower K or resolve")
     # (c, PP-1 postpaid) the SAME floor for governor.postpaid: an ENABLED credit line whose only owner-signed
     # set_account sits below K must be carried into the seed, or the prune drops the line + resets the per-org
     # high-water (re-opening replay of a disabled line). Fail-closed, like the subscription floor.
@@ -757,6 +768,53 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
                  if isinstance(row, (list, tuple)) and len(row) >= 10}
     stranded: set = {key[0] for key, full in below_rows.items() if seed_rows.get(key) != full}
     return sorted(str(o) for o in stranded)
+
+
+def _below_seed(store, archived: list[Segment], K: int):
+    """(below-K records ascending, the seed build() emits for them round-tripped, the succession resolver)."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    below.sort(key=lambda r: r.seq)
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    return below, seed, resolver
+
+
+def stranded_trial_claims(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, pricing S2) — the tenants whose below-K trial claim(s) the snapshot seed would NOT carry (value-aware:
+    a seed that keeps the key but changes the claimant or time is flagged too). EMPTY in the happy path. The
+    genesis fold uses the module's own fold step (`trial_claim.apply_trial_claim`). Read-only."""
+    from ..governor.trial_claim import apply_trial_claim, seed_rows
+    below, seed, resolver = _below_seed(store, archived, K)
+    rows: dict = {}
+    for r in below:
+        apply_trial_claim(r.payload, resolver.at(r.seq), rows)
+    carried = seed_rows(seed)
+    # Both directions: a dropped / altered claim, and a row the seed invents for a key the fold does not hold.
+    bad = {v[0] for key, v in rows.items() if carried.get(key) != v}
+    bad |= {v[0] for key, v in carried.items() if rows.get(key) != v}
+    return sorted(str(o) for o in bad)
+
+
+def stranded_report_unlocks(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, pricing S2) — the tenants whose below-K report unlock / owner relock the snapshot seed would NOT carry
+    (value-aware, both the billing and the owner state). EMPTY in the happy path. Read-only."""
+    from ..governor.report_unlock import apply_report_unlock, seed_state
+    below, seed, resolver = _below_seed(store, archived, K)
+    billing: dict = {}
+    owner: dict = {}
+    for r in below:
+        apply_report_unlock(r.payload, resolver.at(r.seq), billing, owner)
+    c_billing, c_owner = seed_state(seed)
+    # Both directions: a dropped / altered record, and a row the seed invents (e.g. a phantom owner relock).
+    bad = {o for o in set(billing) | set(c_billing) if billing.get(o) != c_billing.get(o)}
+    bad |= {o for o in set(owner) | set(c_owner) if owner.get(o) != c_owner.get(o)}
+    return sorted(str(o) for o in bad)
 
 
 def stranded_active_monitoring_subscriptions(store, archived: list[Segment], K: int) -> list[str]:

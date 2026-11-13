@@ -528,9 +528,14 @@ class Handler(BaseHTTPRequestHandler):
                                             org_id=org, permission="view_assessments"):
                 return self._deny(403, "not authorized for this org's assessments")
             import time as _t
+            # Pricing S5: full detail only when the principal's GLOBAL role carries view_assessments (staff); a
+            # per-org member admitted through the composed gate gets the trial preview when the org is locked.
+            from ..governor.accounts import role_can as _role_can
+            from .finding_preview import preview_locked as _preview_locked
+            locked = (not _role_can(principal.role, "view_assessments")) and _preview_locked(store, org)
             if path == "/api/assessments":
-                return self._json(_assess.assessment_summary(store, org, now=_t.time()))
-            return self._json(_assess.assessment_findings(store, org, now=_t.time()))
+                return self._json(_assess.assessment_summary(store, org, now=_t.time(), preview=locked))
+            return self._json(_assess.assessment_findings(store, org, now=_t.time(), preview=locked))
         if path == "/api/billing/orgs":
             # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
             # tenant is a global-owner action, distinct from the per-org overview above.
@@ -1808,6 +1813,11 @@ def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine
     egress) so a test can drive the OIDC callback against an in-process mock IdP with no network.
     ``customer_oidc_http_post``/``customer_oidc_jwks_fetcher`` are the SAME hooks for the customer
     Google-OIDC provider the provisioner builds per request (E2b — default None ⇒ the host-allowlisted egress)."""
+    # The provisioner is built per request, so validate the trial size HERE, once, at boot: a bad
+    # VIGIL_TRIAL_CREDITS refuses to start the cockpit instead of failing every provision request.
+    from .. import config as _cfg
+    from ..governor.trial_policy import check_trial_credits
+    check_trial_credits(_cfg.TRIAL_CREDITS)
     return UIServer((host, port), Handler, token=token,
                     spine_path=Path(spine_path) if spine_path else SPINE_PATH,
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,

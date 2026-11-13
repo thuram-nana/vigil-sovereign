@@ -296,6 +296,7 @@ WARMED_FOLDS = {
     "governor.customer", "governor.org+membership", "governor.wallet", "governor.plan_credit",
     "governor.subscription:governor.subscription", "governor.subscription:governor.monitoring_subscription",
     "governor.account", "governor.customer_credential", "governor.invoice", "governor.cost_ledger",
+    "governor.trial_claim", "governor.report_unlock",
     "governor.postpaid:governor.postpaid", "governor.postpaid_arrears", "governor.promotion",
     "governor.asset_ownership_proof", "governor.asset_ownership_challenge", "governor.monitoring_authority",
     "governor.killswitch", "governor.capability", "governor.budget", "ui.assessments", "ui.margin.settle_events",
