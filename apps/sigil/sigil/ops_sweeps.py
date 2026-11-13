@@ -39,7 +39,25 @@ def _pending_completions(spool: Path) -> tuple[set, bool]:
     refund (the drain decides the charge). Returns ``(pairs, unreadable)``; ``unreadable`` is True when some
     waiting file could not be parsed, so its (slug, nonce) is unknown — OR when the spool has NONE of the
     expected subdirs (absent / uninitialized / mis-pointed), which must never read as "no pending" (both
-    fail-closed: no refunds at all)."""
+    fail-closed: no refunds at all).
+
+    E3bc: the three globs run under the spool lock held SHARED (``<spool>/.spool.lock``), which the drain's
+    reverse moves (working/ -> incoming/) hold exclusively — so a completion moved between two globs can never be
+    missed. A lock that cannot be taken (busy past its bounded wait, unusable) still scans, but reads as
+    ``unreadable`` (completion_unknown: fail-closed). A mis-pointed spool returns before any lock file is
+    created."""
+    if not any((spool / sub).is_dir() for sub in ("incoming", "working", "rejected")):
+        return set(), True
+    from vigil_integration.live.seam_lock import locked_file
+    try:
+        with locked_file(spool / ".spool.lock", shared=True, create=False, chown_like=spool, wait_s=5.0):
+            return _scan_pending(spool)
+    except OSError:
+        pairs, _unreadable = _scan_pending(spool)
+        return pairs, True
+
+
+def _scan_pending(spool: Path) -> tuple[set, bool]:
     pairs: set = set()
     unreadable = False
     saw_subdir = False
@@ -96,8 +114,11 @@ def _pause_state(base: Any, slug: str, nonce: str) -> "Optional[bool]":
     be read (never guessed either way)."""
     try:
         from vigil_integration.live.credit_lease_pause import lease_pause_state, paused_past_expiry
-        held_past_expiry = paused_past_expiry(base, slug, nonce)
+        # READ ORDER (E3bc, pinned): the pause marker BEFORE the late record. resume writes the late record before it
+        # clears the pause, so a resume racing these two reads is seen either as still paused or as lifted late —
+        # never as "never paused".
         paused_now = lease_pause_state(base, slug, nonce)
+        held_past_expiry = paused_past_expiry(base, slug, nonce)
     except Exception:  # noqa: BLE001 — an import or read failure is "cannot tell", never an answer
         return None
     if held_past_expiry is True or paused_now is True:
@@ -133,16 +154,32 @@ def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now:
         raise _SweepDefer("deferred_config", f"the charge waits on its pricing configuration: {e}") from e
 
 
-def _completion_block(spool: Path, pair: tuple) -> "Callable[[], Optional[str]]":
-    """The sweep's refund precondition, re-read from the spool when called: ``completion_pending`` if a
-    completion for ``pair`` is waiting / quarantined, ``completion_unknown`` if the spool cannot be fully read,
-    else None (the refund may proceed)."""
+def _settle_precondition(spool: Path, pair: tuple, base: Any, *, metered: bool,
+                         paused: bool) -> "Callable[[], Optional[str]]":
+    """The sweep's settle precondition, evaluated INSIDE the settle's critical section (``refuse_if``), right
+    before it decides: ``completion_pending`` if a completion for ``pair`` is waiting / quarantined,
+    ``completion_unknown`` if the spool cannot be fully read; for a metered launch, ``pause_unknown`` if its pause
+    state cannot be read and ``pause_changed`` if it differs from what this sweep priced the settle on (a pause
+    that landed after the up-front read — the next pass applies D4). None: the settle may proceed."""
     def _check() -> Optional[str]:
         pending, unreadable = _pending_completions(spool)
         if pair in pending:
             return "completion_pending"
-        return "completion_unknown" if unreadable else None
+        if unreadable:
+            return "completion_unknown"
+        if metered:
+            now = _pause_state(base, *pair)
+            if now is None:
+                return "pause_unknown"
+            if bool(now) != bool(paused):
+                return "pause_changed"
+        return None
     return _check
+
+
+def _moved(r: dict) -> dict:
+    """The amounts a settle actually moved (a roll-forward's ``settle_completed`` row)."""
+    return {k: int(r.get(k, 0)) for k in ("refunded", "refunded_plan", "refunded_wallet", "net_spend")}
 
 
 def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: bool = False,
@@ -159,9 +196,19 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
       * published metered, NOT paused -> a run VIGIL lost: refunded in full (``refunded``);
       * published metered, pause state UNREADABLE -> not settled (``pause_unknown``): never guessed either way;
       * published FLAT -> refunded in full: a flat launch has no meter, so what it used cannot be measured.
-    Every metered row carries the meter's confirmed spend (``metered_cost_nano``)."""
+    Every metered row carries the meter's confirmed spend (``metered_cost_nano``).
+
+    E3bc statuses: the settle re-checks the spool and (metered) the pause state INSIDE its critical section, so a
+    late completion / pause refuses it as ``completion_pending`` / ``completion_unknown`` / ``pause_changed`` /
+    ``pause_unknown`` (nothing written; the next pass decides); a busy settle lock or meter is ``deferred``; a
+    settle that finished a recorded decision a crash interrupted is ``settle_completed`` with the amounts it moved.
+    With ``VIGIL_SETTLE_SPINE_RECORD`` on, a listed lease whose settlement marker is present (its tombstone pending:
+    possibly a settle interrupted after the marker) is FINISHED under ``apply`` (``settle_launch(finish_only=True)``:
+    only a recorded decision, never a fresh refund; no TTL or spool check) and reported ``settle_interrupted`` with
+    its pending amounts without it. With the flag off such a lease is skipped, as before."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
+    from . import config
 
     if ttl_s < 0:
         raise ValueError("ttl_s must be non-negative")
@@ -185,7 +232,26 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "unverified"})
             continue
         if is_lease_settled(base, doc.engagement_slug, doc.nonce):
-            continue                                       # already closed out (tombstone pending) — not abandoned
+            # already closed out (tombstone pending) — not abandoned. With the settle record on, it may be a settle
+            # a crash interrupted after its marker: FINISH it (finish_only: a recorded decision only, never a fresh
+            # one), whatever the TTL or the spool says; report-only shows it. Flag off: skipped, exactly as before.
+            if config.settle_spine_record_enabled():
+                lease_json = b.signed_lease.model_dump(mode="json")
+                if apply:
+                    r = gate.settle_launch(signed_lease=lease_json, consumed_units=0, now=now, basis="sweep:refund",
+                                           finish_only=True)
+                    if r.get("rolled_forward"):
+                        rows.append({**row, "status": "settle_completed", **_moved(r),
+                                     **_metered_spend(gate, str(doc.engagement_slug), str(doc.nonce))})
+                    elif not r.get("ok") and r.get("retry"):
+                        rows.append({**row, "status": "deferred", "error": r.get("error", "")})
+                    elif not r.get("ok"):
+                        rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
+                else:
+                    pending_settle = gate.interrupted_settlement(lease_json)
+                    if pending_settle:
+                        rows.append({**row, "status": "settle_interrupted", **pending_settle})
+            continue
         if doc.not_after.timestamp() + ttl_s > now:
             continue                                       # still live / inside the grace TTL
         if (doc.engagement_slug, str(doc.nonce)) in pending:
@@ -217,16 +283,22 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             except ValueError as e:
                 rows.append({**row, "status": "settle_failed", "error": f"the run's model meter is broken: {e}"})
                 continue
-        # The spool read above is a snapshot taken before this loop: a completion can land after it. So the
-        # settle RE-CHECKS this lease's completion INSIDE its critical section (under the same cross-process lock
-        # the settle-drain's charge takes), right before it decides — a run whose completion exists by then is
-        # never refunded or charged here.
+        # The spool and pause reads above are a snapshot taken before this settle: a completion or a pause can land
+        # after them. So the settle RE-CHECKS both INSIDE its critical section (under the same cross-process lock the
+        # settle-drain's charge and a pause take), right before it decides — a run whose completion exists by then is
+        # never refunded or charged here, and a pause that landed since is priced by the next pass.
         r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=consumed, now=now,
-                               refuse_if=_completion_block(cast(Path, spool), (slug_, nonce_)))  # apply => a spool
+                               basis=("sweep:paused" if consumed > 0 else "sweep:refund"),
+                               refuse_if=_settle_precondition(cast(Path, spool), (slug_, nonce_), base,  # apply => spool
+                                                              metered=metered, paused=bool(paused)))
         if r.get("refused"):
-            rows.append({**row, "status": str(r["refused"])})
+            rows.append({**row, "status": str(r["refused"]), **_metered_spend(gate, slug_, nonce_)})
+        elif not r.get("ok") and r.get("retry"):
+            rows.append({**row, "status": "deferred", "error": r.get("error", "")})
         elif not r.get("ok"):
             rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
+        elif r.get("action") == "launch_already_settled" and r.get("rolled_forward"):
+            rows.append({**row, "status": "settle_completed", **_moved(r), **_metered_spend(gate, slug_, nonce_)})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
         elif consumed > 0:

@@ -108,6 +108,16 @@ class CompletionSpoolWatcher:
         for d in (self.incoming, self.working, self.processed, self.rejected):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
+        # E3bc: the spool lock the drain's two REVERSE moves (working/ -> incoming/) take exclusively and the
+        # abandoned-lease sweep takes SHARED across its incoming/working/rejected globs — so the sweep's in-lock
+        # completion re-check can never miss a completion moved between two of its globs. Created HERE, by the
+        # drain's own uid, so a sweep run as another uid (root) never leaves a lock file the drain cannot open.
+        try:
+            fd = os.open(str(self.spool / ".spool.lock"),
+                         os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o600)
+            os.close(fd)
+        except OSError:                          # an unusable lock fails closed at use (files stay in working/)
+            _sys.stderr.write("vigil settle-drain: WARNING the completion spool lock cannot be created\n")
 
     # -- the current governance root (re-derived per drain against the live clock, finding B) ------
     def _current_root(self) -> Optional[Any]:
@@ -120,6 +130,13 @@ class CompletionSpoolWatcher:
                                      now=int(self._now()), role=OFFENSE_GOVERNANCE_ROLE, scope=self.scope)
         except DelegationError:
             return None
+
+    def _spool_lock(self) -> Any:
+        """The EXCLUSIVE spool lock (``<spool>/.spool.lock``) held by the drain's reverse moves only — never across a
+        settle (so the drain and the sweep can never deadlock on it and the settle lock). A leaf lock: bounded wait,
+        fail-closed (``seam_lock.locked_file``)."""
+        from vigil_integration.live.seam_lock import locked_file
+        return locked_file(self.spool / ".spool.lock", shared=False, wait_s=5.0)
 
     # -- one envelope → settle (fail-closed) -------------------------------------------------------
     def _settle_one(self, text: str, root: Any) -> Optional[dict]:
@@ -168,27 +185,35 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolError(
                 f"published lease (org={lease_doc.org_id!r}, host={lease_doc.scope_host!r}) does not hash to the "
                 f"completion slug {doc.engagement_slug!r} — refusing a tenant-mismatched settle")
-        consumed = self._consumed_for(doc.outcome.value, lease_doc)
+        consumed, guard = self._settle_inputs(doc.outcome.value, lease_doc)
         result = self._gate.settle_launch(
             signed_lease=bundle.signed_lease.model_dump(mode="json"), consumed_units=consumed,
-            now=self._now(), expect_org_id=lease_doc.org_id)
+            now=self._now(), expect_org_id=lease_doc.org_id, refuse_if=guard,
+            basis=f"completion:{doc.outcome.value}")
         if not result.get("ok"):
-            if result.get("retry"):                    # a request still in flight, a meter not writable right now
+            if result.get("retry"):                    # a request still in flight, a meter / lock busy right now
                 raise CompletionSpoolDeferred(f"settle_launch deferred: {result.get('error')}")
+            if result.get("refused"):                  # the in-lock pricing guard changed: re-priced next drain
+                raise CompletionSpoolDeferred(f"settle refused: {result.get('refused')}")
             raise CompletionSpoolError(f"settle_launch refused: {result.get('error')}")
-        # NTF-3: project the just-settled outcome to a tenant-visible notification record. ONLY on a FRESH
-        # settle (``action == "launch_settled"``, NEVER ``launch_already_settled``) — an idempotent re-drive
-        # of an already-settled (slug, nonce) appends NO second record. STRICTLY SEPARATE from the settle
-        # decision above: the append is best-effort and fail-safe (``_record_outcome`` swallows every error),
-        # so it can NEITHER fail NOR double the settle (which has already committed), mirroring how FDX-2 keeps
-        # findings-crossing out of the settle signal. The record carries NO amount — it is ADVISORY (money-
-        # doctrine clean) and NEVER alters the charge/refund. org_id/slug/host come from the VERIFIED owner-
-        # signed lease, never the signal body.
+        # NTF-3: project the just-settled outcome to a tenant-visible notification record. On a FRESH settle
+        # (``action == "launch_settled"``) — and on a re-drive that FINISHED a completion's recorded settlement a
+        # crash interrupted (``rolled_forward`` with a ``completion:`` basis: the first drive died before it got
+        # here). Never on a plain ``launch_already_settled`` re-drive (no second record), and never for a
+        # roll-forward a cancel or the sweep decided. STRICTLY SEPARATE from the settle decision above: the append
+        # is best-effort and fail-safe (``_record_outcome`` swallows every error), so it can NEITHER fail NOR double
+        # the settle (which has already committed), mirroring how FDX-2 keeps findings-crossing out of the settle
+        # signal; the notification centre de-dups an at-least-once double-append by ``(slug, nonce)``. The record
+        # carries NO amount — it is ADVISORY (money-doctrine clean) and NEVER alters the charge/refund.
+        # org_id/slug/host come from the VERIFIED owner-signed lease, never the signal body.
+        basis = str(result.get("basis") or "")
         if result.get("action") == "launch_settled":
             self._record_outcome(lease_doc, doc)
+        elif result.get("rolled_forward") and basis.startswith("completion:"):
+            self._record_outcome(lease_doc, doc, outcome=basis.split(":", 1)[1])   # the RECORDED outcome
         return result
 
-    def _record_outcome(self, lease_doc: Any, completion: Any) -> None:
+    def _record_outcome(self, lease_doc: Any, completion: Any, *, outcome: Optional[str] = None) -> None:
         """Best-effort tenant-scoped ``assessment_outcome`` projection for the customer notification centre
         (NTF-3). The ``org_id`` / ``engagement_slug`` are taken from the VERIFIED owner-signed lease (never the
         signal body); the terminal ``outcome`` from the governance-verified completion. Carries NO amount —
@@ -201,7 +226,7 @@ class CompletionSpoolWatcher:
                 payload={
                     "engagement_slug": str(lease_doc.engagement_slug),
                     "org_id": str(lease_doc.org_id),
-                    "outcome": str(completion.outcome.value),
+                    "outcome": str(outcome) if outcome is not None else str(completion.outcome.value),
                     "nonce": str(lease_doc.nonce),
                     "ts": float(self._now()),
                 })
@@ -211,7 +236,15 @@ class CompletionSpoolWatcher:
                 "NTF-3 assessment-outcome record append failed (advisory; settle unaffected)", exc_info=True)
 
     def _consumed_for(self, outcome: str, lease_doc: Any) -> int:
-        """The billable units for ONE verified lease's terminal ``outcome``. The mode is the LAUNCH's, decided when it
+        """The billable units for ONE verified lease's terminal ``outcome`` (see :meth:`_settle_inputs`)."""
+        return self._settle_inputs(outcome, lease_doc)[0]
+
+    def _settle_inputs(self, outcome: str, lease_doc: Any) -> "tuple[int, Optional[Callable[[], Optional[str]]]]":
+        """``(consumed, refuse_if)`` for ONE verified lease's terminal ``outcome``: the billable units, and the
+        settle's in-lock precondition (None except where the price was read from a record that can change before
+        the settle takes its lock — a metered FAILED run's paused-past-expiry record, below).
+
+        The billable units for ONE verified lease's terminal ``outcome``. The mode is the LAUNCH's, decided when it
         was published (its grant, metered marker or meter on disk — ``LaunchGate._launch_was_metered``), never the
         flag now: a launch published flat settles by the flat per-run rule (:meth:`_consumed`), byte-identical. A
         launch published metered (PRICING M1c, design §4.3-§4.4) has its model gateway meter CLOSED first (no request
@@ -237,7 +270,7 @@ class CompletionSpoolWatcher:
         except OSError as exc:
             raise CompletionSpoolDeferred(f"the run's billing mode could not be read: {exc}") from exc
         if not metered:
-            return self._consumed(outcome, reserved)
+            return self._consumed(outcome, reserved), None
         from vigil_core import model_metering as mm
         from vigil_core.model_grant import meter_id
         from ..model_gateway import GrantMeter, MeterBusy
@@ -250,6 +283,7 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolDeferred(f"the run's model meter could not be closed: {exc}") from exc
         except ValueError as exc:
             raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
+        guard: "Optional[Callable[[], Optional[str]]]" = None
         if str(outcome) not in ("completed", "canceled"):
             # A FAILED run is free (VIGIL's failure) — unless the customer held it paused through the end of its
             # window and lifted the pause only afterwards: its re-drive is then refused by the window and ends here
@@ -258,13 +292,23 @@ class CompletionSpoolWatcher:
             held = self._paused_past_expiry(lease_doc)
             if held is None:
                 raise CompletionSpoolDeferred("the launch's paused-past-expiry record could not be read")
+
+            def _pause_guard() -> Optional[str]:
+                # E3bc: re-read INSIDE the settle's critical section — a late resume recorded after the read above
+                # re-prices the settle (deferred: the next drain charges it under D4), never refunds it.
+                now = self._paused_past_expiry(lease_doc)
+                if now is None:
+                    return "pause_unknown"
+                return "pause_changed" if bool(now) != bool(held) else None
+
+            guard = _pause_guard
             if not held or (totals.requests == 0 and totals.cost_nano == 0):
-                return 0
+                return 0, guard
         try:
             if str(outcome) == "canceled" and mm.cancel_settlement() == "refund":
-                return 0
+                return 0, guard
             return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
-                                       cap=reserved)
+                                       cap=reserved), guard
         except mm.MeteringError as exc:
             raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}",
                                           config=True) from exc
@@ -339,14 +383,18 @@ class CompletionSpoolWatcher:
         safe, so this can never double-settle a completed one — it only ensures a settlement is never SILENTLY
         LOST (which, for a refund/charge, is money)."""
         try:
-            stale = list(self.working.glob("*.json"))
+            with self._spool_lock():                 # E3bc: never between two of the sweep's in-lock globs
+                try:
+                    stale = list(self.working.glob("*.json"))
+                except OSError:
+                    return
+                for f in stale:
+                    try:
+                        os.replace(f, self.incoming / f.name)
+                    except OSError:
+                        self._safe_unlink(f)
         except OSError:
-            return
-        for f in stale:
-            try:
-                os.replace(f, self.incoming / f.name)
-            except OSError:
-                self._safe_unlink(f)
+            return                                   # left in working/: the sweep reads it as pending; retried next drain
 
     def drain(self) -> dict:
         """Process every file in ``incoming/`` once. Returns ``{settled, noop, rejected, deduped}``. Begins with
@@ -389,7 +437,8 @@ class CompletionSpoolWatcher:
                 result = self._settle_one(text, root)
             except CompletionSpoolDeferred as exc:
                 try:
-                    os.replace(claimed, src)         # back to incoming/: the next drain retries it
+                    with self._spool_lock():         # E3bc: never between two of the sweep's in-lock globs
+                        os.replace(claimed, src)     # back to incoming/: the next drain retries it
                 except OSError:
                     pass                             # left in working/: the next drain's reclaim returns it
                 _sys.stderr.write(f"vigil settle-drain: deferred {src.name}: {exc}\n")
