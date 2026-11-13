@@ -175,6 +175,7 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
@@ -204,6 +205,9 @@ def customer_stepup_required() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_STEPUP_REQUIRED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
+# sign-up requests per canonical mailbox per hour, counted only after the per-ip guard passed. 0 (the default)
+# leaves the per-mailbox limiter unwired; the trial-preview readiness check requires a positive owner-set value.
+SIGNUP_EMAIL_PER_HOUR = _int_env("VIGIL_SIGNUP_EMAIL_PER_HOUR", 0)
 # Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
 # decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
 # later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.

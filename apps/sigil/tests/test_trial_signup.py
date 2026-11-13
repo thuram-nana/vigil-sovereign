@@ -247,3 +247,81 @@ def test_a_google_identity_without_a_mailbox_gets_no_preview_trial(monkeypatch):
     p, s, wallet, tc = _prov()
     _google(p, s, "", "sub-nomail")
     assert _grants(s) == [], "no mailbox to key the one-per-mailbox limit on: no preview trial"
+
+
+# --- (d) the per-canonical-mailbox sign-up limiter --------------------------------------------------------------
+
+def _limited(max_fails=3):
+    from sigil.ui.login_ratelimit import LoginRateLimiter
+    p, s, wallet, tc = _prov()
+    p.signup_email_limiter = LoginRateLimiter(tempfile.mkdtemp(), max_fails=max_fails, window_s=3600.0,
+                                              base_lock_s=3600.0, max_lock_s=3600.0)
+    return p
+
+
+def test_the_mailbox_limiter_trips_across_many_ips_and_aliases():
+    from sigil.ui.provision import ProvisionRateLimited
+    p = _limited(3)
+    for i, alias in enumerate(["a@acme.io", "a+1@acme.io", "A+2@acme.io"]):
+        p.request_signup(alias, ip=f"10.0.0.{i}", now=100.0)
+    with pytest.raises(ProvisionRateLimited):
+        p.request_signup("a+3@acme.io", ip="10.0.0.9", now=101.0)
+    p.request_signup("b@acme.io", ip="10.0.0.10", now=101.0)        # another mailbox is unaffected
+
+
+def test_the_mailbox_limiter_is_not_counted_when_the_ip_guard_refused():
+    from sigil.ui.provision import ProvisionRateLimited
+    p = _limited(2)
+    p.rate_limiter.check = lambda *k, now=None: 999.0              # the per-ip guard refuses every request
+    for _ in range(5):
+        with pytest.raises(ProvisionRateLimited):
+            p.request_signup("victim@acme.io", ip="6.6.6.6", now=100.0)
+    assert p.signup_email_limiter.locked("signup:mailbox:victim@acme.io", now=100.0) is None
+
+
+# --- (e) owner backfill -----------------------------------------------------------------------------------------
+
+def test_backfill_claims_every_existing_mailbox_once(monkeypatch):
+    from sigil.governor.trial_claim import BACKFILL_HOLDER, backfill_email_claims
+    monkeypatch.delenv(_FLAG, raising=False)
+    p, s, wallet, tc = _prov()
+    a = _signup(p, "a@acme.io")
+    b = _signup(p, "Jdoe@gmail.com", ip="2.2.2.2")
+    p.customers.create("loose@acme.io", password="customer-pw-9", username="loose", issued_at=9_000.0)
+    r = backfill_email_claims(p.customers, p.orgs, tc, canonical=canonical_email, issued_at=10_000.0)
+    assert r == {"claimed": 3, "skipped": 0, "unusable": 0}
+    assert tc.claimant("email", key_digest("email", "a@acme.io")) == a["org_id"]
+    assert tc.claimant("email", key_digest("email", "jdoe@gmail.com")) == b["org_id"]
+    assert tc.claimant("email", key_digest("email", "loose@acme.io")) == BACKFILL_HOLDER
+    again = backfill_email_claims(p.customers, p.orgs, tc, canonical=canonical_email, issued_at=10_001.0)
+    assert again == {"claimed": 0, "skipped": 3, "unusable": 0}
+    monkeypatch.setenv(_FLAG, "1")
+    out = _signup(p, "j.doe+new@googlemail.com", ip="3.3.3.3")      # an existing account's mailbox variant
+    assert out["trial"] == "unavailable"
+
+
+def test_backfill_cli_runs_end_to_end(tmp_path, monkeypatch, capsys):
+    from pathlib import Path
+
+    from sigil import cli, config
+    from sigil.governor.identity import ensure_owner_keypair
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "SPINE_PATH", Path(tmp_path) / "spine" / "spine.jsonl")
+    ensure_owner_keypair()
+    try:
+        cli.main(["trial", "backfill-claims"])
+    except SystemExit as e:
+        assert not e.code
+    assert "trial claims: 0 claimed" in capsys.readouterr().out
+
+
+def test_the_factory_wires_the_mailbox_limiter_only_when_configured(monkeypatch):
+    from sigil import config
+    from sigil.ui.provision import build_provisioner
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    monkeypatch.setattr(config, "SIGNUP_EMAIL_PER_HOUR", 0)
+    assert build_provisioner(s).signup_email_limiter is None          # default OFF
+    monkeypatch.setattr(config, "SIGNUP_EMAIL_PER_HOUR", 5)
+    monkeypatch.setattr(config, "SIGNUP_EMAIL_RATELIMIT_DIR", tempfile.mkdtemp())
+    assert build_provisioner(s).signup_email_limiter is not None
+    assert build_provisioner(s).trial_claims is not None

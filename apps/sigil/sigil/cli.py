@@ -1555,6 +1555,24 @@ def _reconcile_once(store) -> list:
     return retired
 
 
+def cmd_trial(a) -> None:
+    """`sigil trial backfill-claims` — owner-sign an email trial claim for every existing customer account
+    (active or revoked) whose canonical mailbox is not yet claimed, so an existing account cannot take a
+    preview trial through a "+tag" or gmail-dot variant. Idempotent. Run once before turning on
+    VIGIL_TRIAL_PREVIEW_ENABLED. Prints counts only (never a mailbox)."""
+    import time as _time
+
+    from .governor.customers import CustomerRegistry
+    from .governor.orgs import OrgRegistry
+    from .governor.trial_claim import TrialClaimRegistry, backfill_email_claims
+    from .governor.trial_policy import canonical_email
+    store = SpineStore()
+    r = backfill_email_claims(CustomerRegistry(store), OrgRegistry(store), TrialClaimRegistry(store),
+                              canonical=canonical_email, issued_at=_time.time())
+    print(f"  trial claims: {r['claimed']} claimed, {r['skipped']} already claimed, "
+          f"{r['unusable']} without a usable mailbox")
+
+
 def cmd_monitoring_reconcile(a) -> None:
     """Sweep: apply the monitoring plan to every org's grants (catches a period lapse with no webhook).
     Default-OFF behind VIGIL_CUSTOMER_MONITORING_ENABLED. Holds no owner key."""
@@ -2851,6 +2869,12 @@ def main(argv=None) -> None:
                      help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
     pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pmd.set_defaults(fn=cmd_monitoring_drain)
+    ptr = sub.add_parser("trial", help="free-trial owner operations (pricing)")
+    ptr_sub = ptr.add_subparsers(dest="trial_cmd", required=True)
+    ptr_bf = ptr_sub.add_parser("backfill-claims",
+                                help="owner-sign an email trial claim for every existing customer (idempotent; "
+                                     "run once before enabling VIGIL_TRIAL_PREVIEW_ENABLED)")
+    ptr_bf.set_defaults(fn=cmd_trial)
     pmr = sub.add_parser("monitoring-reconcile",
                          help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
                               "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")

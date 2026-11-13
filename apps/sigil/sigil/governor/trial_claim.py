@@ -188,3 +188,36 @@ class TrialClaimRegistry:
         if hit is not _UNCACHED:
             return sorted(hit)
         return sorted(k for k, v in self._fold().items() if v[0] == org_id)
+
+
+# A customer with no active org membership is still claimed (so their mailbox cannot take a trial later) under this
+# sentinel holder. It is never a real org: sign-up org ids are server-derived `org_<digest>` values.
+BACKFILL_HOLDER = "trial-backfill"
+
+
+def backfill_email_claims(customers, orgs, claims, *, canonical, issued_at) -> "dict[str, int]":
+    """Owner backfill: write an email claim for every existing customer account (active OR revoked) whose
+    canonical mailbox is not yet claimed, held by the customer's earliest active org (or BACKFILL_HOLDER).
+    Idempotent: an already-claimed mailbox is skipped. Returns counts {claimed, skipped, unusable}."""
+    out = {"claimed": 0, "skipped": 0, "unusable": 0}
+    by_user: dict = {}
+    for m in orgs.memberships():
+        cur = by_user.get(m.username)
+        if cur is None or (m.issued_at, m.org_id) < (cur.issued_at, cur.org_id):
+            by_user[m.username] = m
+    accounts = customers._fold()                       # every account the fold holds, including revoked ones
+    t = float(issued_at)
+    for username in sorted(accounts):
+        ekey = canonical(accounts[username].email)
+        if not ekey:
+            out["unusable"] += 1
+            continue
+        digest = key_digest("email", ekey)
+        if claims.claimant("email", digest) is not None:
+            out["skipped"] += 1
+            continue
+        holder = by_user[username].org_id if username in by_user else BACKFILL_HOLDER
+        claims.claim("email", digest, holder, issued_at=t)
+        t += 0.001
+        out["claimed"] += 1
+    return out

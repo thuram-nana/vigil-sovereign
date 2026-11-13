@@ -160,7 +160,7 @@ class Provisioner:
     email token in the response when no real sender is configured — it must stay False in production."""
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
-                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
+                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
@@ -190,6 +190,10 @@ class Provisioner:
         # uniqueness + the per-ip/email rate-limit — a ceiling on trial-credit farming (Finding: trial
         # abuse). None ⇒ no global cap (tests inject a low-cap one; the factory wires a daily cap).
         self.signup_cap_limiter = signup_cap_limiter
+        # Pricing S3 — a SEPARATE per-canonical-mailbox sign-up limiter (its own marker dir, its own threshold).
+        # It is checked and counted only AFTER the per-ip guard passed, so a stranger cannot cheaply lock a
+        # victim's sign-up from one address. None ⇒ no per-mailbox limit.
+        self.signup_email_limiter = signup_email_limiter
         # A SEPARATE per-org member-management limiter (grant/revoke). None ⇒ NO member-mgmt rate limiting
         # (so there is no "checked-but-never-incremented" dead gate — the review's finding); when injected,
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
@@ -340,6 +344,15 @@ class Provisioner:
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
         self.rate_limiter.record_failure(f"signup:ip:{ip}", now=t)   # count every attempt (anti-flood)
+        if self.signup_email_limiter is not None:
+            from ..governor.trial_policy import canonical_email
+            ekey = canonical_email(email_l)
+            if ekey:
+                mkey = f"signup:mailbox:{ekey}"
+                locked = self.signup_email_limiter.locked(mkey, now=t)
+                if locked is not None:
+                    raise ProvisionRateLimited(locked)
+                self.signup_email_limiter.record_failure(mkey, now=t)
         token = self.email_tokens.issue(email_l, PURPOSE_VERIFY, now=t) if email_l else None
         sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email",
                                                       f"Confirm: token {token}") if token else False
@@ -1669,6 +1682,10 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         # several times the cap — the red-pen's CO10.)
         signup_cap_limiter=LoginRateLimiter(config.SIGNUP_CAP_DIR, max_fails=config.SIGNUP_DAILY_CAP,
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
+        signup_email_limiter=(LoginRateLimiter(config.SIGNUP_EMAIL_RATELIMIT_DIR,
+                                               max_fails=config.SIGNUP_EMAIL_PER_HOUR, window_s=3600.0,
+                                               base_lock_s=3600.0, max_lock_s=3600.0)
+                              if config.SIGNUP_EMAIL_PER_HOUR > 0 else None),   # default OFF (0)
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
         # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
