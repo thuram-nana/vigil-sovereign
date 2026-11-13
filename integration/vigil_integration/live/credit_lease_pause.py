@@ -52,6 +52,8 @@ from vigil_integration.live.credit_lease_broker import (
 )
 
 __all__ = [
+    "record_paused_past_expiry",
+    "paused_past_expiry",
     "pauses_root",
     "pause_path",
     "record_lease_pause",
@@ -62,6 +64,10 @@ __all__ = [
 ]
 
 _PAUSE_DIRNAME = "credit-lease-pauses"
+# A SIBLING of the pauses dir (never inside it, so the marker enumerations never see it): the launches whose pause
+# was still in place when the customer lifted it after the lease window had closed (see record_paused_past_expiry).
+_PAST_EXPIRY_DIRNAME = "credit-lease-paused-past-expiry"
+_PAST_EXPIRY_SCHEMA = "vigil-credit-lease-paused-past-expiry-v1"
 _PAUSE_SCHEMA = "vigil-credit-lease-pause-v1"
 _SCHEMA_VERSION = 1
 
@@ -200,6 +206,56 @@ def _marker_nonces(base_dir: Any, slug: Any) -> "Optional[list[str]]":
     except (OSError, ValueError):
         return None            # is_file()/read raised (EACCES, ...) OR unreadable/corrupt/foreign -> the caller halts
     return [str(n) for n in nonces]
+
+
+def _past_expiry_path(base_dir: Any, slug: Any) -> Optional[Path]:
+    safe = _safe_component(slug)
+    if not safe:
+        return None
+    return _contained_child(Path(_seam_base(base_dir)) / _PAST_EXPIRY_DIRNAME, f"{safe}.json")
+
+
+def _past_expiry_nonces(path: Path) -> "Optional[list[str]]":
+    """The recorded nonces: [] for no file, None for an existing file that cannot be read cleanly."""
+    try:
+        if not path.is_file():
+            return []
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(obj, dict) or obj.get("kind") != _PAST_EXPIRY_SCHEMA or not isinstance(obj.get("nonces"),
+                                                                                                    list):
+            raise ValueError("foreign or malformed paused-past-expiry record")
+    except (OSError, ValueError):
+        return None
+    return [str(n) for n in obj["nonces"]]
+
+
+def record_paused_past_expiry(base_dir: Any, slug: Any, nonce: Any) -> Path:
+    """Durably record that the lease ``(slug, nonce)`` was still PAUSED when its window closed, at the moment the
+    customer lifts that pause. Lifting a pause after expiry re-admits nothing (the window refuses every re-arm), but
+    it must not erase the fact the abandoned-launch sweep and the completion drain bill on: the customer held the
+    launch paused through the end of its window. ADD-ONLY (never cleared) and idempotent. Raises ValueError on an
+    unsafe slug, and on an existing record that cannot be read cleanly (rewriting it would drop other launches'
+    evidence), so the resume that needs it refuses and changes nothing."""
+    path = _past_expiry_path(base_dir, slug)
+    if path is None:
+        raise ValueError(f"unsafe lease slug: {slug!r}")
+    current = _past_expiry_nonces(path)
+    if current is None:
+        raise ValueError("the paused-past-expiry record exists but cannot be read; refusing to overwrite it")
+    merged = sorted(set(current) | {str(nonce)})
+    _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _PAST_EXPIRY_SCHEMA,
+                              "slug": _safe_component(slug), "nonces": merged})
+    return path
+
+
+def paused_past_expiry(base_dir: Any, slug: Any, nonce: Any) -> Optional[bool]:
+    """Tri-state: True when the record holds this nonce, False when there is no record or a clean record without
+    it, None when the record cannot be read positively (or the slug is unsafe). Total; never raises."""
+    path = _past_expiry_path(base_dir, slug)
+    if path is None:
+        return None
+    nonces = _past_expiry_nonces(path)
+    return None if nonces is None else str(nonce) in nonces
 
 
 def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:

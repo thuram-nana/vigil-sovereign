@@ -221,7 +221,9 @@ class CompletionSpoolWatcher:
             for what the run used, never more than the reservation they approved;
           * ``canceled`` ⇒ the owner's named policy (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` as above, or
             ``refund`` = 0;
-          * anything else (``failed``, VIGIL's side) ⇒ 0.
+          * anything else (``failed``, VIGIL's side) ⇒ 0, except a launch the customer held paused through the end
+            of its window (lifted only after it closed, so the re-drive the window refuses ends as ``failed``): it
+            settles like a paused, abandoned launch — what it used, or 0 when it used nothing.
 
         Only CONFIRMED spend is billed: unconfirmed spend (a lost record, the unreported part of a cut-off response)
         is VIGIL's cost. The meter is keyed by the verified lease's own ``(engagement_slug, nonce)`` — never a wire
@@ -248,16 +250,31 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolDeferred(f"the run's model meter could not be closed: {exc}") from exc
         except ValueError as exc:
             raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
+        if str(outcome) not in ("completed", "canceled"):
+            # A FAILED run is free (VIGIL's failure) — unless the customer held it paused through the end of its
+            # window and lifted the pause only afterwards: its re-drive is then refused by the window and ends here
+            # as FAILED, so it settles by the paused-and-abandoned rule (owner decision 2026-11-13: charged for what
+            # it used; nothing used -> nothing charged). An unreadable record defers rather than guessing.
+            held = self._paused_past_expiry(lease_doc)
+            if held is None:
+                raise CompletionSpoolDeferred("the launch's paused-past-expiry record could not be read")
+            if not held or (totals.requests == 0 and totals.cost_nano == 0):
+                return 0
         try:
             if str(outcome) == "canceled" and mm.cancel_settlement() == "refund":
-                return 0
-            if str(outcome) not in ("completed", "canceled"):
                 return 0
             return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
                                        cap=reserved)
         except mm.MeteringError as exc:
             raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}",
                                           config=True) from exc
+
+    def _paused_past_expiry(self, lease_doc: Any) -> "Optional[bool]":
+        try:
+            from vigil_integration.live.credit_lease_pause import paused_past_expiry
+            return paused_past_expiry(self._base_dir, str(lease_doc.engagement_slug), str(lease_doc.nonce))
+        except Exception:  # noqa: BLE001 — an import or read failure is "cannot tell", never an answer
+            return None
 
     @staticmethod
     def _consumed(outcome: str, reserved: int) -> int:

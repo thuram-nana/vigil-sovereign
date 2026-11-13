@@ -514,8 +514,9 @@ def test_a_metered_launch_the_customer_paused_and_never_resumed_is_charged_for_w
     assert again == [] and _avail(s) == 1_000 - 54                     # settled exactly once
 
 
-def test_a_paused_metered_launch_with_no_confirmed_use_pays_the_floor(monkeypatch):
-    """Charged for what it used, and every metered run's charge is at least the per-run floor."""
+def test_a_paused_metered_launch_that_used_nothing_is_refunded(monkeypatch):
+    """Charged for what it used: a paused launch with no model request and no confirmed spend (it may never have
+    started, e.g. the worker was down) used nothing, so it is refunded; the floor covers a run's start-up only."""
     from sigil.ops_sweeps import sweep_abandoned_reservations
     from vigil_integration.live.credit_lease_pause import record_lease_pause
     _metered(monkeypatch)
@@ -523,9 +524,141 @@ def test_a_paused_metered_launch_with_no_confirmed_use_pays_the_floor(monkeypatc
     _owner, r, g, _pub = _reserve(s)
     record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
     done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)]
+    assert _avail(s) == 1_000 and _closed(r)
+
+
+def test_a_paused_launch_with_one_request_and_no_confirmed_spend_pays_the_floor(monkeypatch):
+    """A request was made (the run started) but its spend was never confirmed: the run's start-up floor applies."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, mm.Usage(), 0, held=10 ** 9)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
     floor = mm.run_floor_credits()
     assert [(x["status"], x["charged"]) for x in done] == [("charged_paused", floor)]
     assert _avail(s) == 1_000 - floor
+
+
+def test_a_paused_charge_bills_only_confirmed_spend(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST, held=10 ** 9)            # $1 VIGIL cannot prove: never the customer's
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["charged"]) for x in done] == [("charged_paused", 54)]
+
+
+def test_a_pause_held_by_another_launch_of_the_slug_is_not_this_launchs(monkeypatch):
+    """The pause marker is per slug and holds nonces: a pause of an earlier launch on the same slug never makes this
+    launch 'paused' (it is refunded as a run VIGIL lost)."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import record_lease_pause
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], "an-earlier-nonce")
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)]
+
+
+def _late_resume(monkeypatch, *, spend=True):
+    """A metered launch the customer paused inside its window and lifted only after the window closed."""
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, g, _pub = _reserve(s)
+    if spend:
+        _spend(r, USAGE, USAGE_COST)
+    assert g.pause_launch(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
+    res = g.resume_launch(signed_lease=r["lease"], expect_org_id=ORG, now=NOW + 9 * 3600)
+    assert res["ok"] and res.get("expired") is True
+    return s, owner, r, g
+
+
+def test_lifting_a_pause_after_the_window_closed_still_charges_what_was_used(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import is_lease_paused
+    s, _owner, r, g = _late_resume(monkeypatch)
+    assert not is_lease_paused(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])   # the halt is lifted
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["charged"], x["refunded"]) for x in done] == [("charged_paused", 54, 846)]
+    assert _avail(s) == 1_000 - 54
+
+
+def test_a_late_lifted_pause_whose_re_drive_fails_is_charged_by_the_drain(monkeypatch):
+    s, owner, r, _g = _late_resume(monkeypatch)
+    assert _settle(s, owner, r, "failed")["settled"] == 1
+    assert _avail(s) == 1_000 - 54 and _closed(r)
+
+
+def test_a_late_lifted_pause_that_used_nothing_is_refunded_everywhere(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    s, owner, r, g = _late_resume(monkeypatch, spend=False)
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)] and _avail(s) == 1_000
+    s2, owner2, r2, _g2 = _late_resume(monkeypatch, spend=False)
+    assert _settle(s2, owner2, r2, "failed")["settled"] == 1 and _avail(s2) == 1_000
+
+
+def test_a_pause_lifted_inside_the_window_leaves_no_charge_record(monkeypatch):
+    """Resumed in time: the launch is runnable again, so nothing records it as held — a later loss is VIGIL's."""
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live.credit_lease_pause import paused_past_expiry
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    assert g.pause_launch(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
+    res = g.resume_launch(signed_lease=r["lease"], expect_org_id=ORG, now=NOW + 60)
+    assert res["ok"] and "expired" not in res
+    assert paused_past_expiry(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"]) is False
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)]
+
+
+def test_a_failure_after_a_pause_lifted_inside_the_window_is_free(monkeypatch):
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    assert g.pause_launch(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
+    assert g.resume_launch(signed_lease=r["lease"], expect_org_id=ORG, now=NOW + 60)["ok"]
+    assert _settle(s, owner, r, "failed")["settled"] == 1
+    assert _avail(s) == 1_000                                            # VIGIL's failure: free
+
+
+def test_an_unreadable_late_resume_record_settles_nothing_and_refuses_the_resume(monkeypatch):
+    from sigil.ops_sweeps import sweep_abandoned_reservations
+    from vigil_integration.live import credit_lease_pause as clp
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    rec = clp._past_expiry_path(os.environ["VIGIL_BASE_DIR"], r["slug"])
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("{not json", encoding="utf-8")
+    assert g.pause_launch(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
+    res = g.resume_launch(signed_lease=r["lease"], expect_org_id=ORG, now=NOW + 9 * 3600)
+    assert not res["ok"]                                                  # never erase the evidence it cannot keep
+    assert clp.is_lease_paused(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [x["status"] for x in done] == ["charged_paused"]              # still paused: charged by the marker
+    s2 = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner2, r2, g2, _pub2 = _reserve(s2)
+    _spend(r2, USAGE, USAGE_COST)
+    rec2 = clp._past_expiry_path(os.environ["VIGIL_BASE_DIR"], r2["slug"])
+    rec2.parent.mkdir(parents=True, exist_ok=True)
+    rec2.write_text("{not json", encoding="utf-8")
+    done2 = sweep_abandoned_reservations(g2, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [x["status"] for x in done2] == ["pause_unknown"]
+    assert _settle(s2, owner2, r2, "failed")["settled"] == 0 and _avail(s2) == 100   # the drain defers too
 
 
 def test_a_paused_charge_never_exceeds_the_reservation(monkeypatch):

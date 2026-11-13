@@ -91,20 +91,29 @@ class _SweepDefer(Exception):
 
 
 def _pause_state(base: Any, slug: str, nonce: str) -> "Optional[bool]":
-    """True when the CUSTOMER paused this launch (a cleanly-read pause marker holds its nonce), False when it was
-    not paused, None when the pause state cannot be read (never guessed either way)."""
+    """True when the CUSTOMER paused this launch (a cleanly-read pause marker holds its nonce, or the customer lifted
+    the pause only after the lease window had closed), False when it was not paused, None when either record cannot
+    be read (never guessed either way)."""
     try:
-        from vigil_integration.live.credit_lease_pause import lease_pause_state
-        return lease_pause_state(base, slug, nonce)
+        from vigil_integration.live.credit_lease_pause import lease_pause_state, paused_past_expiry
+        held_past_expiry = paused_past_expiry(base, slug, nonce)
+        paused_now = lease_pause_state(base, slug, nonce)
     except Exception:  # noqa: BLE001 — an import or read failure is "cannot tell", never an answer
         return None
+    if held_past_expiry is True or paused_now is True:
+        return True                                    # positive evidence either way: still paused, or lifted late
+    if held_past_expiry is None or paused_now is None:
+        return None
+    return False
 
 
 def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now: float) -> int:
     """What a metered launch the customer paused and never resumed used, in credits (owner decision 2026-11-13: it
     is CHARGED for what it used, like a completed or customer-cancelled metered run): the run's meter is CLOSED
     first, then ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))``. Only confirmed spend is
-    billed. Raises :class:`_SweepDefer` when the settle must wait; a broken meter raises ``ValueError``."""
+    billed, and a launch with no recorded model request and no confirmed spend is charged nothing (it may never have
+    started; the floor covers a run's start-up). Raises :class:`_SweepDefer` when the settle must wait; a broken
+    meter raises ``ValueError``."""
     from vigil_core import model_metering as mm
     from vigil_core.model_grant import meter_id
     from . import config
@@ -115,6 +124,8 @@ def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now:
         raise _SweepDefer("deferred", str(e)) from e
     except OSError as e:
         raise _SweepDefer("deferred", f"the run's model meter cannot be written right now: {type(e).__name__}") from e
+    if totals.requests == 0 and totals.cost_nano == 0:
+        return 0                                       # nothing was used (it may never have started): refunded
     try:
         return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
                                    cap=int(reserved))
@@ -130,8 +141,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
 
     How an abandoned launch settles (owner decision 2026-11-13: a scan the customer paused and never resumed is
     charged for what it used):
-      * published METERED and PAUSED by the customer (a cleanly-read pause marker holds its nonce) -> CHARGED its
-        confirmed metered use, clamped to [floor, reservation] (``charged_paused``);
+      * published METERED and PAUSED by the customer (a cleanly-read pause marker holds its nonce, or the pause was
+        lifted only after the window closed) -> CHARGED its confirmed metered use, clamped to [floor, reservation]
+        (``charged_paused``); a paused launch that made no model request and has no confirmed spend is refunded;
       * published metered, NOT paused -> a run VIGIL lost: refunded in full (``refunded``);
       * published metered, pause state UNREADABLE -> not settled (``pause_unknown``): never guessed either way;
       * published FLAT -> refunded in full: a flat launch has no meter, so what it used cannot be measured.

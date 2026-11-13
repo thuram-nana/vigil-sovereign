@@ -58,9 +58,10 @@ _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reserv
 _DEFAULT_LEASE_HOURS = 8.0
 _MAX_LEASE_HOURS = 24.0 * 7     # a launch lease caps at a week; a longer engagement re-leases
 #: What ``resume_launch`` tells the customer when it lifts the pause of a lease whose window has closed.
-_RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run already in "
-                           "progress continues and settles normally, but a launch that has not started will not "
-                           "start")
+_RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run still in "
+                           "progress continues and settles normally, but a launch that has not started, or a run "
+                           "that stopped for the pause, will not start again. Because it was paused when its window "
+                           "closed, it is charged for what it used")
 
 
 class LaunchGate:
@@ -772,9 +773,17 @@ class LaunchGate:
         except (TypeError, ValueError, OSError, OverflowError, AttributeError):
             return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
         try:
-            from vigil_integration.live.credit_lease_pause import clear_lease_pause
+            from vigil_integration.live.credit_lease_pause import (clear_lease_pause, lease_pause_state,
+                                                                   record_paused_past_expiry)
             with self._lock:
-                clear_lease_pause(self._seam_base(), s, non)
+                base = self._seam_base()
+                # Owner decision 2026-11-13 (a launch paused and never resumed is charged for what it used): lifting a
+                # pause after the window closed re-admits nothing, so it must not erase that the customer held the
+                # launch paused through the end of its window. Record that first (a failed record refuses the resume
+                # and clears nothing), then lift the halt as before so a run still in flight is never stranded.
+                if expired and lease_pause_state(base, s, non) is True:
+                    record_paused_past_expiry(base, s, non)
+                clear_lease_pause(base, s, non)
         except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-resume
             return {"ok": False, "error": f"could not clear the launch pause (fail-closed): {type(e).__name__}"}
         out = {"ok": True, "action": "launch_resumed", "org_id": oid, "slug": s, "nonce": non}
