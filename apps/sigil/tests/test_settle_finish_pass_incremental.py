@@ -12,7 +12,8 @@ With ``VIGIL_SETTLE_SPINE_RECORD`` on, every settle-drain pass finishes the reco
     equals a full scan pass after pass, and a checkpoint above its size bound is not kept; the whole spine is read
     again at least every ``FULL_RESCAN_S`` (a bundle restored onto the seam from a backup is found then);
   * a spine the pass cannot read raises, so the drain reports ``settle_finish_error`` — never "nothing to finish"
-    (a read-only report still reports nothing);
+    (a read-only report still reports nothing); so does a ledger (wallet, plan or postpaid) it cannot read while it
+    checks what a recorded decision has left to land, and past the grace that failing pass alarms;
   * one unreadable settlement marker is that lease's ``settle_failed``, never the whole pass;
   * a completion's notification (NTF-3) is written right after its settle is finished, so a crash later in the pass
     cannot lose it.
@@ -31,6 +32,8 @@ Mutation-verify targets (each neuter turns a NAMED test red):
                                                                  test_a_checkpoint_that_cannot_be_trusted_means_...
   * the carried evidence dropped                              -> test_the_continued_evidence_equals_a_full_scan_...
   * the finish pass swallowing a spine read error             -> test_a_finish_pass_that_cannot_read_the_spine_...
+  * the finish pass swallowing a ledger read error (its strict check through the report's swallowing
+    ``unlanded_settlement``)                                  -> test_a_finish_pass_that_cannot_read_a_ledger_...
   * is_lease_settled outside the per-lease try                -> test_one_unreadable_settlement_marker_is_that_...
   * NTF-3 written after the whole pass                        -> test_a_crash_later_in_the_pass_keeps_the_notice_...
 
@@ -47,16 +50,19 @@ import pytest
 from sigil import ops_sweeps, settle_checkpoint
 from sigil.governor.identity import delegate_offense_governance, ensure_owner_keypair
 from sigil.governor.launch_settlement import scan_settlements
+from sigil.governor.metering import PlanCreditLedger
+from sigil.governor.postpaid import PostpaidArrearsLedger
 from sigil.governor.wallet import WalletRegistry
 from sigil.inbound.completion_spool import CompletionSpoolWatcher
 from sigil.settle_checkpoint import CHECKPOINT_NAME
 from sigil.spine.store import SpineError, SpineStore
 from sigil.ui.launch_gate import LaunchGate
 from test_settle_one_pass_evidence import (  # noqa: F401  (_iso: the autouse isolation fixture)
-    _NONE, HOST, NOW, ORG, B, _avail, _base, _counting, _decisions, _iso, _kill, _outcomes, _published, _reserve,
-    _seat, _settle, _spool, _store,
+    _NONE, HOST, NOW, ORG, B, _avail, _base, _counting, _decisions, _iso, _kill, _outcomes, _plan, _published,
+    _reserve, _seat, _settle, _spool, _store,
 )
 from vigil_core import AuthorizerKey, generate_keypair
+from vigil_integration.live import settle_progress
 from vigil_integration.live.credit_lease_broker import lease_path
 
 OTHER = "other.cm"
@@ -371,6 +377,40 @@ def test_a_finish_pass_that_cannot_read_the_spine_reports_it_never_nothing_to_fi
     assert "interrupted settles not checked: SpineError" in capsys.readouterr().err
     monkeypatch.setattr(SpineStore, "iter_records", real)
     assert w.drain() == {**_NONE, "settle_completed": 1} and _avail(s) == 1_000
+
+
+@pytest.mark.parametrize("ledger", ["wallet", "plan", "postpaid"])
+def test_a_finish_pass_that_cannot_read_a_ledger_reports_it_and_alarms_past_the_grace(record_on, monkeypatch, capsys,
+                                                                                      ledger):
+    s = _store()
+    if ledger == "postpaid":
+        _seat(s, credits=0, postpaid=(5000, 30))
+        cls, name, held = PostpaidArrearsLedger, "has_credit_entry", lambda: PostpaidArrearsLedger(s).accrued(ORG)
+    elif ledger == "plan":
+        _seat(s, credits=0, plan=1_000)
+        cls, name, held = PlanCreditLedger, "has_grant_entry", lambda: 1_000 - _plan(s)
+    else:
+        _seat(s, credits=1_000)
+        cls, name, held = WalletRegistry, "has_grant_entry", lambda: 1_000 - _avail(s)
+    rA = _reserve(s, units=300, publish=True, hours=8, nonce="A" * 16)
+    _decided_no_marker(monkeypatch, s, rA)                                 # only the spine shows it: nothing moved
+    assert held() == 300
+    restore = _kill(monkeypatch, cls, name, exc=OSError("the ledger cannot be read"))
+    assert LaunchGate(s).interrupted_settlements([rA["lease"]]) == {}     # a report still reports nothing
+    with pytest.raises(OSError):                                           # the pass itself raises it ...
+        ops_sweeps.finish_interrupted_settles(LaunchGate(s), now=NOW + 90)
+    spool, clock = _spool(), {"t": NOW + 60}
+    w = _drain(s, spool, clock, scope=rA["slug"])
+    assert w.drain() == {**_NONE, "settle_finish_error": "OSError"}       # ... and the drain reports it
+    assert "interrupted settles not checked: OSError" in capsys.readouterr().err
+    clock["t"] += settle_progress.UNFINISHED_SETTLE_GRACE_S
+    assert w.drain() == {**_NONE, "settle_finish_error": "OSError", "settle_stuck": 1}   # past the grace: an alarm
+    assert "has failed for more than 600 s (OSError)" in capsys.readouterr().err
+    assert settle_progress.overdue(settle_progress.read_state(spool), now=clock["t"]) == ([], "OSError")
+    restore()
+    clock["t"] += 60
+    assert w.drain() == {**_NONE, "settle_completed": 1} and held() == 0  # readable again: finished, once
+    assert not settle_progress.state_path(spool).exists() and len(_decisions(s)) == 1
 
 
 def test_one_unreadable_settlement_marker_is_that_leases_failure_never_the_whole_pass(record_on, monkeypatch):
