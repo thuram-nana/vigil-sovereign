@@ -31,7 +31,7 @@ import os
 from typing import Any, Optional
 
 from ..autopatch.loop import parse_unified_diff
-from ..remediation.codefix import confined_repo_file, is_safe_repo_path
+from ..remediation.codefix import is_safe_repo_path, read_confined_repo_file
 from .codefix_runner import CodefixConfig, CodefixSession
 from .think_claude import (
     _build_live_client,
@@ -52,19 +52,16 @@ def _read_context(workdir: str, files) -> list:
     """Bounded current content of the named repo-relative files under ``workdir`` (so the model diffs
     against real content). Each path is confinement-checked and read under the workdir only — never an
     absolute path, never ``..``, and never through a symlink the cloned repo planted: the clone's CONTENT
-    is third-party controlled, so the check is on the RESOLVED path (``confined_repo_file``), not the
-    lexical one — otherwise ``settings.py -> <host file>`` would ship a host secret to the model."""
+    is third-party controlled, so the check is on the RESOLVED path, not the lexical one — otherwise
+    ``settings.py -> <host file>`` would ship a host secret to the model. The read goes through
+    ``read_confined_repo_file``, which checks the file it actually OPENED (not just the path it checked a
+    moment earlier), so a link swapped in by code running in the clone at the same time is refused too."""
     out: list = []
     for rel in (files or [])[:_MAX_CONTEXT_FILES]:
         r = str(rel or "").strip()
-        real = confined_repo_file(workdir, r)
-        if not real:
-            continue
-        try:
-            with open(real, encoding="utf-8", errors="replace") as fh:
-                out.append((r, fh.read(_MAX_FILE_BYTES)))
-        except OSError:
-            continue
+        body = read_confined_repo_file(workdir, r, _MAX_FILE_BYTES)
+        if body is not None:
+            out.append((r, body))
     return out
 
 

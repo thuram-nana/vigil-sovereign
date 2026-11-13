@@ -1,7 +1,10 @@
 """Phase D2 console wrappers — propose/apply a dev-mode codebase edit, confined to a repo THIS chat
-cloned. The load-bearing control: `_confined_clone_path` — an edit can only ever touch a directory under
-`<live>/clones/<chat>/`, never an arbitrary path the caller names. Needs `vigil_gateway` transitively
-(dev_edit → codefix_runner → executor), so importorskip (runs in P5, skips in CRUCIBLE-core).
+cloned. The load-bearing control: `_confined_clone_path` — an edit can only ever touch a clone ROOT,
+`<live>/clones/<chat>/<name>` (never a directory nested in it, `.git` least of all), never an arbitrary
+path the caller names. Needs `vigil_gateway` transitively (dev_edit → codefix_runner → executor), so it
+importorskips and skips in CRUCIBLE-core; it RUNS in the offense leg of "integration two-env boundary
+(P5)", which lists it and requires every plane it needs (enforced by
+integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py).
 """
 from __future__ import annotations
 
@@ -144,3 +147,33 @@ def test_apply_into_dot_git_is_refused_so_no_hook_can_be_planted():
     out = actions_mod.apply_codebase_edit(CHAT, wd + "/.git", hook)
     assert out["ok"] is False and "no such cloned codebase" in out["error"]
     assert not (Path(wd) / ".git" / "hooks" / "post-checkout").exists()
+
+
+def test_apply_is_refused_while_the_clones_tests_run(monkeypatch):
+    """The clone's tests run ITS code with the clone bound read-write; it can swap a directory for a link
+    while `git apply` runs, and git's own symlink check is a check-then-use. So an apply that arrives while
+    the tests run is refused (the file is untouched), and the same apply goes through once they finish."""
+    wd = _clone_area_repo()
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
+    monkeypatch.setattr(actions_mod, "_chat_killswitch_tripped", lambda cid: False)
+    during: dict = {}
+
+    class _Done:
+        stdout = '{"ran": true, "exit_code": 0}'
+        stderr = ""
+        returncode = 0
+
+    real_run = subprocess.run
+
+    def _sandbox(argv, **kw):                         # the box is running the clone's tests right now
+        if list(argv[:2]) != ["/opt/vigil/bin/vigil", "sandbox"]:
+            return real_run(argv, **kw)               # host-side git (the apply itself) runs for real
+        during["apply"] = actions_mod.apply_codebase_edit(CHAT, wd, _DIFF)
+        return _Done()
+
+    monkeypatch.setattr(actions_mod.subprocess, "run", _sandbox)
+    assert actions_mod.run_codebase_tests(CHAT, wd, "pytest -q", operator_present=True)["ok"] is True
+    assert during["apply"]["ok"] is False and "busy" in during["apply"]["error"]
+    assert (Path(wd) / "x.py").read_text() == "a = 1\n", "an edit was applied while the clone's tests ran"
+    after = actions_mod.apply_codebase_edit(CHAT, wd, _DIFF)
+    assert after["ok"] is True and (Path(wd) / "x.py").read_text() == "a = 2\n"
