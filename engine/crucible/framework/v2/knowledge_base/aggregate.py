@@ -184,8 +184,15 @@ def _engagement_slugs() -> list[str]:
 def _safe_target_dir(slug: str) -> Optional[Path]:
     """``paths.target_dir(slug)`` IFF it resolves inside ``targets_root()`` — else ``None`` (defense in
     depth: slugs come from ``iterdir`` and are already safe single components, but this refuses any slug
-    that would traverse out of the active tenant's tree, so a per-slug read can never escape the root)."""
-    d = paths.target_dir(slug)
+    that would traverse out of the active tenant's tree, so a per-slug read can never escape the root).
+
+    A directory name that ``paths.target_dir`` refuses as a slug (a backslash or a control character is a
+    legal POSIX file name) is ``None`` too: that one entry is skipped, and the rest of the org's corpus is
+    still built."""
+    try:
+        d = paths.target_dir(slug)
+    except ValueError:
+        return None
     return d if paths.is_within(d, paths.targets_root()) else None
 
 

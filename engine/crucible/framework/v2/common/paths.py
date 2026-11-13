@@ -420,7 +420,7 @@ def ensure_authority_dir_secure() -> Path:
 
 
 def _slug_component(slug: str) -> str:
-    """Refuse a slug that is not ONE path component; return it unchanged otherwise.
+    """Refuse a slug that is not ONE path component; otherwise return it as a plain ``str``.
 
     This is where an engagement slug becomes a filesystem path, so it is where the refusal lives: a caller
     that forwards an unvalidated slug (a console URL segment, a ``?slug=`` query, a spine roster entry)
@@ -431,11 +431,18 @@ def _slug_component(slug: str) -> str:
     uppercase, non-ASCII) and the executor's ``<placeholder>`` slugs are legitimate and resolve
     byte-identically; the empty slug (the "no engagement" value) also resolves as before, to the base
     itself, which is inside the tree. ``ValueError`` is what the console already maps to its honest-empty
-    shape (``_safe``) or a 404."""
-    s = str(slug)
+    shape (``_safe``) or a 404.
+
+    The value checked is the value returned, and the caller joins the returned value. pathlib joins an
+    argument by its ``os.fspath`` content, not by ``str()``, so a ``str`` subclass with its own
+    ``__str__``, a ``(str, Enum)`` member or an ``os.PathLike`` could otherwise pass this check under one
+    spelling and be joined under another. ``os.fspath`` gives the content pathlib would use, and
+    ``str.__str__`` turns it into an exact ``str``; a non-path value (``None``, ``int``, ``bytes``) is a
+    ``TypeError``."""
+    s = str.__str__(os.fspath(slug))
     if s in (".", "..") or any(c in "/\\" or ord(c) < 0x20 or ord(c) == 0x7F for c in s):
-        raise ValueError(f"unsafe engagement slug: {slug!r}")
-    return slug
+        raise ValueError(f"unsafe engagement slug: {s!r}")
+    return s
 
 
 def authority_path(slug: str) -> Path:

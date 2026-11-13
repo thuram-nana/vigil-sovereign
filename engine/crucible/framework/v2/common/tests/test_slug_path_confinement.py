@@ -10,6 +10,9 @@ the authority dir. The refusal lives here so every present and future slug-keyed
 
 from __future__ import annotations
 
+import enum
+from pathlib import Path, PurePosixPath
+
 import pytest
 
 from framework.v2.common import paths
@@ -99,3 +102,82 @@ def test_the_empty_no_engagement_slug_resolves_as_before(root):
     """``""`` is the no-engagement value some callers carry; it is not refused and still names the base."""
     assert paths.target_dir("") == paths.targets_root()
     assert paths.crucible_v2_log("") == paths.targets_root() / ".crucible-v2.log"
+
+
+# --- the value checked is the value joined -------------------------------------------------------------
+# pathlib joins an argument by its os.fspath content, not by str(). Each object below has a benign str()
+# but hostile content, so a guard that checks str(slug) and then returns the original object passes it.
+
+
+class _StrWithBenignStr(str):
+    __slots__ = ()
+
+    def __str__(self) -> str:
+        return "benign"
+
+
+class _EnumSlug(str, enum.Enum):
+    ESCAPE = "../../../escaped-enum"
+    REAL = "acme"
+
+
+class _PathLikeWithBenignStr:
+    def __init__(self, fspath: str) -> None:
+        self._fspath = fspath
+
+    def __str__(self) -> str:
+        return "benign"
+
+    def __fspath__(self) -> str:
+        return self._fspath
+
+
+_HOSTILE_OBJECTS = [
+    pytest.param(_StrWithBenignStr("../../../escaped-sub"), id="str-subclass"),
+    pytest.param(_EnumSlug.ESCAPE, id="str-enum"),
+    pytest.param(_PathLikeWithBenignStr("../../../escaped"), id="pathlike"),
+    pytest.param(PurePosixPath("a/../../b"), id="purepath"),
+]
+
+
+@pytest.mark.parametrize("obj", _HOSTILE_OBJECTS)
+def test_a_non_plain_str_slug_is_checked_by_the_content_pathlib_joins(root, tmp_path, obj):
+    for fn in _TARGET_HELPERS:
+        with pytest.raises(ValueError):
+            fn(obj)
+    with pytest.raises(ValueError):
+        paths.authority_path(obj)
+    paths.set_ephemeral_write_root(tmp_path / "ephemeral")
+    with pytest.raises(ValueError):
+        paths.crucible_v2_log(obj)
+
+
+@pytest.mark.parametrize("obj, content", [
+    pytest.param(_StrWithBenignStr("acme"), "acme", id="str-subclass"),
+    pytest.param(_EnumSlug.REAL, "acme", id="str-enum"),
+    pytest.param(_PathLikeWithBenignStr("acme"), "acme", id="pathlike"),
+    pytest.param(Path("acme"), "acme", id="path"),
+])
+def test_a_safe_non_plain_str_slug_is_returned_as_the_plain_str_that_was_checked(root, tmp_path, obj, content):
+    out = paths._slug_component(obj)
+    assert type(out) is str and out == content
+    assert paths.target_dir(obj) == paths.targets_root() / content
+    assert paths.authority_path(obj) == paths.authority_dir() / f"{content}.authority.json"
+    paths.set_ephemeral_write_root(tmp_path / "ephemeral")
+    assert paths.crucible_v2_log(obj) == tmp_path / "ephemeral" / content / ".crucible-v2.log"
+
+
+@pytest.mark.parametrize("slug", LEGIT + [""])
+def test_a_plain_str_slug_comes_back_as_an_equal_plain_str(slug):
+    out = paths._slug_component(slug)
+    assert type(out) is str and out == slug
+
+
+@pytest.mark.parametrize("bad", [None, 7, b"acme"])
+def test_a_value_that_is_not_a_path_is_a_type_error(root, bad):
+    with pytest.raises(TypeError):
+        paths._slug_component(bad)
+    with pytest.raises(TypeError):
+        paths.target_dir(bad)
+    with pytest.raises(TypeError):
+        paths.authority_path(bad)
