@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +20,43 @@ _ROOT = Path(__file__).resolve().parents[3]
 _VUI = _ROOT / "packages" / "vigil-ui" / "app.js"
 _CVSS = _ROOT / "apps" / "sigil" / "sigil" / "ui" / "public_site" / "tools" / "cvss-calculator" / "cvss.js"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+
+
+def _need_node() -> None:
+    """These guards execute shipped JavaScript, so they need node. Without it they SKIP on a developer machine,
+    but FAIL in CI (GITHUB_ACTIONS, where every runner that runs this file has node) or wherever
+    VIGIL_REQUIRE_NODE=1 — a guard must never go green by not running."""
+    if shutil.which("node") is not None:
+        return
+    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("VIGIL_REQUIRE_NODE") == "1":
+        pytest.fail("node is required to run the JS key-parsing guards here, and it is not on PATH")
+    pytest.skip("node not installed")
+
+
+@pytest.fixture(autouse=True)
+def _node_present():
+    _need_node()
+
+
+def _outcome_of_need_node() -> str:
+    try:
+        _need_node()
+    except pytest.fail.Exception:
+        return "fail"
+    except pytest.skip.Exception:
+        return "skip"
+    return "ran"
+
+
+def test_a_missing_node_fails_in_ci_and_skips_only_locally(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.delenv("VIGIL_REQUIRE_NODE", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert _outcome_of_need_node() == "fail"
+    monkeypatch.delenv("GITHUB_ACTIONS")
+    assert _outcome_of_need_node() == "skip"
+    monkeypatch.setenv("VIGIL_REQUIRE_NODE", "1")
+    assert _outcome_of_need_node() == "fail"
 
 
 def _slice(src: str, start: str, end_after: str) -> str:
@@ -57,10 +94,14 @@ def test_cvss_parse_vector_keys_only_by_its_own_metric_ids():
     prog = (head + "\n" + fn + "\nconst out = [\n"
             " parseVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'),\n"
             " parseVector('AV:N/__PROTO__:X/CONSTRUCTOR:Y/__proto__:N/AV:Z/ZZ:N/av:l'),\n"
+            " parseVector('AV:N/AV:Z'),\n"
+            " parseVector('CVSS:3.1/AV:L/AC:Q/S:X/S:C'),\n"
             "];\nprocess.stdout.write(JSON.stringify({out, clean: ({}).X === undefined && ({}).N === undefined}));")
     got = _node(prog)
     assert got["out"][0] == {"AV": "N", "AC": "L", "PR": "N", "UI": "N", "S": "U", "C": "H", "I": "H", "A": "H"}
     assert got["out"][1] == {"AV": "L"}                                # only real ids with allowed values
+    assert got["out"][2] == {"AV": "N"}                                # a value the metric does not allow is dropped
+    assert got["out"][3] == {"AV": "L", "S": "C"}                      # ... wherever it sits, the id never keyed by it
     assert got["clean"] is True
 
 
