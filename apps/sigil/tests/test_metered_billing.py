@@ -335,6 +335,19 @@ def test_a_failed_re_publish_keeps_the_live_grant(monkeypatch):
     assert read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"], expect_nonce=r["nonce"]) is not None
 
 
+def test_a_launch_marked_metered_is_re_published_with_its_grant(monkeypatch):
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    _owner, r, g, pub = _reserve(s)
+    assert pub["ok"]
+    base = os.environ["VIGIL_BASE_DIR"]
+    from vigil_integration.live.model_grant_broker import remove_model_grant
+    remove_model_grant(base, r["slug"], expect_nonce=r["nonce"])          # say a failed first publish left no grant
+    monkeypatch.delenv("VIGIL_METERED_BILLING")                         # and the flag is off by the retry
+    assert g.publish_lease(signed_lease=r["lease"], expect_org_id=ORG)["ok"]
+    assert read_model_grant(base, r["slug"], expect_nonce=r["nonce"]) is not None
+
+
 def test_an_unpriced_run_model_refuses_the_publish(monkeypatch):
     _metered(monkeypatch)
     monkeypatch.setenv("VIGIL_RUN_MODEL", "claude-unpriced-1")

@@ -518,7 +518,9 @@ class LaunchGate:
         except Exception as e:  # noqa: BLE001 — a seam-read failure is a clean refusal, never a half-publish
             return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
         from .. import config
-        metered = config.metered_billing_enabled()
+        # a launch already marked metered (an earlier publish of this same lease) stays metered whatever the flag
+        # says now: it is re-published with its grant, never without
+        metered = config.metered_billing_enabled() or self._launch_was_metered(doc.engagement_slug, doc.nonce)
         # PRICING M1c: the seam holds one lease per org+host, so a newer launch's lease would replace one still
         # running — its completion could then never settle, and a customer cancel would read it as never started.
         # Where metering is involved (this launch, or the one on the seam), one launch per host is in flight at a time.
