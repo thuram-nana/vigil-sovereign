@@ -6,7 +6,7 @@ import importlib.util
 import os
 import sys
 
-from conftest import REPO_ROOT
+from range_testsupport import REPO_ROOT
 
 
 def _load_range_targets():

@@ -129,6 +129,9 @@ jobs:
           #     these 4 tests only pass when scanner's test_claim_discipline happens to run first and inserts
           #     integration/ onto sys.path — a fragile cross-suite ordering the wholesale (filesystem-order)
           #     run does not provide. Excluded so this job stays order-independent.
+          #     It RUNS in the "integration two-env boundary (P5)" job's offense leg, which has both planes;
+          #     integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py fails the build if a
+          #     file --ignore'd here is not listed there.
           pytest framework/v2 \
                  --ignore=framework/v2/eval \
                  --ignore=framework/v2/console/tests/test_chat_inject.py -q
@@ -521,8 +524,32 @@ jobs:
             # every one of those floored proofs would only ever SKIP (a skipped proof is not a passing proof).
             # (They are not integration/tests files, so the test_ci_framework_tests_run_in_offense_leg guard
             # neither requires nor counts them; listing them here is the coverage fix.)
+            #
+            # CROSS-PLANE TESTS THAT LIVE OUTSIDE integration/tests (the last block of this list). A test
+            # under engine/crucible that needs vigil_integration or vigil_gateway importorskips it, and
+            # SKIPS in "CRUCIBLE core on vigil_core" (which installs neither, by design). Unless it is
+            # also listed HERE it runs in no leg at all — which is where 21 of them were, among them
+            # framework/v2/tests/test_engage_pause_halt.py and test_launch_lease_pause.py (the pause /
+            # halt money path): green on every PR, never once executed. The same holds for
+            # console/tests/test_chat_inject.py (--ignore'd in crucible-core, listed nowhere), for
+            # docs/tests/test_verifier_provenance.py (skips in briefing-completeness, which has no
+            # engine), and for docs/proof-carrying-finding/tests and range/tests (run by no job at all).
+            # gateway/tests/test_scope_source.py is here because its charter tests import the engine
+            # (framework.v2.common.ethics), which the gateway job does not put on its path: there they only
+            # ran because an earlier test happened to resolve engine/crucible from the checkout.
+            #
+            # Two things keep it that way, and neither is a promise:
+            #   * integration/tests/test_ci_cross_plane_tests_run_with_both_planes.py FAILS the build if a
+            #     test file outside integration/tests references a plane its home leg lacks and is not
+            #     in this list; and
+            #   * VIGIL_REQUIRE_PLANES + `-p pytest_require_planes` (.github/scripts) make a skip for
+            #     one of these planes a FAILURE in this process. This leg HAS every plane it names, so
+            #     here "could not import vigil_integration.x" can only mean a rename, a broken import or
+            #     a wrong path — exactly what importorskip would otherwise hide as a skip.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
-            PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+            VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
+            PYTHONPATH=integration:engine/crucible:gateway:.github/scripts python -m pytest \
+              -p pytest_require_planes -rs \
               docs/tests/test_out_of_scope_is_honest.py \
               integration/tests/test_tool_intake.py \
               integration/tests/test_fuzz_corpus_replay.py \
@@ -705,7 +732,45 @@ jobs:
               engine/crucible/framework/v2/scanner/tests/test_race.py \
               engine/crucible/framework/v2/scanner/tests/test_race_bizlogic_benchmark.py \
               engine/crucible/framework/v2/scanner/tests/test_arsenal_wiring.py \
-              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py -q -m "not volume"
+              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py \
+              engine/crucible/framework/v2/agents/tests/test_egress_guard_floor.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_signed_authority.py \
+              engine/crucible/framework/v2/common/tests/test_egress_backstop.py \
+              engine/crucible/framework/v2/console/tests/test_approvals_screen.py \
+              engine/crucible/framework/v2/console/tests/test_chat_clone.py \
+              engine/crucible/framework/v2/console/tests/test_chat_codebase_edit.py \
+              engine/crucible/framework/v2/console/tests/test_chat_inject.py \
+              engine/crucible/framework/v2/console/tests/test_engagement_library.py \
+              engine/crucible/framework/v2/console/tests/test_fixes_apply_local.py \
+              engine/crucible/framework/v2/console/tests/test_system_screen.py \
+              engine/crucible/framework/v2/console/tests/test_target_authorization_install.py \
+              engine/crucible/framework/v2/evidence/tests/test_l3_parity_hardening.py \
+              engine/crucible/framework/v2/scanner/tests/test_claim_discipline.py \
+              engine/crucible/framework/v2/scanner/tests/test_forgery_acceptance.py \
+              engine/crucible/framework/v2/scanner/tests/test_rawhttp_reader.py \
+              engine/crucible/framework/v2/tests/test_engage_pause_halt.py \
+              engine/crucible/framework/v2/tests/test_launch_lease.py \
+              engine/crucible/framework/v2/tests/test_launch_lease_pause.py \
+              engine/crucible/framework/v2/tests/test_run_budget_hard_stop.py \
+              engine/crucible/framework/v2/veracity/tests/test_witness_quorum.py \
+              engine/crucible/framework/v2/verify/tests/test_static_rule_class_binding_m3.py \
+              docs/tests/test_verifier_provenance.py \
+              docs/proof-carrying-finding/tests \
+              gateway/tests/test_scope_source.py \
+              range/tests -q -m "not volume"
+            # The engine tests that need vendor/strix as well (they importorskip("strix…")). Its own
+            # process, so strix being importable changes nothing for the list above. NOTE: one of them,
+            # test_strix_model_sovereignty.py's loader test, still skips here — strix.config.loader needs
+            # pydantic_settings, which is in strix's own lock and not in this job's. That is a
+            # third-party dependency this job does not install, not a missing plane; it is recorded in
+            # the guard's docstring rather than hidden.
+            VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
+            PYTHONPATH=integration:engine/crucible:gateway:vendor/strix:.github/scripts python -m pytest \
+              -p pytest_require_planes -rs \
+              engine/crucible/framework/v2/console/tests/test_run_control.py \
+              engine/crucible/framework/v2/console/tests/test_strix_model_sovereignty.py \
+              engine/crucible/framework/v2/console/tests/test_tool_profile.py \
+              engine/crucible/framework/v2/console/tests/test_tool_research.py -q -m "not volume"
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.

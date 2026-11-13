@@ -1163,8 +1163,10 @@ def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
         # and NON-fatal: the probe never raises, and an unreachable collector still wires the emit seam (the
         # collector may recover mid-run; telemetry never denies cognition). This is the engine-layer half of
         # the "unreachable backend is visible" guarantee; the collector→backend half is in otel-config-backend.yaml.
-        try:
-            from .otel_export import probe_collector
+        shown = "<endpoint>"                 # the ONLY form of the endpoint this function may log (never raw:
+        try:                                 # its path / query can carry an ``?api_key=``)
+            from .otel_export import probe_collector, redact_endpoint
+            shown = redact_endpoint(otlp_endpoint)
             probe = probe_collector(otlp_endpoint)
             reachable = bool(probe.reachable)
             # (an unreachable collector is already logged at WARNING inside probe_collector — not repeated here)
@@ -1183,7 +1185,7 @@ def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
                          "exporter is not installed, or the endpoint was refused) — no spans will be exported")
             return None
         if reachable:
-            _log.info("OTLP collector reachable at %s — engine telemetry export armed", otlp_endpoint)
+            _log.info("OTLP collector reachable at %s — engine telemetry export armed", shown)
     if sink is None:
         return None
 
