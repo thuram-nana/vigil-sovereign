@@ -1382,6 +1382,7 @@ def cmd_billing_drain(a) -> None:
     from .governor import catalog
     from .governor.billing import BillingSigner, FlutterwaveBillingProvider
     from .governor.invoices import InvoiceRegistry
+    from .governor.report_unlock import ReportUnlockRegistry
     from .governor.metering import PlanCreditLedger
     from .governor.subscription import SubscriptionRegistry
     from .governor.wallet import WalletRegistry
@@ -1399,7 +1400,10 @@ def cmd_billing_drain(a) -> None:
                            alarm_unaccounted_plans=alarm,
                            wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
                            plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
-                           expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store))
+                           expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
+                           # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
+                           # unlock is recorded whatever the preview flag says; the records stay inert until read.
+                           report_unlocks=ReportUnlockRegistry(store))
     watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
     del secret
     if getattr(a, "billing_cmd", "drain") == "watch":
@@ -1553,6 +1557,24 @@ def _reconcile_once(store) -> list:
     for oid, host in retired:
         print(f"  retired monitoring grant {host} (org {oid}): monitoring plan no longer covers it")
     return retired
+
+
+def cmd_reports(a) -> None:
+    """`sigil org unlock-reports <org> --reason` / `sigil org relock-reports <org> --reason` — an OWNER-signed
+    report unlock or relock (enterprise, postpaid, goodwill; fraud or chargeback relocks). Latest owner record
+    wins and overrides any billing unlock. Grants no credits, role, proof or authority."""
+    import time as _time
+
+    from .governor.report_unlock import ReportUnlockRegistry
+    action = "unlock" if a.org_cmd == "unlock-reports" else "relock"
+    reg = ReportUnlockRegistry(SpineStore())
+    try:
+        seq = reg.owner_set(a.org_id, action, reason=a.reason, issued_at=_time.time())
+    except ValueError as exc:
+        print(f"  refused: {exc}")
+        sys.exit(2)
+    print(f"  reports {action}ed for {a.org_id} (owner-signed, seq {seq}); now "
+          f"{'unlocked' if reg.is_unlocked(a.org_id) else 'locked'}")
 
 
 def cmd_trial(a) -> None:
@@ -2870,6 +2892,14 @@ def main(argv=None) -> None:
                      help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
     pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pmd.set_defaults(fn=cmd_monitoring_drain)
+    porg = sub.add_parser("org", help="owner operations on a customer org (pricing)")
+    porg_sub = porg.add_subparsers(dest="org_cmd", required=True)
+    for _verb, _help in (("unlock-reports", "owner-sign a full-report unlock for an org"),
+                         ("relock-reports", "owner-sign a report relock for an org (fraud / chargeback)")):
+        _p = porg_sub.add_parser(_verb, help=_help)
+        _p.add_argument("org_id")
+        _p.add_argument("--reason", required=True, help="why (recorded in the owner-signed record)")
+        _p.set_defaults(fn=cmd_reports)
     ptr = sub.add_parser("trial", help="free-trial owner operations (pricing)")
     ptr_sub = ptr.add_subparsers(dest="trial_cmd", required=True)
     ptr_bf = ptr_sub.add_parser("backfill-claims",
