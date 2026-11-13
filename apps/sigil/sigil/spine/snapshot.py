@@ -42,9 +42,10 @@ snapshot and re-scans from genesis (see each consumer).
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Any, Iterable, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from ..config import HEAD_PATH
 from ..reuse import SignedChainHead
@@ -249,6 +250,10 @@ class SnapshotState(BaseModel):
     grounded_keys: list[str] = []
     refused_keys: list[str] = []
     open_queued_below_base: list = [] # approvals referential-floor ASSERT — expected EMPTY
+    # The owner key the prune-time succession placed at `base_seq` (the snapshot record's own `base_pubkey`, beside
+    # the folded state — not a folded row, so no schema bump). `seed_applies` requires the reader's succession to
+    # place the same key there. "" for a state not loaded from a snapshot record, or one written before the field.
+    _base_pubkey: str = PrivateAttr(default="")
 
     # ---- runtime accessors (reconstruct the non-JSON-native runtime forms) -----------------------------
     def creation_counter(self) -> dict[tuple[Optional[str], Optional[str]], int]:
@@ -437,13 +442,101 @@ class SnapshotState(BaseModel):
         if not isinstance(folded, dict):
             raise SnapshotError(f"snapshot record {snapshot_seq} carries no folded_state")
         st = cls.from_folded(folded)                        # W5-3: refuse a snapshot newer than we understand
-        if st.base_seq != base_seq or st.snapshot_seq != snapshot_seq:
+        # The folded state cannot name its OWN record's seq: `prune.snapshot_payload` builds it before the
+        # snapshot record is appended (and the append is idempotent across a crash re-run), so it is persisted
+        # with the placeholder -1 and the seq travels beside it — in the owner-signed head (verified above) and
+        # as the record's own position. Demanding equality here refused EVERY real prune (each seeded fold and
+        # `KillSwitch.is_engaged` then raised, with the pruned prefix already deleted). So: the boundary must
+        # agree with the signed head; the state's seq must be the placeholder (or, were a writer ever to stamp
+        # it, the head's — any OTHER value is a state minted for a different snapshot record: refuse); and the
+        # state handed to the folds carries the head-verified seq.
+        if st.base_seq != base_seq or st.snapshot_seq not in (-1, snapshot_seq):
             raise SnapshotError(f"snapshot record {snapshot_seq} base/seq disagree with the signed head")
-        return st
+        out = st.model_copy(update={"snapshot_seq": snapshot_seq})
+        base_key = rec.payload.get("base_pubkey")
+        out._base_pubkey = base_key if isinstance(base_key, str) else ""
+        return out
+
+
+def seed_applies(snap: "SnapshotState", reader_pubkey: "Optional[str]", store) -> bool:
+    """Whether a registry whose trust anchor is `reader_pubkey` may start its fold from `snap` — THE one rule every
+    seeded fold uses (each registry's `_seed`). True: seed from the folded prefix. False: start from the spine's
+    first record with an empty seed — returned ONLY when nothing is pruned, where that IS the whole fold (the
+    historic "different trust anchor" bypass, byte-identical for every un-pruned spine).
+
+    On a PRUNED spine the seed is half of the fold; the other half is the live window, which the registry verifies
+    with the reader's owner-key succession (`key_history.key_resolver`: walked from the pinned genesis, DENY-all when
+    forked or when it does not end at the reader's key). The seed applies only when that SAME succession places the
+    keys exactly where the prune placed them: the seed's own key (`snap.trusted_pubkey`) at the snapshot's seq, and
+    the key the prune-time succession had at `base_seq` there too. Key equality alone is never enough: a reader
+    still holding a retired key (a process started before a `sigil key rotate`) walks a succession that does not end
+    at its key, so it would verify none of the live records the seed must be folded with; and a genesis pin that is
+    not the one the prune walked from places the live records signed before a rotation under another key.
+
+    Anything else on a pruned spine RAISES `SnapshotError`: the folded prefix is gone, so an empty start would read a
+    short history — the kill switch released, wallets zero. Fail closed; never re-bind the seed to another key."""
+    if snap.base_seq <= 0 and snap.snapshot_seq < 0:
+        return reader_pubkey == snap.trusted_pubkey       # nothing pruned: the genesis scan is the whole fold
+    if reader_pubkey:
+        from ..governor import key_history as _kh
+        res = _kh.resolver_for(store, current=reader_pubkey)     # the same walk the fold itself verifies with
+        base_key = snap._base_pubkey or snap.trusted_pubkey      # a state written before the field: the prune key
+        if res.at(snap.snapshot_seq) == snap.trusted_pubkey and res.at(snap.base_seq) == base_key:
+            return True
+    raise SnapshotError(
+        f"the spine is hard-pruned (live window from seq {snap.base_seq}) and its snapshot was folded under an owner "
+        f"key ({(snap.trusted_pubkey or '-')[:12]}…) that this reader's trust anchor "
+        f"({(reader_pubkey or '-')[:12]}…) does not succeed along the validated owner-key succession — a process "
+        f"started before a `sigil key rotate` (restart it), a different or swapped owner key, a changed genesis pin, "
+        f"a forked key succession, or a re-genesis. Refusing to fold the live window from this seed or from an empty "
+        f"one (the pruned prefix's state would be lost or the live records ignored). Run `sigil verify` and `sigil "
+        f"key status`")
+
+
+_LIVE_START: "dict[str, tuple[tuple, int]]" = {}
+
+
+def live_window_start(store) -> int:
+    """The seq the spine's live window starts at: 0 un-pruned, K after a committed hard prune (the manifest's
+    first segment). O(1): memoized on the manifest file's (inode, mtime, size) — every manifest write is an
+    atomic replace — so the hot read path pays one `stat`, not a manifest parse (O(segments)). 0 for a legacy
+    single-file spine (never prunable) or a store without a segment layout."""
+    layout = getattr(store, "_layout", None)
+    path = getattr(layout, "manifest_path", None)
+    if layout is None or path is None:
+        return 0
+    try:
+        st = os.stat(path)
+    except OSError:
+        return 0
+    sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+    hit = _LIVE_START.get(str(path))
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    from .manifest import read_manifest
+    m = read_manifest(layout)
+    segs = m.ordered() if m is not None else []
+    first = segs[0].first_seq if segs else 0
+    _LIVE_START[str(path)] = (sig, first)
+    return first
 
 
 class SnapshotError(Exception):
     """A committed snapshot is missing or inconsistent — fail closed, never scan a truncated window."""
+
+
+def _refuse_unanchored_prune(store, why: str) -> None:
+    """A spine whose live window starts above seq 0 HAS been hard-pruned: reading it as un-pruned would start every
+    seeded fold from an EMPTY seed over a truncated window (the kill switch released, wallets zero) — silently.
+    A head deleted by accident, a restore that brought back the spine without its head, or a re-sign by a build
+    that did not carry the boundary forward all land here: fail CLOSED."""
+    k = live_window_start(store)
+    if k > 0:
+        raise SnapshotError(
+            f"the live window starts at seq {k} (a hard-pruned spine) but {why} — refusing to read it as "
+            f"un-pruned (every seeded fold would start from an empty seed). Do not re-sign: put back the "
+            f"`spine/head.json` this spine was pruned under (from a file-level copy of SIGIL_HOME), then `sigil "
+            f"verify`; `sigil restore` does not yet restore a hard-pruned spine")
 
 
 def _verified_prune_boundary(store) -> tuple[int, int]:
@@ -458,6 +551,7 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
     or a parsed no-prune head; a PRESENT-but-unparseable head also fails closed (never masquerades as
     no-prune, which would scan a truncated post-prune window with empty seeds)."""
     if not HEAD_PATH.exists():
+        _refuse_unanchored_prune(store, "no signed head stands")
         return 0, -1                                        # genuinely no head -> genesis, nothing pruned
     try:
         head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
@@ -465,6 +559,7 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
         raise SnapshotError(f"head present but unparseable — refusing to treat as no-prune (would scan a "
                             f"truncated window with empty seeds): {e}") from e
     if head.snapshot_seq < 0:
+        _refuse_unanchored_prune(store, "the signed head declares no prune")
         return 0, -1                                        # parsed, no prune declared -> empty identity
     # A prune IS declared: the boundary is only trustworthy under the owner signature. Reuse the full
     # verifier (owner Ed25519 over head_hash+base_seq+snapshot_seq, monotonic floor). Fail closed on any
@@ -473,6 +568,11 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
     ok, msg = verify_checkpoint(store)
     if not ok:
         raise SnapshotError(f"pruned head does not verify ({msg}) — refusing to trust its snapshot boundary")
+    if not head.base_seq <= head.snapshot_seq <= head.last_seq:
+        # Every prune appends its snapshot record inside the window the head it signs commits. A head naming one
+        # outside it would seed every fold from a record no owner signature covers.
+        raise SnapshotError(f"pruned head names snapshot seq {head.snapshot_seq} outside its own signed window "
+                            f"[{head.base_seq}..{head.last_seq}] — refusing to trust its snapshot boundary")
     return head.base_seq, head.snapshot_seq
 
 

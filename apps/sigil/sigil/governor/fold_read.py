@@ -95,7 +95,8 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
 
     def build():
         resolver, horizon = _kh.key_resolver_with_horizon(store, current=trusted_pubkey)
-        view, since = seed(snap)
+        with _kh.pinned_resolver(store, current=trusted_pubkey, resolver=resolver):
+            view, since = seed(snap)                   # the seed is judged with the resolver this build folds with
         return view, resolver, since, horizon
 
     def guarded(view):

@@ -140,6 +140,7 @@ class SnapshotPayload(PayloadModel):
     snapshot_seq: Optional[int] = None          # stamped back by Slice E once the record is appended
     trusted_pubkey: Optional[str] = None
     folded_state: Optional[dict] = None
+    base_pubkey: Optional[str] = None           # the owner key the prune-time succession placed at base_seq
 
 
 # The registry: kind -> payload model. A kind absent here is FREE-FORM (no structural contract).

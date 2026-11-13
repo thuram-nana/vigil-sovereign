@@ -144,12 +144,23 @@ class _FakeCls:
         return Tier.A1
 
 
+def _owner_key_on_disk(monkeypatch):
+    """The production shape of a pruned spine: the owner key on disk IS the key its snapshot was folded under, so
+    the readers the gate builds with the default anchor (kill switch, capability latch, device authz) seed from it.
+    (With no owner key at all, a pruned spine's default-anchor reads fail closed — `seed_applies`.)"""
+    from sigil.governor import capability, killswitch
+    from sigil.mesh import registry
+    for mod in (killswitch, capability, registry):
+        monkeypatch.setattr(mod, "owner_pubkey", lambda: OP)
+
+
 def _gate(store):
     from sigil.gesture.components import RecordingInputBackend
     return SessionGate(store, RecordingInputBackend(), classifier=_FakeCls(), trusted_pubkey=OP)
 
 
 def test_site_b_replay_split_equals_full(monkeypatch):
+    _owner_key_on_disk(monkeypatch)
     s = _store()
     authorize_device(s, "phone1", DEV.public_key_b64, OWNER, issued_at=_dev_iss())     # seq 0: owner-signed DEV authz
     now = time.time()
@@ -191,6 +202,7 @@ def test_site_b_replay_split_equals_full(monkeypatch):
 
 def test_site_b_nonce_type_is_not_stringified(monkeypatch):
     """A prefix that consumed INT nonce 77 must NOT refuse a distinct STR nonce "77" (no stringify)."""
+    _owner_key_on_disk(monkeypatch)
     s = _store()
     authorize_device(s, "phone1", DEV.public_key_b64, OWNER, issued_at=_dev_iss())
     now = time.time()

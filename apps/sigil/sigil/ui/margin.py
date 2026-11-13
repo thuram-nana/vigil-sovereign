@@ -71,7 +71,7 @@ from ..governor.cost_ledger import (  # noqa: E402  (CONSUMED read-only — the 
 from ..governor.identity import owner_pubkey  # noqa: E402  (reads verify under the trusted pubkey, never the key)
 from ..governor.invoices import InvoiceRegistry  # noqa: E402
 from ..governor.orgs import OrgRegistry  # noqa: E402
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed for the settle seen-set, mirrors _fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed for the settle seen-set, mirrors _fold)
 from ..governor.fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from vigil_core import model_metering as _mm  # noqa: E402  (the one pricing input: the target margin)
@@ -140,8 +140,8 @@ def _settle_step(view: _SettleView, r, resolver) -> None:
 _SETTLE_FOLD = FoldCache("ui.margin.settle_events", step=_settle_step)
 
 
-def _settle_seed(snap, trusted_pubkey: Optional[str]) -> "tuple[set, int]":
-    if trusted_pubkey != snap.trusted_pubkey:
+def _settle_seed(snap, trusted_pubkey: Optional[str], store) -> "tuple[set, int]":
+    if not seed_applies(snap, trusted_pubkey, store):
         return set(), -1
     return set(snap.cost_seen_set()), snap.base_seq - 1
 
@@ -161,7 +161,7 @@ def _settle_events(store, trusted_pubkey: Optional[str]) -> dict[str, list[tuple
     ``unscoped`` bucket, so the periods always sum back to the durable lifetime total. A rotated/empty anchor
     genesis-scans (byte-identical under the empty snapshot). Front C S0d: through the verified fold cache when on."""
     def seed(snap):
-        seen, since = _settle_seed(snap, trusted_pubkey)
+        seen, since = _settle_seed(snap, trusted_pubkey, store)
         return _SettleView(seen), since
 
     hit = cached_read(_SETTLE_FOLD, store, trusted_pubkey=trusted_pubkey, seed=seed,
@@ -170,7 +170,7 @@ def _settle_events(store, trusted_pubkey: Optional[str]) -> dict[str, list[tuple
         return hit
     snap = SnapshotState.load(store)
     resolver = _kh.key_resolver(store, current=trusted_pubkey)
-    seen, since = _settle_seed(snap, trusted_pubkey)
+    seen, since = _settle_seed(snap, trusted_pubkey, store)
     out: dict[str, list[tuple[float, int]]] = {}
     for r in store.iter_records(since_seq=since):
         _apply_settle_event(r, resolver, seen, out)

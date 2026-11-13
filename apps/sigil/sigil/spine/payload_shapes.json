@@ -96,6 +96,10 @@
       "required": false,
       "type": "str"
     },
+    "base_pubkey": {
+      "required": false,
+      "type": "str"
+    },
     "base_seq": {
       "required": false,
       "type": "int"
