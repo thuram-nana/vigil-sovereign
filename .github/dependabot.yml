@@ -105,6 +105,17 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # Both images pin the `python` base to the minor the committed hash-locks target (W1-7):
+    # integration/tests/test_aegis_dockerfile_wired.py asserts image == lock for each. A bump to another
+    # minor is therefore red by construction until the locks themselves move, so this keeps Dependabot to
+    # same-minor digest refreshes of 3.13-slim. Only the AEGIS Dockerfile's direct `FROM python:…@sha256`
+    # is parsed by Dependabot; the gateway's `ARG PYTHON_BASE=…` + `FROM ${PYTHON_BASE}` is not resolved by
+    # its docker parser (no ARG substitution), so drift in that digest is surfaced only by the advisory
+    # report of infra/supply-chain/resolve-image-digests.sh and re-pinned by hand. Move this bound together
+    # with the runtime lock.
+    ignore:
+      - dependency-name: "python"
+        versions: [">= 3.14"]
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
