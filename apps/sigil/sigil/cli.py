@@ -1308,6 +1308,23 @@ def cmd_ops_sweep(a) -> None:
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
+        if a.apply:
+            # E3bc: a root --apply would create seam settlement markers + their locks, spine segments and meter state
+            # as root inside the services' directories, after which their settles fail. Fail fast instead.
+            from pathlib import Path
+
+            from . import config
+            from vigil_integration.live.credit_lease_broker import settlements_root
+            seam = gate._seam_base()
+            why = ops_sweeps.root_apply_refusal(
+                [("seam directory", seam), ("spine directory", Path(gate.store.path).parent)],
+                [("settlement-marker directory", settlements_root(seam)), ("completion spool", a.completion_spool),
+                 ("model meter directory", config.MODEL_METER_DIR)])
+            if why:
+                print(f"--apply refused: running as root, but {why}. A root sweep would leave files the services "
+                      f"cannot write. Run it as the service user that owns those directories (e.g. `sudo -u <user> "
+                      f"sigil ops-sweep reservations --apply ...`).", file=sys.stderr)
+                sys.exit(2)
         out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
                                                        completion_spool=(a.completion_spool or None))
         # E7: reservations a later launch of the same target superseded on the seam — invisible to the seam

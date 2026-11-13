@@ -75,8 +75,11 @@ the spine** — never the source of truth.
   (`launch_settlements.unfinished`), so such a hold is never silent. The lock files are transients that
   both backup legs skip: `<stem>.settle.lock` beside the spine, the settlement, pause and
   paused‑past‑expiry `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the
-  completion spool (created by the settle drain). A root `ops-sweep` that must create `<stem>.settle.lock`
-  or `<spool>/.spool.lock` hands it to the owner of its directory, so the services keep opening it.
+  completion spool (created by the settle drain). **Run `ops-sweep reservations --apply` as the service
+  user.** As root it refuses to run unless the seam, the spine and (where they exist) the
+  settlement‑marker, completion‑spool and model‑meter directories are owned by root: a root sweep would
+  create settlement markers, their locks and spine files the services can no longer write. A root
+  report‑only `ops-sweep` that must create `<spool>/.spool.lock` hands it to the owner of the spool.
 
   **`ops-sweep reservations` statuses** added by this: `completion_pending` / `completion_unknown` /
   `pause_changed` / `pause_unknown` when the settle's in‑lock re‑check of the spool or the pause state

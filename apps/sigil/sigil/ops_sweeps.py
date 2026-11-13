@@ -182,6 +182,32 @@ def _settle_precondition(spool: Path, pair: tuple, base: Any, *, metered: bool,
     return _check
 
 
+def root_apply_refusal(required: "Iterable[tuple[str, Any]]", optional: "Iterable[tuple[str, Any]]" = (), *,
+                       euid: Optional[int] = None) -> Optional[str]:
+    """Why a money-moving ``ops-sweep --apply`` must not run as root here, or None. Only when this process is root
+    (``euid``, default ``os.geteuid()``): every ``required`` directory must exist and every ``optional`` one that
+    exists must be owned by root — else the sweep would create seam settlement markers and their locks, spine segment
+    files or meter state as root inside directories the services own, which those services then cannot write (their
+    settles would fail from then on). Each entry is ``(label, path)``."""
+    if euid is None:
+        geteuid = getattr(os, "geteuid", None)
+        euid = geteuid() if geteuid is not None else None
+    if euid != 0:
+        return None
+    for label, path, must in [(lb, p, True) for lb, p in required] + [(lb, p, False) for lb, p in optional]:
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            if must:
+                return f"the {label} {path} does not exist"
+            continue
+        except OSError as e:
+            return f"the {label} {path} cannot be read ({type(e).__name__})"
+        if st.st_uid != 0:
+            return f"the {label} {path} is owned by uid {st.st_uid}, not root"
+    return None
+
+
 def _moved(r: dict) -> dict:
     """The amounts a settle actually moved (a roll-forward's ``settle_completed`` row)."""
     return {k: int(r.get(k, 0)) for k in ("refunded", "refunded_plan", "refunded_wallet", "net_spend")}
