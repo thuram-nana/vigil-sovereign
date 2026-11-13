@@ -86,9 +86,10 @@ class SpineRecord:
         return upcast_payload(self.kind, self.payload)
 
     def text(self) -> str:
-        """Best-effort human/searchable text of the record (for embedding + display)."""
+        """Best-effort human/searchable text of the record (for embedding + display). Never raises: a payload that
+        is not a JSON object (only a hand edit can write one) reads as its compact JSON."""
         p = self.payload or {}
-        for key in ("text", "content", "message", "summary", "body", "title"):
+        for key in ("text", "content", "message", "summary", "body", "title") if isinstance(p, dict) else ():
             v = p.get(key)
             if isinstance(v, str) and v.strip():
                 return v
