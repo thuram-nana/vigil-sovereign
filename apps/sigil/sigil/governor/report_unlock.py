@@ -159,7 +159,11 @@ class ReportUnlockRegistry:
         ref = _check_ref(source_ref, "source_ref")
         if not ref:
             raise ValueError("a billing unlock needs its source_ref (the verified event id)")
-        return self._append(oid, _check_ref(f"unlock:{src}:{ref}", "entry_id"), "unlock", src, ref, issued_at)
+        eid = f"unlock:{src}:{ref}"
+        if len(eid) > 128:                                # a long event id: a fixed-length derived id, same per ref
+            import hashlib
+            eid = f"unlock:{src}:sha256:{hashlib.sha256(ref.encode('utf-8')).hexdigest()}"
+        return self._append(oid, eid, "unlock", src, ref, issued_at)
 
     def owner_set(self, org_id: str, action: str, *, reason: str, issued_at: float) -> int:
         """An OWNER unlock or relock (latest-wins by issued_at). `reason` is carried as the source_ref."""

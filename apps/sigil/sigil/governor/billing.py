@@ -876,14 +876,12 @@ class BillingSigner:
             # prior tranche simply expires: non-rollover).
             seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
             # Red-pen FINDING 2, kept: the billing history never shows a period the plan ledger did not deliver.
-            # The record is decided on whether THIS event's period is the one the subscription fold honours (as
-            # _apply_monitoring does), not on whether this call's refill appended: the refill returns None once
-            # the period's tranche exists, so gating on it would lose the invoice (and the unlock) for good if a
-            # crash fell between the refill and the invoice. A stale / out-of-order event is not the honoured
-            # period, so it still writes neither; a re-drive of the honoured event re-applies both (idempotent).
-            s = self.subscriptions.subscription(oid)
-            if s is not None and (s.plan_id, s.period_start, s.period_end) == (ent.plan_id, float(event.created),
-                                                                             period_end):
+            # The refill returns None once the period's tranche exists, so gating ONLY on its seq would lose the
+            # invoice (and the unlock) for good if a crash fell between the refill and the invoice. So the record
+            # is also written on a re-drive that finds this event's period honoured, active and DELIVERED (its
+            # tranche granted) yet not invoiced under any event id — never for a stale event, an undelivered
+            # period, or a second distinct event for a period already invoiced.
+            if self._period_delivered_unrecorded(oid, event, ent, period_end):
                 self._maybe_unlock(oid, event, "subscription")
                 self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
                                      period_start=event.created, period_end=period_end)
@@ -914,6 +912,24 @@ class BillingSigner:
         if self.on_monitoring_change is not None:
             self.on_monitoring_change(oid, event.created)
         return seq
+
+    def _period_delivered_unrecorded(self, oid: str, event: BillingEvent, ent: Entitlement,
+                                     period_end: float) -> bool:
+        """Whether this credit-plan event's record (invoice + unlock) is due: its period is the one the subscription
+        fold honours, the plan ledger holds a GRANTED tranche for that period (delivered — whatever the status has
+        become since), and no other event id has an invoice line for that period. Covers the first delivery and
+        the crash re-drive alike; a re-drive of the same event is harmless (first line per event id wins)."""
+        s = self.subscriptions.subscription(oid)
+        if s is None or (s.plan_id, s.period_start, s.period_end) != (
+                ent.plan_id, float(event.created), period_end):
+            return False
+        if not any(t.period_end == period_end and t.granted > 0 for t in self.plan.tranches(oid)):
+            return False
+        if self.invoices is not None and any(
+                i.kind == "subscription" and i.period_end == period_end and i.invoice_id != event.event_id
+                for i in self.invoices.invoices(oid)):
+            return False
+        return True
 
     def _unlock_eligible(self, event: BillingEvent) -> bool:
         """A verified, catalog-priced credit purchase whose amount AND currency were present and passed the

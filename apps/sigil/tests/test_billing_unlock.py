@@ -280,3 +280,67 @@ def test_eligibility_on_its_own(change, ok):
     before any mint): it must hold even if that guard changes."""
     signer, s, ru, inv = _rig()
     assert signer._unlock_eligible(_ev(TOPUP, "e", **change)) is ok
+
+
+# --- review folds -----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("unlocks", [True, False])
+def test_a_second_distinct_event_for_the_same_period_writes_no_second_invoice(unlocks):
+    signer, s, ru, inv = _rig(unlocks=unlocks)
+    signer.apply(_ev(PLAN, "evt_p1", created=100.0), now=100.0)
+    signer.apply(_ev(PLAN, "evt_p2", created=100.0), now=101.0)    # same second, distinct id: no new tranche
+    assert [i.invoice_id for i in inv.invoices("org_a")] == ["evt_p1"]
+    assert len(signer.plan.tranches("org_a")) == 1
+
+
+@pytest.mark.parametrize("down", ["payment_failed", "cancel"])
+def test_an_undelivered_period_is_never_invoiced_or_unlocked(monkeypatch, down):
+    """A crash before the tranche is granted, then the subscription goes down, then the re-drive: the plan ledger
+    never delivered the period, so neither the invoice nor the unlock may be written."""
+    from sigil.governor.billing import EVENT_PAYMENT_FAILED
+    signer, s, ru, inv = _rig()
+    real = signer.plan.grant
+    monkeypatch.setattr(signer.plan, "grant", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        signer.apply(_ev(PLAN, "evt_p1", created=100.0), now=100.0)
+    monkeypatch.setattr(signer.plan, "grant", real)
+    if down == "cancel":
+        signer.subscriptions.cancel("org_a")
+    else:
+        signer.apply(BillingEvent(event_id="evt_f", kind=EVENT_PAYMENT_FAILED, org_id="org_a", created=150.0,
+                                  price_id=PLAN.price_id), now=150.0)
+    signer.apply(_ev(PLAN, "evt_p1", created=100.0), now=160.0)
+    assert signer.plan.tranches("org_a") == [] and inv.invoices("org_a") == []
+    assert not ru.is_unlocked("org_a")
+
+
+def test_a_long_event_id_never_half_mints():
+    signer, s, ru, inv = _rig()
+    eid = "e" * 128
+    assert signer.apply(_ev(TOPUP, eid), now=100.0) is not None
+    signer.apply(_ev(TOPUP, eid), now=101.0)
+    assert ru.is_unlocked("org_a") and ru.unlock_of("org_a").source_ref == eid
+    assert [i.invoice_id for i in inv.invoices("org_a")] == [eid]
+    assert signer.wallet.available("org_a") == TOPUP.credits
+
+
+def test_a_delivered_period_is_invoiced_on_redrive_even_after_the_plan_went_down(monkeypatch):
+    """Grant landed, crash before the invoice, the subscription then goes past_due: the period WAS delivered,
+    so the re-drive writes its invoice and unlock."""
+    from sigil.governor.billing import EVENT_PAYMENT_FAILED
+    signer, s, ru, inv = _rig()
+    _crash_once(monkeypatch, inv, "record")
+    with pytest.raises(RuntimeError):
+        signer.apply(_ev(PLAN, "evt_p1", created=100.0), now=100.0)
+    signer.apply(BillingEvent(event_id="evt_f", kind=EVENT_PAYMENT_FAILED, org_id="org_a", created=150.0,
+                              price_id=PLAN.price_id), now=150.0)
+    signer.apply(_ev(PLAN, "evt_p1", created=100.0), now=160.0)
+    assert [i.invoice_id for i in inv.invoices("org_a")] == ["evt_p1"] and ru.is_unlocked("org_a")
+
+
+def test_the_unlock_entry_id_is_bounded():
+    from sigil.governor.report_unlock import REPORT_UNLOCK_SIGNAL
+    signer, s, ru, inv = _rig()
+    signer.apply(_ev(TOPUP, "e" * 128), now=100.0)
+    [rec] = [r.payload for r in s.iter_records() if r.payload.get("signal") == REPORT_UNLOCK_SIGNAL]
+    assert len(rec["entry_id"]) <= 128 and rec["source_ref"] == "e" * 128
