@@ -14,13 +14,19 @@ against a REAL `doctor.collect()` report — no re-implementation of the gate in
 from __future__ import annotations
 
 import json
+import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from vigil_integration import doctor as _doc
 from vigil_integration import unit_alerts as _ua
+from vigil_integration.uiproxy import make_proxy_server
 
 _REPO = Path(_doc.__file__).resolve().parents[2]
 _SCRIPT = _REPO / "tools" / "oneshot-bringup" / "vigil-oneshot.sh"
@@ -35,10 +41,40 @@ export_production_env(){ :; }
 for p in preflight bootstrap controls service_env ui meridian acceptance summary; do
   eval "phase_$p(){ echo PHASE:$p; }"
 done
-MODE=full; REPO=/nonexistent
-eval "$(sed -n '/^doctor_red_is_intake_safe_only(){/,/^}/p; /^phase_doctor_gate(){/,/^}/p; /^main(){/,/^}/p' "$SCRIPT")"
+MODE=full; REPO=/nonexistent; SERVICE_ENV=/nonexistent/.vigil-live/service.env
+eval "$(sed -n '/^doctor_red_is_intake_safe_only(){/,/^}/p; /^billing_intake_up(){/,/^}/p; /^phase_doctor_gate(){/,/^}/p; /^main(){/,/^}/p' "$SCRIPT")"
 main
 """
+
+
+@pytest.fixture()
+def intake(tmp_path, monkeypatch):
+    """Start a REAL UI proxy whose payment intake is "up" (route mounted + secret), "no-secret" (mounted, every
+    delivery refused 503), "unmounted" (no VIGIL_BILLING_WEBHOOK_SPOOL: the path falls through), or nothing at all
+    ("down"); returns the port the script's probe talks to."""
+    servers = []
+
+    def start(state: str) -> int:
+        if state == "down":
+            with socket.socket() as sk:
+                sk.bind(("127.0.0.1", 0))
+                return sk.getsockname()[1]
+        if state == "no-secret":
+            monkeypatch.delenv("VIGIL_BILLING_WEBHOOK_SECRET", raising=False)
+        else:
+            monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "dummy-verif-hash")
+        ui = tmp_path / f"ui-{state}"
+        ui.mkdir()
+        srv = make_proxy_server("127.0.0.1", 0, ui, webhook_billing_spool_dir=(
+            None if state == "unmounted" else str(tmp_path / f"spool-{state}")))
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        servers.append(srv)
+        return srv.server_address[1]
+
+    yield start
+    for srv in servers:
+        srv.shutdown()
+        srv.server_close()
 
 
 def _report(tmp_path, monkeypatch, *units, mismatch: bool = False, posture: bool = False) -> dict:
@@ -71,7 +107,7 @@ def _report(tmp_path, monkeypatch, *units, mismatch: bool = False, posture: bool
     return report
 
 
-def _oneshot(tmp_path, doctor_stdout: str, doctor_rc: int) -> "tuple[int, list[str], str]":
+def _oneshot(tmp_path, doctor_stdout: str, doctor_rc: int, ui_port: int = 9) -> "tuple[int, list[str], str]":
     out_file = tmp_path / "doctor.out"
     out_file.write_text(doctor_stdout + "\n", encoding="utf-8")
     vigil = tmp_path / "vigil"
@@ -79,7 +115,7 @@ def _oneshot(tmp_path, doctor_stdout: str, doctor_rc: int) -> "tuple[int, list[s
     vigil.chmod(0o755)
     r = subprocess.run(["bash", "-c", _HARNESS], capture_output=True, text=True, timeout=120,
                        env={"PATH": "/usr/bin:/bin", "SCRIPT": str(_SCRIPT), "VIGIL": str(vigil),
-                            "OFFPY": sys.executable})
+                            "OFFPY": sys.executable, "UI_PORT": str(ui_port)})
     phases = [ln.split(":", 1)[1] for ln in r.stdout.splitlines() if ln.startswith("PHASE:")]
     return r.returncode, phases, r.stdout + r.stderr
 
@@ -90,18 +126,65 @@ def _starts_intake_and_refuses_the_rest(rc, phases, text):
     assert "payment intake restored" in text and "NOT proven green" in text              # and it is not "green"
 
 
-def test_a_money_in_only_red_still_starts_payment_intake_and_refuses_everything_after_it(tmp_path, monkeypatch):
+def test_a_money_in_only_red_still_starts_payment_intake_and_refuses_everything_after_it(tmp_path, monkeypatch,
+                                                                                          intake):
     report = _report(tmp_path, monkeypatch, "vigil-billing-drain.service")
-    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(report), 1))
+    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(report), 1, intake("up")))
 
 
-def test_a_fold_cache_mismatch_only_red_still_starts_payment_intake(tmp_path, monkeypatch):
+def test_a_fold_cache_mismatch_only_red_still_starts_payment_intake(tmp_path, monkeypatch, intake):
     """A recorded MISMATCH is rewritten only by a RUNNING cockpit's next audit, so refusing to start the UI on it held
     payment intake down until someone deleted the report — while a running cockpit keeps serving after one."""
+    port = intake("up")
     report = _report(tmp_path / "alone", monkeypatch, mismatch=True)
-    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(report), 1))
+    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(report), 1, port))
     both = _report(tmp_path / "both", monkeypatch, "vigil-billing-drain.service", mismatch=True)
-    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(both), 1))
+    _starts_intake_and_refuses_the_rest(*_oneshot(tmp_path, json.dumps(both), 1, port))
+
+
+@pytest.mark.parametrize("state", ["unmounted", "no-secret", "down"])
+def test_the_intake_safe_path_never_claims_intake_it_cannot_see(tmp_path, monkeypatch, intake, state):
+    """The UI is started for payment intake's sake — but the claim "payment intake restored" is made only when the
+    started proxy really ACCEPTS webhooks (its route answers with its own verif-hash refusal). A proxy without the
+    route, one with no secret (every delivery refused), or none answering: the script says intake is NOT up."""
+    report = _report(tmp_path, monkeypatch, "vigil-billing-drain.service")
+    rc, phases, text = _oneshot(tmp_path, json.dumps(report), 1, intake(state))
+    assert phases == ["preflight", "bootstrap", "controls", "service_env", "ui"] and rc != 0, text
+    assert "payment intake is NOT up" in text and "restored" not in text and "NOT proven green" in text
+
+
+def test_reseeding_service_env_keeps_the_operators_payment_intake_settings(tmp_path):
+    """`phase_service_env` rebuilds the UI unit's env file from a fixed list on EVERY run. The proxy mounts
+    /webhooks/billing only when VIGIL_BILLING_WEBHOOK_SPOOL (+ its secret) is in that environment, so a rebuild that
+    dropped them took payment intake down at the very restart the intake-safe path exists for. They are carried
+    over (and only they: the script's own keys are rewritten), the secret never printed."""
+    live = tmp_path / ".vigil-live"
+    live.mkdir()
+    svc = live / "service.env"
+    svc.write_text("VIGIL_POSTURE=dev\nSTALE_OPERATOR_KEY=1\nVIGIL_BILLING_WEBHOOK_SPOOL=/srv/spool\n"
+                   "VIGIL_BILLING_WEBHOOK_SECRET=dummy-verif-hash\n# VIGIL_BILLING_WEBHOOK_SPOOL=/commented/out\n")
+    harness = r"""
+set -euo pipefail
+banner(){ :; }; ok(){ echo "OK: $*"; }
+eval "$(sed -n '/^phase_service_env(){/,/^}/p' "$SCRIPT")"
+phase_service_env
+"""
+    env = {"PATH": "/usr/bin:/bin", "SCRIPT": str(_SCRIPT), "REPO": str(tmp_path), "SERVICE_ENV": str(svc),
+           "VIGIL": "/v/bin/vigil", "CRUCIBLE_ROOT": "/c", "SIGIL_HOME": "/h", "SOVEREIGNTY_TIER": "t",
+           "SLUG": "s", "VIGIL_WITNESS_ROSTER": "r", "CRUCIBLE_ANTHROPIC_MODEL": "dummy", "ANTHROPIC_API_KEY": "x"}
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = svc.read_text().splitlines()
+    assert "VIGIL_BILLING_WEBHOOK_SPOOL=/srv/spool" in lines and "VIGIL_BILLING_WEBHOOK_SECRET=dummy-verif-hash" in lines
+    assert "VIGIL_POSTURE=production" in lines and "VIGIL_POSTURE=dev" not in lines        # the script's keys rewritten
+    assert "STALE_OPERATOR_KEY=1" not in lines and "# VIGIL_BILLING_WEBHOOK_SPOOL=/commented/out" not in lines
+    assert sum(ln.startswith("VIGIL_BILLING_WEBHOOK_") for ln in lines) == 2
+    assert "dummy-verif-hash" not in r.stdout + r.stderr
+    assert oct(os.stat(svc).st_mode & 0o777) == "0o600"
+    # a first run (no file yet) still seeds it, with no intake settings to carry
+    svc.unlink()
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60, env=env)
+    assert r.returncode == 0 and not any(ln.startswith("VIGIL_BILLING") for ln in svc.read_text().splitlines())
 
 
 def test_any_other_red_still_refuses_to_start_the_ui(tmp_path, monkeypatch):

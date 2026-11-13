@@ -57,10 +57,13 @@ Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-%h/.config/vigil/billing-drain.env
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain
-# A pass is a handful of HTTPS re-verifies, each bounded at 15 s (a NET-2b deferral adds no wait: a parked webhook
-# is retried on a LATER pass). One that hangs is killed (unit FAILED → the dead-man alarms) rather than holding the
-# single-drainer lock forever; the next pass reclaims its in-flight claim (idempotent). Above the 120 s lock wait.
-TimeoutStartSec=300
+# Each pass starts a fresh process, so every mint FOLDS the spine from the start (O(spine) — a subscription webhook
+# several times over) on top of its HTTPS re-verifies (each bounded at 15 s; a NET-2b deferral adds no wait). A
+# tight bound would kill a legitimately slow pass on a large spine EVERY time (the webhook reclaimed, re-verified
+# and killed again: never credited). This bound only frees the single-drainer lock from a WEDGED pass, which the
+# dead-man has already alarmed on (no heartbeat within ~2 min); the next pass reclaims its claim (idempotent).
+# A pass killed here shows as `timeout` in the MONEY-5 alarm. Above the 120 s lock wait.
+TimeoutStartSec=1800
 
 # --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
 StateDirectory=vigil

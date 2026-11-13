@@ -169,7 +169,7 @@ no spool: the drain derives this same `$SIGIL_HOME/billing-spool`, or drains the
 `VIGIL_BILLING_WEBHOOK_SPOOL` when you copy that into the same env file — which you must do if the proxy spools
 anywhere else (the drain cannot see the proxy's env); a spool that contradicts it is refused. Run the timer **or**
 `watch`, never both — a per-spool lock serialises them: a timer pass that cannot get it within 120 s fails loudly,
-and a `watch` pass that cannot get it warns on stderr. See
+and a `watch` that keeps finding it held warns on stderr every 120 s. See
 `infra/systemd/vigil-billing-drain.service` for secret injection. Point your Flutterwave webhook at the
 operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.

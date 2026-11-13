@@ -165,12 +165,21 @@ def test_a_watch_pass_holds_the_same_lock(rig):
     assert _tree(rig.spool)["working"] == [] and _tree(rig.spool)["rejected"] == []
 
 
-def _hold_lock(spool: Path) -> int:
-    """Take the drain lock the way another drainer process would (a separate open file description)."""
+def _hold_lock(spool: Path, timeout: float = 10.0) -> int:
+    """Take the drain lock the way another drainer process would (a separate open file description). Never blocks:
+    a lock the code under test failed to release FAILS the test (naming it) instead of hanging the suite."""
     (spool / "working").mkdir(parents=True, exist_ok=True)
     fd = os.open(spool / "working" / ".drain.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                pytest.fail(f"the drain lock on {spool} was never released")
+            time.sleep(0.02)
 
 
 def _watcher(tmp_path, spool: Path):
@@ -223,6 +232,64 @@ def test_a_planted_non_regular_lock_refuses_the_pass_and_touches_nothing(tmp_pat
     with pytest.raises(OSError, match="not a regular file"):
         w.drain()
     assert (spool / "incoming" / "1.json").exists() and not list((spool / "rejected").iterdir())
+
+
+def test_watch_releases_the_lock_between_passes_and_drains_what_arrives_later(tmp_path):
+    """`watch` takes the lock PER PASS: between two passes another drainer can take it (the timer coexists), and a
+    webhook spooled after the first pass is drained by the second."""
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path, spool)
+    (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
+    waits: list[int] = []
+
+    class _Between:
+        def wait(self, interval):
+            waits.append(len(waits))
+            if len(waits) == 1:
+                os.close(_hold_lock(spool, timeout=2.0))            # the lock is FREE between passes
+                (spool / "incoming" / "2.json").write_text("{}", encoding="utf-8")
+                return False
+            return True
+
+    w.watch(interval=0.01, stop=_Between())
+    assert len(waits) == 2
+    assert sorted(p.name for p in (spool / "rejected").iterdir() if p.suffix == ".json") == ["1.json", "2.json"]
+    assert not list((spool / "incoming").iterdir())
+
+
+def test_a_starved_watch_says_so_instead_of_idling_silently(tmp_path, capsys, monkeypatch):
+    """Another drainer holds the lock (a manual pass suspended mid-pass, a wedged one): every `watch` pass is busy
+    and touches nothing. Once that has lasted `busy_warn_s` it WARNS — again every `busy_warn_s`, not once per pass —
+    drains as soon as the lock is free, and a LATER short overlap starts a fresh count. (A fake monotonic clock that
+    advances 0.05 s per pass, so the count of warnings is exact.)"""
+    from sigil.inbound import billing_spool
+    clock = [0.0]
+    monkeypatch.setattr(billing_spool, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=time.sleep,
+                                                               time=time.time))
+    spool = tmp_path / "spool"
+    w = _watcher(tmp_path, spool)
+    (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
+    held = [_hold_lock(spool)]
+    passes: list[int] = []
+
+    class _Stop:
+        def wait(self, interval):
+            passes.append(len(passes) + 1)
+            clock[0] += 0.05
+            if len(passes) == 60:                                   # busy for t = 0 … 2.95 s
+                os.close(held.pop())
+            elif len(passes) == 61:                                 # one clean pass, then a short overlap
+                held.append(_hold_lock(spool))
+            return len(passes) >= 70
+
+    w.watch(interval=0.01, stop=_Stop(), busy_warn_s=1.0)
+    for fd in held:
+        os.close(fd)
+    err = capsys.readouterr().err
+    warnings = [ln for ln in err.splitlines() if "has held the lock on" in ln]
+    assert len(warnings) == 2, err                                   # at t = 1.0 and 2.0 — then reset
+    assert str(spool) in warnings[0] and "for 1 s" in warnings[0] and "never both" in warnings[0]
+    assert (spool / "rejected" / "1.json").exists()                  # the pass after the release drained it
 
 
 def test_a_pass_waits_out_another_drainers_pass_then_drains(tmp_path):
@@ -284,3 +351,11 @@ def test_the_cli_pass_waits_for_a_short_overlap_and_then_drains(cli_rig, capsys,
         cli_rig.run()
     cap = capsys.readouterr()
     assert "drained: 0 minted, 0 noop, 1 rejected" in cap.out and "has held the lock" not in cap.err
+
+
+def test_the_cli_watch_warns_on_the_same_bound_as_the_cli_lock_wait(cli_rig, monkeypatch):
+    from sigil.inbound.billing_spool import BillingSpoolWatcher
+    seen: dict = {}
+    monkeypatch.setattr(BillingSpoolWatcher, "watch", lambda self, **kw: seen.update(kw))
+    cli_rig.cli.cmd_billing_drain(SimpleNamespace(billing_cmd="watch", spool=str(cli_rig.spool), interval=0.5))
+    assert seen == {"interval": 0.5, "busy_warn_s": 0.3}           # cli_rig pins _BILLING_LOCK_WAIT_S = 0.3

@@ -44,19 +44,33 @@ def test_the_unit_names_no_spool_so_the_drain_derives_it_from_sigil_home():
     assert re.search(r"^# SIGIL_HOME=", env, re.M) and "REQUIRED, ALWAYS" in env and "MOVED SIGIL_HOME" not in env
 
 
+def _lock_wait_s() -> float:
+    cli_src = (_REPO / "apps" / "sigil" / "sigil" / "cli.py").read_text(encoding="utf-8")
+    return float(re.search(r"^_BILLING_LOCK_WAIT_S = ([0-9.]+)", cli_src, re.M).group(1))
+
+
 def test_a_hung_pass_is_bounded():
-    """Type=oneshot has NO start timeout by default: a pass stuck in the processor call would hold the
-    single-drainer lock (and the timer) forever."""
+    """Type=oneshot has NO start timeout by default: a WEDGED pass would hold the single-drainer lock (and the timer)
+    forever. But the bound must not kill a legitimately slow pass: each pass is a fresh process whose every mint
+    folds the spine from the start (a subscription webhook several times), so on a large spine one envelope can take
+    minutes — a tight bound would kill that pass every time and the payment would never be credited. Detection of a
+    stuck pass is the dead-man's job (no heartbeat within its ~2 min bound), not this timeout's."""
     d = _directives(_UNIT)
     limit = [ln for ln in d if ln.startswith("TimeoutStartSec=")]
-    assert len(limit) == 1 and 60 < int(limit[0].split("=", 1)[1]) <= 900, limit
-    # … and long enough that a pass which first waits out another drainer's pass (the CLI's lock wait) still has
-    # room for several bounded (15 s) processor re-verifies before systemd kills it
-    cli_src = (_REPO / "apps" / "sigil" / "sigil" / "cli.py").read_text(encoding="utf-8")
-    wait = float(re.search(r"^_BILLING_LOCK_WAIT_S = ([0-9.]+)", cli_src, re.M).group(1))
+    assert len(limit) == 1 and 1800 <= int(limit[0].split("=", 1)[1]) <= 3600, limit
     egress = (_REPO / "apps" / "sigil" / "sigil" / "governor" / "flutterwave_egress.py").read_text(encoding="utf-8")
     per_call = float(re.search(r"^_DEFAULT_TIMEOUT_S = ([0-9.]+)", egress, re.M).group(1))
-    assert int(limit[0].split("=", 1)[1]) >= wait + 4 * per_call
+    assert int(limit[0].split("=", 1)[1]) >= 10 * (_lock_wait_s() + 4 * per_call)
+
+
+def test_the_shipped_lock_wait_outlasts_an_ordinary_overlapping_pass_and_is_the_documented_one():
+    """The CLI's real lock wait (the single-drainer tests pin their own): a timer pass overlapping a manual pass
+    must WAIT it out, not exit 1 at once — that would turn the unit FAILED and raise a false paid-not-credited
+    MONEY-5 alarm with nothing wrong. At least one timer period, and the value the unit and GO-LIVE §9 state."""
+    wait = _lock_wait_s()
+    assert 60 <= wait
+    stated = f"{int(wait)} s"
+    assert stated in _UNIT.read_text() and stated in (_REPO / "docs" / "runbooks" / "GO-LIVE-quickstart.md").read_text()
 
 
 def _run_exec_stop_post(tmp_path, program: str, **extra_env) -> None:

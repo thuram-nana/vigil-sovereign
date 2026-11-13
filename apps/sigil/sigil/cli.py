@@ -1527,7 +1527,7 @@ def cmd_billing_drain(a) -> None:
     if getattr(a, "billing_cmd", "drain") == "watch":
         print(f"  watching {spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
         try:
-            watcher.watch(interval=a.interval)
+            watcher.watch(interval=a.interval, busy_warn_s=_BILLING_LOCK_WAIT_S)   # a starved watch says so
         except KeyboardInterrupt:
             pass
     else:

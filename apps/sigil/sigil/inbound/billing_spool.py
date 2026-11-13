@@ -484,18 +484,34 @@ class BillingSpoolWatcher:
             out["deferred"] = deferred                   # NET-2b only: the OFF result shape is unchanged
         return out
 
-    def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
+    def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None, busy_warn_s: float = 120.0) -> None:
         """Drain in a loop until ``stop`` (a threading.Event) is set. A single bad drain NEVER kills the money
         daemon: an unexpected error OUTSIDE the per-file loop (a transient spine / IO / directory fault) is
         reported to stderr and the loop continues — so the billing-ingress daemon survives a transient blip
-        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator."""
+        instead of dying silently and stranding every subsequent webhook in ``incoming/`` with no operator.
+        Each pass takes the single-drainer lock without waiting; a pass that finds ANOTHER drainer holding it
+        touches nothing (``busy``). Once passes have been busy for ``busy_warn_s`` the loop says so on stderr, and
+        again every ``busy_warn_s`` while it lasts — a wedged holder must never starve ``watch`` silently."""
         import sys as _sys
+        busy_since: Optional[float] = None
+        warned_at: Optional[float] = None
         while True:
+            busy = False
             try:
-                self.drain()
+                busy = bool(self.drain().get("busy"))
             except Exception as exc:  # noqa: BLE001 — the watch loop must survive any single-drain failure
                 _sys.stderr.write("vigil billing-drain: WARNING drain error (continuing): "
                                   f"{type(exc).__name__}: {exc}\n")
+            t = time.monotonic()
+            if not busy:
+                busy_since = warned_at = None
+            else:
+                busy_since = t if busy_since is None else busy_since
+                if t - busy_since >= busy_warn_s and (warned_at is None or t - warned_at >= busy_warn_s):
+                    warned_at = t
+                    _sys.stderr.write(f"vigil billing-drain: WARNING another billing drainer has held the lock on "
+                                      f"{self.spool} for {int(t - busy_since)} s — nothing is being drained. Find "
+                                      f"the stuck drainer (run the timer OR `watch`, never both).\n")
             waiter = getattr(stop, "wait", None)
             if stop is not None and waiter is not None:
                 if waiter(interval):

@@ -538,6 +538,9 @@ phase_service_env(){
     echo "CRUCIBLE_ANTHROPIC_MODEL=$CRUCIBLE_ANTHROPIC_MODEL"
     [ -n "${CRUCIBLE_ANTHROPIC_ZDR:-}" ] && echo "CRUCIBLE_ANTHROPIC_ZDR=$CRUCIBLE_ANTHROPIC_ZDR"
     echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+    # Payment INTAKE is the operator's own setting (the proxy mounts /webhooks/billing only when both are set):
+    # carry it over from the file being replaced, never drop it (a rebuilt file without it takes intake down).
+    [ -f "$SERVICE_ENV" ] && grep -E '^VIGIL_BILLING_WEBHOOK_(SPOOL|SECRET)=' "$SERVICE_ENV" || true
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$SERVICE_ENV"
@@ -580,6 +583,17 @@ PY
 )"
     die "vigil doctor REFUSES: UNMET controls -> ${unmet}. Fix each above (e.g. seal the vault with tpm2-tools; seed the backup runs) and re-run. The script will not start the UI on a red gate."
   fi
+}
+
+# True (exit 0) when the running UI ACCEPTS payment webhooks: an empty POST with no verif-hash gets the mounted
+# route's OWN refusal ("invalid or missing verif-hash" — a secret is configured; nothing is spooled). Unmounted (no
+# VIGIL_BILLING_WEBHOOK_SPOOL), the path falls through; with no secret every delivery is refused (503). Anything
+# else, nothing listening included, is "not up".
+billing_intake_up(){
+  local body
+  body="$(curl -sS -m 4 -X POST --data-binary '' "http://127.0.0.1:$UI_PORT/webhooks/billing" 2>/dev/null || true)"
+  case "$body" in *"missing verif-hash"*) return 0 ;; esac
+  return 1
 }
 
 # True (exit 0) ONLY when every hard issue of the doctor report is one the report itself lists under
@@ -774,7 +788,9 @@ main(){
   phase_doctor_gate
   phase_ui
   if [ "${INTAKE_SAFE_RED_ONLY:-0}" = 1 ]; then
-    die "the UI is UP (payment intake restored), but vigil doctor is RED on intake-safe issues (listed above; a money-IN alarm means a customer PAID and is NOT credited yet). Clear them, then re-run — the range and the acceptance run are REFUSED on a red gate, and this bring-up is NOT proven green."
+    local intake="the UI is UP, but it does NOT accept payment webhooks on /webhooks/billing (VIGIL_BILLING_WEBHOOK_SPOOL and VIGIL_BILLING_WEBHOOK_SECRET are not both in the UI's environment: $SERVICE_ENV): payment intake is NOT up"
+    billing_intake_up && intake="the UI is UP and serves /webhooks/billing (payment intake restored)"
+    die "$intake. vigil doctor is RED on intake-safe issues (listed above; a money-IN alarm means a customer PAID and is NOT credited yet). Clear them, then re-run — the range and the acceptance run are REFUSED on a red gate, and this bring-up is NOT proven green."
   fi
   phase_meridian
   phase_acceptance
