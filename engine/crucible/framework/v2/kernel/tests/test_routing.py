@@ -109,6 +109,10 @@ def test_enabled_but_nothing_mapped_is_byte_identical(monkeypatch):
 def test_unknown_tier_resolves_to_default(monkeypatch):
     monkeypatch.setenv(routing._ENABLE_ENV, "1")
     monkeypatch.setenv(f"{routing._TIER_ENV_PREFIX}STANDARD", _CHEAP)
+    # Map the UNKNOWN names too: the fixed vocabulary, not a missing env var, must be what refuses them
+    # (without these, dropping the `t not in TIERS` guard survives — the named-mutant corpus caught it).
+    for name in ("", "BOGUS", "DEEPISH"):
+        monkeypatch.setenv(f"{routing._TIER_ENV_PREFIX}{name}", _CHEAP)
     for bogus in ("", "   ", "bogus", "DEEPISH"):
         assert routing.resolve_model(bogus, _CURRENT) == _CURRENT
 

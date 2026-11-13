@@ -16,7 +16,9 @@
 #   * integration/tests/test_fuzz_corpus_replay.py — replays every committed atheris seed corpus through
 #     its harness and asserts each parser/verifier has teeth.
 #   * integration/tests/test_mutation_critical_set.py — pins the mutmut/cosmic-ray target sets to the
-#     tools/mutation/critical-set.json manifest so this workflow and the manifest cannot drift.
+#     tools/mutation/critical-set.json manifest so this workflow and the manifest cannot drift, and
+#     statically validates the named-mutant corpus the `named-mutants` job below runs (every mutant still
+#     applies exactly once, compiles, and names a real killing test in its own plane).
 #
 # The engines below run on the ENUMERATED security-critical set (tools/mutation/critical-set.json). This
 # job is best-effort by design: a red run here is a signal to investigate a surviving mutant / a fuzz
@@ -126,3 +128,58 @@ jobs:
             -max_total_time="${FUZZ_SECONDS}" \
             -timeout=25 || true
           echo "::notice::cargo-fuzz warden_classify complete — a crash here is a real fail-open bug."
+
+  # ----------------------------------------------------------------------------------------------
+  # NAMED-MUTANT CORPUS — the money/gate files mutmut cannot reach (critical-set.json mutation=false).
+  # tools/mutation/named-mutants.json names, per file, a fixed list of guard-breaking mutants and the test
+  # that must kill each; tools/mutation/named_mutants.py runs ONE plane per process with a PYTHONPATH built
+  # from scratch (the sovereign plane never has engine/crucible on it — FATAL-2), checks a green baseline,
+  # applies each mutant, runs only its named tests, and always restores the source. KILLED means pytest
+  # exited 1; a collection error / timeout / non-compiling mutant is ERROR, never a kill. Unlike the
+  # best-effort steps above this job goes RED on any survivor: that red is the signal (the workflow is
+  # still scheduled-only, never a merge blocker). The corpus itself is validated on every PR by
+  # integration/tests/test_mutation_critical_set.py, so it cannot go stale between runs.
+  # ----------------------------------------------------------------------------------------------
+  named-mutants:
+    name: named-mutant corpus — money/gate kill table (scheduled)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: install the hash-locked runtime + pytest (the closure the required sovereign/engine jobs use)
+        run: |
+          set -euo pipefail
+          # Third-party packages only (no framework/sigil), so FATAL-2 is untouched; the runner puts each
+          # plane's own source roots on PYTHONPATH itself.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+
+      - name: sovereign plane — apps/sigil money/gate files (engine NOT on the path)
+        env:
+          PYTHONPATH: ""
+        run: |
+          python tools/mutation/named_mutants.py --plane sovereign \
+            --json "${RUNNER_TEMP}/named-mutants-sovereign.json" --summary-md "${GITHUB_STEP_SUMMARY}"
+
+      - name: offense plane — engine gates (run from engine/crucible, apps/sigil NOT on the path)
+        if: ${{ always() }}
+        env:
+          PYTHONPATH: ""
+        run: |
+          python tools/mutation/named_mutants.py --plane offense \
+            --json "${RUNNER_TEMP}/named-mutants-offense.json" --summary-md "${GITHUB_STEP_SUMMARY}"
+
+      - name: publish the kill tables
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: named-mutant-kill-tables
+          path: ${{ runner.temp }}/named-mutants-*.json
+          if-no-files-found: warn

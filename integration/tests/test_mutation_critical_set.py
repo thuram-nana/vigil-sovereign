@@ -19,12 +19,23 @@ mutmut config never lists it — a manifest that describes a discipline the buil
 controls below prove the equality check has teeth: a config missing a manifest file, and a config naming a
 file the manifest does not, are BOTH reported.
 
+THE NAMED-MUTANT CORPUS. The money/gate files mutmut cannot reach (``mutation: false`` — sovereign-leg
+``apps/sigil`` files and engine gates) are mutated instead by ``tools/mutation/named-mutants.json``, run per
+plane by ``tools/mutation/named_mutants.py`` in the scheduled workflow. The guards below bind that corpus too:
+the manifest's ``named_mutants: true`` flags EQUAL the corpus files, every mutant still applies exactly once
+and compiles and names a real test in its own plane (so a refactor that orphans a mutant turns the PR red,
+not the next weekly run), the sovereign plane's PYTHONPATH never holds the engine, and the runner itself is
+proven to tell KILLED from SURVIVED from ERROR and to restore the source.
+
 STDLIB ONLY (``json`` + ``tomllib``, Python >=3.11) and framework-free, so it runs in the sovereign leg of
 the required ``integration two-env boundary (P5)`` job over the whole ``integration/tests`` directory.
 """
 from __future__ import annotations
 
+import copy
 import json
+import os
+import sys
 import tomllib
 from pathlib import Path
 
@@ -35,6 +46,10 @@ _MANIFEST = _REPO / "tools" / "mutation" / "critical-set.json"
 _PYPROJECT = _REPO / "pyproject.toml"
 _COSMIC = _REPO / "tools" / "mutation" / "cosmic-ray.toml"
 _WORKFLOW = _REPO / ".github" / "workflows" / "mutation-fuzz.yml"
+_CORPUS = _REPO / "tools" / "mutation" / "named-mutants.json"
+
+sys.path.insert(0, str(_REPO / "tools" / "mutation"))
+import named_mutants  # noqa: E402 — path is prepended just above (stdlib-only runner).
 
 
 def _manifest() -> dict:
@@ -80,6 +95,8 @@ def test_every_critical_entry_is_classified_and_reasoned():
         assert e.get("reason"), f"{e['path']}: every critical entry must carry a reason"
         assert e["lang"] in {"python", "rust"}
         assert isinstance(e.get("mutation"), bool), f"{e['path']}: mutation must be an explicit bool"
+        if "named_mutants" in e:
+            assert isinstance(e["named_mutants"], bool), f"{e['path']}: named_mutants must be a bool"
 
 
 def test_the_security_critical_categories_are_all_represented():
@@ -181,6 +198,153 @@ def test_positive_control_the_live_configs_satisfy_the_predicate():
     want = _mutation_true_paths(_manifest())
     assert _equal(_mutmut_paths(), want)
     assert _equal(_cosmic_paths(), want)
+
+
+# --------------------------------------------------------------------------------------------------
+# The named-mutant corpus — bound to the manifest, statically valid, plane-separated, and run on schedule.
+# --------------------------------------------------------------------------------------------------
+def _corpus() -> dict:
+    assert _CORPUS.is_file(), f"named-mutant corpus missing: {_CORPUS}"
+    return named_mutants.load_corpus(_CORPUS)
+
+
+def test_named_mutant_corpus_validates():
+    """Every mutant still applies EXACTLY once, compiles, states its guard and names a real test in its own
+    plane. A refactor that moves a guard's text orphans its mutant here, on the PR, not in a weekly run."""
+    problems = named_mutants.validate_corpus(_corpus(), _REPO)
+    assert not problems, "named-mutant corpus does not validate:\n  " + "\n  ".join(problems)
+
+
+def test_named_mutant_flags_equal_the_corpus_files():
+    """critical-set.json ``named_mutants: true`` == the corpus file set (both directions), so the manifest can
+    neither claim a corpus that does not exist nor leave a corpus file unrecorded."""
+    flagged = {e["path"] for e in _manifest()["critical_set"] if e.get("named_mutants") is True}
+    files = {f["path"] for f in _corpus()["files"]}
+    assert flagged == files, (
+        "critical-set.json named_mutants flags drifted from tools/mutation/named-mutants.json:\n"
+        f"  flagged only: {sorted(flagged - files)}\n  corpus only:  {sorted(files - flagged)}"
+    )
+
+
+def test_named_mutant_corpus_runs_both_planes_on_the_money_chokepoint():
+    by_plane: dict[str, set[str]] = {}
+    for f in _corpus()["files"]:
+        by_plane.setdefault(f["plane"], set()).add(f["path"])
+    assert set(by_plane) == {"sovereign", "offense"}, by_plane
+    assert "apps/sigil/sigil/ui/launch_gate.py" in by_plane["sovereign"], "the K4 money chokepoint must be mutated"
+    assert all(p.startswith("engine/crucible/") for p in by_plane["offense"])
+    assert not any(p.startswith("engine/") for p in by_plane["sovereign"])
+
+
+def test_named_mutant_plane_paths_never_cross(tmp_path, monkeypatch):
+    """FATAL-2: the sovereign children's PYTHONPATH (rebuilt from scratch, absolute) never holds the engine,
+    and the offense children's never holds apps/sigil — whatever PYTHONPATH the runner itself inherited (here
+    deliberately BOTH planes, so an inherit-and-append runner is caught)."""
+    c = _corpus()
+    engine, sigil = (_REPO / "engine" / "crucible").resolve(), (_REPO / "apps" / "sigil").resolve()
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(engine), str(sigil)]))
+    for plane, forbidden in (("sovereign", engine), ("offense", sigil)):
+        entries = named_mutants.plane_env(c, plane, _REPO, tmp_path / plane)["PYTHONPATH"].split(os.pathsep)
+        assert entries and all(Path(p).is_absolute() for p in entries), entries
+        assert not any(Path(p) == forbidden or forbidden in Path(p).parents for p in entries), (plane, entries)
+
+
+def test_scheduled_workflow_runs_the_named_corpus_per_plane_and_does_not_swallow_a_survivor():
+    text = _WORKFLOW.read_text(encoding="utf-8")
+    for plane in named_mutants.PLANES:
+        assert f"tools/mutation/named_mutants.py --plane {plane}" in text, f"workflow never runs the {plane} plane"
+    job = text.split("  named-mutants:", 1)
+    assert len(job) == 2, "the named-mutants job is missing from mutation-fuzz.yml"
+    assert "|| true" not in job[1], "the named-mutant job must go red on a survivor, not swallow it"
+
+
+def _perturbed(mutate) -> list[str]:
+    c = copy.deepcopy(_corpus())
+    mutate(c)
+    return named_mutants.validate_corpus(c, _REPO)
+
+
+def _first(c: dict, plane: str) -> dict:
+    return next(f for f in c["files"] if f["plane"] == plane)
+
+
+@pytest.mark.parametrize("perturb,expect", [
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(old="THIS TEXT IS NOT IN THE FILE"), "exactly once"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(
+        old=_dup_line(_first(c, "sovereign")["path"])), "exactly once"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(new="def (:"), "does not compile"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(new=_first(c, "sovereign")["mutants"][0]["old"]),
+     "must differ"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(tests=[]), "names no killing test"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(guard=""), "must state the guard"),
+    (lambda c: _first(c, "sovereign")["mutants"][1].update(id=_first(c, "sovereign")["mutants"][0]["id"]),
+     "duplicate mutant id"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(
+        tests=[_first(c, "sovereign")["mutants"][0]["tests"][0].split("::")[0] + "::test_does_not_exist"]),
+     "is not defined"),
+    (lambda c: _first(c, "sovereign")["mutants"][0].update(tests=_first(c, "offense")["mutants"][0]["tests"]),
+     "not under the sovereign plane's test_roots"),
+    (lambda c: _first(c, "offense").update(plane="sovereign"), "not under the sovereign plane's source_roots"),
+    (lambda c: c["files"].append({"path": "apps/sigil/sigil/obs.py", "plane": "sovereign", "mutants": []}),
+     "not a python entry of tools/mutation/critical-set.json"),
+    (lambda c: c["planes"]["sovereign"]["pythonpath"].append("engine/crucible"), "leaks a forbidden root"),
+    (lambda c: c["planes"]["sovereign"].update(forbidden_pythonpath=[]), "forbidden_pythonpath"),
+], ids=["stale-old", "ambiguous-old", "uncompilable", "no-op", "no-test", "no-guard", "dup-id",
+        "unknown-test", "cross-plane-test", "cross-plane-file", "not-critical", "engine-on-sovereign-path",
+        "no-forbidden-roots"])
+def test_negative_control_a_broken_corpus_is_rejected(perturb, expect):
+    problems = _perturbed(perturb)
+    assert any(expect in p for p in problems), f"expected a {expect!r} problem, got: {problems}"
+
+
+def _dup_line(rel: str) -> str:
+    """A line that occurs MORE than once in ``rel`` — an ambiguous 'old' the validator must refuse."""
+    text = (_REPO / rel).read_text(encoding="utf-8")
+    return next(ln for ln in text.splitlines() if len(ln.strip()) > 8 and text.count(ln) > 1)
+
+
+def test_named_mutant_runner_kills_survives_errors_and_restores(tmp_path):
+    """The runner has teeth and no false kills, on a synthetic plane: an adequate test KILLS a boundary
+    mutant, a weak test lets the SAME mutant SURVIVE, a mutant that breaks collection is ERROR (never a kill)
+    whether pytest reports it as rc 4 (a named node that no longer collects) or rc 2 (a whole file that fails
+    to import), a red baseline scores nothing, and the source is restored byte- and mtime-exact."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    src = tmp_path / "pkg" / "gate.py"
+    src.write_text("def admit(units):\n    return 1 <= units <= 10\n", encoding="utf-8")
+    os.utime(src, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
+    before, mtime = src.read_bytes(), src.stat().st_mtime_ns
+    (tmp_path / "tests" / "test_gate.py").write_text(
+        "from gate import admit\n\n\n"
+        "def test_floor():\n    assert admit(1) and not admit(0)\n\n\n"
+        "def test_weak():\n    assert admit(5)\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_red.py").write_text("def test_red():\n    assert False\n", encoding="utf-8")
+    corpus = {"planes": {"sovereign": {"cwd": ".", "pythonpath": ["pkg"]}}}
+
+    def mut(mid, tests, old="1 <= units", new="0 <= units"):
+        nodes = [t if t.startswith("tests/") else f"tests/test_gate.py::{t}" for t in tests]
+        return {"id": mid, "guard": "floor", "old": old, "new": new, "tests": nodes}
+
+    entry = {"path": "pkg/gate.py", "plane": "sovereign", "mutants": [
+        mut("strong", ["test_floor"]),
+        mut("weak", ["test_weak"]),
+        mut("breaks-import", ["test_floor"], old="def admit(units):", new="raise ImportError('x')\ndef admit(units):"),
+        mut("breaks-import-file", ["tests/test_gate.py"], old="def admit(units):",
+            new="raise ImportError('x')\ndef admit(units):"),
+    ]}
+    run = named_mutants.run_file(entry, corpus, tmp_path, timeout=120)
+    assert run.baseline_ok, run.baseline_detail
+    verdicts = {r.mutant: r.verdict for r in run.results}
+    assert verdicts == {"strong": named_mutants.KILLED, "weak": named_mutants.SURVIVED,
+                        "breaks-import": named_mutants.ERROR, "breaks-import-file": named_mutants.ERROR}, run.results
+    assert "rc=4" in run.results[2].detail and "rc=2" in run.results[3].detail, run.results
+    assert src.read_bytes() == before and src.stat().st_mtime_ns == mtime, "the source was not restored exactly"
+
+    red = {"path": "pkg/gate.py", "plane": "sovereign", "mutants": [mut("strong", ["test_floor", "tests/test_red.py"])]}
+    run = named_mutants.run_file(red, corpus, tmp_path, timeout=120)
+    assert not run.baseline_ok and [r.verdict for r in run.results] == [named_mutants.ERROR]
+    assert "baseline red" in run.results[0].detail
+    assert src.read_bytes() == before
 
 
 if __name__ == "__main__":
