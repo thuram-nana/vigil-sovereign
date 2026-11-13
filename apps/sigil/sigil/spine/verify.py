@@ -28,15 +28,22 @@ def verify_record(record) -> tuple[bool, str]:
     """(ok, reason) for a single SpineRecord — kind vocabulary + binding + entry-hash derivation.
     Fail-closed. The kind check (W5-1) restates the sovereign mirror of the offense SQL
     `CHECK(kind IN (...))` on this per-atom read seam, so the live tail / UI re-verify a record's kind
-    is in-vocabulary the same way the whole-log `SpineStore.verify()` does."""
-    if record.kind not in KINDS:
+    is in-vocabulary the same way the whole-log `SpineStore.verify()` does. A record with no canonical form
+    (e.g. a lone surrogate, which no append can write) is reported tampered — never an exception."""
+    if not isinstance(record.kind, str) or record.kind not in KINDS:
         return False, f"unknown kind {record.kind!r} at seq {record.seq}: not in the enforced KINDS vocabulary"
     content = {
         "scope": record.scope, "kind": record.kind, "source": record.source, "actor": record.actor,
         "payload": record.payload, "parent_id": record.parent_id, "supersedes_id": record.supersedes_id,
     }
-    if digest_payload(content) != record.cert_digest:
+    try:
+        bound = digest_payload(content) == record.cert_digest
+        derived = _entry_hash(record.seq, record.prev_hash, record.cert_digest) == record.entry_hash
+    except (ValueError, TypeError) as e:          # a lone surrogate has no canonical form (UnicodeEncodeError)
+        return False, (f"binding break at seq {record.seq}: content is not canonicalisable ({type(e).__name__}) "
+                       f"(record tampered)")
+    if not bound:
         return False, f"binding break at seq {record.seq}: payload does not match cert_digest (record tampered)"
-    if _entry_hash(record.seq, record.prev_hash, record.cert_digest) != record.entry_hash:
+    if not derived:
         return False, f"entry_hash mismatch at seq {record.seq}: derivation broken (entry tampered)"
     return True, f"seq {record.seq} binds and derives cleanly"

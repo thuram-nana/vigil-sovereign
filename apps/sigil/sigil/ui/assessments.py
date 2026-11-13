@@ -100,19 +100,24 @@ def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
     p = r.payload
     if not isinstance(p, dict):
         return
+    cert = None
     if kind == _FINDING_KIND:
         cert = p.get("certificate")
-        if not isinstance(cert, dict):
-            return
-        index, slug, row = view.findings, cert.get("engagement_slug"), _finding_json(p, cert)
+        # Agents append kind="finding" records with NO certificate (actor.py, bastion, archivist, artificer):
+        # they carry no engagement slug, so no reader can ever ask for them.
+        slug = cert.get("engagement_slug") if isinstance(cert, dict) else None
+        index = view.findings
     else:
-        index, slug, row = view.outcomes, p.get("engagement_slug"), _outcome_json(p)
+        slug, index = p.get("engagement_slug"), view.outcomes
     try:
-        rows = index.setdefault(slug, [])
+        hash(slug)
     except TypeError:
-        view.poisoned = True
+        view.poisoned = True                     # an unhashable slug: the scans compare by ==, so decline
         return
-    rows.append((int(getattr(r, "seq", 0)), row))
+    if not isinstance(slug, str):
+        return                                   # readers ask for str slugs only: keep no unreadable rows
+    row = _finding_json(p, cert) if isinstance(cert, dict) else _outcome_json(p)   # a str slug on a finding => a dict cert
+    index.setdefault(slug, []).append((int(getattr(r, "seq", 0)), row))
 
 
 _ASSESSMENTS_FOLD = FoldCache("ui.assessments", step=_assessments_step)

@@ -9,7 +9,8 @@ those into the cache key, builds the per-entry owner-key resolver with its scan 
 only for its seed — so no registry can forget one of them (`spine/fold_cache.py` holds the trust model).
 
 `UNCACHED` means "no cached answer": the flag is off, the registry's view declared it cannot answer
-(`view.poisoned`), or — for a `live_window` fold, whose full path is a plain scan that never loads the snapshot —
+(`view.poisoned`), the rebuild's read was not contiguous (`FoldDiscontinuity`: a torn read of a record still being
+written, a stale seq index), or — for a `live_window` fold, whose full path is a plain scan that never loads the snapshot —
 the snapshot could not be loaded (the full path would still answer, so the cache declines rather than raise). The
 caller then runs its unchanged full fold.
 
@@ -23,7 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from ..config import fold_cache_enabled
 from ..reuse import assert_no_offense
-from ..spine.fold_cache import FoldCache
+from ..spine.fold_cache import FoldCache, FoldDiscontinuity
 from ..spine.snapshot import SnapshotState
 from . import key_history as _kh
 from .identity import genesis_owner_pubkey
@@ -65,6 +66,17 @@ def _maybe_audit(cache: FoldCache, store, key: tuple, build) -> None:
         results[cache.name] = cache.audit(store, key, build=build)
 
 
+def _window_key(store) -> tuple:
+    """The live window itself keys every entry: a fold that starts at the window's first record (a live-window fold,
+    or a seeded fold whose seed starts at -1) depends on it, and a prune's manifest rebase moves it (the head — and
+    so the snapshot — can commit before the rebase, in the prune's crash window). An entry folded over the old window
+    must not keep answering over the new one."""
+    try:
+        return (store._live_base_prev_hash(),)
+    except Exception:  # noqa: BLE001 — undecidable: an entry that can never match (the full fold answers)
+        return (object(),)
+
+
 def _snapshot(store, live_window: bool):
     if not live_window:
         return SnapshotState.load(store)               # raises exactly as the seeded full fold would
@@ -91,7 +103,7 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
     snap = _snapshot(store, live_window)
     if snap is None:
         return UNCACHED
-    key = (trusted_pubkey, genesis_owner_pubkey(), snap)
+    key = (trusted_pubkey, genesis_owner_pubkey(), snap) + _window_key(store)
 
     def build():
         resolver, horizon = _kh.key_resolver_with_horizon(store, current=trusted_pubkey)
@@ -103,7 +115,10 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
     _maybe_audit(cache, store, key, build)
-    return cache.read(store, key, build=build, reader=guarded)
+    try:
+        return cache.read(store, key, build=build, reader=guarded)
+    except FoldDiscontinuity:
+        return UNCACHED                                # a torn / non-contiguous read: never cached; full fold answers
 
 
 def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tuple[Any, int]"],
@@ -125,5 +140,9 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
     def guarded(view):
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
-    _maybe_audit(cache, store, (snap,), build)
-    return cache.read(store, (snap,), build=build, reader=guarded)
+    key = (snap,) + _window_key(store)
+    _maybe_audit(cache, store, key, build)
+    try:
+        return cache.read(store, key, build=build, reader=guarded)
+    except FoldDiscontinuity:
+        return UNCACHED

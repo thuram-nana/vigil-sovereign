@@ -163,6 +163,10 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "fold_cache_audit.json": "the cockpit's last fold-cache rebuild-and-compare report (Front C S0d) — a "
                              "re-derived verdict over the (captured) spine, rewritten every audit interval; "
                              "no trust or memory state",
+    "fold_cache_audit.ack.jsonl": "the operator's acknowledgements (who, when, which verdict) of a superseded "
+                                  "MISMATCH in that fold-cache audit report (`sigil fold-cache ack`). It only "
+                                  "qualifies that report, which is not captured either: a restored install starts "
+                                  "with neither the note nor its acknowledgements (each is also logged when made)",
     # #70 — the two SaaS money/delivery dirs the shipped units default under SIGIL_HOME. Both DELIBERATELY
     # excluded from THIS (sovereign) leg; the decision is recorded here so the coverage gate stays honest.
     "credit-lease": "the CROSS-PLANE launch seam = the shared VIGIL_BASE_DIR both planes agree on (leases, "

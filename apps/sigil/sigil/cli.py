@@ -1087,9 +1087,10 @@ def cmd_verify(a) -> None:
 
 def _verify_fold_caches(rebuild: bool) -> bool:
     """Front C S0d — the fold-cache line(s) of `sigil verify`. Always: the cockpit's last background audit
-    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify. With `--folds` (and the
-    cache on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns
-    False iff a mismatch was found."""
+    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify; one a previous cockpit
+    recorded (superseded at the running cockpit's start) is printed, not counted, until an operator acknowledges it
+    (`sigil fold-cache ack`). With `--folds` (and the cache on): warm every fold cache in THIS process and
+    rebuild-and-compare each against the spine now. Returns False iff a mismatch was found."""
     from . import config
     ok = True
     try:
@@ -1100,11 +1101,28 @@ def _verify_fold_caches(rebuild: bool) -> bool:
         print(f"folds --: unreadable audit report {config.FOLD_AUDIT_PATH}: {exc}")
         rep = None
     if isinstance(rep, dict):
+        from .governor import fold_warm
+        sup = fold_warm.superseded_mismatch(rep)
+        if sup is not None:
+            print(f"folds --: a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
+                  f"{', '.join(str(f) for f in sup['mismatched'])}; its caches died with it, but investigate a "
+                  f"possible spine edit. Once investigated, acknowledge it: `sigil fold-cache ack`.")
         bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        if bad and not fold_warm.report_is_live(rep):
+            # the caches that disagreed died with that process; this one would rebuild them from the spine
+            print(f"folds --: the cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) recorded {len(bad)} "
+                  f"MISMATCH, but that process is gone and its caches with it — not counted (rebuild-and-compare "
+                  f"now: VIGIL_FOLD_CACHE_ENABLED=1 sigil verify --folds)")
+            bad, rep = [], None
         ok = not bad
+    if isinstance(rep, dict):
+        rows = [f for f in rep.get("folds", []) if isinstance(f, dict)]
+        n_match = sum(1 for f in rows if f.get("status") == "match")
+        n_err = sum(1 for f in rows if f.get("status") == "error")
         print(("folds OK: " if ok else "folds FAIL: ") + f"cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) "
               + (f"— {len(bad)} MISMATCH: " + ", ".join(f"{f.get('fold')} at seq {f.get('seq')} ({f.get('difference')})"
-                                                      for f in bad) if bad else "— every cached fold equals a rebuild"))
+                                                      for f in bad) if bad else
+                 f"— {n_match} cached fold(s) equal a rebuild" + (f"; {n_err} could not be read" if n_err else "")))
     if rebuild:
         if not config.fold_cache_enabled():
             print("folds --: --folds needs VIGIL_FOLD_CACHE_ENABLED (the fold cache is off)")
@@ -1119,6 +1137,37 @@ def _verify_fold_caches(rebuild: bool) -> bool:
               + (" — MISMATCH: " + ", ".join(f"{f['fold']} ({f.get('difference')})" for f in bad) if bad else ""))
         ok = ok and not bad
     return ok
+
+
+def _login_name() -> str:
+    import getpass
+    import os
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 — no login name: the uid names the operator
+        return f"uid {os.getuid()}"
+
+
+def cmd_fold_cache(a) -> None:
+    """Front C S0d — `sigil fold-cache ack`: acknowledge, once investigated, the MISMATCH a previous cockpit recorded
+    (the superseded note of `sigil verify` and `vigil doctor`). The acknowledgement — who, when, which verdict — is
+    recorded in the log beside the audit report, and only that note is removed; refused (exit 2) while the current
+    report records a MISMATCH of its own, or when the report cannot be read."""
+    from . import config
+    from .governor import fold_warm
+    by = a.by if a.by is not None else _login_name()
+    try:
+        entry = fold_warm.acknowledge_superseded(by)
+    except (ValueError, OSError, TimeoutError) as exc:
+        print(f"fold-cache ack: refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if entry is None:
+        print(f"fold-cache ack: nothing to acknowledge ({config.FOLD_AUDIT_PATH} records no superseded MISMATCH)")
+        return
+    sup = entry["superseded"]
+    print(f"fold-cache ack: {entry['by']} acknowledged the MISMATCH a previous cockpit (pid {sup.get('pid')}, audit "
+          f"{sup.get('ts')}) recorded in {', '.join(str(f) for f in sup['mismatched'])}; recorded in "
+          f"{fold_warm.ack_log_path()}")
 
 
 def cmd_status(a) -> None:
@@ -3196,6 +3245,11 @@ def main(argv=None) -> None:
                     help="also warm every verified fold cache in this process and rebuild-and-compare it against the "
                          "spine (Front C S0d; needs VIGIL_FOLD_CACHE_ENABLED)")
     pv.set_defaults(fn=cmd_verify)
+    pfc = sub.add_parser("fold-cache", help="the verified fold cache's audit report (Front C S0d): `ack` acknowledges, "
+                                            "once investigated, the MISMATCH a previous cockpit recorded")
+    pfc.add_argument("action", choices=["ack"])
+    pfc.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
+    pfc.set_defaults(fn=cmd_fold_cache)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")

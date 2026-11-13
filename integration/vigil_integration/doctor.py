@@ -1355,8 +1355,11 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
     `sigil.governor.fold_warm`; read here as inert JSON WITHOUT importing sigil — FATAL-2). Returns (section,
     issues, notes). No report ⇒ `{"present": False}` and nothing else (the cache is off, or the cockpit has not
     audited yet: default output unchanged). A recorded MISMATCH is a HARD issue — a cached fold disagreed with a
-    rebuild from the spine (the cockpit already dropped that entry; find out why). A report older than twice its
-    own interval (+1 h) is a NOTE: the cockpit's audit thread is not running."""
+    rebuild from the spine (the cockpit already dropped that entry; find out why). A MISMATCH recorded by a previous
+    cockpit, which the running one superseded at start (`superseded`), is a NOTE naming that cockpit's pid and audit
+    time — its caches are gone, but the spine edit it may have seen is not — until an operator acknowledges it
+    (`sigil fold-cache ack`). A report older than twice its own interval (+1 h) is a NOTE: the cockpit's audit
+    thread is not running."""
     import datetime as _dt
     import json as _json
     p = (Path(home) if home is not None else _sigil_home()) / "fold_cache_audit.json"
@@ -1380,6 +1383,20 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
               f"({f.get('difference')}). The entry was dropped (the next read rebuilds); run `sigil verify` "
               f"and treat it as a defect or an in-place spine edit." for f in bad]
     notes: list = []
+    errored = [f for f in folds if f.get("status") == "error"]
+    if errored:                    # the rebuild from the spine RAISED: reads of these folds fail closed
+        section["errored"] = len(errored)
+        notes.append(f"the fold-cache audit could not rebuild {len(errored)} fold(s) from the spine "
+                     f"({', '.join(str(f.get('fold')) for f in errored)}: {errored[0].get('error')}); "
+                     f"run `sigil verify`.")
+    sup = rep.get("superseded")
+    sup = sup if isinstance(sup, dict) else {}
+    sup_bad = sup.get("mismatched")
+    if isinstance(sup_bad, list) and sup_bad:
+        section["superseded_mismatched"] = len(sup_bad)
+        notes.append(f"a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
+                     f"{', '.join(str(f) for f in sup_bad)}; its caches died with it, but investigate a possible "
+                     f"spine edit. Once investigated, acknowledge it: `sigil fold-cache ack`.")
     try:
         ts = _dt.datetime.fromisoformat(str(rep.get("ts"))).timestamp()
         interval = float(rep.get("interval_s") or 0)
@@ -2300,6 +2317,7 @@ def render(report: dict) -> str:
         # Front C S0d: rendered ONLY when the cockpit has written an audit (default output byte-identical).
         lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
                      f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
+                     + (f", {fc['errored']} could not be rebuilt" if fc.get("errored") else "")
                      + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
 
     mt = report.get("metering")

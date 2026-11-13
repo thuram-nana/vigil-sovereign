@@ -247,7 +247,9 @@ class PlanCreditLedger:
         finishes an interrupted, recorded decision (E3bc) never reads it — it moves the RECORDED split."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return None
-        hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)))
+        # live_window: this scan never loads the snapshot, so a snapshot that cannot be loaded makes the cached read
+        # decline (the scan below answers) instead of raising where the scan answers.
+        hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)), live_window=True)
         if hit is not _UNCACHED:
             return hit
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
@@ -283,7 +285,7 @@ class PlanCreditLedger:
         return (dict(snap.plan_granted_map()), dict(snap.plan_debited_map()),
                 set(snap.plan_seen_set())), snap.base_seq - 1
 
-    def _cached(self, reader):
+    def _cached(self, reader, *, live_window: bool = False):
         """`reader(view)` over the verified incremental plan-ledger fold (`fold_read.cached_read`, flag-gated),
         else `_UNCACHED` (the caller then runs the full `_fold` / scan)."""
         def seed(snap):
@@ -291,7 +293,7 @@ class PlanCreditLedger:
             return _PlanView(*st), since
 
         return cached_read(_PLAN_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
-                           reader=reader)
+                           reader=reader, live_window=live_window)
 
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (granted, debited, seen) keyed per `(org_id, period_end)`, where `seen` holds the

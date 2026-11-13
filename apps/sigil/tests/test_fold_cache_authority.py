@@ -35,7 +35,8 @@ from sigil.governor.authn import signed_payload
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
 from sigil.spine.snapshot import SnapshotError, SnapshotState, build
-from sigil.spine.store import SpineStore
+from sigil.spine.store import SpineError, SpineStore
+from test_spine_store_integrity import write_chained_line
 
 OWNER = generate_keypair()
 OWNER_PUB = OWNER.public_key_b64
@@ -250,8 +251,11 @@ def test_a_tampered_agent_record_reads_the_unchanged_scan(tmp_path, monkeypatch)
     regs.store.append(kind="event", source="agent", actor="ALPHA", payload={"decision": "auto"},
                       ts=DAYS[0] + "T01:00:00Z")
     assert regs.budget.spent("ALPHA", DAYS[0]).actions == 1                  # warm
-    regs.store.append(kind="event", source="agent", actor="BRAVO", payload=["not", "a", "dict"],
-                      ts=DAYS[1] + "T01:00:00Z")
+    with pytest.raises(SpineError, match="payload is not a JSON object"):    # no append can write it ...
+        regs.store.append(kind="event", source="agent", actor="BRAVO", payload=["not", "a", "dict"],
+                          ts=DAYS[1] + "T01:00:00Z")
+    write_chained_line(regs.store, ["not", "a", "dict"], kind="event", source="agent", actor="BRAVO",
+                       ts=DAYS[1] + "T01:00:00Z")                               # ... a hand edit can
     assert regs.budget.spent("ALPHA", DAYS[0]).actions == 1
     assert bd._BUDGET_FOLD._entries and next(iter(bd._BUDGET_FOLD._entries.values())).state.poisoned
     with pytest.raises(AttributeError):
