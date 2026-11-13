@@ -1409,13 +1409,22 @@ class Provisioner:
         import time as _t
         from . import assessments as _assess
         return self._customer_read(requester, requester_org_id, "view_assessments",
-                                   lambda s, o: _assess.assessment_summary(s, o, now=_t.time()))
+                                   lambda s, o: _assess.assessment_summary(s, o, now=_t.time(),
+                                                                           preview=self._preview_locked(o)))
 
     def customer_assessment_findings(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         import time as _t
         from . import assessments as _assess
-        return self._customer_read(requester, requester_org_id, "view_assessments",
-                                   lambda s, o: _assess.assessment_findings(s, o, now=_t.time()))
+        return self._customer_read(
+            requester, requester_org_id, "view_assessments",
+            lambda s, o: _assess.assessment_findings(
+                s, o, now=_t.time(), preview=self._preview_locked(o),
+                can_buy=self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")))
+
+    def _preview_locked(self, org_id: str) -> bool:
+        """Pricing S5: is this org's finding detail locked (trial preview, not unlocked)? Server-side only."""
+        from .finding_preview import preview_locked
+        return preview_locked(self.store, org_id, wallet=self.wallet)
 
     def customer_assets(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         """Per-host ownership status (verified / pending / expired) for the SESSION org's assets — the read
