@@ -5,9 +5,10 @@ http.client hands the socket to the response object and sets ``conn.sock = None`
 ``conn.sock`` after the response, so verification failed against essentially every real server (they all
 honour the ``Connection: close`` the fetcher itself sends). The fix keeps the TLS socket the request
 actually went out on, re-arms the remaining budget before EVERY send and recv on it (a server dripping one
-byte per recv can no longer outlast the absolute deadline), and checks the connected peer (``getpeername``
-before any byte is sent) is the vetted address. A failure shows the customer only the fetcher's own fixed
-wording; the TLS / socket error text goes to the operator audit.
+byte per recv can no longer outlast the absolute deadline; the name resolution is bounded by the same
+budget), checks the connected peer (``getpeername`` before any byte is sent) is the vetted address, and
+closes that socket itself. A failure (resolve, connect, TLS, transport) shows the customer only the
+fetcher's own fixed wording; the resolver / TLS / socket error text goes to the operator audit.
 
 Loopback is on the fetcher's SSRF deny list, so these tests use test-only seams (monkeypatch): the module's
 ``_addr_is_internal`` is narrowed to allow exactly 127.0.0.1, ``_HTTPS_PORT`` is pointed at the ephemeral
@@ -18,6 +19,7 @@ defaults).
 from __future__ import annotations
 
 import datetime
+import gc
 import http.client
 import http.server
 import itertools
@@ -27,6 +29,7 @@ import ssl
 import tempfile
 import threading
 import time
+import warnings
 
 import pytest
 from cryptography import x509
@@ -44,6 +47,9 @@ TOKEN = b"vigil-site-verification=TOK"
 DOH_BODY = json.dumps({"Answer": [{"type": 16, "data": '"vigil-site-verification=TOK"'}]}).encode()
 DRIP_S = 0.1                                            # one byte every 100 ms ...
 DRIP_N = 60                                             # ... for 6 s — far past the budgets used below
+STALL_DRIP_S = 0.05                                     # drip-then-stall: one byte every 50 ms ...
+STALL_DRIP_N = 18                                       # ... for ~0.9 s of a 1 s budget, then silence
+SLACK_S = 0.5                                           # scheduling slack allowed past a budget
 
 
 @pytest.fixture(scope="module")
@@ -69,11 +75,13 @@ class _Server:
     """A real threaded HTTP(S) server on loopback. ``mode``: ``close`` (HTTP/1.1 + ``Connection: close``),
     ``keepalive`` (HTTP/1.1, Content-Length, no close header), ``http10`` (HTTP/1.0), ``eof`` (no
     Content-Length: the body ends when the server closes), ``drip-head`` / ``drip-body`` (the header block /
-    the body trickles out one byte per ``DRIP_S``), ``badstatus`` (a malformed status line).
-    ``stop()`` joins every handler thread, so ``requests`` is final once it returns."""
+    the body trickles out one byte per ``DRIP_S``), ``stall-head`` / ``stall-body`` (the header block / the
+    body trickles for most of the budget, then the server goes silent until ``stop()``), ``badstatus`` (a
+    malformed status line). ``stop()`` joins every handler thread, so ``requests`` is final once it returns."""
 
     def __init__(self, cert_files, mode, *, bind="127.0.0.1", tls=True, status=200, body=None):
         self.requests: list[str] = []
+        self._quit = threading.Event()
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -90,6 +98,22 @@ class _Server:
                     b = TOKEN
                 if mode == "badstatus":
                     self.wfile.write(b"HTTP/1.1 two-hundred OK\r\n\r\n")
+                    return
+                if mode == "stall-head":
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Drip: ")
+                    for _ in range(STALL_DRIP_N):
+                        self.wfile.write(b"y")
+                        time.sleep(STALL_DRIP_S)
+                    outer._quit.wait(10)                # silent: neither more bytes nor a close
+                    return
+                if mode == "stall-body":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "4000")
+                    self.end_headers()
+                    for _ in range(STALL_DRIP_N):
+                        self.wfile.write(b"x")
+                        time.sleep(STALL_DRIP_S)
+                    outer._quit.wait(10)
                     return
                 if mode == "drip-head":
                     self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Drip: ")
@@ -137,6 +161,7 @@ class _Server:
     def stop(self):
         if not self._stopped:
             self._stopped = True
+            self._quit.set()
             self.srv.shutdown()
             self.srv.server_close()
 
@@ -164,6 +189,82 @@ def serve(cert_files, monkeypatch):
 def _fetcher(cert_files, **kw):
     ctx = ssl.create_default_context(cafile=cert_files[0])   # the module's own trust injection seam
     return WellKnownFetcher(resolver=_loopback_resolver, ssl_context=ctx, **kw)
+
+
+class _RawPeer:
+    """A bare TCP (optionally TLS) listener for ONE connection. With ``reply`` it reads the request head and
+    answers ``reply`` WITHOUT closing; then it waits for the client to close its end. ``saw_eof`` is set
+    when the client's FIN arrives — the client really closed the socket, it was not left for the garbage
+    collector."""
+
+    def __init__(self, cert_files=None, *, bind="127.0.0.1", reply=None):
+        self.saw_eof = threading.Event()
+        self._lsock = socket.create_server((bind, 0))
+        self._lsock.settimeout(5)
+        self.port = self._lsock.getsockname()[1]
+        self._ctx = None
+        if cert_files is not None:
+            self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self._ctx.load_cert_chain(*cert_files)
+        self._reply = reply
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self):
+        try:
+            c, _ = self._lsock.accept()
+        except OSError:
+            return
+        c.settimeout(5)
+        try:
+            if self._ctx is not None:
+                c = self._ctx.wrap_socket(c, server_side=True)
+            if self._reply is not None:
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    chunk = c.recv(4096)
+                    if not chunk:
+                        return
+                    head += chunk
+                c.sendall(self._reply)
+            while c.recv(4096):
+                pass
+            self.saw_eof.set()
+        except OSError:
+            pass                                        # a timeout here means: no EOF from the client
+        finally:
+            c.close()
+
+    def stop(self):
+        self._lsock.close()
+        self._t.join(10)
+
+
+@pytest.fixture
+def raw_peer(monkeypatch):
+    started: list[_RawPeer] = []
+    monkeypatch.setattr(of, "_addr_is_internal", lambda ip: str(ip) != "127.0.0.1")
+
+    def _start(*a, **kw):
+        p = _RawPeer(*a, **kw)
+        started.append(p)
+        monkeypatch.setattr(of, "_HTTPS_PORT", p.port)
+        return p
+    yield _start
+    for p in started:
+        p.stop()
+
+
+@pytest.fixture
+def closed_port(monkeypatch):
+    """A loopback port that is bound but NOT listening: a connect there is refused at once (no race with
+    another process grabbing a just-freed port)."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    monkeypatch.setattr(of, "_addr_is_internal", lambda ip: str(ip) != "127.0.0.1")
+    monkeypatch.setattr(of, "_HTTPS_PORT", sock.getsockname()[1])
+    yield
+    sock.close()
 
 
 _EXPECTED = {METHOD_WELL_KNOWN: TOKEN.decode(), METHOD_META_TAG: TOKEN.decode(),
@@ -240,6 +341,18 @@ def test_peer_mismatch_is_refused_before_any_byte_is_sent(serve, cert_files, mon
     assert s.requests == []
 
 
+def test_refused_peer_socket_is_closed_at_once(raw_peer, cert_files, monkeypatch):
+    """The connection the peer check refuses is closed by the fetcher itself: the listener sees the FIN
+    while the caller still holds the exception (whose traceback keeps the fetcher's frames alive)."""
+    peer = raw_peer(bind="127.0.0.2")
+    real = socket.create_connection
+    monkeypatch.setattr(of, "_connect", lambda addr, timeout=None: real(("127.0.0.2", addr[1]), timeout))
+    with pytest.raises(OwnershipFetchError, match="not the vetted address") as ei:
+        _fetcher(cert_files).fetch(METHOD_WELL_KNOWN, HOST)
+    assert ei.value.__traceback__ is not None
+    assert peer.saw_eof.wait(2.0)
+
+
 def test_undeterminable_peer_is_refused():
     """Fail-closed: a socket whose peer cannot be read (unconnected) is refused, never passed."""
     with socket.socket() as sock:
@@ -297,23 +410,37 @@ def _clock_spent_after(n_calls):
     return mono
 
 
+def test_budget_is_checked_before_resolving(serve, cert_files):
+    """Clock reads: fetch start, then the resolve. Spent there → refused before the resolver is asked."""
+    s = serve("close")
+    asked = []
+
+    def res(host, port, **kw):
+        asked.append(host)
+        return _loopback_resolver(host, port)
+    with pytest.raises(OwnershipFetchError, match="total time budget"):
+        WellKnownFetcher(resolver=res, monotonic=_clock_spent_after(1)).fetch(METHOD_WELL_KNOWN, HOST)
+    s.stop()
+    assert asked == [] and s.requests == []
+
+
 def test_budget_is_rechecked_before_the_request_is_sent(serve, cert_files):
-    """Clock reads: fetch start, connect, handshake, then the request send. Spent at the send → refused,
-    and the server never receives a request."""
+    """Clock reads: fetch start, resolve, connect, handshake, then the request send. Spent at the send →
+    refused, and the server never receives a request."""
     s = serve("close")
     with pytest.raises(OwnershipFetchError, match="total time budget"):
-        _fetcher(cert_files, monotonic=_clock_spent_after(3)).fetch(METHOD_WELL_KNOWN, HOST)
+        _fetcher(cert_files, monotonic=_clock_spent_after(4)).fetch(METHOD_WELL_KNOWN, HOST)
     s.stop()
     assert s.requests == []
 
 
 @pytest.mark.parametrize("mode", ["close", "keepalive"])
 def test_budget_is_rechecked_before_the_first_response_read(serve, cert_files, mode):
-    """The 5th clock read is the first recv of the response: spent there → refused although the server
+    """The 6th clock read is the first recv of the response: spent there → refused although the server
     answered at once."""
     s = serve(mode)
     with pytest.raises(OwnershipFetchError, match="total time budget"):
-        _fetcher(cert_files, monotonic=_clock_spent_after(4)).fetch(METHOD_WELL_KNOWN, HOST)
+        _fetcher(cert_files, monotonic=_clock_spent_after(5)).fetch(METHOD_WELL_KNOWN, HOST)
     s.stop()
     assert len(s.requests) == 1
 
@@ -327,7 +454,45 @@ def test_drip_fed_response_is_cut_at_the_total_budget(serve, cert_files, mode, m
     t0 = time.monotonic()
     with pytest.raises(OwnershipFetchError):
         _fetcher(cert_files, timeout=0.5, total_timeout=1.0).fetch(method, HOST)
-    assert time.monotonic() - t0 < 3.0
+    assert time.monotonic() - t0 < 1.0 + SLACK_S
+
+
+@pytest.mark.parametrize("mode", ["stall-head", "stall-body"])
+def test_drip_then_stall_is_cut_at_the_total_budget_not_a_per_op_timeout_later(serve, cert_files, mode):
+    """The deadline is ABSOLUTE: each recv's own timeout is capped at what is LEFT of the budget. The server
+    drips for ~0.9 s of the 1 s budget and then goes silent, with a per-op timeout (3 s) LONGER than the
+    whole budget — the silent recv must end at the 1 s deadline, not a full timeout after the last byte."""
+    serve(mode)
+    t0 = time.monotonic()
+    with pytest.raises(OwnershipFetchError):
+        _fetcher(cert_files, timeout=3.0, total_timeout=1.0).fetch(METHOD_WELL_KNOWN, HOST)
+    assert time.monotonic() - t0 < 1.0 + SLACK_S
+
+
+@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_DNS_TXT])
+def test_slow_name_resolution_is_cut_at_the_total_budget(serve, cert_files, method):
+    """A customer's nameserver that drops queries leaves the system resolver retrying for tens of seconds:
+    the fetch gives up at the deadline (per-op timeout 3 s, total budget 1 s) and never connects."""
+    s = serve("keepalive")
+    release = threading.Event()
+
+    def stuck(host, port, **kw):
+        release.wait(5)
+        return _loopback_resolver(host, port)
+    f = WellKnownFetcher(resolver=stuck, ssl_context=ssl.create_default_context(cafile=cert_files[0]),
+                         timeout=3.0, total_timeout=1.0)
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(OwnershipFetchError) as ei:
+            f.fetch(method, HOST)
+        elapsed = time.monotonic() - t0
+    finally:
+        release.set()                                   # let the abandoned resolver worker finish
+    assert elapsed < 1.0 + SLACK_S
+    assert str(ei.value) == f"could not resolve {(DOH if method == METHOD_DNS_TXT else HOST)!r}"
+    assert ei.value.detail.startswith("TimeoutError: ")
+    s.stop()
+    assert s.requests == []
 
 
 # --- customer-facing errors vs the operator audit ---------------------------------------------------
@@ -349,6 +514,44 @@ def test_transport_failure_shows_a_fixed_reason_and_keeps_the_detail_for_the_ope
         _fetcher(cert_files).fetch(METHOD_META_TAG, HOST)
     assert str(ei.value) == "meta-tag fetch failed"
     assert "BadStatusLine" in ei.value.detail
+
+
+@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_META_TAG, METHOD_DNS_TXT])
+def test_connect_failure_shows_a_fixed_reason_and_keeps_the_detail_for_the_operator(closed_port, cert_files,
+                                                                                    method):
+    """Host down / firewalled / connect timeout: an ``OwnershipFetchError`` naming the host actually dialled
+    (the DoH resolver for dns-txt), never a bare socket exception."""
+    with pytest.raises(OwnershipFetchError) as ei:
+        _fetcher(cert_files).fetch(method, HOST)
+    assert str(ei.value) == f"could not connect to {(DOH if method == METHOD_DNS_TXT else HOST)!r}"
+    assert ei.value.detail.startswith("ConnectionRefusedError: ")
+
+
+def test_failed_exchange_closes_its_tls_socket_while_the_error_is_held(raw_peer, cert_files):
+    """The server answers on a kept-alive connection with a malformed status line; the fetch fails inside
+    the exchange. The fetcher closes the TLS socket itself: the server sees the FIN while the caller still
+    holds the exception (whose traceback keeps the exchange's frame, and its locals, alive)."""
+    peer = raw_peer(cert_files, reply=b"HTTP/1.1 two-hundred OK\r\n\r\n")
+    with pytest.raises(OwnershipFetchError, match="well-known fetch failed") as ei:
+        _fetcher(cert_files).fetch(METHOD_WELL_KNOWN, HOST)
+    assert ei.value.__traceback__ is not None
+    assert peer.saw_eof.wait(2.0)
+
+
+@pytest.mark.parametrize("status", [200, 404])
+def test_finished_exchange_leaves_no_socket_for_the_garbage_collector(serve, cert_files, status):
+    """On the normal paths too the TLS socket is closed explicitly — no 'unclosed socket' ResourceWarning."""
+    s = serve("keepalive", status=status, body=None if status == 200 else b"")
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always", ResourceWarning)
+        try:
+            _fetcher(cert_files).fetch(METHOD_WELL_KNOWN, HOST)
+        except OwnershipFetchError:
+            assert status == 404
+        gc.collect()
+    ours = [w for w in seen if issubclass(w.category, ResourceWarning)
+            and f"raddr=('127.0.0.1', {s.port})" in str(w.message)]
+    assert ours == []
 
 
 _iss = itertools.count(1)
@@ -438,3 +641,17 @@ def test_resolver_is_asked_for_the_https_port_and_internal_still_refused(cert_fi
     with pytest.raises(OwnershipFetchError, match="non-global"):
         WellKnownFetcher(resolver=res).fetch(METHOD_WELL_KNOWN, HOST)
     assert seen == [443]
+
+
+def test_connect_failure_reaches_customer_as_a_fixed_reason_and_the_audit_with_detail(closed_port, cert_files,
+                                                                                       prov):
+    """End to end (dns-txt, whose dialled peer is the DoH resolver): the customer is told what failed in the
+    fetcher's own words — not a well-known message for a dns-txt verify — and the audit keeps the socket
+    error."""
+    from sigil.ui.provision import ProvisionDenied
+    p, s = prov(_fetcher(cert_files))
+    with pytest.raises(ProvisionDenied) as ei:
+        p.target_verify("u_op", "org_a", HOST, METHOD_DNS_TXT, authorized=True)
+    assert str(ei.value) == "could not read the published token: could not connect to 'cloudflare-dns.com'"
+    (audit,) = _verify_audits(s)
+    assert audit["outcome"] == "fetch_failed" and audit["reason"].startswith("ConnectionRefusedError: ")

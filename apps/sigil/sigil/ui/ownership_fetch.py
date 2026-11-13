@@ -21,18 +21,22 @@ customer host for well-known; the DoH resolver for dns-txt):
   * before any byte is sent, the connected socket's own peer address (``getpeername``) must equal the
     vetted IP — an undeterminable or different peer is refused;
   * https only, NO redirect following (a 30x toward an internal URL is never chased), a hard per-op timeout
-    under an absolute wall-clock budget — re-armed to the REMAINING budget before every send and every recv,
-    so a server that drip-feeds its status line, headers or body cannot hold the fetch past the deadline —
-    and a BOUNDED read (a huge body cannot exhaust memory).
+    under an absolute wall-clock budget that covers the WHOLE fetch: the name resolution (run in a worker
+    and abandoned at the deadline, so a customer's nameserver that drops queries cannot hold the fetch for
+    the system resolver's own retry schedule), the connect, the handshake, and every send and every recv
+    (re-armed to the REMAINING budget each time, so a server that drip-feeds its status line, headers or
+    body cannot hold the fetch past the deadline) — and a BOUNDED read (a huge body cannot exhaust memory).
 
-A failure's ``str()`` is the fetcher's own fixed wording (it reaches the customer); the underlying library
-error text (TLS alerts, socket errors) is carried separately in ``OwnershipFetchError.detail`` for the
-operator audit only.
+Every failure — resolve, connect, TLS, transport — is an ``OwnershipFetchError``. Its ``str()`` is the
+fetcher's own fixed wording (it reaches the customer); the underlying library error text (resolver errors,
+TLS alerts, socket errors) is carried separately in ``OwnershipFetchError.detail`` for the operator audit
+only.
 
 The ``dns-txt`` VERDICT lives in ``governor.asset_ownership``; this module is the FETCH half. An HTML
 meta-tag method is a follow-on (SS-2). Extensible: a new method adds a branch here + a verdict branch,
 without touching the authorization system. FATAL-2: sovereign-side, stdlib only
-(socket/ssl/http.client/ipaddress/json/urllib.parse), ``assert_no_offense`` at import; no framework/strix.
+(socket/ssl/http.client/ipaddress/json/threading/urllib.parse), ``assert_no_offense`` at import; no
+framework/strix.
 """
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ import ipaddress
 import json
 import socket
 import ssl
+import threading
 import time
 from typing import Any, Callable
 from urllib.parse import quote
@@ -99,15 +104,41 @@ def _addr_is_internal(ip_str: Any) -> bool:
                 or ip.is_multicast or ip.is_reserved or ip.is_unspecified or cgnat)
 
 
-def _resolve_public_ip(host: str, *, resolver: Callable[..., Any]) -> str:
+def _call_within(fn: Callable[[], Any], timeout: float) -> Any:
+    """Run ``fn`` in a daemon worker and wait at most ``timeout`` seconds for it: return its result or
+    re-raise its exception here; raise ``TimeoutError`` if it has not finished. A late worker is abandoned
+    (it ends on its own when the system resolver gives up), so the CALLER is never held past ``timeout``."""
+    out: "list[Any]" = []
+    err: "list[BaseException]" = []
+
+    def run() -> None:
+        try:
+            out.append(fn())
+        except BaseException as e:  # noqa: BLE001 — handed back to the waiting caller, never swallowed
+            err.append(e)
+
+    worker = threading.Thread(target=run, name="ownership-resolve", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"name resolution did not finish within {timeout:.2f} s")
+    if err:
+        raise err[0]
+    return out[0]
+
+
+def _resolve_public_ip(host: str, *, resolver: Callable[..., Any], timeout: "float | None" = None) -> str:
     """Resolve ``host`` and return ONE validated-public IP to PIN the connect to. Raises
     ``OwnershipFetchError`` (fail-closed) if resolution fails, yields no address, or ANY resolved address is
     internal — refusing when ANY resolved address is internal defeats a split-horizon name that returns a
-    public AND an internal address."""
+    public AND an internal address. With ``timeout``, a resolution still running after that many seconds is
+    a failure too (the fetcher passes the remaining budget)."""
+    def query() -> Any:
+        return resolver(host, _HTTPS_PORT, type=socket.SOCK_STREAM)
     try:
-        infos = resolver(host, _HTTPS_PORT, type=socket.SOCK_STREAM)
-    except (socket.gaierror, OSError):
-        raise OwnershipFetchError(f"could not resolve {host!r}") from None
+        infos = query() if timeout is None else _call_within(query, timeout)
+    except (socket.gaierror, OSError) as e:
+        raise OwnershipFetchError(f"could not resolve {host!r}", detail=_detail(e)) from None
     ips = []
     for info in infos:
         try:
@@ -198,9 +229,10 @@ class WellKnownFetcher:
         self._doh_resolver = str(doh_resolver or _DEFAULT_DOH_RESOLVER)
 
     def _op_timeout(self, start: float) -> float:
-        """Per-operation socket timeout, capped by the REMAINING total budget — an ABSOLUTE wall-clock
-        deadline across connect→handshake→read, so a cooperating host cannot drip-feed just under the per-op
-        timeout to hold a thread far beyond the budget. Raises (fail-closed) once the budget is spent."""
+        """Per-operation timeout, capped by the REMAINING total budget — an ABSOLUTE wall-clock deadline
+        across resolve→connect→handshake→read, so a cooperating host (or its nameserver) cannot answer just
+        under the per-op timeout to hold a thread far beyond the budget. Raises (fail-closed) once the budget
+        is spent."""
         remaining = self._total - (self._monotonic() - start)
         if remaining <= 0:
             raise OwnershipFetchError("ownership fetch exceeded its total time budget")
@@ -208,15 +240,19 @@ class WellKnownFetcher:
 
     def _open_pinned_https(self, host: str, start: float) -> "tuple[http.client.HTTPSConnection, ssl.SSLSocket]":
         """Open an https connection PINNED to a validated-public resolved IP for ``host`` (the SSRF gate +
-        rebinding defence): resolve→refuse-if-any-internal→connect-to-validated-IP→verify the connected PEER is
-        that IP→TLS with SNI/cert against the HOSTNAME. Shared by both the well-known fetch (host = customer
-        host) and the dns-txt fetch (host = the DoH resolver). Returns ``(conn, tls)``: every send/recv of
-        ``conn`` goes through ``_BudgetedSocket`` over ``tls`` (the socket the peer check vetted), and the
-        caller closes ``tls`` itself — ``conn.sock`` cannot be used for that, http.client sets it to None once
-        a ``Connection: close`` (or HTTP/1.0) response hands the socket to the response object.
-        Raises ``OwnershipFetchError`` fail-closed."""
-        ip = _resolve_public_ip(host, resolver=self._resolver)     # SSRF gate (raises if any addr internal)
-        raw = _connect((ip, _HTTPS_PORT), timeout=self._op_timeout(start))
+        rebinding defence): resolve (within the budget)→refuse-if-any-internal→connect-to-validated-IP→verify
+        the connected PEER is that IP→TLS with SNI/cert against the HOSTNAME. Shared by both the well-known
+        fetch (host = customer host) and the dns-txt fetch (host = the DoH resolver). Returns ``(conn, tls)``:
+        every send/recv of ``conn`` goes through ``_BudgetedSocket`` over ``tls`` (the socket the peer check
+        vetted), and the caller closes ``tls`` itself — ``conn.sock`` cannot be used for that, http.client sets
+        it to None once a ``Connection: close`` (or HTTP/1.0) response hands the socket to the response object.
+        Raises ``OwnershipFetchError`` fail-closed (a resolve or connect failure included)."""
+        ip = _resolve_public_ip(host, resolver=self._resolver,     # SSRF gate (raises if any addr internal);
+                                timeout=self._op_timeout(start))   # bounded by the remaining budget
+        try:
+            raw = _connect((ip, _HTTPS_PORT), timeout=self._op_timeout(start))
+        except OSError as e:                                       # refused / unreachable / connect timeout
+            raise OwnershipFetchError(f"could not connect to {host!r}", detail=_detail(e)) from None
         try:
             _require_peer(raw, ip)                                 # the socket really landed on the vetted IP
             raw.settimeout(self._op_timeout(start))                # bound the TLS handshake by remaining budget
@@ -239,7 +275,6 @@ class WellKnownFetcher:
         server keeps the connection alive or answers ``Connection: close``. No redirect following
         (http.client never chases a 30x). Fail-closed: any transport error raises ``OwnershipFetchError``."""
         conn, tls = self._open_pinned_https(host, start)
-        resp = None
         try:
             conn.request("GET", path,
                          headers={"Host": host, "User-Agent": "VIGIL-ownership-verify", "Accept": accept,
@@ -253,9 +288,10 @@ class WellKnownFetcher:
         except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
             raise OwnershipFetchError(f"{what} fetch failed", detail=_detail(e)) from None
         finally:
-            if resp is not None:
-                _quiet_close(resp)
-            _quiet_close(conn)
+            # ``tls`` is the ONLY OS resource of the exchange: ``conn`` never dials (auto_open=0) and its socket
+            # wrapper's close() is a no-op, the response reads through a buffer over that same wrapper. Close it
+            # here, deterministically — never left to the garbage collector (an exception's traceback keeps
+            # this frame, and so the socket, alive for as long as the caller holds it).
             _quiet_close(tls)
 
     def fetch(self, method: str, host: str, *, now: Any = None) -> "str | list[str]":

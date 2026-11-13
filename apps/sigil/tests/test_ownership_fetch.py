@@ -66,11 +66,15 @@ def test_resolve_returns_public():
     assert _resolve_public_ip("apme.cm", resolver=_res("1.1.1.1")) == "1.1.1.1"
 
 
-def test_resolve_failure_is_refusal():
+@pytest.mark.parametrize("timeout", [None, 1.0])         # direct, and through the budget-bounded worker
+def test_resolve_failure_is_refusal(timeout):
+    """Fail-closed with the fetcher's own wording for the customer; the resolver's error for the operator."""
     def boom(host, port, **kw):
         raise socket.gaierror("nope")
-    with pytest.raises(OwnershipFetchError):
-        _resolve_public_ip("apme.cm", resolver=boom)
+    with pytest.raises(OwnershipFetchError) as ei:
+        _resolve_public_ip("apme.cm", resolver=boom, timeout=timeout)
+    assert str(ei.value) == "could not resolve 'apme.cm'"
+    assert ei.value.detail == "gaierror: nope"
 
 
 def test_fetch_refuses_unsupported_method():
