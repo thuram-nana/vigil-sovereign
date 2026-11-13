@@ -202,7 +202,7 @@ def record_launch_settled(store, owner_key, *, org_id: str, slug: str, nonce: st
     return store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
 
-def _decision_from(p: dict) -> "Optional[SettlementDecision]":
+def _decision_from(p: Any) -> "Optional[SettlementDecision]":
     """The decision a VERIFIED v2 payload carries, or None when it fails an invariant (malformed)."""
     if p.get("v") != SETTLED_RECORD_VERSION:
         return None
