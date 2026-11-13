@@ -42,6 +42,30 @@ from .scope_source import ScopeSource
 
 logger = logging.getLogger("vigil.gateway.proxy")
 
+_LOG_FIELD_MAX = 200  # chars of one client-influenced value (a CONNECT/URL host) we put in a log line
+
+
+def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
+    """The LOGGED copy of a client-influenced value (the requested host, a refusal reason or an exception
+    message that embeds it). The sandboxed client this proxy contains chooses those bytes, so every
+    character that is not ``str.isprintable()`` (C0/C1 controls incl. ESC/NUL/DEL, every line breaker,
+    bidi/zero-width formats, lone surrogates) AND the backslash itself becomes a visible ``\\xNN`` /
+    ``\\uNNNN`` / ``\\UNNNNNNNN`` escape (injective: a real ESC and a typed backslash-x-1-b log
+    differently), and the value is capped at ``limit`` characters. So a client can neither drive the
+    operator's terminal, split or forge a refusal record, nor write one unbounded line. Any other printable
+    text is returned unchanged. Gateway-local on purpose: this plane imports no sigil or engine helper."""
+    s = value if isinstance(value, str) else str(value)
+    out = []
+    for ch in s[:limit]:
+        if ch.isprintable() and ch != "\\":
+            out.append(ch)
+        else:
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp <= 0xFF else f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
+    if len(s) > limit:
+        out.append(f"...[+{len(s) - limit} chars]")
+    return "".join(out)
+
 Resolver = Callable[[str, int], list]
 
 _CONNECT_ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
@@ -345,7 +369,7 @@ class EgressProxy:
                     return
                 await self._do_http(reader, writer, host, port, rewritten, content_length, peer, leftover)
         except Exception as exc:  # fail-closed: never leak a half-open tunnel on error
-            logger.warning("proxy error from %s: %s", peer, exc)
+            logger.warning("proxy error from %s: %s", peer, _log_safe(exc, 2 * _LOG_FIELD_MAX))
             with _suppress():
                 await self._deny(writer, "internal proxy error")
         finally:
@@ -374,7 +398,7 @@ class EgressProxy:
 
     async def _refuse_port(self, writer, kind: str, host, port, peer) -> None:
         logger.warning("DROP %s %s:%s from %s — port not in allowlist %s",
-                       kind, host, port, peer, sorted(self._allowed_ports))
+                       kind, _log_safe(host), port, peer, sorted(self._allowed_ports))
         await self._deny(
             writer,
             f"{kind} to port {port} is not allowed; the gateway permits only "
@@ -389,7 +413,8 @@ class EgressProxy:
             return
         decision = self.decide(host, port)
         if not decision.allowed:
-            logger.warning("DROP CONNECT %s:%s from %s — %s", host, port, peer, decision.reason)
+            logger.warning("DROP CONNECT %s:%s from %s — %s", _log_safe(host), port, peer,
+                           _log_safe(decision.reason, 2 * _LOG_FIELD_MAX))
             await self._deny(writer, decision.reason)
             return
         try:
@@ -400,7 +425,7 @@ class EgressProxy:
         except (OSError, asyncio.TimeoutError) as exc:
             await self._deny(writer, f"upstream connect failed: {exc}")
             return
-        logger.info("ALLOW CONNECT %s:%s→%s from %s", host, port, decision.pinned_ip, peer)
+        logger.info("ALLOW CONNECT %s:%s→%s from %s", _log_safe(host), port, decision.pinned_ip, peer)
         writer.write(_CONNECT_ESTABLISHED)
         await writer.drain()
         if leftover:  # first tunnel bytes the client coalesced with the CONNECT line
@@ -416,7 +441,8 @@ class EgressProxy:
             return
         decision = self.decide(host, port)
         if not decision.allowed:
-            logger.warning("DROP HTTP %s:%s from %s — %s", host, port, peer, decision.reason)
+            logger.warning("DROP HTTP %s:%s from %s — %s", _log_safe(host), port, peer,
+                           _log_safe(decision.reason, 2 * _LOG_FIELD_MAX))
             await self._deny(writer, decision.reason)
             return
         try:
@@ -427,7 +453,7 @@ class EgressProxy:
         except (OSError, asyncio.TimeoutError) as exc:
             await self._deny(writer, f"upstream connect failed: {exc}")
             return
-        logger.info("ALLOW HTTP %s:%s→%s from %s", host, port, decision.pinned_ip, peer)
+        logger.info("ALLOW HTTP %s:%s→%s from %s", _log_safe(host), port, decision.pinned_ip, peer)
         up_writer.write(rewritten_head)
         # A7 (red-pen BLOCK-2c): forward EXACTLY the declared body and nothing more. Any bytes
         # the client coalesced or sends beyond Content-Length are a pipelined second request

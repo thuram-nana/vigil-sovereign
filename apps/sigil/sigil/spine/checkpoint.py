@@ -22,7 +22,6 @@ from ..reuse import (
     KeyPair,
     SignedChainHead,
     TrustRoot,
-    generate_keypair,
     sign_head,
     verify_head,
 )
@@ -53,16 +52,11 @@ def _atomic_write_text(path: Path, data: str) -> None:
 def _owner_keys() -> tuple[str, str]:
     # Owner PRIVATE key routes through the vault (audit G1): plaintext-unchanged until the operator
     # provisions a TPM-sealed KEK, then transparently sealed at rest. The PUBLIC key stays plaintext.
-    from ..platform.vault import OWNER_PRIV_CONTEXT, owner_vault
-    vault = owner_vault()
-    priv = vault.read_text_secret(_PRIV, context=OWNER_PRIV_CONTEXT)
-    if priv is None:
-        KEYS_DIR.mkdir(parents=True, exist_ok=True)
-        kp = generate_keypair()
-        vault.write_text_secret(_PRIV, kp.private_key_b64, context=OWNER_PRIV_CONTEXT)
-        _PUB.write_text(kp.public_key_b64, encoding="utf-8")
-        priv = kp.private_key_b64
-    return priv, _PUB.read_text(encoding="utf-8").strip()
+    # The shared loader mints ONLY on a fresh install (neither file present); a half-present, unreadable,
+    # unsealable or mismatched key raises OwnerKeyUnavailable instead of replacing the owner identity.
+    from ..governor.identity import load_or_init_owner_keypair
+    kp = load_or_init_owner_keypair(_PRIV, _PUB, KEYS_DIR)
+    return kp.private_key_b64, kp.public_key_b64
 
 
 def trust_root(store: SpineStore | None = None) -> TrustRoot:
