@@ -50,7 +50,7 @@ def record_authn(store, event: str, *, username: str = "", method: str = "", out
         # `username` is attacker-controllable (a failed-login submits an arbitrary username under the body
         # cap), so bound every field — a valid username is <=64 chars — so a hostile oversized value cannot
         # bloat the audit record. event/method/outcome/reason are server-chosen literals; capped defensively.
-        payload = {
+        payload: "dict[str, object]" = {
             "signal": "authn.audit",
             "event": str(event)[:64],
             "username": str(username or "anonymous")[:64],
@@ -120,7 +120,7 @@ class FailedAuthnCoalescer:
                 key = ("*",) + key[1:]
             w = self._wins.get(key)
             first = w is None
-            if first:
+            if w is None:
                 self._wins[key] = [now, 0]
             else:
                 w[1] += 1
