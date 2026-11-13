@@ -44,11 +44,35 @@ the spine** — never the source of truth.
   keys and state). Durable, and **not** rebuildable from the spine: the sovereign `sigil backup`
   deliberately excludes it, and the offense `vigil backup` captures it only when its `--base-dir` is this
   directory (`vigil doctor` notes a mismatch). Launch settlement does not rely on it alone: a settle is
-  decided under a cross‑process lock beside the spine, and a settle that moved money (a refund, or any
-  postpaid settle) is on the spine. With `VIGIL_SETTLE_SPINE_RECORD=1` (default off; set it for the
-  cockpit, the settle drain and `ops-sweep` alike) every settle — a completed run's zero‑refund settle
-  included — first writes an owner‑signed `governor.launch_settled` record, so a lost or stale settlement
-  marker cannot re‑open the refund of a settled launch.
+  decided under a cross‑process lock beside the spine (`<stem>.settle.lock`), and a settle that moved
+  money (a refund, or any postpaid settle) is on the spine. With `VIGIL_SETTLE_SPINE_RECORD=1` (default
+  off) every fresh settle — a completed run's zero‑refund settle included — first writes an
+  owner‑signed `governor.launch_settled` record carrying its whole decision (mode, reservation,
+  consumption and the exact plan / wallet / postpaid refund split), and a later settle that finds it
+  finishes it at the recorded amounts. **Set the flag identically for the cockpit, the customer
+  server, the settle drain and `ops-sweep`.** A lost or stale settlement marker then cannot re‑open the
+  refund of a settled launch — but only while BOTH hold: the launch was settled by a process with the
+  flag on (or a refund of it landed), and its owner‑signed evidence is still in the LIVE spine. A hard
+  prune past the settle removes that evidence (the scan is live, not snapshot‑seeded), after which a lost
+  marker is again the only record.
+
+  **Settle locks.** Every lock on the settle path is a bounded wait that ends in a retry, never a hang:
+  the settle lock waits `VIGIL_SETTLE_LOCK_WAIT_S` seconds (default 10, clamped to 0.1–120), then a
+  settle answers "busy; retry" — the settle drain defers the completion (back to `incoming/`), the
+  sweep reports `deferred`, a customer cancel / start is refused with a retry hint. A pause waits at
+  most 2 s and then records the halt anyway (`linearized: false`); a resume never takes the settle
+  lock. The lock files are transients that both backup legs skip: `<stem>.settle.lock` beside the
+  spine, the settlement, pause and paused‑past‑expiry `<slug>.json.lock` files beside their markers,
+  and `<spool>/.spool.lock` in the completion spool (created by the settle drain; a root `ops-sweep`
+  that must create it hands it to the spool directory's owner).
+
+  **`ops-sweep reservations` statuses** added by this: `completion_pending` / `completion_unknown` /
+  `pause_changed` / `pause_unknown` when the settle's in‑lock re‑check of the spool or the pause state
+  refuses it (nothing written; the next pass decides), `deferred` for a busy lock or meter,
+  `settle_completed` (with the amounts moved) when a settle finished a recorded decision a crash
+  interrupted, and — with the flag on — `settle_interrupted` (report only) for a listed lease whose
+  recorded decision has entries not yet landed; `--apply` finishes it. Do **not** move files from the
+  completion spool's `rejected/` back to `incoming/` by hand while a `sweep --apply` is running.
 
 ---
 
