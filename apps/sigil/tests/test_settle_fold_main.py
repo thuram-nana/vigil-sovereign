@@ -37,6 +37,9 @@ Mutation-verify targets (each neuter turns a NAMED test red):
                                                             -> test_an_unusable_settle_lock_still_records_the_halt,
                                                                test_flag_on_a_spine_scan_failure_still_records_...
   * pause skipping the marker check without the settle lock -> test_an_unusable_settle_lock_still_refuses_to_pause_...
+  * the sweep's in-lock pause_unknown check removed         -> test_the_sweeps_in_lock_pause_unknown_branch_...
+  * the drain's in-lock past-expiry guard passing a None    -> test_a_failed_completion_whose_past_expiry_record_...
+  * the postpaid mover ignores the seen-set                 -> test_a_pruned_landed_postpaid_settle_is_not_reissued_...
 
 Run: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -m pytest apps/sigil/tests/test_settle_fold_main.py
 """
@@ -410,6 +413,27 @@ def test_a_pruned_landed_entry_is_not_reissued_by_a_roll_forward(record_on, monk
     again = _settle(s, r, 0, now=NOW + 90)
     assert again["action"] == "launch_already_settled" and "rolled_forward" not in again, again
     assert _signals(s, tip) == [] and _avail(s) == 100               # the seen-set confirmed it: nothing re-issued
+
+
+def test_a_pruned_landed_postpaid_settle_is_not_reissued_by_a_roll_forward(record_on, monkeypatch):
+    s = _store()
+    _seat(s, credits=0, postpaid=(500, 30))
+    r = _reserve(s, units=30)
+    assert _settle(s, r, 10, basis="completion:completed")["refunded"] == 20
+    _lose_marker(r)
+    real = ls.scan_settlement
+
+    def _live_miss(*a, **k):                                         # the settle-postpaid entry left the live window
+        ev = real(*a, **k)
+        ev.landed.discard("postpaid")
+        return ev
+
+    monkeypatch.setattr(ls, "scan_settlement", _live_miss)
+    tip = s.next_seq - 1
+    again = _settle(s, r, 0, now=NOW + 90, basis="cancel")
+    assert again["action"] == "launch_already_settled" and "rolled_forward" not in again, again
+    assert again["refunded"] == 0 and _signals(s, tip) == []          # the seen-set confirmed it: nothing re-issued
+    assert PostpaidArrearsLedger(s).accrued(ORG) == 10
 
 
 def test_forged_settle_entries_are_ignored_as_evidence(flag):
@@ -786,6 +810,9 @@ def _spy_meter_close(monkeypatch):
     return calls
 
 
+# How settle_launch handles each refusal reason a caller's precondition can give (a stub precondition). The callers'
+# real in-lock producers are pinned separately (test_the_sweeps_in_lock_*, test_a_pause_landing_after_*,
+# test_a_failed_completion_whose_past_expiry_record_*, test_a_refused_cancel_of_a_started_*).
 @pytest.mark.parametrize("why", ["completion_pending", "completion_unknown", "pause_changed", "pause_unknown",
                                  "started", "raises"])
 def test_a_refused_settle_writes_no_decision_and_a_later_charge_is_fresh(flag, why, monkeypatch):
@@ -1051,6 +1078,30 @@ def test_a_pause_landing_after_the_sweeps_pause_read_is_honoured(monkeypatch):
     assert [(x["status"], x["charged"]) for x in rows] == [("charged_paused", 54)] and _avail(s) == 1_000 - 54
 
 
+def test_the_sweeps_in_lock_pause_unknown_branch_refuses_a_metered_refund(flag, monkeypatch):
+    from vigil_integration.live.credit_lease_pause import pause_path
+    _metered(monkeypatch)
+    s = _store()
+    _seat(s, credits=1_000)
+    r = _reserve(s, units=900, publish=True, hours=8)
+    _spend(r)
+    gate = LaunchGate(s)
+    real = gate.settle_launch
+
+    def _marker_turns_unreadable(**kw):                              # after the sweep priced it "not paused"
+        p = pause_path(_base(), r["slug"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{not json", encoding="utf-8")
+        return real(**kw)
+
+    monkeypatch.setattr(gate, "settle_launch", _marker_turns_unreadable)
+    tip = s.next_seq - 1
+    rows = _sweep(gate, _spool(), now=MLATE, ttl=86400)
+    assert [x["status"] for x in rows] == ["pause_unknown"] and _avail(s) == 100, rows
+    assert _signals(s, tip) == [] and not _meter_closed(r)            # nothing refunded, recorded or closed
+    assert not is_lease_settled(_base(), r["slug"], r["nonce"])
+
+
 def test_a_late_resume_between_the_sweeps_pause_reads_never_reads_as_unpaused(monkeypatch):
     import vigil_integration.live.credit_lease_pause as P
     s = _store()
@@ -1227,6 +1278,35 @@ def test_a_failed_completion_whose_past_expiry_record_flips_in_lock_is_deferred_
     assert out.get("deferred") == 1 and out["settled"] == 0 and _avail(s) == 100, out
     out = gov.watcher().drain()                                      # re-priced: paused past expiry -> D4
     assert out["settled"] == 1 and _avail(s) == 1_000 - 54, out
+
+
+def test_a_failed_completion_whose_past_expiry_record_turns_unreadable_in_lock_is_deferred(flag, monkeypatch):
+    import vigil_integration.live.credit_lease_pause as P
+    _metered(monkeypatch)
+    s = _store()
+    _seat(s, credits=1_000)
+    r = _reserve(s, units=900, publish=True, hours=8)
+    _spend(r)
+    gov = _Gov(s, r, now=MLATE)
+    gov.emit("failed")
+    w = gov.watcher()
+    real = w._gate.settle_launch
+    late = P._past_expiry_path(_base(), r["slug"])
+
+    def _record_turns_unreadable(**kw):                              # after the drain priced the FAILED run as free
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("{not json", encoding="utf-8")
+        return real(**kw)
+
+    monkeypatch.setattr(w._gate, "settle_launch", _record_turns_unreadable)
+    tip = s.next_seq - 1
+    out = w.drain()
+    assert out.get("deferred") == 1 and out["settled"] == 0 and out["rejected"] == 0, out
+    assert _avail(s) == 100 and _signals(s, tip) == []               # nothing refunded or recorded on a guess
+    assert not is_lease_settled(_base(), r["slug"], r["nonce"])
+    late.unlink()                                                    # readable again (no late record): decided afresh
+    out = gov.watcher().drain()
+    assert out["settled"] == 1 and _avail(s) == 1_000, out
 
 
 def test_flag_on_a_d3_metered_cancel_charge_survives_seam_loss(record_on, monkeypatch):
