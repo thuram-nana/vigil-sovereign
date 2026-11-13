@@ -529,9 +529,12 @@ Gate 5 and the owner's flips.
     A credit must not promise a fixed number of raw tokens; deeper scans and more expensive models consume more.
   - *Margin (decided later the same day):* every scan is priced at an **owner-set target margin over its direct
     cost, recorded privately** (outside this public repo), applied via `VIGIL_BILLING_TARGET_MARGIN` at deploy
-    (`credits = direct cost / (1 − m) × 100`, `0 < m < 1`, **no committed default**: unset ⇒ metered pricing off).
+    (`credits = metered AI cost / (1 − m) × 100`, `0 < m < 1`, **no committed default**: unset ⇒ metered pricing off).
     **Never write the margin value, a markup-to-margin breakdown or any value-based analysis into this repo or a
-    commit message.** Doctor must flag metered billing without it (M1c-1).
+    commit message.** Doctor must flag metered billing without it (M1c-1). *(2026-11-13, one pricing number:)* `m`
+    is the margin over **metered AI cost only** (fees and hosting are outside it) and is the only pricing input; the
+    margin dashboard's target line is `cost / (1 − m)`, and `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are
+    refused while present (doctor hard issue; metered launches refuse, metered charges wait).
   - *Seats:* $25 per seat (assume per month; whether a seat includes credits is open) — a public price, may go in
     the catalog (M3).
   - *Free trial:* a real scan with partial results, the full report unlocked once the org buys credits (any pack from
@@ -546,9 +549,10 @@ Gate 5 and the owner's flips.
     contracts; discounted credit subscriptions only after real scan costs are measured.
 - **OPEN OWNER DECISIONS — do not ratify any of them** (design doc §1.2):
   (a) the §10.3 numbers (the 25-credit floor, tier budgets 450 / 5,000 / 20,000, top-up limits, concurrency
-  4 / 32) are proposed defaults only; (b) the K value is set at deploy from the owner's private margin target until
-  M5 calibration measures the full direct cost; (c) the formula
-  meters AI cost only — M5 must measure worker + storage cost per run or derive an overhead factor; (d)
+  4 / 32) are proposed defaults only; (b) the target margin (over metered AI cost; the only pricing input) is set at
+  deploy from the owner's private record; (c) the formula meters AI cost only, while the owner's profit target is
+  measured after all costs — M5 must report the measured fee and hosting fraction per run so the target margin can
+  be set to land the all-in margin on the target; (d)
   **cancellation** (charge a cancelled run for usage vs. today's full refund) is unanswered — it must be a named
   setting, and `vigil doctor` + the go-live notes must say it has to be chosen before metered billing is enabled.
 - **This repository is public.** Keep business-sensitive detail (margin rationale, cost structure beyond what a
@@ -559,7 +563,7 @@ sovereign gateway's meter.
 
 | Setting | Value | Why / env |
 |---|---|---|
-| Target margin | owner-set in the private deploy environment from calibration (M5); no value is recorded here | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99; the markup is derived as 1/(1−m); no default, so metered paths fail closed while it is unset |
+| Target margin | **owner-set, private** — no committed default; the margin over metered AI cost only | `VIGIL_BILLING_TARGET_MARGIN`: an exact decimal strictly between 0 and 1, at most 0.99; the markup is derived as 1/(1−m); the only pricing input; no default, so metered paths fail closed while it is unset |
 | Floor per run | **25 credits** ($0.25, worker start-up) | `VIGIL_RUN_FLOOR_CREDITS` |
 | Price table | Opus 4.8 per MTok: input $5, output $25, cache read $0.50, 5-min write $6.25, 1-h write $10; web search $10 / 1,000 | `VIGIL_MODEL_PRICES` (inline JSON; integer nano-USD; finer than $0.001/MTok is refused) |
 | Custom top-up | **$5–$500** per purchase; first purchase ≤ $100 until ≥ $100 settled and ≥ 7 days; ≤ $1,000 / 24 h; ≤ 5 attempts / h; > $500 → invoice | Anthropic's own Tier-1 credit-purchase cap is $500 (M3) |
@@ -742,7 +746,8 @@ All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF;
   gateway down or replaced while billing is flat. The flags read `1/true/yes/on/enabled` exactly as the runtime does.
   The margin value is never printed. Nothing is rendered when neither flag is set. Doctor reads the environment the
   cockpit reads: its own, with `$SIGIL_HOME/sigil.env` layered under it (where the settings UI saves the provider
-  key), exactly as `sigil.config` does. A probe that breaks never hides the issues already found.
+  key), exactly as `sigil.config` does. A probe that breaks never hides the issues already found. A retired pricing
+  setting (`VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K`) is a hard issue even with both flags off.
 
 **Interim limits (until later slices):**
 - **`VIGIL_METERED_BILLING` must NOT be enabled before M3**: today's launch products reserve 3 / 20 units (the

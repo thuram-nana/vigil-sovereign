@@ -350,20 +350,20 @@ def postpaid_invoice_amount_minor(credits: int) -> "tuple[int, str]":
 # ==================================================================================================
 # EC-6 — OWNER-INPUT accessors for the billing<->cost MARGIN reconciliation (a READ-ONLY projection).
 #
-# These two numbers convert the EC-4 committed TOKEN cost into money (and, optionally, a target-margin line)
-# for the operator margin dashboard (ui/margin.py). They are OWNER INPUTS exactly like every other price in
-# this catalog — the margin view is only as real as the owner-ratified cost rate — so they default UNSET
+# This number converts the EC-4 committed TOKEN cost into money for the operator margin dashboard
+# (ui/margin.py); the dashboard's target line comes from the one pricing input, the target margin
+# (vigil_core.model_metering.target_margin), not from here. It is an OWNER INPUT exactly like every other price
+# in this catalog — the margin view is only as real as the owner-ratified cost rate — so it defaults UNSET
 # (None = "not configured"): until the owner ratifies the real per-token cost, the dashboard shows committed
 # tokens + billed revenue but NO cost/margin, and NEVER fabricates one. An env override lets the owner set
-# them ahead of the promote-to-owner-signed-catalog enhancement (the same convention as the placeholders).
+# it ahead of the promote-to-owner-signed-catalog enhancement (the same convention as the placeholders).
 #
 # PURELY ADDITIVE: disjoint names, no CatalogEntry/price touched, NOT consumed by the import-time _validate()
 # fail-closed contract, and NOT read by plans()/expected_amounts()/entitlements() — so the public pricing +
-# the mint path are byte-identical whether these are set or not. (Money-anchor doctrine: the cost rate lives
+# the mint path are byte-identical whether it is set or not. (Money-anchor doctrine: the cost rate lives
 # in the owner catalog, next to the prices it reconciles against, not in generic runtime config.)
 # ==================================================================================================
 _COST_RATE_ENV = "VIGIL_COST_RATE_MICRO_MINOR_PER_TOKEN"
-_MARGIN_K_ENV = "VIGIL_MARGIN_MULTIPLIER_K"
 
 
 def cost_rate_micro_minor_per_token() -> Optional[int]:
@@ -381,19 +381,3 @@ def cost_rate_micro_minor_per_token() -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return v if v >= 0 else None
-
-
-def margin_multiplier_k() -> Optional[float]:
-    """The owner-set DISPLAY-ONLY target margin multiplier k (a target revenue = cost * k), for the
-    dashboard's actual-vs-target line only. PLACEHOLDER default **None** (unset => no target line shown). It
-    NEVER affects the computed ACTUAL margin (= revenue - cost), only the informational target.
-    `VIGIL_MARGIN_MULTIPLIER_K` overrides with a POSITIVE finite float; empty / junk / <=0 / non-finite ->
-    None (fail-closed)."""
-    raw = os.environ.get(_MARGIN_K_ENV)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        v = float(raw.strip())
-    except (TypeError, ValueError):
-        return None
-    return v if (math.isfinite(v) and v > 0.0) else None
