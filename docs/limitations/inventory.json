@@ -542,6 +542,22 @@
       "source_doc": "engine/crucible/V2-LIMITATIONS.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-restore-hard-pruned-spine",
+      "title": "sigil restore does not restore a hard-pruned spine",
+      "summary": "A hard-pruned spine is recovered from a file-level copy of SIGIL_HOME (the spine with its signed head and floor, together). Every reader refuses a pruned live window that no signed head anchors, so `sigil restore` of such a home fails closed rather than reading it as un-pruned. A path-aware staged restore of a pruned home (archive, head, floor and manifest verified as one unit) is planned.",
+      "classification": "real-unfinished-code",
+      "severity": "medium",
+      "anchor": {
+        "file": "apps/sigil/sigil/spine/snapshot.py",
+        "symbol": "_refuse_unanchored_prune"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -758,6 +774,20 @@
       "snippet": "not wired into the live launch-gate money path yet",
       "kind": "non-debt",
       "note": "Deliberate design decision, not debt (EC-4 per-tenant token-cost envelope ledger): the cost ledger ships as a DEFAULT-OFF primitive BY DESIGN, per the money doctrine that money-doctrine numbers — here ENVELOPE_TOKENS_PER_CREDIT, the credit->token conversion E — stay behind default-OFF placeholders until explicit owner ratification, so no unratified money number can drive production spend. The primitive itself is complete, owner-signed, mutation-verified and prune-durable (governor/cost_ledger.py + the v9 snapshot fold + the two spine/prune.py tripwires); it is simply not yet consulted by the live gate. Wiring it into the live launch-gate money path (reserve on reserve_launch, settle from the ACTUAL recorded tokens on settle_launch) + the EC-5 global pool meter + the keyless engine's actual-token delivery is the planned EC-4b increment, not unfinished/deferred debt."
+    },
+    {
+      "file": "apps/sigil/sigil/spine/snapshot.py",
+      "snippet": "`sigil restore` does not yet restore a hard-pruned spine",
+      "kind": "debt",
+      "limit_id": "LIMIT-restore-hard-pruned-spine",
+      "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
+    },
+    {
+      "file": "apps/sigil/sigil/spine/checkpoint.py",
+      "snippet": "`sigil restore` does not yet restore a hard-pruned",
+      "kind": "debt",
+      "limit_id": "LIMIT-restore-hard-pruned-spine",
+      "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
     }
   ]
 }
