@@ -61,6 +61,24 @@ def _write_raw(path: Path, lines: list[bytes]) -> None:
     path.write_bytes(b"".join(lines))
 
 
+def _checked(s: SpineStore):
+    from sigil.spine import store as store_mod
+    return store_mod._TAIL_CHECKED[str(s._active.resolve())]
+
+
+class _AnotherProcess:
+    """Run writes as ANOTHER process would: this process's checked-tail progress does not see them."""
+
+    def __enter__(self):
+        from sigil.spine import store as store_mod
+        self.saved = dict(store_mod._TAIL_CHECKED)
+
+    def __exit__(self, *exc):
+        from sigil.spine import store as store_mod
+        store_mod._TAIL_CHECKED.clear()
+        store_mod._TAIL_CHECKED.update(self.saved)
+
+
 # ---- append refuses a non-monotonic tail -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("copied", [(3,), (3, 4), (9,)])       # an older line, an older run, the tip again
@@ -91,7 +109,11 @@ def test_appends_from_two_stores_on_one_spine_interleave(tmp_path):
     a = _legacy(tmp_path, 2)
     b = SpineStore(tmp_path / "spine.jsonl")
     for i in range(12):
-        (a if i % 3 else b).append(kind="message", source="t", actor="u", payload={"text": f"i{i}"})
+        if i % 3:
+            a.append(kind="message", source="t", actor="u", payload={"text": f"i{i}"})
+        else:
+            with _AnotherProcess():                                 # a peer process's append
+                b.append(kind="message", source="t", actor="u", payload={"text": f"i{i}"})
     b.append_many([{"kind": "message", "source": "t", "actor": "u", "payload": {"text": "batch"}}] * 3)
     a.append(kind="message", source="t", actor="u", payload={"text": "last"})
     assert [r.seq for r in a.iter_records()] == list(range(18))
@@ -100,9 +122,10 @@ def test_appends_from_two_stores_on_one_spine_interleave(tmp_path):
 
 def test_append_rechecks_a_spine_that_was_reset_and_regrew(tmp_path):
     a = _legacy(tmp_path, 5)
-    b = SpineStore(tmp_path / "spine.jsonl")
-    b.reset()
-    _add(b, 9)                                                      # past `a`'s checked bytes, different records
+    with _AnotherProcess():
+        b = SpineStore(tmp_path / "spine.jsonl")
+        b.reset()
+        _add(b, 9)                                                  # past `a`'s checked bytes, different records
     assert a.append(kind="message", source="t", actor="u", payload={"text": "after"}) == 9
     assert a.verify()[0]
 
@@ -118,11 +141,12 @@ def test_append_rechecks_a_same_size_rewrite_under_it(tmp_path):
     a = SpineStore(tmp_path / "spine.jsonl")
     _fixed(a, [f"m{i}" for i in range(6)])
     size = a._active.stat().st_size
-    b = SpineStore(tmp_path / "spine.jsonl")
-    b.reset()
-    _fixed(b, [f"n{i}" for i in range(5)])
-    with b._active.open("ab") as f:
-        f.write(_line_of(b, 2))
+    with _AnotherProcess():
+        b = SpineStore(tmp_path / "spine.jsonl")
+        b.reset()
+        _fixed(b, [f"n{i}" for i in range(5)])
+        with b._active.open("ab") as f:
+            f.write(_line_of(b, 2))
     assert a._active.stat().st_size == size                         # the precondition this test is about
     with pytest.raises(SpineError, match="not above every earlier record"):
         a.append(kind="message", source="t", actor="u", payload={"text": "x"})
@@ -134,10 +158,11 @@ def test_append_rechecks_a_longer_rewrite_from_its_start(tmp_path):
     from this store's stale high-water)."""
     a = SpineStore(tmp_path / "spine.jsonl")
     _fixed(a, [f"m{i}" for i in range(20)])
-    b = SpineStore(tmp_path / "spine.jsonl")
-    b.reset()
-    _fixed(b, ["y" * 2000 for _ in range(5)])
-    assert a._active.stat().st_size > a._tail_checked[1]
+    with _AnotherProcess():
+        b = SpineStore(tmp_path / "spine.jsonl")
+        b.reset()
+        _fixed(b, ["y" * 2000 for _ in range(5)])
+    assert a._active.stat().st_size > _checked(a)[1]
     assert a.append(kind="message", source="t", actor="u", payload={"text": "after"}) == 5
     assert a.verify()[0]
 
@@ -148,10 +173,11 @@ def test_append_rechecks_a_rewrite_that_ends_on_a_record_boundary(tmp_path):
     a = SpineStore(tmp_path / "spine.jsonl")
     _fixed(a, [f"a{i}" for i in range(10)])                         # 10 equal lines, seqs 0..9
     lx = a._active.stat().st_size // 10
-    b = SpineStore(tmp_path / "spine.jsonl")
-    b.reset()
-    _fixed(b, ["b" * (2 + lx) for _ in range(6)])                   # 6 lines of exactly 2*lx: a boundary at 10*lx
-    assert b._active.stat().st_size == 12 * lx and a._tail_checked[1] == 10 * lx
+    with _AnotherProcess():
+        b = SpineStore(tmp_path / "spine.jsonl")
+        b.reset()
+        _fixed(b, ["b" * (2 + lx) for _ in range(6)])               # 6 lines of exactly 2*lx: a boundary at 10*lx
+    assert b._active.stat().st_size == 12 * lx and _checked(a)[1] == 10 * lx
     assert a.append(kind="message", source="t", actor="u", payload={"text": "after"}) == 6
 
 
@@ -418,3 +444,143 @@ def test_the_cockpit_json_encoder_round_trips_a_lone_surrogate():
     obj = {"t": "a\ud800b", "ok": "ünïcode"}
     raw = _json_bytes(obj)
     assert json.loads(raw) == obj and "ünïcode".encode("utf-8") in raw
+
+
+# ---- review fold: one record rule, the seam, the seal, the per-process checkpoint --------------------------------
+
+def test_a_duplicate_seq_key_cannot_hide_an_older_tail(tmp_path):
+    """The check reads a line exactly as the readers do: a rewritten line carrying a second `seq` key (JSON keeps the
+    last) still counts as the record the readers yield."""
+    s = _legacy(tmp_path)
+    lines = s._active.read_bytes().splitlines(keepends=True)
+    for i in range(3, 10):
+        lines[i] = b'{"seq": 0, ' + lines[i][1:]
+    lines.append(lines[3])
+    _write_raw(s._active, lines)
+    with pytest.raises(SpineError, match="not above every earlier record"):
+        SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+def test_an_append_after_a_rotation_refuses_a_sealed_tail_that_is_not_the_recorded_boundary(tmp_path):
+    s = _segmented(tmp_path)
+    s.rotate()                                                      # the active is empty: the seam decides
+    sealed = sorted(s._layout.segments_dir.glob("seg-*.jsonl"))[-2]
+    with sealed.open("ab") as f:
+        f.write(_line_of(s, 4))
+    with pytest.raises(SpineError, match="not at the boundary the manifest records"):
+        SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+def test_a_rotation_refuses_to_seal_a_tail_an_append_would_refuse(tmp_path):
+    s = _segmented(tmp_path)
+    with s._active.open("ab") as f:
+        f.write(_line_of(s, 4))
+    gen = s.generation()
+    with pytest.raises(SpineError, match="not above every earlier record"):
+        SpineStore(tmp_path / "spine.jsonl").rotate()
+    assert s.generation() == gen, "the segment was sealed"
+
+
+def _with_line(s: SpineStore, at: int, raw: bytes):
+    lines = s._active.read_bytes().splitlines(keepends=True)
+    lines.insert(at, raw)
+    _write_raw(s._active, lines)
+
+
+def test_a_line_the_readers_skip_never_blocks_an_append(tmp_path):
+    s = _legacy(tmp_path)
+    _with_line(s, 5, b'{"seq": 999999, "note": "not a record"}\n')
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    assert fresh.verify()[0]
+    assert fresh.append(kind="message", source="t", actor="u", payload={"text": "x"}) == 10
+    assert fresh.verify()[0]
+
+
+@pytest.mark.parametrize("field,value", [("seq", "3"), ("seq", 3.0), ("seq", True), ("kind", ["message"]),
+                                         ("payload", ["not", "a", "dict"]), ("schema_version", "x"),
+                                         ("parent_id", "1"), ("ts", 5)])
+def test_a_line_of_the_wrong_shape_is_skipped_by_every_reader_never_a_crash(tmp_path, field, value):
+    s = _legacy(tmp_path, 6)
+    rec = json.loads(_line_of(s, 3))
+    rec[field] = value
+    _with_line(s, 6, (json.dumps(rec) + "\n").encode())           # a wrong-shape copy of seq 3, at the end
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    assert [r.seq for r in fresh.iter_records()] == list(range(6))
+    assert fresh.get(3).seq == 3 and fresh.count() == 6 and fresh.verify()[0]
+    t = SpineTailer(fresh, since_seq=2)
+    assert [e["seq"] for e in t.poll()] == [3, 4, 5]
+    assert fresh.append(kind="message", source="t", actor="u", payload={"text": "x"}) == 6   # not chained from it
+
+
+def test_verify_record_reports_a_kind_that_is_not_a_string():
+    from types import SimpleNamespace
+    rec = SimpleNamespace(seq=1, kind=["message"], scope="sigil", source="t", actor="u", payload={},
+                          parent_id=None, supersedes_id=None, cert_digest="c", prev_hash="p", entry_hash="e")
+    ok, why = verify_record(rec)
+    assert ok is False and "unknown kind" in why
+
+
+def test_a_verify_pass_that_is_restarted_still_sees_a_duplicate(tmp_path, monkeypatch):
+    s = _segmented(tmp_path)
+    sealed = sorted(s._layout.segments_dir.glob("seg-*.jsonl"))[1]
+    lines = sealed.read_bytes().splitlines(keepends=True)
+    _write_raw(sealed, lines[:1] + [lines[0]] + lines[1:])          # seq 3 twice in a sealed segment
+    fresh = SpineStore(tmp_path / "spine.jsonl")
+    fresh.get(5)                                                    # build the index (last offset of seq 3 wins)
+    real = fresh._open_segment
+    state = {"raised": False}
+
+    def flaky(p):
+        if p == sealed and not state["raised"]:
+            state["raised"] = True
+            raise FileNotFoundError(p)                              # a compaction moved it under the pass
+        return real(p)
+
+    monkeypatch.setattr(fresh, "_open_segment", flaky)
+    ok, why = fresh.verify()
+    assert state["raised"] and ok is False and "duplicated or reordered" in why
+
+
+def test_an_append_refuses_a_manifest_that_is_not_a_contiguous_run(tmp_path):
+    s = _segmented(tmp_path)
+    mp = s._layout.manifest_path
+    m = json.loads(mp.read_text())
+    _omit_middle(m)
+    mp.write_text(json.dumps(m))
+    with pytest.raises(SpineError, match="not a contiguous segment run"):
+        SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": "x"})
+
+
+def test_two_segments_naming_one_file_are_not_a_contiguous_run(tmp_path):
+    s = _segmented(tmp_path)
+    mp = s._layout.manifest_path
+    m = json.loads(mp.read_text())
+    sealed = sorted((g for g in m["segments"] if g["sealed"]), key=lambda g: g["first_seq"])
+    sealed[1]["file"] = sealed[0]["file"]
+    mp.write_text(json.dumps(m))
+    with pytest.raises(SpineError, match="two segments name the same file"):
+        list(SpineStore(tmp_path / "spine.jsonl").iter_records())
+
+
+def test_a_fresh_store_per_request_does_not_re_read_the_active_segment(tmp_path, monkeypatch):
+    from sigil.spine import store as store_mod
+    _legacy(tmp_path, 50)
+    reads: list = []
+    real = store_mod._lines_between
+
+    def counting(path, start, end, **kw):
+        reads.append((start, end))
+        return real(path, start, end, **kw)
+
+    monkeypatch.setattr(store_mod, "_lines_between", counting)
+    for i in range(5):                                              # five requests, five stores, one process
+        SpineStore(tmp_path / "spine.jsonl").append(kind="message", source="t", actor="u", payload={"text": f"{i}"})
+    assert reads == [], "a store of this process re-read bytes this process had already checked"
+
+
+def test_the_check_streams_lines_across_chunk_boundaries(tmp_path):
+    from sigil.spine import store as store_mod
+    p = tmp_path / "f"
+    p.write_bytes(b"aaaa\nbb\n\ncccccc\nd\n")
+    assert list(store_mod._lines_between(p, 0, p.stat().st_size, chunk=3)) == [b"aaaa", b"bb", b"cccccc", b"d"]
+    assert list(store_mod._lines_between(p, 5, 8, chunk=2)) == [b"bb"]

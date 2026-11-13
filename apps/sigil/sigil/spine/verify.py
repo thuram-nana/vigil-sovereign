@@ -30,7 +30,7 @@ def verify_record(record) -> tuple[bool, str]:
     `CHECK(kind IN (...))` on this per-atom read seam, so the live tail / UI re-verify a record's kind
     is in-vocabulary the same way the whole-log `SpineStore.verify()` does. A record with no canonical form
     (e.g. a lone surrogate, which no append can write) is reported tampered — never an exception."""
-    if record.kind not in KINDS:
+    if not isinstance(record.kind, str) or record.kind not in KINDS:
         return False, f"unknown kind {record.kind!r} at seq {record.seq}: not in the enforced KINDS vocabulary"
     content = {
         "scope": record.scope, "kind": record.kind, "source": record.source, "actor": record.actor,
