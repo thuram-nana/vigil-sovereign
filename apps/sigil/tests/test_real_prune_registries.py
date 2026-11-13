@@ -51,6 +51,7 @@ import sigil.spine.checkpoint as _cp
 import sigil.spine.floor as _fl
 import sigil.spine.snapshot as _snap
 import sigil.spine.tail as _tail
+from sigil.bridge import envelope as _env
 from sigil.governor import accounts as acc
 from sigil.governor import asset_ownership as ao
 from sigil.governor import budget as bd
@@ -2718,11 +2719,14 @@ def test_a_cached_build_judges_its_seed_with_the_resolver_it_folds_with(world, m
 # The owner-signed pruned head names this prune's OWN snapshot record — never another `kind="snapshot"` record
 # that merely shares its boundary and cumulative root
 # ======================================================================================================
-def _ready_to_prune(world: _World, grants: tuple = (("acme", 100, "g1"),)) -> int:
-    """The kill switch engaged and `grants` ((org, credits, entry_id), ...) below K, a sealed live segment and an
-    owner-signed head: a spine ready for a real prune at the returned K. Nothing is pruned yet."""
-    world.apply([lambda R: R.kill.engage(reason="incident")]
-                + [lambda R, g=g: R.wallet.grant(g[0], g[1], "trial", entry_id=g[2], issued_at=1.0) for g in grants])
+def _ready_to_prune(world: _World, grants: tuple = (("acme", 100, "g1"),), below: tuple = ()) -> int:
+    """The kill switch engaged, `grants` ((org, credits, entry_id), ...) and then the `below` ops below K, a sealed
+    live segment and an owner-signed head: a spine ready for a real prune at the returned K. Nothing is pruned yet."""
+    out = world.apply([lambda R: R.kill.engage(reason="incident")]
+                      + [lambda R, g=g: R.wallet.grant(g[0], g[1], "trial", entry_id=g[2], issued_at=1.0)
+                         for g in grants]
+                      + list(below))
+    assert set(out) == {"ok"}, out
     world.seal()
     world.apply([_noise(0)])
     k = world.seal()
@@ -2758,21 +2762,54 @@ def _unreadable_folded_state(p: dict) -> dict:
     return p
 
 
+def _only(field: str, value: Any) -> Callable[[dict], dict]:
+    """A look-alike that differs from this prune's snapshot in the ONE folded field `field` (set to `value`, a value
+    this build reads) and in nothing else."""
+    def alter(p: dict) -> dict:
+        p["folded_state"][field] = value
+        return p
+    return alter
+
+
+_WARDEN = "warden-a"
+
+
+def _high_waters() -> tuple:
+    """Below-K ops that give the snapshot's scalar and dict folded fields a value of their own: a release honored at
+    10.0 and the kill switch engaged again (`killswitch_issued_hw` 10.0, `killswitch_engaged`), a device's receipted
+    nonce 7 (`nonce_highwater`) and a WARDEN anchor at count 5 (`warden_best`). The release is kept for a replay."""
+    return (_stash("rel", lambda R: R.kill.release(issued_at=10.0)),
+            lambda R: R.kill.engage(reason="incident"),
+            lambda R: _env.record_receipt(R.store, {"device": "dev-a", "action": "noop", "nonce": 7, "ts": 1.0}),
+            lambda R: R.store.append(kind="warden_checkpoint", source="warden", actor="warden",
+                                     payload={"count": 5, "head_hash": "h5", "pubkey": _WARDEN}))
+
+
 @pytest.mark.parametrize("label,alter", [
     ("releases the kill switch and mints credit", _mint),
     ("forgets the consumed grant keys", _forget_consumed_grants),
     ("names another owner key at the boundary", _another_base_key),
     ("carries one more field", _one_more_field),
     ("carries a folded state this build does not read", _unreadable_folded_state),
+    ("releases the kill switch, nothing else", _only("killswitch_engaged", False)),
+    ("forgets the release high-water, nothing else", _only("killswitch_issued_hw", None)),
+    ("forgets the device nonce high-water, nothing else", _only("nonce_highwater", {})),
+    ("forgets the WARDEN anchor, nothing else", _only("warden_best", {})),
+    ("mints credit, nothing else", _only("wallet_granted", [["acme", 10_000_000]])),
 ])
 def test_a_prune_never_adopts_a_snapshot_record_it_did_not_compute(world, label, alter):
     """A `kind="snapshot"` record in the live tail with this prune's `base_seq` and `cumulative_merkle_root` (public
     values, computable from the spine) and the owner's envelope (`spine`/`OWNER`), but a payload other than the one
-    this prune computes, is not this prune's snapshot: the head the prune signs names a record of its own. The kill
-    switch stays engaged, the wallet holds what was granted, a replayed grant credits nothing, on both fold-cache
-    legs."""
-    k = _ready_to_prune(world)
+    this prune computes — down to one scalar, dict or row-list field of the folded state — is not this prune's
+    snapshot: the head the prune signs names a record of its own. The kill switch stays engaged, the wallet holds
+    what was granted, the device nonce and WARDEN high-waters stand, and a replayed grant or release changes nothing,
+    on both fold-cache legs."""
+    k = _ready_to_prune(world, below=_high_waters())
     own = prune.snapshot_payload(world.store(), k)
+    fs = own["folded_state"]
+    assert (fs["killswitch_engaged"], fs["killswitch_issued_hw"], fs["nonce_highwater"],
+            fs["warden_best"][_WARDEN][:2], fs["wallet_granted"]) == (True, 10.0, {"dev-a": 7}, [5, "h5"],
+                                                                      [["acme", 100]])
     other = alter(copy.deepcopy(own))
     assert (other["base_seq"], other["cumulative_merkle_root"]) == (own["base_seq"], own["cumulative_merkle_root"])
     oseq = world.store().append(kind="snapshot", source="spine", actor="OWNER", payload=other)
@@ -2782,10 +2819,68 @@ def test_a_prune_never_adopts_a_snapshot_record_it_did_not_compute(world, label,
     named = world.store().get(head.snapshot_seq)
     assert json.loads(json.dumps(named.payload)) == json.loads(json.dumps(own)), label
     assert _cp.verify_checkpoint(world.store())[0] and prune.verify_with_archive(world.store())[0]
+    assert _both_flags(world, lambda R: (R.kill.is_engaged(), R.wallet.available("acme"),
+                                         _env.device_nonce_highwater(R.store, "dev-a"),
+                                         SnapshotState.load(R.store).warden_best_of(_WARDEN)[:2])) == {
+        "OFF": (True, 100, 7, (5, "h5")), "ON": (True, 100, 7, (5, "h5"))}, label
+    world.apply([lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0),   # replays
+                 _replay("rel")])
     assert _both_flags(world, lambda R: (R.kill.is_engaged(), R.wallet.available("acme"))) == {
         "OFF": (True, 100), "ON": (True, 100)}, label
-    world.apply([lambda R: R.wallet.grant("acme", 100, "trial", entry_id="g1", issued_at=1.0)])   # a replay
-    assert _both_flags(world, lambda R: R.wallet.available("acme")) == {"OFF": 100, "ON": 100}, label
+
+
+def _a_readable_change(field: str, value: Any, folded: dict) -> Any:
+    """Another value for folded field `field` that this build still reads (`from_folded`) and that changes that
+    field — and only it — in the loaded state."""
+    if isinstance(value, bool):
+        candidates: list = [not value]
+    elif isinstance(value, int):
+        candidates = [value - 1, value + 1]
+    elif isinstance(value, str):
+        candidates = [value + "0"]
+    elif isinstance(value, dict):
+        candidates = [{}, {"zz": 1}, {"zz": [1, "h", 0]}]
+    elif isinstance(value, list):
+        candidates = [[*value, "zz"], value[:-1]]
+    else:                                                   # a float high-water, or its None bottom
+        candidates = [9e18, 1.0]
+    base = SnapshotState.from_folded(folded).model_dump()
+    for c in candidates:
+        try:
+            got = SnapshotState.from_folded({**folded, field: c}).model_dump()
+        except Exception:  # noqa: BLE001 — not readable: try the next candidate
+            continue
+        if {f for f in base if got[f] != base[f]} == {field}:
+            return c
+    raise AssertionError(f"no readable one-field change for folded field {field!r} ({value!r})")
+
+
+def test_a_record_differing_from_the_snapshot_in_any_one_field_is_never_adopted(world, tmp_path):
+    """The resume guard compares the WHOLE payload: a record that differs from this prune's snapshot in ONE field —
+    any top-level field, or any one folded field (scalar, dict or row list) changed to a value this build reads — is
+    passed over and the snapshot is appended, while a record carrying this very snapshot is adopted."""
+    k = _ready_to_prune(world, below=_high_waters())
+    own = json.loads(json.dumps(prune.snapshot_payload(world.store(), k)))
+    fields = ([(None, f) for f in own if f != "folded_state"]
+              + [("folded_state", f) for f in SnapshotState.model_fields])
+    assert {f for _, f in fields} >= {"killswitch_engaged", "killswitch_issued_hw", "nonce_highwater", "warden_best",
+                                      "wallet_granted", "base_pubkey", "base_prev_hash"}
+    adopted = []
+    for i, (part, field) in enumerate(fields):
+        other = copy.deepcopy(own)
+        where = other if part is None else other[part]
+        where[field] = (_a_readable_change(field, where[field], own["folded_state"]) if part
+                        else [where[field]])
+        (tmp_path / str(i)).mkdir()
+        store = SpineStore(tmp_path / str(i) / "spine.jsonl")
+        store.migrate()
+        oseq = store.append(kind="snapshot", source="spine", actor="OWNER", payload=other)
+        seq = prune._append_snapshot_idempotent(store, own)
+        if seq == oseq:
+            adopted.append(f"{part or 'payload'}.{field}")
+            continue
+        assert seq == oseq + 1 == prune._append_snapshot_idempotent(store, own), f"{field}: own record not adopted"
+    assert not adopted, f"adopted a record that differs in one field: {adopted}"
 
 
 def test_an_unreadable_snapshot_payload_is_never_matched_to_a_record(world):
