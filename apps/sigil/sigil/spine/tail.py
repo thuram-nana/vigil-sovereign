@@ -78,7 +78,10 @@ class SpineTailer:
         emitted flagged (not dropped); the cursor still advances so the feed never re-emits or stalls."""
         out: list[dict] = []
         for r in self.store.iter_records(since_seq=self.cursor):
-            atom_ok, reason = verify_record(r)
+            try:
+                atom_ok, reason = verify_record(r)
+            except Exception as e:  # noqa: BLE001 — an unverifiable record is FLAGGED, and the cursor still advances
+                atom_ok, reason = False, f"seq {r.seq} could not be verified ({type(e).__name__})"
             if r.prev_hash != self._last_hash:
                 ok = False
                 reason = f"linkage break at seq {r.seq}: prev_hash != last emitted entry_hash (rewind/fork/gap)"

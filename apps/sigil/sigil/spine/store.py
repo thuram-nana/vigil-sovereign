@@ -184,6 +184,44 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
         window *= 4
 
 
+def _line_seq(raw: bytes) -> "int | None":
+    """The `seq` of one complete record line, or None for a line the readers skip (not a record). Every line the
+    write path produces starts `{"seq": N,`, so that prefix is read without a full parse; any other shape falls
+    back to the readers' own rule (JSON object carrying every chain field)."""
+    if raw.startswith(b'{"seq": ') and raw.rstrip().endswith(b"}"):
+        head = raw[8:24].split(b",", 1)[0]
+        if head.isdigit():
+            return int(head)
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(d, dict) and all(k in d for k in _REQUIRED_KEYS) and isinstance(d["seq"], int):
+        return d["seq"]
+    return None
+
+
+def _segment_run_break(m: Manifest) -> "str | None":
+    """Why the manifest's segments are NOT one contiguous run, or None. Every segment but the last is sealed; at
+    most one is unsealed; each next segment starts at the seq after the previous one's last and links from its
+    boundary. A manifest that omits (or duplicates, or overlaps) a segment would otherwise make every reader
+    yield a short chain."""
+    if sum(1 for s in m.segments if not s.sealed) > 1:
+        return "more than one unsealed segment"
+    segs = m.ordered()
+    for a, b in zip(segs, segs[1:]):
+        if not a.sealed or a.last_seq is None:
+            return f"segment {a.id} is not sealed but segment {b.id} follows it"
+        if b.first_seq != a.last_seq + 1 or b.first_prev_hash != a.boundary_hash:
+            return (f"segment {b.id} (first seq {b.first_seq}) does not continue segment {a.id} "
+                    f"(last seq {a.last_seq})")
+    return None
+
+
+class SpineOrderError(SpineError):
+    """A record line whose seq does not exceed the previous line's (a duplicated or reordered line)."""
+
+
 class _Waiter:
     """One queued append awaiting a group commit (SCALE-C1b). Guarded ENTIRELY by the owning store's
     `_commit_cv`: `spec` is set at construction (immutable thereafter); `seq`/`error`/`done` are written only
@@ -235,6 +273,9 @@ class SpineStore:
         self._index_epoch: tuple | None = None           # change_token when the index was last reconciled
         self._max_seq = -1
         self._last: ChainEntry | None = self._read_last_entry()
+        # The monotonic-tail check's progress in the active segment: (path, bytes checked, highest seq in them,
+        # entry_hash of the last record in them). Lets each append re-check only bytes it has not seen.
+        self._tail_checked: "tuple[str, int, int, str] | None" = None
         # spine-payload DEK (G1 slice-4), loaded lazily on the first content append / decrypted read.
         # `_UNSET` until first use; then the 32-byte DEK, or None when the vault is not provisioned
         # (opt-in passthrough → plaintext, byte-identical to today).
@@ -314,10 +355,10 @@ class SpineStore:
         for r in reversed(recent):                       # newest first — the nearest duplicate
             try:
                 rr = self.decrypted(r)                   # fail-closed: an unopenable record is NOT a match
-            except Exception:  # noqa: BLE001 — locked/corrupt sealed content ⇒ skip (never a false dedup)
+                rkey = self._content_key(rr.kind, rr.source, rr.actor, rr.payload, rr.parent_id, rr.supersedes_id)
+            except Exception:  # noqa: BLE001 — locked/corrupt/non-canonicalisable content ⇒ skip (never a false dedup)
                 continue
-            if self._content_key(rr.kind, rr.source, rr.actor, rr.payload,
-                                 rr.parent_id, rr.supersedes_id) == key:
+            if rkey == key:
                 return r.seq
         return None
 
@@ -468,6 +509,9 @@ class SpineStore:
                 # single file here would yield a SHORT chain (invariant 15). RAISE.
                 raise SpineError("spine manifest disappeared while resolving segments")
             gen, missing = m.generation, ""
+            brk = _segment_run_break(m)
+            if brk is not None:                          # an omitted/overlapping segment = a short chain
+                raise SpineError(f"spine manifest (generation {gen}) is not a contiguous segment run: {brk}")
             out: list[Path] = []
             for seg in m.ordered():
                 p = self._layout.seg_path(seg)
@@ -1016,6 +1060,56 @@ class SpineStore:
         return changed
 
     # --- write --------------------------------------------------------------------
+    def _check_monotonic_tail_locked(self, active: Path, clean_end: int, last: "ChainEntry | None") -> None:
+        """MUST hold the flock, after the torn-tail truncate. REFUSE to extend a tail whose last record does not
+        carry the highest seq in the active segment (or sits below the segment's first seq): the next record
+        would chain from it — a fork below the true tip that every reader's seq order then hides. Reads only the
+        bytes this store has not checked: none after its own appends, a peer process's appends, or the whole
+        active segment (bounded by the seal threshold) after a truncation, rotation or reset."""
+        if last is None:
+            self._tail_checked = None
+            return
+        ps = str(active)
+        ck = self._tail_checked
+        if ck is not None and not (ck[0] == ps and (
+                (ck[1] == clean_end and ck[3] == last.entry_hash)
+                or (ck[1] < clean_end and self._ends_with_entry(active, ck[1], ck[3])))):
+            ck = None                                     # not a continuation of what was checked: re-check all
+        if ck is None:
+            act = self._manifest.active() if self._manifest is not None else None
+            ck = (ps, 0, (act.first_seq if act is not None else 0) - 1, "")
+        off, top = ck[1], ck[2]
+        if off < clean_end:
+            with active.open("rb") as f:
+                f.seek(off)
+                buf = f.read(clean_end - off)
+            seqs = [q for q in (_line_seq(ln) for ln in buf.split(b"\n") if ln.strip()) if q is not None]
+            below = max([top, *seqs[:-1]])                # every record before the tail
+            if last.seq <= below:
+                raise SpineError(
+                    f"refusing to append: the spine tail (seq {last.seq}) is not above every earlier record in "
+                    f"the active segment (highest seq {below}) — a duplicated or reordered line; run `sigil verify`")
+            top = max(below, last.seq)
+        self._tail_checked = (ps, clean_end, top, last.entry_hash)
+
+    @staticmethod
+    def _ends_with_entry(path: Path, off: int, entry_hash: str) -> bool:
+        """Whether the bytes of `path` before offset `off` still end with the record whose entry_hash this is."""
+        window = 8192
+        with path.open("rb") as f:
+            while True:
+                start = max(0, off - window)
+                f.seek(start)
+                parts = f.read(off - start).rstrip(b"\n").rsplit(b"\n", 1)
+                if len(parts) == 2 or start == 0:
+                    break
+                window *= 4
+        try:
+            d = json.loads(parts[-1])
+        except ValueError:
+            return False
+        return isinstance(d, dict) and d.get("entry_hash") == entry_hash
+
     def _write_record_locked(
         self, f, pred: "ChainEntry | None", *, kind: str, source: str, actor: str,
         payload: dict[str, Any], parent_id: int | None, supersedes_id: int | None,
@@ -1219,6 +1313,7 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before "
                                      "append_many (%s)", pre_size - clean_end, active)
+                    self._check_monotonic_tail_locked(active, clean_end, last)
                     pred = last if last is not None else self._seam_tip_for_active()
                     off = clean_end
                     try:
@@ -1256,6 +1351,7 @@ class SpineStore:
                                     self._max_seq = entry.seq
                                 self._seg_scanned[active_str] = o + n
                 self._last = entries[-1]
+                self._tail_checked = (str(active), off, entries[-1].seq, entries[-1].entry_hash)
                 self._maybe_rotate_locked()
         return [e.seq for e in entries]
 
@@ -1325,6 +1421,7 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
                                      pre_size - clean_end, active)
+                    self._check_monotonic_tail_locked(active, clean_end, last)
                     # Derive the predecessor BEFORE writing (the SAME chain math as append_entry/build_chain);
                     # _write_record_locked derives seq = pred.seq+1 (genesis 0), seals the content fields under
                     # the spine DEK bound to that seq, and writes the line (no fsync). active EMPTY ⇒ seed from
@@ -1351,6 +1448,7 @@ class SpineStore:
                                 self._max_seq = entry.seq
                             self._seg_scanned[active_str] = offset + nbytes
                 self._last = entry
+                self._tail_checked = (str(active), offset + nbytes, entry.seq, entry.entry_hash)
                 # write-then-rotate: the record is durable (fsync'd) above BEFORE any seal, so a panic
                 # append is never blocked by rotation for more than the bounded seal-swap (D1). No-op unless
                 # a migrated active hit a threshold.
@@ -1366,7 +1464,7 @@ class SpineStore:
             return gzip.open(p, "rb")
         return p.open("rb")
 
-    def iter_records(self, *, since_seq: int = -1) -> Iterator[SpineRecord]:
+    def iter_records(self, *, since_seq: int = -1, strict_order: bool = False) -> Iterator[SpineRecord]:
         """Records with seq > `since_seq`, in seq order, ACROSS ALL SEGMENTS (sealed segments then the
         active) as ONE contiguous chain, so every full-scanning consumer keeps seeing the whole log. For
         since_seq >= 0 the index seeks straight to the first wanted line in its owning segment
@@ -1374,12 +1472,14 @@ class SpineStore:
         first. A line that fails to parse or lacks required keys is SKIPPED (a torn active tail can't crash
         the read; a torn MIDDLE line becomes a seq gap that verify() fails on). RAISES SpineError if the
         manifest references a segment that cannot be read — a read must NEVER silently yield a short chain
-        (invariant 15: no state-scanner fail-open)."""
+        (invariant 15: no state-scanner fail-open). A line whose seq does not exceed the one before it (a
+        duplicated or reordered line) is not yielded; with `strict_order` (verify()) it RAISES SpineOrderError."""
         yielded_upto = since_seq
         for _attempt in range(_SEG_RESOLVE_ATTEMPTS):    # D2 reader-grace: tolerate a few compaction moves
             segs = self._segments_in_order()             # RAISES on a genuinely missing referenced segment
             if not segs:
                 return
+            seen = -1                                    # the last seq read in THIS pass (a retry restarts it)
             try:
                 start_i, start_off = self._start_locus(yielded_upto, segs)   # its index build opens segments
                 for i in range(start_i, len(segs)):
@@ -1395,6 +1495,10 @@ class SpineStore:
                             except (ValueError, KeyError, TypeError):
                                 _log.warning("spine: skipping malformed line during iter_records (%s)", p)
                                 continue
+                            if strict_order and rec.seq <= seen:
+                                raise SpineOrderError(
+                                    f"duplicate or out-of-order seq {rec.seq} after seq {seen} in {p.name}")
+                            seen = rec.seq
                             if rec.seq > yielded_upto:
                                 yield rec
                                 yielded_upto = rec.seq
@@ -1616,16 +1720,24 @@ class SpineStore:
         `KINDS` set fails verify. `kind` is inside the digested content, so a hand-edited kind ALSO breaks
         the binding check — this is a defence-in-depth restatement of the same invariant on read."""
         entries: list[ChainEntry] = []
-        for r in self.iter_records():
-            if r.kind not in KINDS:
-                return False, f"unknown kind {r.kind!r} at seq {r.seq}: not in the enforced KINDS vocabulary"
-            content = {
-                "scope": r.scope, "kind": r.kind, "source": r.source, "actor": r.actor,
-                "payload": r.payload, "parent_id": r.parent_id, "supersedes_id": r.supersedes_id,
-            }
-            if digest_payload(content) != r.cert_digest:
-                return False, f"binding break at seq {r.seq}: payload does not match cert_digest (record tampered)"
-            entries.append(ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest, entry_hash=r.entry_hash))
+        try:
+            for r in self.iter_records(strict_order=True):
+                if r.kind not in KINDS:
+                    return False, f"unknown kind {r.kind!r} at seq {r.seq}: not in the enforced KINDS vocabulary"
+                content = {
+                    "scope": r.scope, "kind": r.kind, "source": r.source, "actor": r.actor,
+                    "payload": r.payload, "parent_id": r.parent_id, "supersedes_id": r.supersedes_id,
+                }
+                try:
+                    bound = digest_payload(content) == r.cert_digest
+                except (UnicodeError, ValueError, TypeError) as e:   # e.g. a lone surrogate: no canonical form
+                    return False, f"binding break at seq {r.seq}: content is not canonicalisable ({type(e).__name__})"
+                if not bound:
+                    return False, f"binding break at seq {r.seq}: payload does not match cert_digest (record tampered)"
+                entries.append(ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest,
+                                          entry_hash=r.entry_hash))
+        except SpineOrderError as e:
+            return False, f"chain break: {e} (a record line was duplicated or reordered)"
         # PRUNE-AWARE ROOTING (hard-prune Slice E). The live window links from GENESIS for an un-pruned spine
         # or from the retained-segment boundary (base_prev_hash) after a cold-archive prune. The first live
         # segment's `first_prev_hash` carries that base (== GENESIS when nothing is pruned, so this stays
