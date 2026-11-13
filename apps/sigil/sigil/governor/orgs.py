@@ -87,7 +87,7 @@ from vigil_core.rbac import ROLES, role_can  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — the fold mirrors accounts._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — the fold mirrors accounts._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0b — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -490,7 +490,7 @@ class OrgRegistry:
     def _org_seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((state, issued, orgs), since): the org fold's HARD-PRUNE SEED from `snap`, or the empty genesis start
         under the pubkey-dependent bypass (our anchor differs from the snapshot's)."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         state = dict(snap.org_state_map())                # org_id -> "active"|"revoked" (LWW; keep revoked)
         issued = dict(snap.org_issued_map())              # org_id -> per-org high-water
@@ -501,7 +501,7 @@ class OrgRegistry:
 
     def _membership_seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((state, issued, mems), since): the membership fold's seed, with the same bypass as `_org_seed`."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         state = dict(snap.membership_state_map())         # (org_id, username) -> "active"|"revoked" (keep revoked)
         issued = dict(snap.membership_issued_map())       # (org_id, username) -> per-pair high-water

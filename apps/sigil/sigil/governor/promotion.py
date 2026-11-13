@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..spine.fold_cache import FoldCache
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
@@ -114,7 +114,7 @@ class PromotionPolicy:
     def _seed(self, st) -> "tuple[tuple[dict, dict], int]":
         """((state, issued), since): the HARD-PRUNE SEED from `st`, or the empty genesis start when the trusted
         pubkey differs from the snapshot's (see `_fold`)."""
-        if self.trusted_pubkey != st.trusted_pubkey:
+        if not seed_applies(st, self.trusted_pubkey, self.store):
             return ({}, {}), -1
         # PER-(agent, scope) high-water, seeded from the SAME snapshot under the SAME pubkey condition
         # — otherwise the first hard prune would reset it and make every pruned grant replayable.

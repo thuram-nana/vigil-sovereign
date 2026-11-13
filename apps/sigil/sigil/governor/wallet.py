@@ -50,7 +50,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -227,15 +227,9 @@ class WalletRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
-            # mirroring accounts._fold. DEFERRED (prune-integration slice): unlike the pubkey-DEPENDENT folds,
-            # the wallet seed is ADDITIVE and was already verified under the key valid at each seq, so a future
-            # prune+rotation path should CARRY this seed (accept a snapshot whose trusted_pubkey is any key in
-            # the succession history) rather than bypass to a rescan — else a pruned tenant's balance would
-            # transiently under-read until the next prune re-commits under the new key. Unreachable today:
-            # SnapshotState.load fails closed on any real prune (the Slice-D/E cutover is unwired), so this
-            # bypass is only taken under the empty (no-prune) snapshot, where genesis-scan == the correct fold.
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            # Only when NOTHING is pruned (`seed_applies` raises on a pruned spine it cannot seed, and carries
+            # the seed across a rotation the succession validates): the genesis scan is then the whole fold.
             return ({}, {}, set()), -1
         return (dict(snap.wallet_granted_map()), dict(snap.wallet_debited_map()),
                 set(snap.wallet_seen_set())), snap.base_seq - 1

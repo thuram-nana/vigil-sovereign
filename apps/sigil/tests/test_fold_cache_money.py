@@ -32,7 +32,7 @@ from sigil.governor import wallet as wl
 from sigil.governor.authn import signed_payload
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -111,6 +111,16 @@ def _assert_equivalent(regs, entry_ids, monkeypatch, no_full_fold=None):
     finally:
         monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
     assert cached == full
+
+
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
 
 
 @pytest.mark.parametrize("seed", [21, 22, 23])
@@ -259,14 +269,15 @@ def test_a_seeded_prune_keeps_balances_tranches_and_consumed_entry_ids(tmp_path,
     assert regs.plan.debited_entry("acme", "res-1") is not None, "the live replay of the debit is found"
 
 
-def test_the_pubkey_bypass_folds_the_live_window_only(tmp_path, monkeypatch, no_full_fold):
+def test_a_foreign_key_reader_of_a_pruned_snapshot_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     store, _regs, _snap, _captured = _pruned_money(tmp_path, monkeypatch, snap_pub=OWNER_PUB)
     new_owner = generate_keypair()
     reader = _Regs(_regs.wallet.store, key=new_owner, pub=new_owner.public_key_b64)
-    reader.wallet.grant("acme", 7, "topup", issued_at=_iss())  # live, under the reader's key
-    _assert_equivalent(reader, ["res-1"], monkeypatch, no_full_fold)
-    assert reader.wallet.balance("acme").granted == 7 and reader.plan.tranches("acme") == []
-    assert reader.subs.subscription("acme") is None and reader.plan.debited_entry("acme", "res-1") is None
+    _fails_closed_both_ways(monkeypatch, lambda: reader.wallet.balance("acme"), lambda: reader.plan.tranches("acme"),
+                            lambda: reader.subs.subscription("acme"))
 
 
 @pytest.mark.parametrize("value", ["", "0", "off"])

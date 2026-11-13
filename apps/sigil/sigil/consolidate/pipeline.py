@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Iterator
 
 from ..config import CACHE_DIR, ensure_dirs
-from ..spine.checkpoint import checkpoint
+from ..spine.checkpoint import checkpoint, standing_pruned_head
 from ..spine.store import SpineStore
 from .brief import write_brief
 from .extract import ExtractionProvider, HeuristicProvider
@@ -67,6 +67,8 @@ def run_consolidation(provider: ExtractionProvider | None = None, *, store: Spin
                       do_brief: bool = True, sign: bool = True,
                       save_cursor: bool = True) -> ConsolidationReport:
     store = store or SpineStore()
+    if sign and not dry_run:
+        standing_pruned_head(store)   # a pruned spine whose head could not be re-signed: refuse BEFORE promoting
     provider = provider or HeuristicProvider()
     since = since_seq if since_seq is not None else _load_cursor()
     head_before = store.next_seq - 1                       # never feed our own promotions

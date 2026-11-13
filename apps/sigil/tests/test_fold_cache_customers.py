@@ -31,7 +31,7 @@ from sigil.governor.authn import signed_payload
 from sigil.governor.customers import CustomerRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -93,6 +93,16 @@ def _assert_equivalent(reg, usernames, emails, no_full_fold=None):
 
 
 # ---- randomized equivalence ------------------------------------------------------------------------------
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+
+
 @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
 def test_randomized_equivalence_with_the_full_fold(tmp_path, seed, no_full_fold):
     rng = random.Random(seed)
@@ -360,20 +370,22 @@ class _PrunedView:
         return self._inner.append(**kw)
 
 
-def test_a_prune_moves_the_key_under_the_pubkey_bypass(tmp_path, monkeypatch, no_full_fold):
+def test_a_pruned_snapshot_under_a_foreign_key_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     store = SpineStore(str(tmp_path / "spine.jsonl"))
     view = _PrunedView(store)
     reg = _reg(view)
     u, _ = reg.create("p@acme.com", issued_at=_iss())               # seq 0
     k = store.append(kind="event", source="t", actor="u", payload={"signal": "marker"})
     assert reg.customer(u) is not None                              # warm over the unpruned spine
-    other = generate_keypair().public_key_b64                       # the snapshot's pubkey differs: BYPASS
+    other = generate_keypair().public_key_b64                       # the snapshot's key is not the reader's
     snap = build([r for r in store.iter_records() if r.seq < k], trusted_pubkey=other, base_seq=k,
                  snapshot_seq=k - 1)
     view.K = k                                                      # [0..k) physically gone
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
-    _assert_equivalent(reg, [u], ["p@acme.com"], no_full_fold)
-    assert reg.customer(u) is None, "the bypass folds only the live window: the pruned grant is gone"
+    _fails_closed_both_ways(monkeypatch, lambda: reg.customer(u), lambda: reg.by_email("p@acme.com"))
 
 
 def test_a_seeded_prune_keeps_the_pruned_customer_and_its_high_water(tmp_path, monkeypatch, no_full_fold):
