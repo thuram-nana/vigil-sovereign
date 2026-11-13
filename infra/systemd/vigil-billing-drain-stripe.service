@@ -1,0 +1,60 @@
+# VIGIL SaaS money-IN drain, STRIPE lane — systemd USER service (oneshot, fired every 60s by its timer). OPT-IN.
+# =====================================================================
+# The Stripe twin of vigil-billing-drain.service. The proxy's /webhooks/stripe route (VIGIL_STRIPE_WEBHOOK_SPOOL)
+# checks each delivery's Stripe-Signature and spools it INERT with the signature and its receive time; this unit runs
+# ONE `sigil billing-drain --provider stripe` pass: re-verify the signature at the receive time, RE-FETCH the Checkout
+# Session / Invoice / Subscription from Stripe with the restricted key, and only then let the OWNER CATALOG decide the
+# credit. A quarantined webhook (a paid charge that could not be minted) makes the pass exit non-zero, so this unit
+# stays FAILED and the dead-man alarms until rejected/ is empty.
+#
+# The drain refuses (exit 2) unless VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1 and VIGIL_BILLING_ENABLE_STRIPE=1, with
+# VIGIL_STRIPE_WEBHOOK_SECRET (never the Flutterwave secret), VIGIL_STRIPE_SECRET_KEY (a recognisable live/test key)
+# and VIGIL_STRIPE_API_VERSION set, and refuses to drain the Flutterwave spool.
+#
+# NETWORK: deliberately NOT PrivateNetwork — the re-fetch is an HTTPS call to api.stripe.com (host-allowlisted in
+# sigil.governor.stripe_egress).
+#
+# SECRETS — inject from your secret manager (GO-LIVE §9b); never commit them. The EnvironmentFile below (mode 0600)
+# is the documented FALLBACK — see vigil-billing-drain-stripe.env.example.
+# The spool default below MUST equal the proxy's VIGIL_STRIPE_WEBHOOK_SPOOL, or the drain runs "healthy" on an empty
+# directory and credits nothing. ONE DRAINER per spool: this timer OR a manual watch, never both.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-billing-drain-stripe.service
+#     journalctl --user -u vigil-billing-drain-stripe -e
+#
+# INSTALL (paired with its timer):
+#   cp infra/systemd/vigil-billing-drain-stripe.{service,timer} ~/.config/systemd/user/
+#   install -m 600 infra/systemd/vigil-billing-drain-stripe.env.example ~/.config/vigil/billing-drain-stripe.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-billing-drain-stripe.timer
+
+[Unit]
+Description=VIGIL SaaS money-IN drain, Stripe lane (one pass: webhook → Stripe re-fetch → owner-signed credit mint)
+Documentation=file:%h/vigil/docs/runbooks/GO-LIVE-quickstart.md
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+# Path DEFAULTS live HERE (systemd expands %h in a unit directive, NEVER inside an EnvironmentFile value).
+Environment=VIGIL_STRIPE_BILLING_SPOOL=%h/.sigil/stripe-billing-spool
+EnvironmentFile=-%h/.config/vigil/billing-drain-stripe.env
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --provider stripe --spool ${VIGIL_STRIPE_BILLING_SPOOL}
+
+# --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# IMPORTANT: if VIGIL_STRIPE_BILLING_SPOOL (or SIGIL_HOME) is outside ~/.sigil, ADD it to ReadWritePaths above.

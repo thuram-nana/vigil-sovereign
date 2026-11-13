@@ -189,6 +189,10 @@ HA_UNITS: tuple[UnitSpec, ...] = (
     UnitSpec("vigil-billing-drain.service", "vigil-billing-drain.timer", 60, 15,
              "SaaS: drain the inbound billing-webhook spool → re-verify → owner-signed credit mint (60s; opt-in)",
              optional=True, enable_env="VIGIL_BILLING_DRAIN_ENABLED"),
+    # Stripe parity: the Stripe lane of the money-IN drain, watched once its own enable flag is set.
+    UnitSpec("vigil-billing-drain-stripe.service", "vigil-billing-drain-stripe.timer", 60, 15,
+             "SaaS: drain the inbound Stripe webhook spool → Stripe re-fetch → owner-signed credit mint (60s; opt-in)",
+             optional=True, enable_env="VIGIL_STRIPE_BILLING_DRAIN_ENABLED"),
     # ── DEP-3 (#73): the on-box upgrade/rollback drill. OPTIONAL like the SaaS drains: an install that never
     # enabled it gets no false ABSENT alarm; VIGIL_UPGRADE_DRILL_ENABLED arms it fail-closed from the start ──
     UnitSpec("vigil-upgrade-drill.service", "vigil-upgrade-drill.timer", 7 * 24 * 3600, 1800,

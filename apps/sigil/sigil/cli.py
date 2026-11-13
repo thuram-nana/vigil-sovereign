@@ -1326,7 +1326,8 @@ def cmd_ops_sweep(a) -> None:
             print("tx-refs requires --checkouts and --spool", file=sys.stderr)
             sys.exit(2)
         out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(a.checkouts), spool_dir=a.spool,
-                                                now=now, ttl_s=a.ttl)
+                                                now=now, ttl_s=a.ttl,
+                                                provider=getattr(a, "provider", "flutterwave"))
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
@@ -2950,6 +2951,8 @@ def main(argv=None) -> None:
                           "are never refunded (required with --apply)")
     pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
     pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
+    pos.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
+                     help="(tx-refs) which processor's webhook spool --spool is")
     pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
     pos.set_defaults(fn=cmd_ops_sweep)
     pbd = sub.add_parser("billing-drain",

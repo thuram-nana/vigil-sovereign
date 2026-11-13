@@ -1136,8 +1136,14 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # an operator-visible money failure, so RED, not an advisory note. Like the others it is OPTIONAL (watched only
 # once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected; and `vigil ready`
 # only REPORTS (nothing Requires= it), so a RED here never holds the proxy that accepts new payments down.
-_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service")
-_BILLING_DRAIN_UNIT = "vigil-billing-drain.service"
+_MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service",
+                      "vigil-billing-drain-stripe.service")
+# The money-IN drains, one per processor lane: (unit, default spool, the drain command that re-runs it).
+_BILLING_DRAIN_UNITS = {
+    "vigil-billing-drain.service": ("~/.sigil/billing-spool", "sigil billing-drain drain --spool <spool>"),
+    "vigil-billing-drain-stripe.service": ("~/.sigil/stripe-billing-spool",
+                                           "sigil billing-drain drain --provider stripe --spool <spool>"),
+}
 
 
 # ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
@@ -1646,12 +1652,13 @@ def collect(repo_root) -> dict:
                 # gap the ALL-ABSENT branch above handles. Make it a HARD issue so `vigil doctor` — the
                 # deploy preflight / production gate — goes RED until it is cleared. Non-money units stay
                 # advisory (`vigil alerts` owns the full dead-man).
-                if st.unit in _MONEY_DRAIN_UNITS and st.unit == _BILLING_DRAIN_UNIT:
+                if st.unit in _MONEY_DRAIN_UNITS and st.unit in _BILLING_DRAIN_UNITS:
+                    spool_default, rerun = _BILLING_DRAIN_UNITS[st.unit]
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"failed/stalled billing drain means paid webhooks are quarantined or not being "
                            f"drained: a customer PAID and has NOT been credited. Read each `.reason` in the billing "
-                           f"spool's rejected/ (default ~/.sigil/billing-spool), fix the cause, move the envelope "
-                           f"back to incoming/, and run `sigil billing-drain drain --spool <spool>` (or restart "
+                           f"spool's rejected/ (default {spool_default}), fix the cause, move the envelope "
+                           f"back to incoming/, and run `{rerun}` (or restart "
                            f"the unit) — re-ingest is idempotent, a payment is credited once.")
                 elif st.unit in _MONEY_DRAIN_UNITS:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
