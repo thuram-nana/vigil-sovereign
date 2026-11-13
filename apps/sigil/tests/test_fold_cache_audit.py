@@ -391,6 +391,9 @@ def test_the_cockpit_starts_the_warm_up_at_boot(monkeypatch, capsys):
         def shutdown(self):
             pass
 
+        def server_close(self):
+            pass
+
     fake = _Srv()
     seen = {}
     monkeypatch.setattr(srv_mod, "build_server", lambda **kw: fake)
