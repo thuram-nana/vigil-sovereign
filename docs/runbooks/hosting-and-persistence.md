@@ -80,6 +80,28 @@ the spine** — never the source of truth.
   recorded decision has entries not yet landed; `--apply` finishes it. Do **not** move files from the
   completion spool's `rejected/` back to `incoming/` by hand while a `sweep --apply` is running.
 
+  **One launch per host, superseded reservations.** With `VIGIL_ONE_LAUNCH_PER_HOST=1` (default off) a
+  customer holds at most one outstanding launch per (org, host): a second reserve is refused while an
+  earlier one is unsettled and may still run, and a start never replaces another launch's unsettled lease
+  on the seam, whatever the billing mode (decided under the settle lock). `ops-sweep reservations` also
+  reads launch reservations from the spine and lists one that a later launch of the same target replaced
+  on the seam (`superseded`), past its longest lease window plus `--ttl`; `--apply` refunds it through the
+  same exactly‑once settle (`released`). It is never released while a completion that could charge it is
+  anywhere in the completion spool (`completion_pending` / `completion_unknown`), when the spine and the
+  seam disagree about the target (`outcome_recorded` / `seam_inconsistent`), or when it was published
+  metered (`metered` / `metered_unknown`: it is charged for what it used, through its completion or a
+  cancel). With the settle record on, a release a crash interrupted is finished by `--apply`
+  (`settle_completed`) and reported `settle_interrupted` without it.
+
+  **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
+  after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace
+  (`VIGIL_PAUSED_EXPIRY_SETTLE_GRACE_SECONDS`, default 86400, from the later of the window end, the pause
+  and the late resume) has passed and nothing settled it. `ops-sweep reservations --apply` settles it by
+  the paused‑launch rule (metered: charged for what it used; flat: refunded); with
+  `VIGIL_PAUSED_EXPIRY_SETTLE=1` (default off; set it for the settle‑drain unit) the settle drain does the
+  same after each pass's completions, re‑checking the completion spool, the pause state and that it is
+  still due inside the settle lock, and prints `expired paused launches: N settled, M still held`.
+
 ---
 
 ## 2. Hosting topology
