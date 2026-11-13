@@ -41,7 +41,11 @@ where the caller simply did not re-append. Default off — the append path is ot
 (the durable commit) → rebase the manifest → delete the orphaned files. A crash before the head sign rolls
 back to the un-pruned spine; a crash after it leaves a validly-signed pruned head that `verify()` /
 `verify_checkpoint` honour whether or not the manifest+file GC has finished, and `finish_prune` completes the
-GC idempotently. Proven by a kill-9-during-cutover fuzz (deterministic per-barrier crashes + random SIGKILL)
+GC idempotently. The archive copy is verified for exactly the pending prune before its manifest row is written
+(every row re-derived from the archived bytes; the still-live part equal to the owner-signed records), so a
+refused attempt leaves no row behind; a row left by an interrupted attempt at another boundary is refused with
+the command that completes it; and re-running a prune whose head already committed reports it complete (exit
+0). Proven by a kill-9-during-cutover fuzz (deterministic per-barrier crashes + random SIGKILL)
 with a negative control that the recovery oracle detects a deleted retained record. It is behind three owner
 gates: a valid owner-signed head (the cutover re-signs with the owner key), explicit `--yes` confirmation,
 and the §7 referential-safety floors.

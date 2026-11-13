@@ -83,8 +83,9 @@ def test_archive_copy_and_reattach_verify(tmp_path, isolated):
     assert not ok2 and "does not verify" in msg2
 
 
-def test_reattach_detects_at_rest_tamper(tmp_path):
+def test_reattach_detects_at_rest_tamper(tmp_path, isolated):
     s = _segmented_store(tmp_path)
+    _cp.checkpoint(s)                      # an archive copy verifies against the owner-signed head
     payload = prune.snapshot_payload(s, 10)
     prune.archive_copy(s, 10, payload, adir=tmp_path / "arch")
     # flip a byte in an archived segment file -> sha256 mismatch caught.

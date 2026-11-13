@@ -200,15 +200,13 @@ def test_a_wider_prune_after_an_interrupted_narrower_one_names_it_and_writes_not
     orphan = _snapshots(world)
     assert len(orphan) == 1 and _head(world).snapshot_seq < 0
     before = _mpath(world).read_bytes()
-    with pytest.raises(prune.PruneUnsafe, match="uncommitted prune at 4"):
+    with pytest.raises(prune.PruneUnsafe, match=r"uncommitted prune at 4 .* `sigil spine prune -K 4 --yes`"):
         prune.commit_prune(_store_of(world), 6, confirm=True)
     assert _mpath(world).read_bytes() == before and _first_seq(world) == 0
-    prune.commit_prune(_store_of(world), 4, confirm=True)
+    assert prune.commit_prune(_store_of(world), 4, confirm=True)["base_seq"] == 4
     assert [r.seq for r in _snapshots(world)] == [orphan[0].seq], "the completed prune stacked a second snapshot"
-    rep = prune.commit_prune(_store_of(world), 6, confirm=True)
-    assert rep["base_seq"] == 6
+    assert _head(world).snapshot_seq == orphan[0].seq
     _verified(world)
-    assert _snapshots(world)[-1].payload["prev_snapshot_seq"] == orphan[0].seq
 
 
 def test_a_narrower_prune_after_an_interrupted_wider_one_names_it(world):
@@ -219,32 +217,49 @@ def test_a_narrower_prune_after_an_interrupted_wider_one_names_it(world):
     _verified(world)
 
 
-def test_a_row_inconsistent_with_the_committed_head_stops_the_next_prune(world):
+def _pending_past_the_committed_prune(root, rows_before=()):
+    """A candidate archive for a prune at 6 on top of the committed prune at 4: the archived [0..4), plus [4..6)
+    copied from the live spine and a row chaining from the committed one (`rows_before` are prepended)."""
+    s = _store_of(root)
+    am = _manifest(root)
+    seg = next(g for g in prune.read_manifest(s._layout).segments if g.first_seq == 4)
+    ad = root / "archive"
+    prune._copy_segments(s, [seg], am, {r["id"] for r in am["segments"]}, ad / "segments", ad)
+    leaves = [r.entry_hash for r in s.iter_records() if 4 <= r.seq < 6]
+    head = _head(root)
+    delta = merkle_root(leaves)
+    pending = {"base_seq": 6, "base_count": 6, "base_prev_hash": leaves[-1], "delta_merkle_root": delta,
+               "cumulative_merkle_root": chain_cumulative(head.cumulative_merkle_root, delta),
+               "prev_snapshot_seq": head.snapshot_seq}
+    am["snapshots"] = [*rows_before, *am["snapshots"], {k: pending[k] for k in (
+        "base_seq", "base_count", "delta_merkle_root", "cumulative_merkle_root", "prev_snapshot_seq")}]
+    return s, am, pending
+
+
+def test_a_pending_prune_past_a_committed_one_verifies_only_if_the_committed_rows_re_derive_the_head(world):
     prune.commit_prune(_store_of(world), 4, confirm=True)
-    m = _manifest(world)
-    m["snapshots"].insert(0, dict(m["snapshots"][0], base_seq=2, base_count=2))   # no head committed this
-    _mpath(world).write_text(json.dumps(m))
-    before, head, snaps = _mpath(world).read_bytes(), _head(world), len(_snapshots(world))
-    with pytest.raises(prune.PruneUnsafe, match="nothing was pruned"):
-        prune.commit_prune(_store_of(world), 6, confirm=True)
-    assert _first_seq(world) == 4 and len(_snapshots(world)) == snaps
-    assert _head(world) == head and _mpath(world).read_bytes() == before
+    s, am, pending = _pending_past_the_committed_prune(world)
+    ok, why = prune.verify_with_archive(s, pending=pending, manifest=am)
+    assert ok, why
+    committed = am["snapshots"][0]
+    forged = dict(committed, base_seq=2, base_count=2)                  # a row no signed head committed
+    s, am, pending = _pending_past_the_committed_prune(world, rows_before=[forged])
+    ok, why = prune.verify_with_archive(s, pending=pending, manifest=am)
+    assert ok is False and "the current head commits does not re-derive" in why
 
 
 # ---- the prior snapshot is the one the signed head commits -----------------------------------------------------
 
-def test_the_next_prune_chains_from_the_committed_snapshot_not_a_newer_record(world):
+def test_the_prior_snapshot_is_the_committed_one_not_a_newer_record(world):
     prune.commit_prune(_store_of(world), 4, confirm=True)
     committed = _head(world).snapshot_seq
     s = _store_of(world)
     real = s.get(committed)
     s.append(kind="snapshot", source="spine", actor="OWNER",       # a snapshot record no signed head names
              payload=dict(real.payload, base_seq=5, cumulative_merkle_root="f" * 64))
-    assert prune._prior_snapshot(_store_of(world))["snapshot_seq"] == committed
-    rep = prune.commit_prune(_store_of(world), 6, confirm=True)
-    assert rep["base_seq"] == 6
-    _verified(world)
-    assert _snapshots(world)[-1].payload["prev_snapshot_seq"] == committed
+    prior = prune._prior_snapshot(_store_of(world))
+    assert prior["snapshot_seq"] == committed
+    assert prior["cumulative_merkle_root"] == _head(world).cumulative_merkle_root
 
 
 def test_no_prior_snapshot_before_the_first_prune_even_with_a_snapshot_record(world):
@@ -252,10 +267,11 @@ def test_no_prior_snapshot_before_the_first_prune_even_with_a_snapshot_record(wo
     assert _snapshots(world) and prune._prior_snapshot(_store_of(world)) is None
 
 
-def test_a_head_naming_a_missing_snapshot_is_refused(world, monkeypatch):
+@pytest.mark.parametrize("named", [999, 5])                  # nothing there / an ordinary event record
+def test_a_head_naming_a_missing_snapshot_is_refused(world, monkeypatch, named):
     prune.commit_prune(_store_of(world), 4, confirm=True)
     head = _head(world)
-    monkeypatch.setattr(_cp, "_read_head_on_disk", lambda: head.model_copy(update={"snapshot_seq": 999}))
+    monkeypatch.setattr(_cp, "_read_head_on_disk", lambda: head.model_copy(update={"snapshot_seq": named}))
     with pytest.raises(prune.PruneUnsafe, match="no snapshot record"):
         prune._prior_snapshot(_store_of(world))
 
@@ -282,6 +298,21 @@ def test_a_prune_at_or_below_the_committed_boundary_is_refused(world):
         with pytest.raises(prune.PruneUnsafe, match="already pruned at 6"):
             prune.commit_prune(_store_of(world), K, confirm=True)
     assert _first_seq(world) == 6
+
+
+def test_the_pending_check_refuses_an_archive_with_no_segments(world):
+    pay = prune.snapshot_payload(_store_of(world), 4)
+    ok, why = prune.verify_with_archive(_store_of(world), pending=pay, manifest={"segments": [], "snapshots": []})
+    assert ok is False and "does not cover exactly [0..4)" in why
+
+
+def test_the_pending_check_refuses_a_payload_whose_root_the_archive_does_not_re_derive(world):
+    """The archive (left by an interrupted attempt) is consistent with itself; the payload the head would sign is
+    not consistent with it — the prune must not commit that root."""
+    _crashed_prune(world, 4, "prune_after_archive")
+    pay = dict(prune.snapshot_payload(_store_of(world), 4), cumulative_merkle_root="f" * 64)
+    ok, why = prune.verify_with_archive(_store_of(world), pending=pay)
+    assert ok is False and "the pending prune's cumulative_merkle_root" in why
 
 
 def test_the_pending_check_refuses_a_prune_that_is_not_past_the_committed_one(world):
