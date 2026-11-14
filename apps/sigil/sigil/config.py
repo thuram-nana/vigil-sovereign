@@ -369,6 +369,14 @@ def _seam_base() -> str:
     return resolve_seam_base()
 
 
+def seam_migration_guard_enabled() -> bool:
+    """``VIGIL_SEAM_MIGRATION_GUARD`` — refuse to serve, settle, sweep with ``--apply``, arm an eval grant or provision
+    a monitoring secret while a former seam directory of this host holds launch-seam records the seam lacks (until
+    ``sigil seam migrate --apply`` commits them). DEFAULT OFF in code; the shipped ``sigil-cockpit.service`` and
+    ``vigil-settle-drain.service`` set it to 1, so the seam move and the guard always arrive together."""
+    return (os.environ.get("VIGIL_SEAM_MIGRATION_GUARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir

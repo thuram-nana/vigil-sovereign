@@ -219,3 +219,6 @@ def test_every_shipped_seam_unit_sets_the_same_vigil_base_dir(unit):
     lines = [ln.strip() for ln in _UNITS[unit].read_text(encoding="utf-8").splitlines()]
     assert "Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease" in lines
     assert not any(ln.startswith("Environment=VIGIL_SETTLE_BASE_DIR") for ln in lines)
+    # the seam writers that serve or settle carry the migration guard with the seam base (one re-copied unit brings
+    # both); the backup units only capture the seam
+    assert ("Environment=VIGIL_SEAM_MIGRATION_GUARD=1" in lines) == (unit in ("cockpit", "settle"))

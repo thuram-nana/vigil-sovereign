@@ -718,7 +718,9 @@ def cmd_eval_grant(a) -> None:
 
     # arm / revoke / reconcile publish to the seam the offense plane reads: refuse before anything is appended
     # or published when this shell would write a different tree than the configured units use.
-    _writer_seam_base(f"eval-grant {a.action}")
+    _eval_seam = _writer_seam_base(f"eval-grant {a.action}")
+    if a.action == "arm":
+        _refuse_unmigrated_seam("eval-grant arm", _eval_seam)
 
     # Fail CLOSED on a locked/tampered vault (mirror `mesh`): never mint a fresh owner identity over an
     # existing one — that would FORK the trust root and sign under a key no verifier trusts.
@@ -955,6 +957,8 @@ def cmd_serve(a) -> None:
               f"address only — never 0.0.0.0 / an unspecified / a public address. Put a reverse proxy in "
               f"front to serve a real domain (deploy/REMOTE-HOSTING.md).", file=sys.stderr)
         sys.exit(2)
+    from vigil_core.seam_base import resolve_seam_base
+    _refuse_unmigrated_seam("serve", resolve_seam_base())     # before any token is minted or port bound
     allowed_hosts = _multi(a.allow_host, "SIGIL_UI_ALLOWED_HOSTS")
     allowed_origins = _multi(a.allow_origin, "SIGIL_UI_ALLOWED_ORIGINS")
 
@@ -1261,6 +1265,41 @@ def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> s
     return base
 
 
+def _unmigrated_seam(seam: str) -> list:
+    """The former seam directories of this host holding launch-seam records not committed into ``seam``
+    (``vigil_integration.seam_migration``; ``[]`` when every one is migrated or empty)."""
+    from vigil_integration.seam_base_units import unit_details
+    from vigil_integration.seam_migration import legacy_candidates, unmigrated_legacy
+    return unmigrated_legacy(seam, legacy_candidates(seam, units=unit_details()))
+
+
+def _migrate_hint(verb: str, seam: str, left: list) -> str:
+    lines = [f"{verb}: refused — launch-seam records in a former seam directory are not carried into the seam "
+             f"{seam} yet:"]
+    lines += [f"    {x['path']}: {x['files']} record(s), {x['reason']}" for x in left]
+    lines.append("  Stop the cockpit, the customer server and the settle drain, run `sigil seam migrate` (it reports "
+                 "what it will carry), then `sigil seam migrate --apply` as the service user, then start them again.")
+    return "\n".join(lines)
+
+
+def _refuse_unmigrated_seam(verb: str, seam: str) -> None:
+    """With ``VIGIL_SEAM_MIGRATION_GUARD`` on, exit 2 (before anything is written) while a former seam directory of
+    this host holds launch-seam records ``seam`` lacks; the guard state cannot be read ⇒ refused too. Off (the code
+    default): nothing."""
+    from . import config
+    if not config.seam_migration_guard_enabled():
+        return
+    try:
+        left = _unmigrated_seam(seam)
+    except Exception as e:  # noqa: BLE001 — the guard is on: an unreadable migration state refuses
+        print(f"{verb}: refused — the seam migration state cannot be read ({type(e).__name__}); run `vigil doctor`",
+              file=sys.stderr)
+        sys.exit(2)
+    if left:
+        print(_migrate_hint(verb, seam, left), file=sys.stderr)
+        sys.exit(2)
+
+
 def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
     """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
     Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
@@ -1375,10 +1414,11 @@ def cmd_settle_drain(a) -> None:
     # pointed at the wrong tree finds no lease and archives every completion unsettled.
     from vigil_core.seam_base import SeamBaseError, require_seam_base
     try:
-        require_seam_base(a.base_dir or None)
+        seam = require_seam_base(a.base_dir or None)
     except SeamBaseError as e:
         print(f"settle-drain: {e}", file=sys.stderr)
         sys.exit(2)
+    _refuse_unmigrated_seam("settle-drain", seam)            # nothing claimed, reclaimed or archived (unit FAILED)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1514,6 +1554,18 @@ def cmd_ops_sweep(a) -> None:
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
+        if a.apply:
+            _refuse_unmigrated_seam("ops-sweep reservations --apply", gate._seam_base())
+        else:
+            from . import config as _cfg
+            if _cfg.seam_migration_guard_enabled():
+                try:
+                    _left = _unmigrated_seam(gate._seam_base())
+                except Exception:  # noqa: BLE001 — a report never fails on the advisory
+                    _left = []
+                if _left:
+                    print("WARNING: a former seam directory holds launch-seam records not carried into this seam "
+                          "(`sigil seam migrate`); these rows cover this seam only.", file=sys.stderr)
         if a.apply:
             # E3bc: a root --apply would create seam settlement markers + their locks, spine segments and meter state
             # as root inside the services' directories, after which their settles fail. Fail fast instead.
@@ -2033,6 +2085,8 @@ def cmd_monitoring_secret(a) -> None:
     _monitoring_flag_or_exit("monitoring-secret")
     base = a.secrets_dir or config.monitoring_secrets_dir()
     if not a.export_only:
+        from vigil_core.seam_base import resolve_seam_base
+        _refuse_unmigrated_seam("monitoring-secret", resolve_seam_base())
         try:
             provision_report_secret(a.org, a.host, base, rotate=a.rotate)
         except (OSError, ValueError) as e:
@@ -2403,6 +2457,25 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def _upgrade_seam_check() -> "tuple[str, list]":
+    """``(seam, unmigrated former trees)`` for ``upgrade --check`` — read-only, whatever the guard flag says. The seam
+    is the one the configured seam units agree on, else this environment's; units that disagree are `vigil doctor`'s
+    to report (nothing listed here)."""
+    import os
+    try:
+        from vigil_core.seam_base import resolve_seam_base
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates, unmigrated_legacy
+        units = unit_details()
+        seams = {os.path.realpath(u["seam"]) for u in units.values()}
+        if len(seams) > 1:
+            return "", []
+        seam = next(iter(units.values()))["seam"] if units else resolve_seam_base()
+        return seam, unmigrated_legacy(seam, legacy_candidates(seam, units=units))
+    except ImportError:
+        return "", []
+
+
 def cmd_upgrade(a) -> None:
     """`sigil upgrade` — the automated, crash-safe data-migration verb (W5-5, #449):
     verify(before) -> backup -> verify(backup) -> migrate -> verify(after) -> report, ROLLING BACK to the
@@ -2414,8 +2487,14 @@ def cmd_upgrade(a) -> None:
     store = SpineStore()
     if getattr(a, "check", False):
         needed, reason = migration_needed(store)
+        seam, left = _upgrade_seam_check()
         if needed:
             print(f"upgrade REQUIRED: {reason}")
+        for x in left:
+            print(f"seam migration REQUIRED: {x['path']} holds {x['files']} launch-seam record(s) not carried into "
+                  f"the seam {seam} ({x['reason']}) — stop the cockpit, the customer server and the settle drain, "
+                  f"then run `sigil seam migrate` and `sigil seam migrate --apply`")
+        if needed or left:
             sys.exit(3)
         print("up to date: the spine is migrated (or fresh) — no upgrade needed")
         return

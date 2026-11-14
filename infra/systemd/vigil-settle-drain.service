@@ -43,6 +43,10 @@ Environment=PYTHONUNBUFFERED=1
 # alarm) instead of silently settling against the wrong one; `vigil doctor` flags units that disagree.
 Environment=VIGIL_SETTLE_SPOOL=%h/.sigil/spool/settle
 Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
+# Set together with the seam base: the drain refuses to run (exit 2 before it claims anything, so this unit stays
+# FAILED and the dead-man alarms) while a former seam directory holds launch-seam records not yet carried into the
+# seam by `sigil seam migrate --apply`. Turn it off only deliberately (VIGIL_SEAM_MIGRATION_GUARD=0 in the env file).
+Environment=VIGIL_SEAM_MIGRATION_GUARD=1
 Environment=VIGIL_SETTLE_SCOPE=*
 EnvironmentFile=-%h/.config/vigil/settle-drain.env
 WorkingDirectory=%h/.sigil

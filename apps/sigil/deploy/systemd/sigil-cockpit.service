@@ -46,6 +46,10 @@ Environment=SIGIL_LOG_LEVEL=INFO
 # WorkingDirectory, a different tree from the drain's, so no completion ever settled. %h expands HERE (never in
 # the EnvironmentFile, which overrides this only with an ABSOLUTE path). It sits under ReadWritePaths below.
 Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
+# Set together with the seam base above: the cockpit refuses to start (exit 2, nothing served) while a former seam
+# directory of this host (e.g. %h/.sigil/.vigil-live) holds launch-seam records not yet carried into the seam by
+# `sigil seam migrate --apply`. Turn it off only deliberately (VIGIL_SEAM_MIGRATION_GUARD=0 in the env file).
+Environment=VIGIL_SEAM_MIGRATION_GUARD=1
 
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil serve --host ${SIGIL_UI_BIND} --port ${SIGIL_UI_PORT}
