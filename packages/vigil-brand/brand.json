@@ -1,0 +1,83 @@
+{
+  "about": "The VIGIL brand set: each generated asset in generated/, what it must be, and every UI copy of it. generate.py writes generated/ from source/ and copies each asset to its targets; apps/sigil/tests/test_brand_assets.py checks every entry.",
+  "assets": [
+    {
+      "name": "favicon.svg",
+      "type": "image/svg+xml",
+      "fills": ["#07090D", "#FFFFFF"],
+      "square": true,
+      "targets": [
+        "apps/sigil/sigil/ui/public_site/assets/favicon.svg",
+        "apps/sigil/sigil/ui/customer_app/brand/favicon.svg"
+      ]
+    },
+    {
+      "name": "favicon.ico",
+      "type": "image/x-icon",
+      "ico_sizes": [16, 32, 48, 64],
+      "targets": [
+        "apps/sigil/sigil/ui/public_site/assets/favicon.ico",
+        "apps/sigil/sigil/ui/customer_app/brand/favicon.ico"
+      ]
+    },
+    {
+      "name": "icon-192.png",
+      "type": "image/png",
+      "size": [192, 192],
+      "opaque": true,
+      "targets": [
+        "apps/sigil/sigil/ui/customer_app/brand/icon-192.png"
+      ]
+    },
+    {
+      "name": "icon-512.png",
+      "type": "image/png",
+      "size": [512, 512],
+      "opaque": true,
+      "targets": [
+        "apps/sigil/sigil/ui/customer_app/brand/icon-512.png"
+      ]
+    },
+    {
+      "name": "apple-touch-icon.png",
+      "type": "image/png",
+      "size": [180, 180],
+      "opaque": true,
+      "targets": [
+        "apps/sigil/sigil/ui/public_site/assets/apple-touch-icon.png",
+        "apps/sigil/sigil/ui/customer_app/brand/apple-touch-icon.png"
+      ]
+    },
+    {
+      "name": "vigil-wordmark.svg",
+      "type": "image/svg+xml",
+      "fills": ["#111827"],
+      "targets": [
+        "apps/sigil/sigil/ui/customer_app/brand/vigil-wordmark.svg"
+      ]
+    },
+    {
+      "name": "vigil-wordmark-white.svg",
+      "type": "image/svg+xml",
+      "fills": ["#FFFFFF"],
+      "targets": [
+        "apps/sigil/sigil/ui/public_site/assets/vigil-wordmark-white.svg",
+        "apps/sigil/sigil/ui/customer_app/brand/vigil-wordmark-white.svg"
+      ]
+    },
+    {
+      "name": "vigil-mark.svg",
+      "type": "image/svg+xml",
+      "fills": ["#111827"],
+      "square": true,
+      "targets": []
+    },
+    {
+      "name": "vigil-mark-white.svg",
+      "type": "image/svg+xml",
+      "fills": ["#FFFFFF"],
+      "square": true,
+      "targets": []
+    }
+  ]
+}
