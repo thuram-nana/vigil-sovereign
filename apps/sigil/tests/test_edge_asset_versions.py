@@ -147,7 +147,10 @@ def test_version_json_is_unauthenticated_no_store_and_names_the_build(edge):
     assert h["content-type"].startswith("application/json") and "set-cookie" not in h
     build = json.loads(body)["build"]
     assert re.fullmatch(r"[0-9a-f]{12}", build) and h["x-vigil-build"] == build
-    assert build == SiteSnapshot(edge.root, {}, max_file=1 << 20).build
+    # the customer edge also writes a per-deployment value (the iOS install flag) into its page: part of the build
+    expected = (SiteSnapshot(edge.root, {}, max_file=1 << 20) if edge.kind == "public"
+                else custui.build_app_snapshot(edge.root)).build
+    assert build == expected
 
 
 @pytest.mark.parametrize("path", ["/", "/assets/site.css", "/healthz", "/readyz", "/nope", "/version.json"])
