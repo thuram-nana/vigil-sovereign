@@ -342,7 +342,9 @@ class EmailCodeLedger:
 
     @staticmethod
     def _live(rec: "Optional[dict]", now: float) -> bool:
-        exp = rec.get("exp") if rec else None
+        if not rec:
+            return False
+        exp = rec.get("exp")
         return (isinstance(exp, (int, float)) and not isinstance(exp, bool) and now < float(exp)
                 and isinstance(rec.get("salt"), str) and isinstance(rec.get("hash"), str))
 
