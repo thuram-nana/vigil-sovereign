@@ -20,6 +20,10 @@ by) the drain's completion spool and the spool must be fully readable; a metered
 read as it was priced; and the lease must STILL be due — a pause or a late resume recorded since restarts the
 grace (``not_due``).
 
+HELD FOR THE OWNER: a launch the seam migration held (``legacy_hold`` in ``<seam>/.seam-migration/journal.json``) is
+never settled here — reported ``legacy_hold``, checked before anything is read or closed and again inside the settle's
+critical section — and while that journal exists but cannot be read no launch is (``journal_unreadable``).
+
 SOVEREIGN PLANE ONLY (FATAL-2): ``assert_no_offense()`` at import.
 """
 from __future__ import annotations
@@ -96,17 +100,25 @@ def settle_expired_paused_launches(gate: Any, *, now: float, completion_spool: "
     Returns one row per due launch: ``status`` ``settled`` (with ``refunded``), ``charged_paused`` (with ``charged``
     and ``refunded``), ``settle_completed`` (a recorded settle finished), ``already_settled``, a refusal reason
     (``completion_pending`` / ``completion_unknown`` / ``pause_changed`` / ``pause_unknown`` / ``not_due``),
-    ``deferred`` / ``deferred_config`` (retried next pass) or ``settle_failed`` (with ``error``). Never raises for
-    one lease."""
+    ``deferred`` / ``deferred_config`` (retried next pass), ``settle_failed`` (with ``error``), or ``legacy_hold`` /
+    ``journal_unreadable`` (held for the owner by the seam migration; never settled here). Never raises for one
+    lease."""
     from vigil_integration.live.credit_lease_expiry import due_expired_pauses
+
+    from .ops_sweeps import _held_snapshot
 
     base = gate._seam_base()
     spool = Path(completion_spool)
+    held, held_unknown = _held_snapshot(base)
     rows: "list[dict]" = []
     for d in due_expired_pauses(base, now=now, grace=grace):
         if scope != "*" and d.slug != scope:
             continue
         row: dict = {"slug": d.slug, "nonce": d.nonce}
+        if (str(d.slug), str(d.nonce)) in held or held_unknown:
+            row.update(status="legacy_hold" if not held_unknown else "journal_unreadable")
+            rows.append(row)                 # held for the owner by the seam migration: nothing read, closed or settled
+            continue
         try:
             row.update(_settle_one(gate, d, now=now, spool=spool, base=base, grace=grace))
         except Exception as e:  # noqa: BLE001 — one bad lease never sinks the pass (a settle is atomic)

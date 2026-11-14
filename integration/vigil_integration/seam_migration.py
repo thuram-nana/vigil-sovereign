@@ -420,12 +420,10 @@ def write_journal(seam: Any, obj: dict) -> None:
 
 
 def held_launches(seam: Any) -> "set[tuple[str, str]]":
-    """``{(slug, nonce)}`` the journal of ``seam`` lists as held for the owner (``legacy_hold``). Never raises: an
-    unreadable journal holds nothing here (``vigil doctor`` and the guard report the journal itself)."""
-    try:
-        j = read_journal(seam)
-    except ValueError:
-        return set()
+    """``{(slug, nonce)}`` the journal of ``seam`` lists as held for the owner (``legacy_hold``); empty when there is
+    no journal. Raises ``ValueError`` when the journal exists but cannot be read: a held launch cannot be ruled out
+    then, and every caller that settles refuses (``journal_unreadable``) until it is restored."""
+    j = read_journal(seam)
     out: "set[tuple[str, str]]" = set()
     for src in (j or {}).get("sources", {}).values():
         for h in (src.get("held") or []) if isinstance(src, dict) else []:
