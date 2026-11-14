@@ -51,3 +51,14 @@ def test_the_dropin_replaces_execstart_with_a_proxy_only_console_against_8733():
     cmd = starts[1]
     assert " up --proxy-only " in cmd and "--sovereign-addr 127.0.0.1:8733" in cmd and "--port 8770" in cmd
     assert cmd.startswith("ExecStart=%h/vigil/.venv-offense/bin/vigil ")
+
+
+def test_both_ways_to_share_the_settle_settings_reach_the_ops_sweep_shell():
+    s6 = _section(RUNBOOK.read_text(encoding="utf-8"), "## 6. Run the planes")
+    para = s6[s6.index("**Settings every settling process must share.**"):]
+    opt1 = para[para.index("1. "):para.index("2. ")]
+    opt2 = para[para.index("2. "):para.index("`vigil doctor` reads only")]
+    assert "$SIGIL_HOME/sigil.env" in opt1 and "exports the cockpit's `SIGIL_HOME`" in opt1
+    assert "settle-drain.env" in opt2
+    assert "export it" in opt2 and "sigil ops-sweep" in opt2 and "export VIGIL_SETTLE_SPINE_RECORD=1" in opt2
+    assert "never its own environment" in para and "vigil-ready.service" in para

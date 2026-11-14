@@ -125,8 +125,9 @@ systemctl --user is-enabled vigil-command.service
 ```
 
 `vigil doctor` must exit 0: clear every hard issue first — in particular settle and money settings that
-differ between the cockpit, the customer edge, the settle drain and ops-sweep. Do not upgrade a host that
-`vigil panic` contained (`vigil-command.service` reads `masked`); close the incident first.
+differ between the cockpit, the customer edge and the settle drain (a note names what the shell running
+`sigil ops-sweep` must export). Do not upgrade a host that `vigil panic` contained (`vigil-command.service`
+reads `masked`); close the incident first.
 
 ### 2.3 Quiesce: let money in flight finish
 

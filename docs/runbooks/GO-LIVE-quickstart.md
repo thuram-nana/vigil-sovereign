@@ -147,10 +147,16 @@ screens federate to an offense console and API on this host (127.0.0.1:8787 / :8
 
 **Settings every settling process must share.** `VIGIL_SETTLE_SPINE_RECORD` and the metered-settle pricing
 (`VIGIL_BILLING_TARGET_MARGIN`, `VIGIL_RUN_FLOOR_CREDITS`, `VIGIL_BILLING_CANCEL_SETTLEMENT`) must hold the same
-value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. Set each
-once in `$SIGIL_HOME/sigil.env` (every sigil process reads it beneath its own env file), or the same value in
-`cockpit.env`, `customer.env` and `~/.config/vigil/settle-drain.env`. `vigil doctor` reads the env files the
-installed units load and reports any disagreement as a hard issue.
+value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. Either:
+
+1. set each once in `$SIGIL_HOME/sigil.env` — every sigil process reads it beneath its own env file, and so does
+   a shell that exports the cockpit's `SIGIL_HOME` — or
+2. set the same value in `cockpit.env`, `customer.env` and `~/.config/vigil/settle-drain.env`, **and** export it
+   in the shell before every `sigil ops-sweep` (e.g. `export VIGIL_SETTLE_SPINE_RECORD=1`).
+
+`vigil doctor` reads only the files the installed units load, never its own environment, so it gives the same
+answer from your shell and from `vigil-ready.service`: a disagreement between the units is a hard issue, and a
+value that a shell reading only `sigil.env` would not see (option 2) is a note naming what to export.
 
 ## 7. Reverse proxy + TLS (three separate origins)
 

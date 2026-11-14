@@ -199,8 +199,10 @@ def _money_host(home: Path, *, cockpit="", customer="", drain="", sigil_env=None
         _write(home / ".sigil" / "sigil.env", sigil_env)
 
 
-def test_only_the_shell_is_not_configured(tmp_path):
-    assert dc.must_match_report(tmp_path, _REPO, {}) == ({"configured": False}, [], [])
+def test_no_settling_unit_is_not_configured(tmp_path):
+    assert dc.must_match_report(tmp_path, _REPO) == ({"configured": False}, [], [])
+    _write(tmp_path / ".sigil" / "sigil.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")   # a sigil.env alone is no unit
+    assert dc.must_match_report(tmp_path, _REPO) == ({"configured": False}, [], [])
 
 
 def test_the_shipped_env_examples_agree(tmp_path):
@@ -209,45 +211,63 @@ def test_the_shipped_env_examples_agree(tmp_path):
     _money_host(tmp_path, cockpit=(sigil / "cockpit.env.example").read_text(),
                 customer=(sigil / "customer.env.example").read_text(),
                 drain=(_REPO / "infra" / "systemd" / "vigil-settle-drain.env.example").read_text())
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
-    assert issues == [] and sec["ok"] is True
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and notes == [] and sec["ok"] is True
     assert set(sec["processes"]) == {"cockpit", "customer", "settle-drain", "ops-sweep"}
 
 
 def test_the_settle_record_flag_on_everywhere_agrees(tmp_path):
     on = "VIGIL_SETTLE_SPINE_RECORD=1\n"
-    _money_host(tmp_path, cockpit=on, customer="VIGIL_SETTLE_SPINE_RECORD=true\n", drain=on)
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {"VIGIL_SETTLE_SPINE_RECORD": "yes"})
-    assert issues == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
+    _money_host(tmp_path, cockpit=on, customer="VIGIL_SETTLE_SPINE_RECORD=true\n", drain=on,
+                sigil_env="VIGIL_SETTLE_SPINE_RECORD=on\n")
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and notes == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
+    assert sec["ops_sweep_agrees"] is True
 
 
 def test_the_settle_record_flag_on_in_the_cockpit_only_is_a_hard_issue(tmp_path):
     _money_host(tmp_path, cockpit="VIGIL_SETTLE_SPINE_RECORD=1\n")
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     assert sec["ok"] is False and len(issues) == 1
     msg = issues[0]
     assert msg.startswith("VIGIL_SETTLE_SPINE_RECORD must be the same")
-    assert "on in cockpit" in msg and "off in customer, settle-drain, ops-sweep" in msg
+    assert "on in cockpit" in msg and "off in customer, settle-drain" in msg
+    assert "~/.sigil/sigil.env" in msg                     # the one file every unit here reads beneath its env file
 
 
-def test_ops_sweep_alone_disagreeing_is_a_hard_issue(tmp_path):
+def test_ops_sweep_alone_disagreeing_is_a_note_naming_what_its_shell_must_export(tmp_path):
+    # GO-LIVE §6, the flag in each unit env file: the units agree, so nothing blocks bring-up; a shell that reads
+    # only sigil.env would settle without the record, so the doctor says what that shell must export
     on = "VIGIL_SETTLE_SPINE_RECORD=1\n"
     _money_host(tmp_path, cockpit=on, customer=on, drain=on)
-    _sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
-    assert len(issues) == 1 and "off in ops-sweep" in issues[0]
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and sec["ok"] is True and sec["ops_sweep_agrees"] is False
+    assert len(notes) == 1
+    assert notes[0].startswith("VIGIL_SETTLE_SPINE_RECORD differs between the units that settle and `sigil ops-sweep`")
+    assert "on in cockpit, customer, settle-drain" in notes[0] and "off in ops-sweep" in notes[0]
+    assert "`export VIGIL_SETTLE_SPINE_RECORD=1`" in notes[0] and "~/.sigil/sigil.env" in notes[0]
+
+
+def test_a_pricing_value_missing_from_the_ops_sweep_shell_is_a_note_that_never_prints_it(tmp_path):
+    v = f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n"
+    _money_host(tmp_path, cockpit=v, drain=v)
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and len(notes) == 1
+    assert "set in cockpit, settle-drain; unset in ops-sweep" in notes[0]
+    assert "export the same VIGIL_BILLING_TARGET_MARGIN as ~/.sigil/cockpit.env" in notes[0]
+    assert _VALUE not in notes[0] and _VALUE not in repr(sec)
 
 
 def test_one_value_in_sigil_env_reaches_every_unit(tmp_path):
     # the remedy the issue names: set it once in $SIGIL_HOME/sigil.env, which every sigil process reads
     _money_host(tmp_path, sigil_env=f"VIGIL_SETTLE_SPINE_RECORD=1\nVIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
-    ops = {"VIGIL_SETTLE_SPINE_RECORD": "1", "VIGIL_BILLING_TARGET_MARGIN": _VALUE}
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, ops)
-    assert issues == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and notes == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
 
 
 def test_a_unit_env_file_overrides_sigil_env(tmp_path):
     _money_host(tmp_path, cockpit="VIGIL_SETTLE_SPINE_RECORD=0\n", sigil_env="VIGIL_SETTLE_SPINE_RECORD=1\n")
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {"VIGIL_SETTLE_SPINE_RECORD": "1"})
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     assert sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"]["cockpit"] == "off"
     assert len(issues) == 1 and "off in cockpit" in issues[0]
 
@@ -256,17 +276,30 @@ def test_sigil_env_is_read_at_each_processs_own_sigil_home(tmp_path):
     data = tmp_path / "data" / ".sigil"
     _write(data / "sigil.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")
     _money_host(tmp_path, cockpit=f"SIGIL_HOME={data}\n")
-    sec, _issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     flags = sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"]
     assert flags["cockpit"] == "on" and flags["settle-drain"] == "off"
+    assert flags["ops-sweep"] == "on"                      # the ops-sweep shell is read at the COCKPIT's SIGIL_HOME
+    assert sec["processes"]["ops-sweep"]["sigil_env"] == "~/data/.sigil/sigil.env"
+    assert len(issues) == 1 and "different SIGIL_HOMEs" in issues[0] and "cockpit: ~/data/.sigil" in issues[0]
+
+
+def test_golive_durable_volume_with_the_flag_once_in_its_sigil_env_agrees_everywhere(tmp_path):
+    # GO-LIVE §2 (SIGIL_HOME on the durable volume, in each unit env file) + §6 (the flag once in its sigil.env)
+    vol = tmp_path / "mnt" / ".sigil"
+    _write(vol / "sigil.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")
+    home_line = f"SIGIL_HOME={vol}\n"
+    _money_host(tmp_path, cockpit=home_line, customer=home_line, drain=home_line)
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and notes == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
 
 
 def test_a_pricing_setting_set_in_the_cockpit_only_is_a_hard_issue_and_its_value_is_never_printed(tmp_path):
     _money_host(tmp_path, cockpit=f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     assert len(issues) == 1
     assert issues[0].startswith("VIGIL_BILLING_TARGET_MARGIN must be the same")
-    assert "set in cockpit; unset in settle-drain, ops-sweep" in issues[0]
+    assert "set in cockpit; unset in settle-drain" in issues[0]
     assert _VALUE not in issues[0] and _VALUE not in repr(sec)
     assert "customer" not in sec["flags"]["VIGIL_BILLING_TARGET_MARGIN"]   # the customer edge does not settle
 
@@ -274,8 +307,8 @@ def test_a_pricing_setting_set_in_the_cockpit_only_is_a_hard_issue_and_its_value
 def test_two_different_pricing_values_are_a_hard_issue(tmp_path):
     _money_host(tmp_path, cockpit="VIGIL_BILLING_CANCEL_SETTLEMENT=refund\n",
                 drain="VIGIL_BILLING_CANCEL_SETTLEMENT=metered\n")
-    _sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {"VIGIL_BILLING_CANCEL_SETTLEMENT": "refund"})
-    assert len(issues) == 1 and "different values in cockpit, ops-sweep / settle-drain" in issues[0]
+    _sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
+    assert len(issues) == 1 and "different values in cockpit / settle-drain" in issues[0]
     assert "refund" not in issues[0] and "metered" not in issues[0].split("(")[1].split(")")[0]
 
 
@@ -286,7 +319,7 @@ def test_the_env_file_named_by_the_installed_unit_and_its_dropins_is_the_one_rea
     _write(tmp_path / ".config" / "systemd" / "user" / "vigil-settle-drain.service.d" / "env.conf",
            "[Service]\nEnvironmentFile=-%h/secrets/settle.env\n")
     _write(tmp_path / "secrets" / "settle.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {"VIGIL_SETTLE_SPINE_RECORD": "1"})
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     assert issues == [], issues
     assert "~/secrets/settle.env" in sec["processes"]["settle-drain"]["env_files"]
 
@@ -294,16 +327,17 @@ def test_the_env_file_named_by_the_installed_unit_and_its_dropins_is_the_one_rea
 def test_the_user_managers_environment_reaches_every_unit(tmp_path):
     _money_host(tmp_path)
     _write(tmp_path / ".config" / "environment.d" / "50-vigil.conf", "VIGIL_SETTLE_SPINE_RECORD=1\n")
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {"VIGIL_SETTLE_SPINE_RECORD": "1"})
-    assert issues == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
+    flags = sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"]
+    assert issues == [] and {flags[p] for p in ("cockpit", "customer", "settle-drain")} == {"on"}
 
 
-def test_an_env_file_present_without_an_installed_unit_still_takes_part(tmp_path):
+def test_env_files_present_without_installed_units_still_take_part(tmp_path):
     _money_host(tmp_path, cockpit="VIGIL_SETTLE_SPINE_RECORD=1\n", install=False)
-    (tmp_path / ".sigil" / "customer.env").unlink()
     (tmp_path / ".config" / "vigil" / "settle-drain.env").unlink()
-    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
-    assert set(sec["processes"]) == {"cockpit", "ops-sweep"} and len(issues) == 1
+    sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
+    assert set(sec["processes"]) == {"cockpit", "customer", "ops-sweep"}
+    assert len(issues) == 1 and "off in customer; on in cockpit" in issues[0]
 
 
 # ── wired into `vigil doctor` ────────────────────────────────────────────────────────────────────────────────
@@ -344,10 +378,39 @@ def test_doctor_reports_each_finding_as_a_hard_issue(tmp_path, monkeypatch):
     assert "Deployment units" in text and "DISAGREE" in text
 
 
-def test_ops_sweep_reads_the_shell_and_sigil_env_as_doctor_does(tmp_path, monkeypatch):
+def _settle_findings(report):
+    return ([i for i in report["issues"] if "VIGIL_SETTLE_SPINE_RECORD" in i],
+            [n for n in report["notes"] if "VIGIL_SETTLE_SPINE_RECORD" in n])
+
+
+@pytest.mark.parametrize("doctor_env", [{}, {"VIGIL_SETTLE_SPINE_RECORD": "1"}, {"VIGIL_SETTLE_SPINE_RECORD": "0"},
+                                        {"SIGIL_HOME": "/nonexistent/elsewhere"}],
+                         ids=["vigil-ready", "shell-exports-on", "shell-exports-off", "shell-other-home"])
+def test_the_doctors_own_environment_never_decides_the_settle_verdict(tmp_path, monkeypatch, doctor_env):
+    # GO-LIVE §6 with the flag in each unit env file, judged from vigil-ready.service (no SIGIL_HOME, no flag) and
+    # from shells that export either value: the units agree, so it is never a hard issue, and the verdict is the same
     home = _isolated(monkeypatch, tmp_path)
-    _money_host(home, cockpit="VIGIL_SETTLE_SPINE_RECORD=1\n", customer="VIGIL_SETTLE_SPINE_RECORD=1\n",
-                drain="VIGIL_SETTLE_SPINE_RECORD=1\n")
-    assert any("off in ops-sweep" in i for i in _doc.collect(_REPO)["issues"])
-    _write(home / ".sigil" / "sigil.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")
-    assert _doc.collect(_REPO)["must_match_flags"]["ok"] is True
+    monkeypatch.delenv("SIGIL_HOME", raising=False)
+    for k, v in doctor_env.items():
+        monkeypatch.setenv(k, v)
+    on = "VIGIL_SETTLE_SPINE_RECORD=1\n"
+    _money_host(home, cockpit=on, customer=on, drain=on)
+    report = _doc.collect(_REPO)
+    hard, notes = _settle_findings(report)
+    assert hard == [] and report["must_match_flags"]["ok"] is True
+    assert len(notes) == 1 and "`export VIGIL_SETTLE_SPINE_RECORD=1`" in notes[0]
+    assert "an ops-sweep shell reading only sigil.env differs" in _doc.render(report)
+
+
+def test_golive_durable_volume_layout_passes_under_vigil_ready(tmp_path, monkeypatch):
+    # GO-LIVE §2 + §6 alternative 1, as vigil-ready.service runs the doctor: no SIGIL_HOME in its environment
+    home = _isolated(monkeypatch, tmp_path)
+    monkeypatch.delenv("SIGIL_HOME", raising=False)
+    vol = tmp_path / "mnt" / ".sigil"
+    _write(vol / "sigil.env", "VIGIL_SETTLE_SPINE_RECORD=1\n")
+    line = f"SIGIL_HOME={vol}\n"
+    _money_host(home, cockpit=line, customer=line, drain=line)
+    report = _doc.collect(_REPO)
+    assert _settle_findings(report) == ([], [])
+    assert report["must_match_flags"]["ok"] is True and report["must_match_flags"]["ops_sweep_agrees"] is True
+    assert "an ops-sweep shell reading only sigil.env agrees" in _doc.render(report)

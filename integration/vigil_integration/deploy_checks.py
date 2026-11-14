@@ -14,12 +14,16 @@ so a development checkout's `vigil doctor` output is unchanged:
   virtualenv.
 * :func:`must_match_report` — the settle and money settings that must hold the SAME value in every process that
   settles a customer launch (``config.settle_spine_record_enabled``, OWNER DECISION OD-4, and the metered
-  settle's pricing) agree across the cockpit, the customer edge, the settle drain and ``sigil ops-sweep``.
+  settle's pricing) agree across the cockpit, the customer edge and the settle drain (a HARD issue when they do
+  not), and a shell running ``sigil ops-sweep`` that reads only ``sigil.env`` under the cockpit's ``SIGIL_HOME``
+  agrees with them (a note naming what that shell must export when it does not).
 
 Every value is read from the files the units load: the installed unit and its drop-ins under
 ``~/.config/systemd/user`` (``Environment=`` and ``EnvironmentFile=``, ``%h`` expanded), then ``sigil.env`` under
-the process's own ``SIGIL_HOME`` layered beneath it exactly as ``sigil.config`` does at import. stdlib only — no
-sigil or framework import (FATAL-2). Never raises: an unreadable file reads as absent.
+the process's own ``SIGIL_HOME`` layered beneath it exactly as ``sigil.config`` does at import. Nothing is read
+from the environment `vigil doctor` itself runs in, so the verdict is the same from an operator's shell and from
+``vigil-ready.service``. stdlib only — no sigil or framework import (FATAL-2). Never raises: an unreadable file reads
+as absent.
 """
 from __future__ import annotations
 
@@ -422,10 +426,21 @@ def _norm(kind: str, raw: "str | None") -> "str | None":
     return v or None
 
 
-def process_environments(home: Path, repo: Path, ops_env: dict) -> "tuple[dict, dict]":
-    """``({process: effective env}, {process: description})`` for every process that takes part: a unit-backed
-    process takes part when its unit is installed or one of the env files it names exists; ops-sweep always (its
-    environment is the shell `vigil doctor` runs in, plus sigil.env)."""
+def _sigil_home_of(env: dict, home: Path) -> Path:
+    """The ``SIGIL_HOME`` a process with environment ``env`` reads ``sigil.env`` from (``sigil.config``'s rule)."""
+    return Path(env.get("SIGIL_HOME") or (Path(home) / ".sigil"))
+
+
+def process_environments(home: Path, repo: Path) -> "tuple[dict, dict]":
+    """``({process: effective env}, {process: description})`` for every process that takes part, read only from
+    files — never from the environment `vigil doctor` itself runs in, so the verdict is the same from an operator's
+    shell and from ``vigil-ready.service``.
+
+    A unit-backed process (the cockpit, the customer edge, the settle drain) takes part when its unit is installed
+    or one of the env files it names exists. ``ops-sweep`` runs from an operator's shell, not a unit: it is read as
+    a shell that exports the cockpit's ``SIGIL_HOME`` (the first unit-backed process that takes part, when the
+    cockpit does not) and nothing else, so it reads ``sigil.env`` there. It takes part only beside a unit-backed
+    process."""
     envs: dict = {}
     where: dict = {}
     for proc, unit_name in _PROCESS_UNITS:
@@ -437,52 +452,85 @@ def process_environments(home: Path, repo: Path, ops_env: dict) -> "tuple[dict, 
         envs[proc] = _layer_sigil_env(u.environment(), Path(home))
         where[proc] = {"unit": unit_name, "installed": u.installed,
                        "env_files": [_display(p, Path(home)) for p in present]}
-    envs["ops-sweep"] = dict(ops_env)
-    where["ops-sweep"] = {"env": "this shell + sigil.env"}
+    if envs:
+        sh = _sigil_home_of(next(iter(envs.values())), Path(home))
+        envs["ops-sweep"] = _layer_sigil_env({"SIGIL_HOME": str(sh)}, Path(home))
+        where["ops-sweep"] = {"env": f"a shell with SIGIL_HOME={_display(sh, Path(home))}",
+                              "sigil_env": _display(sh / "sigil.env", Path(home))}
     return envs, where
 
 
-def must_match_report(home: Path, repo: Path, ops_env: dict) -> "tuple[dict, list, list]":
-    """(section, issues, notes). A disagreement is a HARD issue naming the setting and which processes hold which
-    state — never the value itself."""
-    envs, where = process_environments(home, repo, ops_env)
-    if len(envs) < 2:
+def _state(kind: str, vals: dict) -> str:
+    """Which processes hold which state, never the value itself."""
+    if kind == "switch":
+        groups: dict = {}
+        for p, v in vals.items():
+            groups.setdefault(v, []).append(p)
+        return "; ".join(f"{v} in {', '.join(ps)}" for v, ps in sorted(groups.items()))
+    unset = [p for p, v in vals.items() if v is None]
+    distinct: dict = {}
+    for p, v in vals.items():
+        if v is not None:
+            distinct.setdefault(v, []).append(p)
+    parts = [f"unset in {', '.join(unset)}"] if unset else []
+    if len(distinct) == 1:
+        parts.insert(0, f"set in {', '.join(next(iter(distinct.values())))}")
+    elif distinct:
+        parts.insert(0, "different values in " + " / ".join(", ".join(ps) for ps in distinct.values()))
+    return "; ".join(parts)
+
+
+def must_match_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
+    """(section, issues, notes). A disagreement between the UNITS that settle (read from the files they load) is a
+    HARD issue naming the setting and which processes hold which state — never the value itself. ``ops-sweep`` is
+    run by hand from a shell the doctor cannot see, so a difference between the units and what a shell reads from
+    ``sigil.env`` (:func:`process_environments`) is a note naming what that shell must export; the doctor's own
+    environment never decides either."""
+    envs, where = process_environments(home, repo)
+    units = [p for p in envs if p != "ops-sweep"]
+    if not units:
         return {"configured": False}, [], []
+    homes = {p: _sigil_home_of(envs[p], Path(home)) for p in units}
+    distinct_homes = sorted({str(h) for h in homes.values()})
+    if len(distinct_homes) == 1:
+        once = (f"Set it once in {_display(Path(distinct_homes[0]) / 'sigil.env', Path(home))} (each of them reads it "
+                f"beneath its own env file) and remove it from the unit env files")
+    else:
+        once = ("They read sigil.env under different SIGIL_HOMEs ("
+                + "; ".join(f"{p}: {_display(h, Path(home))}" for p, h in homes.items())
+                + "): set the same SIGIL_HOME in each unit's env file, then set it once in that sigil.env")
     flags: dict = {}
     issues: list = []
+    notes: list = []
     for name, kind, readers in MUST_MATCH:
         present = [p for p in readers if p in envs]
-        if len(present) < 2:
-            continue
         vals = {p: _norm(kind, envs[p].get(name)) for p in present}
-        if kind == "switch":
-            flags[name] = dict(vals)
-        else:
-            flags[name] = {p: ("set" if v is not None else "unset") for p, v in vals.items()}
-        if len(set(vals.values())) <= 1:
+        flags[name] = (dict(vals) if kind == "switch" else
+                       {p: ("set" if v is not None else "unset") for p, v in vals.items()})
+        unit_vals = {p: v for p, v in vals.items() if p != "ops-sweep"}
+        if len(set(unit_vals.values())) > 1:
+            issues.append(f"{name} must be the same in every process that settles customer launches, and it is not "
+                          f"({_state(kind, unit_vals)}). A process with a different value settles differently from "
+                          f"the others. {once}, or set the same value in each: ~/.sigil/cockpit.env, "
+                          f"~/.sigil/customer.env and ~/.config/vigil/settle-drain.env (and export it in the shell "
+                          f"that runs `sigil ops-sweep`). Restart the units after the change.")
             continue
-        if kind == "switch":
-            groups = {}
-            for p, v in vals.items():
-                groups.setdefault(v, []).append(p)
-            state = "; ".join(f"{v} in {', '.join(ps)}" for v, ps in sorted(groups.items()))
+        if "ops-sweep" not in vals or not unit_vals or vals["ops-sweep"] == next(iter(unit_vals.values())):
+            continue
+        sweep_file = where["ops-sweep"]["sigil_env"]
+        want = next(iter(unit_vals.values()))
+        if want is None or want == "off":
+            fix = (f"Remove it from {sweep_file} (the units' env files override it there), or "
+                   + (f"`export {name}=0`" if kind == "switch" else f"`unset {name}`")
+                   + " in that shell before every `sigil ops-sweep`")
+        elif kind == "switch":
+            fix = f"Set it once in {sweep_file}, or `export {name}=1` in that shell before every `sigil ops-sweep`"
         else:
-            unset = [p for p, v in vals.items() if v is None]
-            distinct: dict = {}
-            for p, v in vals.items():
-                if v is not None:
-                    distinct.setdefault(v, []).append(p)
-            parts = [f"unset in {', '.join(unset)}"] if unset else []
-            if len(distinct) == 1:
-                parts.insert(0, f"set in {', '.join(next(iter(distinct.values())))}")
-            elif distinct:
-                parts.insert(0, "different values in " + " / ".join(", ".join(ps) for ps in distinct.values()))
-            state = "; ".join(parts)
-        issues.append(f"{name} must be the same in every process that settles customer launches, and it is not "
-                      f"({state}). A process with a different value settles differently from the others. Set it "
-                      f"once in $SIGIL_HOME/sigil.env (every sigil process reads it beneath its own env file) and "
-                      f"remove it from the unit env files, or set the same value in each: ~/.sigil/cockpit.env, "
-                      f"~/.sigil/customer.env, ~/.config/vigil/settle-drain.env, and the shell that runs "
-                      f"`sigil ops-sweep`. Restart the units after the change.")
-    section = {"configured": True, "processes": where, "flags": flags, "ok": not issues}
-    return section, issues, []
+            fix = (f"Set it once in {sweep_file}, or export the same {name} as ~/.sigil/cockpit.env in that shell "
+                   f"before every `sigil ops-sweep`")
+        notes.append(f"{name} differs between the units that settle and `sigil ops-sweep` run from a shell that "
+                     f"reads only {sweep_file} ({_state(kind, vals)}): a sweep from such a shell settles differently "
+                     f"from the units. {fix}.")
+    section = {"configured": True, "processes": where, "flags": flags, "ok": not issues,
+               "ops_sweep_agrees": not notes}
+    return section, issues, notes
