@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:0d636ea6-2d5c-5a57-adf4-15431ccd56c4",
+  "serialNumber": "urn:uuid:6c2b52cb-068c-5f61-85cd-c99383d9ad33",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-14T06:02:13Z",
+    "timestamp": "2026-11-14T07:19:15Z",
     "tools": [
       {
         "vendor": "OBSIDIAN / CRUCIBLE",
@@ -2897,17 +2897,17 @@
       "type": "library",
       "bom-ref": "pytest-httpserver",
       "name": "pytest-httpserver",
-      "version": "1.2.0",
-      "purl": "pkg:pypi/pytest-httpserver@1.2.0",
+      "version": "1.2.1",
+      "purl": "pkg:pypi/pytest-httpserver@1.2.1",
       "scope": "optional",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "749937892dbf909c8b703503b491be66fc24073e7988bf9b4d783af4f33da942"
+          "content": "3f440eebbaea9c7b26a4ee83bb331b7d25ade45f849150c040d64f9f15be91a0"
         },
         {
           "alg": "SHA-256",
-          "content": "d07744ce2efaafa0575ed3081d416b999c773b09e84aa95065138bedc3e12352"
+          "content": "fbad14449e1acfacf24a4d6e2de3211a8654597f03e296af4a833b51836467bc"
         }
       ],
       "properties": [
