@@ -49,16 +49,16 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import os
 import shutil
 import subprocess  # noqa: F401 — the isolated child runs through it (isolated_child.run_isolated)
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+from .consistent_copy import shared_writer_lock as _shared_writer_lock
+from .consistent_copy import tree_digest
 from .isolated_child import consume_nonce, last_json_line, run_isolated, tempdir_outside
 from .store import SpineStore
 from .upgrade import restore_from_backup, upgrade
@@ -106,14 +106,7 @@ def _iter_files(root: Path) -> Iterator["tuple[Path, Path]"]:
 def _tree_digest(root: Path) -> str:
     """A streamed content digest of every regular file under ``root`` (relative path + bytes); lockfiles, the
     cold-archive and secret key files excluded (their bytes are never read). Proves the copy is faithful."""
-    h = hashlib.sha256()
-    for p, rel in _iter_files(root):
-        h.update(str(rel).encode("utf-8", "surrogateescape") + b"\0")
-        with open(p, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        h.update(b"\0")
-    return h.hexdigest()
+    return tree_digest(_iter_files(root))
 
 
 def _key_fingerprint(spine_dir: Path) -> str:
@@ -149,33 +142,6 @@ def _has_data(spine_dir: Path) -> bool:
         if (p.name.endswith(".jsonl") or p.name.endswith(".jsonl.gz")) and p.stat().st_size > 0:
             return True
     return False
-
-
-@contextmanager
-def _shared_writer_lock(spine_dir: Path, data_name: str) -> Iterator[None]:
-    """Hold a SHARED flock on the store's cross-process lockfile (``<ns>.lock``; writers take it EXCLUSIVELY per
-    append) so a snapshot is consistent. Opened READ-ONLY and never created (the real home may be read-only);
-    best-effort: no lockfile ⇒ no writer has ever run here ⇒ nothing to exclude."""
-    fd = None
-    lock = spine_dir / f"{Path(data_name).stem}.lock"
-    try:
-        if lock.is_file():
-            import fcntl
-            fd = os.open(str(lock), os.O_RDONLY)
-            fcntl.flock(fd, fcntl.LOCK_SH)
-    except Exception:  # noqa: BLE001 — best effort (non-POSIX / unreadable lock): the digest still proves it
-        if fd is not None:
-            os.close(fd)
-        fd = None
-    try:
-        yield
-    finally:
-        if fd is not None:
-            try:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
 
 
 def _overlaps(a: Path, b: Path) -> bool:

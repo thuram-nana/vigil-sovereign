@@ -68,7 +68,12 @@ _MAGIC = b"SGLBK1\x00"
 # subtrees (qdrant/ + graph/) and RE-WRAPS the sealed KV secret store (secrets.sealed) portably. Older
 # schemas are still read on restore (back-compat) — the file table is authenticated the same way either way.
 _SCHEMA = 3
-_MAX_BACKUP_SCHEMA = _SCHEMA   # refuse-newer gate (W5-3): a backup schema above this is "upgrade sigil"
+# schema 4: written ONLY for a home whose spine is HARD-PRUNED, with SIGIL_PRUNED_RESTORE on. The spine, its signed
+# head, the floor and the archive are captured as one consistent, verified unit, under the normalized ``spine/archive``
+# rel wherever the archive lives, and the signed manifest carries a ``prune_unit`` block a restore cross-checks against
+# the staged unit. Every other backup stays schema 3, so an older build still restores it.
+_PRUNED_SCHEMA = 4
+_MAX_BACKUP_SCHEMA = _PRUNED_SCHEMA   # refuse-newer gate (W5-3): a backup schema above this is "upgrade sigil"
 # scrypt work factors — n=2^16 (64 MiB) is a strong interactive KDF; salt is per-backup, stored in the header.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 16, 8, 1
 _SCRYPT_MAXMEM = 132 * _SCRYPT_N * _SCRYPT_R          # headroom over scrypt's 128*n*r working set
@@ -87,6 +92,14 @@ _DEK_CONTEXT = b"sigil/spine.dek"
 # backup.)  The KV store file itself is NEVER packaged as a raw ``files`` entry — only its plaintext, re-wrapped.
 _SECRETS_KV_FILE = "secrets.sealed"
 _SECRETS_KV_CONTEXT = b"sigil/secrets.kv"
+# Private key material under spine/keys that is NEVER packaged as a raw file: the owner key and the DEK are re-wrapped
+# from plaintext (above); a staged successor owner key (a rotation in progress) is never backed up at all.
+_RAW_KEY_RELS = ("spine/keys/owner.priv", "spine/keys/spine.dek", "spine/keys/owner.next.priv")
+_STAGED_ROTATION_MARKER = "spine/keys/owner.next.pub"
+# A consistent capture of a pruned unit is retried this many times when the spine changed under it (a concurrent
+# `sigil sign` writes the head and the floor outside the writer lock), backing off this long times the attempt.
+_CAPTURE_ATTEMPTS = 5
+_CAPTURE_BACKOFF_S = 0.2
 # Top-level CONFIG files (not key material) packaged verbatim into the sealed body. floor.json /
 # security.manifest.json were already covered; W7-2 adds the HA witness roster (the failover guard depends on
 # it), the governor budget caps, and the persisted env file. ``sigil.env`` can hold a signing secret (e.g.
@@ -238,7 +251,7 @@ def _is_sensitive_rel(rel: str) -> bool:
     return "/" not in rel and rel.endswith(".env")
 
 
-def _spine_files(home: Path) -> list[tuple[Path, str]]:
+def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Path, str]]:
     """Every trust-root/spine/kernel/config/state file to package, as ``(absolute_path, home-relative posix
     rel)`` pairs. Includes the spine dir (segments, manifest, signed head, the owner PUBLIC key), the config
     files (anti-rollback floor, G2 security manifest, HA witness roster, budget caps, persisted env), the
@@ -250,17 +263,35 @@ def _spine_files(home: Path) -> list[tuple[Path, str]]:
     ``home``) so a ``SIGIL_WARDEN_HOME`` pointed OUTSIDE ``SIGIL_HOME`` still restores to ``<home>/warden``;
     transient ``*.lock`` is skipped. ``warden.key`` is a plaintext-0600 kernel key — it rides inside the
     AEAD-sealed body like any packaged file (safe: the whole body is passphrase-sealed) and restore re-creates
-    it 0600 (see :func:`_is_sensitive_rel`)."""
+    it 0600 (see :func:`_is_sensitive_rel`).
+
+    ``archive`` (a hard-pruned unit, see :func:`_capture_pruned_unit`): the effective archive dir. Its files are
+    packaged under the normalized ``spine/archive/`` rel wherever it lives (never an absolute path), the default
+    ``spine/archive`` dir and the archive dir itself are left out of the spine walk (so the rels never collide), and
+    so are the read-index sidecars and atomic-write temp files a concurrent reader or writer leaves."""
     out: list[tuple[Path, str]] = []
     spine = home / "spine"
+    skip_dirs = []
+    if archive is not None:
+        from .spine.consistent_copy import transient
+        skip_dirs = [(spine / "archive").resolve(), archive.resolve()]
     if spine.is_dir():
         for p in sorted(spine.rglob("*")):
             if not p.is_file():
                 continue
             rel = p.relative_to(home).as_posix()
-            if rel.endswith((".lock",)) or rel in ("spine/keys/owner.priv", "spine/keys/spine.dek"):
+            if rel.endswith((".lock",)) or rel in _RAW_KEY_RELS:
+                continue
+            if archive is not None and (transient(p.name)
+                                        or any(p.resolve().is_relative_to(d) for d in skip_dirs)):
                 continue
             out.append((p, rel))
+    if archive is not None and archive.resolve().is_dir():
+        root = archive.resolve()
+        for p in sorted(root.rglob("*")):
+            if p.is_symlink() or not p.is_file() or transient(p.name):
+                continue
+            out.append((p, "spine/archive/" + p.relative_to(root).as_posix()))
     for extra in _CONFIG_FILES:
         f = home / extra
         if f.is_file() and not f.is_symlink():
@@ -282,14 +313,94 @@ def _spine_files(home: Path) -> list[tuple[Path, str]]:
     return out
 
 
+def _pruned_unit_digest(home: Path, archive: Path) -> str:
+    """The content digest of a pruned unit: the spine dir, the floor and the archive (transients excluded)."""
+    from .spine.consistent_copy import unit_digest
+    return "|".join(unit_digest(p) for p in (home / "spine", home / "floor.json", archive.resolve()))
+
+
+def _capture_pruned_unit(home: Path) -> "tuple[list[tuple[Path, str]], dict[str, bytes], dict]":
+    """Capture a HARD-PRUNED home as one consistent, verified unit: ``(files, bytes by rel, prune_unit)``.
+
+    The home must be this process's own SIGIL_HOME (its readers resolve the head, floor, keys and archive paths from
+    it). Under a SHARED flock on the spine's writer lockfile, the unit (spine dir, floor, effective archive dir) is
+    digested, VERIFIED with the real readers in-process (chain, signed head, succession tip, snapshot seed, a seeded
+    read, the whole archive re-derived) and read, then digested again: a capture whose digests differ raced a writer
+    outside that lock and is retried; one that never settles is refused. A unit that does not verify is refused —
+    a backup that cannot be restored is no safety net."""
+    from . import config
+    from .spine.consistent_copy import shared_writer_lock
+    from .spine.home_unit import check_live_unit, failure_reason
+    from .spine.prune import archive_dir as effective_archive_dir
+    from .spine.store import SpineStore
+    if home.resolve() != config.SIGIL_HOME.resolve():
+        raise BackupError(f"{home} holds a hard-pruned spine and is not this process's home — its head, floor and "
+                          f"archive are read with this process's paths; run the backup with SIGIL_HOME={home}")
+    eff = effective_archive_dir()
+    relocated = eff.resolve() != (home / "spine" / "archive").resolve()
+    for attempt in range(_CAPTURE_ATTEMPTS):
+        with shared_writer_lock(home / "spine", "spine.jsonl"):
+            before = _pruned_unit_digest(home, eff)
+            rep = check_live_unit(SpineStore(), require_archive=True, deep=True, archive_dir=eff)
+            if not rep.get("ok"):
+                why = failure_reason(rep)
+                failed = next((c.get("name") for c in rep.get("checks") or [] if not c.get("ok")), "")
+                hint = (f" — the backup must see the same SIGIL_SPINE_ARCHIVE_DIR as the services (it read {eff})"
+                        if "archive" in why else
+                        " — if a `sigil key rotate` was interrupted before it re-signed the head, finish it with "
+                        "`sigil key rotate --finish --yes` first" if failed in ("chain", "signed_head") else "")
+                raise BackupError(f"the hard-pruned spine does not verify as one unit ({why}){hint}; a backup that "
+                                  f"cannot be restored is refused")
+            files = _spine_files(home, archive=eff)
+            raw = {rel: f.read_bytes() for f, rel in files}
+            after = _pruned_unit_digest(home, eff)
+        if before == after:
+            sh = rep["shape"]
+            stale = relocated and any(p.is_file() for p in (home / "spine" / "archive").rglob("*"))
+            prune_unit = {
+                "schema": 1, "base_seq": sh["base_seq"], "snapshot_seq": sh["snapshot_seq"],
+                "last_seq": sh["last_seq"], "entry_count": sh["entry_count"], "head_sig_hash": sh["head_sig_hash"],
+                "floor_head_sig_hash": sh["floor_head_sig_hash"],
+                "cumulative_merkle_root": sh["cumulative_merkle_root"],
+                "archive": {"rel": "spine/archive", "source": "relocated" if relocated else "default",
+                            "source_dir": str(eff), "segments": sh["archive_segments"],
+                            "stale_default_skipped": stale},
+                "succession_tip": sh["succession_tip"], "verified_at_capture": True,
+            }
+            return files, raw, prune_unit
+        import time
+        time.sleep(_CAPTURE_BACKOFF_S * (attempt + 1))
+    raise BackupError("the spine kept changing during the backup (a concurrent sign or prune) — retry when it is "
+                      "idle")
+
+
+def _captures_pruned_unit(home: Path) -> bool:
+    """True iff this backup captures ``home`` as a hard-pruned unit (SIGIL_PRUNED_RESTORE on, and the spine pruned —
+    its live window starts above seq 0 or its head commits a prune)."""
+    from . import config
+    if not config.pruned_restore_enabled():
+        return False
+    from .spine.home_unit import HomeUnit, unit_shape
+    return unit_shape(HomeUnit.for_home(home), require_archive=False).pruned
+
+
 def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, owner_key: KeyPair) -> dict:
     """Write a portable, signed, passphrase-encrypted backup of ``home``'s trust root + spine to ``dest``.
 
     ``vault`` reads the (possibly TPM-sealed) owner private key + spine DEK + sealed KV secret store as
     plaintext to re-wrap them into the encrypted backup; ``owner_key`` signs the file manifest. Returns a
-    summary."""
+    summary. With SIGIL_PRUNED_RESTORE on, a HARD-PRUNED home is captured as one consistent, verified unit
+    (:func:`_capture_pruned_unit`, manifest schema 4 with ``prune_unit``); every other home exactly as before."""
     home = Path(home)
-    files = _spine_files(home)
+    if (home / _STAGED_ROTATION_MARKER).exists():
+        raise BackupError("an owner-key rotation is staged in this home — finish it with `sigil key rotate --finish "
+                          "--yes` before taking a backup")
+    raw_by_rel: "dict[str, bytes] | None" = None
+    prune_unit: "dict | None" = None
+    if _captures_pruned_unit(home):
+        files, raw_by_rel, prune_unit = _capture_pruned_unit(home)
+    else:
+        files = _spine_files(home)
     if not any(rel == "spine/head.json" for _f, rel in files):
         raise BackupError(f"no signed spine head under {home} — nothing to back up (run `sigil sign` first)")
     # DEFENCE-IN-DEPTH against the W16-8 "don't co-locate the DEK with the ciphertext" rule: the sealed KV
@@ -302,7 +413,7 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     file_hashes: dict[str, str] = {}
     warden_rels: list[str] = []
     for f, rel in files:
-        raw = f.read_bytes()
+        raw = f.read_bytes() if raw_by_rel is None else raw_by_rel[rel]
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
         if rel.startswith("warden/"):
@@ -326,6 +437,9 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
         # signed file table (fail-closed on a partial warden capture); an empty list means no warden dir existed.
         "warden": sorted(warden_rels),
     }
+    if prune_unit is not None:
+        manifest["schema"] = _PRUNED_SCHEMA
+        manifest["prune_unit"] = prune_unit
     manifest_sig = sign(owner_key.private_key_b64, canonical_json(manifest))
 
     body = {
@@ -345,9 +459,12 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     finally:
         os.close(fd)
     os.replace(str(tmp), str(dest))
-    return {"dest": str(dest), "files": len(file_blobs), "owner_key": owner_priv is not None,
-            "dek": dek is not None, "secrets_kv": secrets_kv is not None, "warden": len(warden_rels),
-            "bytes": len(sealed)}
+    out = {"dest": str(dest), "files": len(file_blobs), "owner_key": owner_priv is not None,
+           "dek": dek is not None, "secrets_kv": secrets_kv is not None, "warden": len(warden_rels),
+           "bytes": len(sealed)}
+    if prune_unit is not None:
+        out["prune_unit"] = prune_unit
+    return out
 
 
 def _read_header(src: Path) -> tuple[bytes, bytes]:

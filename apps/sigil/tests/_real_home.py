@@ -75,12 +75,13 @@ def env(home, **extra):
     return e, sys.executable
 
 
-def signed_home(tmp_path, *, pruned: bool, name: str = "realhome", world: bool = False) -> Path:
+def signed_home(tmp_path, *, pruned: bool, name: str = "realhome", world: bool = False, archive_dir=None) -> Path:
     """A REAL sovereign home (its own SIGIL_HOME, built in a child process): a segmented spine with an
-    owner-signed head + floor + owner keypair under ``home/spine/keys`` — optionally cold-archive PRUNED."""
+    owner-signed head + floor + owner keypair under ``home/spine/keys`` — optionally cold-archive PRUNED (into
+    ``archive_dir`` when given, else the default ``spine/archive``)."""
     home = Path(tmp_path) / name
     home.mkdir()
-    e, py = env(home, SIGIL_SPINE_ARCHIVE_DIR=None)
+    e, py = env(home, SIGIL_SPINE_ARCHIVE_DIR=str(archive_dir) if archive_dir is not None else None)
     argv = [py, "-c", MAKE_HOME, "prune" if pruned else "keep"] + (["world"] if world else [])
     subprocess.run(argv, env=e, check=True)
     assert (home / "spine" / "keys" / "owner.priv").is_file() and (home / "spine" / "head.json").is_file()
@@ -99,3 +100,37 @@ def read_home(home, *, fold_cache: bool = False, archive_dir=None) -> dict:
     proc = run_in_home(home, READ_HOME, VIGIL_FOLD_CACHE_ENABLED="1" if fold_cache else None,
                        SIGIL_SPINE_ARCHIVE_DIR=str(archive_dir) if archive_dir is not None else None)
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+# Back up the home the child runs in (its own SIGIL_HOME); prints the summary as one JSON line.
+BACKUP_HOME = """
+import json, sys
+from sigil import config
+from sigil.backup import BackupError, create_backup
+from sigil.governor.identity import ensure_owner_keypair
+from sigil.platform.vault import owner_vault
+try:
+    res = create_backup(sys.argv[1], "pw-test-only", home=config.SIGIL_HOME, vault=owner_vault(),
+                        owner_key=ensure_owner_keypair())
+except BackupError as e:
+    res = {"error": str(e)}
+print(json.dumps(res))
+"""
+
+PW = "pw-test-only"
+
+
+def backup_home(home, dest, *, flag: bool = True, **extra) -> dict:
+    """``sigil backup`` of ``home`` run as that home (SIGIL_PRUNED_RESTORE on unless ``flag`` is False)."""
+    import json
+    proc = run_in_home(home, BACKUP_HOME, str(dest), SIGIL_PRUNED_RESTORE="1" if flag else None, **extra)
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def open_backup(path) -> dict:
+    """Decrypt a backup file (test passphrase) and return its body (manifest + file table)."""
+    import json
+    from sigil import backup as b
+    from vigil_core.sealing import unseal
+    salt, sealed = b._read_header(Path(path))
+    return json.loads(unseal(b._derive_key(PW, salt), sealed, context=b._BODY_CONTEXT).decode("utf-8"))

@@ -526,6 +526,16 @@ def paused_expiry_settle_enabled() -> bool:
     return (os.environ.get("VIGIL_PAUSED_EXPIRY_SETTLE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def pruned_restore_enabled() -> bool:
+    """True iff a backup / restore handles a HARD-PRUNED spine as one verified unit (``SIGIL_PRUNED_RESTORE``
+    affirmative): the backup captures the spine, its head, the floor and the archive as one consistent set and
+    verifies it before writing (manifest schema 4, ``prune_unit``); a restore stages that set, verifies it in a child
+    process scoped to the staged home and only then swaps it in. OFF by default (unset / non-affirmative): a backup
+    is written exactly as before, and a restore of a backup holding a hard-pruned spine is refused before anything
+    is written. Read at call time."""
+    return (os.environ.get("SIGIL_PRUNED_RESTORE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail
