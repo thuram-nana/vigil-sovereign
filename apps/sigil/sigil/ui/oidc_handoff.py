@@ -20,6 +20,15 @@ Why both secrets: the verifier alone would let a person who starts a hand-off on
 someone else to finish the Google sign-in redeem that person's session; the code is shown only where the Google
 sign-in actually happened. Redeeming needs the app that started the flow AND the person who signed in.
 
+Why the network: a code shown on a page can be read out and typed somewhere else, so a code alone does not prove
+that the client redeeming it is the one that finished the Google sign-in. Every step of a hand-off therefore
+happens on ONE network, as the edge sees the client address (`client_net`: the /24 of an IPv4 address, the /56 of
+an IPv6 one): the login start records its network, the callback refuses a different one before Google's answer is
+used, the completed-login record keeps the callback's network, and a redeem from any other network removes the
+record and mints nothing. The guarantee: a completed Google sign-in is redeemed only from the network where it was
+finished. It does not tell apart two clients on that same network (one Wi-Fi, one office or carrier address
+range); there the pairing code and the page's warning are what stand in the way.
+
 Properties of this store (one 0600 file per completed login, under a directory the edge owns):
   * the file NAME is sha256 of the challenge (fixed [0-9a-f]{64}: no traversal) — the raw challenge, verifier
     and code are never written. The code is kept as HMAC-SHA256 keyed by the challenge over a per-record salt
@@ -28,8 +37,11 @@ Properties of this store (one 0600 file per completed login, under a directory t
     and the `max_attempts`-th wrong code removes it, so a guess at the code is at most 5 in 1,000,000 per
     completed sign-in;
   * a second completion for a challenge that already has a live record is refused (first one wins);
-  * the directory is bounded: expired records are swept on every write, and a write at `max_records` live
-    records is refused;
+  * a record keeps the network of the client that finished the Google sign-in; a redeem from another network
+    removes it without checking the code;
+  * the directory is bounded: expired records are swept on every write, a write at `max_records` live records is
+    refused, and so is a write when `max_per_user` records for the same account, or `max_per_net` records from the
+    same network, are already waiting — one account, or one network, cannot fill the store for everybody;
   * every read-modify-write runs under one exclusive flock, so concurrent redemptions of one record yield
     exactly one session, and concurrent wrong codes all count. Without flock (non-POSIX) redemption refuses.
 
@@ -40,6 +52,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -61,6 +74,12 @@ _LOCK_NAME = ".handoff.lock"
 DEFAULT_TTL_S = 120.0
 DEFAULT_MAX_RECORDS = 4096
 DEFAULT_MAX_ATTEMPTS = 5
+#: Completed sign-ins waiting at once for one account, and from one network (see the module docstring).
+DEFAULT_MAX_PER_USER = 3
+DEFAULT_MAX_PER_NET = 16
+#: The prefix that makes "one network": an IPv4 /24, an IPv6 /56 (a home or a phone's delegated range).
+_V4_PREFIX = 24
+_V6_PREFIX = 56
 
 
 def valid_challenge(value: str) -> bool:
@@ -88,12 +107,32 @@ def format_code(code: str) -> str:
     return f"{code[:3]} {code[3:]}"
 
 
+def client_net(ip) -> str:
+    """The network a client address belongs to for the hand-off's same-network rule: the /24 of an IPv4 address, the
+    /56 of an IPv6 one (an IPv4-mapped IPv6 address counts as its IPv4 address), e.g. "203.0.113.0/24". "" when the
+    value is not an IP address — every caller then refuses (fail closed)."""
+    raw = str(ip or "").strip()
+    try:
+        addr = ipaddress.ip_address(raw.split("%", 1)[0])          # a zone id ("fe80::1%eth0") is not the network
+    except ValueError:
+        return ""
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv4Address):
+        return str(ipaddress.IPv4Network((int(addr), _V4_PREFIX), strict=False))
+    return str(ipaddress.IPv6Network((int(addr), _V6_PREFIX), strict=False))
+
+
 class HandoffBusy(Exception):
     """The store is at capacity, or could not be written; the person should try again shortly."""
 
 
 class HandoffExists(Exception):
     """A completed login for this challenge is already waiting (the first completion wins)."""
+
+
+class HandoffTooMany(HandoffBusy):
+    """Too many completed sign-ins for this account, or from this network, are already waiting."""
 
 
 class Redeemed(NamedTuple):
@@ -109,13 +148,21 @@ class Gone(NamedTuple):
     """No live record for this verifier: unknown, expired, already used, or removed after too many wrong codes."""
 
 
+class Elsewhere(NamedTuple):
+    """The redeem came from another network than the one where the Google sign-in finished: the record is removed
+    and nothing is minted (the code was not checked)."""
+
+
 class HandoffStore:
     def __init__(self, path, *, ttl_s: float = DEFAULT_TTL_S, max_records: int = DEFAULT_MAX_RECORDS,
-                 max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> None:
+                 max_attempts: int = DEFAULT_MAX_ATTEMPTS, max_per_user: int = DEFAULT_MAX_PER_USER,
+                 max_per_net: int = DEFAULT_MAX_PER_NET) -> None:
         self.dir = Path(path)
         self.ttl_s = float(ttl_s)
         self.max_records = int(max_records)
         self.max_attempts = int(max_attempts)
+        self.max_per_user = int(max_per_user)
+        self.max_per_net = int(max_per_net)
 
     # -- internals ---------------------------------------------------------------------------------------------
     def _name(self, challenge: str) -> Path:
@@ -166,43 +213,52 @@ class HandoffStore:
         except OSError:
             pass
 
-    def _sweep(self, now: float) -> int:
-        """Remove every expired, unreadable or stray file; return how many live records remain."""
-        live = 0
+    def _sweep(self, now: float) -> "list[dict]":
+        """Remove every expired, unreadable or stray file; return the live records that remain."""
+        live: "list[dict]" = []
         try:
             entries = list(os.scandir(self.dir))
         except OSError:
-            return 0
+            return live
         for e in entries:
             if e.name == _LOCK_NAME:
                 continue
             rec = self._read(Path(e.path)) if not e.name.startswith(".") else None
             exp = rec.get("exp") if rec else None
-            if not isinstance(exp, (int, float)) or isinstance(exp, bool) or now >= float(exp):
+            if rec is None or not isinstance(exp, (int, float)) or isinstance(exp, bool) or now >= float(exp):
                 self._unlink(e.path)
             else:
-                live += 1
+                live.append(rec)
         return live
 
     # -- the two operations --------------------------------------------------------------------------------------
-    def complete(self, challenge: str, username: str, org_id: "Optional[str]", *,
+    def complete(self, challenge: str, username: str, org_id: "Optional[str]", *, net: str,
                  now: "Optional[float]" = None) -> str:
-        """Record a verified Google sign-in for `challenge` and return the 6-digit pairing code to show. Raises
-        ValueError on a malformed challenge or empty username, HandoffExists when a live record for the challenge
-        is already waiting, HandoffBusy at capacity or on a write error."""
+        """Record a verified Google sign-in for `challenge`, finished on network `net` (`client_net` of the client
+        that finished it), and return the 6-digit pairing code to show. Raises ValueError on a malformed challenge,
+        an empty username or no network, HandoffExists when a live record for the challenge is already waiting,
+        HandoffTooMany when this account or this network already has its share of records waiting, HandoffBusy at
+        capacity or on a write error."""
         if not valid_challenge(challenge):
             raise ValueError("malformed hand-off challenge")
         if not username:
             raise ValueError("a completed sign-in needs a username")
+        if not isinstance(net, str) or not net:
+            raise ValueError("a completed sign-in needs the network it was finished on")
         t = time.time() if now is None else float(now)
         code = f"{secrets.randbelow(1_000_000):06d}"
         salt = secrets.token_hex(16)
-        rec = {"exp": t + self.ttl_s, "username": str(username), "org_id": org_id, "salt": salt,
+        rec = {"exp": t + self.ttl_s, "username": str(username), "org_id": org_id, "net": net, "salt": salt,
                "mac": self._mac(challenge, salt, code), "attempts": 0}
         try:
             with self._locked():
-                if self._sweep(t) >= self.max_records:
+                live = self._sweep(t)
+                if len(live) >= self.max_records:
                     raise HandoffBusy("too many sign-ins are waiting; try again shortly")
+                if sum(1 for r in live if r.get("username") == rec["username"]) >= self.max_per_user:
+                    raise HandoffTooMany("too many sign-ins for this account are waiting")
+                if sum(1 for r in live if r.get("net") == net) >= self.max_per_net:
+                    raise HandoffTooMany("too many sign-ins from this network are waiting")
                 self._write(self._name(challenge), rec, exclusive=True)
         except (HandoffExists, HandoffBusy):
             raise
@@ -210,10 +266,12 @@ class HandoffStore:
             raise HandoffBusy("the sign-in could not be recorded") from e
         return code
 
-    def redeem(self, verifier: str, code: str, *, now: "Optional[float]" = None):
-        """Redeem a completed sign-in with the app's `verifier` and the person's `code`. Returns Redeemed (the
-        record is consumed), WrongCode (the attempt counted; at the last attempt the record is removed) or Gone.
-        Never raises for a bad input or an I/O error: those are Gone (fail closed)."""
+    def redeem(self, verifier: str, code: str, *, net: str, now: "Optional[float]" = None):
+        """Redeem a completed sign-in with the app's `verifier` and the person's `code`, from network `net`
+        (`client_net` of the redeeming client). Returns Redeemed (the record is consumed), WrongCode (the attempt
+        counted; at the last attempt the record is removed), Elsewhere (another network than the one the sign-in
+        was finished on: the record is removed, the code is not checked) or Gone. Never raises for a bad input or
+        an I/O error: those are Gone (fail closed)."""
         if not valid_verifier(verifier):
             return Gone()
         typed = normalize_code(code)
@@ -230,6 +288,11 @@ class HandoffStore:
                         or not isinstance(salt, str) or not isinstance(mac, str)):
                     self._unlink(p)
                     return Gone()
+                bound = rec.get("net")
+                if (not isinstance(net, str) or not net or not isinstance(bound, str) or not bound
+                        or not hmac.compare_digest(net.encode("utf-8"), bound.encode("utf-8"))):
+                    self._unlink(p)                        # another network: a relayed code, or a network change
+                    return Elsewhere()
                 if typed and hmac.compare_digest(self._mac(challenge, salt, typed), mac):
                     username, org_id = rec.get("username"), rec.get("org_id")
                     self._unlink(p)                        # single use: consumed before the session is minted

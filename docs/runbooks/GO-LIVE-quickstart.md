@@ -205,6 +205,17 @@ enter it in the VIGIL app on this phone"), and the app exchanges its secret veri
 session. The pairing code works once, for about 2 minutes; its 5th wrong entry ends it, and failed exchanges are
 limited per client IP. Outside an installed app the normal browser sign-in is used.
 
+What protects that code: the whole hand-off happens on **one network** as the edge sees the client address (the
+same IPv4 /24, or IPv6 /56). The sign-in must finish on the network where the app started it, or it is refused
+before Google's answer is used (no account is created); and the code is redeemed only from the network where the
+sign-in finished — a code typed into anything else and sent from another network ends the sign-in and signs in
+nobody. Google shows its account chooser for every installed-app sign-in, and the code page names the Google account
+and says to close the page unless the person just tapped *Continue with Google* in the VIGIL app on this phone. At
+most 3 sign-ins per account and 16 per network wait at once. The network rule does not tell apart two clients on the
+same network (one Wi-Fi, one office or carrier address range): there, the code and the page's warning are what
+stand in the way. A person whose phone changes network mid-way (Wi-Fi to mobile data) is asked to start again.
+
+
 Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
 to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to
 VIGIL and type the code — you are signed in inside the app. Then sign up a second address with the emailed 6-digit

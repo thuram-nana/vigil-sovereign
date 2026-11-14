@@ -364,13 +364,21 @@ def pkce_challenge_s256(verifier: str) -> str:
 
 
 # --- authorize redirect + token exchange -------------------------------------------------------------
-def build_authorize_url(config: OidcConfig, state: str, nonce: str, *, code_challenge: str) -> str:
+#: The OIDC `prompt` values a caller may ask for (OpenID Connect Core 1.0 §3.1.2.1).
+_PROMPTS = frozenset({"none", "login", "consent", "select_account"})
+
+
+def build_authorize_url(config: OidcConfig, state: str, nonce: str, *, code_challenge: str,
+                        prompt: str = "") -> str:
     """The IdP authorize URL for a fresh login (response_type=code). `state` and `nonce` are the single-use
     server-minted values recorded in the state store; the IdP echoes `state` at the callback and binds
     `nonce` into the id_token. `code_challenge` is the S256 PKCE challenge (REQUIRED) — its verifier is held
-    server-side bound to `state` and sent only at token exchange, closing authorization-code injection."""
+    server-side bound to `state` and sent only at token exchange, closing authorization-code injection.
+    `prompt` (optional, e.g. "select_account") is passed to the IdP as is; without it the URL has none."""
     if not isinstance(code_challenge, str) or not code_challenge:
         raise OidcError("refusing to build an authorize URL without a PKCE code_challenge")
+    if prompt and prompt not in _PROMPTS:
+        raise OidcError(f"unknown OIDC prompt {prompt!r}")
     params = {
         "response_type": "code",
         "client_id": config.client_id,
@@ -381,6 +389,8 @@ def build_authorize_url(config: OidcConfig, state: str, nonce: str, *, code_chal
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
+    if prompt:
+        params["prompt"] = prompt
     sep = "&" if urllib.parse.urlparse(config.authorize_endpoint).query else "?"
     return config.authorize_endpoint + sep + urllib.parse.urlencode(params)
 
@@ -509,11 +519,14 @@ class OidcLoginRecord(NamedTuple):
                      browser presenting the response is the SAME one that started the flow (defeats login-CSRF).
       • `handoff`  — the customer edge's installed-app hand-off challenge (base64url(sha256(app verifier))),
                      bound INSTEAD of `sid_hash` when an installed app starts the login (ui/oidc_handoff.py);
-                     "" for every other login. The operator plane never sets it."""
+                     "" for every other login. The operator plane never sets it.
+      • `handoff_net` — with `handoff`: the network (ui/oidc_handoff.client_net) of the client that started the
+                     login; the callback refuses a client on another network. "" for every other login."""
     nonce: str
     verifier: str
     sid_hash: str
     handoff: str = ""
+    handoff_net: str = ""
 
 
 class OidcStateStore:
@@ -566,10 +579,11 @@ class OidcStateStore:
         return live
 
     def issue(self, state: str, nonce: str, *, verifier: str = "", sid_hash: str = "", handoff: str = "",
-              now: "float | None" = None) -> None:
+              handoff_net: str = "", now: "float | None" = None) -> None:
         """Record a freshly-minted login `state` as OUTSTANDING (single-use), binding to it the `nonce`, the
         PKCE `verifier`, and the `sid_hash` of the initiating browser session — or, for the customer edge's
-        installed-app hand-off, the `handoff` challenge instead of a sid_hash. Sweeps expired markers first
+        installed-app hand-off, the `handoff` challenge (and the `handoff_net` of the client that started it)
+        instead of a sid_hash. Sweeps expired markers first
         (the bound), refuses at capacity, then `O_CREAT | O_EXCL`-creates the marker storing them + the
         issue time. Raises on a blank state/nonce, a full ledger, or a real I/O error."""
         st = str(state or "").strip()
@@ -582,7 +596,8 @@ class OidcStateStore:
             raise RuntimeError(f"OIDC state ledger at capacity ({self.max_outstanding}); retry shortly")
         marker = self._marker(st)
         payload = json.dumps({"iat": t, "nonce": nc, "verifier": str(verifier or ""),
-                              "sid_hash": str(sid_hash or ""), "handoff": str(handoff or "")},
+                              "sid_hash": str(sid_hash or ""), "handoff": str(handoff or ""),
+                              "handoff_net": str(handoff_net or "")},
                              ensure_ascii=False)
         fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # FileExistsError on a dup
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -616,7 +631,8 @@ class OidcStateStore:
             return None
         return OidcLoginRecord(nonce=nonce, verifier=str(rec.get("verifier", "") or ""),
                                sid_hash=str(rec.get("sid_hash", "") or ""),
-                               handoff=str(rec.get("handoff", "") or ""))
+                               handoff=str(rec.get("handoff", "") or ""),
+                               handoff_net=str(rec.get("handoff_net", "") or ""))
 
     def _fsync_dir(self) -> None:
         try:

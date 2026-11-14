@@ -672,7 +672,9 @@ class Provisioner:
             explicit in-session verified link, a later slice). The binding is `(iss, sub)`, never the email.
 
         Then the SHARED `finish_login` tail → {username, orgs} the keyless edge mints a CUSTOMER cookie from
-        (never an operator bearer; `CustomerPrincipal` carries no global role). Fail-closed when customer
+        (never an operator bearer; `CustomerPrincipal` carries no global role), plus `email`, the verified Google
+        address, which the installed-app hand-off page shows in the browser that just signed in with it (never
+        used to resolve or mint anything). Fail-closed when customer
         Google sign-in is not enabled/configured (`oidc_provider is None`). The check-then-provision is atomic
         under the spine lock, so two concurrent first-sign-ins of the same Google account mint exactly one
         customer + trial."""
@@ -697,6 +699,7 @@ class Provisioner:
                 self._link_or_provision_federated(identity, now=t, ip=ip)
         result = self.finish_login(identity)                # re-resolves by (iss,sub) live; role-free tail
         self._audit("oidc_login", requester=result["username"], target=result["username"], outcome="ok")
+        result["email"] = str(identity.email or "")          # display only (the hand-off page names the account)
         return result
 
     def _link_or_provision_federated(self, identity: CustomerIdentity, *, now: float, ip: str = "") -> str:

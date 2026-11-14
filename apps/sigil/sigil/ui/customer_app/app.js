@@ -240,7 +240,8 @@
           h("button.cust-nav-link", { type: "button", text: "Start again", onClick: function () {
             pendingClear().then(startGoogle); } }),
         ]),
-        h("p.muted", { text: "Only enter a code that VIGIL showed you after you signed in with Google on this phone." }),
+        h("p.muted", { text: "Only enter a code that VIGIL showed you after you signed in with Google on this phone. "
+          + "Stay on the same Wi-Fi or mobile network until you are signed in." }),
       ]);
       try { input.focus(); } catch (e) { /* no focus outside a gesture */ }
     });

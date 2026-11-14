@@ -178,7 +178,7 @@ def test_oidc_finish_auto_provisions_then_logs_in_the_same_customer():
     assert AccountsRegistry(s).account(u) is None               # a Google customer is NEVER an operator account
     # a SECOND sign-in (same iss,sub) logs the SAME customer in — no new org, no doubled trial
     second = p.oidc_finish(code="c2", code_verifier="v2", nonce=NONCE, ip="1.2.3.4")
-    assert second == {"username": u, "orgs": [org]}
+    assert second == {"username": u, "orgs": [org], "email": "a@gmail.com"}   # the address: display only
     assert WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP).available(org) == 100  # trial not re-granted
 
 

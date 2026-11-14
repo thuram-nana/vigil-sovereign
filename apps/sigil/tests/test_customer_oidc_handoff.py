@@ -15,6 +15,13 @@ Pinned here:
   * THE ATTACK: an attacker starts a hand-off on their own device and gets a victim to finish Google sign-in — the
     attacker holds the verifier but never sees the code, so a wrong-code brute force is cut off after 5 guesses and
     the record is destroyed (the right code no longer works either); the attacker never gets a session;
+  * THE RELAY: the victim is talked into typing the code into a look-alike "VIGIL app" whose server holds the
+    verifier. Every step of a hand-off is bound to ONE network (client_net: IPv4 /24, IPv6 /56): a callback on
+    another network than the login start is refused before Google's answer is used (no code exchanged, no account),
+    and a redeem from another network than the callback removes the record unchecked — the relayed code mints
+    nothing. Google is asked for its account chooser (prompt=select_account) and the code page names the Google
+    account and says to close the page unless the person just started this in the VIGIL app on this phone;
+  * one Google account (3) or one network (16) cannot fill the store of waiting sign-ins for everybody;
   * the normal (non-hand-off) flow keeps its sid binding unchanged with the hand-off on.
 """
 from __future__ import annotations
@@ -37,14 +44,17 @@ from test_custui import _scrub_shared_owner_state  # noqa: F401  (autouse: keep 
 from test_custui import _edge_raw, _get, _MiniIdP, _oidc_login, _opener, _stack_oidc
 
 from sigil.ui.custui import CUSTOMER_COOKIE, build_customer_server
-from sigil.ui.oidc_handoff import (Gone, HandoffBusy, HandoffExists, HandoffStore, Redeemed, WrongCode,
-                                   challenge_of, format_code, normalize_code)
+from sigil.ui.oidc_handoff import (Elsewhere, Gone, HandoffBusy, HandoffExists, HandoffStore, HandoffTooMany,
+                                   Redeemed, WrongCode, challenge_of, client_net, format_code, normalize_code)
 
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 
 
 def _verifier() -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+
+
+_NET = "198.51.100.0/24"                       # the network every store test finishes and redeems on
 
 
 # ================================================================================================================
@@ -58,17 +68,17 @@ def test_challenge_is_pkce_s256_rfc7636_vector():
 def test_complete_then_redeem_once(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a", now=100.0)
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
     assert len(code) == 6 and code.isdigit()
-    assert st.redeem(v, format_code(code), now=101.0) == Redeemed("cust_alice", "org_a")   # "123 456" accepted
-    assert st.redeem(v, code, now=101.0) == Gone()                                           # single use
+    assert st.redeem(v, format_code(code), net=_NET, now=101.0) == Redeemed("cust_alice", "org_a")   # "123 456" accepted
+    assert st.redeem(v, code, net=_NET, now=101.0) == Gone()                                           # single use
 
 
 def test_raw_values_are_never_on_disk(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
     ch = challenge_of(v)
-    code = st.complete(ch, "cust_alice", "org_a", now=100.0)
+    code = st.complete(ch, "cust_alice", "org_a", net=_NET, now=100.0)
     files = [p for p in tmp_path.iterdir() if p.name != ".handoff.lock"]
     assert len(files) == 1 and len(files[0].name) == 64 and all(c in "0123456789abcdef" for c in files[0].name)
     assert oct(files[0].stat().st_mode & 0o777) == "0o600"
@@ -77,7 +87,7 @@ def test_raw_values_are_never_on_disk(tmp_path):
         assert raw not in blob and raw not in files[0].name
     # and the stored MAC does not let a reader of the directory test codes without the challenge
     rec = json.loads(blob)
-    assert set(rec) == {"exp", "username", "org_id", "salt", "mac", "attempts"}
+    assert set(rec) == {"exp", "username", "org_id", "net", "salt", "mac", "attempts"}
 
 
 def test_the_stored_code_check_is_keyed_by_the_challenge(tmp_path):
@@ -85,7 +95,7 @@ def test_the_stored_code_check_is_keyed_by_the_challenge(tmp_path):
     # sha256): the same salt and code under any other key give another MAC
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a", now=100.0)
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
     rec = json.loads(next(p for p in tmp_path.iterdir() if p.name != ".handoff.lock").read_text())
     assert HandoffStore._mac(challenge_of(v), rec["salt"], code) == rec["mac"]
     assert HandoffStore._mac(challenge_of(_verifier()), rec["salt"], code) != rec["mac"]
@@ -95,12 +105,12 @@ def test_the_stored_code_check_is_keyed_by_the_challenge(tmp_path):
 def test_five_wrong_codes_destroy_the_record(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a", now=100.0)
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
     wrong = f"{(int(code) + 1) % 1_000_000:06d}"
-    assert [st.redeem(v, wrong, now=101.0) for _ in range(4)] == [WrongCode(4), WrongCode(3), WrongCode(2),
+    assert [st.redeem(v, wrong, net=_NET, now=101.0) for _ in range(4)] == [WrongCode(4), WrongCode(3), WrongCode(2),
                                                                    WrongCode(1)]
-    assert st.redeem(v, wrong, now=101.0) == WrongCode(0)                 # the 5th wrong code removes it
-    assert st.redeem(v, code, now=101.0) == Gone()                        # the right code no longer works
+    assert st.redeem(v, wrong, net=_NET, now=101.0) == WrongCode(0)                 # the 5th wrong code removes it
+    assert st.redeem(v, code, net=_NET, now=101.0) == Gone()                        # the right code no longer works
     assert [p for p in tmp_path.iterdir() if p.name != ".handoff.lock"] == []
 
 
@@ -108,57 +118,57 @@ def test_five_wrong_codes_destroy_the_record(tmp_path):
 def test_a_malformed_code_counts_as_wrong(tmp_path, typed):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    st.complete(challenge_of(v), "cust_alice", None, now=100.0)
-    assert st.redeem(v, typed, now=101.0) == WrongCode(4)
+    st.complete(challenge_of(v), "cust_alice", None, net=_NET, now=100.0)
+    assert st.redeem(v, typed, net=_NET, now=101.0) == WrongCode(4)
 
 
 def test_expired_unknown_and_wrong_verifier_are_gone(tmp_path):
     st = HandoffStore(tmp_path, ttl_s=120.0)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a", now=100.0)
-    assert st.redeem(_verifier(), code, now=101.0) == Gone()              # another verifier: no record
-    assert st.redeem("not-a-verifier", code, now=101.0) == Gone()
-    assert st.redeem(v + "A", code, now=101.0) == Gone()
-    assert st.redeem(v, code, now=220.0) == Gone()                       # 120 s later: expired
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
+    assert st.redeem(_verifier(), code, net=_NET, now=101.0) == Gone()              # another verifier: no record
+    assert st.redeem("not-a-verifier", code, net=_NET, now=101.0) == Gone()
+    assert st.redeem(v + "A", code, net=_NET, now=101.0) == Gone()
+    assert st.redeem(v, code, net=_NET, now=220.0) == Gone()                       # 120 s later: expired
     assert [p for p in tmp_path.iterdir() if p.name != ".handoff.lock"] == []
 
 
 def test_first_completion_wins(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a", now=100.0)
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
     with pytest.raises(HandoffExists):
-        st.complete(challenge_of(v), "cust_mallory", "org_m", now=101.0)
-    assert st.redeem(v, code, now=102.0) == Redeemed("cust_alice", "org_a")
+        st.complete(challenge_of(v), "cust_mallory", "org_m", net=_NET, now=101.0)
+    assert st.redeem(v, code, net=_NET, now=102.0) == Redeemed("cust_alice", "org_a")
 
 
 def test_the_store_is_bounded(tmp_path):
     st = HandoffStore(tmp_path, max_records=2, ttl_s=120.0)
-    st.complete(challenge_of(_verifier()), "a", None, now=100.0)
-    st.complete(challenge_of(_verifier()), "b", None, now=100.0)
+    st.complete(challenge_of(_verifier()), "a", None, net=_NET, now=100.0)
+    st.complete(challenge_of(_verifier()), "b", None, net=_NET, now=100.0)
     with pytest.raises(HandoffBusy):
-        st.complete(challenge_of(_verifier()), "c", None, now=101.0)
-    st.complete(challenge_of(_verifier()), "c", None, now=300.0)           # the expired two were swept
+        st.complete(challenge_of(_verifier()), "c", None, net=_NET, now=101.0)
+    st.complete(challenge_of(_verifier()), "c", None, net=_NET, now=300.0)           # the expired two were swept
 
 
 def test_complete_refuses_a_malformed_challenge_or_no_username(tmp_path):
     st = HandoffStore(tmp_path)
     for bad in ("", "x" * 42, "x" * 44, "../" + "x" * 40, "x" * 42 + "="):
         with pytest.raises(ValueError):
-            st.complete(bad, "cust_alice", None)
+            st.complete(bad, "cust_alice", None, net=_NET)
     with pytest.raises(ValueError):
-        st.complete(challenge_of(_verifier()), "", None)
+        st.complete(challenge_of(_verifier()), "", None, net=_NET)
 
 
 def test_concurrent_redeems_yield_exactly_one_session(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a")
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET)
     results, barrier = [], threading.Barrier(16)
 
     def go():
         barrier.wait()
-        results.append(HandoffStore(tmp_path).redeem(v, code))
+        results.append(HandoffStore(tmp_path).redeem(v, code, net=_NET))
 
     ts = [threading.Thread(target=go) for _ in range(16)]
     [t.start() for t in ts]
@@ -169,20 +179,81 @@ def test_concurrent_redeems_yield_exactly_one_session(tmp_path):
 def test_concurrent_wrong_codes_all_count(tmp_path):
     st = HandoffStore(tmp_path)
     v = _verifier()
-    code = st.complete(challenge_of(v), "cust_alice", "org_a")
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET)
     wrong = f"{(int(code) + 7) % 1_000_000:06d}"
     barrier = threading.Barrier(5)
     out = []
 
     def go():
         barrier.wait()
-        out.append(HandoffStore(tmp_path).redeem(v, wrong))
+        out.append(HandoffStore(tmp_path).redeem(v, wrong, net=_NET))
 
     ts = [threading.Thread(target=go) for _ in range(5)]
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert sorted(r.remaining for r in out) == [0, 1, 2, 3, 4]           # none lost: the 5th removed it
-    assert st.redeem(v, code) == Gone()
+    assert st.redeem(v, code, net=_NET) == Gone()
+
+
+def test_a_redeem_from_another_network_removes_the_record_without_checking_the_code(tmp_path):
+    st = HandoffStore(tmp_path)
+    v = _verifier()
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
+    assert st.redeem(v, code, net="203.0.113.0/24", now=101.0) == Elsewhere()   # the RIGHT code, elsewhere
+    assert st.redeem(v, code, net=_NET, now=101.0) == Gone()                     # removed: nothing to redeem
+    for other in ("", None, "203.0.113.0/24"):
+        v = _verifier()
+        code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
+        assert st.redeem(v, code, net=other, now=101.0) == Elsewhere()          # no network is not a network
+        assert st.redeem(v, code, net=_NET, now=101.0) == Gone()
+
+
+def test_a_record_without_a_network_redeems_nowhere(tmp_path):
+    # a record written without one (an edge from before the network rule) never redeems
+    st = HandoffStore(tmp_path)
+    v = _verifier()
+    code = st.complete(challenge_of(v), "cust_alice", "org_a", net=_NET, now=100.0)
+    rec_path = next(p for p in tmp_path.iterdir() if p.name != ".handoff.lock")
+    rec = json.loads(rec_path.read_text())
+    del rec["net"]
+    rec_path.write_text(json.dumps(rec))
+    assert st.redeem(v, code, net=_NET, now=101.0) == Elsewhere()
+
+
+def test_complete_needs_the_network(tmp_path):
+    with pytest.raises(ValueError):
+        HandoffStore(tmp_path).complete(challenge_of(_verifier()), "cust_alice", None, net="")
+
+
+def test_one_account_or_one_network_cannot_fill_the_store(tmp_path):
+    st = HandoffStore(tmp_path, max_per_user=3, max_per_net=4, ttl_s=120.0)
+    for _ in range(3):
+        st.complete(challenge_of(_verifier()), "cust_busy", None, net=_NET, now=100.0)
+    with pytest.raises(HandoffTooMany):
+        st.complete(challenge_of(_verifier()), "cust_busy", None, net="203.0.113.0/24", now=100.0)
+    st.complete(challenge_of(_verifier()), "cust_other", None, net=_NET, now=100.0)       # 4 from _NET now
+    with pytest.raises(HandoffTooMany):
+        st.complete(challenge_of(_verifier()), "cust_third", None, net=_NET, now=100.0)
+    st.complete(challenge_of(_verifier()), "cust_third", None, net="203.0.113.0/24", now=100.0)
+    st.complete(challenge_of(_verifier()), "cust_busy", None, net=_NET, now=300.0)        # the old ones expired
+    assert issubclass(HandoffTooMany, HandoffBusy)
+
+
+def test_the_store_defaults_bound_one_account_and_one_network():
+    st = HandoffStore("/nonexistent")
+    assert (st.max_per_user, st.max_per_net, st.max_records, st.ttl_s) == (3, 16, 4096, 120.0)
+
+
+@pytest.mark.parametrize("ip,net", [
+    ("203.0.113.77", "203.0.113.0/24"), (" 203.0.113.1 ", "203.0.113.0/24"),
+    ("::ffff:203.0.113.9", "203.0.113.0/24"),                                  # IPv4-mapped counts as IPv4
+    ("2001:db8:1200:a1::5", "2001:db8:1200::/56"), ("2001:db8:1200:ff:ffff::1", "2001:db8:1200::/56"),
+    ("2001:db8:1200:100::1", "2001:db8:1200:100::/56"),                       # the next /56 is another network
+    ("fe80::1%eth0", "fe80::/56"), ("127.0.0.1", "127.0.0.0/24"),
+    ("", ""), (None, ""), ("unknown", ""), ("203.0.113.0/24", ""), ("1.2.3.4, 5.6.7.8", ""),
+])
+def test_client_net(ip, net):
+    assert client_net(ip) == net
 
 
 def test_normalize_code():
@@ -198,13 +269,28 @@ def _on(monkeypatch):
     monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_HANDOFF", "1")
 
 
-def _handoff_login(ep, challenge):
-    st, hdr, body = _edge_raw(ep, f"/api/customer/oidc/login?handoff={quote(challenge)}")
-    return st, hdr, body
+def _get_from(ep, path, *, ip=None, cookie=None):
+    """A no-redirect GET to the edge, as the proxy forwards it from client `ip` (X-Real-IP) — or, with no `ip`, as
+    a loopback client (the edge's peer address)."""
+    if ip is None:
+        return _edge_raw(ep, path, cookie=cookie)
+    conn = http.client.HTTPConnection("127.0.0.1", ep, timeout=5)
+    h = {"Host": f"127.0.0.1:{ep}", "X-Real-IP": ip}
+    if cookie:
+        h["Cookie"] = cookie
+    conn.request("GET", path, headers=h)
+    r = conn.getresponse()
+    out = (r.status, dict(r.getheaders()), r.read())
+    conn.close()
+    return out
 
 
-def _callback(ep, state, *, cookie=None):
-    return _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}", cookie=cookie)
+def _handoff_login(ep, challenge, *, ip=None):
+    return _get_from(ep, f"/api/customer/oidc/login?handoff={quote(challenge)}", ip=ip)
+
+
+def _callback(ep, state, *, cookie=None, ip=None):
+    return _get_from(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}", ip=ip, cookie=cookie)
 
 
 def _redeem(ep, body, *, origin=None, ip=None):
@@ -236,15 +322,28 @@ def _whoami(ep, set_cookie):
 import http.cookies  # noqa: E402  (used by _whoami)
 
 
-def _app_finishes_google(ep, idp, *, sub="g-sub-1", email="founder@gmail.com"):
-    """An installed app starts a hand-off; the person finishes Google sign-in in another browser (no cookies)."""
+def _app_finishes_google(ep, idp, *, sub="g-sub-1", email="founder@gmail.com", ip=None):
+    """An installed app starts a hand-off; the person finishes Google sign-in in another browser (no cookies) on the
+    same phone, so from the same client address `ip`."""
     v = _verifier()
-    st, hdr, _ = _handoff_login(ep, challenge_of(v))
+    st, hdr, _ = _handoff_login(ep, challenge_of(v), ip=ip)
     assert st == 302, (st, hdr)
     q = parse_qs(urlparse(hdr["Location"]).query)
     idp.next_id_token = idp.mint(nonce=q["nonce"][0], sub=sub, email=email)
-    st, hdr, page = _callback(ep, q["state"][0])
+    st, hdr, page = _callback(ep, q["state"][0], ip=ip)
     return v, st, hdr, page
+
+
+class _CountingIdP(_MiniIdP):
+    """The fake Google, counting the authorization codes exchanged at its token endpoint."""
+
+    def __init__(self):
+        super().__init__()
+        self.exchanges = 0
+
+    def http_post(self, url, form):
+        self.exchanges += 1
+        return super().http_post(url, form)
 
 
 def test_the_handoff_is_404_unless_google_and_the_handoff_are_on(tmp_path, monkeypatch):
@@ -313,33 +412,126 @@ def test_full_handoff_round_trip_mints_the_session_in_the_redeeming_jar(tmp_path
 def test_attacker_with_the_verifier_cannot_redeem_a_victims_sign_in_without_the_code(tmp_path, monkeypatch):
     """The attack the pairing code exists for: the ATTACKER starts a hand-off on their own device (they hold the
     verifier), sends the Google link to a VICTIM, and the victim finishes Google sign-in. The callback runs in the
-    victim's browser, so only the victim sees the code. The attacker's wrong-code brute force is cut off after 5
-    guesses — the record is destroyed, so even the right code no longer works — and no session is ever minted."""
+    victim's browser, so only the victim sees the code. Here the attacker is on the victim's own network (the same
+    Wi-Fi: from anywhere else the callback is refused, see the relay tests below), so only the code stands in the
+    way: the wrong-code brute force is cut off after 5 guesses — the record is destroyed, so even the right code no
+    longer works — and no session is ever minted."""
     _on(monkeypatch)
     idp = _MiniIdP()
     sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
     try:
         attacker_v = _verifier()
-        st, hdr, _ = _handoff_login(ep, challenge_of(attacker_v))         # on the attacker's device
+        st, hdr, _ = _handoff_login(ep, challenge_of(attacker_v), ip="192.0.2.7")   # the attacker's device
         q = parse_qs(urlparse(hdr["Location"]).query)
         # the victim opens the attacker's Google link and signs in as THEMSELVES; their browser hits the callback
         idp.next_id_token = idp.mint(nonce=q["nonce"][0], sub="victim-sub", email="victim@gmail.com")
-        st, vhdr, page = _callback(ep, q["state"][0])
+        st, vhdr, page = _callback(ep, q["state"][0], ip="192.0.2.50")
         assert st == 200 and CUSTOMER_COOKIE not in (vhdr.get("Set-Cookie") or "")
         victims_code = _code_from(page)                                    # shown ONLY in the victim's browser
-        # the attacker has the verifier but not the code: guesses (from up to 5 addresses, so the per-IP limit is
-        # not what stops them) — every one refused, and no session cookie
+        # the attacker has the verifier but not the code: guesses (from 5 addresses on that network, so the per-IP
+        # limit is not what stops them) — every one refused, and no session cookie
         guesses = [f"{(int(victims_code) + k) % 1_000_000:06d}" for k in range(1, 6)]
-        answers = [_redeem(ep, {"verifier": attacker_v, "code": g}, ip=f"203.0.113.{k}")
+        answers = [_redeem(ep, {"verifier": attacker_v, "code": g}, ip=f"192.0.2.{k}")
                    for k, g in enumerate(guesses)]
         assert [a[0] for a in answers] == [401] * 5
         assert [a[2]["retry"] for a in answers] == [True, True, True, True, False]
         assert not any(CUSTOMER_COOKIE in (a[1].get("Set-Cookie") or "") for a in answers)
         # the record is destroyed: even the victim's real code (were it phished later) redeems nothing
-        st, hdr, body = _redeem(ep, {"verifier": attacker_v, "code": victims_code}, ip="203.0.113.99")
+        st, hdr, body = _redeem(ep, {"verifier": attacker_v, "code": victims_code}, ip="192.0.2.99")
         assert st == 401 and body["retry"] is False and CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
         # and a fresh verifier with the right code redeems nothing either (the record is keyed by the challenge)
-        assert _redeem(ep, {"verifier": _verifier(), "code": victims_code}, ip="203.0.113.98")[0] == 401
+        assert _redeem(ep, {"verifier": _verifier(), "code": victims_code}, ip="192.0.2.98")[0] == 401
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_a_relayed_code_redeemed_from_another_network_mints_nothing(tmp_path, monkeypatch):
+    """THE RELAY (the review's account-takeover path): the attacker's server holds a verifier and gets the victim to
+    open the GENUINE login link for its challenge (so the login starts on the victim's network). The victim signs
+    in to Google, the genuine page shows the code, and the victim types it into a look-alike "VIGIL app"; the
+    attacker's server redeems {verifier, code} from its own address. The redeem is refused, the record is removed
+    unchecked, no session cookie is set — and the victim's code is dead even on the victim's own network."""
+    _on(monkeypatch)
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        attacker_v = _verifier()
+        st, hdr, _ = _handoff_login(ep, challenge_of(attacker_v), ip="198.51.100.23")        # the victim's browser
+        q = parse_qs(urlparse(hdr["Location"]).query)
+        idp.next_id_token = idp.mint(nonce=q["nonce"][0], sub="victim-sub", email="victim@gmail.com")
+        st, _vh, page = _callback(ep, q["state"][0], ip="198.51.100.23")
+        assert st == 200
+        code = _code_from(page)
+        st, hdr, body = _redeem(ep, {"verifier": attacker_v, "code": code}, ip="203.0.113.250")   # the attacker
+        assert st == 401 and body["retry"] is False and "another network" in body["error"]
+        assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
+        st, hdr, body = _redeem(ep, {"verifier": attacker_v, "code": code}, ip="198.51.100.40")
+        assert st == 401 and body["retry"] is False and CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_a_sign_in_finished_on_another_network_than_it_started_is_refused_before_google_is_asked(tmp_path,
+                                                                                                  monkeypatch):
+    """The other relay: the attacker's server starts the hand-off itself and sends the victim straight to the Google
+    URL it got back. The callback arrives from the victim's network, not the one the login started on: it is
+    refused BEFORE the authorization code is exchanged — no code page, no session, no account created."""
+    _on(monkeypatch)
+    idp = _CountingIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        attacker_v = _verifier()
+        st, hdr, _ = _handoff_login(ep, challenge_of(attacker_v), ip="203.0.113.250")        # the attacker's server
+        q = parse_qs(urlparse(hdr["Location"]).query)
+        idp.next_id_token = idp.mint(nonce=q["nonce"][0], sub="victim-sub", email="victim@gmail.com")
+        st, vhdr, page = _callback(ep, q["state"][0], ip="198.51.100.23")                   # the victim's browser
+        assert st == 403 and b"cust-handoff-code" not in page and b"started on another network" in page
+        assert CUSTOMER_COOKIE not in (vhdr.get("Set-Cookie") or "")
+        assert idp.exchanges == 0                                           # Google's answer was never used
+        assert [p for p in (tmp_path / "customer-oidc-handoff").glob("*") if p.name != ".handoff.lock"] == []
+        assert _callback(ep, q["state"][0], ip="203.0.113.250")[0] == 401  # and the state is spent
+        # the same login from one network (an IPv6 phone moving between addresses of its own /56) completes
+        v = _verifier()
+        st, hdr, _ = _handoff_login(ep, challenge_of(v), ip="2001:db8:1200:a1::5")
+        q = parse_qs(urlparse(hdr["Location"]).query)
+        idp.next_id_token = idp.mint(nonce=q["nonce"][0])
+        st, _h, page = _callback(ep, q["state"][0], ip="2001:db8:1200:b7::9")
+        assert st == 200 and idp.exchanges == 1
+        assert _redeem(ep, {"verifier": v, "code": _code_from(page)}, ip="2001:db8:1200:c3::1")[0] == 200
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_the_handoff_asks_google_for_the_account_chooser_and_the_page_names_the_account(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        st, hdr, _ = _handoff_login(ep, challenge_of(_verifier()))
+        assert parse_qs(urlparse(hdr["Location"]).query)["prompt"] == ["select_account"]
+        st, hdr, _ = _edge_raw(ep, "/api/customer/oidc/login")                # the normal flow: unchanged
+        assert st == 302 and "prompt=" not in hdr["Location"]
+        _v, st, _h, page = _app_finishes_google(ep, idp, email="o'brien+<x>@gmail.com")
+        text = page.decode()
+        assert st == 200 and "You signed in to Google as" in text
+        assert "o&#x27;brien+&lt;x&gt;@gmail.com" in text and "<x>" not in text    # escaped, never markup
+        assert ("If you did not just tap Continue with Google in the VIGIL app installed on this phone, close this "
+                "page and do not enter the code anywhere.") in text
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_one_google_account_cannot_fill_the_store_of_waiting_sign_ins(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        for _ in range(3):                                                  # three waiting at once: fine
+            assert _app_finishes_google(ep, idp, sub="busy-sub", email="busy@gmail.com")[1] == 200
+        _v, st, hdr, page = _app_finishes_google(ep, idp, sub="busy-sub", email="busy@gmail.com")
+        assert st == 429 and b"cust-handoff-code" not in page and b"Too many Google sign-ins" in page
+        assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
+        assert _app_finishes_google(ep, idp, sub="other-sub", email="other@gmail.com")[1] == 200   # others unaffected
     finally:
         sov.shutdown(); edge.shutdown()
 
@@ -363,7 +555,7 @@ def test_the_redeem_is_origin_gated_and_limited_per_ip(tmp_path, monkeypatch):
     idp = _MiniIdP()
     sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
     try:
-        v, _st, _h, page = _app_finishes_google(ep, idp)
+        v, _st, _h, page = _app_finishes_google(ep, idp, ip="198.51.100.20")
         code = _code_from(page)
         assert _redeem(ep, {"verifier": v, "code": code}, origin="https://evil.example")[0] == 403   # CSRF
         # one IP: 10 failed redemptions (unknown verifiers) in 15 minutes, then 429 — even with the right pair
@@ -371,7 +563,8 @@ def test_the_redeem_is_origin_gated_and_limited_per_ip(tmp_path, monkeypatch):
             assert _redeem(ep, {"verifier": _verifier(), "code": "000000"}, ip="198.51.100.7")[0] == 401
         st, hdr, _ = _redeem(ep, {"verifier": v, "code": code}, ip="198.51.100.7")
         assert st == 429 and int(hdr["Retry-After"]) >= 1
-        # another address still redeems (the per-IP leg is best effort; the per-record limit is the bound)
+        # another address on that network still redeems (the per-IP leg is best effort; the per-record limit is the
+        # bound)
         st, _h, body = _redeem(ep, {"verifier": v, "code": code}, ip="198.51.100.8")
         assert st == 200 and body["ok"] is True
     finally:
