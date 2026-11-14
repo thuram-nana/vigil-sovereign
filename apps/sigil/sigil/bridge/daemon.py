@@ -168,12 +168,11 @@ class BridgeDaemon:
                                           "tier": "A0", "decision": "auto"})
 
     def panic_engage(self, *, by: str = "phone") -> int:
-        """Halt the mesh from the phone. ANY engage halts (fail-safe) — no signature needed for the
-        SAFE direction. Release stays owner-only at the desktop (the dangerous direction is signed)."""
-        from ..governor.killswitch import SIGNAL as KS_SIGNAL
-        return self.store.append(kind="event", source="mesh", actor="DEVICE",
-                                 payload={"signal": KS_SIGNAL, "state": "engaged", "by": by,
-                                          "reason": "panic halt from phone", "tier": "A0", "decision": "auto"})
+        """Halt the mesh from the phone. ANY governor-shaped engage halts (fail-safe) — no signature needed
+        for the SAFE direction, so the bridge (which holds no private key) records the halt in the governor's
+        own record shape. Release stays owner-only at the desktop (the dangerous direction is signed)."""
+        from ..governor.killswitch import append_engage
+        return append_engage(self.store, owner_key=None, by=by, reason="panic halt from phone", actor="DEVICE")
 
     def relay(self, text: str) -> str:
         """Relay a KERNEL command — the same T0-router + WARDEN gate + signed action log as voice/UI."""

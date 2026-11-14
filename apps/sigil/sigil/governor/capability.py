@@ -22,7 +22,11 @@ back on. So `issued_at` joins the signed core and the fold keeps a PER-CAPABILIT
 counts only while its `issued_at` strictly exceeds every enable already honored FOR THAT CAPABILITY.
 Per-capability and not global, or a fresh `enable(voice)` would refuse a legitimate later
 `enable(gesture)` that happened to carry a smaller `issued_at`. The SAFE direction (disable) keeps NO
-freshness requirement and stays honored even unsigned — gating it would make a fail-safe fail open."""
+freshness requirement and stays honored even unsigned — gating it would make a fail-safe fail open.
+
+WHO CAN WRITE A DISABLE OR AN ENABLE: the fold honours only records shaped the way ``disable``/``enable`` write
+them (``kind == "event"``, ``source == "governor"``: ``authn.governor_written``). Whatever any other record's
+payload says, it never disables or re-enables a capability."""
 from __future__ import annotations
 
 import threading
@@ -32,7 +36,7 @@ from typing import Optional
 from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
-from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
+from .authn import NO_HIGHWATER, as_issued_at, governor_written, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
 from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey
 
@@ -68,9 +72,11 @@ class _Latch:
 
 def _apply_capability_record(r, resolver, capability: str, latch: _Latch) -> None:
     """Fold ONE spine record into `capability`'s `latch` — THE capability fold body, shared by the authoritative
-    per-capability scan and the verified fold cache (Front C S0d) so the two can never diverge."""
+    per-capability scan, the verified fold cache (Front C S0d) and the snapshot fold (``spine.snapshot.build``) so
+    they can never diverge. Only a governor-written record can move the latch; every payload is still read first, so
+    a record the fold cannot read fails the read (DISABLED) whoever wrote it."""
     p = r.payload
-    if p.get("signal") != SIGNAL or p.get("capability") != capability:
+    if p.get("signal") != SIGNAL or p.get("capability") != capability or not governor_written(r):
         return
     state = p.get("state")
     if state == "disabled":
@@ -92,9 +98,29 @@ def _capabilities_step(latches: dict, r, resolver) -> None:
 _CAPABILITY_FOLD = FoldCache("governor.capability", step=_capabilities_step)
 
 
+def append_disable(store, capability: str, *, owner_key=None, by: str = "owner", reason: str = "",
+                   actor: str = "WARDEN") -> int:
+    """Append ONE disable in the governor's record shape (the caller has checked ``capability``). Signed when
+    ``owner_key`` is given (provenance); a disable takes effect either way, so the paired-phone bridge — which
+    holds no private key — records an authenticated off-switch through this with ``owner_key=None``."""
+    core = {"signal": SIGNAL, "capability": capability, "state": "disabled", "issued_at": 0.0}
+    payload = {**signed_payload(core, owner_key), "by": by, "reason": reason, "tier": "A0", "decision": "auto",
+               "summary": f"capability {capability} DISABLED (governed latch)"}
+    return store.append(kind="event", source="governor", actor=actor, payload=payload)
+
+
 class CapabilityGate:
     """The per-capability enable/disable latch. Constructor contract mirrors `KillSwitch`/`PromotionPolicy`:
     defaults the owner key / trusted pubkey from the persisted owner identity."""
+
+    @classmethod
+    def reader(cls, store, *, trusted_pubkey: Optional[str] = None) -> "CapabilityGate":
+        """A verdict-only gate: ``is_enabled``/``state_all`` work, no private key is loaded (``disable``/``enable``
+        need one, so use the constructor for those)."""
+        g = cls.__new__(cls)
+        g.store, g.owner_key = store, None
+        g.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        return g
 
     def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
         self.store = store
@@ -112,12 +138,7 @@ class CapabilityGate:
         signature — disabling is the SAFE direction. Carries a FIXED `issued_at` of 0.0: no freshness is
         required or checked here (a replayed disable merely re-disables), and the constant keeps the
         record signature-valid under the new core so its provenance still verifies."""
-        core = {"signal": SIGNAL, "capability": self._check(capability), "state": "disabled",
-                "issued_at": 0.0}
-        payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
-                   "tier": "A0", "decision": "auto",
-                   "summary": f"capability {capability} DISABLED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        return append_disable(self.store, self._check(capability), owner_key=self.owner_key, by=by, reason=reason)
 
     def enable(self, capability: str, *, issued_at: float, by: str = "owner", reason: str = "") -> int:
         """Re-enable a capability — the DANGEROUS direction. Only meaningful if it verifies against the

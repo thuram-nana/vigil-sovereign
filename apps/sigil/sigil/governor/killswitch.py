@@ -17,7 +17,14 @@ a replay just gets a fresh one). So a release carries an owner-set, strictly-inc
 INSIDE the signed core and the fold keeps a high-water: a release un-halts only while its `issued_at`
 strictly exceeds every release already honored, and honoring one consumes that value so its own
 replay is refused thereafter. Identical shape to `offense_gate.state()`. The SAFE direction (engage)
-keeps NO freshness requirement at all — gating it would convert a fail-safe into a fail-open."""
+keeps NO freshness requirement at all — gating it would convert a fail-safe into a fail-open.
+
+WHO CAN WRITE A HALT OR A RELEASE: the fold honours only records shaped the way the governor writes them
+(``kind == "event"``, ``source == "governor"``: ``authn.governor_written``) — whatever any other record's payload
+says, it never halts or releases the mesh. The paired phone's panic (an authenticated, receipted device
+envelope at the bridge) is written in that same shape by ``append_engage``; a phone halt recorded before then
+(``kind == "event"``, ``source == "mesh"``, ``actor == "DEVICE"``) stays a halt. A release counts only as an
+owner-signed governor record."""
 from __future__ import annotations
 
 import threading
@@ -27,7 +34,7 @@ from typing import Optional
 from ..spine.fold_cache import FoldCache
 from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
-from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
+from .authn import NO_HIGHWATER, as_issued_at, governor_written, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
 from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey
 
@@ -58,16 +65,28 @@ class _Latch:
         self.engaged, self.max_issued = engaged, max_issued
 
 
+def phone_halt_written(r) -> bool:
+    """True iff ``r`` has the shape the paired-phone bridge gave a panic halt before it wrote governor records
+    (``kind == "event"``, ``source == "mesh"``, ``actor == "DEVICE"``). Only an ENGAGE in that shape counts."""
+    return (getattr(r, "kind", None) == "event" and getattr(r, "source", None) == "mesh"
+            and getattr(r, "actor", None) == "DEVICE")
+
+
 def _apply_killswitch_record(r, resolver, latch: _Latch) -> None:
-    """Fold ONE spine record into `latch` — THE kill-switch fold body, shared by the authoritative scan and the
-    verified fold cache (Front C S0d) so the two can never diverge."""
+    """Fold ONE spine record into `latch` — THE kill-switch fold body, shared by the authoritative scan, the
+    verified fold cache (Front C S0d) and the snapshot fold (``spine.snapshot.build``) so they can never diverge.
+    Only a governor-written record (or a halt from the paired phone) can move the latch; every payload is still
+    read first, so a record the fold cannot read fails the read whoever wrote it."""
     p = r.payload
     if p.get("signal") != SIGNAL:
+        return
+    governor = governor_written(r)
+    if not governor and not phone_halt_written(r):
         return
     state = p.get("state")
     if state == "engaged":
         latch.engaged = True                    # honor ANY engage — halting is fail-safe
-    elif state == "released" and verify_signed(p, _CORE, resolver.at(r.seq)):
+    elif state == "released" and governor and verify_signed(p, _CORE, resolver.at(r.seq)):
         issued = as_issued_at(p.get("issued_at"))
         if issued <= latch.max_issued:
             return                              # REPLAY / stale re-append of an already-honored release
@@ -82,7 +101,25 @@ def _killswitch_step(latch: _Latch, r, resolver) -> None:
 _KILLSWITCH_FOLD = FoldCache("governor.killswitch", step=_killswitch_step)
 
 
+def append_engage(store, *, owner_key=None, by: str = "owner", reason: str = "", actor: str = "WARDEN") -> int:
+    """Append ONE halt in the governor's record shape. Signed when ``owner_key`` is given (provenance); a halt
+    takes effect either way, so the paired-phone bridge — which holds no private key — records its authenticated
+    panic through this with ``owner_key=None`` and ``actor="DEVICE"``."""
+    core = {"signal": SIGNAL, "state": "engaged", "issued_at": 0.0}
+    payload = {**signed_payload(core, owner_key), "by": by, "reason": reason, "tier": "A0", "decision": "auto"}
+    return store.append(kind="event", source="governor", actor=actor, payload=payload)
+
+
 class KillSwitch:
+    @classmethod
+    def reader(cls, store, *, trusted_pubkey: Optional[str] = None) -> "KillSwitch":
+        """A verdict-only kill switch: ``is_engaged()`` works, no private key is loaded (``engage``/``release``
+        need one, so use the constructor for those)."""
+        ks = cls.__new__(cls)
+        ks.store, ks.owner_key = store, None
+        ks.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        return ks
+
     def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
@@ -94,10 +131,7 @@ class KillSwitch:
         mesh), and demanding one would let a stale-clock caller fail to halt. The constant keeps the
         record signature-valid under the new core so `sigil governor status` still shows a verified
         provenance chain for the halt."""
-        core = {"signal": SIGNAL, "state": "engaged", "issued_at": 0.0}
-        payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
-                   "tier": "A0", "decision": "auto"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        return append_engage(self.store, owner_key=self.owner_key, by=by, reason=reason)
 
     def release(self, *, issued_at: float, by: str = "owner", reason: str = "") -> int:
         """UN-HALT the mesh — the DANGEROUS direction. `issued_at` is a REQUIRED, owner-set,

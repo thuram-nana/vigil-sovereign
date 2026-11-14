@@ -33,6 +33,14 @@ def as_issued_at(value) -> float:
     return f if math.isfinite(f) else 0.0
 
 
+def governor_written(r) -> bool:
+    """True iff spine record ``r`` has the shape the governor's own latch writers give it: ``kind == "event"``
+    and ``source == "governor"``. The latch folds (kill switch, capability and customer latches) honour no
+    other record, so a record appended by any other path — whatever its payload says — can never halt,
+    disable or re-enable anything. Both fields are inside the record's digested content (tamper-bound)."""
+    return getattr(r, "kind", None) == "event" and getattr(r, "source", None) == "governor"
+
+
 def _canon(core: dict) -> bytes:
     m = canonical_json(core)
     return m if isinstance(m, bytes) else m.encode()
