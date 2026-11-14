@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import shlex
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 #: Every shipped unit that reads or writes the money seam, and where the repo ships it.
 SEAM_UNITS: "tuple[tuple[str, str], ...]" = (
@@ -36,6 +36,11 @@ SEAM_UNITS: "tuple[tuple[str, str], ...]" = (
     ("vigil-command.service", "infra/systemd"),
 )
 _LEGACY_ALIAS = "VIGIL_SETTLE_BASE_DIR"
+#: The configured units that WRITE the money seam (the backup units only capture it). Their working directories are
+#: where a CWD-relative ``.vigil-live`` default would have put an earlier seam (``seam_migration.legacy_candidates``).
+WRITER_SEAM_UNITS: "tuple[str, ...]" = ("sigil-cockpit.service", "vigil-settle-drain.service", "vigil-command.service")
+#: The units whose seam a money writer (``sigil seam migrate``) must agree with — one destination is required.
+MONEY_SEAM_UNITS: "tuple[str, ...]" = WRITER_SEAM_UNITS
 
 
 def _spec(value: str, home: Path) -> str:
@@ -89,7 +94,8 @@ def parse_env_file(path: Path) -> "dict | None":
 def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[dict]],
                    *, installed: bool = False) -> "Optional[dict]":
     """The seam base the process of the unit ``text`` would use, or ``None`` when the unit is not configured
-    here. Returns ``{"seam": <abs path>, "legacy": <abs VIGIL_SETTLE_BASE_DIR or None>}``."""
+    here. Returns ``{"seam": <abs path>, "legacy": <abs VIGIL_SETTLE_BASE_DIR or None>, "workdir": <abs working
+    directory>}``."""
     env: dict = {}
     files: "list[Path]" = []
     workdir = str(home)
@@ -132,32 +138,47 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
 
     raw = (_subst(base_arg, env) if base_arg is not None else "") or env.get("VIGIL_BASE_DIR") or ".vigil-live"
     legacy = env.get(_LEGACY_ALIAS) or ""
-    return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None}
+    return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None, "workdir": _abs(workdir)}
 
 
-def seam_base_agreement(repo: "Path | str | None" = None, home: "Path | None" = None, *,
-                        parse_env: Optional[Callable[[Path], Optional[dict]]] = None,
-                        display: Callable[[str], str] = str) -> "tuple[dict, list]":
-    """Return ``(section, hard_issues)``. ``section["units"]`` maps each CONFIGURED seam unit to the seam base it
-    resolves; ``hard_issues`` names every unit when two of them disagree (or a unit's own legacy
-    ``VIGIL_SETTLE_BASE_DIR`` contradicts it). Nothing configured ⇒ ``({"units": {}}, [])``."""
+def unit_details(repo: "Path | str | None" = None, home: "Path | None" = None, *,
+                 parse_env: Optional[Callable[[Path], Optional[dict]]] = None,
+                 only: "Optional[Iterable[str]]" = None) -> "dict[str, dict]":
+    """``{unit: unit_seam_base(...)}`` for every CONFIGURED seam unit (``only`` narrows :data:`SEAM_UNITS`): the
+    installed copy, else the repo's shipped copy, then its drop-ins. An unreadable unit is left out. Never raises."""
     h = Path(home) if home is not None else Path.home()
     repo = Path(repo) if repo is not None else Path(__file__).resolve().parents[2]
     parse = parse_env if parse_env is not None else parse_env_file
-    seams: dict = {}
-    issues: list = []
+    wanted = set(only) if only is not None else None
+    out: "dict[str, dict]" = {}
     for unit, shipped_dir in SEAM_UNITS:
+        if wanted is not None and unit not in wanted:
+            continue
         installed = h / ".config" / "systemd" / "user" / unit
-        src = installed if installed.is_file() else repo / shipped_dir / unit
         try:
+            src = installed if installed.is_file() else repo / shipped_dir / unit
             text = src.read_text(encoding="utf-8")
             for dropin in sorted((h / ".config" / "systemd" / "user" / f"{unit}.d").glob("*.conf")):
                 text += "\n" + dropin.read_text(encoding="utf-8")
             got = unit_seam_base(text, h, parse, installed=installed.is_file())
         except (OSError, ValueError):     # unreadable / unparsable unit text: nothing to compare for it
             continue
-        if got is None:
-            continue
+        if got is not None:
+            out[unit] = got
+    return out
+
+
+def seam_base_agreement(repo: "Path | str | None" = None, home: "Path | None" = None, *,
+                        parse_env: Optional[Callable[[Path], Optional[dict]]] = None,
+                        display: Callable[[str], str] = str,
+                        only: "Optional[Iterable[str]]" = None) -> "tuple[dict, list]":
+    """Return ``(section, hard_issues)``. ``section["units"]`` maps each CONFIGURED seam unit to the seam base it
+    resolves; ``hard_issues`` names every unit when two of them disagree (or a unit's own legacy
+    ``VIGIL_SETTLE_BASE_DIR`` contradicts it). ``only`` narrows the units compared (default: every seam unit).
+    Nothing configured ⇒ ``({"units": {}}, [])``."""
+    seams: dict = {}
+    issues: list = []
+    for unit, got in unit_details(repo, home, parse_env=parse_env, only=only).items():
         seams[unit] = got["seam"]
         if got["legacy"] is not None and os.path.realpath(got["legacy"]) != os.path.realpath(got["seam"]):
             issues.append(

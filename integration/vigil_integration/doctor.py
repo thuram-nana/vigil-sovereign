@@ -2134,6 +2134,33 @@ def collect(repo_root) -> dict:
         report["seam_base"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the seam-base agreement probe could not run: {exc}")
 
+    # Seam migration — once seam units are configured, launch-seam records still held in a former seam directory
+    # (``$SIGIL_HOME/.vigil-live``, a writer unit's ``<WorkingDirectory>/.vigil-live``, a retired
+    # VIGIL_SETTLE_BASE_DIR, VIGIL_SEAM_LEGACY_DIRS) must be carried into the seam the units use by
+    # `sigil seam migrate`; until its journal commits that tree at its current digest it is a HARD issue (one per
+    # tree). Only class paths are hashed; no file is otherwise read. Nothing configured ⇒ no key (byte-identical);
+    # units that disagree are already a HARD issue above. Best-effort: never raises.
+    try:
+        from .seam_base_units import unit_details
+        _sm_units = unit_details(repo, parse_env=_parse_env_file)
+        if _sm_units:
+            if len({os.path.realpath(u["seam"]) for u in _sm_units.values()}) != 1:
+                report["seam_migration"] = {"skipped": "the configured units disagree on the seam base"}
+            else:
+                from .seam_migration import legacy_candidates, unmigrated_legacy
+                _sm_seam = next(iter(_sm_units.values()))["seam"]
+                _sm_left = unmigrated_legacy(_sm_seam, legacy_candidates(_sm_seam, units=_sm_units))
+                report["seam_migration"] = {"seam": _display_path(_sm_seam), "legacy": [
+                    {"path": _display_path(x["path"]), "reason": x["reason"], "files": x["files"]} for x in _sm_left]}
+                for x in _sm_left:
+                    _issue(f"seam migration: {_display_path(x['path'])} holds {x['files']} launch-seam record(s) "
+                           f"not carried into the seam {_display_path(_sm_seam)} ({x['reason']}). With the cockpit, "
+                           f"the customer server and the settle drain stopped, run `sigil seam migrate` (it reports "
+                           f"what it will carry), then `sigil seam migrate --apply` as the service user.")
+    except Exception as exc:  # noqa: BLE001 — the seam-migration probe must never crash the report
+        report["seam_migration"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the seam-migration probe could not run: {exc}")
+
     # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
     # (nothing configured) adds no note. Best-effort: never raises.
     try:
