@@ -47,6 +47,11 @@ SIGNAL = "governor.capability"
 # `autolearn` enabled only permits DRAFTING/showing learn proposals — it never learns, applies, or mints
 # a fact; each proposal still needs the owner's signed ACCEPT.
 CAPABILITIES = frozenset({"gesture", "voice", "autolearn"})
+# The owner's CUSTOMER latches (``customer_latch.py``): the same latch, record shape, fold, snapshot carry and
+# anti-replay as the capabilities above, each keyed by its own name inside the signed core (so an enable of one
+# can never be replayed as another). Default ENABLED, so a spine with no record behaves exactly as before.
+CUSTOMER_LATCHES = frozenset({"customer_launch", "customer_signup", "checkout", "trial", "founder_tester"})
+_LATCHES = CAPABILITIES | CUSTOMER_LATCHES
 # `issued_at` MUST be in the core: outside it, an attacker could re-stamp a captured enable's freshness
 # past the high-water without breaking the signature — precisely the replay this guard refuses.
 _CORE = ("signal", "capability", "state", "issued_at")
@@ -129,8 +134,8 @@ class CapabilityGate:
 
     @staticmethod
     def _check(capability: str) -> str:
-        if capability not in CAPABILITIES:
-            raise ValueError(f"unknown capability {capability!r} (expected one of {sorted(CAPABILITIES)})")
+        if capability not in _LATCHES:
+            raise ValueError(f"unknown capability {capability!r} (expected one of {sorted(_LATCHES)})")
         return capability
 
     def disable(self, capability: str, *, by: str = "owner", reason: str = "") -> int:
@@ -189,6 +194,10 @@ class CapabilityGate:
         """{capability: "enabled"|"disabled"} for the read plane / status output."""
         return {c: ("enabled" if self.is_enabled(c) else "disabled") for c in sorted(CAPABILITIES)}
 
+    def customer_state_all(self) -> dict[str, str]:
+        """{customer latch: "enabled"|"disabled"} — the customer latches' read (``customer_latch.state_all``)."""
+        return {c: ("enabled" if self.is_enabled(c) else "disabled") for c in sorted(CUSTOMER_LATCHES)}
+
     def _seed(self, st, capability: str) -> "tuple[_Latch, int]":
         """(latch, since) for `capability`: seeded from the folded snapshot prefix (default ENABLED; a missing
         high-water row means no enable was honored for it in the pruned prefix), or the genesis start when the
@@ -201,7 +210,7 @@ class CapabilityGate:
     def _seed_all(self, st) -> "tuple[dict, int]":
         since = -1
         latches = {}
-        for c in sorted(CAPABILITIES):
+        for c in sorted(_LATCHES):
             latches[c], since = self._seed(st, c)
         return latches, since
 

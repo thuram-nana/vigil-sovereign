@@ -352,6 +352,13 @@ class Provisioner:
         nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
         return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
 
+    def _latch_refusal(self, name: str) -> "Optional[str]":
+        """The owner's customer latch ``name`` (``governor.customer_latch``), read fresh from the spine (an off-switch
+        is honoured at once, no restart; a read that fails refuses): None when it is on, else the customer-facing
+        reason. Consulted only before a NEW sign-up, checkout, trial grant or trial scan."""
+        from ..governor.customer_latch import refusal
+        return refusal(self.store, name, trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None))
+
     def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str, ip: str = "") -> str:
         """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
         append is idempotent, so a retry re-applies it safely. Returns "granted", "none" (trial size 0) or
@@ -369,6 +376,9 @@ class Provisioner:
         if not config.trial_preview_enabled():
             if self.wallet.has_grant_entry(org_id, preview):
                 return "granted"
+            # the owner's `trial` latch withholds a NEW trial; a grant this sign-up already made stands
+            if not self.wallet.has_grant_entry(org_id, legacy) and self._latch_refusal("trial") is not None:
+                return self._trial_withheld(org_id, "paused")
             self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=legacy, source_ref=source_ref,
                               issued_at=self._next_issued())
             return "granted"
@@ -389,6 +399,8 @@ class Provisioner:
             return self._trial_withheld(org_id, "mailbox_claimed")
         ip_key = None
         if holder is None:
+            if self._latch_refusal("trial") is not None:        # the owner's `trial` latch: no NEW trial claim
+                return self._trial_withheld(org_id, "paused")
             # S3c gates run only for a NEW claim. A mailbox this org already claimed is a retry of a sign-up that
             # stopped between its claim and its grant: it resumes to the grant, whatever the list or the per-IP
             # count says now (re-running them could strand the claim with no trial).
@@ -422,6 +434,9 @@ class Provisioner:
         """Phase 1: rate-limit, then issue a single-use verify token and send it. Mints NOTHING yet (no
         account/org/trial), so a flood of requests cannot farm trial credits — only a VERIFIED email in
         phase 2 does. Never reveals whether the email already exists."""
+        paused = self._latch_refusal("customer_signup")    # the owner's latch: no NEW sign-up is started
+        if paused is not None:
+            raise ProvisionDenied(paused)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
@@ -493,6 +508,11 @@ class Provisioner:
                 # a DIFFERENT signup already owns this email (not an idempotent retry of THIS one) → refuse
                 raise ProvisionDenied("an account already exists for this email")
             if existing is None:                            # first attempt — mint the account at the fixed id
+                # the owner's `customer_signup` latch refuses a NEW sign-up (the token stays valid for later); a
+                # retry finishing a sign-up whose account already exists is never refused
+                paused = self._latch_refusal("customer_signup")
+                if paused is not None:
+                    raise ProvisionDenied(paused)
                 self.customers.create(email, password=password, username=username,
                                       issued_at=self._next_issued())
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
@@ -640,6 +660,12 @@ class Provisioner:
                 self._audit("oidc_login", target=email, outcome="email_collision")
                 raise ProvisionDenied(
                     "an account already exists for this email; sign in with your password, then link Google")
+        # the owner's `customer_signup` latch refuses a NEW federated customer; a retry finishing this identity's own
+        # deterministic account (a crash between its mints) is never refused
+        if self.customers.customer(username) is None:
+            paused = self._latch_refusal("customer_signup")
+            if paused is not None:
+                raise ProvisionDenied(paused)
         # GLOBAL signup cap (anti-trial-farming) — the SAME ceiling email signup uses, checked under the lock.
         if self.signup_cap_limiter is not None:
             capped = self.signup_cap_limiter.locked("signup:global", now=now)
@@ -1041,6 +1067,9 @@ class Provisioner:
         from ..governor.asset_ownership import AssetOwnershipRegistry
         from ..governor.registrable_domain import TrialDomainRefused, load_rules, same_domain, trial_domain
         from ..governor.trial_claim import key_digest
+        paused = self._latch_refusal("trial")              # the owner's `trial` latch: no NEW trial scan
+        if paused is not None:
+            self._trial_launch_refuse(requester, org_id, host, "trial_paused", paused)
         product = config.trial_product_id()
         if not product or self.trial_claims is None or self.trial_launch_limiter is None:
             self._trial_launch_refuse(requester, org_id, host, "trial_not_configured",
@@ -1239,6 +1268,9 @@ class Provisioner:
         from .. import config
         if not config.customer_checkout_enabled():
             raise ProvisionDenied("customer checkout is not enabled")
+        paused = self._latch_refusal("checkout")          # the owner's latch narrows the flag: no NEW checkout
+        if paused is not None:
+            raise ProvisionDenied(paused)
         t = self._now() if now is None else float(now)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,

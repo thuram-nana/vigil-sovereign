@@ -392,6 +392,58 @@ def cmd_capability(a) -> None:
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
+def _switches_read(store) -> dict:
+    """The owner's instant switches as this host reads them: the kill switch and every customer latch with its
+    environment ceiling (``governor.customer_latch``). Needs no private key. A read error is reported, not raised."""
+    from .governor.customer_latch import LATCHES, ceiling_state, state_all
+    from .governor.killswitch import KillSwitch
+    try:
+        kill = "engaged" if KillSwitch.reader(store).is_engaged() else "released"
+    except Exception as e:  # noqa: BLE001 — the read plane reports, never crashes
+        kill = f"unreadable ({type(e).__name__})"
+    latches = state_all(store)
+    return {"kill_switch": kill,
+            "customer_latches": {n: {"latch": latches[n], "ceiling": ceiling_state(n)} for n in LATCHES}}
+
+
+def cmd_latch(a) -> None:
+    """The owner's customer latches (``governor.customer_latch``): ``status`` (no key), ``off`` (honoured at once,
+    owner-signed for provenance), ``on`` (owner-signed with a fresh ``issued_at`` — the anti-replay high-water). A
+    latch gates only NEW launch reservations, sign-ups, checkouts, trial grants/scans and founder-tester grants; the
+    environment flag stays the ceiling. The CLI stamps ``issued_at``; the latch reads no clock."""
+    import json as _json
+    import time as _time
+
+    from .governor.customer_latch import LATCHES, turn_off, turn_on
+    from .governor.identity import ensure_owner_keypair
+    store = SpineStore()
+    if a.action == "status":
+        rep = _switches_read(store)
+        if getattr(a, "json", False):
+            print(_json.dumps(rep, indent=2, sort_keys=True))
+            return
+        print(f"  kill switch: {rep['kill_switch']}")
+        for n, v in rep["customer_latches"].items():
+            print(f"  {n:16} {v['latch'].upper():4} (ceiling: {v['ceiling']})")
+        return
+    names = list(LATCHES) if a.name == "all" else [a.name]
+    if a.action == "on" and a.name == "all":
+        print("  refused: turn latches on one at a time (`sigil latch on <name>`)", file=sys.stderr)
+        sys.exit(2)
+    if a.name != "all" and a.name not in LATCHES:
+        print(f"  unknown latch {a.name!r} (expected one of {', '.join(LATCHES)})", file=sys.stderr)
+        sys.exit(2)
+    ok = ensure_owner_keypair()
+    now = _time.time()
+    for n in names:
+        if a.action == "off":
+            seq = turn_off(store, n, owner_key=ok, reason=a.reason)
+            print(f"  {n} OFF (seq {seq}) — new requests are refused now; existing ones are untouched")
+        else:
+            seq = turn_on(store, n, owner_key=ok, issued_at=now, reason=a.reason)
+            print(f"  {n} ON (seq {seq}, owner-signed)")
+
+
 def _parse_ttl(value):
     """Parse a ``--ttl`` duration into seconds, or None for 'never'. Accepts a bare number (seconds) or an
     ``Ns``/``Nm``/``Nh``/``Nd``/``Nw`` suffix (e.g. ``24h``, ``7d``). Fail-fast (exit 2) on garbage or a
@@ -1178,6 +1230,10 @@ def cmd_status(a) -> None:
     print(f"vectors:   {vi.count()} points | last_indexed_seq {vi.last_indexed_seq()}")
     print(f"chain:     {'OK' if ok else 'FAIL'} — {msg}")
     print(f"head:      {'OK' if hok else '(' + hmsg + ')'}")
+    sw = _switches_read(store)
+    off = [n for n, v in sw["customer_latches"].items() if v["latch"] != "on"]
+    print(f"switches:  kill switch {sw['kill_switch']} | customer latches "
+          f"{'all on' if not off else 'OFF: ' + ', '.join(off)}")
 
 
 def cmd_settings(a) -> None:
@@ -2552,6 +2608,16 @@ def sigil_doctor_report() -> dict:
     checks.append(Check(id="kernel_pin", ok=(_mark != "!!"), required=True,
                         state=("TAMPER" if _mark == "!!" else ("UNPINNED" if _mark == "**" else "OK")),
                         detail=_detail))
+    try:                                   # the owner's instant switches: advisory (an off-switch is a choice)
+        _sw = _switches_read(SpineStore())
+        _off = [n for n, v in _sw["customer_latches"].items() if v["latch"] != "on"]
+        _swok = _sw["kill_switch"] == "released" and not _off
+        _swdetail = (f"kill switch {_sw['kill_switch']}; customer latches "
+                     f"{'all on' if not _off else 'OFF: ' + ', '.join(_off)} (`sigil latch status`)")
+    except Exception as e:  # noqa: BLE001 — the doctor reports, never crashes
+        _swok, _swdetail = False, f"could not read the switches ({type(e).__name__})"
+    checks.append(Check(id="switches", ok=_swok, required=False, state=("ON" if _swok else "OFF"),
+                        detail=_swdetail))
     _shok, _shdetail = _signed_head_doctor()
     checks.append(Check(id="signed_head", ok=_shok, required=True,
                         state=("OK" if _shok else "NO-HEAD"), detail=_shdetail))
@@ -3195,6 +3261,13 @@ def main(argv=None) -> None:
     pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
+    plat = sub.add_parser("latch", help="the owner's customer latches (customer_launch, customer_signup, checkout, "
+                                        "trial, founder_tester): status | off <name|all> | on <name>")
+    plat.add_argument("action", choices=["status", "off", "on"])
+    plat.add_argument("name", nargs="?", default="all", help="a latch name, or `all` (off only)")
+    plat.add_argument("--reason", default="", help="reason recorded on the spine")
+    plat.add_argument("--json", action="store_true", help="status as JSON")
+    plat.set_defaults(fn=cmd_latch)
     pacc = sub.add_parser("accounts",
                           help="per-user RBAC accounts (Claim 6): create|assign|revoke|enroll-pubkey|"
                                "enroll-totp|set-password|disable-totp|list (owner-signed grants)")
