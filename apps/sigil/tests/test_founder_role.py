@@ -11,7 +11,9 @@ Load-bearing invariants (each a mutation target):
     administrator for the last-admin rule; every member verb canonicalises the target name once and uses only
     that value, so surrounding whitespace never reaches a different membership than the one it writes;
   * the kill switch: flag OFF admits an existing founder as `org_admin` (no testing, billing kept), with no spine
-    write; flag ON restores it;
+    write; flag ON restores it. A reserved launch that has not started stays releasable for a full refund by any
+    org member holding `run_engagement` or `manage_billing` (so a founder whose testing was withdrawn can still
+    cancel it); a started launch is never cancelled;
   * the owner verbs (`sigil org set-member-role`, `sigil org demote-founders`) change a founder with a critical
     audit row first; demote-founders is idempotent and is the rollback procedure;
   * payment and trial grants never write a membership record;
@@ -363,6 +365,83 @@ def test_kill_switch_turns_founder_testing_off_and_back_on_with_no_spine_write(f
     assert sum(1 for _ in s.iter_records()) == n + 1                # only the refusal's audit row
     monkeypatch.setenv(FLAG, "1")
     assert can("run_engagement") and can("view_assessments")
+
+
+def _demote_by_kill_switch(p, s, org, u, monkeypatch):
+    monkeypatch.setenv(FLAG, "0")
+
+
+def _demote_by_owner_verb(p, s, org, u, monkeypatch):
+    from sigil.ui.provision import owner_demote_founders
+    owner_demote_founders(s, reason="rollback", issued_at=9e9)
+
+
+def _demote_by_set_member_role(p, s, org, u, monkeypatch):
+    from sigil.ui.provision import owner_set_member_role
+    owner_set_member_role(s, org, u, "org_admin", reason="support", issued_at=9e9)
+
+
+@pytest.mark.parametrize("demote", [_demote_by_kill_switch, _demote_by_owner_verb, _demote_by_set_member_role])
+def test_a_founders_unstarted_reservation_is_always_releasable_for_a_full_refund(flag_on, monkeypatch, demote):
+    # Founder testing withdrawn (the kill switch, demote-founders, or an owner role change): the founder can no
+    # longer reserve or start, but as an org admin it can still cancel the reservation it holds, and the whole
+    # reservation returns to the org's balance.
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov()
+    a = _signup(p)
+    u, org = a["username"], a["org_id"]
+    _prove(p, u, org, "acme-founder.io")
+    before = p.wallet.available(org)
+    lease = p.launch_reserve(u, org, "acme-founder.io")
+    assert p.wallet.available(org) == before - lease["units_reserved"] < before
+    demote(p, s, org, u, monkeypatch)
+    assert not p.orgs.admit_customer(username=u, org_id=org, permission="run_engagement")
+    with pytest.raises(ProvisionDenied):
+        p.launch_start(u, org, lease["lease"])
+    with pytest.raises(ProvisionDenied):
+        p.launch_reserve(u, org, "acme-founder.io")
+    assert p.launch_cancel(u, org, lease["lease"]) == {"slug": lease["slug"], "refunded": lease["units_reserved"]}
+    assert p.wallet.available(org) == before
+    assert _audits(s, "launch_cancel")[-1]["outcome"] == "canceled"
+
+
+def test_a_billing_admin_releases_a_reservation_but_a_reader_cannot(flag_on):
+    # Cancelling a reserved, not started launch is a billing act (it only refunds the org's own balance): an
+    # org_admin teammate may release the founder's reservation; a viewer or analyst teammate may not.
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov()
+    u, org, mate = _founder_and_mate(p)
+    reader = _signup(p, email="reader@reader-founder.io", org="Reader")["username"]
+    p.grant_member(u, org, reader, "viewer")
+    _prove(p, u, org, "acme-founder.io")
+    before = p.wallet.available(org)
+    lease = p.launch_reserve(u, org, "acme-founder.io")
+    for role in ("viewer", "analyst"):
+        p.grant_member(u, org, reader, role)
+        with pytest.raises(ProvisionDenied, match="may not manage launches"):
+            p.launch_cancel(reader, org, lease["lease"])
+    assert p.wallet.available(org) == before - lease["units_reserved"]
+    p.grant_member(u, org, mate, "org_admin")
+    assert p.launch_cancel(mate, org, lease["lease"])["refunded"] == lease["units_reserved"]
+    assert p.wallet.available(org) == before
+
+
+def test_a_billing_admin_never_refunds_a_started_launch(flag_on, monkeypatch):
+    # The cancel stays a reserved-not-started release for every caller: once the founder started the launch, the
+    # founder (as an org admin under the kill switch) and an org_admin teammate are both refused, and nothing moves.
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov()
+    u, org, mate = _founder_and_mate(p)
+    p.grant_member(u, org, mate, "org_admin")
+    _prove(p, u, org, "acme-founder.io")
+    lease = p.launch_reserve(u, org, "acme-founder.io")
+    held = p.wallet.available(org)
+    assert p.launch_start(u, org, lease["lease"])["slug"] == lease["slug"]
+    monkeypatch.setenv(FLAG, "0")
+    for requester in (u, mate):
+        with pytest.raises(ProvisionDenied, match="has been started"):
+            p.launch_cancel(requester, org, lease["lease"])
+    assert p.wallet.available(org) == held
 
 
 @pytest.mark.parametrize("first, second, want", [("1", "0", "org_admin"), ("0", "1", "founder")])

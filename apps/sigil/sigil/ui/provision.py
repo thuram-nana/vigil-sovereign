@@ -1491,15 +1491,20 @@ class Provisioner:
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
-        admit_customer(run_engagement) AND the lease's org MUST match the requester's session org
-        (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The refund is bound to the
-        owner-signed lease, not a wire amount. The METERED settle (consumed > 0) is driven by offense
-        completion, not this customer path."""
+        admit_customer(run_engagement) OR admit_customer(manage_billing), AND the lease's org MUST match the
+        requester's session org (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The
+        refund is bound to the owner-signed lease, not a wire amount. The METERED settle (consumed > 0) is driven
+        by offense completion, not this customer path.
+
+        Why billing authority suffices: a cancel only ever releases a reserved, NOT started launch back to the
+        org's own balance (a started launch is refused below), so it authorises no traffic. An org admin — and a
+        founder while founder testing is switched off, or after the owner changed its role — can therefore always
+        release a reservation: credits never stay held because nobody left in the org may run tests."""
         t = self._now() if now is None else float(now)
         from .launch_gate import LaunchGate
         with self._lock:
-            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
-                                            permission="run_engagement"):
+            if not any(self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission=perm)
+                       for perm in ("run_engagement", "manage_billing")):
                 self._audit("launch_cancel", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
