@@ -34,13 +34,18 @@ two deliberate owner switches at the very end (§10–§11). Work top to bottom;
 ## 1. Install & build the planes
 
 ```bash
-git clone <your-fork> vigil && cd vigil
-# Sovereign venv (apps/sigil + vigil_core):
-python3.13 -m venv ~/.sigil/venv && ~/.sigil/venv/bin/pip install -e apps/sigil
+git clone <your-fork> ~/vigil && cd ~/vigil    # the units run the checkout at ~/vigil (%h/vigil)
+./bootstrap.sh          # the hash-locked venvs (.venv-sovereign, .venv-offense) + the WARDEN kernel,
+                        # and the link ~/.sigil/venv -> .venv-sovereign that every sigil unit runs
 # Confirm the CLIs resolve:
 ~/.sigil/venv/bin/sigil --help >/dev/null && echo "sigil ok"
 vigil doctor            # operator readiness: binaries, both venvs, writable dirs, UI ports, docker
 ```
+
+Run `./bootstrap.sh` before §2 and with `SIGIL_HOME` unset, so the link lands at `~/.sigil/venv`, the path
+the units execute. Install nothing into `~/.sigil/venv` by hand: `envs/build_envs.sh` (which bootstrap runs)
+installs every dependency from hash-pinned requirements, and `vigil doctor` reports a `~/.sigil/venv` that is
+not the symlink to a built `.venv-sovereign` as a hard issue.
 
 `vigil doctor` exits non-zero on a hard prerequisite gap — clear those first.
 
@@ -115,8 +120,37 @@ loginctl enable-linger "$USER"        # keep units up after logout
 systemctl --user status sigil-cockpit sigil-customer sigil-public
 ```
 
-The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — start it
-on this host and keep it **private** (SSO/VPN), never a public face.
+The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — keep it
+**private** (SSO/VPN), never a public face. On this host the cockpit already runs as `sigil-cockpit` on
+127.0.0.1:8733, so the console runs **proxy-only** in front of it: it starts no cockpit of its own and federates
+`/sovereign/*` to the cockpit unit (a plain `vigil up` would start a second cockpit on the same port). Install
+the console unit with its production drop-in:
+
+```bash
+cp infra/systemd/vigil-command.service ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/vigil-command.service.d
+cp infra/systemd/vigil-command.service.d/production.conf ~/.config/systemd/user/vigil-command.service.d/
+# ~/vigil/.vigil-live/service.env (plain KEY=VALUE, mode 0600): the console's hostname from §7 and the api key
+# `vigil up --domain` requires. Add the same hostname to SIGIL_UI_ALLOWED_HOSTS / SIGIL_UI_ALLOWED_ORIGINS
+# in ~/.sigil/cockpit.env.
+#   VIGIL_CONSOLE_DOMAIN=console.vigil.example.com
+#   CRUCIBLE_API_KEY=<a long random secret>
+systemctl --user daemon-reload
+systemctl --user enable --now vigil-command
+vigil doctor            # reports a console that is not proxy-only beside the cockpit unit, as a hard issue
+```
+
+The drop-in runs `vigil up --proxy-only --sovereign-addr 127.0.0.1:8733`; if `cockpit.env` binds the cockpit
+elsewhere, change `--sovereign-addr` to match (`vigil doctor` reports a mismatch). The console's `/offense/*`
+screens federate to an offense console and API on this host (127.0.0.1:8787 / :8799) when you run them
+(`docs/architecture/HA-PROFILE.md` §1.1). Do not also run a plain `vigil up` on this host.
+
+**Settings every settling process must share.** `VIGIL_SETTLE_SPINE_RECORD` and the metered-settle pricing
+(`VIGIL_BILLING_TARGET_MARGIN`, `VIGIL_RUN_FLOOR_CREDITS`, `VIGIL_BILLING_CANCEL_SETTLEMENT`) must hold the same
+value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. Set each
+once in `$SIGIL_HOME/sigil.env` (every sigil process reads it beneath its own env file), or the same value in
+`cockpit.env`, `customer.env` and `~/.config/vigil/settle-drain.env`. `vigil doctor` reads the env files the
+installed units load and reports any disagreement as a hard issue.
 
 ## 7. Reverse proxy + TLS (three separate origins)
 
