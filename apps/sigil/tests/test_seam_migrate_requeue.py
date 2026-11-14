@@ -390,8 +390,10 @@ def test_the_report_holds_what_the_apply_holds(trees, monkeypatch, tmp_path, whe
     for apply in (False, True):
         code, rep = seam_migrate.run(s, ensure_owner_keypair(), seam=seam, sources=[str(legacy)], spool=spool,
                                      apply=apply, now=NOW + 60)
-        seen.append([(h["slug"], h["nonce"]) for h in rep["sources"][0]["held"]])
-    assert seen == [[(r["slug"], r["nonce"])]] * 2
+        seen.append([(h["slug"], h["nonce"], h["why"]) for h in rep["sources"][0]["held"]])
+    why = ("no completion spool to inspect" if where == "no_spool" else
+           f"{spool} is not the settle drain's completion spool")
+    assert seen == [[(r["slug"], r["nonce"], why)]] * 2
 
 
 def test_a_launch_with_a_quarantined_completion_is_neither_requeued_nor_held(trees, monkeypatch, tmp_path):
