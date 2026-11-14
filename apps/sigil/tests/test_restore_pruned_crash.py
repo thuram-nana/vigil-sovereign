@@ -707,6 +707,72 @@ def test_every_restore_that_replaces_existing_units_is_journaled(world, tmp_path
     _assert_is_the_plain_backup(world, target)
 
 
+def test_a_force_restore_over_a_stale_journal_in_a_home_holding_no_unit_is_journaled(world, tmp_path):
+    """The interrupted restore moved the home's only captured unit (its spine) aside, so the home holds none of the
+    units a --force restore of another backup brings: that restore is journaled all the same (its journal replaces
+    the stale one before its first swap), so it leaves the home entirely its backup's with no journal standing, and
+    nothing is left that `--resume` could put back over it."""
+    target = tmp_path / "target"
+    target.mkdir()
+    shutil.copytree(world["old_plain"] / "spine", target / "spine")       # the home's only captured unit
+    assert _kill_at(world, target, "restore_moved_aside:spine").returncode == KILLED
+    assert not (target / "spine").exists() and (target / "restore-journal.json").is_file()
+    r = _kill_at(world, target, "never", backup="bk_plain")
+    assert r.returncode == 0, r.stderr[-800:]
+    _assert_is_the_plain_backup(world, target)
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 1 and "no interrupted restore" in r.stderr, (r.returncode, r.stderr)
+    assert (target / "spine" / "head.json").read_bytes() == (world["plain"] / "spine" / "head.json").read_bytes()
+
+
+# A non-forced restore during which another restore's journal lands in the home (after its first check, before it
+# takes the swap lock): the journal is moved in as the restore builds its own.
+JOURNAL_LANDS = """
+import json, os, sys
+from pathlib import Path
+from sigil import backup
+from vigil_core.vault import Vault
+a = json.loads(sys.argv[1])
+home = Path(a["home"])
+real = backup._new_journal
+def new_journal(*k, **kw):
+    out = real(*k, **kw)
+    os.replace(a["held"], str(home / "restore-journal.json"))
+    return out
+backup._new_journal = new_journal
+try:
+    backup.restore_backup(a["src"], home, "pw-test-only", vault=Vault(home / "vault"))
+    print(json.dumps({"ok": True}))
+except backup.BackupError as e:
+    print(json.dumps({"error": str(e)}))
+"""
+
+
+def test_a_restore_without_force_refuses_a_journal_found_only_under_the_swap_lock(world, tmp_path):
+    """Whether an interrupted restore stands is decided again under the swap lock: a restore without --force that
+    finds a journal only there refuses, replaces nothing and leaves that journal and its staging as they were (its
+    abort then still leaves the home as it was)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    held = tmp_path / "held-journal.json"
+    os.replace(target / "restore-journal.json", held)
+    journal = held.read_bytes()
+    staging = Path(json.loads(journal)["staging"])
+    before = _tree(target)
+    host = tmp_path / "restoring-host"
+    r = run_in_home(host, JOURNAL_LANDS, json.dumps({"src": str(world["bk"]), "home": str(target), "held": str(held)}),
+                    check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    out = json.loads(r.stdout.splitlines()[-1])
+    assert "was interrupted" in out.get("error", ""), (out, r.stderr[-800:])
+    assert (target / "restore-journal.json").read_bytes() == journal
+    assert {k: v for k, v in _tree(target).items() if k != "restore-journal.json"} == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".restore-")] == [staging.name]
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 0 and "discarded" in r.stdout, r.stderr
+    assert _tree(target) == before and not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+
+
 # A restore whose renames of the spine unit fail with an OSError: the old spine cannot be moved aside ("aside"), the
 # staged spine cannot be renamed in and the old one is renamed back ("in"), or neither the new one in nor the old one
 # back ("in, not back").
