@@ -135,6 +135,51 @@ def test_a_request_that_reached_the_provisioner_is_never_reported_as_updating(tm
         prov.close()
 
 
+def _hop_fails_with(monkeypatch, prov_port: int, reason: OSError) -> None:
+    """Every edge→provisioner hop (to ``prov_port``) fails as urllib reports an OSError raised while it sends the
+    request: URLError(reason). Every other urlopen (this test's own client) is the real one."""
+    real = urllib.request.urlopen
+
+    def _urlopen(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        if f"127.0.0.1:{prov_port}/" in url:
+            raise urllib.error.URLError(reason)
+        return real(req, *a, **k)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+
+
+@pytest.mark.parametrize("reason", [ConnectionResetError(104, "reset while sending"),
+                                    BrokenPipeError(32, "broken pipe while sending"), TimeoutError("timed out"),
+                                    ConnectionAbortedError(103, "aborted"), OSError(113, "no route to host")],
+                         ids=["reset", "broken-pipe", "timeout", "aborted", "oserror"])
+def test_only_a_refused_connection_is_reported_as_updating(tmp_path, monkeypatch, reason):
+    # urllib wraps an OSError raised while SENDING the request in URLError: the request may have reached the
+    # provisioner, so it is a 502 — only ConnectionRefusedError (nothing listening) proves it reached nothing
+    port = _dead_port()
+    _hop_fails_with(monkeypatch, port, reason)
+    srv = _edge(tmp_path, port)
+    try:
+        sid = srv.sessions.create("alice", "customer", org_id="org_a")
+        status, headers, payload = _call(srv, "/api/customer/launch/reserve",
+                                         body={"host": "example.test", "product_id": "x"}, cookie=sid)
+        assert status == 502 and payload.get("error") != "updating", (status, payload)
+        assert headers.get("Retry-After") is None
+    finally:
+        srv.shutdown()
+
+
+def test_a_refused_connection_wrapped_by_urllib_is_updating(tmp_path, monkeypatch):
+    port = _dead_port()
+    _hop_fails_with(monkeypatch, port, ConnectionRefusedError(111, "Connection refused"))
+    srv = _edge(tmp_path, port)
+    try:
+        sid = srv.sessions.create("alice", "customer", org_id="org_a")
+        status, _h, payload = _call(srv, "/api/customer/billing", cookie=sid)
+        assert status == 503 and payload == {"error": "updating"}
+    finally:
+        srv.shutdown()
+
+
 def test_readyz_still_reports_the_provisioner_down(tmp_path):
     srv = _edge(tmp_path, _dead_port())
     try:

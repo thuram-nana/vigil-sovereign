@@ -211,8 +211,10 @@ def _login(port: int):
     r = conn.getresponse()
     r.read()
     status, loc, setck = r.status, r.getheader("Location"), r.getheader("Set-Cookie")
+    no_store = r.getheader("Cache-Control")
     conn.close()
     assert status == 302 and loc, (status, loc)
+    assert no_store == "no-store", no_store                 # the redirect carrying the single-use state is never cached
     params = parse_qs(urlparse(loc).query)
     sid = http.cookies.SimpleCookie(setck)[_SID_COOKIE].value if setck else ""
     return params["state"][0], params["nonce"][0], sid, params
