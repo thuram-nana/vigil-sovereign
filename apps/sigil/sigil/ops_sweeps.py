@@ -181,6 +181,13 @@ def _legacy_hold(base: Any, pair: tuple) -> Optional[str]:
     return "legacy_hold" if (str(pair[0]), str(pair[1])) in held else None
 
 
+def _hold_block(base: Any, pair: tuple) -> "Callable[[], Optional[str]]":
+    """:func:`_legacy_hold` for ``pair`` as a ``refuse_if`` check (read when called, inside the critical section)."""
+    def _check() -> Optional[str]:
+        return _legacy_hold(base, pair)
+    return _check
+
+
 def _first_refusal(*checks: "Callable[[], Optional[str]]") -> "Callable[[], Optional[str]]":
     """One ``refuse_if``: the first of ``checks`` that refuses, else None."""
     def _check() -> Optional[str]:
@@ -684,8 +691,7 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
             continue
         r = gate.release_superseded_reservation(
             org_id=oid, slug=slug, nonce=nonce, now=now, grace_s=ttl_s,
-            refuse_if=_first_refusal(lambda b=base, p=(slug, nonce): _legacy_hold(b, p),
-                                     _release_block(cast(Path, spool), (slug, nonce))))
+            refuse_if=_first_refusal(_hold_block(base, (slug, nonce)), _release_block(cast(Path, spool), (slug, nonce))))
         if r.get("refused"):
             rows.append({**row, "status": str(r["refused"])})
         elif not r.get("ok") and r.get("retry"):

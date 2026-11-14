@@ -761,7 +761,7 @@ def cmd_eval_grant(a) -> None:
             seq = g0.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
         except Exception as e:  # noqa: BLE001 — every other seam is still tried, then this re-raises
             first_error = e
-        unconfirmed = []
+        not_confirmed: "list[str]" = []
         for extra in _revoke_targets[1:]:               # the same spine record, published to each other unit's seam
             gx = EvalCapabilityGrant(store, owner_key=owner, base_dir=extra)
             try:
@@ -771,15 +771,15 @@ def cmd_eval_grant(a) -> None:
                 from .governor.seam_publish import raise_close_alarm
                 raise_close_alarm(f"a revoke of eval-capability grant {a.engagement!r} could not be confirmed on the "
                                   f"seam {extra}", cause="seam_unreconciled", failed=[f"grant:{a.engagement}"])
-                unconfirmed.append(f"{extra} ({type(e).__name__})")
+                not_confirmed.append(f"{extra} ({type(e).__name__})")
         if first_error is not None:
             raise first_error
         print(f"eval-capability-grant REVOKED for engagement {a.engagement!r} (seq {seq}); every gate "
               f"enforces again until a fresh owner+evaluator grant lands."
               + (f" Published to {len(_revoke_targets)} seams: {', '.join(_revoke_targets)}."
                  if len(_revoke_targets) > 1 else ""))
-        if unconfirmed:
-            print(f"!! the revoke could not be confirmed on: {'; '.join(unconfirmed)} — `sigil eval-grant reconcile` "
+        if not_confirmed:
+            print(f"!! the revoke could not be confirmed on: {'; '.join(not_confirmed)} — `sigil eval-grant reconcile` "
                   f"once it is reachable", file=sys.stderr)
             sys.exit(1)
         return
