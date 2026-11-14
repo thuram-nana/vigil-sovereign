@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
 __all__ = [
-    "SEAM_CLASSES", "LEFT_IN_PLACE", "SeamClass", "active_classes", "inventory", "legacy_candidates",
+    "SEAM_CLASSES", "LEFT_IN_PLACE", "OUTSIDE_SEAM_STATE", "SeamClass", "active_classes", "inventory", "legacy_candidates",
     "running_up_base", "journal_path", "journal_lock", "read_journal", "write_journal", "new_journal",
     "unmigrated_legacy", "LEGACY_DIRS_ENV", "JOURNAL_KIND",
 ]
@@ -110,6 +110,19 @@ LEFT_IN_PLACE: "tuple[str, ...]" = (
     "offense-spine.key", "install-manifest.json", "restricted-mode", "proofs", "runs", "vigil-live-reports",
     JOURNAL_DIRNAME,
 )
+
+
+#: Settle-path state kept BESIDE the settle drain's completion spool or the spine — never in the seam — and how a
+#: migration treats each (pinned to the constants that name them by the sovereign test suite).
+OUTSIDE_SEAM_STATE: "dict[str, str]" = {
+    ".settle-scan.json": "the settle drain's scan checkpoint: removed by `seam migrate --apply`, so the next pass "
+                         "reads the whole spine; it also names its seam, so one from another seam is never continued",
+    ".settle-retire.json": "when the drain last re-drove each settled, unretired lease: kept (a lease it never tried "
+                           "is re-driven)",
+    ".settle-unfinished.json": "the drain's record of unfinished settles: kept (rewritten every pass)",
+    ".spool.lock": "the completion spool lock: taken exclusively by the requeue",
+    ".settle.lock": "the spine's settle lock (<stem>.settle.lock): held from the re-plan through the commit",
+}
 
 
 def active_classes(env: "Optional[Mapping[str, str]]" = None) -> "tuple[SeamClass, ...]":

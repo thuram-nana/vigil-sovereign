@@ -266,3 +266,21 @@ def test_settled_by_the_seam_marker_alone_is_settled(trees, monkeypatch):
     assert _settle(s, started, 30)["refunded"] == 0
     (src,) = _run(s, seam, legacy, now=LATE + 3600)[1]["sources"]
     assert src["leases"][0]["state"] == "settled"
+
+
+def test_the_settle_paths_state_outside_the_seam_is_classified():
+    """Every settle-path file kept beside the completion spool or the spine has a documented migration treatment."""
+    from sigil import settle_checkpoint
+    from sigil.governor.launch_settlement import settle_lock_path
+    from vigil_integration.live import settle_progress
+    names = {settle_checkpoint.CHECKPOINT_NAME, settle_checkpoint.RETIRE_NAME, settle_progress.STATE_NAME,
+             ".spool.lock"}
+    assert names <= set(sm.OUTSIDE_SEAM_STATE), names - set(sm.OUTSIDE_SEAM_STATE)
+
+    class _S:
+        path = "/x/spine.jsonl"
+    assert settle_lock_path(_S()).name.endswith(".settle.lock") and ".settle.lock" in sm.OUTSIDE_SEAM_STATE
+    import inspect
+
+    from sigil.inbound import completion_spool
+    assert '".spool.lock"' in inspect.getsource(completion_spool)
