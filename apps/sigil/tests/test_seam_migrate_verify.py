@@ -8,6 +8,7 @@ Each guarantee here is checked on its own (no other check backs it up in the sce
     ``applying``; a re-run finishes it);
   * a carried file whose seam copy changed before VERIFY aborts the commit;
   * a single-use floor missing on the seam at VERIFY aborts the commit;
+  * a spent-token file present on both sides with other bytes is no conflict (present is present);
   * a launch whose completion is already waiting for the drain is not requeued again;
   * an archived completion moves back to the drain only while the requeue holds the spool lock.
 
@@ -19,6 +20,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the copy "differs" abort dropped                          -> test_a_file_appearing_on_the_seam_during_the_copy_aborts
   * the carried-bytes verify dropped                          -> test_a_carried_file_changed_on_the_seam_aborts
   * the floor verify dropped                                  -> test_a_floor_missing_on_the_seam_at_verify_aborts
+  * the spent-token (union_files) tolerance dropped           -> test_a_spent_token_on_both_sides_is_no_conflict
   * the requeue's pending exclusion dropped                   -> test_a_completion_already_waiting_is_not_requeued
   * the requeue's spool lock dropped                          -> test_the_requeue_moves_completions_under_the_spool_lock
 """
@@ -151,6 +153,18 @@ def test_a_floor_missing_on_the_seam_at_verify_aborts(trees, monkeypatch):
     code, rep = _apply(_store(), seam, legacy, None)
     assert code == 1
     _aborted(rep, seam, legacy, "below the former directory's")
+
+
+def test_a_spent_token_on_both_sides_is_no_conflict(trees):
+    """One file per spent token (an engage attempt): present on the seam is spent, whatever its bytes — the source
+    commits and the seam's copy is kept."""
+    legacy, seam, _ = trees
+    for tree, body in ((legacy, '{"at": 1}'), (seam, '{"at": 2}')):
+        (tree / ".engage-attempts").mkdir(parents=True)
+        (tree / ".engage-attempts" / "tok-1.json").write_text(body)
+    code, rep = _apply(_store(), seam, legacy, None)
+    assert code == 0 and rep["sources"][0]["status"] == "migrated" and rep["sources"][0]["conflicts"] == [], rep
+    assert (seam / ".engage-attempts" / "tok-1.json").read_text() == '{"at": 2}'
 
 
 def test_a_completion_already_waiting_is_not_requeued(trees, monkeypatch, tmp_path):

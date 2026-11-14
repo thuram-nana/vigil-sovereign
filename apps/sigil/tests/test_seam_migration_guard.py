@@ -22,6 +22,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * an unreadable guard state lets a verb run          -> test_an_unreadable_migration_state_refuses
   * an unreadable journal hides a former tree          -> test_an_unreadable_journal_never_hides_a_former_tree
   * upgrade --check / migrate without units use the cwd -> test_with_no_seam_unit_nothing_is_compared_or_guessed
+  * the flag's code default ON                         -> test_the_flag_is_off_unless_set
 """
 from __future__ import annotations
 
@@ -136,6 +137,16 @@ def test_an_unreadable_journal_never_hides_a_former_tree(host, serve_spy, capsys
     sm.journal_path(host["seam"]).write_text("{truncated")
     assert _exit(["serve"]) == 2 and serve_spy["serve"] == 1
     assert "no_journal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value,on", [(None, False), ("", False), ("0", False), ("1", True), ("true", True)])
+def test_the_flag_is_off_unless_set(monkeypatch, value, on):
+    from sigil import config
+    if value is None:
+        monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD", raising=False)
+    else:
+        monkeypatch.setenv("VIGIL_SEAM_MIGRATION_GUARD", value)
+    assert config.seam_migration_guard_enabled() is on
 
 
 def test_with_the_guard_off_every_verb_is_unchanged(host, serve_spy, monkeypatch):

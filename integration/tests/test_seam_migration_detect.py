@@ -143,6 +143,25 @@ def test_a_symlink_in_a_class_path_is_unsafe(tmp_path):
     assert sm.unmigrated_legacy(tmp_path / "seam", [str(legacy)])[0]["reason"] == "unsafe"
 
 
+def test_a_fifo_in_a_class_path_is_unsafe_and_never_opened(tmp_path):
+    """A non-regular leaf (here a FIFO, which would block a reader) is refused from its lstat, never opened."""
+    import threading
+    legacy = tmp_path / "legacy"
+    d = legacy / "credit-lease-settlements"
+    d.mkdir(parents=True)
+    fifo = d / "cust_x.json"
+    os.mkfifo(fifo)
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.update(sm.inventory(legacy)), daemon=True)
+    t.start()
+    t.join(10)
+    blocked = t.is_alive()
+    if blocked:                                                  # release the blocked reader before failing
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        t.join(10)
+    assert not blocked and out["status"] == "unsafe", out
+
+
 def test_a_symlinked_class_directory_is_unsafe(tmp_path):
     legacy, real = tmp_path / "legacy", tmp_path / "real"
     record_lease_settlement(str(real), "cust_a", "n1")
