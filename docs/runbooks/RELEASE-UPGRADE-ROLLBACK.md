@@ -162,8 +162,8 @@ while systemctl --user list-units --type=service --state=activating --plain --no
 # 3. record and stop the long-running services: the edges and the console first, the cockpit (the writer) last
 systemctl --user list-units --type=service --state=running --plain --no-legend 'vigil-*' 'sigil-*' \
   | awk '{print $1}' > "$U/services"
-systemctl --user stop sigil-customer.service sigil-public.service vigil-command.service \
-  'sigil-bridge@*.service' 'vigil-witness@*.service'
+systemctl --user stop sigil-customer.service sigil-public.service 'sigil-customer@*.service' \
+  'sigil-public@*.service' vigil-command.service 'sigil-bridge@*.service' 'vigil-witness@*.service'
 systemctl --user stop sigil-cockpit.service
 
 # 4. confirm nothing is left running

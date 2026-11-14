@@ -1,0 +1,53 @@
+# SIGIL customer edge (custui) — systemd USER service TEMPLATE: one edge per loopback port
+# =============================================================================
+# The instance name IS the port: sigil-customer@8734 and sigil-customer@8744 are
+# the two halves of the edge swap (tools/deploy/edge-swap.sh). The nginx vhost
+# (deploy/reverse-proxy/vigil-customer.nginx.conf) sends every request to 8734
+# while it accepts connections and to 8744 when it does not, so a new edge can
+# start on the free port, prove /healthz, and only then replace the old one.
+#
+# Everything else is sigil-customer.service: the same env file (bind address,
+# allowlist, provisioner hop key), the same graceful SIGTERM drain, the same
+# hardening. Run EITHER the plain sigil-customer.service OR these instances —
+# never the plain unit and @8734 together (they want the same port). The swap
+# script moves you from the plain unit to an instance the first time it runs.
+#
+# INSTALL (user-level, no root):
+#   cp deploy/systemd/sigil-customer@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   tools/deploy/edge-swap.sh customer      # replaces whichever customer edge runs now
+#
+# Logs → the journal:  journalctl --user -u 'sigil-customer@*' -f
+
+[Unit]
+Description=SIGIL customer edge (custui) on loopback port %i
+Documentation=file:%h/sigil/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.sigil/customer.env
+Environment=SIGIL_LOG_LEVEL=INFO
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil serve-customer --host ${VIGIL_CUSTOMER_BIND} --port %i
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (as sigil-customer.service) -----------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

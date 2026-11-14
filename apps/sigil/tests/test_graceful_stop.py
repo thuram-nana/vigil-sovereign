@@ -302,7 +302,8 @@ def test_the_three_servers_are_graceful(cls):
     assert cls.block_on_close is False
 
 
-@pytest.mark.parametrize("unit", ["sigil-cockpit.service", "sigil-customer.service", "sigil-public.service"])
+@pytest.mark.parametrize("unit", ["sigil-cockpit.service", "sigil-customer.service", "sigil-public.service",
+                                  "sigil-customer@.service", "sigil-public@.service"])
 def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit):
     text = (_SIGIL / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
     m = re.search(r"^TimeoutStopSec=(\d+)\s*$", text, re.M)

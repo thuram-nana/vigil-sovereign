@@ -1,0 +1,54 @@
+# SIGIL public site (pubui) — systemd USER service TEMPLATE: one site per loopback port
+# =============================================================================
+# The instance name IS the port: sigil-public@8735 and sigil-public@8745 are the
+# two halves of the edge swap (tools/deploy/edge-swap.sh). The nginx vhost
+# (deploy/reverse-proxy/vigil-public.nginx.conf) sends every request to 8735
+# while it accepts connections and to 8745 when it does not, so a new site can
+# start on the free port, prove /healthz, and only then replace the old one.
+#
+# Everything else is sigil-public.service: the same env file, the same graceful
+# SIGTERM drain, the same hardening. Run EITHER the plain sigil-public.service
+# OR these instances — never the plain unit and @8735 together (they want the
+# same port). The swap script moves you from the plain unit to an instance the
+# first time it runs.
+#
+# INSTALL (user-level, no root):
+#   cp deploy/systemd/sigil-public@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   tools/deploy/edge-swap.sh public        # replaces whichever public site runs now
+#
+# Logs → the journal:  journalctl --user -u 'sigil-public@*' -f
+
+[Unit]
+Description=SIGIL public site (pubui) on loopback port %i
+Documentation=file:%h/sigil/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.sigil/public.env
+Environment=SIGIL_LOG_LEVEL=INFO
+Environment=VIGIL_PUBLIC_BIND=127.0.0.1
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil serve-public --host ${VIGIL_PUBLIC_BIND} --port %i
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (as sigil-public.service) -------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
