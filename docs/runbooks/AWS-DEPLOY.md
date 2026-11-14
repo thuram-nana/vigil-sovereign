@@ -235,8 +235,8 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    be up to 60 s old at the edge (`s-maxage=60`), and that page names the previous build's `?v=<hash>` assets,
    which the new origin answers with 404 + `no-store`: at a Cloudflare location that holds the old page but not
    its assets, visitors get the page without its styles and scripts until it expires. The purge, run right after
-   the new public edge serves (`EDGE-SWAP.md`), closes that window. The customer app is never cached, so it is
-   never purged. To purge from the host:
+   the new public edge serves (`EDGE-SWAP.md`), closes that window for every public page. The customer app is
+   never cached, so there is nothing of it to purge. To purge from the host:
    - In Cloudflare → My Profile → API Tokens, create a **custom token** with one permission,
      **Zone → Cache Purge → Purge**, and **Zone Resources: Include → Specific zone → vigilguard.net**. Nothing
      else: it cannot read or change DNS, rules or settings.
@@ -248,15 +248,20 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      read -rs CF_TOKEN && printf 'Authorization: Bearer %s\n' "$CF_TOKEN" > ~/.sigil/cloudflare-purge.header
      unset CF_TOKEN
      ```
-   - After a release (or an edge swap of the public site, `EDGE-SWAP.md`), purge the pages by URL
+   - After a release (or an edge swap of the public site, `EDGE-SWAP.md`), purge everything the zone holds
      (`<zone-id>` is on the zone's Overview page; it is not a secret):
      ```
      curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/<zone-id>/purge_cache" \
        -H @"$HOME/.sigil/cloudflare-purge.header" -H "Content-Type: application/json" \
-       --data '{"files":["https://vigilguard.net/","https://www.vigilguard.net/",
-                "https://vigilguard.net/vs","https://vigilguard.net/tools","https://vigilguard.net/cve",
-                "https://vigilguard.net/trust","https://vigilguard.net/blog","https://vigilguard.net/support"]}'
+       --data '{"purge_everything":true}'
      ```
+     This purges exactly the public site: the rules in item 5 make the public site the only host this zone
+     caches (`app` is Bypass, `console` has no public record, and the `www` redirect carries no Cache-Control),
+     so nothing else is in the cache. It reaches every page, which a list of URLs cannot: `/privacy`, `/careers`,
+     every `/vs/…`, `/tools/…`, `/blog/…` and `/cve/…` page, and each query-string variant (`?utm_…`), which
+     Cloudflare keeps under its own cache key. A purged object is fetched from the origin again on its next
+     request. If a later rule ever makes another host cacheable on this zone, purge by host name instead where
+     the plan offers it (`--data '{"hosts":["vigilguard.net"]}'`; EXTERNAL: Cloudflare plan feature).
      Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`

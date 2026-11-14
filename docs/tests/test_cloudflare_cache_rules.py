@@ -7,7 +7,9 @@
 * the cache headers the runbook quotes are the ones the edges send (read from their source);
 * the purge — recommended after every release and public-site swap, because a page Cloudflare still holds names
   the previous build's ?v= assets, which the new edge answers 404 — uses a purge-only token scoped to the one zone,
-  kept on the host (never GitHub), read from a 0600 header file;
+  kept on the host (never GitHub), read from a 0600 header file, and purges the WHOLE zone cache: a hand-kept URL
+  list misses most pages and every query-string variant, and the rules make the public site the only host the zone
+  caches, so the whole-zone purge is exactly the public site;
 * EDGE-SWAP.md names the tools, units and sections it relies on.
 
 Stdlib only (reads files), so it rides the docs CI job.
@@ -95,8 +97,29 @@ def test_the_recommended_purge_is_zone_scoped_purge_only_and_kept_on_the_host():
     assert "install -m 600 /dev/null ~/.sigil/cloudflare-purge.header" in six
     assert "read -rs CF_TOKEN" in six                     # never typed into the shell history
     assert '-H @"$HOME/.sigil/cloudflare-purge.header"' in six
-    assert '"purge_everything"' not in six                # purge pages by URL, not the whole zone
     assert "app.vigilguard.net" not in six                # the app is never cached, so never purged
+
+
+def test_the_purge_covers_every_public_page_not_a_hand_kept_list():
+    # A list of URLs left most pages stale (/privacy, every /vs/..., /cve/<id>, /blog/..., any ?utm_ variant, which
+    # Cloudflare keys separately) loading without their styles and scripts for up to 60 s after a release.
+    six = _item(6)
+    commands = re.findall(r"--data '([^']*)'", six)
+    assert commands[0] == '{"purge_everything":true}', commands
+    assert '"files"' not in six and '"prefixes"' not in six
+    flat = re.sub(r"\s+", " ", six)
+    assert "This purges exactly the public site" in flat and "query-string variant" in flat
+    # ... which is exact only because the public site is the one host the zone caches:
+    rules = _rules()
+    eligible = [expr for expr, then in rules.values() if "**Eligible for cache**" in then]
+    assert eligible == ['(http.host in {"vigilguard.net" "www.vigilguard.net"})']
+    assert "**Bypass cache**" in rules["VIGIL app — bypass"][1]
+    assert "| A | `console` | — | **OMIT — no public record** |" in _section3()
+    # and the www name only redirects, with no Cache-Control (the cache rule bypasses a response without one)
+    conf = (REPO / "apps/sigil/deploy/reverse-proxy/vigil-public.nginx.conf").read_text(encoding="utf-8")
+    www = conf[conf.index("server_name www.vigilguard.net;"):]
+    www = www[: www.index("\n}")]
+    assert "return 301 https://vigilguard.net$request_uri;" in www and "Cache-Control" not in www
 
 
 def test_the_edge_swap_runbook_names_what_it_relies_on():
