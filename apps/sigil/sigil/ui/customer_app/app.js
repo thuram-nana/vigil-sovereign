@@ -23,6 +23,10 @@
  * ?handoff=<base64url(sha256(verifier))>. The page where Google sign-in finished shows a 6-digit code; back in the
  * app, a code box asks for it and POSTs {verifier, code} to api/customer/oidc/handoff, which sets the session
  * cookie in the app's own cookie jar. Outside a standalone app the normal flow is used, unchanged.
+ *
+ * EMAIL CODES. When the deployment sends them (the request answers code: true), the sign-up and password-reset emails
+ * carry a 6-digit code beside the token, and the screens ask for "the 6-digit code from your email" (with the token
+ * one tap away). The code is sent with the email address it went to; it works once, for 10 minutes.
  */
 (function () {
   "use strict";
@@ -99,6 +103,9 @@
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Sign in", onClick: doLogin }),
         h("button.cust-nav-link", { type: "button", text: "Create an account", onClick: function () { nav("#/signup"); } }),
+      ]),
+      h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "Forgot your password?", onClick: function () { nav("#/recover"); } }),
       ]),
     ]);
     return shell(form, "#/login");
@@ -279,16 +286,56 @@
     var form = h("div.card.cust-auth", {}, [
       h("h2", { text: "Create your account" }),
       googleBlock(),
-      h("p.muted", { text: "We email you a single-use verification token. Your account and workspace are "
-        + "owner-signed on confirmation — this page never grants access by itself." }),
+      h("p.muted", { text: "We email you a single-use verification token (and, where enabled, a 6-digit code). "
+        + "Your account and workspace are owner-signed on confirmation — this page never grants access by itself." }),
       field("su-email", "Work email", "email"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Send verification", onClick: doSignupRequest }),
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#su-confirm"), confirmBlock(true, true, "", "")); } }),
+      ]),
+      h("div.row", {}, [
         h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
       ]),
       h("div#su-confirm"),
     ]);
     return shell(form, "#/signup");
+  }
+
+  // The mailbox proof of a sign-up or reset email: its 6-digit code (with the email address it went to), or its
+  // token. `byCode` = the deployment sends codes; `offer` = show the other way too.
+  function codeField(id) {
+    return [h("label", { for: id, text: "6-digit code" }),
+            h("input#" + id + ".cust-code-input", { type: "text", inputmode: "numeric", pattern: "[0-9 ]*",
+              autocomplete: "one-time-code", maxlength: "7", spellcheck: "false" })];
+  }
+  function proofSwitch(holder, prefix, tokenLabel, byCode, offer) {
+    function draw(useCode) {
+      holder.dataset.mode = useCode ? "code" : "token";
+      VUI.mount(holder, [
+        h("p.muted", { text: useCode ? "Enter the 6-digit code from your email."
+                                     : "Paste the token from the email." }),
+        useCode ? codeField(prefix + "-code") : field(prefix + "-token", tokenLabel, "text"),
+        offer ? h("button.cust-nav-link", { type: "button",
+          text: useCode ? "Use the token from the email instead" : "Use the 6-digit code instead",
+          onClick: function () { draw(!useCode); } }) : null,
+      ]);
+    }
+    draw(byCode);
+    return holder;
+  }
+  // {code, email} or {token} from the proof block; null (with the message shown) when it is not filled in.
+  function proofBody(prefix, emailId) {
+    var holder = VUI.$("#" + prefix + "-proof");
+    if (holder && holder.dataset.mode === "code") {
+      var code = val(prefix + "-code").replace(/\s+/g, ""), email = val(emailId);
+      if (!email) { err("Enter the email address the code was sent to."); return null; }
+      if (!/^[0-9]{6}$/.test(code)) { err("Enter the 6-digit code from your email."); return null; }
+      return { email: email, code: code };
+    }
+    var token = val(prefix + "-token");
+    if (!token) { err("Paste the token from the email."); return null; }
+    return { token: token };
   }
 
   async function doSignupRequest() {
@@ -297,38 +344,112 @@
     if (!email) { return err("Enter your email."); }
     try {
       var r = await VUI.postJSON(API + "/signup/request", { email: email });
-      // The token is delivered by email. A dev edge MAY echo it (explicit, governed flag) to speed local
-      // testing; if present we prefill, otherwise we ask the customer to paste the link's token.
+      // The token (and, where enabled, a 6-digit code) is delivered by email. A dev edge MAY echo them (explicit,
+      // governed flag) to speed local testing; if present we prefill.
+      var byCode = !!(r && r.code);
       var devToken = (r && (r.token || r.dev_token)) || "";
-      VUI.mount(VUI.$("#su-confirm"), confirmBlock(devToken));
-      VUI.toast("Check your email for the verification token.");
+      VUI.mount(VUI.$("#su-confirm"), confirmBlock(byCode, byCode, devToken, (r && r.dev_code) || ""));
+      VUI.toast(byCode ? "Check your email for your 6-digit code." : "Check your email for the verification token.");
     } catch (e) { err(authMsg(e, "Could not start signup.")); }
   }
 
-  function confirmBlock(devToken) {
+  function confirmBlock(byCode, offer, devToken, devCode) {
     var box = h("div", {}, [
       h("hr"),
-      h("p.muted", { text: "Paste the token from the email, pick a password, and name your workspace." }),
-      field("su-token", "Verification token", "text"),
+      proofSwitch(h("div#su-proof"), "su", "Verification token", byCode, offer),
+      h("p.muted", { text: "Pick a password and name your workspace." }),
       field("su-password", "Choose a password", "password"),
       field("su-org", "Workspace name", "text"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Create account", onClick: doSignupConfirm }),
       ]),
     ]);
-    if (devToken) { setTimeout(function () { var t = VUI.$("#su-token"); if (t) t.value = devToken; }, 0); }
+    setTimeout(function () {
+      var t = VUI.$("#su-token"), c = VUI.$("#su-code");
+      if (t && devToken) t.value = devToken;
+      if (c && devCode) c.value = devCode;
+    }, 0);
     return box;
   }
 
   async function doSignupConfirm() {
     clearErr();
-    var token = val("su-token"), password = val("su-password"), org = val("su-org");
-    if (!token || !password || !org) { return err("Fill in the token, password, and workspace name."); }
+    var password = val("su-password"), org = val("su-org");
+    var proof = proofBody("su", "su-email");
+    if (!proof) return;
+    if (!password || !org) { return err("Choose a password and name your workspace."); }
+    proof.password = password;
+    proof.org_name = org;
     try {
-      var r = await VUI.postJSON(API + "/signup/confirm", { token: token, password: password, org_name: org });
+      var r = await VUI.postJSON(API + "/signup/confirm", proof);
       if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Welcome to VIGIL"); }
       else { err("Could not complete signup."); }
     } catch (e) { err(authMsg(e, "Could not complete signup.")); }
+  }
+
+  // ---- password reset ---------------------------------------------------------------------------------
+  function viewRecover() {
+    var form = h("div.card.cust-auth", {}, [
+      h("h2", { text: "Reset your password" }),
+      h("p.muted", { text: "We email a single-use token (and, where enabled, a 6-digit code) to the address of your "
+        + "account. Setting a new password signs you out everywhere." }),
+      field("rc-email", "Email", "email"),
+      h("div.row", {}, [
+        h("button.btn.btn-primary", { type: "button", text: "Send reset email", onClick: doRecoverRequest }),
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#rc-confirm"), recoverBlock(true, true, "", "")); } }),
+      ]),
+      h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
+      ]),
+      h("div#rc-confirm"),
+    ]);
+    return shell(form, "#/recover");
+  }
+
+  async function doRecoverRequest() {
+    clearErr();
+    var email = val("rc-email");
+    if (!email) { return err("Enter your email."); }
+    try {
+      var r = await VUI.postJSON(API + "/recover/request", { email: email });
+      var byCode = !!(r && r.code);
+      VUI.mount(VUI.$("#rc-confirm"), recoverBlock(byCode, byCode, (r && r.dev_token) || "", (r && r.dev_code) || ""));
+      // the same answer whether or not the address has an account
+      VUI.toast(byCode ? "If that address has an account, a 6-digit code is on its way."
+                       : "If that address has an account, a reset token is on its way.");
+    } catch (e) { err(authMsg(e, "Could not send the reset email.")); }
+  }
+
+  function recoverBlock(byCode, offer, devToken, devCode) {
+    var box = h("div", {}, [
+      h("hr"),
+      proofSwitch(h("div#rc-proof"), "rc", "Reset token", byCode, offer),
+      field("rc-password", "New password", "password"),
+      h("div.row", {}, [
+        h("button.btn.btn-primary", { type: "button", text: "Set new password", onClick: doRecoverConfirm }),
+      ]),
+    ]);
+    setTimeout(function () {
+      var t = VUI.$("#rc-token"), c = VUI.$("#rc-code");
+      if (t && devToken) t.value = devToken;
+      if (c && devCode) c.value = devCode;
+    }, 0);
+    return box;
+  }
+
+  async function doRecoverConfirm() {
+    clearErr();
+    var password = val("rc-password");
+    var proof = proofBody("rc", "rc-email");
+    if (!proof) return;
+    if (!password) { return err("Choose a new password."); }
+    proof.new_password = password;
+    try {
+      var r = await VUI.postJSON(API + "/recover/confirm", proof);
+      if (r && r.username) { nav("#/login"); VUI.toast("Password changed. Sign in with your new password."); }
+      else { err("Could not reset the password."); }
+    } catch (e) { err(authMsg(e, "Could not reset the password.")); }
   }
 
   // ---- views: logged in ---------------------------------------------------------------------------
@@ -934,6 +1055,7 @@
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/login": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
+    "#/recover": function () { return authed() ? viewDashboard() : viewRecover(); },
     "#/google-code": function () { return authed() ? viewDashboard() : viewGoogleCode(); },
     "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
     "#/billing/return": function () { return authed() ? viewBillingReturn() : viewLogin(); },

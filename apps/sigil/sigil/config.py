@@ -170,6 +170,8 @@ def sovereign_provision_base() -> str:
     return os.environ.get("VIGIL_PROVISION_BASE", f"http://127.0.0.1:{COCKPIT_UI_PORT}")
 CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
 EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
+EMAIL_CODES_DIR = _customer / "email_codes"             # the 6-digit codes sent beside them (when enabled)
+EMAIL_CODE_RATELIMIT_DIR = _customer / "email_code_ratelimit"   # wrong codes per email+purpose, across re-sends
 LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers
 TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial grant (never on-the-wire)
 # Anti-farming ceilings on the provisioner's owner-signed mints. The signup cap is a GLOBAL per-rolling-day
@@ -566,6 +568,16 @@ def email_enabled() -> bool:
     default: a dev/sovereign install uses NullEmailSender and surfaces a verify/recover token only on an
     explicit dev flag, NEVER in production."""
     return bool(os.environ.get("SIGIL_EMAIL_HOST", "").strip())
+
+
+def customer_email_code_enabled() -> bool:
+    """True iff the sign-up and password-reset emails also carry a 6-digit code (`VIGIL_CUSTOMER_EMAIL_CODE`
+    affirmative), so a person in the installed app can type it instead of following the email into a browser. OFF by
+    default: the emails carry only the token, exactly as before, and a code confirmation is refused. Read by the
+    customer provisioner (the cockpit process). A code is bound to the email and the purpose, used once, lives 10
+    minutes, and is gone after 5 wrong codes; wrong codes are also limited per email across re-sent codes and per
+    client IP. The token in the same email keeps working."""
+    return (os.environ.get("VIGIL_CUSTOMER_EMAIL_CODE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def email_sender():

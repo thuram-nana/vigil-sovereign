@@ -855,7 +855,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("signup_request", "", {"email": body.get("email", ""), "ip": self._ip()})
             return self._json(r, c)
         if action == "signup/confirm":
+            # the email's token, or its 6-digit code with the email it was sent to (the provisioner decides which)
             c, r = self._provision("signup_confirm", "", {"token": body.get("token", ""),
+                    "email": body.get("email", ""), "code": body.get("code", ""),
                     "password": body.get("password", ""), "org_name": body.get("org_name", ""),
                     "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
@@ -875,7 +877,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json(r, c)
         if action == "recover/confirm":
             c, r = self._provision("recover_confirm", "", {"token": body.get("token", ""),
-                    "new_password": body.get("new_password", "")})
+                    "email": body.get("email", ""), "code": body.get("code", ""),
+                    "new_password": body.get("new_password", ""), "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
                 # SEVER every existing session for the account (the edge half of the session-reset seam).
                 self.server.sessions.revoke_all_for_user(str(r["username"]))

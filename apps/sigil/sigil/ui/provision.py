@@ -17,6 +17,9 @@ Workflows:
     (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant.
   * login — email+password (constant-time via the decoy), rate-limited + locked out on abuse.
   * request_recover / confirm_recover — single-use recovery token → owner-signed password reset.
+  * confirm_signup_code / confirm_recover_code — the same two confirmations with the 6-digit code from the same
+    email instead of its token (when the provisioner has an EmailCodeLedger; off by default): bound to the email
+    and the purpose, single use, 10 minutes, 5 wrong codes per email+purpose, plus a per-IP limit.
   * grant_member / revoke_member — an `org_admin` manages THEIR org's team: the service checks
     `admit_customer(requester, org_id, manage_members)` THEN owner-signs the (capped) membership grant /
     revoke. This is R1's AUTHENTICATED ordinary revocation (never an anonymous unsigned record) and the
@@ -40,7 +43,7 @@ assert_no_offense()
 
 from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
                                 METHOD_GOOGLE_OIDC, METHOD_PASSKEY, PasswordIdentityProvider)
-from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
+from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY, CodeOk, format_code  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
 _LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
@@ -53,6 +56,20 @@ _ORG_ID_PREFIX = "org_"
 # run_engagement) and `owner` — a customer can never hand a teammate any offense‑adjacent or global
 # authority (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
+# The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
+# one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
+_SIGNUP_CODE_EMAIL = (
+    "Your VIGIL verification code is:\n\n    {code}\n\n"
+    "Type it into VIGIL within 10 minutes. It works once.\n\n"
+    "Or paste this single-use token on the sign-up page (valid for 1 hour):\n\n    {token}\n\n"
+    "If you did not ask to create a VIGIL account, ignore this email. VIGIL will never ask you for this code or "
+    "token by phone, chat or another email.\n")
+_RECOVER_CODE_EMAIL = (
+    "Your VIGIL password reset code is:\n\n    {code}\n\n"
+    "Type it into VIGIL within 10 minutes to choose a new password. It works once.\n\n"
+    "Or paste this single-use token on the password reset page (valid for 1 hour):\n\n    {token}\n\n"
+    "If you did not ask to reset your VIGIL password, ignore this email: your password stays as it is. VIGIL will "
+    "never ask you for this code or token by phone, chat or another email.\n")
 # The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
 # so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
 _NOTIF_MAX = 100
@@ -195,13 +212,19 @@ class Provisioner:
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
-                 trial_ip_limiter=None,
+                 trial_ip_limiter=None, email_codes=None, email_code_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
         self.orgs = orgs
         self.wallet = wallet
         self.email_tokens = email_tokens
+        # The 6-digit email codes (an EmailCodeLedger) sent beside the token. None ⇒ off: the emails carry only the
+        # token, exactly as before, and the code confirmations refuse. `email_code_limiter` (a LoginRateLimiter) bounds
+        # wrong codes per email+purpose ACROSS re-sent codes (each code also dies at its own 5th wrong code); the
+        # per-IP leg uses `rate_limiter`.
+        self.email_codes = email_codes
+        self.email_code_limiter = email_code_limiter
         self.rate_limiter = rate_limiter
         # Slice E2a/E2b — the owner-signed customer-credential registry (the (iss,sub) / passkey substrate)
         # and the Google-OIDC identity provider. `customer_credentials` is wired whenever the provisioner is
@@ -436,11 +459,22 @@ class Provisioner:
                     raise ProvisionRateLimited(locked)
                 self.signup_email_limiter.record_failure(mkey, now=t)
         token = self.email_tokens.issue(email_l, PURPOSE_VERIFY, now=t) if email_l else None
-        sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email",
-                                                      f"Confirm: token {token}") if token else False
-        out = {"status": "verification_sent"}          # same response whether or not the email exists
+        code = None
+        if token and self.email_codes is not None:
+            # the code is bound to the ids THIS token derives, so the code and the token complete the same sign-up
+            # (a crash half-way through one is finished by either); the derived ids are not secrets
+            code = self.email_codes.issue(email_l, PURPOSE_VERIFY, now=t,
+                                          bind={"u": _signup_username(token), "o": _signup_org_id(token)})
+        body = (_SIGNUP_CODE_EMAIL.format(code=format_code(code), token=token) if code
+                else f"Confirm: token {token}")
+        sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email", body) if token else False
+        out: "dict[str, object]" = {"status": "verification_sent"}   # same response whether or not the email exists
+        if self.email_codes is not None:
+            out["code"] = True                         # the deployment sends codes (the same answer for every request)
         if token and self.expose_dev_tokens and not sent:
             out["dev_token"] = token                   # DEV ONLY (no real sender) — never populated in prod
+            if code:
+                out["dev_code"] = code
         return out
 
     def confirm_signup(self, token: str, *, password: str, org_name: str, ip: str = "",
@@ -472,7 +506,52 @@ class Provisioner:
         email = self.email_tokens.peek(tok, PURPOSE_VERIFY, now=t)   # validate WITHOUT consuming (commit-marker)
         if not email:
             raise ProvisionDenied("invalid or expired verification token")
-        username, org_id = _signup_username(tok), _signup_org_id(tok)
+        return self._signup_commit(email, _signup_username(tok), _signup_org_id(tok), password=password,
+                                   org_name=org_name, ip=ip, t=t,
+                                   commit=lambda: self.email_tokens.consume(tok, PURPOSE_VERIFY, now=t))
+
+    def confirm_signup_code(self, email: str, code: str, *, password: str, org_name: str, ip: str = "",
+                            now: "Optional[float]" = None) -> dict:
+        """Phase 2 with the 6-digit code from the verification email instead of its token (the installed app types
+        the code). The code is checked WITHOUT being consumed (wrong codes count: 5 per email, then it is gone; plus
+        the per-IP limit), then the SAME commit-marker transaction runs over the ids bound to the code at issue —
+        the ids the email's token derives — and consuming the code is the commit marker."""
+        t = self._now() if now is None else float(now)
+        email_l, bind = self._code_check(email, PURPOSE_VERIFY, code, ip=ip, t=t, consume=False)
+        username, org_id = str(bind.get("u") or ""), str(bind.get("o") or "")
+        if not username or not org_id:
+            raise ProvisionDenied("invalid or expired code")
+        codes = self.email_codes
+        return self._signup_commit(email_l, username, org_id, password=password, org_name=org_name, ip=ip, t=t,
+                                   commit=lambda: codes.consume_code(email_l, PURPOSE_VERIFY))
+
+    def _code_check(self, email: str, purpose: str, code, *, ip: str, t: float, consume: bool) -> "tuple[str, dict]":
+        """Check a typed email code. Refused before the check while the caller's IP (`rate_limiter`) or this
+        email+purpose (`email_code_limiter`) is locked out; a wrong, malformed, expired or unknown code counts on
+        both and is one generic refusal (no hint whether the email has an account). Returns (email, bound values)."""
+        if self.email_codes is None:
+            raise ProvisionError("email codes are not enabled on this deployment")
+        email_l = str(email or "").strip().lower()
+        ikey, ekey = f"code:ip:{ip}", f"code:{purpose}:{email_l}"
+        self._rate_guard(ikey, now=t)
+        if self.email_code_limiter is not None:
+            locked = self.email_code_limiter.locked(ekey, now=t)
+            if locked is not None:
+                raise ProvisionRateLimited(locked)
+        res = self.email_codes.check(email_l, purpose, code, consume=consume, now=t) if email_l else None
+        if isinstance(res, CodeOk):
+            return email_l, res.bind
+        self.rate_limiter.record_failure(ikey, now=t)
+        if self.email_code_limiter is not None:
+            self.email_code_limiter.record_failure(ekey, now=t)
+        self._audit(f"{purpose}_code", target=email_l, outcome="denied")
+        raise ProvisionDenied("invalid or expired code")
+
+    def _signup_commit(self, email: str, username: str, org_id: str, *, password: str, org_name: str, ip: str,
+                       t: float, commit) -> dict:
+        """The owner-signed sign-up transaction for a verified mailbox (see confirm_signup): idempotent mints over
+        the deterministic `username`/`org_id`, the critical audit, then `commit()` (consume the token or the code —
+        the commit marker), then every other token and code for the email is dropped."""
         # NH-2: validate EVERY client-supplied input BEFORE the first owner-signed append. Otherwise an
         # invalid org_name (too long / control chars) would raise inside create_org AFTER customers.create
         # has already minted the account+email binding — a deterministic partial commit that squats the
@@ -503,11 +582,13 @@ class Provisioner:
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
                         critical=True)
-            # COMMIT MARKER — consume the token LAST (single-use); a replay now finds it already consumed.
-            self.email_tokens.consume(tok, PURPOSE_VERIFY, now=t)
+            # COMMIT MARKER — consume the token (or the code) LAST (single-use); a replay now finds it consumed.
+            commit()
             if self.signup_cap_limiter is not None:         # count this signup toward the cap (post-commit)
                 self.signup_cap_limiter.record_failure("signup:global", now=t)
         self.email_tokens.revoke_for_email(email)      # drop any other outstanding tokens for this email
+        if self.email_codes is not None:
+            self.email_codes.revoke_for_email(email)   # ... and its codes: one sign-up, by the token or the code
         out = {"username": username, "org_id": org_id}
         if trial == "unavailable":
             out["trial"] = "unavailable"                # generic: never says which limit applied
@@ -825,13 +906,20 @@ class Provisioner:
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"recover:ip:{ip}", f"recover:email:{email_l}", now=t)
         self.rate_limiter.record_failure(f"recover:ip:{ip}", now=t)
-        out = {"status": "recovery_sent"}
+        out: "dict[str, object]" = {"status": "recovery_sent"}
+        if self.email_codes is not None:
+            out["code"] = True                         # the deployment sends codes (the same answer for every email)
         if email_l and self.customers.by_email(email_l) is not None:
             token = self.email_tokens.issue(email_l, PURPOSE_RECOVER, now=t)
-            sent = bool(token) and self.email_sender.send(email_l, "Reset your VIGIL password",
-                                                          f"Reset: token {token}")
+            code = (self.email_codes.issue(email_l, PURPOSE_RECOVER, now=t)
+                    if token and self.email_codes is not None else None)
+            body = (_RECOVER_CODE_EMAIL.format(code=format_code(code), token=token) if code
+                    else f"Reset: token {token}")
+            sent = bool(token) and self.email_sender.send(email_l, "Reset your VIGIL password", body)
             if token and self.expose_dev_tokens and not sent:
                 out["dev_token"] = token               # DEV ONLY
+                if code:
+                    out["dev_code"] = code
         return out
 
     def confirm_recover(self, token: str, *, new_password: str, now: "Optional[float]" = None) -> dict:
@@ -849,6 +937,20 @@ class Provisioner:
         email = self.email_tokens.consume(str(token or ""), PURPOSE_RECOVER, now=t)
         if not email:
             raise ProvisionDenied("invalid or expired recovery token")
+        return self._recover_commit(email, new_password)
+
+    def confirm_recover_code(self, email: str, code: str, *, new_password: str, ip: str = "",
+                             now: "Optional[float]" = None) -> dict:
+        """The password reset with the 6-digit code from the reset email instead of its token. The code is checked
+        and consumed in one step (single use; wrong codes count: 5 per email, then it is gone; plus the per-IP
+        limit), then the same owner-signed reset and session-revocation contract as confirm_recover."""
+        t = self._now() if now is None else float(now)
+        email_l, _bind = self._code_check(email, PURPOSE_RECOVER, code, ip=ip, t=t, consume=True)
+        return self._recover_commit(email_l, new_password)
+
+    def _recover_commit(self, email: str, new_password: str) -> dict:
+        """The owner-signed reset for a mailbox already proven (token or code consumed), then every other token and
+        code for the email is dropped; the edge revokes the account's sessions on the answer."""
         with self._lock:
             acct = self.customers.by_email(email)
             if acct is None:
@@ -857,6 +959,8 @@ class Provisioner:
             self._audit("recover", requester=acct.username, target=acct.username, outcome="password_reset",
                         critical=True)
         self.email_tokens.revoke_for_email(email)      # no sibling verify/recover token survives the reset
+        if self.email_codes is not None:
+            self.email_codes.revoke_for_email(email)   # ... nor any code
         return {"username": acct.username, "sessions_must_revoke": True}
 
     # -- member management (the milestone: an org_admin manages THEIR org) --------------------------
@@ -1976,7 +2080,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
-    from .email_channel import EmailTokenLedger
+    from .email_channel import EmailCodeLedger, EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
     from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs, stripe_billing_spool_dirs
     from .signcount import SignCountLedger
@@ -2009,6 +2113,12 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         wallet=WalletRegistry(store),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
+        # the 6-digit email codes, OFF unless VIGIL_CUSTOMER_EMAIL_CODE: 5 wrong codes per email+purpose per hour
+        # across re-sent codes, the lock doubling up to a day (each code also dies at its own 5th wrong code)
+        email_codes=EmailCodeLedger(config.EMAIL_CODES_DIR) if config.customer_email_code_enabled() else None,
+        email_code_limiter=(LoginRateLimiter(config.EMAIL_CODE_RATELIMIT_DIR, max_fails=5, window_s=3600.0,
+                                             base_lock_s=3600.0, max_lock_s=86400.0)
+                            if config.customer_email_code_enabled() else None),
         # the GLOBAL per-day signup ceiling (anti-trial-farming) and the per-org member-management ceiling —
         # separate limiters under disjoint marker dirs (never couple to the login limiter). The signup cap's
         # base_lock_s EQUALS its window (86400s): on the CAP-th committed signup the limiter trips and stays

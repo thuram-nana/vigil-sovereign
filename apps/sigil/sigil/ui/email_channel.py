@@ -18,19 +18,33 @@ TTL — each a path to account takeover / trial-credit farming):
   * The raw token is NEVER written to disk — only `sha256(token)` names the marker (mirrors
     `sessions.SessionLedger`), so a read of the ledger directory cannot recover a live token.
 
+EMAIL CODES (`EmailCodeLedger`, OFF unless the provisioner is given one): a 6-digit code sent in the same email as
+the token, so a person in the installed app can type it instead of following the email into a browser. A code is
+bound to the email address and the purpose, used once, lives 10 minutes, and is gone after 5 wrong codes; one live
+code per (email, purpose) — a new email replaces the previous code. Stored hash-named only: the record name is
+sha256 of (purpose, email) and the code is kept as a salted scrypt hash, never the raw code. A code proves the
+same thing as the token in that email — control of the mailbox — and nothing more.
+
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
 import smtplib
 import time
+from contextlib import contextmanager
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, NamedTuple, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX: code checks then refuse (fail closed)
+    fcntl = None  # type: ignore[assignment]
 
 # Purposes a token may be minted/consumed for. A token minted for one is refused for the other.
 PURPOSE_VERIFY = "verify"
@@ -237,5 +251,196 @@ class EmailTokenLedger:
             rec = self._read(Path(entry.path))
             if isinstance(rec, dict) and rec.get("email") == email:
                 self._unlink(entry.path)
+                n += 1
+        return n
+
+
+# --- 6-digit email codes ----------------------------------------------------------------------------------------
+_DEFAULT_CODE_TTL_S = 10 * 60.0         # a code is typed while the email is open: 10 minutes
+_DEFAULT_CODE_ATTEMPTS = 5              # wrong codes per (email, purpose) before the code is destroyed
+_CODE_LOCK = ".codes.lock"
+# scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
+# directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1
+
+
+def normalize_code(value) -> str:
+    """The code as typed, without spaces ("123 456" -> "123456"); "" unless it is exactly 6 digits."""
+    raw = "".join(str(value or "").split())
+    return raw if len(raw) == 6 and raw.isascii() and raw.isdigit() else ""
+
+
+def format_code(code: str) -> str:
+    return f"{code[:3]} {code[3:]}"
+
+
+class CodeOk(NamedTuple):
+    bind: dict              # what the issuer bound to the code (e.g. the sign-up's derived username/org id)
+
+
+class CodeWrong(NamedTuple):
+    remaining: int          # wrong codes left; 0 means the code has just been destroyed
+
+
+class CodeGone(NamedTuple):
+    """No live code for this (email, purpose): never issued, expired, used, replaced or destroyed."""
+
+
+class EmailCodeLedger:
+    """6-digit, single-use, 10-minute codes bound to (email, purpose); see the module docstring."""
+
+    def __init__(self, path: "str | os.PathLike", *, ttl_s: float = _DEFAULT_CODE_TTL_S,
+                 max_attempts: int = _DEFAULT_CODE_ATTEMPTS, max_records: int = _DEFAULT_MAX_TOKENS) -> None:
+        self.dir = Path(path)
+        self.ttl_s = float(ttl_s)
+        self.max_attempts = int(max_attempts)
+        self.max_records = int(max_records)
+
+    def _name(self, email: str, purpose: str) -> Path:
+        return self.dir / hashlib.sha256(("code\x00" + purpose + "\x00" + email).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _hash(code: str, salt: str, email: str, purpose: str) -> str:
+        return hashlib.scrypt(code.encode("ascii"), salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
+                              n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32).hex()
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        if fcntl is None:
+            raise OSError("no flock on this platform")
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(self.dir / _CODE_LOCK), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _read(p: Path) -> "Optional[dict]":
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    def _write(self, p: Path, rec: dict) -> None:
+        tmp = p.with_name(f".{p.name}.{secrets.token_hex(8)}.tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, json.dumps(rec).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)
+
+    @staticmethod
+    def _unlink(p) -> None:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _live(rec: "Optional[dict]", now: float) -> bool:
+        exp = rec.get("exp") if rec else None
+        return (isinstance(exp, (int, float)) and not isinstance(exp, bool) and now < float(exp)
+                and isinstance(rec.get("salt"), str) and isinstance(rec.get("hash"), str))
+
+    def _sweep(self, now: float) -> int:
+        live = 0
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for e in entries:
+            if e.name == _CODE_LOCK:
+                continue
+            if not e.name.startswith(".") and self._live(self._read(Path(e.path)), now):
+                live += 1
+            else:
+                self._unlink(e.path)
+        return live
+
+    def issue(self, email: str, purpose: str, *, bind: "Optional[dict]" = None,
+              now: "Optional[float]" = None) -> "Optional[str]":
+        """A fresh code for (`email`, `purpose`), replacing any earlier one, with `bind` stored beside it (returned by
+        a right `check`). Returns the raw code (never stored), or None when the ledger is full or cannot be written."""
+        if purpose not in _PURPOSES:
+            raise ValueError(f"purpose must be one of {sorted(_PURPOSES)}")
+        if not isinstance(email, str) or not email:
+            raise ValueError("email must be a non-empty string")
+        t = time.time() if now is None else float(now)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        salt = secrets.token_hex(16)
+        rec = {"exp": t + self.ttl_s, "salt": salt, "hash": self._hash(code, salt, email, purpose),
+               "attempts": 0, "bind": dict(bind or {})}
+        try:
+            with self._locked():
+                p = self._name(email, purpose)
+                if not p.exists() and self._sweep(t) >= self.max_records:
+                    return None
+                self._write(p, rec)
+        except OSError:
+            return None
+        return code
+
+    def check(self, email: str, purpose: str, code, *, consume: bool = False,
+              now: "Optional[float]" = None):
+        """Check a typed code for (`email`, `purpose`). Right: CodeOk(bind), and the code is removed when `consume`
+        (a caller that commits later removes it with `consume_code`). Wrong: the attempt is counted and the
+        `max_attempts`-th wrong code removes the code (CodeWrong(0)). No live code: CodeGone. A malformed code counts
+        as wrong. Never raises; an I/O error is CodeGone (fail closed)."""
+        if purpose not in _PURPOSES or not isinstance(email, str) or not email:
+            return CodeGone()
+        typed = normalize_code(code)
+        t = time.time() if now is None else float(now)
+        p = self._name(email, purpose)
+        first = self._read(p)
+        if first is None or not self._live(first, t):
+            return CodeGone()
+        # the slow hash outside the lock (so one check does not hold up every other), compared under it
+        guess = self._hash(typed, str(first["salt"]), email, purpose) if typed else ""
+        try:
+            with self._locked():
+                rec = self._read(p)
+                if rec is None or not self._live(rec, t):
+                    self._unlink(p)
+                    return CodeGone()
+                if rec["salt"] != first["salt"] and typed:              # replaced meanwhile: hash for the new one
+                    guess = self._hash(typed, str(rec["salt"]), email, purpose)
+                if typed and hmac.compare_digest(guess, str(rec["hash"])):
+                    if consume:
+                        self._unlink(p)
+                    bind = rec.get("bind")
+                    return CodeOk(dict(bind) if isinstance(bind, dict) else {})
+                attempts = rec.get("attempts")
+                attempts = (attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0) + 1
+                if attempts >= self.max_attempts:
+                    self._unlink(p)
+                    return CodeWrong(0)
+                rec["attempts"] = attempts
+                try:
+                    self._write(p, rec)
+                except OSError:
+                    self._unlink(p)                     # a wrong code that cannot be counted ends the code
+                    return CodeGone()
+                return CodeWrong(self.max_attempts - attempts)
+        except OSError:
+            return CodeGone()
+
+    def consume_code(self, email: str, purpose: str) -> None:
+        """Remove the code for (`email`, `purpose`) — the commit marker of a caller that checked without consuming."""
+        if purpose in _PURPOSES and isinstance(email, str) and email:
+            self._unlink(self._name(email, purpose))
+
+    def revoke_for_email(self, email: str) -> int:
+        """Remove the codes of every purpose for `email` (a sign-up or reset completed by either path)."""
+        n = 0
+        if not isinstance(email, str) or not email:
+            return 0
+        for purpose in sorted(_PURPOSES):
+            p = self._name(email, purpose)
+            if p.exists():
+                self._unlink(p)
                 n += 1
         return n

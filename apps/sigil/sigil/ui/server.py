@@ -1562,6 +1562,10 @@ class Handler(BaseHTTPRequestHandler):
         if action == "signup_request":
             return p.request_signup(str(body.get("email", "")), ip=ip)
         if action == "signup_confirm":
+            if not str(body.get("token", "") or "") and str(body.get("code", "") or ""):   # the 6-digit email code
+                return p.confirm_signup_code(str(body.get("email", "")), str(body.get("code", "")),
+                                             password=str(body.get("password", "")),
+                                             org_name=str(body.get("org_name", "")), ip=ip)
             return p.confirm_signup(str(body.get("token", "")), password=str(body.get("password", "")),
                                     org_name=str(body.get("org_name", "")), ip=ip)
         if action == "login":
@@ -1569,6 +1573,9 @@ class Handler(BaseHTTPRequestHandler):
         if action == "recover_request":
             return p.request_recover(str(body.get("email", "")), ip=ip)
         if action == "recover_confirm":
+            if not str(body.get("token", "") or "") and str(body.get("code", "") or ""):   # the 6-digit email code
+                return p.confirm_recover_code(str(body.get("email", "")), str(body.get("code", "")),
+                                              new_password=str(body.get("new_password", "")), ip=ip)
             return p.confirm_recover(str(body.get("token", "")), new_password=str(body.get("new_password", "")))
         # E2b — Google-OIDC login finish: the secret-bearing token exchange + verify + auto-provision /
         # anti-takeover, then {username, orgs}. A public bootstrap (no requester — the hop key alone gates it,
