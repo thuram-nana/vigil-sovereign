@@ -1224,14 +1224,15 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
-def _writer_seam_base(verb: str) -> str:
+def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> str:
     """The seam base for an operator-run command that WRITES the cross-plane seam (an eval grant / attestation
     publication, its rollback floor, a reservation refund's markers). The ONE resolver picks it ($VIGIL_BASE_DIR,
     else ./.vigil-live); this refuses (exit 2), before anything is written, when that is not the directory the
     configured seam units use — e.g. a shell without the VIGIL_BASE_DIR the shipped units set. Written there, a
     revoke or withdrawal would never reach the publication the offense plane reads, and a reconcile would clear
     the `vigil doctor` alarm over the wrong tree. Nothing configured on this host (no installed seam unit, no env
-    file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for the settle drain."""
+    file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for the settle drain. ``units``
+    narrows the units compared (default: every seam unit)."""
     import os
 
     from vigil_core.seam_base import SeamBaseError, require_seam_base
@@ -1244,7 +1245,7 @@ def _writer_seam_base(verb: str) -> str:
         from vigil_integration.seam_base_units import seam_base_agreement
     except ImportError:          # the unit-agreement probe is not installed here: nothing to compare against
         return base
-    units = seam_base_agreement()[0]["units"]
+    units = seam_base_agreement(only=units)[0]["units"]
     seams = {os.path.realpath(s) for s in units.values()}
     if len(seams) > 1:
         print(f"{verb}: refusing — the configured units disagree on the seam base "
@@ -1436,6 +1437,51 @@ def cmd_settle_drain(a) -> None:
                   f"stays FAILED until they finish (a lease that could not be retired is retried every 10 "
                   f"minutes). `vigil doctor` lists them.", file=sys.stderr)
             sys.exit(1)
+
+
+def _settle_spool_default() -> str:
+    """The settle drain's completion spool: ``VIGIL_SETTLE_SPOOL``, else ``~/.config/vigil/settle-drain.env``'s,
+    else the unit default ``~/.sigil/spool/settle`` (what ``vigil doctor`` reads)."""
+    import os
+    from pathlib import Path
+    v = (os.environ.get("VIGIL_SETTLE_SPOOL") or "").strip()
+    if not v:
+        try:
+            from vigil_integration.seam_base_units import parse_env_file
+            v = ((parse_env_file(Path.home() / ".config" / "vigil" / "settle-drain.env") or {})
+                 .get("VIGIL_SETTLE_SPOOL") or "").strip()
+        except ImportError:
+            v = ""
+    return str(Path(v).expanduser() if v else Path.home() / ".sigil" / "spool" / "settle")
+
+
+def cmd_seam(a) -> None:
+    """``seam migrate``: carry the launch-seam records of a former seam directory into the seam the configured
+    units use (``seam_migrate``). Report-only without ``--apply``. Exit 0 migrated / nothing to carry, 1 conflicts
+    (nothing committed for that source), 2 refused."""
+    import os
+
+    from . import seam_migrate
+    from .governor.identity import owner_keypair
+    if a.to:
+        seam = os.path.abspath(os.path.expanduser(a.to))
+    else:
+        from vigil_integration.seam_base_units import MONEY_SEAM_UNITS
+        seam = _writer_seam_base("seam migrate", units=MONEY_SEAM_UNITS)
+    if a.sources:
+        sources = [os.path.abspath(os.path.expanduser(s)) for s in a.sources]
+    else:
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates
+        sources = legacy_candidates(seam, units=unit_details())
+    spool = a.completion_spool or _settle_spool_default()
+    try:
+        code, report = seam_migrate.run(SpineStore(), owner_keypair(), seam=seam, sources=sources, spool=spool)
+    except seam_migrate.MigrateRefused as e:
+        print(f"seam migrate: refused — {e}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(report, indent=2, sort_keys=True) if a.json else seam_migrate.format_report(report))
+    sys.exit(code)
 
 
 def cmd_ops_sweep(a) -> None:
@@ -3339,6 +3385,19 @@ def main(argv=None) -> None:
                           "and any legacy $VIGIL_SETTLE_BASE_DIR, or the drain refuses)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
+    psm = sub.add_parser("seam", help="the cross-plane seam directory (`seam migrate`)")
+    psm_sub = psm.add_subparsers(dest="seam_cmd", required=True)
+    psmm = psm_sub.add_parser("migrate", help="carry launch-seam records from a former seam directory into the seam "
+                                              "(report only unless --apply)")
+    psmm.add_argument("--from", dest="sources", action="append", default=[],
+                      help="a former seam directory (repeatable; default: the ones this host's units and "
+                           "$SIGIL_HOME left)")
+    psmm.add_argument("--to", default="", help="the seam (default: the one the configured units use)")
+    psmm.add_argument("--completion-spool", default="",
+                      help="the settle drain's completion spool (default: VIGIL_SETTLE_SPOOL, else the drain's env "
+                           "file, else ~/.sigil/spool/settle)")
+    psmm.add_argument("--json", action="store_true", help="print the report as JSON")
+    psmm.set_defaults(fn=cmd_seam)
     pos = sub.add_parser("ops-sweep",
                          help="read-only operator sweeps: abandoned credit reservations (--apply full-refunds "
                               "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / postpaid reconcile "
