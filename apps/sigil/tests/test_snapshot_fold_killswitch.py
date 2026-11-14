@@ -164,5 +164,3 @@ def test_a_pruned_snapshot_under_a_foreign_anchor_fails_closed(monkeypatch):
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
     with pytest.raises(SnapshotError, match="does not succeed"):
         _ks(s)._scan_engaged()
-
-
