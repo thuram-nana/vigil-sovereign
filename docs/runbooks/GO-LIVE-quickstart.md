@@ -165,9 +165,11 @@ systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
 
 On a host where the operator console unit (`vigil-command.service`) is installed, the procedure is the same:
 `sigil seam migrate` carries the former tree into the seam the cockpit and the settle drain use, never into the
-console's engine home, and the cockpit `vigil up` starts on the console's own seam serves again once the migration
-commits. `vigil doctor` keeps reporting that the console's seam differs from the other units' (above); that is not a
-seam migration issue.
+console's engine home (a `--to` naming the console's seam is refused), and the cockpit `vigil up` starts on the
+console's own seam serves again once the migration commits. `vigil doctor` and `sigil upgrade --check` check the
+seam the cockpit and the settle drain use and report the former tree until it is committed there; `vigil doctor`
+also keeps reporting that the console's seam differs from the other units' (above), which is not a seam migration
+issue.
 
 Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
 eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an

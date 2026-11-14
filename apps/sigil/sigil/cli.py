@@ -1618,6 +1618,28 @@ def _settle_spool(verb: str, given: "str | None") -> str:
     return path
 
 
+def _refuse_non_money_destination(verb: str, seam: str) -> None:
+    """Exit 2 (before anything is read or written) when ``seam`` is the seam of a configured unit other than the
+    cockpit and the settle drain (``seam_base_units.MONEY_SEAM_UNITS``) — the operator console's engine home, a backup
+    unit's tree — and not theirs: a former tree is carried only into the seam the cockpit and the settle drain use."""
+    import os
+    try:
+        from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, unit_details
+    except ImportError:          # the unit model is not installed here: nothing configured to compare against
+        return
+    units = unit_details()
+    money = {os.path.realpath(str(u["seam"])) for n, u in units.items() if n in MONEY_SEAM_UNITS and u.get("seam")}
+    here = os.path.realpath(seam)
+    named = sorted(n for n, u in units.items()
+                   if n not in MONEY_SEAM_UNITS and u.get("seam") and os.path.realpath(str(u["seam"])) == here)
+    if named and here not in money:
+        print(f"{verb}: refused — {seam} is the seam of {', '.join(named)}, not of the cockpit and the settle drain; "
+              f"a former tree is carried only into the seam they use"
+              + (f" ({', '.join(sorted(money))}). Run it without --to." if money else
+                 ". Name the seam the cockpit's VIGIL_BASE_DIR sets with --to."), file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_seam(a) -> None:
     """``seam migrate``: carry the launch-seam records of a former seam directory into the seam the configured
     units use (``seam_migrate``). Report-only without ``--apply``. Exit 0 migrated / nothing to carry, 1 conflicts
@@ -1628,6 +1650,7 @@ def cmd_seam(a) -> None:
     from .governor.identity import owner_keypair
     if a.to:
         seam = os.path.abspath(os.path.expanduser(a.to))
+        _refuse_non_money_destination("seam migrate", seam)
     else:
         try:
             from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, unit_details
@@ -2591,17 +2614,16 @@ def cmd_spine(a) -> None:
 
 def _upgrade_seam_check() -> "tuple[str, list]":
     """``(seam, unmigrated former trees)`` for ``upgrade --check`` — read-only, whatever the guard flag says. The seam
-    is the one the configured seam units agree on; with no seam unit configured there is nothing to compare (nothing
-    listed, as in `vigil doctor`), and units that disagree are `vigil doctor`'s to report (nothing listed here)."""
-    import os
+    is the one the configured cockpit and settle drain agree on (``seam_migration.migration_seam``, as in `vigil
+    doctor`; a console keeping its engine home elsewhere does not hide it); with no seam unit configured there is
+    nothing to compare (nothing listed), and units that disagree are `vigil doctor`'s to report (nothing listed here)."""
     try:
         from vigil_integration.seam_base_units import unit_details
-        from vigil_integration.seam_migration import legacy_candidates, unmigrated_legacy
+        from vigil_integration.seam_migration import legacy_candidates, migration_seam, unmigrated_legacy
         units = unit_details()
-        seams = {os.path.realpath(u["seam"]) for u in units.values()}
-        if len(seams) != 1:
+        seam = migration_seam(units)
+        if seam is None:
             return "", []
-        seam = next(iter(units.values()))["seam"]
         return seam, unmigrated_legacy(seam, legacy_candidates(seam, units=units))
     except ImportError:
         return "", []

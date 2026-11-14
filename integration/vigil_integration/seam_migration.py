@@ -314,8 +314,9 @@ def legacy_candidates(seam: Any, *, units: "Optional[Mapping[str, Mapping[str, A
     (``seam_base_units.WRITER_SEAM_UNITS``); a unit's still-set retired ``VIGIL_SETTLE_BASE_DIR`` naming another tree;
     and each absolute path in ``VIGIL_SEAM_LEGACY_DIRS``. Removed: ``seam`` itself, every configured unit's CURRENT
     seam (units that disagree are reported by ``vigil doctor`` separately), a tree a committed migration carried into
-    ANOTHER configured unit's seam (it is that seam's former directory: its records are there) and a running ``vigil
-    up``'s base. ``units`` is ``seam_base_units.unit_details()`` (default: computed here)."""
+    the cockpit's and settle drain's seam when ``seam`` is another one (it is that seam's former directory: its records
+    are there; :func:`_carried_elsewhere`) and a running ``vigil up``'s base. ``units`` is
+    ``seam_base_units.unit_details()`` (default: computed here)."""
     from .seam_base_units import WRITER_SEAM_UNITS, unit_details
     e = os.environ if env is None else env
     if units is None:
@@ -352,12 +353,30 @@ def legacy_candidates(seam: Any, *, units: "Optional[Mapping[str, Mapping[str, A
     return out
 
 
+def migration_seam(units: "Mapping[str, Mapping[str, Any]]") -> Optional[str]:
+    """The seam a former tree is carried into and reported against (`vigil doctor`, `sigil upgrade --check`): the one
+    the configured cockpit and settle drain agree on (``seam_base_units.MONEY_SEAM_UNITS``) — the operator console
+    keeping its engine home elsewhere does not hide it; with neither configured, the one every configured unit agrees
+    on. None when they disagree (`vigil doctor` reports that) or nothing is configured."""
+    from .seam_base_units import MONEY_SEAM_UNITS
+    named = {n: u for n, u in units.items() if u.get("seam")}
+    basis = {n: u for n, u in named.items() if n in MONEY_SEAM_UNITS} or named
+    if len({os.path.realpath(str(u["seam"])) for u in basis.values()}) != 1:
+        return None
+    return str(next(iter(basis.values()))["seam"])
+
+
 def _carried_elsewhere(seam: Any, units: "Mapping[str, Mapping[str, Any]]") -> "set[str]":
-    """The real paths of the trees a COMMITTED migration carried into the seam of a configured unit other than
-    ``seam`` (its journal names them ``complete``). A journal that cannot be read names none (they stay candidates)."""
+    """The real paths of the trees a COMMITTED migration carried into the money seam — the one seam the configured
+    cockpit and settle drain agree on (``seam_base_units.MONEY_SEAM_UNITS``, the only migration destination) — when
+    that is not ``seam`` (its journal names them ``complete``). No other unit's journal is trusted: a tree committed
+    into the console's or a backup unit's seam stays a candidate of the money seam. Those units disagreeing, or none
+    configured: none. A journal that cannot be read names none (they stay candidates)."""
+    from .seam_base_units import MONEY_SEAM_UNITS
     out: "set[str]" = set()
     here = os.path.realpath(str(seam))
-    for other in {os.path.realpath(str(u["seam"])) for u in units.values() if u.get("seam")} - {here}:
+    money = {os.path.realpath(str(units[u]["seam"])) for u in MONEY_SEAM_UNITS if (units.get(u) or {}).get("seam")}
+    for other in (money if len(money) == 1 else set()) - {here}:
         try:
             j = read_journal(other)
         except (OSError, ValueError):

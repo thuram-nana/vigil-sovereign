@@ -27,6 +27,9 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the console unit taken as a migration destination -> test_the_upgrade_procedure_on_a_console_host
   * a tree carried into the units' seam still guarding the console's own seam
                                                       -> test_the_upgrade_procedure_on_a_console_host
+  * `seam migrate --to` the console's seam accepted    -> test_seam_migrate_never_carries_into_the_consoles_seam
+  * the console's journal trusted for the money seam   -> test_a_tree_committed_into_the_consoles_seam_still_guards_the_money_seam
+  * upgrade --check skipping a console host            -> test_upgrade_check_on_a_console_host_reports_the_former_tree
 """
 from __future__ import annotations
 
@@ -398,3 +401,61 @@ def test_the_upgrade_procedure_on_a_console_host(host, serve_spy, monkeypatch, c
     monkeypatch.setenv("VIGIL_BASE_DIR", str(console))
     cli.main(["serve"])                                                    # the console's cockpit
     assert serve_spy["serve"] == 2
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_seam_migrate_never_carries_into_the_consoles_seam(host, monkeypatch, capsys, apply):
+    """`sigil seam migrate --to <the console's seam>` is refused (exit 2, nothing written): a former tree is carried
+    only into the seam the cockpit and the settle drain use."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home")
+    console = _install_console(host)
+    ensure_owner_keypair()
+    before, tip = _listing(console), host["store"].next_seq
+    argv = ["seam", "migrate", "--to", str(console), "--from", str(host["legacy"])] + (["--apply"] if apply else [])
+    assert _exit(argv) == 2
+    err = capsys.readouterr().err
+    assert "vigil-command.service" in err and str(host["seam"]) in err and "without --to" in err
+    assert _listing(console) == before and not sm.journal_path(console).exists() and host["store"].next_seq == tip
+    # a backup unit sharing the cockpit's and drain's seam never makes that seam a refused destination
+    shutil.copy(_REPO / "infra/systemd/vigil-backup.service",
+                host["tmp"] / "home" / ".config" / "systemd" / "user" / "vigil-backup.service")
+    assert _exit(["seam", "migrate", "--to", str(host["seam"]), "--from", str(host["legacy"]), "--json"]) == 0
+
+
+def test_a_tree_committed_into_the_consoles_seam_still_guards_the_money_seam(host, serve_spy, monkeypatch, capsys):
+    """A journal in the console's seam (an earlier build let `--to` name it) that says the former tree is complete:
+    the cockpit's and drain's seam never received its records, so the tree stays its candidate — the cockpit there is
+    refused and `seam migrate` lists the tree — until it is migrated into that seam."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home")
+    console = _install_console(host)
+    ensure_owner_keypair()
+    j = sm.new_journal(console)
+    j["sources"][os.path.realpath(host["legacy"])] = {"state": "complete",
+                                                      "inventory": {"digest": sm.inventory(host["legacy"])["digest"]}}
+    sm.write_journal(console, j)
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(host["seam"]))
+    left = cli._unmigrated_seam(str(host["seam"]))
+    assert [x["path"] for x in left] == [os.path.realpath(host["legacy"])]
+    assert _exit(["serve"]) == 2 and serve_spy["serve"] == 0
+    capsys.readouterr()
+    assert _exit(["seam", "migrate", "--json"]) == 0
+    assert [x["from"] for x in json.loads(capsys.readouterr().out)["sources"]] == [os.path.realpath(host["legacy"])]
+    assert _exit(["seam", "migrate", "--apply"]) == 0, capsys.readouterr().err
+    cli.main(["serve"])
+    assert serve_spy["serve"] == 1
+
+
+def test_upgrade_check_on_a_console_host_reports_the_former_tree(host, monkeypatch, capsys):
+    """`sigil upgrade --check` on the console host compares the seam the cockpit and the settle drain agree on (the
+    console's engine home elsewhere does not hide it): exit 3 naming the former tree until it is migrated there."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home")
+    _install_console(host)
+    assert _exit(["upgrade", "--check"]) == 3
+    out = capsys.readouterr().out
+    assert "seam migration REQUIRED" in out and str(host["legacy"]) in out and str(host["seam"]) in out
+    _migrated(host)
+    cli.main(["upgrade", "--check"])
+    assert "up to date" in capsys.readouterr().out

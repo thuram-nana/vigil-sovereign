@@ -19,6 +19,9 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * a drop-in's ExecStart= reset keeping the old --spool -> test_the_settle_drains_spool_is_what_systemd_gives_it
   * a tree carried into another unit's seam kept as this seam's candidate
                                                          -> test_a_tree_carried_into_another_units_seam_is_not_this_seams_candidate
+  * a journal of the console's / a backup unit's seam trusted for the money seam
+                                                         -> test_a_tree_committed_into_a_non_money_units_seam_stays_the_money_seams_candidate
+  * doctor skipping the section on a console host       -> test_doctor_reports_an_unmigrated_tree_on_a_console_host
 """
 from __future__ import annotations
 
@@ -252,6 +255,48 @@ def test_a_tree_carried_into_another_units_seam_is_not_this_seams_candidate(tmp_
     assert got(seam) == [str(former)]
 
 
+@pytest.mark.parametrize("into", ["console", "backup", "money_disagree"])
+def test_a_tree_committed_into_a_non_money_units_seam_stays_the_money_seams_candidate(tmp_path, into):
+    """Only the journal of the seam the cockpit and the settle drain agree on removes a candidate of another seam: a
+    tree a migration committed into the console's engine home or a backup unit's tree never received the money seam's
+    records, so it stays the money seam's candidate (and an unmigrated one). While the cockpit and the settle drain
+    disagree, no journal of another seam is trusted."""
+    home, repo = tmp_path / "home", tmp_path / "vigil"
+    _install(home, "sigil-cockpit.service", "vigil-settle-drain.service", "vigil-backup.service")
+    d = home / ".config" / "systemd" / "user"
+    d.joinpath("vigil-command.service").write_text(
+        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+    console, seam, other = repo / ".vigil-live", home / ".sigil" / "credit-lease", tmp_path / "other-tree"
+    console.mkdir(parents=True)
+    other.mkdir()
+    env = home / ".config" / "vigil" / ("settle-drain.env" if into == "money_disagree" else "backup.env")
+    env.parent.mkdir(parents=True)
+    env.write_text(f"VIGIL_BACKUP_PASSPHRASE=x\nVIGIL_BASE_DIR={other}\n")
+    former = home / ".sigil" / ".vigil-live"
+    record_lease_settlement(str(former), "cust_a", "n1")
+    units = unit_details(_REPO, home)
+    target = console if into == "console" else other
+    assert any(os.path.realpath(u["seam"]) == os.path.realpath(target) for u in units.values())
+    _committed(target, former)
+    got = lambda s: sm.legacy_candidates(s, units=units, sigil_home=home / ".sigil", env={})  # noqa: E731
+    assert got(seam) == [str(former)]
+    assert [x["path"] for x in sm.unmigrated_legacy(seam, got(seam))] == [str(former)]
+
+
+@pytest.mark.parametrize("units, want", [
+    ({"sigil-cockpit.service": "/s/money", "vigil-settle-drain.service": "/s/money", "vigil-command.service": "/r/c"},
+     "/s/money"),
+    ({"sigil-cockpit.service": "/s/a", "vigil-settle-drain.service": "/s/b", "vigil-command.service": "/s/a"}, None),
+    ({"vigil-command.service": "/r/c", "vigil-backup.service": "/r/c"}, "/r/c"),
+    ({"vigil-command.service": "/r/c", "vigil-backup.service": "/s/x"}, None),
+    ({}, None),
+], ids=["console_apart", "money_disagree", "no_money_unit", "no_money_unit_disagree", "none"])
+def test_the_migration_seam_is_the_cockpits_and_drains(units, want):
+    """`vigil doctor` / `sigil upgrade --check` check the seam the cockpit and the settle drain agree on — the console
+    keeping its engine home elsewhere does not hide it; with neither configured, the one every unit agrees on."""
+    assert sm.migration_seam({u: {"seam": s} for u, s in units.items()}) == want
+
+
 def test_writer_units_working_directory_default_is_a_candidate(tmp_path):
     home = tmp_path / "home"
     _install(home, "sigil-cockpit.service", "vigil-settle-drain.service")
@@ -349,6 +394,37 @@ def test_doctor_reports_an_unmigrated_tree_as_a_hard_issue(tmp_path, monkeypatch
     assert len(hits) == 1 and "sigil seam migrate" in hits[0] and report["ok"] is False
     assert not any(n.startswith("seam migration:") for n in report["notes"])
     _committed(home / ".sigil" / "credit-lease", legacy)
+    report = _doc.collect(_REPO)
+    assert report["seam_migration"]["legacy"] == []
+    assert not any(i.startswith("seam migration:") for i in report["issues"])
+
+
+def test_doctor_reports_an_unmigrated_tree_on_a_console_host(tmp_path, monkeypatch):
+    """The runbook's console host: the console unit keeps its engine home in <repo>/.vigil-live, so the units disagree
+    (a HARD seam-base issue of its own) — the seam-migration section still checks the seam the cockpit and the settle
+    drain agree on, and reports the former tree until it is committed there (never into the console's seam)."""
+    home, repo = tmp_path / "home", tmp_path / "vigil"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SIGIL_HOME", str(home / ".sigil"))
+    monkeypatch.setenv("VIGIL_SETTLE_SPOOL", str(tmp_path / "no-spool"))
+    monkeypatch.delenv("VIGIL_BASE_DIR", raising=False)
+    monkeypatch.delenv(sm.LEGACY_DIRS_ENV, raising=False)
+    legacy = home / ".sigil" / ".vigil-live"
+    record_lease_settlement(str(legacy), "cust_a", "n1")
+    _install(home, "sigil-cockpit.service", "vigil-settle-drain.service")
+    d = home / ".config" / "systemd" / "user"
+    d.joinpath("vigil-command.service").write_text(
+        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+    console, seam = repo / ".vigil-live", home / ".sigil" / "credit-lease"
+    console.mkdir(parents=True)
+    report = _doc.collect(_REPO)
+    assert any("disagree on the seam base" in i for i in report["issues"])
+    sec = report["seam_migration"]
+    assert sec["seam"] == _doc._display_path(str(seam)) and sec["legacy"][0]["reason"] == "no_journal"
+    assert len([i for i in report["issues"] if i.startswith("seam migration:")]) == 1
+    _committed(console, legacy)                                   # committed into the console's seam: not enough
+    assert len([i for i in _doc.collect(_REPO)["issues"] if i.startswith("seam migration:")]) == 1
+    _committed(seam, legacy)
     report = _doc.collect(_REPO)
     assert report["seam_migration"]["legacy"] == []
     assert not any(i.startswith("seam migration:") for i in report["issues"])
