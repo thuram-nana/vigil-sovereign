@@ -13,15 +13,19 @@ assessment scope — registering/paying authorizes NO assessment.
 
 Workflows:
   * request_signup / confirm_signup — public self-serve: a verify token proves mailbox control, THEN the
-    service owner-signs {customer account, org, `org_admin` membership, trial credit} atomically. The trial
-    (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant.
+    service owner-signs {customer account, org, founding membership, trial credit} atomically. The trial
+    (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant. The founding
+    membership is `org_admin`, or `founder` (org_admin plus self-serve testing on hosts the org proves) while
+    VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on — server-set, never a client value (`_signup_role`).
   * login — email+password (constant-time via the decoy), rate-limited + locked out on abuse.
   * request_recover / confirm_recover — single-use recovery token → owner-signed password reset.
-  * grant_member / revoke_member — an `org_admin` manages THEIR org's team: the service checks
+  * grant_member / revoke_member — an `org_admin` (or the founder) manages THEIR org's team: the service checks
     `admit_customer(requester, org_id, manage_members)` THEN owner-signs the (capped) membership grant /
     revoke. This is R1's AUTHENTICATED ordinary revocation (never an anonymous unsigned record) and the
     milestone primitive: an org admin invites/manages users without ever touching the owner key, another
-    tenant's resources, or any assessment target (the grantable set excludes `operator`/`owner`).
+    tenant's resources, or any assessment target (the grantable set excludes `operator`/`founder`/`owner`).
+    A founder's own membership is never changed or revoked here: that is an owner act
+    (`owner_set_member_role` / `owner_demote_founders`, the `sigil org` verbs).
 
 FATAL-2: sovereign-side (`assert_no_offense` at import); no framework/strix.
 """
@@ -42,6 +46,8 @@ from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
                                 METHOD_GOOGLE_OIDC, METHOD_PASSKEY, PasswordIdentityProvider)
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
+# The PER-ORG predicate (a membership role the org fold resolved) — never the global-role `accounts.role_can`.
+from vigil_core.rbac import role_can  # noqa: E402
 
 _LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
                         "in Billing to unlock it.")
@@ -49,10 +55,12 @@ _LOCKED_COMPLETED_BODY = ("An assessment run completed. Every finding is listed 
                           "Billing to unlock the full proof and fix.")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
-# The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` (which carries
-# run_engagement) and `owner` — a customer can never hand a teammate any offense‑adjacent or global
-# authority (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
+# The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` and `founder` (which
+# carry run_engagement) and `owner` — a customer can never hand a teammate any testing or global authority
+# (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
+# The per-org role only the service owner grants or changes (vigil_core.rbac `founder`).
+_FOUNDER_ROLE = "founder"
 # The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
 # so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
 _NOTIF_MAX = 100
@@ -94,6 +102,14 @@ def _signup_org_id(token: str) -> str:
     so `create_org`/`grant_membership`/`wallet.grant` all re-target the same keys and are idempotent (the
     commit-marker recovery, Finding A). Not guessable without the token; a valid `_TENANT_RE` tenant id."""
     return _ORG_ID_PREFIX + hashlib.sha256(("o:" + str(token)).encode("utf-8")).hexdigest()[:24]
+
+
+def _signup_role() -> str:
+    """The per-org role a sign-up grants its founding customer, on BOTH sign-up paths (email confirm and Google
+    auto-provision): `founder` while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on, else `org_admin` (the default,
+    unchanged). Server-decided at the committing attempt — never a client value."""
+    from .. import config
+    return _FOUNDER_ROLE if config.signup_founder_tester_enabled() else "org_admin"
 
 
 def _signup_username(token: str) -> str:
@@ -183,6 +199,93 @@ def _publish_monitoring(base, org_id: str, host: str, data: bytes):
         tmp.unlink(missing_ok=True)
         raise
     return final
+
+
+def _member_admins(orgs, org_id: str) -> "set[str]":
+    """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (per-org predicate on the stored
+    role) — `org_admin` and `founder` today. The last-admin (anti-orphan) rules count these."""
+    return {m.username for m in orgs.memberships(org_id) if role_can(m.role, "manage_members")}
+
+
+def _audit_payload(action: str, *, requester: str, org_id: str, target: str, outcome: str,
+                   reason: str) -> "dict[str, object]":
+    """The secret-free, field-capped core of one `provision.audit` row (shared by the provisioner and the owner
+    membership verbs, so both write the same shape)."""
+    return {"signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
+            "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
+            "reason": str(reason)[:160]}
+
+
+def _owner_membership_audit(store, action: str, *, org_id: str, target: str, role: str, reason: str) -> None:
+    """A CRITICAL audit row for an owner membership change, written BEFORE the owner-signed grant: a write failure
+    propagates, so the change fails closed (committed implies audited)."""
+    payload = _audit_payload(action, requester="owner", org_id=org_id, target=target, outcome=f"role={role}",
+                             reason=reason)
+    payload["role"] = str(role)[:32]
+    store.append(kind="event", source="provision", actor="WARDEN", payload=payload)
+
+
+def _fresh_issued_at(orgs, org_id: str, username: str, issued_at: float) -> float:
+    """An issued_at strictly above the member's current grant, so an owner change is never ignored as stale."""
+    cur = next((m.issued_at for m in orgs.memberships(org_id) if m.username == username), None)
+    at = float(issued_at)
+    return at if cur is None or at > cur else math.nextafter(float(cur), math.inf)
+
+
+def owner_set_member_role(store, org_id: str, username: str, role: str, *, reason: str, issued_at: float,
+                          orgs=None, customers=None) -> dict:
+    """OWNER act (`sigil org set-member-role`): owner-sign `username`'s per-org role in `org_id` — any assignable
+    per-org role, `founder` included. This is how a founder's role is granted or changed (customer member
+    management refuses a founder target). Fail-closed: a valid role and username and a non-empty reason are
+    required; the org must be active; the target must be an active customer or a current member of the org; a
+    change that would leave the org with no member holding `manage_members` is refused. A CRITICAL audit row is
+    written before the owner-signed grant. Returns {org_id, username, role, previous_role, seq}."""
+    from ..governor.customers import CustomerRegistry
+    from ..governor.orgs import OrgRegistry, _check_member_role, _check_member_username, _check_org_id
+    oid, u, r = _check_org_id(org_id), _check_member_username(username), _check_member_role(role)
+    why = str(reason or "").strip()
+    if not why:
+        raise ValueError("a reason is required (it is recorded in the audit)")
+    orgs = orgs if orgs is not None else OrgRegistry(store)
+    customers = customers if customers is not None else CustomerRegistry(store)
+    with spine_lock(store.path):
+        if orgs.org(oid) is None:
+            raise ValueError(f"no active org {oid!r}")
+        prev = orgs.membership_role(u, oid)
+        if prev is None and customers.customer(u) is None:
+            raise ValueError("the target is neither an active customer nor a member of this org")
+        if not role_can(r, "manage_members") and _member_admins(orgs, oid) == {u}:
+            raise ValueError("refused: the org would have no administrator left (grant another admin first)")
+        at = _fresh_issued_at(orgs, oid, u, issued_at)
+        _owner_membership_audit(store, "owner_set_member_role", org_id=oid, target=u, role=r, reason=why)
+        seq = orgs.grant_membership(oid, u, r, issued_at=at)
+    return {"org_id": oid, "username": u, "role": r, "previous_role": prev, "seq": seq}
+
+
+def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Optional[str]" = None,
+                          orgs=None) -> dict:
+    """OWNER act (`sigil org demote-founders`): re-grant `org_admin` to every ACTIVE `founder` membership — in one
+    org, or in every active org. Idempotent: a second run finds none. Run it before rolling back to a build that
+    has no `founder` role (such a build gives the role no permission, so a founder-only org would have no
+    administrator there). Each change writes a CRITICAL audit row before its owner-signed grant. Returns counts
+    only: {demoted, orgs}."""
+    from ..governor.orgs import OrgRegistry, _check_org_id
+    why = str(reason or "").strip()
+    if not why:
+        raise ValueError("a reason is required (it is recorded in the audit)")
+    oid = _check_org_id(org_id) if org_id is not None else None
+    orgs = orgs if orgs is not None else OrgRegistry(store)
+    with spine_lock(store.path):
+        if oid is not None and orgs.org(oid) is None:
+            raise ValueError(f"no active org {oid!r}")
+        founders = [m for m in orgs.memberships(oid)
+                    if m.role == _FOUNDER_ROLE and orgs.org(m.org_id) is not None]
+        for m in founders:
+            at = _fresh_issued_at(orgs, m.org_id, m.username, issued_at)
+            _owner_membership_audit(store, "owner_demote_founder", org_id=m.org_id, target=m.username,
+                                    role="org_admin", reason=why)
+            orgs.grant_membership(m.org_id, m.username, "org_admin", issued_at=at)
+    return {"demoted": len(founders), "orgs": len({m.org_id for m in founders})}
 
 
 class Provisioner:
@@ -281,7 +384,7 @@ class Provisioner:
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
-               tx_ref: str = "", expires_at: float = 0.0) -> None:
+               tx_ref: str = "", expires_at: float = 0.0, role: str = "") -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -291,10 +394,10 @@ class Provisioner:
         the transaction lock, before the signup commit marker, so a committed signup is always audited.
         Only NON-critical telemetry (`critical=False`, e.g. a login outcome) swallows a write failure,
         following a separate availability policy."""
-        payload: "dict[str, object]" = {
-            "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
-            "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
-            "reason": str(reason)[:160]}
+        payload = _audit_payload(action, requester=requester, org_id=org_id, target=target, outcome=outcome,
+                                 reason=reason)
+        if role:
+            payload["role"] = str(role)[:32]        # the per-org role a sign-up or owner membership change granted
         if tx_ref:
             payload["tx_ref"] = str(tx_ref)[:128]   # the processor reference this audit row is about (checkout)
         if expires_at:
@@ -346,11 +449,12 @@ class Provisioner:
             raise ProvisionRateLimited(locked)
         self.member_limiter.record_failure(f"member:org:{org_id}", now=now)
 
-    def _org_admin_usernames(self, org_id: str) -> "set[str]":
-        """The usernames holding an ACTIVE `org_admin` membership in `org_id` (resolved LIVE from the
-        membership fold). The basis for last-admin protection: an org must never be left with zero admins, or
-        nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
-        return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
+    def _member_admins(self, org_id: str) -> "set[str]":
+        """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (resolved LIVE from the
+        membership fold) — `org_admin` and `founder` today. The basis for last-admin protection: an org must never
+        be left with zero admins, or nobody could ever manage its members/billing again (an un-governable,
+        orphaned tenant)."""
+        return _member_admins(self.orgs, org_id)
 
     def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str, ip: str = "") -> str:
         """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
@@ -463,7 +567,8 @@ class Provisioner:
             any point before the consume leaves the token valid; the next attempt re-derives the same ids,
             re-applies every (idempotent) mutation, re-audits, and consumes. A crash AFTER the consume leaves
             a fully-committed, audited signup.
-        The role is SERVER-set to `org_admin`; the org_id/username are SERVER-derived (never client values);
+        The role is SERVER-set (`_signup_role`: `org_admin`, or `founder` while the founder flag is on, read at
+        the committing attempt); the org_id/username are SERVER-derived (never client values);
         the trial amount is a server constant granted ONLY now (post-verification, anti-Sybil) and bounded by
         the optional GLOBAL signup cap (anti-farming). A DIFFERENT token for an already-registered email
         derives a different username, so the by-email collision check refuses it (no second account)."""
@@ -497,12 +602,13 @@ class Provisioner:
                                       issued_at=self._next_issued())
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
-            self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
+            role = _signup_role()
+            self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
             trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
-                        critical=True)
+                        role=role, critical=True)
             # COMMIT MARKER — consume the token LAST (single-use); a replay now finds it already consumed.
             self.email_tokens.consume(tok, PURPOSE_VERIFY, now=t)
             if self.signup_cap_limiter is not None:         # count this signup toward the cap (post-commit)
@@ -652,13 +758,14 @@ class Provisioner:
             self.customers.create(email or f"{username}@google-oidc.local", password=None, username=username,
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
-        self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
+        role = _signup_role()
+        self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
         self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
         self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created-google",
-                    critical=True)
+                    role=role, critical=True)
         if self.signup_cap_limiter is not None:             # count this signup toward the cap (post-commit)
             self.signup_cap_limiter.record_failure("signup:global", now=now)
         return username
@@ -872,7 +979,9 @@ class Provisioner:
         so an attacker cannot name another admin's username to borrow authority; (TOCTOU) the authority check
         runs INSIDE the transaction lock, immediately before the owner-signs, so a concurrently-revoked admin
         cannot sign through a stale check; the target must be a real active customer; a change that would
-        orphan the org (strip its last `org_admin`) is refused; the op is rate-limited per org."""
+        orphan the org (leave no member holding `manage_members`) is refused; the op is rate-limited per org.
+        A target whose CURRENT role is `founder` is refused (the founder included, on themself): changing a
+        founder's role is an owner act (`owner_set_member_role`)."""
         t = self._now() if now is None else float(now)
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
@@ -886,9 +995,14 @@ class Provisioner:
             # P6: meter AUTHORIZED churn only — the rate guard records AFTER admit_customer, so a non-admin
             # cannot burn the per-org member budget and lock the real admin out (the limiter's finding).
             self._member_rate_guard(requester_org_id, now=t)
+            if self.orgs.membership_role(member_username, requester_org_id) == _FOUNDER_ROLE:
+                self._audit("grant_member", requester=requester, org_id=requester_org_id,
+                            target=member_username, outcome="denied", reason="founder_owner_only")
+                raise ProvisionDenied("the founder's role can only be changed by the service owner")
             if self.customers.customer(member_username) is None:        # never seat an unknown / foreign id
                 raise ProvisionDenied("target is not an active customer account")
-            if role != "org_admin" and self._org_admin_usernames(requester_org_id) == {member_username}:
+            if (not role_can(role, "manage_members")
+                    and self._member_admins(requester_org_id) == {member_username}):
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
             # NH-3: durable audit BEFORE the owner-signed mutation — a critical-audit store failure then fails
             # CLOSED with no membership change (committed⟹audited), mirroring the signup audit-before-commit.
@@ -907,8 +1021,10 @@ class Provisioner:
 
         Hardening (second security review): `requester` is the server-authenticated session principal (never
         a client field — Finding D); the authority check is INSIDE the lock (no TOCTOU with a concurrent
-        revoke of the requester's own admin membership); and the org's SOLE `org_admin` cannot be revoked
-        (anti-orphan — the tenant must retain at least one administrator)."""
+        revoke of the requester's own admin membership); the org's SOLE administrator (member holding
+        `manage_members`) cannot be revoked (anti-orphan — the tenant must retain at least one administrator);
+        and a `founder` membership is never revoked here (the founder included, on themself): that is an
+        owner act."""
         t = self._now() if now is None else float(now)
         from ..governor.orgs import _check_member_username
         _check_member_username(member_username)          # NH-3 prep: validate target shape before any audit
@@ -920,7 +1036,11 @@ class Provisioner:
                 raise ProvisionDenied("requester is not an administrator of this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
             self._member_rate_guard(requester_org_id, now=t)   # P6: meter AUTHORIZED churn only (after admit)
-            admins = self._org_admin_usernames(requester_org_id)
+            if self.orgs.membership_role(member_username, requester_org_id) == _FOUNDER_ROLE:
+                self._audit("revoke_member", requester=requester, org_id=requester_org_id,
+                            target=member_username, outcome="denied", reason="founder_owner_only")
+                raise ProvisionDenied("the founder can only be removed by the service owner")
+            admins = self._member_admins(requester_org_id)
             if member_username in admins and len(admins) <= 1:
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
             # NH-3: durable critical audit BEFORE the owner-signed revoke (fail-closed; committed⟹audited).

@@ -80,7 +80,7 @@ def test_per_org_role_names_carry_no_permission_in_vscp(cfg, monkeypatch):
     monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
     kp = generate_keypair()
     with open_store(cfg) as store:
-        for role in ("org_admin", "tenant_tester"):
+        for role in ("founder", "org_admin", "tenant_tester"):
             with pytest.raises(PermissionRefused):
                 DeploymentRegistry(store).register(role=role, id="d9", name="edge", environment="production")
             with pytest.raises(PermissionRefused):

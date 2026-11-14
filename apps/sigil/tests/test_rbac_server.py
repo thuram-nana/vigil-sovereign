@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.spine.store import SpineStore
 from sigil.ui.server import build_server
@@ -99,7 +101,8 @@ def test_whoami_owner_and_anonymous():
         srv.shutdown()
 
 
-def test_whoami_lists_no_permissions_for_a_per_org_role_on_an_account():
+@pytest.mark.parametrize("per_org_role", ["org_admin", "founder"])
+def test_whoami_lists_no_permissions_for_a_per_org_role_on_an_account(per_org_role):
     # An owner-signed account record carrying a PER-ORG role name (never produced by create/assign_role, which
     # refuse it) resolves, but lists NO permissions — the list the proxy's coarse offense floor reads — and the
     # composed admit gate's global leg refuses it on a tenant read.
@@ -108,15 +111,16 @@ def test_whoami_lists_no_permissions_for_a_per_org_role_on_an_account():
     spine = _spine()
     srv, port = _serve(spine)
     try:
-        bearer, salt = "per-org-role-on-an-account-0001", "ab" * 16
+        bearer, salt = f"per-org-role-on-an-account-{per_org_role}", "ab" * 16
         AccountsRegistry(SpineStore(spine))._append_active(
-            "mallory", "org_admin", cred_hash=sha256_hex((salt + bearer).encode("utf-8")), cred_salt=salt,
+            "mallory", per_org_role, cred_hash=sha256_hex((salt + bearer).encode("utf-8")), cred_salt=salt,
             issued_at=time.time())
         code, body = _get(port, "/api/whoami", token=bearer)
         d = json.loads(body)
         assert code == 200 and d["authenticated"] is True and d["username"] == "mallory"
-        assert d["role"] == "org_admin" and d["permissions"] == []
+        assert d["role"] == per_org_role and d["permissions"] == []
         assert _get(port, "/api/billing/invoices?org=org_acme", token=bearer)[0] == 403
+        assert _get(port, "/api/assessments?org=org_acme", token=bearer)[0] == 403
         # negative control: a real global role lists its permissions and passes the same read
         viewer = _make_account(port, "vera", "viewer")
         d = json.loads(_get(port, "/api/whoami", token=viewer)[1])

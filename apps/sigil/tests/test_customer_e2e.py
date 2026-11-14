@@ -81,6 +81,7 @@ def _full_stack(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_RP_ID", PK_RP)
     monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ORIGINS", PK_ORIGIN)
     monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")
+    monkeypatch.delenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", raising=False)   # code default: org_admin sign-up
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
                  "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
@@ -134,6 +135,25 @@ def test_e2e_password_journey_with_stepup_and_billing_not_testing(tmp_path, monk
         # now (still stepped-up) the founder can register a target; the challenge binds the SESSION org
         c, ch = _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})
         assert c == 200 and ch["dns_name"] == "_vigil-challenge.acme.example", (c, ch)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_e2e_founder_flag_signup_registers_a_target_without_owner_promotion(tmp_path, monkeypatch):
+    # With the founder flag on, the signing-up customer is a founder: it registers a target straight away (no
+    # owner promotion), cannot hand testing to a teammate, and the kill switch (flag off) refuses its next request.
+    sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
+    monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    try:
+        op = _opener()
+        conf = _signup(op, ep, "founder@acme.com")
+        assert OrgRegistry(sov.store()).membership_role(conf["username"], conf["org_id"]) == "founder"
+        assert _get(op, ep, "/api/customer/billing")[1]["org_id"] == conf["org_id"]
+        c, ch = _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})
+        assert c == 200 and ch["dns_name"] == "_vigil-challenge.acme.example", (c, ch)
+        monkeypatch.delenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED")
+        assert _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})[0] == 403
+        assert _get(op, ep, "/api/customer/billing")[1]["org_id"] == conf["org_id"]   # billing kept
     finally:
         sov.shutdown(); edge.shutdown()
 

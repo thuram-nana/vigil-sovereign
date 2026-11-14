@@ -108,6 +108,10 @@ fails signup/login **closed**. In `customer.env` also set `VIGIL_CUSTOMER_ALLOWE
 `VIGIL_CUSTOMER_ALLOWED_ORIGINS` to your customer domain (the edge sets a cookie, so its anti-rebind +
 CSRF gates must know the public host/origin).
 
+`cockpit.env.example` ships `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1`: a sign-up makes its founding customer a
+`founder`, who can prove a host it controls and scan it; every launch gate still applies, and unsetting the
+flag is the instant kill switch. Roles, owner verbs and the rollback rule: `customer-roles-and-seats.md`.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now sigil-cockpit sigil-customer sigil-public sigil-checkpoint.timer

@@ -184,3 +184,30 @@ def test_role_can_global_refuses_a_per_org_role_that_carries_the_permission(monk
 def test_role_can_global_is_exported_by_the_package():
     assert vigil_core.role_can_global is rbac.role_can_global
     assert "role_can_global" in vigil_core.__all__
+
+
+# --- the per-org founder role (owner-approved self-serve testing) ------------------------------------
+def test_founder_is_exactly_org_admin_plus_the_two_testing_permissions():
+    assert "founder" not in ROLES                         # per-org only — never a global account role
+    assert PERMISSIONS["founder"] == frozenset({
+        "read", "view_billing", "view_usage", "view_invoices", "manage_billing", "manage_members",
+        "manage_monitoring", "run_engagement", "view_assessments"})
+    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {"run_engagement", "view_assessments"}
+    assert PERMISSIONS["founder"] <= PERMISSIONS["owner"]  # owner remains the ceiling
+
+
+def test_founder_never_carries_authority_approval_config_or_secrets():
+    for forbidden in ("offense_authority", "approve_a2", "approve_a3", "toggle_guard", "toggle_protected_guard",
+                      "config_nonsecret", "queue_proposal", "manage_org", "manage_users", "secrets", "promote",
+                      "kill_release"):
+        assert role_can("founder", forbidden) is False, f"founder must NOT carry {forbidden}"
+
+
+def test_founder_carries_nothing_in_a_global_position():
+    for perm in _PROBES:
+        assert role_can_global("founder", perm) is False, perm
+    # inside its own org (the per-org predicate) it runs and reads its own assessments
+    assert role_can("founder", "run_engagement") is True and role_can("founder", "view_assessments") is True
+    # and the operator-tier offense routes are therefore never reachable by a founder stamp
+    for path in ("/api/v1/tool/invoke", "/api/launch/preview", "/api/launch/assessment", "/api/killswitch/s/trip"):
+        assert role_can_global("founder", offense_perm_for(path)) is False

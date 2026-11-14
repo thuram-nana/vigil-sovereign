@@ -193,11 +193,11 @@ def test_viewer_may_trip_the_killswitch_protective_emergency_stop():
 def test_per_org_role_stamp_is_refused_on_every_tier(monkeypatch):
     # The stamped role is a GLOBAL account role. A per-org role name carries nothing at any tier — not even
     # the read-tier emergency stop — although org_admin holds `read` inside its own org, and a per-org role
-    # carrying run_engagement is still refused on the operator routes.
+    # carrying run_engagement (the founder) is still refused on the operator routes, launch preview included.
     from vigil_core import rbac
     monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
     with _running() as base:
-        for role in ("org_admin", "tenant_tester"):
+        for role in ("founder", "org_admin", "tenant_tester"):
             for route in (KILLSWITCH_ROUTE, LAUNCH_PREVIEW_ROUTE, OPERATOR_ROUTE):
                 st = _post(base, route, extra_headers=_hop_headers(role, route))
                 assert st == 403, f"per-org role {role!r} must be refused on {route}, got {st}"

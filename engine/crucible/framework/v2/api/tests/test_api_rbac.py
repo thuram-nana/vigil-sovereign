@@ -158,13 +158,14 @@ def test_owner_stamped_invoke_reaches_handler():
 
 # --- a per-org role name in the stamped (global) position carries nothing ----------------------------
 def test_per_org_role_stamp_is_refused_even_when_it_carries_the_permission(monkeypatch):
-    # The stamped role is a GLOBAL account role. A per-org role name (org_admin, or a per-org role that
-    # carries run_engagement) is refused under a VALID hop signature, and the tool never runs.
+    # The stamped role is a GLOBAL account role. A per-org role name (the founder, which carries run_engagement
+    # inside its own org; org_admin; a synthetic per-org role carrying run_engagement) is refused under a VALID
+    # hop signature, and the tool never runs.
     from vigil_core import rbac
     monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
     reg, spy = _registry_with_spy()
     with _running(registry=reg) as base:
-        for role in ("org_admin", "tenant_tester"):
+        for role in ("founder", "org_admin", "tenant_tester"):
             st, body = _post(base, INVOKE, body={"slug": "x", "tool": "spy_scan", "args": {}},
                              extra_headers=_hop_headers(role, INVOKE))
             assert st == 403, f"a per-org role {role!r} must be refused on the gated api, got {st}"
