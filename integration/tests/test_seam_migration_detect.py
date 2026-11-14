@@ -272,3 +272,13 @@ def test_doctor_reports_an_unmigrated_tree_as_a_hard_issue(tmp_path, monkeypatch
     report = _doc.collect(_REPO)
     assert report["seam_migration"]["legacy"] == []
     assert not any(i.startswith("seam migration:") for i in report["issues"])
+
+
+def test_the_offense_backup_of_the_seam_carries_the_journal(tmp_path):
+    """A restore of the seam from a backup brings the migration journal back with it (its lock file never)."""
+    from vigil_integration.backup import _iter_base_files
+    seam = tmp_path / "seam"
+    sm.write_journal(seam, sm.new_journal(seam))
+    with sm.journal_lock(seam):
+        rels = {rel for _p, rel in _iter_base_files(seam)}
+    assert ".seam-migration/journal.json" in rels and ".seam-migration/journal.json.lock" not in rels
