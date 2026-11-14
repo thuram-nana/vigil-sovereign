@@ -122,7 +122,12 @@ Stop here unless the tag's commit is on `origin/main`. When your clone holds the
 ```
 vigil doctor
 systemctl --user is-enabled vigil-command.service
+systemctl --user list-units --state=activating,failed --plain --no-legend 'vigil-*' 'sigil-*'
 ```
+
+The last line lists units that are not running cleanly. One shown as `activating auto-restart` is restarting
+after a failure; the upgrade stops it with the rest (2.4), installs this release's units (2.6) and starts it
+again (2.8) — check it in 2.9.
 
 `vigil doctor` must exit 0: clear every hard issue first — in particular settle and money settings that
 differ between the cockpit, the customer edge and the settle drain (a note names what the shell running
@@ -156,12 +161,18 @@ systemctl --user list-units --type=timer --state=active --plain --no-legend 'vig
 cat "$U/timers"                       # vigil-ha-mirror.timer (the off-host rsync of ~/.sigil) is one of them
 xargs -r systemctl --user stop < "$U/timers"
 
-# 2. wait for a oneshot that was already running (a drain pass, a backup push, a mirror rsync) to finish
-while systemctl --user list-units --type=service --state=activating --plain --no-legend 'vigil-*' 'sigil-*' \
-      | grep -q .; do sleep 5; done
+# 2. wait, at most 30 minutes, for a oneshot that was already running (a drain pass, a backup push, a mirror
+#    rsync) to finish. A unit restarting after a failure (SUB auto-restart) is not waited for: step 3 stops it.
+for i in $(seq 360); do
+  busy="$(systemctl --user list-units --type=service --state=activating --plain --no-legend 'vigil-*' 'sigil-*' \
+          | awk '$4 != "auto-restart" {print $1}')"
+  [ -z "$busy" ] && break
+  echo "waiting for: $busy"; sleep 5
+done
+[ -z "$busy" ] && echo "no oneshot running" || echo "STOP: still running after 30 minutes: $busy"
 
 # 3. record and stop the long-running services: the edges and the console first, the cockpit (the writer) last
-systemctl --user list-units --type=service --state=running --plain --no-legend 'vigil-*' 'sigil-*' \
+systemctl --user list-units --type=service --state=running,activating --plain --no-legend 'vigil-*' 'sigil-*' \
   | awk '{print $1}' > "$U/services"
 systemctl --user stop sigil-customer.service sigil-public.service vigil-command.service \
   'sigil-bridge@*.service' 'vigil-witness@*.service'
@@ -171,7 +182,8 @@ systemctl --user stop sigil-cockpit.service
 systemctl --user list-units --state=active,activating --plain --no-legend 'vigil-*' 'sigil-*'
 ```
 
-Step 4 lists nothing but finished oneshots (`active exited`, e.g. `vigil-bringup.service`). Stopping
+Do not go on past a `STOP:` line from step 2: find out why that oneshot is still running first. Step 4 lists
+nothing but finished oneshots (`active exited`, e.g. `vigil-bringup.service`). Stopping
 `vigil-command` this way keeps its boot start, and every edge finishes the requests it already accepted
 before it exits; while they are down the nginx vhosts answer customers with a 503 "briefly unavailable"
 page. A system-level `aegis-saas-gateway@` instance, where one runs, is stopped and recorded the same way
@@ -192,7 +204,7 @@ verifies the copy at the destination); by hand it is
 before anything changes. The sovereign leg leaves the pending-signal spools out by design; `$U/spools`
 records what was in them.
 
-### 2.6 Get the release and build it
+### 2.6 Get the release, build it and install its units
 
 ```
 git checkout --detach "$SHA"
@@ -202,7 +214,27 @@ vigil --version
 
 `bootstrap.sh` rebuilds the two hash-locked venvs, the WARDEN kernel and the egress guard
 (`envs/build_envs.sh`) and links `~/.sigil/venv` to `.venv-sovereign`; `vigil doctor` reports that link if
-it is anything else.
+it is anything else. Run it with `SIGIL_HOME` unset, so the link lands at `~/.sigil/venv`.
+
+Then install this release's copy of every unit file and drop-in this host already has, so the units started
+in 2.8 are the release's (a release may change them). The old set is kept in `$U/units-before`, the changes
+in `$U/units.diff`; a masked or linked unit and one the release does not ship are left as they are, and
+nothing new is installed:
+
+```
+UD=~/.config/systemd/user
+cp -a "$UD" "$U/units-before"
+: > "$U/units.diff"
+for f in "$UD"/*.service "$UD"/*.timer "$UD"/*.service.d/*.conf; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  rel="${f#"$UD"/}"
+  for d in infra/systemd apps/sigil/deploy/systemd; do
+    if [ -f "$d/$rel" ] && ! cmp -s "$d/$rel" "$f"; then
+      diff -u "$f" "$d/$rel" >> "$U/units.diff"; cp "$d/$rel" "$f"; echo "updated $rel"
+    fi
+  done
+done
+```
 
 ### 2.7 Migrate the sovereign data store
 
@@ -222,7 +254,7 @@ substitute for it.)
 ### 2.8 Start exactly the recorded units, the cockpit first
 
 ```
-systemctl --user daemon-reload
+systemctl --user daemon-reload                                       # loads the units installed in 2.6
 systemctl --user start sigil-cockpit.service
 until curl -fsS http://127.0.0.1:8733/readyz; do sleep 2; done      # the spine opens
 xargs -r systemctl --user start < "$U/timers"
@@ -254,7 +286,8 @@ There are two independent things to roll back: the **code** and the **data**.
 If `vigil upgrade` fails, it has already rolled the store back to the verified pre-migration backup and
 says so in its report — no action is needed for the data. Roll the **code** back to the previous version
 with the same stop and restore as the upgrade: stop every unit (2.4, recording into a new `$U` if they were
-started again), check out the previous release's commit, rebuild, and start the recorded units (2.8):
+started again), check out the previous release's commit, rebuild, install its units (2.6) and start the
+recorded units (2.8):
 
 ```
 git checkout --detach "$(git rev-parse "vPREV^{commit}")"
