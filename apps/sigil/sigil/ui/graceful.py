@@ -10,8 +10,11 @@ On SIGTERM (what `systemctl stop|restart` sends) or SIGINT the server:
      under way still complete), so nothing can join the queue between the last accept and the close;
   3. closes its listening socket, so a new connection is refused (on Linux, the client's second SYN about a second
      later) — the reverse proxy sends it to the other edge port, or answers it;
-  4. waits for every request accepted to finish, up to :data:`DRAIN_DEADLINE_S` — shorter than the units'
-     ``TimeoutStopSec=20``, so a drain always ends before systemd would SIGKILL;
+  4. waits for every request accepted to finish, up to the server's own drain deadline
+     (:meth:`GracefulMixin.drain_deadline`): :data:`DRAIN_DEADLINE_S` by default, longer where a request can
+     legitimately take longer (the customer edge outwaits its slowest call to the cockpit, so a stop never cuts an
+     action the cockpit is still completing). Each unit's ``TimeoutStopSec`` sits above its server's deadline (a
+     test pins it), so a drain always ends before systemd would SIGKILL;
   5. closes the server (the cockpit writes its pending failed-login counts there) and returns.
 A second signal during the drain ends the wait at once.
 
@@ -28,8 +31,9 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-#: How long a stopping server waits for accepted requests to finish. The sigil-cockpit, sigil-customer and
-#: sigil-public units allow TimeoutStopSec=20 (a test pins DRAIN_DEADLINE_S below every one of them).
+#: How long a stopping server waits for accepted requests to finish, unless the server sets its own
+#: (:meth:`GracefulMixin.drain_deadline`). The cockpit and the public site use it (TimeoutStopSec=20); the customer edge
+#: waits longer (custui.drain_deadline_s). A test pins each server's deadline below its units' TimeoutStopSec.
 DRAIN_DEADLINE_S = 10.0
 
 #: Once new connection attempts are dropped, how long a stop waits for the handshakes already under way to land in
@@ -83,6 +87,10 @@ class GracefulMixin:
         with self._inflight_cv:
             self._inflight -= 1
             self._inflight_cv.notify_all()
+
+    def drain_deadline(self) -> float:
+        """How long this server, when it stops, waits for the requests it accepted. Read at stop time."""
+        return DRAIN_DEADLINE_S
 
     def inflight(self) -> int:
         with self._inflight_cv:
@@ -173,13 +181,17 @@ def _close_listener(srv: Any) -> None:
         pass
 
 
-def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
+def graceful_stop(srv: Any, *, drain_deadline_s: Optional[float] = None,
                   abort: Optional[threading.Event] = None, log: Callable[[str], None] = print,
                   serving: bool = True) -> bool:
-    """Stop a ``GracefulMixin`` server: signal the streams, stop accepting, drain within the deadline. Returns
-    True when every accepted request finished in time. Call it from a thread other than the one inside
-    ``serve_forever`` (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has
-    already ended. A log line that cannot be written (a closed stdout) never interrupts the stop."""
+    """Stop a ``GracefulMixin`` server: signal the streams, stop accepting, drain within the deadline (the
+    server's own, :meth:`GracefulMixin.drain_deadline`, unless ``drain_deadline_s`` is given). Returns True when
+    every accepted request finished in time. Call it from a thread other than the one inside ``serve_forever``
+    (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has already ended. A log
+    line that cannot be written (a closed stdout) never interrupts the stop."""
+    if drain_deadline_s is None:
+        drain_deadline_s = float(srv.drain_deadline())
+
     def _say(msg: str) -> None:
         try:
             log(msg)
@@ -205,11 +217,12 @@ def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
     return drained
 
 
-def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
+def serve_until_signal(srv: Any, *, drain_deadline_s: Optional[float] = None,
                        stop: Optional[threading.Event] = None, log: Callable[[str], None] = print) -> bool:
-    """Serve ``srv`` until SIGTERM/SIGINT (or ``stop`` is set), then stop gracefully (:func:`graceful_stop`) and
-    close it. Signal handlers are installed only on the main thread and are restored on return. Returns True
-    when the drain finished within the deadline."""
+    """Serve ``srv`` until SIGTERM/SIGINT (or ``stop`` is set), then stop gracefully (:func:`graceful_stop`; the
+    server's own drain deadline unless ``drain_deadline_s`` is given) and close it. Signal handlers are installed
+    only on the main thread and are restored on return. Returns True when the drain finished within the
+    deadline."""
     stop = stop if stop is not None else threading.Event()
     force = threading.Event()
 

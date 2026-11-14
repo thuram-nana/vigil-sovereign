@@ -24,6 +24,13 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   in its listen queue, then closes. On Linux it first stops taking new connection attempts; such an attempt is
   refused about a second later and nginx gives it to the other port before any byte of the request was sent, so
   this holds for a POST too.
+- It exits only once every request it accepted is answered, waiting up to its drain deadline. The customer edge
+  waits up to 75 s, longer than its slowest call to the cockpit (60 s, a sign-up or recovery email sent inline;
+  45 s, a checkout or a Google sign-in), so an action the cockpit is still completing reaches the customer as the
+  cockpit's own answer — never as the unavailable page for an email that was sent, a checkout that was created or
+  a sign-in code that was spent. The public site serves only files and waits up to 10 s. Stopping the old
+  customer edge therefore takes up to 75 s while such an action is in flight; its units allow 90 s
+  (`TimeoutStopSec`).
 - `tools/deploy/edge-swap.sh customer|public` starts the new instance on the free port, waits for its
   `/healthz` (not `/readyz`, which is 503 while the cockpit restarts), waits `VIGIL_EDGE_SWAP_SETTLE_S` (3 s) with
   both edges up and checks the new one still runs and answers, then stops the old one and leaves the new instance

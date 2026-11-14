@@ -134,6 +134,77 @@ def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path):
         prov.shutdown()
 
 
+class _SlowerThanTheGenericDeadline(_SlowProvisioner):
+    received = threading.Event()
+
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        type(self).received.set()
+        time.sleep(3.0)                                  # the generic deadline in the child below is 1 s
+        body = json.dumps({"ok": True, "marker": "sent-after-the-generic-deadline"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_customer_edge_outwaits_a_cockpit_action_slower_than_the_generic_deadline(tmp_path):
+    # In production the generic deadline (10 s) is shorter than what custui allows some cockpit calls (45-60 s): a
+    # sign-up email taking 14 s, cut at 10 s by an edge swap, left the customer with nginx's "unavailable" page
+    # while the cockpit sent the email anyway. Here the child's generic deadline is 1 s and the action takes 3 s:
+    # the real `serve-customer` entry point must still wait for it, answer it, and only then exit 0.
+    _SlowerThanTheGenericDeadline.received.clear()
+    prov = ThreadingHTTPServer(("127.0.0.1", 0), _SlowerThanTheGenericDeadline)
+    threading.Thread(target=prov.serve_forever, daemon=True).start()
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("VIGIL_", "SIGIL_"))}
+    env.update({"SIGIL_HOME": str(tmp_path / "home"), "PYTHONPATH": _PYPATH, "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONUNBUFFERED": "1", "VIGIL_PROVISION_HOP_KEY": "graceful-hop-key",
+                "VIGIL_PROVISION_BASE": f"http://127.0.0.1:{prov.server_address[1]}"})
+    (tmp_path / "home").mkdir()
+    code = ("import sys\nfrom sigil.ui import graceful\ngraceful.DRAIN_DEADLINE_S = 1.0\n"
+            "from sigil.cli import main\n"
+            f"main(['serve-customer', '--host', '127.0.0.1', '--port', '{port}'])\n")
+    log = open(tmp_path / "server.log", "w")  # noqa: SIM115 — closed below
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        _wait_listening(port, proc)
+        result: dict = {}
+
+        def _client():
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+            try:
+                c.request("POST", "/api/customer/signup/request", body=json.dumps({"email": "a@example.test"}),
+                          headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}",
+                                   "Origin": f"http://127.0.0.1:{port}"})
+                r = c.getresponse()
+                result["status"], result["body"] = r.status, r.read().decode()
+            except Exception as exc:  # noqa: BLE001 — the pre-fix failure mode: the edge exits mid-action
+                result["error"] = repr(exc)
+
+        t = threading.Thread(target=_client)
+        t.start()
+        assert _SlowerThanTheGenericDeadline.received.wait(10), "the hop never reached the provisioner"
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        t.join(20)
+        assert result.get("status") == 200, result
+        assert json.loads(result["body"])["marker"] == "sent-after-the-generic-deadline"
+        assert proc.wait(20) == 0
+        assert time.monotonic() - t0 > 2.0               # it waited past the generic deadline, for the action
+        log.close()
+        # ... with the customer edge's own deadline (the one the units' TimeoutStopSec is sized for)
+        assert f"waiting up to {custui.drain_deadline_s():g} s for 1 request(s)" in \
+            (tmp_path / "server.log").read_text(encoding="utf-8")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
+        prov.shutdown()
+
+
 # ── the public site: a request still being read when SIGTERM lands is answered, then it exits 0 ──────────────
 def test_public_site_drains_a_request_being_read_then_exits_cleanly(tmp_path):
     port = _free_port()
@@ -283,6 +354,42 @@ def test_drain_gives_up_at_the_deadline():
     t.join(5)
 
 
+class _LongDrainSrv(_Srv):
+    def drain_deadline(self) -> float:
+        return 5.0
+
+
+class _ShortDrainSrv(_Srv):
+    def drain_deadline(self) -> float:
+        return 0.4
+
+
+def test_a_stop_without_an_explicit_deadline_uses_the_servers_own():
+    # the deadline is the server's (the customer edge's is longer than the generic one), not one global figure
+    for cls, drained in ((_LongDrainSrv, True), (_ShortDrainSrv, False)):
+        srv = cls(("127.0.0.1", 0), _Hold)
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        t, _out = _held_request(srv)
+        threading.Timer(1.0, _Hold.release.set).start()
+        assert graceful.graceful_stop(srv, log=lambda _m: None) is drained, cls.__name__
+        srv.server_close()
+        _Hold.release.set()
+        t.join(5)
+
+
+def test_the_customer_edge_waits_past_its_slowest_cockpit_hop():
+    # A stopping edge must outwait every hop it may be in: otherwise it exits while the cockpit still completes
+    # the action (an email sent, a checkout created, a single-use sign-in code spent) and the customer is told
+    # it failed. The public site and the cockpit keep the generic deadline.
+    longest = max([custui._HOP_TIMEOUT_S, *custui._SLOW_HOP_TIMEOUTS_S.values()])
+    customer = object.__new__(CustomerServer).drain_deadline()
+    assert customer >= longest + 15, (customer, longest)
+    assert customer == custui.drain_deadline_s()
+    assert object.__new__(PublicServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
+    assert object.__new__(UIServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
+    assert graceful.DRAIN_DEADLINE_S < longest           # why the customer edge needs its own
+
+
 def test_serve_until_signal_stops_on_its_event_and_closes_the_server():
     srv = _Srv(("127.0.0.1", 0), _Hold)
     stop = threading.Event()
@@ -302,13 +409,16 @@ def test_the_three_servers_are_graceful(cls):
     assert cls.block_on_close is False
 
 
-@pytest.mark.parametrize("unit", ["sigil-cockpit.service", "sigil-customer.service", "sigil-public.service",
-                                  "sigil-customer@.service", "sigil-public@.service"])
-def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit):
+@pytest.mark.parametrize("unit,cls", [("sigil-cockpit.service", UIServer), ("sigil-customer.service", CustomerServer),
+                                      ("sigil-public.service", PublicServer), ("sigil-customer@.service", CustomerServer),
+                                      ("sigil-public@.service", PublicServer)])
+def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit, cls):
+    # systemd SIGKILLs at TimeoutStopSec: the server's own drain must end well before that
     text = (_SIGIL / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
     m = re.search(r"^TimeoutStopSec=(\d+)\s*$", text, re.M)
     assert m, f"{unit} sets no TimeoutStopSec"
-    assert graceful.DRAIN_DEADLINE_S + 5 <= int(m.group(1)), (unit, m.group(1))
+    deadline = object.__new__(cls).drain_deadline()
+    assert deadline + graceful.HANDSHAKE_GRACE_S + 5 <= int(m.group(1)), (unit, deadline, m.group(1))
     assert re.search(r"^KillSignal=SIGTERM\s*$", text, re.M)
 
 

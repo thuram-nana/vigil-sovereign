@@ -36,7 +36,10 @@ ExecStart=%h/.sigil/venv/bin/sigil serve-customer --host ${VIGIL_CUSTOMER_BIND} 
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=20
+# A stopping edge first finishes every request it accepted, up to 75 s (custui.drain_deadline_s: past its
+# slowest wait on the cockpit, 60 s for a sign-up email), so a stop never cuts an action the cockpit is
+# still completing. systemd must not SIGKILL before that (a test pins the margin).
+TimeoutStopSec=90
 
 # --- hardening (as sigil-customer.service) -----------------------------------
 NoNewPrivileges=yes

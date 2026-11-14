@@ -88,6 +88,19 @@ _SLOW_HOP_TIMEOUTS_S = {
 def _hop_timeout(action: str) -> float:
     """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
     return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
+
+
+# How much longer than its slowest hop a stopping edge waits for the requests it accepted (ui/graceful.py).
+_DRAIN_MARGIN_S = 15.0
+
+
+def drain_deadline_s() -> float:
+    """How long a stopping customer edge (an edge swap, a restart, a release stop) waits for the requests it accepted:
+    past the slowest hop above, so it never exits while the cockpit is still completing an action this edge relayed
+    — the customer gets the cockpit's answer, not the proxy's "unavailable" page for an action that went through.
+    nginx hands the edge each request whole (request buffering), so a request's time here is its hop. The customer
+    units' TimeoutStopSec sits above this (test_graceful_stop.py pins both)."""
+    return max([_HOP_TIMEOUT_S, *_SLOW_HOP_TIMEOUTS_S.values()]) + _DRAIN_MARGIN_S
 # The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
 # the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
 # routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
@@ -224,6 +237,9 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
 
 class CustomerServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
+
+    def drain_deadline(self) -> float:
+        return drain_deadline_s()     # outwaits the slowest cockpit hop (ui/graceful.py reads it at stop time)
 
     def __init__(self, addr, handler, *, hop_key: str, provision_base: str, sessions_dir,
                  extra_hosts=(), extra_origins=()):
