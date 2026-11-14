@@ -52,6 +52,7 @@ from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
 from ..spine.verify import verify_record
 from . import actions as _actions
+from .graceful import GracefulMixin, serve_until_signal
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -141,7 +142,7 @@ BOOTSTRAP_PATHS = frozenset({
 })
 
 
-class UIServer(ThreadingHTTPServer):
+class UIServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
@@ -1359,7 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
             since = -1                                          # any malformed cursor → from genesis
         tailer = SpineTailer(self.server.store(), since_seq=since)
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 for ev in tailer.poll():
                     self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
@@ -1367,7 +1368,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")                    # heartbeat / flush
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return                                               # client closed — end the stream
 
@@ -1397,7 +1398,7 @@ class Handler(BaseHTTPRequestHandler):
         from ..voice.hud_status import read_status
         last_state = None
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 # S4: fan out the voice FSM state (idle/listening/thinking/speaking) from the EPHEMERAL 0600
                 # status file — deduped (emit only on change). It is read-only telemetry, never the spine.
@@ -1425,7 +1426,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -1936,9 +1937,6 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     gw = model_gateway.start_from_env()
     if gw is not None:
         print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        srv.shutdown()
-    finally:
-        srv.server_close()                        # writes any pending failed-login counts (FailedAuthnCoalescer)
+    # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted, the requests in flight finish (bounded by
+    # graceful.DRAIN_DEADLINE_S), then server_close writes any pending failed-login counts (FailedAuthnCoalescer).
+    serve_until_signal(srv)

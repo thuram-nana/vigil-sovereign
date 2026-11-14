@@ -308,16 +308,17 @@ def test_password_reset_severs_existing_sessions(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
-def test_dead_provisioner_is_502(tmp_path, monkeypatch):
+def test_dead_provisioner_is_503_updating(tmp_path, monkeypatch):
     from sigil import config
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
-    # point the edge at a closed loopback port (no sovereign there)
+    # point the edge at a closed loopback port (no sovereign there): the connection is refused, so the request
+    # reached nothing — the edge says "updating" (503), stays up, never crashes or mints
     edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "custsessions"))
     try:
         c, r = _post(_opener(), ep, "/api/customer/signup/request", {"email": "x@acme.com"})
-        assert c == 502, (c, r)                                   # edge stays up; never crashes or mints
+        assert c == 503 and r == {"error": "updating"}, (c, r)
     finally:
         edge.shutdown()
 

@@ -44,9 +44,13 @@ from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
+from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
+#: Seconds a customer is told to wait (`Retry-After`) when the provisioner is not listening — the cockpit restarts
+#: in about this long (sigil-cockpit.service RestartSec=5).
+UPDATING_RETRY_AFTER_S = 5
 # E2b — the SHORT-LIVED Google-OIDC browser-binding cookie: HttpOnly, SameSite=Lax (must ride the IdP's
 # top-level GET redirect back to us), Path-scoped to /api/customer/oidc, Max-Age 600s. Its sha256 is bound to
 # the single-use `state` at login and re-checked at the callback (anti login-CSRF). DISTINCT from the session
@@ -171,7 +175,7 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
           "/api/customer/assets": "assets_overview",
           "/api/customer/notifications": "notifications"}
 
-class CustomerServer(ThreadingHTTPServer):
+class CustomerServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, hop_key: str, provision_base: str, sessions_dir,
@@ -237,6 +241,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if self._no_store(ctype):
             self.send_header("Cache-Control", "no-store")
+        ra = getattr(self, "_pending_retry_after", None)
+        if ra:
+            self.send_header("Retry-After", ra)
         sc = getattr(self, "_pending_set_cookie", None)
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -325,8 +332,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
     def _provision(self, action: str, principal: str, body: dict):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
         sovereign verifies it (role == action; principal + method + path + ts inside the HMAC). The hop key
-        is this edge's ONLY credential — it holds no owner key. A dead provisioner, or a reply that cannot be read
-        (truncated, not JSON), is a 502, never a crash."""
+        is this edge's ONLY credential — it holds no owner key. A provisioner that is not listening (the cockpit is
+        restarting) is a 503 `{"error": "updating"}` with Retry-After: the request reached nothing. Any other
+        failure — one after the request may have arrived, or a reply that cannot be read (truncated, not JSON) — is
+        a 502, never a crash. The edge sends each request to the provisioner once."""
         if not self.server.hop_key:
             # No hop key: nothing this edge could stamp would verify (and `body_binding` raises on a blank key —
             # a POST surfaced that as a 400, a GET dropped the connection). Refuse before any hop, with the same
@@ -353,7 +362,15 @@ class CustomerHandler(BaseHTTPRequestHandler):
                 return e.code, json.loads(e.read().decode())
             except (ValueError, http.client.HTTPException, OSError):   # an unreadable error body keeps its status
                 return e.code, {"error": "provision error"}
-        except (urllib.error.URLError, OSError):
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ConnectionRefusedError):
+                # Nothing listens on the provisioner port (the cockpit is restarting): the connection was refused
+                # before a byte of the request was sent, so it reached nothing and changed nothing. Say so, and
+                # when to come back; the caller decides whether to send it again (the edge never does).
+                self._pending_retry_after = str(UPDATING_RETRY_AFTER_S)
+                return 503, {"error": "updating"}
+            return 502, {"error": "provisioner unreachable"}
+        except OSError:
             return 502, {"error": "provisioner unreachable"}
         except (ValueError, http.client.HTTPException):
             # a 2xx whose body is truncated (IncompleteRead) or not JSON — e.g. the cockpit restarted mid-reply, or
@@ -888,7 +905,4 @@ def serve_customer(*, host: str = "127.0.0.1", port=None, hop_key=None, provisio
              else "hop key UNSET → provisioning FAILS CLOSED (set VIGIL_PROVISION_HOP_KEY)")
     print(f"  vigil customer edge on http://{host}:{bound_port}  (keyless; cookie=vigil_customer_session; "
           f"provisioner={srv.provision_base}; {keyed})")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    serve_until_signal(srv)          # SIGTERM/SIGINT: finish the requests in flight, then exit (ui/graceful)
