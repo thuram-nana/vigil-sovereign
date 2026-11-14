@@ -231,9 +231,12 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      response is the backstop if that rule is ever missing (the customer vhost has no Authenticated Origin Pulls
      block, so the origin's headers, not Cloudflare, are the real control).
    - Turn on the WAF managed ruleset.
-6. **Optional — purge the public pages after a release.** Without it a page is at most 60 s old at the edge
-   (`s-maxage=60`); assets never go stale because each page names them by content hash, and the customer app is
-   never cached. To purge at once from the host:
+6. **Recommended — purge the public pages after every release and every public-site swap.** Without it a page can
+   be up to 60 s old at the edge (`s-maxage=60`), and that page names the previous build's `?v=<hash>` assets,
+   which the new origin answers with 404 + `no-store`: at a Cloudflare location that holds the old page but not
+   its assets, visitors get the page without its styles and scripts until it expires. The purge, run right after
+   the new public edge serves (`EDGE-SWAP.md`), closes that window. The customer app is never cached, so it is
+   never purged. To purge from the host:
    - In Cloudflare → My Profile → API Tokens, create a **custom token** with one permission,
      **Zone → Cache Purge → Purge**, and **Zone Resources: Include → Specific zone → vigilguard.net**. Nothing
      else: it cannot read or change DNS, rules or settings.

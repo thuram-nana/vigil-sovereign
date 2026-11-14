@@ -1,12 +1,13 @@
-"""AWS-DEPLOY.md §3 items 5-6 state the Cloudflare cache rules EXACTLY and the optional purge safely:
+"""AWS-DEPLOY.md §3 items 5-6 state the Cloudflare cache rules EXACTLY and the recommended purge safely:
 
 * two cache rules, each on exact host names — the public site (vigilguard.net, www) eligible and respecting the
   origin's Cache-Control, the customer app (app.vigilguard.net) bypassed — and no rule expression anywhere that
   could also match the app (no wildcard, ends_with, contains, matches);
 * the zone's Browser Cache TTL respects the origin, and no override TTL ever applies to the app;
 * the cache headers the runbook quotes are the ones the edges send (read from their source);
-* the optional purge uses a purge-only token scoped to the one zone, kept on the host (never GitHub), read from a
-  0600 header file;
+* the purge — recommended after every release and public-site swap, because a page Cloudflare still holds names
+  the previous build's ?v= assets, which the new edge answers 404 — uses a purge-only token scoped to the one zone,
+  kept on the host (never GitHub), read from a 0600 header file;
 * EDGE-SWAP.md names the tools, units and sections it relies on.
 
 Stdlib only (reads files), so it rides the docs CI job.
@@ -83,9 +84,12 @@ def test_the_quoted_headers_are_the_ones_the_edges_send():
     assert "`no-store`" in five
 
 
-def test_the_optional_purge_is_zone_scoped_purge_only_and_kept_on_the_host():
+def test_the_recommended_purge_is_zone_scoped_purge_only_and_kept_on_the_host():
     six = _item(6)
-    assert "**Optional" in six
+    assert "**Recommended — purge the public pages after every release and every public-site swap.**" in six
+    flat = re.sub(r"\s+", " ", six)
+    assert "previous build's `?v=<hash>` assets" in flat and "404 + `no-store`" in flat   # why: unstyled pages
+    assert "optional" not in six.lower()
     assert "**Zone → Cache Purge → Purge**" in six and "Specific zone → vigilguard.net" in six
     assert "never in GitHub secrets or Actions" in six and "on the host only" in six
     assert "install -m 600 /dev/null ~/.sigil/cloudflare-purge.header" in six
@@ -100,6 +104,10 @@ def test_the_edge_swap_runbook_names_what_it_relies_on():
                    "sigil-public@8745", "VIGIL_EDGE_SWAP_SETTLE_S", "max_fails=0", "/healthz",
                    "RELEASE-UPGRADE-ROLLBACK.md` §2.1", "`AWS-DEPLOY.md` §3.5", "`AWS-DEPLOY.md` §3.6"):
         assert needle in SWAP, needle
+    # a public swap is followed by the purge, and the runbook says what happens without it
+    assert "tools/deploy/edge-swap.sh public                    # then purge the public pages" in SWAP
+    flat = re.sub(r"\s+", " ", SWAP)
+    assert "without its styles and scripts" in flat and "never go stale" not in flat
     for rel in ("tools/deploy/edge-swap.sh", "tools/deploy/edge_only.py",
                 "apps/sigil/deploy/systemd/sigil-customer@.service", "apps/sigil/deploy/systemd/sigil-public@.service"):
         assert (REPO / rel).is_file(), rel

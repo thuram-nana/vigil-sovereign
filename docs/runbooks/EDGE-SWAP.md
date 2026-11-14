@@ -56,7 +56,8 @@ tools/deploy/edge-swap.sh customer      # or: public
 
 It prints `edge-swap: <old> -> <new>` and exits 0, or names what stopped it and exits 1 with the old edge still
 serving. Open customer tabs see "A new version of VIGIL is available — Refresh" within ten minutes (sooner on
-focus); the public site's pages are revalidated on every visit.
+focus). After a swap of the public site, purge its pages at Cloudflare (`AWS-DEPLOY.md` §3.6) — see Cloudflare
+below for what happens without it.
 
 ## The edge-only fast path
 
@@ -74,7 +75,7 @@ SHA="$(git rev-parse "$TAG^{commit}")"
 python3 tools/deploy/edge_only.py HEAD "$SHA"       # exit 0 prints the edges to swap; 1 = full upgrade
 git checkout --detach "$SHA"                        # only served static files and inert files change on disk
 tools/deploy/edge-swap.sh customer                  # each edge the check printed
-tools/deploy/edge-swap.sh public
+tools/deploy/edge-swap.sh public                    # then purge the public pages (AWS-DEPLOY.md §3.6)
 curl -fsS https://app.vigilguard.net/version.json   # the new build id
 ```
 
@@ -85,6 +86,8 @@ out the previous release's commit and swap the same edges again.
 ## Cloudflare
 
 The customer origin is never cached by Cloudflare (bypass rule, `AWS-DEPLOY.md` §3.5), so a swap reaches every
-customer at once. The public site's pages may be held for up to 60 s (`s-maxage=60`); its versioned assets
-never go stale, because a page names each asset by its content hash. A purge of the public pages is optional
-(`AWS-DEPLOY.md` §3.6).
+customer at once. The public site's pages may be held for up to 60 s (`s-maxage=60`), and a held page names the
+previous build's `?v=` assets, which the new edge answers with 404 + `no-store` (it never serves today's bytes
+under another build's name). So at a Cloudflare location that still holds an old page but not its assets, that
+page loads without its styles and scripts until it expires — up to 60 s. Purging the public pages right after
+the swap (`AWS-DEPLOY.md` §3.6) closes that window to the seconds before the purge lands.
