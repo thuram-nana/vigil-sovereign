@@ -181,6 +181,13 @@ def _close_listener(srv: Any) -> None:
         pass
 
 
+def drain_deadline_of(srv: Any) -> float:
+    """The server's own drain deadline (:meth:`GracefulMixin.drain_deadline`), or :data:`DRAIN_DEADLINE_S` for a
+    server that does not set one."""
+    own = getattr(srv, "drain_deadline", None)
+    return float(own()) if callable(own) else DRAIN_DEADLINE_S
+
+
 def graceful_stop(srv: Any, *, drain_deadline_s: Optional[float] = None,
                   abort: Optional[threading.Event] = None, log: Callable[[str], None] = print,
                   serving: bool = True) -> bool:
@@ -190,7 +197,7 @@ def graceful_stop(srv: Any, *, drain_deadline_s: Optional[float] = None,
     (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has already ended. A log
     line that cannot be written (a closed stdout) never interrupts the stop."""
     if drain_deadline_s is None:
-        drain_deadline_s = float(srv.drain_deadline())
+        drain_deadline_s = drain_deadline_of(srv)
 
     def _say(msg: str) -> None:
         try:

@@ -377,6 +377,12 @@ def test_a_stop_without_an_explicit_deadline_uses_the_servers_own():
         t.join(5)
 
 
+def test_a_server_without_its_own_deadline_gets_the_generic_one():
+    assert graceful.drain_deadline_of(object()) == graceful.DRAIN_DEADLINE_S
+    assert graceful.drain_deadline_of(_LongDrainSrv.__new__(_LongDrainSrv)) == 5.0
+    assert graceful.drain_deadline_of(object.__new__(CustomerServer)) == custui.drain_deadline_s()
+
+
 def test_the_customer_edge_waits_past_its_slowest_cockpit_hop():
     # A stopping edge must outwait every hop it may be in: otherwise it exits while the cockpit still completes
     # the action (an email sent, a checkout created, a single-use sign-in code spent) and the customer is told
