@@ -1150,7 +1150,7 @@ class BillingSigner:
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
                  on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None,
-                 require_verified_amount: bool = False):
+                 require_verified_amount: bool = False, alarm_unaccounted_topups: bool = False):
         self.provider = provider
         # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
         # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
@@ -1186,6 +1186,11 @@ class BillingSigner:
         # bounds the amount. The Flutterwave adapter already enforces this itself (#1093); a signer serving another
         # provider sets it.
         self._require_verified_amount = bool(require_verified_amount)
+        # Opt-in (default OFF => byte-identical): a verified TOP-UP the signer cannot credit at the catalog's price —
+        # a price not in the catalog (with a verified paid amount), no verified currency (require_verified_amount),
+        # or less than / another currency than the catalog price — raises UnaccountedPayment (the drain quarantines
+        # and alarms) instead of archiving a paid charge as a no-op. Nothing is written either way.
+        self._alarm_unaccounted_topups = bool(alarm_unaccounted_topups)
         self._last_outcome: Optional[IngestOutcome] = None
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
@@ -1257,6 +1262,12 @@ class BillingSigner:
                 raise UnaccountedPayment(f"verified subscription charge {event.event_id} for org {oid!r} names "
                                          f"price {event.price_id!r}, which is not in the owner catalog — paid but "
                                          f"UN-MINTED; reconcile by hand")
+            if (self._alarm_unaccounted_topups and event.kind == EVENT_TOPUP and event.currency
+                    and int(event.amount_minor) > 0):
+                raise UnaccountedPayment(f"verified top-up {event.event_id} for org {oid!r} paid "
+                                         f"{event.amount_minor} {event.currency} for price {event.price_id!r}, which "
+                                         f"is not in the owner catalog — paid but UN-MINTED; refund it or "
+                                         f"reconcile (runbook)")
             return None, "unknown_price"              # unknown price -> no entitlement -> mint nothing
         # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
         # amount below the owner catalog's expected price (or in the wrong currency): belt-and-suspenders on top of
@@ -1271,6 +1282,11 @@ class BillingSigner:
                     raise UnaccountedPayment(
                         f"verified plan charge {event.event_id} for org {oid!r} carries no verified amount/currency "
                         f"for {event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
+                if self._alarm_unaccounted_topups and event.kind == EVENT_TOPUP:
+                    raise UnaccountedPayment(
+                        f"verified top-up {event.event_id} for org {oid!r} carries no verified amount/currency, the "
+                        f"catalog expects {exp[0]} {exp[1]} for {event.price_id!r} — paid but UN-MINTED; refund it "
+                        f"or reconcile (runbook)")
                 return None, "no_verified_amount"     # no verified amount/currency -> mint nothing (fail-closed)
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
@@ -1281,6 +1297,11 @@ class BillingSigner:
                             f"verified plan charge {event.event_id} for org {oid!r} paid "
                             f"{event.amount_minor} {event.currency} but the catalog expects {exp[0]} {exp[1]} for "
                             f"{event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
+                    if self._alarm_unaccounted_topups and event.kind == EVENT_TOPUP:
+                        raise UnaccountedPayment(
+                            f"verified top-up {event.event_id} for org {oid!r} paid {event.amount_minor} "
+                            f"{event.currency}, the catalog expects {exp[0]} {exp[1]} for {event.price_id!r} — paid "
+                            f"but UN-MINTED; refund it or reconcile (runbook)")
                     return None, "underpaid_or_currency"   # underpaid / wrong currency -> mint nothing (fail-closed)
             # Red-pen FINDING 1: event_id is the idempotency anchor for the wallet entry_id (top-up) AND the
             # invoice_id (both value paths), but verify_and_parse only checks it is a non-empty str. Bound it to

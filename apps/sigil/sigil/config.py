@@ -300,6 +300,14 @@ def billing_plan_alarm_enabled() -> bool:
         (os.environ.get("VIGIL_BILLING_PLAN_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE)
 
 
+def billing_topup_alarm_enabled() -> bool:
+    """Whether the Flutterwave billing drain QUARANTINES (alarms on) a verified paid TOP-UP it cannot credit at the
+    catalog price — a price not in the catalog, no verified currency, or less than / another currency than the
+    catalog price — instead of archiving it as a no-op (``VIGIL_BILLING_TOPUP_ALARM`` affirmative; default OFF:
+    unchanged). The Stripe drain always alarms. Read by the billing drain process."""
+    return (os.environ.get("VIGIL_BILLING_TOPUP_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_billing_return_url() -> "str | None":
     """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
     ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value

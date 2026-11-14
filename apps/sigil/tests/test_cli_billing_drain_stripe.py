@@ -402,3 +402,24 @@ def test_a_stripe_pass_that_cannot_get_the_lock_fails_loudly_and_touches_nothing
         os.close(fd)
     cli.main(_stripe_argv(spool))                         # lock free: the pass runs and mints
     assert "drained: 1 minted" in capsys.readouterr().out
+
+
+# ---- ST-11.0a: the Stripe lane always alarms on a paid top-up it cannot credit ---------------------------------
+def test_an_underpaid_payment_session_is_quarantined_and_alarms(home, capsys, monkeypatch):
+    pid, _credits = _topup()
+    amt, ccy = catalog.mintable_expected()[pid]
+
+    def fetch(kind, oid):
+        return {"object": "checkout.session", "id": oid, "livemode": False, "mode": "payment",
+                "status": "complete", "payment_status": "paid", "client_reference_id": "vigil:acme:n1",
+                "metadata": {"org_id": "acme", "price_id": pid}, "amount_total": amt - 1, "currency": ccy.lower(),
+                "created": 1000}
+    monkeypatch.delenv("VIGIL_BILLING_TOPUP_ALARM", raising=False)    # the Stripe lane needs no flag for it
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: fetch)
+    spool = Path(tempfile.mkdtemp())
+    _spool_stripe(spool)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_billing_drain(_ns(spool))
+    assert ei.value.code == 1 and WalletRegistry(SpineStore(home)).available("acme") == 0
+    reasons = "".join(p.read_text() for p in (spool / "rejected").glob("*.reason"))
+    assert "top-up cs_test_a1" in reasons and "UN-MINTED" in reasons

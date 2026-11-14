@@ -1518,9 +1518,10 @@ def _stripe_checkout_creator():
     return se.make_checkout_creator()
 
 
-def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bool = False):
+def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bool = False,
+                    alarm_topups: bool = False):
     """The ONE billing signer both drain lanes use: the owner catalog (mintable view), the expected amounts, the
-    owner-signed registries and the plan alarm. Only the provider differs between lanes."""
+    owner-signed registries, the plan alarm and the top-up alarm. Only the provider differs between lanes."""
     from .governor import catalog
     from .governor.billing import BillingSigner
     from .governor.invoices import InvoiceRegistry
@@ -1535,7 +1536,7 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
                          # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
                          # unlock is recorded whatever the preview flag says; the records stay inert until read.
                          report_unlocks=ReportUnlockRegistry(store),
-                         require_verified_amount=require_verified_amount)
+                         require_verified_amount=require_verified_amount, alarm_unaccounted_topups=alarm_topups)
 
 
 def _same_dir(a: str, b: str) -> bool:
@@ -1594,13 +1595,13 @@ def _stripe_billing_watcher(a):
         refuse("VIGIL_STRIPE_API_VERSION is unset or malformed")
     _require_billing_owner_home(spool, "stripe")
     # The Stripe lane is always loud: a paid Stripe object it cannot credit (no tenant, time or currency, an
-    # off-catalog or underpaid plan, a monitoring price with no line) quarantines and alarms, never a silent no-op —
-    # whatever the plan-checkout flag in this unit's environment says.
+    # off-catalog or underpaid plan or top-up, a monitoring price with no line) quarantines and alarms, never a
+    # silent no-op — whatever the plan-checkout or top-up alarm flags in this unit's environment say.
     alarm = True
     provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm,
                                      strict=True)
     del secret
-    signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True)
+    signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True, alarm_topups=alarm)
     return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
 
 
@@ -1792,9 +1793,11 @@ def cmd_billing_drain(a) -> None:
     # real + DEFAULT-OFF: None (no VIGIL_FLW_SECRET_KEY) ⇒ create_checkout keeps refusing, unchanged.
     from .config import billing_plan_alarm_enabled
     alarm = billing_plan_alarm_enabled()         # CHK-1b: an unaccountable paid plan charge ALARMS (quarantine)
+    from .config import billing_topup_alarm_enabled
     signer = _billing_signer(FlutterwaveBillingProvider(secret, verifier,
                                                         checkout_creator=_billing_checkout_creator(),
-                                                        alarm_unaccounted_plans=alarm), store, alarm=alarm)
+                                                        alarm_unaccounted_plans=alarm), store, alarm=alarm,
+                             alarm_topups=billing_topup_alarm_enabled())   # a paid top-up it cannot credit ALARMS
     watcher = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash=secret)
     del secret
     _run_billing_watcher(a, watcher)
