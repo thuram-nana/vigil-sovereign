@@ -48,12 +48,10 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import hmac
 import json
 import os
-import secrets
 import shutil
-import subprocess
+import subprocess  # noqa: F401 — the isolated child runs through it (isolated_child.run_isolated)
 import sys
 import tempfile
 import time
@@ -61,6 +59,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+from .isolated_child import consume_nonce, last_json_line, run_isolated, tempdir_outside
 from .store import SpineStore
 from .upgrade import restore_from_backup, upgrade
 
@@ -283,38 +282,16 @@ def _run_isolated(data: Path, work_dir: Path) -> dict:
     """Run :func:`drill_copy` in a CHILD process scoped to the scratch home (``SIGIL_HOME`` = ``data``'s home,
     ``TMPDIR`` inside the work dir). The child's import-time config therefore derives the head, key and floor
     paths from the COPY — the real home is never named to it."""
-    import sigil
-    pkg_root = str(Path(sigil.__file__).resolve().parent.parent)
-    tmp = work_dir / "tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["SIGIL_HOME"] = str(data.parent.parent)
-    env["TMPDIR"] = str(tmp)
-    env["PYTHONPATH"] = os.pathsep.join([pkg_root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    nonce, nonce_file = secrets.token_hex(16), work_dir / _NONCE_FILE
-    nonce_file.unlink(missing_ok=True)
-    fd = os.open(str(nonce_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, nonce.encode("ascii"))
-    finally:
-        os.close(fd)
-    env[_NONCE_ENV] = nonce
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "sigil.spine.upgrade_drill", _CHILD_FLAG, str(data), "--work-dir", str(work_dir)],
-            cwd=str(work_dir), env=env, capture_output=True, text=True, timeout=_CHILD_TIMEOUT_S)
-    finally:
-        nonce_file.unlink(missing_ok=True)
-    try:
-        res = json.loads(proc.stdout.strip().splitlines()[-1])
-        if not isinstance(res, dict) or "status" not in res:
-            raise ValueError("no verdict")
+    proc = run_isolated("sigil.spine.upgrade_drill", [_CHILD_FLAG, str(data), "--work-dir", str(work_dir)],
+                        home=data.parent.parent, work_dir=work_dir, nonce_file=_NONCE_FILE, nonce_env=_NONCE_ENV,
+                        timeout=_CHILD_TIMEOUT_S)
+    res = last_json_line(proc.stdout)
+    if res is not None and "status" in res:
         return res
-    except (ValueError, IndexError):
-        tail = (proc.stderr or proc.stdout or "").strip()[-600:]
-        return {"status": FAIL, "detail": f"the isolated drill process failed (rc={proc.returncode}): {tail}",
-                "steps": [{"step": "error", "error": f"isolated child rc={proc.returncode}"}],
-                "count": None, "migrated": None}
+    tail = (proc.stderr or proc.stdout or "").strip()[-600:]
+    return {"status": FAIL, "detail": f"the isolated drill process failed (rc={proc.returncode}): {tail}",
+            "steps": [{"step": "error", "error": f"isolated child rc={proc.returncode}"}],
+            "count": None, "migrated": None}
 
 
 def _snapshot(src_dir: Path, data_name: str, home: Path) -> "Optional[str]":
@@ -440,18 +417,12 @@ def _child_main(data: str, work_dir: str) -> int:
     from .. import config
     d, w = Path(data), Path(work_dir).resolve()
     home = (w / "home").resolve()
-    nonce_file = w / _NONCE_FILE
-    try:
-        made = nonce_file.read_text(encoding="ascii").strip()
-        nonce_file.unlink()
-    except (OSError, UnicodeDecodeError):
-        made = ""
-    sent = os.environ.get(_NONCE_ENV, "").encode("utf-8", "surrogateescape")
-    tmp = Path(tempfile.gettempdir()).resolve()
-    why = ("no matching one-shot nonce from the parent drill" if not (made and hmac.compare_digest(made.encode(), sent))
+    nonce_ok = consume_nonce(w, _NONCE_FILE, _NONCE_ENV)
+    tmp = tempdir_outside(w)
+    why = ("no matching one-shot nonce from the parent drill" if not nonce_ok
            else f"the data path {d} is not the work dir's scratch copy" if d.parent.resolve() != home / "spine"
            else f"SIGIL_HOME={config.SIGIL_HOME} is not the scratch home" if config.SIGIL_HOME.resolve() != home
-           else f"TMPDIR={tmp} is outside the work dir" if not tmp.is_relative_to(w)
+           else f"TMPDIR={tmp} is outside the work dir" if tmp is not None
            else "")
     if why:
         res = {"status": FAIL, "detail": f"refusing: the isolated drill is not scoped to its copy ({why})",

@@ -2186,6 +2186,43 @@ def cmd_key(a) -> None:
 _SPINE_RATE_FLAGS = {"since": None, "until": None, "window": None, "group_by": "signal", "top": 20,
                      "ceiling": None, "json": False}
 _SPINE_PRUNE_FLAGS = {"boundary": None, "yes": False, "archive": None}
+_SPINE_UNIT_FLAGS = {"unit_home": None, "archive_dir": None, "deep": False}
+
+
+def _spine_verify_unit(a) -> None:
+    """`sigil spine verify-unit`: verify a home's spine as ONE unit — its owner-signed head, the floor, the owner
+    public key(s), the live segments and the cold archive — with the real readers. This process's own home is
+    checked in-process; another home (``--home``) in a child process scoped to it, which reads public keys only.
+    Exit 0 when the unit verifies (or the spine is not pruned), 2 when it is refused."""
+    from pathlib import Path as _P
+
+    from . import config
+    from .spine import home_unit as hu
+    home = _P(a.unit_home) if a.unit_home else config.SIGIL_HOME
+    if not (home / "spine").is_dir():
+        print(f"spine verify-unit: no spine at {home}", file=sys.stderr)
+        sys.exit(2)
+    if home.resolve() == config.SIGIL_HOME.resolve():
+        res = hu.check_live_unit(SpineStore(), require_archive=True, deep=a.deep, archive_dir=a.archive_dir)
+    else:
+        held = hu.HomeUnit.for_home(home).secret_files()
+        if held:
+            print(f"spine verify-unit: {home} holds private key material ({', '.join(held)}) and is not this "
+                  f"process's home — verify it as its own home: SIGIL_HOME={home} sigil spine verify-unit",
+                  file=sys.stderr)
+            sys.exit(2)
+        res = hu.verify_other_home(home, archive_dir=a.archive_dir)
+    for c in res.get("checks") or []:
+        print(f"  {'ok  ' if c.get('ok') else 'FAIL'} {c.get('name')}: {c.get('why')}")
+    if not res.get("ok"):
+        print(f"REFUSED: {hu.failure_reason(res)}", file=sys.stderr)
+        sys.exit(2)
+    if not res.get("pruned"):
+        print(f"OK: {home} is not pruned — nothing to verify as a pruned unit (`sigil verify` checks its chain)")
+        return
+    sh = res.get("shape") or {}
+    print(f"OK: the spine unit at {home} verifies (live window from seq {sh.get('base_seq')}, snapshot at seq "
+          f"{sh.get('snapshot_seq')}, {sh.get('archive_segments')} archived segment(s))")
 
 
 def cmd_spine(a) -> None:
@@ -2195,11 +2232,18 @@ def cmd_spine(a) -> None:
     # the wrong action is refused (exit 2), never silently ignored (`spine status --json` printing a table).
     rate_flags = [f for f, dflt in _SPINE_RATE_FLAGS.items() if getattr(a, f, dflt) != dflt]
     prune_flags = [f for f, dflt in _SPINE_PRUNE_FLAGS.items() if getattr(a, f, dflt) != dflt]
-    wrong = prune_flags if a.action == "append-rate" else rate_flags
+    unit_flags = [f for f, dflt in _SPINE_UNIT_FLAGS.items() if getattr(a, f, dflt) != dflt]
+    if a.action == "verify-unit":
+        wrong = rate_flags + prune_flags
+    else:
+        wrong = (prune_flags if a.action == "append-rate" else rate_flags) + unit_flags
     if wrong:
         print(f"spine {a.action}: does not take " + ", ".join("--" + f.replace("_", "-") for f in wrong),
               file=sys.stderr)
         sys.exit(2)
+    if a.action == "verify-unit":
+        _spine_verify_unit(a)
+        return
     store = SpineStore()
     if a.action == "migrate":
         if store.migrate():
@@ -3424,9 +3468,11 @@ def main(argv=None) -> None:
     pup.set_defaults(fn=cmd_upgrade)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; "
                                        "prune-plan; verify-archive; prune; prune-finish; "
-                                       "append-rate (read-only appends/s by signal)")
+                                       "append-rate (read-only appends/s by signal); "
+                                       "verify-unit (a home's spine as one unit: head, floor, keys, archive)")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
-                                        "prune-plan", "verify-archive", "prune", "prune-finish", "append-rate"])
+                                        "prune-plan", "verify-archive", "prune", "prune-finish", "append-rate",
+                                        "verify-unit"])
     psp.add_argument("--since", default=None, help="append-rate: count records with ts >= this ISO-8601 time (no offset = UTC)")
     psp.add_argument("--until", default=None, help="append-rate: count records with ts < this ISO-8601 time")
     psp.add_argument("--window", type=int, action="append", default=None,
@@ -3445,6 +3491,14 @@ def main(argv=None) -> None:
     psp.add_argument("--yes", action="store_true",
                      help="prune: REQUIRED confirmation — the hard prune DELETES the pruned prefix [0..K)")
     psp.add_argument("--archive", default=None, help="verify-archive: the archive dir (default SIGIL_HOME/spine/archive)")
+    psp.add_argument("--home", dest="unit_home", default=None,
+                     help="verify-unit: the home to verify (default: this SIGIL_HOME; another home is verified in a "
+                          "child process scoped to it, with public keys only)")
+    psp.add_argument("--archive-dir", dest="archive_dir", default=None,
+                     help="verify-unit: the unit's archive dir (default: SIGIL_SPINE_ARCHIVE_DIR for this home, "
+                          "<home>/spine/archive for another)")
+    psp.add_argument("--deep", action="store_true",
+                     help="verify-unit: re-derive the whole archive (another home is always verified in full)")
     psp.set_defaults(fn=cmd_spine)
     pck = sub.add_parser("checkpoint",
                          help="witnessed anti-rollback checkpoints (audit G3(b)): emit | verify | cosign | witness")
