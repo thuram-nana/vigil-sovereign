@@ -58,7 +58,10 @@ def world(tmp_path_factory):
     bk = root / "bk.sglbk"
     assert "error" not in backup_home(src, bk, SIGIL_SPINE_ARCHIVE_DIR=None)
     old = signed_home(root, pruned=True, name="old")                # the target's OLD home: another pruned home
-    return {"bk": bk, "old": old}
+    plain = signed_home(root, pruned=False, world=True, name="plain")  # a home that was never pruned
+    bk_plain = root / "plain.sglbk"
+    assert "error" not in backup_home(plain, bk_plain, SIGIL_SPINE_ARCHIVE_DIR=None)
+    return {"bk": bk, "old": old, "plain": plain, "bk_plain": bk_plain}
 
 
 def _tree(root: Path) -> dict:
@@ -74,10 +77,10 @@ def _target(world, tmp_path) -> Path:
     return t
 
 
-def _kill_at(world, target: Path, barrier: str, archive_dir: "Path | None" = None):
+def _kill_at(world, target: Path, barrier: str, archive_dir: "Path | None" = None, backup: str = "bk"):
     host = target.parent / "restoring-host"
     host.mkdir(exist_ok=True)
-    r = run_in_home(host, RESTORE_KILLED, json.dumps({"src": str(world["bk"]), "home": str(target),
+    r = run_in_home(host, RESTORE_KILLED, json.dumps({"src": str(world[backup]), "home": str(target),
                                                       "barrier": barrier,
                                                       "archive_dir": str(archive_dir) if archive_dir else None}),
                     check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
@@ -290,6 +293,34 @@ def test_a_new_restore_over_an_interrupted_one_needs_force(world, tmp_path):
     assert plain.returncode != 0 and "was interrupted" in plain.stderr
     assert _kill_at(world, target, "never").returncode == 0
     _assert_restored(target)
+
+
+@pytest.mark.parametrize("barrier", ["restore_after_journal", "restore_after_unit:spine",
+                                     "restore_before_journal_delete", "never"])
+def test_a_force_restore_over_an_interrupted_one_is_resumed_into_itself(world, tmp_path, barrier):
+    """A backup of a home that was never pruned, force-restored over an interrupted (hard-pruned) restore: its own
+    journal replaces the interrupted one's before its first swap and the interrupted one's staging is dropped, so
+    killed anywhere after that, `--resume` completes THIS restore, never the one it replaced; uninterrupted, it leaves
+    no journal and no staging behind."""
+    target = _target(world, tmp_path)
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED      # the restore it replaces
+    r = _kill_at(world, target, barrier, backup="bk_plain")
+    plain_head = (world["plain"] / "spine" / "head.json").read_bytes()
+    if barrier != "never":
+        assert r.returncode == KILLED, (r.returncode, r.stderr[-800:])
+        j = json.loads((target / "restore-journal.json").read_text())
+        assert j["backup_sha256"] == hashlib.sha256(world["bk_plain"].read_bytes()).hexdigest()
+        _assert_fails_closed(target)
+        r = _cli(target, "restore", "--resume", str(target))
+        assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    else:
+        assert r.returncode == 0, r.stderr[-800:]
+    assert (target / "spine" / "head.json").read_bytes() == plain_head
+    assert not (target / "restore-journal.json").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+    assert not [p for p in target.iterdir() if p.name.startswith(".restore-old-")]
+    seen = read_home(target)
+    assert seen["verify_checkpoint"][0] is True and seen["wallet_acme"] == 100, seen
 
 
 def test_cli_verify_only_and_usage(world, tmp_path):

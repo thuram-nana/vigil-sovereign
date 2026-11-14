@@ -101,9 +101,10 @@ _STAGED_ROTATION_MARKER = "spine/keys/owner.next.pub"
 # `sigil sign` writes the head and the floor outside the writer lock), backing off this long times the attempt.
 _CAPTURE_ATTEMPTS = 5
 _CAPTURE_BACKOFF_S = 0.2
-# The roll-forward journal of a restore that swaps a hard-pruned unit in: written (atomically, durably) BEFORE the
-# first swap and removed after the last, so a restore interrupted between its swaps is resumed (or, before any swap,
-# aborted) instead of leaving a home whose units come from two different points in time.
+# The roll-forward journal of a restore that swaps a hard-pruned unit in, or that replaces an interrupted restore:
+# written (atomically, durably) BEFORE the first swap and removed after the last, so a restore interrupted between its
+# swaps is resumed (or, before any swap, aborted) instead of leaving a home whose units come from two different points
+# in time.
 _JOURNAL_NAME = "restore-journal.json"
 _JOURNAL_SCHEMA = 1
 # Test-only fault-injection hook at the journaled swap's barriers (mirrors ``spine.store._crash_hook``). Production
@@ -859,14 +860,15 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
     _drop_staging(journal)
 
 
-def _new_journal(src: Path, staged: Path, placed: dict, units: "list[tuple[Path, Path]]", shape: dict) -> dict:
-    """The journal of a pruned-unit swap: every unit in swap order (a relocated archive first, then the spine, the
+def _new_journal(src: Path, staged: Path, placed: "dict | None", units: "list[tuple[Path, Path]]", shape: dict, *,
+                 pruned: bool) -> dict:
+    """The journal of a journaled swap: every unit in swap order (a relocated archive first, then the spine, the
     floor and the rest), each with the digest of the staged unit the restore verified and re-sealed."""
     from datetime import datetime, timezone
 
     from .spine.consistent_copy import unit_digest
     rows = []
-    if placed["unit"] is not None:
+    if placed is not None and placed["unit"] is not None:
         a_src, a_dst = placed["unit"]
         rows.append({"name": "archive", "src": str(a_src.resolve()), "dst": str(a_dst.resolve()),
                      "digest": unit_digest(a_src), "started": False, "done": False})
@@ -880,8 +882,9 @@ def _new_journal(src: Path, staged: Path, placed: dict, units: "list[tuple[Path,
     return {"schema": _JOURNAL_SCHEMA, "restore_id": os.urandom(8).hex(),
             "created": datetime.now(timezone.utc).isoformat(), "backup_sha256": h.hexdigest(),
             "staging": str(staged.resolve()),
-            "archive_staging": str(placed["cleanup"].resolve()) if placed["cleanup"] is not None else None,
-            "pruned": True, "head_sig_hash": shape.get("head_sig_hash"), "base_seq": shape.get("base_seq"),
+            "archive_staging": (str(placed["cleanup"].resolve()) if placed is not None and placed["cleanup"] is not None
+                                else None),
+            "pruned": pruned, "head_sig_hash": shape.get("head_sig_hash"), "base_seq": shape.get("base_seq"),
             "units": rows}
 
 
@@ -997,7 +1000,9 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     signed head, the floor, the owner public key(s) and the archive are verified as ONE unit by the real readers in a
     child process scoped to the staged home, holding back the private keys, the KV store and ``sigil.env`` until it
     verifies (:func:`_verify_staged_pruned_unit`); the archive is placed per :func:`_place_staged_archive`
-    (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). ``verify_only`` runs every check into a
+    (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). Its swap is JOURNALED (resumable, see
+    :func:`restore_resume`), and so is the swap of ANY restore that replaces (``--force``) an interrupted one: its
+    journal replaces the interrupted restore's before its first swap. ``verify_only`` runs every check into a
     throwaway staging dir and swaps nothing (``vault`` may then be None)."""
     if new_home is None and not verify_only:
         raise BackupError("a restore needs a target home")
@@ -1152,9 +1157,11 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             os.chmod(env_path, 0o600)
         units = _captured_swap_list(staged_dir, new_home, captured_units)
         new_home.mkdir(parents=True, exist_ok=True)
-        if pruned:
-            assert placed is not None
-            journal = _new_journal(src, staged_dir, placed, units, sh)
+        if pruned or stale_journal:
+            # JOURNALED: a hard-pruned unit always; and any restore that replaces an interrupted one, whose journal
+            # this one's replaces BEFORE the first swap — a crash from here on is resumed into THIS restore, never
+            # back into the one it replaced
+            journal = _new_journal(src, staged_dir, placed, units, sh, pruned=pruned)
             with _target_writers_quiet(new_home):
                 if stale_journal:
                     _drop_staging(_read_journal_or_empty(new_home))
@@ -1168,9 +1175,6 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured
             # home content intact), then drop the drained staging shell (its units were moved out).
             _swap_units(units)
-            if stale_journal:                                # a --force restore replaced an interrupted one
-                _drop_staging(_read_journal_or_empty(new_home))
-                (new_home / _JOURNAL_NAME).unlink(missing_ok=True)
             shutil.rmtree(staged_dir, ignore_errors=True)
             staged = None
         return result
