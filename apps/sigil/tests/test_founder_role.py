@@ -522,6 +522,67 @@ def test_owner_set_member_role_changes_a_founder_with_a_critical_audit(flag_on, 
     assert p.orgs.membership_role(u, org) == "founder"
 
 
+def test_a_refused_owner_verb_writes_no_audit_row_and_no_grant(flag_on, monkeypatch, tmp_path):
+    s = _cli_store(monkeypatch, tmp_path)
+    p, _ = _prov(store=s)
+    u, org, mate = _founder_and_mate(p)
+    other = _signup(p, email="gone@gone-founder.io", org="Gone")
+    p.orgs.revoke_org(other["org_id"])                              # an org that is no longer active
+
+    def rows():
+        return [r.payload for r in s.iter_records() if isinstance(r.payload, dict)
+                and r.payload.get("signal") in ("provision.audit", MEMBERSHIP_SIGNAL)]
+
+    before = rows()
+    for argv in (["org", "set-member-role", org, u, "org_admin", "--reason", " "],
+                 ["org", "set-member-role", org, u, "owner", "--reason", "x"],
+                 ["org", "set-member-role", other["org_id"], other["username"], "viewer", "--reason", "x"],
+                 ["org", "set-member-role", org, "cust_nobody", "viewer", "--reason", "x"],
+                 ["org", "set-member-role", org, u, "viewer", "--reason", "x"],
+                 ["org", "demote-founders", "--org", other["org_id"], "--reason", "x"],
+                 ["org", "demote-founders", "--org", "org_nosuchorg", "--reason", "x"],
+                 ["org", "demote-founders", "--reason", " "]):
+        assert _run_cli(argv) == 2, argv
+    assert rows() == before
+    assert p.orgs.membership_role(u, org) == "founder"
+
+
+def test_an_owner_change_applies_even_when_its_issued_at_is_older_than_the_current_grant(flag_on):
+    # The owner verbs sign strictly above the member's current grant, so a slow or skewed clock can never leave an
+    # owner change folded as stale (silently not applied) while its audit row says it happened.
+    from sigil.ui.provision import owner_demote_founders, owner_set_member_role
+    p, s = _prov()
+    a, b = _signup(p), _signup(p, email="b@beta-founder.io", org="Beta")
+    cur = next(m.issued_at for m in p.orgs.memberships(a["org_id"]) if m.username == a["username"])
+    r = owner_set_member_role(s, a["org_id"], a["username"], "org_admin", reason="support", issued_at=cur - 500.0)
+    assert r["previous_role"] == "founder" and p.orgs.membership_role(a["username"], a["org_id"]) == "org_admin"
+    assert owner_demote_founders(s, reason="rollback", issued_at=1.0) == {"demoted": 1, "orgs": 1}
+    assert p.orgs.membership_role(b["username"], b["org_id"]) == "org_admin"
+    assert owner_demote_founders(s, reason="rollback", issued_at=1.0) == {"demoted": 0, "orgs": 0}
+
+
+def test_demote_founders_skips_an_org_that_is_no_longer_active(flag_on, monkeypatch):
+    # An org revoke whose member cascade did not finish leaves a founder membership under an inactive org: the
+    # demote run leaves that org alone (no audit row, no grant) and still demotes every active org's founder.
+    from sigil.governor.orgs import OrgRegistry
+    from sigil.ui.provision import owner_demote_founders
+    p, s = _prov()
+    a, b = _signup(p), _signup(p, email="b@beta-founder.io", org="Beta")
+
+    def interrupted(self, org_id, username):
+        raise OSError("interrupted before the member cascade")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(OrgRegistry, "_append_revoked_membership", interrupted)
+        with pytest.raises(OSError):
+            p.orgs.revoke_org(a["org_id"])
+    assert p.orgs.org(a["org_id"]) is None
+    assert [m.role for m in p.orgs.memberships(a["org_id"])] == ["founder"]
+    assert owner_demote_founders(s, reason="rollback", issued_at=9e9) == {"demoted": 1, "orgs": 1}
+    assert p.orgs.membership_role(b["username"], b["org_id"]) == "org_admin"
+    assert [x["org_id"] for x in _audits(s, "owner_demote_founder")] == [b["org_id"]]
+
+
 def test_owner_set_member_role_audits_before_the_grant(flag_on, monkeypatch):
     from sigil.ui.provision import owner_set_member_role
     p, s = _prov()
