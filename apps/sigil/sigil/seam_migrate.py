@@ -213,12 +213,12 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
             plan["_ops"].append(("settlements", "marker", x["slug"], x["nonce"]))   # spine-settled: mark it too
         path, data = lease_files[x["slug"]]
         dst = seam_p / x["rel"]
-        have = _bytes_or_none(dst)
-        if have is None:
+        have_b = _bytes_or_none(dst)
+        if have_b is None:
             x["action"] = "copy"
             plan["_ops"].append(("leases", "copy", x["rel"], None))
             plan["_carried"].append(x["rel"])
-        elif have == data:
+        elif have_b == data:
             x["action"] = "identical"
             plan["_carried"].append(x["rel"])
         else:
@@ -246,14 +246,14 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
             if not isinstance(g, dict) or live.get(slug) is None or str(g.get("nonce")) != live[slug]:
                 c["skipped"] = c.get("skipped", 0) + 1  # only a live, unsettled launch's grant is carried
                 continue
-        have, data = _bytes_or_none(seam_p / rel), _read_bounded(path, 1 << 24)
-        if have is None:
+        have_b, data = _bytes_or_none(seam_p / rel), _read_bounded(path, 1 << 24)
+        if have_b is None:
             c["copied"] = c.get("copied", 0) + 1
             plan["_ops"].append((cls.name, "copy", rel, None))
             plan["_carried"].append(rel)
-        elif have == data or cls.rule == "union_files":
+        elif have_b == data or cls.rule == "union_files":
             c["identical"] = c.get("identical", 0) + 1  # a spent-token file: present is present
-            if have == data:
+            if have_b == data:
                 plan["_carried"].append(rel)
         else:
             _conflict(plan, cls.name, rel, "the seam holds a different copy of this owner-signed file"
@@ -288,14 +288,15 @@ def _completion_plan(spool: Any, expired: "list[dict]") -> "tuple[list, list]":
         return [], []
     found: "dict[tuple[str, str], list[str]]" = {}
     pending: "set[tuple[str, str]]" = set()
-    sp = Path(spool) if spool is not None else None
-    for sub in ("processed", "incoming", "working", "rejected") if sp is not None else ():
+    subs = ("processed", "incoming", "working", "rejected") if spool is not None else ()
+    for sub in subs:
+        d = Path(spool) / sub
         try:
-            names = sorted(f.name for f in (sp / sub).glob("*.json"))
+            names = sorted(f.name for f in d.glob("*.json"))
         except OSError:
             names = []
         for name in names:
-            t = _envelope_target(sp / sub / name)
+            t = _envelope_target(d / name)
             if t in want:
                 if sub == "processed":
                     found.setdefault(t, []).append(name)
@@ -535,7 +536,7 @@ def _publication_verifies(cls: str, seam_s: str, slug: str, owner_pub: str) -> b
     if cls == "eval_grants":
         from vigil_integration.live import eval_capability_grant as mod
     else:
-        from vigil_integration.live import eval_attestation as mod  # type: ignore[no-redef]
+        from vigil_integration.live import eval_attestation as mod
     obj = mod._read_published(seam_s, slug)
     if obj is None or not isinstance(obj.get("records"), list):
         return False
@@ -584,7 +585,7 @@ def run(store: Any, owner_key: Any, *, seam: Any, sources: "list[str]", spool: A
         journal = read_journal(seam_s)
     except ValueError as e:
         raise MigrateRefused(f"{e}; restore it from a backup or move it aside after checking it") from e
-    out = {"to": seam_s, "applied": bool(apply), "sources": []}
+    out: dict = {"to": seam_s, "applied": bool(apply), "sources": []}
     if not apply:
         code = 0
         for s in sources:
