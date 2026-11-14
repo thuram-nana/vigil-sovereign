@@ -254,7 +254,7 @@ def test_the_edges_own_error_answers_pass_through_untouched(nginx, edge, mode, c
 @pytest.mark.parametrize("edge", sorted(_CONFS))
 @pytest.mark.parametrize("on", ["primary", "backup"])
 def test_one_broken_connection_never_takes_the_only_edge_out(nginx, edge, on):
-    # Normally ONE edge runs, on either port (after the first swap it is on the backup port). A request it drops
+    # Normally ONE edge runs, on the primary (during a swap, on the backup port alone for seconds). A request it drops
     # (a handler fault, a slow answer) must cost that request only: nginx never marks a server unavailable, so the
     # next requests reach the same edge at once instead of nginx's "no live upstreams" for seconds.
     up = _Upstream("ok", "A", break_path="/api/customer/broken")
@@ -274,6 +274,29 @@ def test_one_broken_connection_never_takes_the_only_edge_out(nginx, edge, on):
 
 
 # ── the two ports: the edge swap ─────────────────────────────────────────────────────────────────────────────
+def _errors(port: int, edge: str, tmp_path) -> str:
+    return (tmp_path / f"nginx-{edge}-{port}" / "error.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("edge", sorted(_CONFS))
+def test_on_the_primary_nginx_logs_no_error_per_request(nginx, edge, tmp_path):
+    # Why the swap always ends on the primary port: there nginx's first try succeeds and its error log stays quiet.
+    # On the backup port alone every request first meets the refused primary, which nginx logs as an [error] line
+    # (burying real upstream faults, firing log-based alerts) and counts as one of its two tries.
+    up = _Upstream("ok", "A")
+    try:
+        port = nginx(edge, up.port)
+        assert all(_req(port, "GET", "/")[0] == 200 for _ in range(10))
+        assert "connect() failed" not in _errors(port, edge, tmp_path)
+    finally:
+        up.close()
+    up = _Upstream("ok", "B")
+    try:
+        port = nginx(edge, _free_port(), up.port)
+        assert all(_req(port, "GET", "/")[0] == 200 for _ in range(10))
+        assert _errors(port, edge, tmp_path).count("connect() failed (111") == 10
+    finally:
+        up.close()
 @pytest.mark.parametrize("edge", sorted(_CONFS))
 def test_the_primary_takes_every_request_while_it_is_up(nginx, edge):
     a, b = _Upstream("ok", "A"), _Upstream("ok", "B")

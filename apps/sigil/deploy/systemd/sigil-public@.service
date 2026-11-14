@@ -5,6 +5,7 @@
 # (deploy/reverse-proxy/vigil-public.nginx.conf) sends every request to 8735
 # while it accepts connections and to 8745 when it does not, so a new site can
 # start on the free port, prove /healthz, and only then replace the old one.
+# The swap goes out to 8745 and back, so the site rests on @8735.
 #
 # Everything else is sigil-public.service: the same env file, the same graceful
 # SIGTERM drain, the same hardening. Run EITHER the plain sigil-public.service
@@ -15,6 +16,7 @@
 # INSTALL (user-level, no root):
 #   cp deploy/systemd/sigil-public@.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
+#   export VIGIL_EDGE_SWAP_PUBLIC_URL=https://vigilguard.net        # where the proxy serves it
 #   tools/deploy/edge-swap.sh public        # replaces whichever public site runs now
 #
 # Logs → the journal:  journalctl --user -u 'sigil-public@*' -f

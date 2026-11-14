@@ -5,6 +5,7 @@
 # (deploy/reverse-proxy/vigil-customer.nginx.conf) sends every request to 8734
 # while it accepts connections and to 8744 when it does not, so a new edge can
 # start on the free port, prove /healthz, and only then replace the old one.
+# The swap goes out to 8744 and back, so the edge rests on @8734.
 #
 # Everything else is sigil-customer.service: the same env file (bind address,
 # allowlist, provisioner hop key), the same graceful SIGTERM drain, the same
@@ -15,6 +16,7 @@
 # INSTALL (user-level, no root):
 #   cp deploy/systemd/sigil-customer@.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
+#   export VIGIL_EDGE_SWAP_CUSTOMER_URL=https://app.vigilguard.net   # where the proxy serves it
 #   tools/deploy/edge-swap.sh customer      # replaces whichever customer edge runs now
 #
 # Logs → the journal:  journalctl --user -u 'sigil-customer@*' -f

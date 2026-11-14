@@ -111,4 +111,8 @@ def test_the_edge_swap_runbook_names_what_it_relies_on():
     for rel in ("tools/deploy/edge-swap.sh", "tools/deploy/edge_only.py",
                 "apps/sigil/deploy/systemd/sigil-customer@.service", "apps/sigil/deploy/systemd/sigil-public@.service"):
         assert (REPO / rel).is_file(), rel
+    # every setting the swap script reads (the proxy URLs are required) is one the runbook tells the operator about
+    settings = set(re.findall(r"VIGIL_EDGE_SWAP_[A-Z_]+", (REPO / "tools/deploy/edge-swap.sh").read_text("utf-8")))
+    assert {"VIGIL_EDGE_SWAP_CUSTOMER_URL", "VIGIL_EDGE_SWAP_PUBLIC_URL"} <= settings
+    assert not {s for s in settings if s not in SWAP}, settings
     assert "Cache Rules" in _item(5) and "purge" in _item(6).lower()   # §3.5 / §3.6 are those items

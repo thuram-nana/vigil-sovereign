@@ -31,15 +31,27 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   a sign-in code that was spent. The public site serves only files and waits up to 10 s. Stopping the old
   customer edge therefore takes up to 75 s while such an action is in flight; its units allow 90 s
   (`TimeoutStopSec`).
-- `tools/deploy/edge-swap.sh customer|public` starts the new instance on the free port, waits for its
-  `/healthz` (not `/readyz`, which is 503 while the cockpit restarts), waits `VIGIL_EDGE_SWAP_SETTLE_S` (3 s) with
-  both edges up and checks the new one still runs and answers, then stops the old one and leaves the new instance
-  enabled for boot. If the new edge does not answer within `VIGIL_EDGE_SWAP_HEALTH_S` (30 s), or stops answering
-  during the settle, it is stopped and the old one keeps serving.
+- `tools/deploy/edge-swap.sh customer|public` moves the edge in hops, out to the second port and back to the
+  first, so the edge always comes to rest on the FIRST port. There nginx's first try succeeds; on the second port
+  alone, every request would first meet the refused first port, and nginx would log a `connect() failed (111:
+  Connection refused)` line per request (and spend one of its two tries on it). Those lines appear only in the
+  seconds between the two hops of a swap. A swap that stopped half way leaves the edge on the second port; the
+  next run moves it to the first in one hop.
+- Each hop starts the new instance on the free port, waits for its `/healthz` (not `/readyz`, which is 503 while
+  the cockpit restarts), waits `VIGIL_EDGE_SWAP_SETTLE_S` (3 s) with both edges up and checks the new one still
+  runs and answers, then stops the old one and leaves the new instance enabled for boot. If the new edge does not
+  answer within `VIGIL_EDGE_SWAP_HEALTH_S` (30 s), or stops answering during the settle, it is stopped and the old
+  one keeps serving.
+- The script checks the reverse proxy itself, through the address it serves the edge at
+  (`VIGIL_EDGE_SWAP_CUSTOMER_URL` / `VIGIL_EDGE_SWAP_PUBLIC_URL`, required): before the first hop
+  `<url>/version.json` must name the build of the edge running now (so a wrong URL changes nothing), and after
+  each hop the build of the new edge. If the proxy does not reach the new edge — a vhost that still names one port,
+  or a Caddyfile — the script moves the edge back to the port the proxy reached and exits 1. The proxy has no
+  edge for those few seconds, as in a restart; nothing stays unreachable.
 
-The Caddy examples (`*.Caddyfile`) name one port only, so behind Caddy do not swap: an edge moved to the second
-port would never be reached. Restart the plain unit there instead (`systemctl --user restart
-sigil-customer.service`), which leaves the edge unreachable for a few seconds.
+The Caddy examples (`*.Caddyfile`) name one port only, so behind Caddy do not swap: the swap would find that Caddy
+does not reach the second port, move the edge back and exit 1. Restart the plain unit there instead
+(`systemctl --user restart sigil-customer.service`), which leaves the edge unreachable for a few seconds.
 
 ## One-time setup
 
@@ -47,13 +59,16 @@ sigil-customer.service`), which leaves the edge unreachable for a few seconds.
 cp apps/sigil/deploy/systemd/sigil-customer@.service apps/sigil/deploy/systemd/sigil-public@.service \
    ~/.config/systemd/user/
 systemctl --user daemon-reload
-sudo nginx -t && sudo systemctl reload nginx        # after installing the current vhosts
-tools/deploy/edge-swap.sh customer                  # moves sigil-customer.service to sigil-customer@8744
-tools/deploy/edge-swap.sh public                    # moves sigil-public.service to sigil-public@8745
+sudo nginx -t && sudo systemctl reload nginx        # after installing the current vhosts (both ports upstream)
+export VIGIL_EDGE_SWAP_CUSTOMER_URL=https://app.vigilguard.net
+export VIGIL_EDGE_SWAP_PUBLIC_URL=https://vigilguard.net
+tools/deploy/edge-swap.sh customer                  # moves sigil-customer.service to sigil-customer@8734
+tools/deploy/edge-swap.sh public                    # moves sigil-public.service to sigil-public@8735
 ```
 
-Run either the plain unit or the instances, never the plain unit and the first-port instance together. The
-full upgrade (`RELEASE-UPGRADE-ROLLBACK.md` §2.4) records and stops the instances like every other unit.
+The two `export` lines belong in the deploy user's shell profile, so every later swap has them. Run either the
+plain unit or the instances, never the plain unit and the first-port instance together. The full upgrade
+(`RELEASE-UPGRADE-ROLLBACK.md` §2.4) records and stops the instances like every other unit.
 
 ## Swap an edge
 
@@ -61,8 +76,9 @@ full upgrade (`RELEASE-UPGRADE-ROLLBACK.md` §2.4) records and stops the instanc
 tools/deploy/edge-swap.sh customer      # or: public
 ```
 
-It prints `edge-swap: <old> -> <new>` and exits 0, or names what stopped it and exits 1 with the old edge still
-serving. Open customer tabs see "A new version of VIGIL is available — Refresh" within ten minutes (sooner on
+It prints `edge-swap: <old> -> <new>` for each hop and `edge-swap: done — …` and exits 0, or names what stopped it
+and exits 1 with an edge serving where the proxy reaches it. It takes about ten seconds, longer while the old
+customer edge finishes a slow action (up to 75 s per hop). Open customer tabs see "A new version of VIGIL is available — Refresh" within ten minutes (sooner on
 focus). After a swap of the public site, purge its pages at Cloudflare (`AWS-DEPLOY.md` §3.6) — see Cloudflare
 below for what happens without it.
 
