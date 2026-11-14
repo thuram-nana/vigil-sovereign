@@ -686,9 +686,9 @@ pydantic-core==2.50.4 \
     --hash=sha256:fc04affef30be98c1f36f0c422a4061ef618fdc1dde79f5ad5458dd496fecffa \
     --hash=sha256:ffb616d8d55965839670301dc3bae3abacff560a7e137a89056058a8a9da4d96
     # via pydantic
-pytest-httpserver==1.2.0 \
-    --hash=sha256:749937892dbf909c8b703503b491be66fc24073e7988bf9b4d783af4f33da942 \
-    --hash=sha256:d07744ce2efaafa0575ed3081d416b999c773b09e84aa95065138bedc3e12352
+pytest-httpserver==1.2.1 \
+    --hash=sha256:3f440eebbaea9c7b26a4ee83bb331b7d25ade45f849150c040d64f9f15be91a0 \
+    --hash=sha256:fbad14449e1acfacf24a4d6e2de3211a8654597f03e296af4a833b51836467bc
     # via -r framework/v2/requirements.in
 pyyaml==6.0.3 \
     --hash=sha256:00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \
