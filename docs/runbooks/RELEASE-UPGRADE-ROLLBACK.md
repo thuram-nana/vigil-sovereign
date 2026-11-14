@@ -184,9 +184,11 @@ systemctl --user list-units --state=active,activating --plain --no-legend 'vigil
 
 Do not go on past a `STOP:` line from step 2: find out why that oneshot is still running first. Step 4 lists
 nothing but finished oneshots (`active exited`, e.g. `vigil-bringup.service`). Stopping
-`vigil-command` this way keeps its boot start, and every edge finishes the requests it already accepted
-before it exits; while they are down the nginx vhosts answer customers with a 503 "briefly unavailable"
-page. A system-level `aegis-saas-gateway@` instance, where one runs, is stopped and recorded the same way
+`vigil-command` this way keeps its boot start. The cockpit and the customer edge finish every request they
+already accepted before they exit — waiting up to 65 s, longer than the slowest provisioner action (an email
+sent inline) — and the cockpit's model gateway refuses new requests from the moment the cockpit stops; the
+public site drains within 10 s. While they are down the nginx vhosts answer customers with a 503 "briefly
+unavailable" page. A system-level `aegis-saas-gateway@` instance, where one runs, is stopped and recorded the same way
 with `sudo systemctl`.
 
 ### 2.5 Back up with the old build, after the writers stopped

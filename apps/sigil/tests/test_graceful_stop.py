@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,6 +87,7 @@ def _refused(port: int, within: float = 1.5) -> bool:
 # ── the customer edge: an accepted request (a slow provisioner hop) completes across SIGTERM ─────────────────
 class _SlowProvisioner(BaseHTTPRequestHandler):
     received = threading.Event()
+    delay = 3.0
 
     def log_message(self, *a):
         pass
@@ -93,7 +95,7 @@ class _SlowProvisioner(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         type(self).received.set()
-        time.sleep(3.0)
+        time.sleep(type(self).delay)
         body = json.dumps({"ok": True, "marker": "the-slow-answer"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -102,7 +104,11 @@ class _SlowProvisioner(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path):
+@pytest.mark.parametrize("delay", [3.0, graceful.DRAIN_DEADLINE_S + 2.0],
+                         ids=["quick", "slower-than-the-public-sites-deadline"])
+def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path, monkeypatch, delay):
+    # a reset email sent inline may take up to 60 s; the edge (and the cockpit) wait for it across a stop
+    monkeypatch.setattr(_SlowProvisioner, "delay", delay)
     _SlowProvisioner.received.clear()
     prov = ThreadingHTTPServer(("127.0.0.1", 0), _SlowProvisioner)
     threading.Thread(target=prov.serve_forever, daemon=True).start()
@@ -115,7 +121,7 @@ def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path):
         result: dict = {}
 
         def _client():
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=delay + 15)
             try:
                 c.request("POST", "/api/customer/recover/request", body=json.dumps({"email": "a@example.test"}),
                           headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}",
@@ -131,7 +137,7 @@ def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path):
         proc.send_signal(signal.SIGTERM)
         time.sleep(0.3)
         assert _refused(port), "a stopping edge must refuse new connections"
-        t.join(15)
+        t.join(delay + 15)
         assert result.get("status") == 200, result
         assert json.loads(result["body"])["marker"] == "the-slow-answer"
         assert proc.wait(15) == 0
@@ -193,14 +199,15 @@ def test_a_second_signal_ends_the_drain_at_once(tmp_path):
             proc.wait()
 
 
-# ── the cockpit: its SSE feed ends on SIGTERM and the process exits 0 well inside the deadline ───────────────
-def test_cockpit_ends_its_sse_feed_and_exits_cleanly_on_sigterm(tmp_path):
+# ── the cockpit: its SSE feeds end on SIGTERM and the process exits 0 well inside the deadline ──────────────
+@pytest.mark.parametrize("feed", ["/api/stream", "/api/sigil/hud"], ids=["spine", "hud"])
+def test_cockpit_ends_its_sse_feed_and_exits_cleanly_on_sigterm(tmp_path, feed):
     port = _free_port()
     proc = _spawn(tmp_path, ["serve", "--host", "127.0.0.1", "--port", str(port), "--token", "graceful-token"])
     try:
         _wait_listening(port, proc)
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
-        c.request("GET", "/api/stream?token=graceful-token", headers={"Host": f"127.0.0.1:{port}"})
+        c.request("GET", f"{feed}?token=graceful-token", headers={"Host": f"127.0.0.1:{port}"})
         r = c.getresponse()
         assert r.status == 200 and r.getheader("Content-Type") == "text/event-stream"
         assert r.fp.readline()                           # the feed is live (heartbeats)
@@ -310,13 +317,63 @@ def test_the_three_servers_are_graceful(cls):
     assert cls.block_on_close is False
 
 
-@pytest.mark.parametrize("unit", ["sigil-cockpit.service", "sigil-customer.service", "sigil-public.service"])
-def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit):
+@pytest.mark.parametrize("unit,deadline", [("sigil-cockpit.service", graceful.PROVISIONER_DRAIN_DEADLINE_S),
+                                           ("sigil-customer.service", graceful.PROVISIONER_DRAIN_DEADLINE_S),
+                                           ("sigil-public.service", graceful.DRAIN_DEADLINE_S)])
+def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit, deadline):
     text = (_SIGIL / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
     m = re.search(r"^TimeoutStopSec=(\d+)\s*$", text, re.M)
     assert m, f"{unit} sets no TimeoutStopSec"
-    assert graceful.DRAIN_DEADLINE_S + 5 <= int(m.group(1)), (unit, m.group(1))
+    assert deadline + 5 <= int(m.group(1)), (unit, m.group(1))
     assert re.search(r"^KillSignal=SIGTERM\s*$", text, re.M)
+
+
+def test_the_provisioner_drain_outwaits_every_action_the_customer_edge_waits_for():
+    from sigil.ui import custui
+    waits = [custui._HOP_TIMEOUT_S, *custui._SLOW_HOP_TIMEOUTS_S.values()]
+    assert graceful.PROVISIONER_DRAIN_DEADLINE_S > max(waits)
+    assert graceful.DRAIN_DEADLINE_S < graceful.PROVISIONER_DRAIN_DEADLINE_S
+
+
+def _captured_serve(monkeypatch, module) -> dict:
+    seen: dict = {}
+
+    def _capture(srv, **kw):
+        seen.update(kw, srv=srv)
+        srv.server_close()
+        return True
+    monkeypatch.setattr(module, "serve_until_signal", _capture)
+    return seen
+
+
+def test_the_customer_edge_stops_with_the_provisioner_deadline(tmp_path, monkeypatch):
+    from sigil.ui import custui
+    seen = _captured_serve(monkeypatch, custui)
+    (tmp_path / "s").mkdir()
+    custui.serve_customer(host="127.0.0.1", port=0, hop_key="k", provision_base="http://127.0.0.1:9",
+                          sessions_dir=str(tmp_path / "s"))
+    assert seen["drain_deadline_s"] == graceful.PROVISIONER_DRAIN_DEADLINE_S
+
+
+@pytest.mark.parametrize("gateway_on", [True, False], ids=["gateway", "no-gateway"])
+def test_the_cockpit_stops_with_the_provisioner_deadline_and_stops_its_gateway(tmp_path, monkeypatch, gateway_on):
+    from sigil import model_gateway
+    from sigil.spine.store import SpineStore
+    from sigil.ui import server
+    seen = _captured_serve(monkeypatch, server)
+    fake_gw = SimpleNamespace(server_address=("127.0.0.1", 0))
+    stopped: list = []
+    monkeypatch.setattr(model_gateway, "start_from_env", lambda: fake_gw if gateway_on else None)
+    monkeypatch.setattr(model_gateway, "stop", lambda gw, *, drain_s=None: stopped.append((gw, drain_s)))
+    spine = tmp_path / "spine.jsonl"
+    SpineStore(spine).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    server.serve(token="graceful-token", host="127.0.0.1", port=0, spine_path=spine)
+    assert seen["drain_deadline_s"] == graceful.PROVISIONER_DRAIN_DEADLINE_S
+    if not gateway_on:
+        assert seen["on_stop"] is None
+        return
+    seen["on_stop"](seen["drain_deadline_s"])
+    assert stopped == [(fake_gw, graceful.PROVISIONER_DRAIN_DEADLINE_S)]
 
 
 class _Crashing(_Srv):
@@ -372,3 +429,53 @@ def test_an_idle_server_stops_promptly(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# ── a companion server stops with the server, from the same moment and within the same deadline ─────────────────
+def test_the_model_gateway_refuses_new_requests_from_the_moment_the_cockpit_stops(tmp_path):
+    from vigil_core import generate_keypair
+
+    from sigil import model_gateway
+    cfg = model_gateway.GatewayConfig(api_key="sk-test-not-used", owner_pubkey=generate_keypair().public_key_b64,
+                                      meter_dir=tmp_path / "meter")
+    gw_srv, _t = model_gateway.start(cfg)
+    gw_port = gw_srv.server_address[1]
+    srv = _Srv(("127.0.0.1", 0), _Hold)
+    stop = threading.Event()
+    done = threading.Event()
+    threading.Thread(target=lambda: (graceful.serve_until_signal(
+        srv, stop=stop, log=lambda _m: None, drain_deadline_s=10,
+        on_stop=lambda d: model_gateway.stop(gw_srv, drain_s=d)), done.set()), daemon=True).start()
+    t, out = _held_request(srv)                          # the cockpit is draining a request ...
+    stop.set()
+    assert _refused(gw_port, within=3), "the gateway must stop accepting when the cockpit's stop begins"
+    assert not done.is_set() and out == {}               # ... while that request is still in flight
+    _Hold.release.set()
+    assert done.wait(10) and out == {"status": 204}
+    t.join(5)
+    assert model_gateway.GrantMeter(tmp_path / "meter")._live_boot() is None   # its meter directory let go
+
+
+def test_a_companion_that_fails_never_stops_the_servers_own_stop():
+    srv = _Srv(("127.0.0.1", 0), _Hold)
+    stop = threading.Event()
+    stop.set()
+
+    def _boom(_d):
+        raise RuntimeError("companion failed")
+    logs: list = []
+    assert graceful.serve_until_signal(srv, stop=stop, log=logs.append, on_stop=_boom) is True
+    assert _refused(srv.server_address[1])
+    assert any("companion stop failed: RuntimeError: companion failed" in m for m in logs), logs
+
+
+def test_a_companion_still_running_at_the_deadline_is_not_waited_for_past_it():
+    srv = _Srv(("127.0.0.1", 0), _Hold)
+    stop = threading.Event()
+    stop.set()
+    hold = threading.Event()
+    t0 = time.monotonic()
+    assert graceful.serve_until_signal(srv, stop=stop, log=lambda _m: None, drain_deadline_s=0.5,
+                                       on_stop=lambda _d: hold.wait(30)) is False
+    assert time.monotonic() - t0 < 3
+    hold.set()

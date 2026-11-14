@@ -52,7 +52,7 @@ from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
 from ..spine.verify import verify_record
 from . import actions as _actions
-from .graceful import GracefulMixin, serve_until_signal
+from .graceful import PROVISIONER_DRAIN_DEADLINE_S, GracefulMixin, serve_until_signal
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -1937,6 +1937,9 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     gw = model_gateway.start_from_env()
     if gw is not None:
         print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
-    # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted, the requests in flight finish (bounded by
-    # graceful.DRAIN_DEADLINE_S), then server_close writes any pending failed-login counts (FailedAuthnCoalescer).
-    serve_until_signal(srv)
+    # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted — here or at the model gateway — and the requests
+    # in flight finish within graceful.PROVISIONER_DRAIN_DEADLINE_S (longer than any action the customer edge waits
+    # for), the gateway's metered as they finish; then server_close writes any pending failed-login counts
+    # (FailedAuthnCoalescer).
+    serve_until_signal(srv, drain_deadline_s=PROVISIONER_DRAIN_DEADLINE_S,
+                       on_stop=None if gw is None else (lambda d: model_gateway.stop(gw, drain_s=d)))

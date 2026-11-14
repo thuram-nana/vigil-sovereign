@@ -1682,12 +1682,13 @@ class _Server(ThreadingHTTPServer):
             return
         self._drain_and_close()
 
-    def _drain_and_close(self) -> None:
-        """Stop serving, wait (up to ``shutdown_drain_s``) for the requests in flight to be metered and for every
-        record a failed write still owes to be written, and only then give up the meter directory. A connection that
-        has not started its request is cut, and one that starts after this point is refused. If a request is still
-        running, or a record still owed, at the deadline, the meter lock is KEPT (and the record retried) until the
-        process exits, so a settle step can never mistake a live request for a crash's leftover."""
+    def _drain_and_close(self, drain_s: Optional[float] = None) -> None:
+        """Stop serving, wait (up to ``drain_s``, default ``shutdown_drain_s``) for the requests in flight to be
+        metered and for every record a failed write still owes to be written, and only then give up the meter
+        directory. A connection that has not started its request is cut, and one that starts after this point is
+        refused. If a request is still running, or a record still owed, at the deadline, the meter lock is KEPT (and
+        the record retried) until the process exits, so a settle step can never mistake a live request for a
+        crash's leftover."""
         super().server_close()
         with self._in_flight_cond:
             self._stopping = True
@@ -1696,7 +1697,7 @@ class _Server(ThreadingHTTPServer):
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
-        deadline = time.monotonic() + self.gateway.config.shutdown_drain_s
+        deadline = time.monotonic() + (self.gateway.config.shutdown_drain_s if drain_s is None else drain_s)
         with self._in_flight_cond:
             while self._in_flight > 0:
                 left = deadline - time.monotonic()
@@ -1742,6 +1743,18 @@ def start(config: GatewayConfig, *, host: str = "127.0.0.1", port: int = 0) -> "
                          daemon=True)
     t.start()
     return server, t
+
+
+def stop(server: _Server, *, drain_s: Optional[float] = None) -> None:
+    """Stop a running gateway: it refuses new requests at once, the requests in flight are metered as they finish
+    (waited for up to ``drain_s``, default the configured ``shutdown_drain_s``), and the meter directory is given up
+    — or kept until the process exits while a request is still running (:meth:`_Server._drain_and_close`). The
+    cockpit calls this when it stops, so the gateway stops accepting at the same moment as the cockpit does."""
+    server.shutdown()
+    server._drain_and_close(drain_s)
+    with _RUNNING_LOCK:
+        for k in [k for k, v in _RUNNING.items() if v is server]:
+            del _RUNNING[k]
 
 
 # ---------------------------------------------------------------------------------------------------------------

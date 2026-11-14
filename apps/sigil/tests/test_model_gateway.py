@@ -195,7 +195,8 @@ def _start(upstream, meter_dir, clock=None, **kw):
     cfg = gw.GatewayConfig(api_key=PROVIDER_KEY, owner_pubkey=OWNER.public_key_b64, meter_dir=meter_dir,
                            upstream=f"http://127.0.0.1:{upstream.server_address[1]}", opener=NO_PROXY,
                            clock=lambda: clock["now"], **kw)
-    server, _t = gw.start(cfg)
+    server, t = gw.start(cfg)
+    server.serve_thread = t
     server.clock = clock
     server.url = f"http://127.0.0.1:{server.server_address[1]}"
     return server
@@ -1213,6 +1214,29 @@ def test_stopping_the_gateway_waits_for_requests_in_flight(upstream, tmp_path):
     t = gw.GrantMeter(d).close(g.meter_id, now=NOW)                    # now the gateway is gone and nothing is open
     assert (t.cost_nano, t.unconfirmed_nano, t.closed) == (USAGE_COST, 0, True)
     assert [ln["kind"] for ln in _lines(d, g)] == ["open", "usage", "close"]
+
+
+def test_a_bounded_stop_refuses_new_requests_and_returns_at_its_bound(upstream, tmp_path):
+    # the cockpit stops its gateway within its own drain deadline (gw.stop(drain_s=...)), not the configured 660 s
+    d = tmp_path / "meter"
+    server = _start(upstream, d)
+    gw._RUNNING["test-bounded-stop"] = server
+    upstream.delay = 3.0
+    g = _grant()
+    flying = threading.Thread(target=_call, args=(server, BODY, _tok(g)), daemon=True)
+    flying.start()
+    assert _wait(lambda: server.gateway.meter.pending(g.meter_id) > 0)
+    t0 = time.monotonic()
+    gw.stop(server, drain_s=0.5)
+    assert time.monotonic() - t0 < 2.0                                 # returned at its bound, not after 660 s
+    assert "test-bounded-stop" not in gw._RUNNING                       # a later start_from_env starts afresh
+    server.serve_thread.join(2)
+    assert not server.serve_thread.is_alive()                          # its serve loop has ended
+    with pytest.raises(OSError):                                       # nothing listens any more
+        socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=1).close()
+    with pytest.raises(gw.MeterBusy):                                  # the request still running keeps the lock
+        gw.GrantMeter(d).close(g.meter_id, now=NOW)
+    flying.join(10)
 
 
 def test_a_crashed_gateways_leftovers_never_block_a_settle(upstream, tmp_path, monkeypatch):

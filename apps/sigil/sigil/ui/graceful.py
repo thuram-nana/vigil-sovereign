@@ -5,10 +5,12 @@ On SIGTERM (what `systemctl stop|restart` sends) or SIGINT the server:
   1. sets ``server.stopping`` — every long-lived stream loop (the cockpit's SSE feeds) checks it and ends;
   2. stops accepting and closes its listening socket, so a new connection is refused at once (the reverse proxy
      in front answers it) instead of queueing behind a server that is going away;
-  3. waits for every request already accepted to finish, up to :data:`DRAIN_DEADLINE_S` — shorter than the
-     units' ``TimeoutStopSec=20``, so a drain always ends before systemd would SIGKILL;
+  3. waits for every request already accepted to finish, up to its drain deadline — :data:`DRAIN_DEADLINE_S` for
+     the public site, :data:`PROVISIONER_DRAIN_DEADLINE_S` for the cockpit and the customer edge, each shorter
+     than its unit's ``TimeoutStopSec``, so a drain always ends before systemd would SIGKILL;
   4. closes the server (the cockpit writes its pending failed-login counts there) and returns.
-A second signal during the drain ends the wait at once.
+A second signal during the drain ends the wait at once. A companion server in the same process (the cockpit's
+model gateway) is stopped from the same moment and within the same deadline (``on_stop``).
 
 Request threads stay daemon threads, so a request still running at the deadline cannot hold the process past it.
 stdlib only (FATAL-2).
@@ -23,9 +25,23 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-#: How long a stopping server waits for accepted requests to finish. The sigil-cockpit, sigil-customer and
-#: sigil-public units allow TimeoutStopSec=20 (a test pins DRAIN_DEADLINE_S below every one of them).
+#: How long the public site waits for accepted requests to finish (sigil-public allows TimeoutStopSec=20; a test
+#: pins the deadline below it).
 DRAIN_DEADLINE_S = 10.0
+#: How long the cockpit and the customer edge wait for accepted requests to finish: longer than the slowest
+#: edge→cockpit action the customer edge waits for (custui._SLOW_HOP_TIMEOUTS_S — an email sent inline, 60 s), so
+#: a stop never ends a request whose answer the edge, and so the customer, is still waiting for. A stop with
+#: nothing in flight is still immediate. sigil-cockpit and sigil-customer allow TimeoutStopSec=75 (a test pins
+#: both relations).
+PROVISIONER_DRAIN_DEADLINE_S = 65.0
+
+
+def _say(log: Callable[[str], None], msg: str) -> None:
+    """Write a log line; one that cannot be written (a closed stdout) never interrupts the stop."""
+    try:
+        log(msg)
+    except Exception:  # noqa: BLE001 — the stop must complete whatever happened to the log stream
+        pass
 
 
 class GracefulMixin:
@@ -110,12 +126,6 @@ def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
     True when every accepted request finished in time. Call it from a thread other than the one inside
     ``serve_forever`` (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has
     already ended. A log line that cannot be written (a closed stdout) never interrupts the stop."""
-    def _say(msg: str) -> None:
-        try:
-            log(msg)
-        except Exception:  # noqa: BLE001 — the stop must complete whatever happened to the log stream
-            pass
-
     stopping = getattr(srv, "stopping", None)
     if stopping is not None:
         stopping.set()
@@ -126,18 +136,21 @@ def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
         return True                     # a server without GracefulMixin keeps no count: nothing to wait for
     n = srv.inflight()
     if n:
-        _say(f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
+        _say(log, f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
     drained = srv.wait_drained(drain_deadline_s, abort=abort)
     if not drained:
-        _say(f"  stopping: {srv.inflight()} request(s) still running at the deadline; closing")
+        _say(log, f"  stopping: {srv.inflight()} request(s) still running at the deadline; closing")
     return drained
 
 
 def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
-                       stop: Optional[threading.Event] = None, log: Callable[[str], None] = print) -> bool:
+                       stop: Optional[threading.Event] = None, log: Callable[[str], None] = print,
+                       on_stop: Optional[Callable[[float], None]] = None) -> bool:
     """Serve ``srv`` until SIGTERM/SIGINT (or ``stop`` is set), then stop gracefully (:func:`graceful_stop`) and
-    close it. Signal handlers are installed only on the main thread and are restored on return. Returns True
-    when the drain finished within the deadline."""
+    close it. ``on_stop(drain_deadline_s)`` runs on its own thread from the moment the stop begins — a companion
+    server in this process stops accepting at the same time as ``srv`` and drains in the same window — and is
+    waited for until the deadline (or a second signal). Signal handlers are installed only on the main thread and
+    are restored on return. Returns True when the drain (and ``on_stop``) finished within the deadline."""
     stop = stop if stop is not None else threading.Event()
     force = threading.Event()
 
@@ -169,6 +182,14 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
     worker = threading.Thread(target=_serve, name="sigil-http-serve", daemon=True)
     worker.start()
     drained = True
+    companion: Optional[threading.Thread] = None
+
+    def _companion() -> None:
+        try:
+            on_stop(drain_deadline_s)   # type: ignore[misc]  # set whenever this thread is started
+        except Exception as exc:  # noqa: BLE001 — a companion's failure never stops this server's own drain
+            _say(log, f"  stopping: the companion stop failed: {type(exc).__name__}: {exc}")
+
     try:
         while not stop.wait(0.5):
             if not worker.is_alive():   # serve_forever ended on its own (it failed): stop and report it
@@ -176,6 +197,10 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
     except KeyboardInterrupt:           # SIGINT before the handler was installed
         stop.set()
     finally:
+        end = time.monotonic() + max(0.0, drain_deadline_s)
+        if on_stop is not None:
+            companion = threading.Thread(target=_companion, name="sigil-http-stop-companion", daemon=True)
+            companion.start()
         try:
             drained = graceful_stop(srv, drain_deadline_s=drain_deadline_s, abort=force, log=log,
                                     serving=worker.is_alive())
@@ -183,6 +208,9 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
             try:
                 srv.server_close()
             finally:
+                if companion is not None:
+                    companion.join(0 if force.is_set() else max(0.0, end - time.monotonic()))
+                    drained = drained and not companion.is_alive()
                 worker.join(timeout=5)
                 for sig, h in previous.items():
                     try:

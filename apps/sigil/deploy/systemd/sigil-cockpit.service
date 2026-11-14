@@ -50,7 +50,9 @@ ExecStart=%h/.sigil/venv/bin/sigil serve --host ${SIGIL_UI_BIND} --port ${SIGIL_
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=20
+# A stop finishes the requests in flight first: up to 65 s, longer than the slowest provisioner action the
+# customer edge waits for (sigil/ui/graceful.py PROVISIONER_DRAIN_DEADLINE_S). An idle stop is immediate.
+TimeoutStopSec=75
 
 # --- hardening (least privilege without cutting off what the cockpit needs) --
 NoNewPrivileges=yes

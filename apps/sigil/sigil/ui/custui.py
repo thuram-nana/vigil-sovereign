@@ -44,7 +44,7 @@ from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
-from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
+from .graceful import PROVISIONER_DRAIN_DEADLINE_S, GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
@@ -905,4 +905,5 @@ def serve_customer(*, host: str = "127.0.0.1", port=None, hop_key=None, provisio
              else "hop key UNSET → provisioning FAILS CLOSED (set VIGIL_PROVISION_HOP_KEY)")
     print(f"  vigil customer edge on http://{host}:{bound_port}  (keyless; cookie=vigil_customer_session; "
           f"provisioner={srv.provision_base}; {keyed})")
-    serve_until_signal(srv)          # SIGTERM/SIGINT: finish the requests in flight, then exit (ui/graceful)
+    # SIGTERM/SIGINT: finish the requests in flight — a slow provisioner action included — then exit (ui/graceful)
+    serve_until_signal(srv, drain_deadline_s=PROVISIONER_DRAIN_DEADLINE_S)
