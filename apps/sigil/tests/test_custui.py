@@ -91,7 +91,8 @@ def _stack(tmp_path, monkeypatch):
     # the passkey sign-count floor, else their persistent markers leak stale state across test runs (a stale
     # (username,step) or a stale sign-count floor would spuriously refuse a fresh enroll/login).
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
-                 "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR"):
+                 "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR", "CHECKOUT_RATELIMIT_DIR",
+                 "PENDING_PLAN_CHECKOUT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     path = tempfile.mktemp(suffix=".jsonl")
     SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
@@ -317,6 +318,87 @@ def test_dead_provisioner_is_502(tmp_path, monkeypatch):
     try:
         c, r = _post(_opener(), ep, "/api/customer/signup/request", {"email": "x@acme.com"})
         assert c == 502, (c, r)                                   # edge stays up; never crashes or mints
+    finally:
+        edge.shutdown()
+
+
+def test_an_edge_without_a_hop_key_refuses_every_verb_cleanly(tmp_path, monkeypatch):
+    """Audit E1c: an edge with a BLANK hop key used to surface `body_binding`'s ValueError — a 400 on POST and, on
+    GET (no catch-all there), a traceback and a DROPPED connection. Both verbs now get the cockpit's own clean 403
+    over a connection that answers, and nothing is stamped or sent."""
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "nokey@acme.com"})[1]["dev_token"]
+        assert _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "N"})[0] == 200
+        jar = next(h for h in op.handlers if hasattr(h, "cookiejar")).cookiejar
+        cookie = "; ".join(f"{c.name}={c.value}" for c in jar)
+        edge.hop_key = ""                                         # the edge lost its hop key
+        assert _post(op, ep, "/api/customer/login", {"email": "nokey@acme.com", "password": "customer-pw-1"}) \
+            == (403, {"error": "provision denied (hop)"})
+        conn = http.client.HTTPConnection("127.0.0.1", ep, timeout=5)
+        try:
+            conn.request("GET", "/api/customer/billing", headers={"Cookie": cookie})
+            r = conn.getresponse()                                # (main: RemoteDisconnected)
+            assert (r.status, json.loads(r.read())) == (403, {"error": "provision denied (hop)"})
+        finally:
+            conn.close()
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def _bad_provisioner(reply: bytes):
+    """A loopback stand-in for the cockpit that answers every hop with 200 + ``reply`` VERBATIM (raw bytes, so
+    the reply can lie about its length — a truncated body — or not be JSON at all)."""
+    import socketserver
+
+    class _H(socketserver.StreamRequestHandler):
+        def handle(self):
+            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                pass                                              # (headers; the body is never read)
+            self.wfile.write(reply)
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+_UNREADABLE = (502, {"error": "provisioner reply unreadable"})
+
+
+@pytest.mark.parametrize("reply,want", [
+    (b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\n<html></html>", _UNREADABLE),
+    (b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"ok\": tr", _UNREADABLE),
+    (b"HTTP/1.0 403 Forbidden\r\nContent-Length: 400\r\n\r\n{\"error\": \"pro",          # a truncated REFUSAL keeps
+     (403, {"error": "provision error"})),                                                  # its status
+], ids=["not_json", "truncated", "truncated_refusal"])
+def test_an_unreadable_provisioner_reply_is_one_clean_answer_on_every_verb(tmp_path, monkeypatch, reply, want):
+    """Audit E1c (root cause): a hop reply the edge cannot read used to raise out of `_provision` — a 400 on POST
+    and, on GET, a handler traceback and a DROPPED connection. Both verbs now answer the same clean status."""
+    monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
+    bad, bport = _bad_provisioner(reply)
+    edge, ep = _edge(f"http://127.0.0.1:{bport}", str(tmp_path / "custsessions"))
+    try:
+        assert _post(_opener(), ep, "/api/customer/login", {"email": "x@acme.com", "password": "pw"}) == want
+        sid = edge.sessions.create("cust_reader", "customer", org_id="org_reader")
+        assert _get(_opener(), ep, "/api/customer/billing", cookie=f"{CUSTOMER_COOKIE}={sid}") == want
+    finally:
+        edge.shutdown(); bad.shutdown()
+
+
+def test_an_unexpected_get_fault_answers_a_clean_500(tmp_path, monkeypatch):
+    """Any other GET-handler fault gets do_POST's catch-all treatment: one JSON error, no internals, never a
+    dropped connection."""
+    from sigil.ui.custui import CustomerHandler
+
+    def boom(self, action):
+        raise RuntimeError("internal detail that must not leak")
+    monkeypatch.setattr(CustomerHandler, "_customer_read_relay", boom)
+    edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "custsessions"))
+    try:
+        assert _get(_opener(), ep, "/api/customer/billing") == (500, {"error": "request failed"})
     finally:
         edge.shutdown()
 

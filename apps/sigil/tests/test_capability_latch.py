@@ -15,7 +15,7 @@ import pytest
 from sigil.governor.authn import signed_payload
 from sigil.governor.capability import SIGNAL, CapabilityGate
 from sigil.reuse import generate_keypair
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -166,12 +166,12 @@ def test_fold_split_prefix_seed_is_load_bearing(monkeypatch):
     assert split == full is False, "fold(prefix) ∘ fold(live) must equal the full genesis scan"
 
 
-def test_fold_foreign_pubkey_snapshot_is_bypassed(monkeypatch):
+def test_fold_pruned_snapshot_under_a_foreign_anchor_fails_closed(monkeypatch):
     s = _store()
-    _cg(s).disable("gesture")                         # genesis truth: disabled
+    _cg(s).disable("gesture")
     assert _cg(s)._scan_enabled("gesture") is False
     other = generate_keypair().public_key_b64
-    poisoned = SnapshotState(base_seq=99, capability_latch=[["gesture", True]], trusted_pubkey=other)
+    poisoned = SnapshotState(base_seq=99, snapshot_seq=98, capability_latch=[["gesture", True]], trusted_pubkey=other)
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
-    assert _cg(s)._scan_enabled("gesture") is False, \
-        "a snapshot under a foreign anchor is bypassed; its (enabled) latch cannot re-enable the capability"
+    with pytest.raises(SnapshotError, match="does not succeed"):   # never re-enabled by the foreign latch
+        _cg(s)._scan_enabled("gesture")

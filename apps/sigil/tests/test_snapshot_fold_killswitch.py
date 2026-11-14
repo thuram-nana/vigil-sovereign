@@ -19,9 +19,11 @@ Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snaps
 import itertools
 import tempfile
 
+import pytest
+
 from sigil.governor.killswitch import SIGNAL, KillSwitch
 from sigil.reuse import generate_keypair
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -149,19 +151,16 @@ def test_split_live_window_overrides_seed(monkeypatch):
 # ---------------------------------------------------------------------------------------------------
 # (C) PUBKEY-DEPENDENCE — a snapshot folded under a foreign anchor is BYPASSED (genesis rescan).
 # ---------------------------------------------------------------------------------------------------
-def test_foreign_pubkey_snapshot_is_bypassed(monkeypatch):
-    """The latch is pubkey-dependent (a release un-halts only under the anchor it verifies against). A
-    snapshot folded under a DIFFERENT owner pubkey MUST NOT be trusted: bypass -> full genesis rescan."""
+def test_a_pruned_snapshot_under_a_foreign_anchor_fails_closed(monkeypatch):
+    """The latch is pubkey-dependent (a release un-halts only under the anchor it verifies against). A PRUNED
+    snapshot folded under a key the reader's succession does not reach is never trusted — and never replaced by
+    an empty start over the deleted prefix either (that would drop a pruned engage): the read RAISES."""
     s = _store()
     writer = _ks(s)
-    writer.engage(reason="halt")         # seq0 engaged -> True (genesis truth: engaged)
-    full = _ks(s)._scan_engaged()
-    assert full is True
-
-    # a hostile/rotated-anchor snapshot claims engaged=False under a FOREIGN pubkey.
+    writer.engage(reason="halt")
+    assert _ks(s)._scan_engaged() is True
     other = generate_keypair().public_key_b64
-    poisoned = SnapshotState(base_seq=99, killswitch_engaged=False, trusted_pubkey=other)
+    poisoned = SnapshotState(base_seq=99, snapshot_seq=98, killswitch_engaged=False, trusted_pubkey=other)
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
-    # reader anchor (OWNER_PUB) != poisoned.trusted_pubkey -> BYPASS -> genesis rescan -> real verdict.
-    assert _ks(s)._scan_engaged() is True, \
-        "a snapshot under a foreign anchor is bypassed; the folded (False) latch cannot un-halt the mesh"
+    with pytest.raises(SnapshotError, match="does not succeed"):
+        _ks(s)._scan_engaged()

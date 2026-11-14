@@ -47,6 +47,10 @@ class _Stripe:
                 "amount_total": li["unit_amount"], "currency": li["currency"],
                 "url": f"https://checkout.stripe.com/c/pay/{sid}", "status": "open", "payment_status": "unpaid",
                 "created": 1000}
+        if "expires_at" in params:                     # Stripe echoes the session bound it was asked for
+            sess["expires_at"] = params["expires_at"]
+        if "payment_method_types" in params:           # ... and the payment methods it was limited to
+            sess["payment_method_types"] = list(params["payment_method_types"])
         sess.update(self.override)
         self.sessions[sid] = sess
         return copy.deepcopy(sess)
@@ -162,6 +166,34 @@ def test_a_plan_checkout_is_a_subscription_recurring_in_days_with_subscription_m
     assert "payment_intent_data" not in params
 
 
+def test_a_plan_checkout_is_card_only_and_a_topup_payload_is_unchanged():
+    """A plan session is limited to card, so its first invoice is settled when the checkout completes; a top-up
+    session's payload does not change."""
+    from sigil.governor.stripe_egress import encode_form
+    api = _Stripe()
+    p = _provider(api)
+    _checkout(p, price="price_pro", payment_plan="price_pro", session_minutes=30)
+    _checkout(p, nonce="n2")
+    (plan, _k), (topup, _k2) = api.calls
+    assert plan["payment_method_types"] == ["card"]
+    assert ("payment_method_types[0]", "card") in encode_form(plan)
+    assert "payment_method_types" not in topup
+
+
+@pytest.mark.parametrize("echo", ["absent", [], ["card", "us_bank_account"], ["us_bank_account"], "card", ("card",)])
+def test_a_plan_session_that_does_not_confirm_card_only_is_refused(echo):
+    if echo == "absent":
+        api = _Stripe()
+        api.create = (lambda real: (lambda params, *, idempotency_key: {
+            k: v for k, v in real(params, idempotency_key=idempotency_key).items()
+            if k != "payment_method_types"}))(api.create)
+    else:
+        api = _Stripe(payment_method_types=echo)
+    with pytest.raises(UnsupportedCapability, match="card-only"):
+        _checkout(_provider(api), price="price_pro", payment_plan="price_pro")
+    assert _checkout(_provider(_Stripe(payment_method_types=echo)), nonce="n2").hosted_link   # a top-up is not checked
+
+
 def test_the_status_is_appended_where_the_customer_app_reads_it():
     for url, ok in (("https://app.example.test/#/billing/return",
                      "https://app.example.test/#/billing/return?status=successful"),
@@ -241,3 +273,51 @@ def test_checkout_then_the_paid_session_event_mints_for_the_bound_org():
     send("invoice.paid", "in_1", "evt_2")
     sub = subs.subscription("acme")
     assert sub is not None and sub.plan_id == "pro" and sub.period_end - sub.period_start == _PERIODS["price_pro"]
+
+
+# ---- the bounded plan session (the provisioner's pending plan-checkout record outlives it) ---------------------------
+def test_a_bounded_session_sets_expires_at_and_an_unbounded_one_sends_none(monkeypatch):
+    from sigil.governor import billing
+    monkeypatch.setattr(billing.time, "time", lambda: 1_000_000.5)
+    api = _Stripe()
+    p = _provider(api)
+    _checkout(p, price="price_pro", payment_plan="price_pro", session_minutes=30)
+    _checkout(p, price="price_pro", payment_plan="price_pro", session_minutes=1440, nonce="n2")
+    _checkout(p, nonce="n3")
+    (bounded, _k), (ceiling, _k2), (topup, _k3) = api.calls
+    # 30 min plus a little slack for our clock reading before Stripe creates the session; never past 24 h
+    assert bounded["expires_at"] == 1_000_000 + 30 * 60 + 60
+    assert ceiling["expires_at"] == 1_000_000 + 1440 * 60
+    assert "expires_at" not in topup                                      # no bound asked: the payload is unchanged
+
+
+@pytest.mark.parametrize("bad", [0, 29, 1441, True, "30", 30.0, -30])
+def test_a_session_outside_stripes_range_is_refused_before_calling_stripe(bad):
+    api = _Stripe()
+    with pytest.raises(ValueError, match="session_minutes"):
+        _checkout(_provider(api), price="price_pro", payment_plan="price_pro", session_minutes=bad)
+    assert api.calls == []
+
+
+@pytest.mark.parametrize("echo", [None, 0, True, "x", "same+1"])
+def test_a_session_that_does_not_confirm_the_bound_is_refused(monkeypatch, echo):
+    from sigil.governor import billing
+    monkeypatch.setattr(billing.time, "time", lambda: 1_000_000.0)
+    want = 1_000_000 + 30 * 60 + 60
+    api = _Stripe(expires_at=(want + 1 if echo == "same+1" else echo))
+    if echo is None:
+        api = _Stripe()
+        api.create = (lambda real: (lambda params, *, idempotency_key: {
+            k: v for k, v in real(params, idempotency_key=idempotency_key).items() if k != "expires_at"}))(api.create)
+    with pytest.raises(UnsupportedCapability, match="bounded payment session"):
+        _checkout(_provider(api), price="price_pro", payment_plan="price_pro", session_minutes=30)
+    ok = _Stripe()
+    assert _checkout(_provider(ok), price="price_pro", payment_plan="price_pro", session_minutes=30).hosted_link
+
+
+@pytest.mark.parametrize("resp", [None, ["checkout.session"], "cs_test_1x"])
+def test_a_bounded_session_create_that_returns_no_session_is_refused(resp):
+    api = _Stripe()
+    api.create = lambda params, *, idempotency_key: resp
+    with pytest.raises(UnsupportedCapability):
+        _checkout(_provider(api), price="price_pro", payment_plan="price_pro", session_minutes=30)

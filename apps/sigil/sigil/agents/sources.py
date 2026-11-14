@@ -26,11 +26,63 @@ UA = "SIGIL-SCHOLAR/1.0 (authorized owner research)"
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 _SCRIPT = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.S | re.I)
+# The parts of _SCRIPT that _strip_scripts measures separately. _SAME_NAME applies _SCRIPT's own closing
+# rule (the case-insensitive backreference) to an opener name and a candidate closer name.
+_SCRIPT_HEAD = re.compile(r"<(script|style)", re.I)
+_SCRIPT_CLOSE = re.compile(r"</(script|style)>", re.I)
+_SAME_NAME = re.compile(r"(script|style)\x00\1", re.I)
+# How many times _strip_scripts found an opener and a later closer where _SCRIPT then did not match.
+_STRIP_SCAN_MISSES = [0]
+
+
+def _strip_scripts(html: str) -> str:
+    """``_SCRIPT.sub(" ", html)``, byte-identical, in linear time.
+
+    An opener ends at the first ``>`` after its name, and a block closes at the first closer after that
+    which repeats the name. ``.sub`` re-scanned to the end of the page from every opener with no closer
+    after it (a third-party page of ``<script>`` repeated: quadratic). Here each opener is decided from
+    the first ``>`` after it and the LAST closer for its name, both measured once; ``_SCRIPT`` itself is
+    run only where it matches, so every removed span is the pattern's own."""
+    last_closer: dict[str, int] = {}
+    for close in _SCRIPT_CLOSE.finditer(html):
+        last_closer[close.group(1)] = close.start()
+    closes_after: dict[str, int] = {}            # opener name -> start of the last closer it accepts, or -1
+    parts: list[str] = []
+    last = pos = 0
+    gt = -1                                      # the first ">" after the current opener's name
+    while (head := _SCRIPT_HEAD.search(html, pos)) is not None:
+        if gt < head.end():
+            gt = html.find(">", head.end())
+            if gt == -1:
+                break                            # no opener from here on can end
+        name = head.group(1)
+        if name not in closes_after:
+            closes_after[name] = max((at for closer, at in last_closer.items()
+                                      if _SAME_NAME.fullmatch(name + "\x00" + closer)), default=-1)
+        if closes_after[name] > gt:
+            block = _SCRIPT.match(html, head.start())
+            if block is None:                    # never expected (held at 0 by the tests): the pattern decides
+                _STRIP_SCAN_MISSES[0] += 1
+                return _SCRIPT.sub(" ", html)
+            parts.append(html[last : block.start()])
+            parts.append(" ")
+            last = pos = block.end()
+            continue
+        pos = head.start() + 1
+    parts.append(html[last:])
+    return "".join(parts)
+
+
+def _strip_tags(html: str) -> str:
+    """``_TAG.sub(" ", html)``, byte-identical, in linear time. No tag can start in, or run past, the text
+    after the LAST ``>``, so only the prefix up to and including it is scanned; inside it every ``<`` reaches
+    a ``>``. Over the whole page, ``<`` repeated with no ``>`` re-scanned to the end from every ``<``."""
+    cut = html.rfind(">") + 1
+    return _TAG.sub(" ", html[:cut]) + html[cut:]
 
 
 def _strip_html(html: str) -> str:
-    html = _SCRIPT.sub(" ", html)
-    return _WS.sub(" ", _TAG.sub(" ", html)).strip()
+    return _WS.sub(" ", _strip_tags(_strip_scripts(html))).strip()
 
 
 def _vetted_ip(host: str) -> Optional[str]:

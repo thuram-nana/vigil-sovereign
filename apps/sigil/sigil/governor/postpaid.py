@@ -55,7 +55,7 @@ from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # 
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors subscription._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors subscription._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 from .ledger_view import PairedLedgerView  # noqa: E402
@@ -310,7 +310,7 @@ class PostpaidRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((enabled, issued, row), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
         trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         enabled = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_state", [])}
         issued = {r[0]: r[1] for r in getattr(snap, f"{self._SNAP}_issued", [])}
@@ -465,11 +465,25 @@ class PostpaidArrearsLedger:
         _debited, _credited, seen = self._fold()
         return key in seen
 
+    def has_credit_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed postpaid CREDIT (a reverse or a launch settle) under (org_id, entry_id) has been
+        folded — the SnapshotState-seeded seen-set, so it survives a hard prune (mirrors `was_accrued`). The settle
+        roll-forward confirms a ``settle-postpaid:`` entry with it before re-issuing one the live scan cannot see.
+        Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (POSTPAID_CREDIT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        _debited, _credited, seen = self._fold()
+        return key in seen
+
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((debited, credited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, set()), -1
         return (dict(snap.postpaid_arrears_debited_map()), dict(snap.postpaid_arrears_credited_map()),
                 set(snap.postpaid_arrears_seen_set())), snap.base_seq - 1
@@ -540,7 +554,7 @@ class PostpaidArrearsLedger:
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}      # in-flight suffix -> reserved credits (first-mint-wins, idempotent)
         settled: set[str] = set()          # suffixes whose settle credit has landed
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             seen: set = set()              # anchor mismatch (rotated/empty key) => genesis scan, mirror _fold
             since = -1
         else:

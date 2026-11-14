@@ -130,7 +130,9 @@ def test_atomic_write_leaves_no_partial_file_on_midwrite_failure():
     assert P.pause_path(base, "cust_abc123") is not None
     assert not P.pause_path(base, "cust_abc123").is_file()            # no partial target file was published
     root = P.pauses_root(base)
-    leftovers = sorted(p.name for p in root.iterdir()) if root.is_dir() else []
+    # (the writer's own `<slug>.json.lock` is a deliberate transient — E3bc's cross-process marker lock — not a
+    # partial marker: the `*.json` readers never match it and the backups skip `*.lock`)
+    leftovers = sorted(p.name for p in root.iterdir() if not p.name.endswith(".json.lock")) if root.is_dir() else []
     assert leftovers == [], f"left a partial/tmp file behind: {leftovers}"   # the finally-unlink cleaned the tmp
     # and the primitive is not globally broken — a real record now succeeds and reads back paused.
     P.record_lease_pause(base, "cust_abc123", "n1")

@@ -181,6 +181,8 @@ MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-man
 SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
 TRIAL_LAUNCH_CAP_DIR = _customer / "trial_launch_cap"   # the global daily trial-launch cap's markers
 TRIAL_IP_LIMIT_DIR = _customer / "trial_ip_limit"       # the opt-in per-IP trial-grant limiter's markers
+CHECKOUT_RATELIMIT_DIR = _customer / "checkout_ratelimit"   # the per-org/per-requester checkout limiter's markers
+PENDING_PLAN_CHECKOUT_DIR = _customer / "pending_plan_checkout"   # owner-signed pending plan-checkout records
 # Slice E3b — customer MFA (TOTP / passkey). The AEAD context that binds a sealed CUSTOMER TOTP secret to its
 # purpose — DOMAIN-SEPARATED from the operator `sigil/account.totp` so a customer seal can never be opened as
 # an operator TOTP secret (or vice-versa) or swapped for the owner key. The provisioner (the owner-key holder)
@@ -460,6 +462,70 @@ def cost_ledger_write_enabled() -> bool:
     return global_pool_tokens() is not None
 
 
+def settle_spine_record_enabled() -> bool:
+    """True iff every FRESH launch settle appends an owner-signed ``governor.launch_settled`` v2 DECISION record
+    (``governor/launch_settlement.py``: mode, reserved, consumed and the exact plan / wallet / postpaid refund
+    split, keyed on the lease ``(slug, nonce)``) before it moves any money — so a settle that moved no money (a
+    completed run, refund 0) is on the spine and not only in the seam settlement marker, and a later settle can
+    finish a decision a crash interrupted at the RECORDED amounts. OFF by default (``VIGIL_SETTLE_SPINE_RECORD``
+    unset / non-affirmative): no record is appended and every settle path writes the same spine records as
+    before. Resolved at call time.
+
+    It gates ONLY: the decision-record append; the sweeps' finish paths for a recorded settle (``ops_sweeps``); the
+    settle drain's pass that finishes every recorded settle of a lease still on the seam
+    (``ops_sweeps.finish_interrupted_settles`` — it only rolls forward a recorded decision); the spine check of an
+    earlier launch in ``_earlier_launch_in_flight``; and the spine check in ``pause_launch``. Settle evidence already on the spine (a refund grant, a postpaid settle) is honoured either
+    way. OWNER DECISION OD-4: set it IDENTICALLY for every process that settles — the cockpit, the customer
+    server, the settle-drain and ``ops-sweep`` — or a process with it off settles without a record its crash
+    could be finished from."""
+    return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+#: The default and the bounds of :func:`settle_lock_wait_s` (OWNER DECISION OD-7).
+SETTLE_LOCK_WAIT_DEFAULT_S = 10.0
+_SETTLE_LOCK_WAIT_BOUNDS = (0.1, 120.0)
+
+
+def settle_lock_wait_s() -> float:
+    """How long a settle / publish / pause waits for the cross-process settle lock before it answers "busy; retry"
+    (``VIGIL_SETTLE_LOCK_WAIT_S`` seconds, default 10, clamped to [0.1, 120]; an unparsable or non-finite value
+    reads as the default). Resolved at call time. A settle that times out moves nothing and is retryable: the
+    drain defers the completion, the sweep reports ``deferred``, a customer cancel / start is refused with a
+    retry hint."""
+    raw = (os.environ.get("VIGIL_SETTLE_LOCK_WAIT_S") or "").strip()
+    if not raw:
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    try:
+        v = float(raw)
+    except ValueError:
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    if v != v or v in (float("inf"), float("-inf")):
+        return SETTLE_LOCK_WAIT_DEFAULT_S
+    lo, hi = _SETTLE_LOCK_WAIT_BOUNDS
+    return min(hi, max(lo, v))
+
+
+def one_launch_per_host_enabled() -> bool:
+    """True iff a customer may hold only ONE outstanding launch per ``(org, host)`` (E7): ``reserve_launch``
+    refuses a new reservation while an earlier one for the same target is unsettled, and ``publish_lease``
+    (launch_start) refuses to put a lease on the seam over another launch's unsettled lease (the seam holds one
+    lease per slug, so the second would replace the first, whose reservation only `ops-sweep reservations` then
+    settles). Both checks run under
+    the cross-process settle lock (`governor/launch_settlement.settle_lock`). OFF by default
+    (`VIGIL_ONE_LAUNCH_PER_HOST` unset / non-affirmative): reserve and start behave exactly as before."""
+    return (os.environ.get("VIGIL_ONE_LAUNCH_PER_HOST") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def paused_expiry_settle_enabled() -> bool:
+    """E8 — True iff the settle-drain also settles every PAUSED customer launch whose lease window closed more than
+    the settle grace ago and that nothing settled (`sigil/paused_expiry_settle.py`, due predicate
+    `vigil_integration/live/credit_lease_expiry.py`), by the owner's paused-launch rule: a metered launch is charged
+    for what it used, a flat one refunded — exactly what `ops-sweep reservations --apply` does for it. OFF by default
+    (`VIGIL_PAUSED_EXPIRY_SETTLE` unset / non-affirmative): the drain is unchanged and such a launch waits for the
+    sweep; `vigil doctor` reports it as a hard issue either way. Set it for the settle-drain unit."""
+    return (os.environ.get("VIGIL_PAUSED_EXPIRY_SETTLE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail
@@ -546,7 +612,8 @@ def fold_cache_enabled() -> bool:
     (Front C S0a): every registry read runs its full signature-verifying fold, byte-identical to a build without
     the cache. When ON, a registry that supports it (S0a: `CustomerRegistry`) extends an in-memory fold over only
     the records appended since its last read, anchored to the chain (`spine/fold_cache.py`); on any doubt it
-    rebuilds from the spine. Read at call time, so an operator can turn it off without a restart."""
+    rebuilds from the spine. Read at call time (tests toggle it), but a running process keeps the caches it built and
+    the environment it started with: to turn the cache off in production, change the setting AND restart the process."""
     return (os.environ.get("VIGIL_FOLD_CACHE_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 

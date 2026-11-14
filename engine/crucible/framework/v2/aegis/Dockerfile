@@ -26,7 +26,7 @@
 # never exercised. integration/tests/test_aegis_dockerfile_wired.py asserts this pin equals the locked
 # target and turns red if either side drifts.
 
-FROM python:3.13-slim@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
 WORKDIR /src

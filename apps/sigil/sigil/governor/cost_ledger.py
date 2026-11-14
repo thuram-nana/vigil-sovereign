@@ -43,7 +43,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id validation; same-plane reuse)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 from .ledger_view import PairedLedgerView  # noqa: E402
@@ -229,10 +229,9 @@ class CostEnvelopeLedger:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((reserved, settled, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
-            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
-            # mirroring wallet._fold. Unreachable with a real prune today (SnapshotState.load fails closed on any
-            # real prune), so this branch is only taken under the empty snapshot, where genesis-scan == the fold.
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            # Only when NOTHING is pruned (`seed_applies` raises on a pruned spine it cannot seed): the genesis
+            # scan is then the whole fold, mirroring wallet._fold.
             return ({}, {}, set()), -1
         return (dict(snap.cost_reserved_map()), dict(snap.cost_settled_map()), set(snap.cost_seen_set())), \
             snap.base_seq - 1
@@ -274,7 +273,7 @@ class CostEnvelopeLedger:
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[str, int] = {}     # in-flight suffix -> reserved tokens (first-mint-wins, idempotent)
         settled: set[str] = set()         # suffixes whose settle record has landed
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             seen: set = set()             # anchor mismatch (rotated/empty key) => genesis scan, mirror _fold
             since = -1
         else:
@@ -348,6 +347,19 @@ class CostEnvelopeLedger:
         _reserved, _settled, seen = self._fold()
         return key in seen
 
+    def was_settled(self, org_id: str, entry_id: str) -> bool:
+        """True iff a cost_settle for `(org_id, entry_id)` has been folded (the seeded seen-set, prune-durable;
+        mirrors `was_reserved`). The launch settle roll-forward writes a missing ``settle-cost:`` entry only when this
+        is False, so a re-settle never appends a duplicate. Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (COST_SETTLE_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        _reserved, _settled, seen = self._fold()
+        return key in seen
+
     def tenant_cost(self, org_id: str) -> TenantCost:
         """The full cost position for `org_id` (fail-closed: unknown/empty reads all-zero)."""
         if not isinstance(org_id, str) or not org_id:
@@ -400,7 +412,7 @@ class CostEnvelopeLedger:
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         reserves: dict[tuple[str, str], int] = {}   # (org_id, suffix) -> reserved tokens of an in-flight reserve
         settled_suffixes: set[tuple[str, str]] = set()   # (org_id, suffix) whose settle record has landed
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             # Anchor mismatch (rotated/empty key) ⇒ bypass the snapshot and genesis-scan, mirroring _fold/_in_flight.
             committed = 0
             seen: set = set()

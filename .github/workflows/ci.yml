@@ -925,6 +925,22 @@ jobs:
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
             echo "::error::apps/sigil/tests/test_offense_gate.py missing from the checkout"; exit 1
           fi
+      - name: settle exactly-once with the settle decision record ON (E3bc)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+          VIGIL_SETTLE_SPINE_RECORD: "1"
+        run: |
+          # The whole-dir step above runs every settle path with VIGIL_SETTLE_SPINE_RECORD unset (the default).
+          # Re-run the settle-adjacent suites with it ON, so a behaviour only the flag-on path reaches (the
+          # decision record, the roll-forward, the sweep's finish path) cannot regress unseen. Tests that need a
+          # specific flag value still set it themselves.
+          PYTHONPATH=apps/sigil:integration python -m pytest -q \
+            apps/sigil/tests/test_metered_billing.py apps/sigil/tests/test_launch_gate.py \
+            apps/sigil/tests/test_ops_sweeps.py apps/sigil/tests/test_completion_spool.py \
+            apps/sigil/tests/test_completion_spool_outcome_record.py apps/sigil/tests/test_k45_loopback_e2e.py \
+            apps/sigil/tests/test_launch_pause_resume_actions.py apps/sigil/tests/test_postpaid_gate.py \
+            apps/sigil/tests/test_ec3_settle_composition.py apps/sigil/tests/test_settle_survives_seam_loss.py \
+            apps/sigil/tests/test_settle_fold_main.py
       - name: spine concurrency REPEAT-STRESS + flake record (W11-5 #486)
         env:
           SIGIL_HOME: /tmp/sigil-ci

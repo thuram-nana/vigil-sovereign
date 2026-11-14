@@ -57,7 +57,7 @@ from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
 from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
-from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 
@@ -241,11 +241,15 @@ class PlanCreditLedger:
         The launch settle path uses this to re-derive how much a reservation debited from the PLAN bucket, and
         which period's tranche, so a refund restores the SAME expiring tranche rather than the permanent wallet
         — the amount comes from the owner-signed record, never a wire value (the plan-credit-laundering fix).
-        Verified under the owner key valid at the seq; fail-closed to None. A live scan is sound here: a
-        reservation is settled well within its lease window, so its debit record is never pruned."""
+        Verified under the owner key valid at the seq; fail-closed to None.
+
+        It is a LIVE scan (not prune-durable), so it is read ONLY to build a FRESH settle decision; a settle that
+        finishes an interrupted, recorded decision (E3bc) never reads it — it moves the RECORDED split."""
         if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
             return None
-        hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)))
+        # live_window: this scan never loads the snapshot, so a snapshot that cannot be loaded makes the cached read
+        # decline (the scan below answers) instead of raising where the scan answers.
+        hit = self._cached(lambda v: v.first_debit.get((org_id, entry_id)), live_window=True)
         if hit is not _UNCACHED:
             return hit
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
@@ -259,16 +263,29 @@ class PlanCreditLedger:
                 return (_as_credits(p.get("credits")), _as_period(p.get("period_end")))
         return None
 
+    def has_grant_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed plan GRANT with this (org_id, entry_id) has been folded — membership of the
+        fold's own seen-set, so it survives a hard prune (the seen-set is part of the snapshot seed). Mirrors
+        ``WalletRegistry.has_grant_entry``; the settle roll-forward confirms a ``settle-plan:`` entry with it
+        before re-issuing one the live scan cannot see. Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (PLAN_GRANT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        return key in self._fold()[2]
+
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's (byte-identical under the empty snapshot)."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, set()), -1
         return (dict(snap.plan_granted_map()), dict(snap.plan_debited_map()),
                 set(snap.plan_seen_set())), snap.base_seq - 1
 
-    def _cached(self, reader):
+    def _cached(self, reader, *, live_window: bool = False):
         """`reader(view)` over the verified incremental plan-ledger fold (`fold_read.cached_read`, flag-gated),
         else `_UNCACHED` (the caller then runs the full `_fold` / scan)."""
         def seed(snap):
@@ -276,7 +293,7 @@ class PlanCreditLedger:
             return _PlanView(*st), since
 
         return cached_read(_PLAN_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
-                           reader=reader)
+                           reader=reader, live_window=live_window)
 
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (granted, debited, seen) keyed per `(org_id, period_end)`, where `seen` holds the

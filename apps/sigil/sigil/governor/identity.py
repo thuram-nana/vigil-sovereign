@@ -181,6 +181,30 @@ def load_or_init_owner_keypair(priv_path: Path, pub_path: Path, keys_dir: Path) 
     return KeyPair(public_key_b64=pub, private_key_b64=priv)
 
 
+def check_owner_pub_against_priv(priv_path: Path, pub: str) -> None:
+    """The VERIFY-path half of the loader's consistency check: when ``owner.priv`` is on this box, raise
+    ``OwnerKeyUnavailable`` unless it can be read (unsealed) and ``pub`` is its public key. When it is absent
+    (the owner key kept off-box, or the upgrade drill's keyless copy) there is nothing to check ``pub`` against
+    and this returns. Like the loader, an existence check that cannot tell counts as present. Never writes and
+    never mints: the private key is read through the vault's READ-ONLY accessor (``peek_text_secret``), so a
+    plaintext ``owner.priv`` stays byte-identical even with the vault enabled (the signing loader migrates it)."""
+    if not _path_present(priv_path):
+        return
+    from ..platform.vault import OWNER_PRIV_CONTEXT, VaultLocked, owner_vault
+    advice = ("the signed head is not verified against it. Restore the matching owner.priv and owner.pub from a "
+              "backup (or fix the vault/TPM unseal); `vigil doctor` reports the state")
+    try:
+        priv = owner_vault().peek_text_secret(priv_path, context=OWNER_PRIV_CONTEXT)
+    except VaultLocked as e:
+        raise OwnerKeyUnavailable(f"owner.priv is sealed and cannot be unsealed ({e}); {advice}") from e
+    except (OSError, UnicodeDecodeError, ValueError):
+        priv = None
+    if not priv:
+        raise OwnerKeyUnavailable(f"owner.priv is present but empty or unreadable; {advice}")
+    if _public_of(priv) != pub:
+        raise OwnerKeyUnavailable(f"owner.pub is not the public key of owner.priv; {advice}")
+
+
 def ensure_owner_keypair() -> KeyPair:
     """Return the persisted owner keypair for an owner SIGNING action, generating+persisting it ONLY on a
     fresh install (neither key file present). A half-present, unreadable, unsealable or mismatched key

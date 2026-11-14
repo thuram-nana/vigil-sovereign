@@ -153,6 +153,23 @@ class Vault:
             self._migrate_text(p, text, context)  # opportunistic, non-destructive
         return text
 
+    def peek_text_secret(self, path, *, context: bytes) -> Optional[str]:
+        """The READ-ONLY twin of :meth:`read_text_secret`, for a caller that must never write (a verify path):
+        unseals a sealed file in memory, or returns a plaintext file's text, and NEVER migrates — with the vault
+        enabled a plaintext file is left byte-identical (the next :meth:`read_text_secret` migrates it). Returns
+        None if absent/empty. Fail-closed on a sealed file it cannot open (:class:`VaultLocked`)."""
+        p = Path(path)
+        try:
+            raw = p.read_bytes()
+        except OSError:
+            return None
+        if is_sealed(raw):
+            try:
+                return self._open(raw, context=context).decode("utf-8")
+            except SealError as e:
+                raise VaultLocked(f"sealed secret {p.name} failed to open: {e}") from e
+        return raw.decode("utf-8", errors="strict").strip() or None
+
     def write_text_secret(self, path, value: str, *, context: bytes) -> None:
         """Persist a UTF-8 secret — sealed when the vault is enabled, else plaintext (unchanged legacy
         behaviour). Atomic + 0600."""

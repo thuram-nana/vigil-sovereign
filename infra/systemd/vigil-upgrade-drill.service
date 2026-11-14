@@ -3,19 +3,29 @@
 # An upgrade you have never drilled against your REAL data is a hope. `vigil upgrade` is crash-safe and
 # deploy_verify proves the pipeline in CI — but on a SYNTHETIC spine. This unit periodically proves THIS box's
 # own sovereign spine still upgrades under the installed build and that the rollback target restores it:
-# `python -m sigil.spine.upgrade_drill` copies the real spine into a throwaway dir, runs the REAL upgrade()
-# orchestrator on the COPY, proves a corrupted deployment is detected, rolls back with restore_from_backup and
-# re-verifies the pre-upgrade record set exactly. A non-zero exit fails the unit, so a box whose data would no
-# longer upgrade/roll back shows up in `systemctl --user status` / journald BEFORE a real upgrade — not during.
+# `python -m sigil.spine.upgrade_drill` takes a CONSISTENT snapshot of the real spine (under the store's shared
+# writer lock, proven byte-faithful by digest) into a throwaway dir, then — in a child process whose SIGIL_HOME
+# is that scratch copy — runs the REAL upgrade() orchestrator on the COPY, proves a corrupted deployment is
+# detected, rolls back with restore_from_backup and re-verifies the pre-upgrade record set exactly. A non-zero
+# exit fails the unit, so a box whose data would no longer upgrade/roll back shows up in
+# `systemctl --user status` / journald BEFORE a real upgrade — not during.
 #
-# IT CHANGES NOTHING REAL. The drill only reads the real spine (a content digest taken before + after must
-# match, or the drill FAILS) and ReadOnlyPaths= below makes the real home read-only to this unit at the kernel
-# level. The copy lives under the unit's PRIVATE /var/tmp (disk-backed — a big spine never fills a RAM /tmp;
-# allow ~3x the spine dir of scratch) and is discarded on exit.
+# IT CHANGES NOTHING REAL AND NEVER HOLDS THE OWNER KEY. The drill only reads the real spine; every write lands
+# in its own work dir (refused if placed inside or around the spine dir), and ReadOnlyPaths= below makes the
+# real home read-only to this unit at the kernel level. The owner PRIVATE key (and the spine DEK) is never
+# copied — verification of the copy is keyless / owner-PUBLIC-key only — so no private key ever lands in the
+# scratch tree or in the backup tarball the drill writes there; one that does, or owner key material that
+# changes in the real home while the drill runs, FAILS the drill. The copy lives under the unit's PRIVATE
+# /var/tmp (disk-backed — a big spine never fills a RAM /tmp; allow ~3x the spine dir of scratch) and is
+# discarded on exit.
+#
+# A BUSY BOX STILL GETS A VERDICT: live appends after the snapshot are expected (the verdict is about the
+# consistent snapshot) and are reported as `source_changed_during_drill`, never as a failure.
 #
 # EXIT CODES (any non-zero fails the unit): 0 PASS · 1 FAIL · 3 NOT-RUN (no spine data yet — enable this only
-# once the home holds data, or it fails weekly) · 4 INCONCLUSIVE (a concurrent writer changed the real spine
-# while the drill ran — re-run when idle; the drill only ever writes inside its own work dir).
+# once the home holds data, or it fails weekly) · 4 INCONCLUSIVE (no consistent snapshot could be taken: the
+# spine kept changing even under the shared writer lock across every attempt — re-run when idle). Neither 3
+# nor 4 is ever green.
 #
 # Sovereign plane: it runs in the SOVEREIGN venv (it reads sigil.spine), never the offense one (FATAL-2).
 #
@@ -55,7 +65,9 @@ ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
 
 # --- hardening -------------------------------------------------------------
 # PURELY LOCAL (copy + upgrade + restore inside PrivateTmp; no egress): the network is removed, and the REAL
-# sovereign home is read-only to this unit (kernel-enforced, on top of the drill's own before/after digest).
+# sovereign home is read-only to this unit (kernel-enforced, on top of the drill's own isolation: a child process
+# scoped to its scratch copy). The drill's after-digest of the real spine is only reported
+# (`source_changed_during_drill`), never a guard.
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes

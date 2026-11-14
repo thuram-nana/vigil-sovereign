@@ -40,6 +40,8 @@ def _events_for(rec: dict[str, Any], project: str) -> Iterator[tuple[str, str, d
         return
     msg = rec.get("message") or {}
     role = msg.get("role") or t
+    if not isinstance(role, str):
+        role = t                     # the record's own type names the speaker; an event's actor is a string
     base = {
         "session_id": rec.get("sessionId"), "project": project, "role": role,
         "model": msg.get("model"), "cwd": rec.get("cwd"), "git_branch": rec.get("gitBranch"),
@@ -95,12 +97,14 @@ def ingest_transcript(store: SpineStore, path: Path, project: str, *,
             if rec.get("isMeta"):
                 continue
             parent_seq = uuid_to_seq.get(rec.get("parentUuid"))
+            ts = rec.get("timestamp")
+            ts = ts if isinstance(ts, str) else None   # a record's ts is a string: otherwise the ingest time
             first_seq_of_record: int | None = None
             for kind, actor, payload in _events_for(rec, project):
                 if extra:
                     payload = {**payload, **extra}  # extra wins (can re-key session_id)
                 seq = store.append(kind=kind, source=source, actor=actor,
-                                   payload=payload, parent_id=parent_seq, ts=rec.get("timestamp"))
+                                   payload=payload, parent_id=parent_seq, ts=ts)
                 if first_seq_of_record is None:
                     first_seq_of_record = seq
                 added += 1

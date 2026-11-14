@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import secrets
@@ -316,7 +317,13 @@ class CustomerHandler(BaseHTTPRequestHandler):
     def _provision(self, action: str, principal: str, body: dict):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
         sovereign verifies it (role == action; principal + method + path + ts inside the HMAC). The hop key
-        is this edge's ONLY credential — it holds no owner key. A dead provisioner is a 502, never a crash."""
+        is this edge's ONLY credential — it holds no owner key. A dead provisioner, or a reply that cannot be read
+        (truncated, not JSON), is a 502, never a crash."""
+        if not self.server.hop_key:
+            # No hop key: nothing this edge could stamp would verify (and `body_binding` raises on a blank key —
+            # a POST surfaced that as a 400, a GET dropped the connection). Refuse before any hop, with the same
+            # 403 the cockpit gives an unkeyed hop, so every verb gets one clean, fail-closed answer.
+            return 403, {"error": "provision denied (hop)"}
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
         data = json.dumps(body).encode("utf-8")
@@ -336,10 +343,14 @@ class CustomerHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             try:
                 return e.code, json.loads(e.read().decode())
-            except ValueError:
+            except (ValueError, http.client.HTTPException, OSError):   # an unreadable error body keeps its status
                 return e.code, {"error": "provision error"}
         except (urllib.error.URLError, OSError):
             return 502, {"error": "provisioner unreachable"}
+        except (ValueError, http.client.HTTPException):
+            # a 2xx whose body is truncated (IncompleteRead) or not JSON — e.g. the cockpit restarted mid-reply, or
+            # provision_base names the wrong service: one clean 502 on every verb (a GET used to drop the connection)
+            return 502, {"error": "provisioner reply unreadable"}
 
     def _mint(self, username: str, org_id, *, mfa_at=None, mfa_method=None) -> None:
         # E3c — `mfa_at`/`mfa_method` stamp a FRESH step-up at mint: a passkey LOGIN is itself a fresh second
@@ -366,6 +377,14 @@ class CustomerHandler(BaseHTTPRequestHandler):
 
     # --- routing -----------------------------------------------------------------------------------
     def do_GET(self):
+        # the same catch-all do_POST has: an unexpected fault answers one clean JSON 500 (no internals), never a
+        # dropped connection with a handler traceback
+        try:
+            return self._route_get()
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._deny(500, "request failed")
+
+    def _route_get(self):
         path = urlparse(self.path).path
         # Probe surface (UNAUTHENTICATED, no cookie, no secret) — placed FIRST, ahead of the session/relay
         # plane, so a k8s/LB liveness+readiness probe (which can present no customer cookie) is answered

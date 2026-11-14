@@ -700,8 +700,39 @@ _CRUCIBLE_STORE_UNIT = ".blackboard/store.sqlite"     # a FILE unit
 _CRUCIBLE_RUNS_UNIT = ".console/runs"                 # a whole SUBTREE unit
 # W7-2: the ENGAGEMENT tree — ``targets/<slug>/`` charters, threat models, notes, AND the per-action HTTP
 # evidence archive (``targets/<slug>/evidence/**``). A restore without it produces an install that has lost
-# every client engagement + its evidence. A whole SUBTREE unit, replaced wholesale like the runs unit.
+# every client engagement + its evidence. The unit is every entry directly under ``targets/`` EXCEPT the
+# committed scaffold (``_CRUCIBLE_TARGETS_SCAFFOLD``): ``targets/_template`` is REPO CONTENT that every checkout
+# carries (the skeleton intake copies into a new engagement), not engagement state. It is neither captured, nor
+# counted by the force-gate, nor touched by a restore: a fresh checkout ALWAYS has it, so counting it as live state
+# made every default restore onto a fresh checkout refuse, and ``--force`` then replaced the committed scaffold
+# with the backup's (possibly older) copy. Every other entry (engagements, ``targets/.archive``, an operator's
+# own ``_``-named dirs) stays in the unit. The unit is still swapped WHOLE, with one atomic rename like every
+# other subtree unit (whatever ``targets`` is at the destination: a dir, a symlink, a dangling link, a file):
+# before anything is swapped, the destination's own scaffold is copied into the STAGED unit
+# (``_stage_targets_unit``), so the committed content survives byte-identical while a stale copy an older
+# backup carried is never swapped in.
 _CRUCIBLE_TARGETS_UNIT = "targets"
+_CRUCIBLE_TARGETS_SCAFFOLD = frozenset({"_template"})
+# Signed-manifest flag: the source's targets unit WAS captured, even when it held no engagement (only the
+# scaffold, which is never packaged), so a restore still applies the DR-snapshot semantic to it (an engagement
+# the backup lacks is dropped under ``--force``). Absent ⇒ the unit was not captured (no ``targets`` dir, or a
+# symlinked one, which capture never follows) and a restore leaves the destination's ``targets`` untouched.
+_TARGETS_UNIT_MANIFEST_FLAG = "crucible_targets_unit"
+
+
+def _targets_unit_entries(targets_dir: Path) -> list[Path]:
+    """The members of the targets unit: every entry directly under ``targets_dir`` except the committed scaffold.
+    Follows a symlinked ``targets_dir`` exactly as the force-gate always has (``_dir_is_nonempty``)."""
+    if not targets_dir.is_dir():
+        return []
+    return sorted(e for e in targets_dir.iterdir() if e.name not in _CRUCIBLE_TARGETS_SCAFFOLD)
+
+
+def _captured_subtree(subtree: Path) -> bool:
+    """True iff capture packages ``subtree`` as a unit: a real directory, never a symlinked one."""
+    return subtree.is_dir() and not subtree.is_symlink()
+
+
 # W7-2 (#460): the three TRUST-STATE units a functional recovery needs — dropping any is a fail-OPEN/fail-CLOSED
 # posture regression on restore (a recovered install could not re-establish its entitlement gate, its
 # destruction m-of-n, or its authority-verification root).
@@ -800,18 +831,47 @@ def _crucible_units_present(croot: Path) -> list[str]:
     present: list[str] = list(_sqlite_db_unit_rels(layout.v2_root))
     for unit in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_ENTITLEMENT_UNIT,
                  _CRUCIBLE_AUTHORITY_UNIT, _CRUCIBLE_AUTHORITY_ROOT_UNIT):
-        if _dir_is_nonempty(layout.disk(unit)):
+        disk = layout.disk(unit)
+        # the committed ``targets/_template`` of a fresh checkout is not live state: it never forces ``--force``
+        if _targets_unit_entries(disk) if unit == _CRUCIBLE_TARGETS_UNIT else _dir_is_nonempty(disk):
             present.append(unit)
     return present
+
+
+def _stage_targets_unit(staged_croot: Path, dest_croot: Path, *, captured: bool) -> None:
+    """Finish the STAGED targets unit BEFORE anything is swapped, so the later swap is the same single atomic
+    rename as every other unit. When the backup captured the unit (``captured``: the signed manifest flag) or
+    carries any of its files, the staged unit is created if empty, any scaffold copy in it (an older backup
+    packaged ``targets/_template``) is dropped, and the DESTINATION's own scaffold is copied in (read through a
+    symlinked ``targets`` too). The committed scaffold therefore survives a restore byte-identical, never
+    replaced by the backup's copy, and the swap never writes THROUGH a symlinked or non-directory ``targets``
+    (that half-applied a restore, or deleted entries outside ``crucible_root``). A backup that never captured the
+    unit leaves the destination's ``targets`` untouched. A copy failure raises OffenseBackupError while every
+    destination is still the complete old state."""
+    staged = staged_croot / _CRUCIBLE_TARGETS_UNIT
+    if not (captured or staged.is_dir()):
+        return
+    staged.mkdir(parents=True, exist_ok=True)
+    live_targets = _CrucibleLayout(dest_croot).disk(_CRUCIBLE_TARGETS_UNIT)
+    for name in sorted(_CRUCIBLE_TARGETS_SCAFFOLD):
+        _drop_path(staged / name)
+        live = live_targets / name
+        try:
+            if live.is_dir():
+                shutil.copytree(live, staged / name, symlinks=True)
+        except OSError as e:                              # shutil.Error is an OSError
+            raise OffenseBackupError(f"could not carry the committed {live} into the restored targets unit "
+                                     f"(nothing was swapped): {e}") from e
 
 
 def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
     """Swap ONLY the captured crucible units (the proof-db file, the runs subtree, the targets engagement
     subtree, the entitlement TRUST ROOT and the DestructionAuthority) from the staged tree onto ``dest_croot``,
     each atomically, leaving every un-captured file OUTSIDE those units (the CRUCIBLE code, config, sibling
-    ``.console``/``.blackboard`` entries, the crypto-shred evidence keystore) UNTOUCHED. Honest scope: each
-    subtree is replaced WHOLESALE — a run/engagement/authority created AFTER the backup lives inside that unit
-    and is therefore dropped (the intended DR-snapshot semantic; for ``.authority`` this includes a kill-switch
+    ``.console``/``.blackboard`` entries, the crypto-shred evidence keystore) UNTOUCHED; the committed
+    ``targets/_template`` keeps its exact bytes (``_stage_targets_unit`` carried it into the staged unit). Honest
+    scope: each subtree is replaced WHOLESALE — a run/engagement/authority created AFTER the backup lives inside
+    that unit and is therefore dropped (the intended DR-snapshot semantic; for ``.authority`` this includes a kill-switch
     the backup lacks, which is why the force-gate refuses a restore over a present authority unit), so this
     bounds ``--force``'s blast radius to the captured units, not to "no un-captured data anywhere". The units
     are swapped sequentially (a crash leaves each unit complete-old-or-complete-new, never torn), matching the
@@ -880,7 +940,8 @@ def _iter_crucible_files(croot: Path):
     ``.blackboard/store.sqlite``; the whole ``.console/runs/**`` subtree (reports, reverifiable findings, raw
     evidence bytes, AND any exported self-contained verifiable bundle — the superset needed so a restored FACT
     re-verifies end-to-end); the ``targets/**`` engagement tree (W7-2 — charters, threat models, notes, and
-    the per-action HTTP evidence archive), so a restore recovers the client engagements + their evidence;
+    the per-action HTTP evidence archive; never the committed ``targets/_template`` scaffold), so a restore
+    recovers the client engagements + their evidence;
     AND (W7-2 #460 + Phase 0.1) the three TRUST-STATE units a functional recovery needs — the entitlement TRUST
     ROOT (``framework/v2/.entitlement`` — authoriser pubkeys + threshold, the signed entitlement, the revocation
     list), the DestructionAuthority (``framework/v2/.authority`` — the per-slug signed authority + the
@@ -924,13 +985,15 @@ def _iter_crucible_files(croot: Path):
         units.append(_CRUCIBLE_AUTHORITY_ROOT_UNIT)
     for unit in units:
         subtree = layout.disk(unit)
-        if not subtree.is_dir() or subtree.is_symlink():
+        if not _captured_subtree(subtree):
             continue
         for p in sorted(subtree.rglob("*")):
             if p.is_symlink() or not p.is_file():
                 continue
             if p.name == "dossier.zip" or p.name.endswith(".lock"):
                 continue
+            if unit == _CRUCIBLE_TARGETS_UNIT and p.relative_to(subtree).parts[0] in _CRUCIBLE_TARGETS_SCAFFOLD:
+                continue                                  # the committed ``targets/_template`` — repo content
             if _under(p, keys_dir):                       # never package a crypto-shred DEK (W16-8)
                 continue
             yield p, _CRUCIBLE_PREFIX + unit + "/" + p.relative_to(subtree).as_posix()
@@ -998,6 +1061,8 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
         # names only — the key VALUES live in the AEAD-sealed body (like the sovereign owner_priv/dek).
         "secrets": sorted(secrets.keys()),
     }
+    if croot is not None and _captured_subtree(_CrucibleLayout(croot).disk(_CRUCIBLE_TARGETS_UNIT)):
+        manifest[_TARGETS_UNIT_MANIFEST_FLAG] = True   # captured, even with no engagement (see the flag's note)
     manifest_sig = sign(gov.private_key_b64, canonical_json(manifest))
     body = {
         "manifest": manifest, "manifest_sig": manifest_sig, "manifest_pubkey": gov.public_key_b64,
@@ -1081,7 +1146,8 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         (W5-4 #448 — written by the startup gate the instant any verb, restore included, runs against the dir)
         counts as clean: it is this host's own fresh marker, not stale state, and the whole-tree swap drops it.
       * ``crucible_root`` is a strict SUBSET capture — the proof-db (``.blackboard/store.sqlite``), the runs
-        subtree (``.console/runs``), the ``targets/`` engagement tree, the entitlement TRUST ROOT
+        subtree (``.console/runs``), the ``targets/`` engagement tree (never the committed ``targets/_template``
+        scaffold, so a fresh checkout restores without ``--force``), the entitlement TRUST ROOT
         (``framework/v2/.entitlement``) and the DestructionAuthority (``framework/v2/.authority``). Restore
         replaces ONLY those units; every file OUTSIDE them under ``crucible_root`` (the CRUCIBLE code, config,
         sibling ``.console``/``.blackboard`` entries, and the crypto-shred evidence keystore) is LEFT INTACT,
@@ -1152,8 +1218,11 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
     if set(secrets) != set(manifest.get("secrets", []) or []):
         raise OffenseBackupError("backup secret set does not match its signed manifest")
 
-    # If a crucible-rooted file exists in the table, restore REQUIRES a crucible_root to route it to.
-    has_crucible = any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files)
+    # If a crucible-rooted file exists in the table, restore REQUIRES a crucible_root to route it to. A captured
+    # targets unit with no engagement in it is crucible state too (the signed flag): restoring it drops engagements
+    # the backup lacks, exactly as when its scaffold files were packaged.
+    targets_captured = manifest.get(_TARGETS_UNIT_MANIFEST_FLAG) is True
+    has_crucible = targets_captured or any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files)
     if has_crucible and croot is None:
         raise OffenseBackupError("backup carries CRUCIBLE proof files but no crucible_root was given to "
                                  "restore them into — refusing a partial restore")
@@ -1244,6 +1313,8 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         # RE-VERIFY the STAGED tree — nothing is swapped into place until this passes, so a failed re-verify
         # leaves the real destinations UNTOUCHED (still the complete old state, or absent).
         verified_bundles = _reverify_restored(staged_base, staged_croot, secrets)
+        if staged_croot is not None and active_croot is not None:   # still BEFORE any swap: a failure here
+            _stage_targets_unit(staged_croot, active_croot, captured=targets_captured)   # leaves all untouched
 
         # everything verified: atomically swap the staged trees onto the real destinations (base first, then
         # crucible). Clearing the ref after each swap keeps the finally from deleting a tree already moved in.

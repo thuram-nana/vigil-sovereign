@@ -27,7 +27,7 @@ from sigil.governor.authn import signed_payload
 from sigil.governor.orgs import OrgRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -108,6 +108,16 @@ def _assert_equivalent(reg, no_full_fold=None):
     if no_full_fold is not None:
         assert no_full_fold["n"] == before, "a cached read fell back to a full fold"
     assert got == _full_answers(reg)
+
+
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
 
 
 @pytest.mark.parametrize("seed", [11, 12, 13, 14])
@@ -276,9 +286,10 @@ def test_a_raw_org_revoke_without_the_cascade_strips_every_member(tmp_path, no_f
     assert not reg.admit_customer(username="alice", org_id="acme", permission="read")
 
 
-def test_the_pubkey_bypass_ignores_both_seeds(tmp_path, monkeypatch, no_full_fold):
-    """A snapshot folded under a DIFFERENT pubkey than the reader trusts (a rotated / re-genesis key) is not
-    trusted: both folds scan the live window only, so an org + member whose grants were pruned are gone."""
+def test_a_foreign_key_reader_of_a_pruned_snapshot_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     store = SpineStore(str(tmp_path / "spine.jsonl"))
     view = _PrunedView(store)
     reg = _reg(view)
@@ -287,16 +298,13 @@ def test_the_pubkey_bypass_ignores_both_seeds(tmp_path, monkeypatch, no_full_fol
     k = store.append(kind="event", source="t", actor="u", payload={"signal": "marker"})
     snap = build([r for r in store.iter_records() if r.seq < k], trusted_pubkey=OWNER_PUB, base_seq=k,
                  snapshot_seq=k - 1)
-    assert snap.membership_row and snap.org_row, "the snapshot carries the rows the bypass must ignore"
+    assert snap.membership_row and snap.org_row, "the snapshot carries the rows a foreign reader must never see"
     new_owner = generate_keypair()
     reader = OrgRegistry(view, owner_key=new_owner, trusted_pubkey=new_owner.public_key_b64)
-    reader.create_org("globex", "Globex", owner="owner", issued_at=_iss())  # live, under the reader's key
-    assert reader.org("globex") is not None                                # warm, unpruned
     view.K = k
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
-    _assert_equivalent(reader, no_full_fold)
-    assert reader.org("acme") is None and reader.memberships() == []
-    assert reader.membership_role("alice", "acme") is None and reader.org("globex") is not None
+    _fails_closed_both_ways(monkeypatch, lambda: reader.org("acme"), reader.memberships,
+                            lambda: reader.membership_role("alice", "acme"))
 
 
 @pytest.mark.parametrize("value", ["", "0", "off"])

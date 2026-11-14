@@ -56,9 +56,21 @@ message + remediation.
 2. **Provision the 8 controls** (idempotent; details below).
 3. **Seed `.vigil-live/service.env`** — the `EnvironmentFile=-` both UI units load
    (`infra/systemd/vigil-command.service:67`, `vigil-bringup.service:49`). Nothing
-   in the tree writes this file; the script is the writer (0600, atomic).
+   in the tree writes this file; the script is the writer (0600, atomic). It is rebuilt
+   on every run; the operator's payment-intake settings in it
+   (`VIGIL_BILLING_WEBHOOK_SPOOL` / `VIGIL_BILLING_WEBHOOK_SECRET`, which mount the
+   proxy's `/webhooks/billing`, and the Stripe lane's `VIGIL_STRIPE_WEBHOOK_SPOOL` /
+   `VIGIL_STRIPE_WEBHOOK_SECRET` for `/webhooks/stripe`) are carried over.
 4. **Production gate — `vigil doctor`** — run **before** starting the UI so a red
-   control aborts with the exact unmet list. `vigil doctor --json` exposes
+   control aborts with the exact unmet list. One exception: when **every** red issue
+   is one the report itself lists under `.intake_safe_issues` (a money-IN
+   billing-drain alarm — a paid webhook not credited yet — or a fold-cache
+   MISMATCH), the UI is still started, because the proxy's `/webhooks/billing` only
+   accepts and durably spools and must not be held down by them; the script then
+   aborts non-zero **before** the range and the acceptance run, saying which payment
+   webhook routes the started proxy really accepts (each route's own signature refusal
+   to an empty probe POST) or that payment intake is NOT up.
+   `vigil doctor --json` exposes
    `.production_gate.unmet[].control` (`_cmd_doctor` `integration/vigil_integration/cli.py:3187`;
    exit `0 if report.ok else 1`). The UI unit also self-gates at ExecStart
    (`_enforce_production_gate("up")` `cli.py:3012`) — defense in depth.

@@ -153,8 +153,11 @@ def test_insufficient_credits_refused():
 def test_bad_units_refused(units):
     s = _store()
     _setup(s, "org_a", "apme.cm", credits=100)
-    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
-    assert r["ok"] is False and _avail(s, "org_a") == 100
+    try:
+        r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
+    except Exception as e:  # noqa: BLE001 — the gate's own bound must refuse; nothing downstream may be reached
+        pytest.fail(f"units={units!r} must be refused by the gate, not raise {type(e).__name__}")
+    assert r["ok"] is False and "units" in r["error"] and _avail(s, "org_a") == 100
 
 
 # --- settle / release: refund bound to the SIGNED lease (net spend == consumption) ------------------
@@ -193,7 +196,41 @@ def test_settle_clamps_consumed_to_reserved():
     s = _store()
     r = _reserve(s)
     out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=999, now=3000.0)
-    assert out["refunded"] == 0 and _avail(s, "org_a") == 70     # clamped: no negative refund, no over-claw
+    assert out["ok"] is True, out                                 # an over-report settles (clamped), never refused
+    assert out.get("refunded") == 0 and _avail(s, "org_a") == 70  # clamped: no negative refund, no over-claw
+
+
+def test_settle_refuses_a_negative_consumed_no_over_refund():
+    """consumed_units is reported by the offense side: a NEGATIVE value is refused outright, so the refund
+    (reserved - consumed) can never exceed what the signed reservation held."""
+    s = _store()
+    r = _reserve(s)                                        # 100 - 30 reserved = 70
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=-5, now=3000.0)
+    assert out["ok"] is False and "non-negative" in out["error"], out
+    assert _avail(s, "org_a") == 70                        # nothing refunded
+
+
+def test_publish_refuses_a_lease_the_owner_did_not_sign():
+    """publish_lease verifies the lease under the PINNED owner key before anything reaches the seam: the same
+    document re-signed by another key, and a genuine lease whose document was altered, are both refused and
+    leave the seam empty; the genuine lease is the control that publishes."""
+    import os
+    from vigil_core import SignedCreditLaunchLease, generate_keypair, sign_credit_launch_lease
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    s = _store()
+    r = _reserve(s)
+    g = _gate(s)
+    base = os.environ["VIGIL_BASE_DIR"]
+    genuine = SignedCreditLaunchLease.model_validate(r["lease"])
+    resigned = sign_credit_launch_lease(genuine.document, {"owner": generate_keypair().private_key_b64})
+    altered = genuine.model_dump(mode="json")
+    altered["document"]["units_reserved"] = int(genuine.document.units_reserved) + 1
+    for bad in (resigned.model_dump(mode="json"), altered):
+        out = g.publish_lease(signed_lease=bad, expect_org_id="org_a")
+        assert out["ok"] is False and "does not verify" in out["error"], out
+        assert read_credit_lease(base, r["slug"]) is None
+    assert g.publish_lease(signed_lease=r["lease"], expect_org_id="org_a")["ok"]
+    assert read_credit_lease(base, r["slug"]) is not None
 
 
 def test_settle_is_idempotent():
@@ -321,6 +358,59 @@ def test_forged_seam_authority_refused_owner_must_sign():
     write_authorization(os.environ["VIGIL_BASE_DIR"], slug, forged, forged_root)
     r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
     assert r["ok"] is False and "engagement authority" in r["error"]   # owner never signed -> refused
+    assert _avail(s, "org_a") == 100
+
+
+def _owner_authority_on_seam(org, host, *, scope, not_before, not_after):
+    """Write a GENUINELY owner-signed EngagementAuthority for (org, host)'s slug straight onto the seam, so a
+    test can vary ONLY the scope / window the gate must still check after the owner-pin passes."""
+    import os
+    from datetime import datetime, timezone
+    from vigil_core import (AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot,
+                            sign_engagement_authority)
+    from vigil_integration.live.authorization_broker import write_authorization
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.target_authorization import _customer_slug
+    owner = ensure_owner_keypair()
+    slug = _customer_slug(org, host)
+    doc = EngagementAuthority(engagement_slug=slug, environment=TargetEnvironment("live"), scope=scope,
+                              not_before=datetime.fromtimestamp(not_before, tz=timezone.utc),
+                              not_after=datetime.fromtimestamp(not_after, tz=timezone.utc), issued_by="owner")
+    signed = sign_engagement_authority(doc, {"owner": owner.private_key_b64})
+    root = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)])
+    write_authorization(os.environ["VIGIL_BASE_DIR"], slug, signed, root)
+
+
+@pytest.mark.parametrize("not_before,not_after,admitted", [
+    (0.0, 1e9, True),          # positive control: owner-signed, exact scope, window covers now -> admitted
+    (0.0, 1500.0, False),      # EXPIRED before now=2000 (a stale bundle left on the seam)
+    (2500.0, 1e9, False),      # NOT YET valid at now=2000
+], ids=["covering-window-admitted", "expired-refused", "not-yet-valid-refused"])
+def test_owner_signed_authority_must_be_current(not_before, not_after, admitted):
+    """The target authority must be CURRENT, not merely owner-signed: a genuinely owner-signed authority whose
+    window has closed (or not opened) never authorizes a launch, and nothing is debited. The covering-window
+    case is the control that proves the helper's bundle passes the owner-pin, so the refusals are the window's."""
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100, authority=False)
+    _owner_authority_on_seam("org_a", "apme.cm", scope=["apme.cm"], not_before=not_before, not_after=not_after)
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
+    if admitted:
+        assert r["ok"], r
+        assert _avail(s, "org_a") == 90
+    else:
+        assert r["ok"] is False and "engagement authority" in r["error"], r
+        assert _avail(s, "org_a") == 100
+
+
+def test_owner_signed_authority_with_a_wider_scope_refused():
+    """The target authority must scope EXACTLY this host: an owner-signed bundle under the slug whose scope
+    also covers another host is refused — the gate never launches on an authority broader than [host]."""
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100, authority=False)
+    _owner_authority_on_seam("org_a", "apme.cm", scope=["apme.cm", "other.example"], not_before=0.0, not_after=1e9)
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
+    assert r["ok"] is False and "engagement authority" in r["error"], r
     assert _avail(s, "org_a") == 100
 
 

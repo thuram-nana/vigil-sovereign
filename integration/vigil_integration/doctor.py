@@ -1134,16 +1134,43 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # MONEY-5: the money-IN billing drain (#1055) joins them. A FAILED billing drain means a paid webhook is standing
 # in rejected/ (the processor never redelivers): a customer PAID and has NOT been credited until an operator acts —
 # an operator-visible money failure, so RED, not an advisory note. Like the others it is OPTIONAL (watched only
-# once VIGIL_BILLING_DRAIN_ENABLED is set), so an install that takes no payments is unaffected; and `vigil ready`
-# only REPORTS (nothing Requires= it), so a RED here never holds the proxy that accepts new payments down.
+# once its lane's enable flag is set), so an install that takes no payments is unaffected. It must never hold
+# payment INTAKE down (accepting + durably spooling a webhook is always safe; refusing one loses it): `vigil up`
+# gates on the production posture only, `vigil ready` only REPORTS, and the one scripted bring-up that gates on
+# this report (tools/oneshot-bringup) reads `intake_safe_issues` (_INTAKE_SAFE below) to tell this alarm from
+# every other RED — it still starts the proxy, and still refuses everything after it (the range, the acceptance
+# run). Both processor lanes' drains are money-IN drains alike.
 _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service",
                       "vigil-billing-drain-stripe.service")
-# The money-IN drains, one per processor lane: (unit, default spool, the drain command that re-runs it).
+# The money-IN drains, one per processor lane: unit -> (its journal name, the pass the unit runs, its timer).
 _BILLING_DRAIN_UNITS = {
-    "vigil-billing-drain.service": ("~/.sigil/billing-spool", "sigil billing-drain drain --spool <spool>"),
-    "vigil-billing-drain-stripe.service": ("~/.sigil/stripe-billing-spool",
-                                           "sigil billing-drain drain --provider stripe --spool <spool>"),
+    "vigil-billing-drain.service": ("vigil-billing-drain", "sigil billing-drain drain", "vigil-billing-drain.timer"),
+    "vigil-billing-drain-stripe.service": ("vigil-billing-drain-stripe", "sigil billing-drain drain --provider stripe",
+                                           "vigil-billing-drain-stripe.timer"),
 }
+
+
+def _billing_spool_where(unit: str) -> str:
+    """Where a money-IN drain's spool is, for its remediation text (each lane's own variables)."""
+    if unit == "vigil-billing-drain-stripe.service":
+        return ("the drain's VIGIL_STRIPE_BILLING_SPOOL, which must equal the proxy's VIGIL_STRIPE_WEBHOOK_SPOOL; "
+                "default ~/.sigil/stripe-billing-spool")
+    return f"the proxy's VIGIL_BILLING_WEBHOOK_SPOOL, else {_display_path(_sigil_home() / 'billing-spool')}"
+
+
+# INTAKE-SAFE hard issues: the REDs under which starting the UI (`vigil-command`: the proxy that accepts + durably
+# spools /webhooks/billing and /webhooks/stripe, AND the cockpit whose launch path reserves paid runs) is still
+# SAFE, so a scripted bring-up must not hold payment intake down on them (a webhook the proxy is not up to accept is
+# lost). Each is
+# listed in the report's `intake_safe_issues`; every other hard issue (a posture control, a spine-integrity
+# violation, a build-integrity tamper, a money-OUT/results drain, …) still refuses the UI. Two kinds qualify:
+#   * a money-IN billing drain alarm (MONEY-5, either lane) — under-credit only, and the remedy needs the proxy UP;
+#   * a fold-cache MISMATCH (Front C S0d) — EVIDENCE recorded by the cockpit that audited, which already DROPPED the
+#     entry (its next read rebuilds from the spine) and keeps serving launches, as a newly started cockpit (empty
+#     cache) would: refusing to START the UI adds no launch safety, and since only a running cockpit rewrites the
+#     report, it would hold intake down until someone deleted the file. A tampered spine is the integrity check's
+#     RED, which stays a refusal.
+_INTAKE_SAFE = "intake_safe_issues"
 
 
 # ── NET-4 (#73): network-recovery / telemetry-export posture (ADVISORY) ────────────────────────────────────
@@ -1328,8 +1355,11 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
     `sigil.governor.fold_warm`; read here as inert JSON WITHOUT importing sigil — FATAL-2). Returns (section,
     issues, notes). No report ⇒ `{"present": False}` and nothing else (the cache is off, or the cockpit has not
     audited yet: default output unchanged). A recorded MISMATCH is a HARD issue — a cached fold disagreed with a
-    rebuild from the spine (the cockpit already dropped that entry; find out why). A report older than twice its
-    own interval (+1 h) is a NOTE: the cockpit's audit thread is not running."""
+    rebuild from the spine (the cockpit already dropped that entry; find out why). A MISMATCH recorded by a previous
+    cockpit, which the running one superseded at start (`superseded`), is a NOTE naming that cockpit's pid and audit
+    time — its caches are gone, but the spine edit it may have seen is not — until an operator acknowledges it
+    (`sigil fold-cache ack`). A report older than twice its own interval (+1 h) is a NOTE: the cockpit's audit
+    thread is not running."""
     import datetime as _dt
     import json as _json
     p = (Path(home) if home is not None else _sigil_home()) / "fold_cache_audit.json"
@@ -1353,6 +1383,20 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
               f"({f.get('difference')}). The entry was dropped (the next read rebuilds); run `sigil verify` "
               f"and treat it as a defect or an in-place spine edit." for f in bad]
     notes: list = []
+    errored = [f for f in folds if f.get("status") == "error"]
+    if errored:                    # the rebuild from the spine RAISED: reads of these folds fail closed
+        section["errored"] = len(errored)
+        notes.append(f"the fold-cache audit could not rebuild {len(errored)} fold(s) from the spine "
+                     f"({', '.join(str(f.get('fold')) for f in errored)}: {errored[0].get('error')}); "
+                     f"run `sigil verify`.")
+    sup = rep.get("superseded")
+    sup = sup if isinstance(sup, dict) else {}
+    sup_bad = sup.get("mismatched")
+    if isinstance(sup_bad, list) and sup_bad:
+        section["superseded_mismatched"] = len(sup_bad)
+        notes.append(f"a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
+                     f"{', '.join(str(f) for f in sup_bad)}; its caches died with it, but investigate a possible "
+                     f"spine edit. Once investigated, acknowledge it: `sigil fold-cache ack`.")
     try:
         ts = _dt.datetime.fromisoformat(str(rep.get("ts"))).timestamp()
         interval = float(rep.get("interval_s") or 0)
@@ -1523,6 +1567,23 @@ def _probe_model_gateway(url: str) -> "bool | None":
         return None
     return None
 
+
+#: How long a lease may stay published after its settlement marker was written — or a recorded settle stay on the
+#: settle drain's unfinished record — before ``vigil doctor`` reports it as a hard issue (E3bc): a settle retires its
+#: lease within moments, and the settle drain (every ~60 s) finishes an interrupted one, so a lasting one is an issue,
+#: a settle in progress is not. The drain ALARMs on the same grace (one constant: ``live/settle_progress``).
+from .live.settle_progress import UNFINISHED_SETTLE_GRACE_S as _UNFINISHED_SETTLE_GRACE_S  # noqa: E402
+
+
+def _settle_spool_dir() -> Path:
+    """The settle drain's completion spool, where it records the settles it could not finish
+    (``live/settle_progress``): ``VIGIL_SETTLE_SPOOL`` in this environment (or ``sigil.env``), else in
+    ``~/.config/vigil/settle-drain.env``, else the unit's default ``~/.sigil/spool/settle``. Never raises."""
+    v = (_runtime_env().get("VIGIL_SETTLE_SPOOL") or "").strip()
+    if not v:
+        v = ((_parse_env_file(Path.home() / ".config" / "vigil" / "settle-drain.env") or {}).get("VIGIL_SETTLE_SPOOL")
+             or "").strip()
+    return Path(v).expanduser() if v else Path.home() / ".sigil" / "spool" / "settle"
 
 #: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
 #: (the full list is in ``report["paused_launches"]["unreadable"]``) — keeps one bad directory from flooding it.
@@ -1844,13 +1905,21 @@ def collect(repo_root) -> dict:
                 # deploy preflight / production gate — goes RED until it is cleared. Non-money units stay
                 # advisory (`vigil alerts` owns the full dead-man).
                 if st.unit in _MONEY_DRAIN_UNITS and st.unit in _BILLING_DRAIN_UNITS:
-                    spool_default, rerun = _BILLING_DRAIN_UNITS[st.unit]
+                    journal, rerun, timer = _BILLING_DRAIN_UNITS[st.unit]
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"failed/stalled billing drain means paid webhooks are quarantined or not being "
-                           f"drained: a customer PAID and has NOT been credited. Read each `.reason` in the billing "
-                           f"spool's rejected/ (default {spool_default}), fix the cause, move the envelope "
-                           f"back to incoming/, and run `{rerun}` (or restart "
-                           f"the unit) — re-ingest is idempotent, a payment is credited once.")
+                           f"drained: a customer PAID and has NOT been credited. `journalctl --user -u "
+                           f"{journal} -e` says why (the unit runs `{rerun}`). A QUARANTINE "
+                           f"names its rejected/ directory (in the billing spool: {_billing_spool_where(st.unit)}): "
+                           f"read each `.reason`, fix the cause, "
+                           f"move the envelope back to incoming/ and delete its `.reason`. A REFUSAL names its cause "
+                           f"(the spool or SIGIL_HOME the drain sees, a missing secret, a stuck second drainer). "
+                           f"Only the unit's own run clears this alarm: its next timer pass (within 60 s) or "
+                           f"`systemctl --user start {st.unit}`; a STALE drain's timer is not "
+                           f"firing — `systemctl --user enable --now {timer}`. Re-ingest is "
+                           f"idempotent, a payment is credited once. Keep the proxy UP meanwhile: new payments "
+                           f"keep spooling safely.")
+                    report.setdefault(_INTAKE_SAFE, []).append(report["issues"][-1])
                 elif st.unit in _MONEY_DRAIN_UNITS:
                     _issue(f"MONEY/pipeline drain unhealthy — {st.unit} is {st.state}: {st.detail}. A "
                            f"stalled/failed settle drain means completed paid runs are not being "
@@ -1916,6 +1985,17 @@ def collect(repo_root) -> dict:
                   f"`sigil ops-sweep reservations`.")
         if _n_settled:
             report["paused_launches"]["settled"] = _n_settled    # inert: a settled lease never runs again
+        # E8: an expired paused launch (paused when its window closed, or its pause lifted only after) past the settle
+        # grace that NOTHING settled holds a paid reservation nothing can run any more — a HARD issue, whatever the
+        # flag (`expired_unsettled`, added only when non-empty; due predicate: live/credit_lease_expiry).
+        from .live.credit_lease_expiry import due_expired_pauses
+        _due = due_expired_pauses(_pbase, now=_time.time())
+        if _due:
+            report["paused_launches"]["expired_unsettled"] = sorted({d.slug for d in _due})
+            _issue(f"{len(_due)} paused customer launch(es) whose lease window closed more than the settle grace "
+                   f"ago are NOT settled — reserved credits nothing can run any more. The settle drain settles them "
+                   f"(a metered launch charged for what it used, a flat one refunded) when VIGIL_PAUSED_EXPIRY_SETTLE=1 "
+                   f"is set for it; otherwise run `sigil ops-sweep reservations --apply`.")
         _unreadable = unreadable_pause_markers(_pbase)
         if _unreadable:
             report["paused_launches"]["unreadable"] = _unreadable
@@ -1949,6 +2029,70 @@ def collect(repo_root) -> dict:
         report["paused_launches"] = {"error": f"{type(exc).__name__}: {exc}"}
         _note(f"the paused-launch probe could not run: {exc}")
 
+    # E3bc — a customer launch whose settle was recorded but has not finished. A settle writes the lease's settlement
+    # marker BEFORE it moves any money and retires the lease LAST, so a lease still published although its marker
+    # lists it (past a short grace) is a settle whose refund may not have landed — and while its recorded money has
+    # not landed, a new launch on that host is refused with a retry. With VIGIL_SETTLE_SPINE_RECORD on the settle
+    # drain finishes it on its next pass, so a lasting one is a HARD issue (`launch_settlements["unfinished"]`, slugs
+    # only, added only when non-empty). Off (default): nothing records the decision to finish it from, nothing is
+    # added. Best-effort: never raises.
+    try:
+        if (_runtime_env().get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _AFFIRMATIVE:
+            import time as _time
+
+            from .live.credit_lease_broker import unfinished_settlements
+            _sbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+            _unf = unfinished_settlements(_sbase, now=_time.time(), grace=_UNFINISHED_SETTLE_GRACE_S)
+            if _unf:
+                report["launch_settlements"] = {"unfinished": sorted({s for s, _n in _unf})}
+                _issue(f"{len(_unf)} customer launch settle(s) were recorded but have not finished (the lease is still "
+                       f"published after its settlement was recorded): the refund may not have landed, and while it "
+                       f"has not, a new launch on that host is refused with a retry. The settle drain finishes it on "
+                       f"its next pass (VIGIL_SETTLE_SPINE_RECORD on, in the drain's environment too); if it stays "
+                       f"listed, check the settle drain unit (`vigil alerts --status`) and run "
+                       f"`sigil ops-sweep reservations` to see what is pending.")
+    except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
+        report["launch_settlements"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the launch-settlement probe could not run: {exc}")
+    # E3bc — the settle drain's own record of the recorded settles it has NOT been able to finish (written beside its
+    # completion spool every pass: live/settle_progress). It holds a settle whatever stopped it — its seam marker never
+    # written included, which the marker probe above cannot see — and a finish pass that keeps failing. Past the same
+    # grace each is a HARD issue (`launch_settlements["drain_unfinished"]` slugs / `["drain_error"]`, added only when
+    # present), as the drain itself ALARMs and fails its unit. With the record flag off nothing is read. Best-effort.
+    try:
+        if (_runtime_env().get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _AFFIRMATIVE:
+            import time as _time
+
+            from .live import settle_progress as _sp
+            _spool = _settle_spool_dir()
+            try:
+                _st = _sp.read_state(_spool)
+            except ValueError as exc:
+                report.setdefault("launch_settlements", {})["drain_record"] = "unreadable"
+                _note(f"the settle drain's record of unfinished settles ({_display_path(_sp.state_path(_spool))}) "
+                      f"cannot be read ({exc}); its next pass rewrites it. Run `vigil doctor` as the drain's user.")
+                _st = {}
+            _held, _err = _sp.overdue(_st, now=_time.time(), grace=_UNFINISHED_SETTLE_GRACE_S)
+            _mins = int(_UNFINISHED_SETTLE_GRACE_S // 60)
+            if _held:
+                report.setdefault("launch_settlements", {})["drain_unfinished"] = sorted({s for s, _n in _held})
+                _issue(f"{len(_held)} recorded customer launch settle(s) could not be finished by the settle drain for "
+                       f"more than {_mins} minutes: the refund has not landed, and a new launch on that host is "
+                       f"refused with a retry until it does, or (tombstone_failed) the settled lease could not be "
+                       f"retired from the seam. The drain prints the cause each pass (its unit's journal); typically "
+                       f"the seam (VIGIL_SETTLE_BASE_DIR), the spine or the spool is not writable by the drain's user. "
+                       f"Fix it; the drain finishes the settle on its next pass (retires such a lease within "
+                       f"{_mins} minutes).")
+            if _err:
+                report.setdefault("launch_settlements", {})["drain_error"] = _err
+                _issue(f"the settle drain's pass that finishes interrupted settles has failed for more than {_mins} "
+                       f"minutes ({_err}): a recorded settle it cannot see stays unfinished, and the relaunch it "
+                       f"holds is refused with a retry. Check the spine (`sigil verify`) and the drain unit "
+                       f"(`vigil alerts --status`).")
+    except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
+        report.setdefault("launch_settlements", {})["drain_record"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the settle drain's record of unfinished settles could not be read: {exc}")
+
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.
     try:
@@ -1976,6 +2120,7 @@ def collect(repo_root) -> dict:
         report["fold_cache_audit"] = _fc
         for _m in _fc_issues:
             _issue(_m)
+            report.setdefault(_INTAKE_SAFE, []).append(report["issues"][-1])   # evidence, not live state
         for _m in _fc_notes:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the fold-cache probe must never crash the report
@@ -2172,6 +2317,7 @@ def render(report: dict) -> str:
         # Front C S0d: rendered ONLY when the cockpit has written an audit (default output byte-identical).
         lines.append(f"\n{_mark(bool(fc.get('ok')))}fold cache audit ({fc.get('ts')}): {fc.get('matched')} match, "
                      f"{fc.get('mismatched')} MISMATCH, {fc.get('skipped')} skipped"
+                     + (f", {fc['errored']} could not be rebuilt" if fc.get("errored") else "")
                      + ("  (STALE — audit thread not running)" if fc.get("stale") else ""))
 
     mt = report.get("metering")

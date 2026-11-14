@@ -12,7 +12,7 @@ from .ingest.docs import ingest_docs
 from .ingest.transcript import ingest_transcript
 from .mesh import authorize_device, authorized_devices, revoke_device
 from .reuse import sha256_hex
-from .spine.checkpoint import checkpoint, verify_checkpoint
+from .spine.checkpoint import CheckpointRefused, checkpoint, standing_pruned_head, verify_checkpoint
 from .spine.store import SpineStore
 from .vectors.index import VectorIndex
 
@@ -265,6 +265,17 @@ def cmd_voice(a) -> None:
     print(f"  events:     {p.events}")
 
 
+def _head_declares_prune() -> bool:
+    """True iff the on-disk signed head declares a committed hard prune (also true in the prune's own crash window,
+    before the manifest is rebased)."""
+    from .config import HEAD_PATH
+    from .reuse import SignedChainHead
+    try:
+        return SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8")).snapshot_seq >= 0
+    except Exception:  # noqa: BLE001 — absent / unparseable: the live-window check decides
+        return False
+
+
 def cmd_warden_anchor_set(a) -> None:
     """Cross-anchor the WARDEN action-log head into the append-only spine (anti-rollback).
     AUTHENTICATED: the (count, head_hash, pubkey) tuple must carry a valid Ed25519 signature by
@@ -275,6 +286,7 @@ def cmd_warden_anchor_set(a) -> None:
         print("REJECTED: warden-anchor-set signature invalid (only the WARDEN key may anchor)", file=sys.stderr)
         sys.exit(2)
     store = SpineStore()
+    standing_pruned_head(store)   # a pruned spine whose head could not be re-signed: refuse BEFORE appending
     store.append(kind="warden_checkpoint", source="warden", actor="warden",
                  payload={"count": int(a.count), "head_hash": a.head_hash, "pubkey": a.pubkey})
     checkpoint(store)  # re-sign the spine head so the anchor sits under the spine's signature (anti-truncation)
@@ -1075,9 +1087,10 @@ def cmd_verify(a) -> None:
 
 def _verify_fold_caches(rebuild: bool) -> bool:
     """Front C S0d — the fold-cache line(s) of `sigil verify`. Always: the cockpit's last background audit
-    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify. With `--folds` (and the
-    cache on): warm every fold cache in THIS process and rebuild-and-compare each against the spine now. Returns
-    False iff a mismatch was found."""
+    (`config.FOLD_AUDIT_PATH`), if one was written — a recorded MISMATCH fails verify; one a previous cockpit
+    recorded (superseded at the running cockpit's start) is printed, not counted, until an operator acknowledges it
+    (`sigil fold-cache ack`). With `--folds` (and the cache on): warm every fold cache in THIS process and
+    rebuild-and-compare each against the spine now. Returns False iff a mismatch was found."""
     from . import config
     ok = True
     try:
@@ -1088,11 +1101,28 @@ def _verify_fold_caches(rebuild: bool) -> bool:
         print(f"folds --: unreadable audit report {config.FOLD_AUDIT_PATH}: {exc}")
         rep = None
     if isinstance(rep, dict):
+        from .governor import fold_warm
+        sup = fold_warm.superseded_mismatch(rep)
+        if sup is not None:
+            print(f"folds --: a previous cockpit (pid {sup.get('pid')}, audit {sup.get('ts')}) recorded a MISMATCH in "
+                  f"{', '.join(str(f) for f in sup['mismatched'])}; its caches died with it, but investigate a "
+                  f"possible spine edit. Once investigated, acknowledge it: `sigil fold-cache ack`.")
         bad = [f for f in rep.get("folds", []) if isinstance(f, dict) and f.get("status") == "MISMATCH"]
+        if bad and not fold_warm.report_is_live(rep):
+            # the caches that disagreed died with that process; this one would rebuild them from the spine
+            print(f"folds --: the cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) recorded {len(bad)} "
+                  f"MISMATCH, but that process is gone and its caches with it — not counted (rebuild-and-compare "
+                  f"now: VIGIL_FOLD_CACHE_ENABLED=1 sigil verify --folds)")
+            bad, rep = [], None
         ok = not bad
+    if isinstance(rep, dict):
+        rows = [f for f in rep.get("folds", []) if isinstance(f, dict)]
+        n_match = sum(1 for f in rows if f.get("status") == "match")
+        n_err = sum(1 for f in rows if f.get("status") == "error")
         print(("folds OK: " if ok else "folds FAIL: ") + f"cockpit audit {rep.get('ts', '?')} (pid {rep.get('pid', '?')}) "
               + (f"— {len(bad)} MISMATCH: " + ", ".join(f"{f.get('fold')} at seq {f.get('seq')} ({f.get('difference')})"
-                                                      for f in bad) if bad else "— every cached fold equals a rebuild"))
+                                                      for f in bad) if bad else
+                 f"— {n_match} cached fold(s) equal a rebuild" + (f"; {n_err} could not be read" if n_err else "")))
     if rebuild:
         if not config.fold_cache_enabled():
             print("folds --: --folds needs VIGIL_FOLD_CACHE_ENABLED (the fold cache is off)")
@@ -1107,6 +1137,37 @@ def _verify_fold_caches(rebuild: bool) -> bool:
               + (" — MISMATCH: " + ", ".join(f"{f['fold']} ({f.get('difference')})" for f in bad) if bad else ""))
         ok = ok and not bad
     return ok
+
+
+def _login_name() -> str:
+    import getpass
+    import os
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 — no login name: the uid names the operator
+        return f"uid {os.getuid()}"
+
+
+def cmd_fold_cache(a) -> None:
+    """Front C S0d — `sigil fold-cache ack`: acknowledge, once investigated, the MISMATCH a previous cockpit recorded
+    (the superseded note of `sigil verify` and `vigil doctor`). The acknowledgement — who, when, which verdict — is
+    recorded in the log beside the audit report, and only that note is removed; refused (exit 2) while the current
+    report records a MISMATCH of its own, or when the report cannot be read."""
+    from . import config
+    from .governor import fold_warm
+    by = a.by if a.by is not None else _login_name()
+    try:
+        entry = fold_warm.acknowledge_superseded(by)
+    except (ValueError, OSError, TimeoutError) as exc:
+        print(f"fold-cache ack: refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if entry is None:
+        print(f"fold-cache ack: nothing to acknowledge ({config.FOLD_AUDIT_PATH} records no superseded MISMATCH)")
+        return
+    sup = entry["superseded"]
+    print(f"fold-cache ack: {entry['by']} acknowledged the MISMATCH a previous cockpit (pid {sup.get('pid')}, audit "
+          f"{sup.get('ts')}) recorded in {', '.join(str(f) for f in sup['mismatched'])}; recorded in "
+          f"{fold_warm.ack_log_path()}")
 
 
 def cmd_status(a) -> None:
@@ -1292,6 +1353,14 @@ def cmd_settle_drain(a) -> None:
         print(f"  drained: {r['settled']} settled, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped" + (f", {r['deferred']} deferred (retried next drain)" if r.get("deferred")
                                            else ""))
+        if r.get("settle_completed") or r.get("settle_unfinished") or r.get("settle_finish_error"):
+            # E3bc, only while VIGIL_SETTLE_SPINE_RECORD is on and a recorded settle needed finishing
+            print(f"  interrupted settles: {r.get('settle_completed', 0)} finished, {r.get('settle_unfinished', 0)} "
+                  f"left for the next pass"
+                  + (f" (not checked: {r['settle_finish_error']})" if r.get("settle_finish_error") else ""))
+        if "expired_settled" in r:              # E8, only while VIGIL_PAUSED_EXPIRY_SETTLE is on
+            print(f"  expired paused launches: {r['expired_settled']} settled, {r['expired_unsettled']} still held"
+                  + (f" (not checked: {r['expired_error']})" if r.get("expired_error") else ""))
         from .inbound import quarantined_count
         q = quarantined_count(watcher.rejected)
         if q:
@@ -1306,6 +1375,16 @@ def cmd_settle_drain(a) -> None:
             print(f"  ALARM: {r['deferred_config']} metered settle(s) wait on the pricing configuration "
                   f"(VIGIL_BILLING_TARGET_MARGIN / VIGIL_BILLING_CANCEL_SETTLEMENT / the price table, in THIS unit's "
                   f"environment). Fix it; this unit stays FAILED until they settle.", file=sys.stderr)
+            sys.exit(1)
+        if r.get("settle_stuck"):
+            # E3bc: a recorded settle this drain has not been able to finish for longer than its grace (or a finish
+            # pass that keeps failing) holds that customer's refund and any relaunch on the host. Fail the unit.
+            print(f"  ALARM: {r['settle_stuck']} recorded settle(s) have not been finished for more than 10 minutes "
+                  f"(the reasons are on stderr above): the refund has not landed and a new launch on that host is "
+                  f"refused with a retry, or (tombstone_failed) the settled lease could not be retired from the "
+                  f"seam. Fix the cause (the seam / spine / spool must be writable by this unit's user); this unit "
+                  f"stays FAILED until they finish (a lease that could not be retired is retried every 10 "
+                  f"minutes). `vigil doctor` lists them.", file=sys.stderr)
             sys.exit(1)
 
 
@@ -1336,8 +1415,29 @@ def cmd_ops_sweep(a) -> None:
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
+        if a.apply:
+            # E3bc: a root --apply would create seam settlement markers + their locks, spine segments and meter state
+            # as root inside the services' directories, after which their settles fail. Fail fast instead.
+            from pathlib import Path
+
+            from . import config
+            from vigil_integration.live.credit_lease_broker import settlements_root
+            seam = gate._seam_base()
+            why = ops_sweeps.root_apply_refusal(
+                [("seam directory", seam), ("spine directory", Path(gate.store.path).parent)],
+                [("settlement-marker directory", settlements_root(seam)), ("completion spool", a.completion_spool),
+                 ("model meter directory", config.MODEL_METER_DIR)])
+            if why:
+                print(f"--apply refused: running as root, but {why}. A root sweep would leave files the services "
+                      f"cannot write. Run it as the service user that owns those directories (e.g. `sudo -u <user> "
+                      f"sigil ops-sweep reservations --apply ...`).", file=sys.stderr)
+                sys.exit(2)
         out = ops_sweeps.sweep_abandoned_reservations(gate, now=now, ttl_s=a.ttl, apply=a.apply,
                                                        completion_spool=(a.completion_spool or None))
+        # E7: reservations a later launch of the same target superseded on the seam — invisible to the seam
+        # listing above — under the same report-by-default / --apply gates (rows only when there are any).
+        out["items"].extend(ops_sweeps.sweep_superseded_reservations(
+            gate, now=now, ttl_s=a.ttl, apply=a.apply, completion_spool=(a.completion_spool or None))["items"])
     elif a.sweep_cmd == "reconcile":
         # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
         # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed
@@ -1466,7 +1566,10 @@ def _stripe_billing_watcher(a):
         sys.exit(2)
     if os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
         refuse("the Stripe adapter is not enabled (VIGIL_BILLING_ENABLE_STRIPE)")
-    _require_expanded_path(a.spool, "--spool", required=True)
+    # The same operating guards as the Flutterwave lane: a spool that contradicts the proxy's Stripe spool (or the
+    # fixed ~/.sigil default under a moved SIGIL_HOME) and an implicit ~/.sigil home are refused (exit 2).
+    spool = _resolve_billing_spool(getattr(a, "spool", ""), lane="stripe")
+    _require_explicit_billing_home("stripe")
     secret = os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET", "")
     if not secret:
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET is not set")
@@ -1474,8 +1577,8 @@ def _stripe_billing_watcher(a):
         refuse("VIGIL_STRIPE_WEBHOOK_SECRET must differ from VIGIL_BILLING_WEBHOOK_SECRET (one secret per provider)")
     from . import config
     flw_default = os.path.join(os.environ.get("SIGIL_HOME") or str(config.SIGIL_HOME), "billing-spool")
-    if any(_same_dir(a.spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
-                                            os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
+    if any(_same_dir(spool, p) for p in (os.environ.get("VIGIL_BILLING_SPOOL", ""),
+                                          os.environ.get("VIGIL_BILLING_WEBHOOK_SPOOL", ""), flw_default)):
         refuse("--spool is the Flutterwave billing spool (VIGIL_BILLING_SPOOL / VIGIL_BILLING_WEBHOOK_SPOOL); "
                "the Stripe lane drains its own spool")
     fetcher = _stripe_object_fetcher()
@@ -1488,6 +1591,7 @@ def _stripe_billing_watcher(a):
         se._api_version()
     except se.StripeEgressError:
         refuse("VIGIL_STRIPE_API_VERSION is unset or malformed")
+    _require_billing_owner_home(spool, "stripe")
     # The Stripe lane is always loud: a paid Stripe object it cannot credit (no tenant, time or currency, an
     # off-catalog or underpaid plan, a monitoring price with no line) quarantines and alarms, never a silent no-op —
     # whatever the plan-checkout flag in this unit's environment says.
@@ -1496,7 +1600,155 @@ def _stripe_billing_watcher(a):
                                      strict=True)
     del secret
     signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True)
-    return BillingSpoolWatcher(signer, spool_dir=a.spool, envelope_reader=StripeEnvelopeV1())
+    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
+
+
+# The money-IN drain lanes: (the drain's own spool variable — None: the lane drains exactly the --spool its unit
+# passes —, the proxy's (writer's) spool variable, the runbook spool name under SIGIL_HOME, the drain unit's env file
+# under ~/.config/vigil, the prefix its refusals carry).
+_BILLING_LANES = {
+    "flutterwave": ("VIGIL_BILLING_SPOOL", "VIGIL_BILLING_WEBHOOK_SPOOL", "billing-spool", "billing-drain.env",
+                    "billing-drain"),
+    "stripe": (None, "VIGIL_STRIPE_WEBHOOK_SPOOL", "stripe-billing-spool", "billing-drain-stripe.env",
+               "billing-drain --provider stripe"),
+}
+
+
+def _resolve_billing_spool(arg: "str | None", lane: str = "flutterwave") -> str:
+    """The ONE place the money-IN drain decides WHICH spool it drains, so it cannot run "healthy" on a directory
+    the proxy never writes to (a paid webhook spooled, never credited, the unit exiting 0).
+
+    The writer is the proxy's ``/webhooks/billing`` route, which spools into ``VIGIL_BILLING_WEBHOOK_SPOOL`` (the
+    runbook value: ``$SIGIL_HOME/billing-spool``). With no explicit spool (``--spool`` / ``VIGIL_BILLING_SPOOL``)
+    the drain therefore DERIVES it: the writer's own variable when it is visible here, else
+    ``$SIGIL_HOME/billing-spool`` — it follows a moved ``SIGIL_HOME`` instead of a fixed ``~/.sigil`` default.
+    An explicit spool still wins, but is REFUSED (exit 2 -> the unit is FAILED and the dead-man alarms) when it
+    contradicts what this process can see: it differs from the writer's variable, or it is the legacy fixed
+    default ``~/.sigil/billing-spool`` while ``SIGIL_HOME`` points elsewhere and nothing confirms the choice.
+
+    The Stripe lane (``lane="stripe"``) drains exactly the ``--spool`` its unit passes (still required), under the
+    same two refusals against its own writer variable ``VIGIL_STRIPE_WEBHOOK_SPOOL`` and its fixed
+    ``~/.sigil/stripe-billing-spool`` default."""
+    import os
+    from pathlib import Path
+
+    from .config import _resolve_home
+
+    def _same(x: str, y: "str | Path") -> bool:
+        return os.path.realpath(x) == os.path.realpath(str(y))
+
+    own_env, intake_env, name, _env_file, who = _BILLING_LANES[lane]
+    intake = os.environ.get(intake_env, "").strip()
+    explicit = (arg or (os.environ.get(own_env, "") if own_env else "") or "").strip()
+    home_default = _resolve_home() / name
+    spool = (explicit or intake or str(home_default)) if own_env else explicit
+    _require_expanded_path(spool, "--spool", required=True)
+    if own_env:
+        agree = f"Drop --spool / {own_env}, or make them agree."
+        follow = (f"Drop --spool / {own_env} so the spool follows SIGIL_HOME, or set {intake_env} to the directory "
+                  f"the proxy really uses.")
+    else:
+        agree = f"Make the unit's --spool (VIGIL_STRIPE_BILLING_SPOOL) agree with {intake_env}."
+        follow = (f"Set VIGIL_STRIPE_BILLING_SPOOL (the unit's --spool) to the proxy's {intake_env}, or copy "
+                  f"{intake_env} into the drain's env file to confirm this directory.")
+    if explicit and intake and not _same(explicit, intake):
+        print(f"{who}: the spool to drain ({explicit}) is NOT the spool the proxy writes paid webhooks to "
+              f"({intake_env}={intake}) — refusing (fail-closed: draining the wrong directory "
+              f"credits nobody while exiting 0). {agree}", file=sys.stderr)
+        sys.exit(2)
+    if (explicit and not intake and _same(explicit, Path.home() / ".sigil" / name)
+            and not _same(explicit, home_default)):
+        print(f"{who}: the spool to drain ({explicit}) is the fixed ~/.sigil default, but SIGIL_HOME is "
+              f"{_resolve_home()} (the runbook spool is {home_default}) — refusing (fail-closed: draining the "
+              f"wrong directory credits nobody while exiting 0). {follow}", file=sys.stderr)
+        sys.exit(2)
+    return spool
+
+
+# The cockpit unit's env file (sigil-cockpit.service `EnvironmentFile=-%h/.sigil/cockpit.env`), where GO-LIVE §2
+# persists a moved SIGIL_HOME. The drain only READS its SIGIL_HOME line to compare; it never loads the file.
+_COCKPIT_ENV = (".sigil", "cockpit.env")
+
+
+def _cockpit_env_sigil_home() -> "tuple[str, str] | None":
+    """``(file, value)`` of the LAST ``SIGIL_HOME=`` assignment in the cockpit's env file (systemd EnvironmentFile
+    syntax: a line with no ``=`` is ignored, one pair of surrounding quotes is stripped; a ``#``/``;`` comment line
+    never carries the bare key), or None when the file is absent, unreadable or names no (or an empty) SIGIL_HOME —
+    nothing to compare against."""
+    from pathlib import Path
+    f = Path.home().joinpath(*_COCKPIT_ENV)
+    try:
+        if not f.is_file():                     # never block on a FIFO planted at that name
+            return None
+        with open(f, "rb") as fh:
+            raw = fh.read(64 * 1024).decode("utf-8", errors="replace")
+    except OSError:                             # e.g. replaced between the check and the open
+        return None
+    value = None
+    for line in raw.split("\n"):
+        k, sep, v = line.strip().partition("=")
+        if not sep or k.strip() != "SIGIL_HOME":
+            continue
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        value = v
+    return (str(f), value) if value else None
+
+
+def _require_explicit_billing_home(lane: str = "flutterwave") -> None:
+    """The money-IN drain mints OWNER-signed credit onto the spine under SIGIL_HOME and, with no spool named,
+    drains ``$SIGIL_HOME/billing-spool``. So it NEVER falls back to the implicit ``~/.sigil``: SIGIL_HOME must be
+    set — absolute and expanded — in this process's own environment. A fallback cannot tell "never moved" from "moved
+    for the cockpit and the proxy, but not in this drain's env file": the drain then drains an empty
+    ``~/.sigil/billing-spool`` and exits 0 forever (the dead-man reading it HEALTHY), or — given the proxy's spool —
+    credits a ``~/.sigil`` spine the cockpit never reads. Whatever owner key happens to sit in ``~/.sigil`` (a
+    pre-move install, a copy-migration, any owner-signing command run without SIGIL_HOME exported) proves nothing.
+    When the cockpit's own env file names a SIGIL_HOME, this one must be the same directory (a stale copy — e.g.
+    the old volume after a migration — is refused). Exit 2 either way: the unit goes FAILED and MONEY-5 alarms.
+    The Stripe lane mints onto the same spine, so it is held to the same rule (its env file: billing-drain-stripe)."""
+    import os
+    from pathlib import Path
+    _own, _intake, _name, env_file, who = _BILLING_LANES[lane]
+    home = os.environ.get("SIGIL_HOME", "").strip()
+    if not home:
+        print(f"{who}: SIGIL_HOME is not set in this drain's environment — refusing (fail-closed: the drain "
+              f"mints onto the spine under SIGIL_HOME and drains its billing-spool, and an implicit ~/.sigil may "
+              f"not be the cockpit's home: a paid webhook would wait uncredited while the pass exits 0). Set "
+              f"SIGIL_HOME to the cockpit's SIGIL_HOME in ~/.config/vigil/{env_file} (an install that never "
+              f"moved it: SIGIL_HOME=/home/<user>/.sigil).", file=sys.stderr)
+        sys.exit(2)
+    if "%" in home or not Path(home).is_absolute():
+        print(f"{who}: SIGIL_HOME must be an ABSOLUTE, already-expanded path (got {home!r}; systemd does "
+              f"NOT expand %h inside an EnvironmentFile value) — refusing.", file=sys.stderr)
+        sys.exit(2)
+    cockpit = _cockpit_env_sigil_home()
+    if cockpit is not None and os.path.realpath(cockpit[1]) != os.path.realpath(home):
+        print(f"{who}: this drain's SIGIL_HOME ({home}) is not the cockpit's — {cockpit[0]} sets "
+              f"SIGIL_HOME={cockpit[1]} — refusing (fail-closed: the drain would credit a spine the cockpit never "
+              f"reads, or drain a spool the proxy never writes to, while exiting 0). Make SIGIL_HOME in "
+              f"~/.config/vigil/{env_file} the cockpit's.", file=sys.stderr)
+        sys.exit(2)
+
+
+def _require_billing_owner_home(spool: str, lane: str = "flutterwave") -> None:
+    """The drain mints OWNER-signed credit onto the spine under SIGIL_HOME. A home with no owner identity is not the
+    cockpit's (a mistyped path, a fresh volume): draining its spool would exit 0 forever while paid webhooks wait
+    (the dead-man reading it HEALTHY), and nothing there could be minted. A defence in depth only — an owner key
+    proves nothing about WHOSE home it is (``_require_explicit_billing_home``). Exit 2."""
+    from .config import _resolve_home
+    from .governor.identity import owner_pubkey
+    _own, _intake, _name, env_file, who = _BILLING_LANES[lane]
+    if not owner_pubkey():
+        print(f"{who}: SIGIL_HOME ({_resolve_home()}) holds no owner identity, so it is not the cockpit's "
+              f"home — refusing (fail-closed: draining {spool} would credit nobody while exiting 0). Set the "
+              f"cockpit's SIGIL_HOME in this drain's env (~/.config/vigil/{env_file}).", file=sys.stderr)
+        sys.exit(2)
+
+
+# How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
+# handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
+_BILLING_LOCK_WAIT_S = 120.0
 
 
 def cmd_billing_drain(a) -> None:
@@ -1514,10 +1766,11 @@ def cmd_billing_drain(a) -> None:
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
         print("billing-drain is disabled (set VIGIL_BILLING_DRAIN_ENABLED=1 to enable)", file=sys.stderr)
         sys.exit(2)
-    # Front B (money-IN automation): the supervised vigil-billing-drain unit passes --spool from an env value; a
-    # literal %h / relative path would drain NOTHING while exiting 0 (a paid customer never credited, and the
-    # dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
-    _require_expanded_path(a.spool, "--spool", required=True)
+    # Front B (money-IN automation): WHICH spool is resolved in one place (`_resolve_billing_spool`), which also
+    # refuses a literal %h / relative path — that would drain NOTHING while exiting 0 (a paid customer never
+    # credited, and the dead-man reads it HEALTHY). Same fail-closed guard as the settle / finding drains.
+    spool = _resolve_billing_spool(getattr(a, "spool", ""))
+    _require_explicit_billing_home()                   # no implicit ~/.sigil for the money mint (exit 2)
     secret = os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET", "")
     if not secret:
         print("billing-drain: VIGIL_BILLING_WEBHOOK_SECRET is not set — refusing (fail-closed)", file=sys.stderr)
@@ -1527,6 +1780,7 @@ def cmd_billing_drain(a) -> None:
         print("billing-drain: no server-side transaction verifier is configured — refusing (fail-closed; a "
               "verif-hash alone never grants value)", file=sys.stderr)
         sys.exit(2)
+    _require_billing_owner_home(spool)                 # a home with no owner identity is not the cockpit's (exit 2)
 
     from .governor.billing import FlutterwaveBillingProvider
     from .inbound.billing_spool import BillingSpoolWatcher
@@ -1540,22 +1794,31 @@ def cmd_billing_drain(a) -> None:
     signer = _billing_signer(FlutterwaveBillingProvider(secret, verifier,
                                                         checkout_creator=_billing_checkout_creator(),
                                                         alarm_unaccounted_plans=alarm), store, alarm=alarm)
-    watcher = BillingSpoolWatcher(signer, spool_dir=a.spool, verif_hash=secret)
+    watcher = BillingSpoolWatcher(signer, spool_dir=spool, verif_hash=secret)
     del secret
     _run_billing_watcher(a, watcher)
 
 
 def _run_billing_watcher(a, watcher) -> None:
     """Run one billing drain pass (or watch), with the shared reporting: NET-2b parked count, and a FAILED exit
-    (the dead-man alarms) while anything sits in quarantine."""
+    (the dead-man alarms) while anything sits in quarantine. Both lanes: a pass waits out another drainer's pass
+    (the single-drainer lock) for ``_BILLING_LOCK_WAIT_S`` and then FAILS loudly, and a starved ``watch`` warns."""
+    spool = watcher.spool
     if getattr(a, "billing_cmd", "drain") == "watch":
-        print(f"  watching {a.spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
+        print(f"  watching {spool}/incoming → owner-signed billing mint; Ctrl-C to stop")
         try:
-            watcher.watch(interval=a.interval)
+            watcher.watch(interval=a.interval, busy_warn_s=_BILLING_LOCK_WAIT_S)   # a starved watch says so
         except KeyboardInterrupt:
             pass
     else:
-        r = watcher.drain()
+        r = watcher.drain(wait_s=_BILLING_LOCK_WAIT_S)   # waits out another drainer's pass (single-drainer lock)
+        if r.get("busy"):
+            # Still held after the wait: a stuck drainer (or a second one that never lets go). This pass touched
+            # nothing — and must NOT read as a healthy pass, or a wedged holder would hide behind exit 0 forever.
+            print(f"billing-drain: another billing drainer has held the lock on {spool} for over "
+                  f"{int(_BILLING_LOCK_WAIT_S)} s — this pass touched nothing. Find the stuck drainer (run the "
+                  f"timer OR `watch`, never both).", file=sys.stderr)
+            sys.exit(1)
         print(f"  drained: {r['minted']} minted, {r['noop']} noop, {r['rejected']} rejected, "
               f"{r['deduped']} deduped")
         parked = watcher.parked_count() if "deferred" in r else 0   # NET-2b ON only (OFF output unchanged)
@@ -1850,8 +2113,12 @@ def cmd_key(a) -> None:
             print(f"  epoch {e.epoch:>3}  seq [{e.start}, {end})  {e.pubkey}")
         print(f"validated current   : {succ.current}")
         if cur and cur != succ.current:
+            from .spine.checkpoint import _KEY_RECOVERY
+            from .spine.snapshot import live_window_start
+            fix = (_KEY_RECOVERY.rstrip(".")
+                   if live_window_start(store) > 0 or _head_declares_prune() else "recover with `sigil key re-genesis`")
             print(f"!! on-disk owner.pub ({cur}) is NOT the validated succession tip — tampered/inconsistent "
-                  f"key state (recover with `sigil key re-genesis`)", file=sys.stderr)
+                  f"key state ({fix})", file=sys.stderr)
             sys.exit(2)
         print(f"epochs: {len(succ.epochs)}  (rotations so far: {len(succ.epochs) - 1})")
         _cmd_key_material(a)                                # + per-key at-rest sealing / KEK/DEK/warden state
@@ -1862,12 +2129,26 @@ def cmd_key(a) -> None:
                   "and re-anchors the head. Pre-rotation heads/grants keep verifying. Re-run with --yes.",
                   file=sys.stderr)
             sys.exit(2)
+        if getattr(a, "finish", False):
+            # The owner finishes a rotation that was interrupted before it re-signed a PRUNED spine's head: the
+            # head is still under the retired key, which no routine sign carries forward (see
+            # `standing_pruned_head`). Deliberate and owner-run, like `sigil floor reset --yes`.
+            checkpoint(store, admit_incumbent=True)
+            ok, why = verify_checkpoint(store)
+            if not ok:                                      # never report a rotation finished that does not verify
+                print(f"!! the rotation is NOT finished: the head does not verify ({why})", file=sys.stderr)
+                sys.exit(2)
+            print("rotation FINISHED: the pruned head is re-signed under the current owner key.")
+            return
+        # A pruned spine whose head could not be re-signed: refuse BEFORE rotating. The head validated here (under
+        # the key being retired) is the one the re-sign below carries forward — no later sign trusts the old key.
+        standing = standing_pruned_head(store)
         try:
             new_kp, seq = kh.rotate(store, issued_at=time.time())
         except (ValueError, kh.SuccessionError) as e:
             print(f"!! rotation refused (fail-closed): {e}", file=sys.stderr)
             sys.exit(2)
-        checkpoint(store)                                   # re-sign the head+floor under the NEW owner key
+        checkpoint(store, carry=standing)                   # re-sign the head+floor under the NEW owner key
         print(f"owner key ROTATED. succession record @ seq {seq}.")
         print(f"new owner pubkey: {new_kp.public_key_b64}")
         print("every pre-rotation head and grant still verifies (walked from the pinned genesis root).")
@@ -1880,6 +2161,13 @@ def cmd_key(a) -> None:
                   "verifiable continuity of ALL pre-re-genesis history (every prior head, grant and "
                   "succession record stops being authenticated by the new root). Use ONLY for an actual key "
                   "COMPROMISE. Re-run with --yes --i-understand-continuity-is-abandoned.", file=sys.stderr)
+            sys.exit(2)
+        from .spine.snapshot import live_window_start
+        if live_window_start(store) > 0 or _head_declares_prune():
+            print("refusing: this spine was hard-pruned. Its prune boundary is owner-signed under the key history "
+                  "`sigil key re-genesis` abandons, so the new root could not carry it forward and every seeded "
+                  "read would fail closed. Nothing was changed. (Re-genesis on a pruned spine is not supported.)",
+                  file=sys.stderr)
             sys.exit(2)
         new_kp, seq = kh.re_genesis(store, issued_at=time.time())
         checkpoint(store)
@@ -1974,6 +2262,13 @@ def cmd_spine(a) -> None:
         except PruneUnsafe as e:
             print(f"prune UNSAFE at K={a.boundary}: {e}", file=sys.stderr)
             sys.exit(2)
+        if rep.get("already_complete"):
+            if rep.get("floor_advanced"):
+                print(f"the prune at {rep['base_seq']} was already committed (its head is signed); its durable "
+                      f"anti-rollback floor is now brought up to that head.")
+            print(f"the prune at {rep['base_seq']} was already committed (its head is signed); its cleanup is "
+                  f"complete — nothing more to do.")
+            return
         print(f"pruned [0..{rep['base_seq']}): archived {rep['archived_segments']} segment(s), deleted "
               f"{rep['files_deleted']} file(s), snapshot at seq {rep['snapshot_seq']}, head last_seq "
               f"{rep['head_last_seq']}. Re-attach anytime with `sigil spine verify-archive`.")
@@ -2950,6 +3245,11 @@ def main(argv=None) -> None:
                     help="also warm every verified fold cache in this process and rebuild-and-compare it against the "
                          "spine (Front C S0d; needs VIGIL_FOLD_CACHE_ENABLED)")
     pv.set_defaults(fn=cmd_verify)
+    pfc = sub.add_parser("fold-cache", help="the verified fold cache's audit report (Front C S0d): `ack` acknowledges, "
+                                            "once investigated, the MISMATCH a previous cockpit recorded")
+    pfc.add_argument("action", choices=["ack"])
+    pfc.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
+    pfc.set_defaults(fn=cmd_fold_cache)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")
@@ -3010,7 +3310,10 @@ def main(argv=None) -> None:
                               "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
                               "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
     pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
-    pbd.add_argument("--spool", required=True, help="the billing spool directory (its incoming/ is drained)")
+    pbd.add_argument("--spool", default="",
+                     help="the billing spool directory (its incoming/ is drained). Default: $VIGIL_BILLING_SPOOL, "
+                          "else the proxy's $VIGIL_BILLING_WEBHOOK_SPOOL, else $SIGIL_HOME/billing-spool "
+                          "(--provider stripe: required, its own Stripe spool)")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pbd.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
                      help="which provider's spool this drains (stripe: default-OFF, VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
@@ -3089,6 +3392,9 @@ def main(argv=None) -> None:
                       choices=["status", "rotate", "re-genesis", "seal-warden",
                                "rotate-warden", "rotate-dek", "rotate-kek", "reconcile"])
     pkey.add_argument("--yes", action="store_true", help="confirm a rotate / re-genesis")
+    pkey.add_argument("--finish", action="store_true",
+                      help="rotate only: finish a rotation that was interrupted before it re-signed a "
+                           "hard-pruned spine's head (re-signs it under the current owner key)")
     pkey.add_argument("--i-understand-continuity-is-abandoned", dest="i_understand", action="store_true",
                       help="re-genesis only: acknowledge that ALL pre-re-genesis history stops being "
                            "authenticated by the new root")
@@ -3247,7 +3553,11 @@ def main(argv=None) -> None:
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
     _assert_store_operable_or_exit(a.cmd)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except CheckpointRefused as e:         # a pruned spine with no verifying pruned head: never sign over it
+        print(f"!! {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 # Commands that DIAGNOSE or FIX a degraded store must run even when a migration is needed — otherwise the

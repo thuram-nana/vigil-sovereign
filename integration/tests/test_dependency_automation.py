@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,86 @@ def test_dependabot_does_not_watch_the_vulnerable_eval_corpus():
     for d in _dependabot_directories(_load_yaml(DEPENDABOT)):
         assert "corpus_apps" not in d and "vendor" not in d, \
             f"dependabot must not target quarantined/deliberately-vulnerable path: {d}"
+
+
+# Dependabot's docker parser reads only LITERAL `FROM <image>[:tag][@sha256:…]` lines and never substitutes
+# an ARG, so a base pinned only through `ARG X=<image>` + `FROM ${X}` is invisible to it: the directory is
+# "watched" yet that pin never gets a refresh PR. (gateway/Dockerfile was in exactly that state.)
+IMAGE_PINS = REPO / "infra" / "supply-chain" / "image_pins.py"
+# Dependabot's own selection (dependabot-core docker/lib/dependabot/docker/file_fetcher.rb, DOCKER_REGEXP):
+# any file in a listed directory whose NAME contains "dockerfile" or "containerfile", case-insensitively.
+_DEPENDABOT_DOCKERFILE = re.compile(r"dockerfile|containerfile", re.IGNORECASE)
+
+
+def _load_image_pins():
+    import sys
+
+    spec = importlib.util.spec_from_file_location("vigil_image_pins_for_dependabot", IMAGE_PINS)
+    assert spec and spec.loader, f"cannot load {IMAGE_PINS}"
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # @dataclass resolves its module through sys.modules
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def dependabot_docker_files(config: dict, root: Path = REPO) -> list[Path]:
+    """Every Dockerfile a docker update entry watches (Dependabot scans each listed directory, not below),
+    selected by the same name rule Dependabot uses."""
+    out: list[Path] = []
+    for u in config.get("updates") or []:
+        if u.get("package-ecosystem") != "docker":
+            continue
+        dirs = list(u.get("directories") or []) + ([u["directory"]] if u.get("directory") else [])
+        for d in dirs:
+            base = root / d.strip("/")
+            out += sorted(p for p in base.iterdir() if p.is_file() and _DEPENDABOT_DOCKERFILE.search(p.name))
+    return out
+
+
+def dependabot_invisible_pins(dockerfile: Path, root: Path) -> list[str]:
+    """The registry base images in `dockerfile` reached only through ARG substitution — the ones Dependabot
+    cannot see. image_pins is the single parser of FROM lines (ARG- and build-stage-aware); a ref whose
+    context is anything but a literal "FROM" came through an ARG."""
+    return [f"{r.source}:{r.line} {r.ref} ({r.context})"
+            for r in _load_image_pins().dockerfile_refs(dockerfile, root) if r.context != "FROM"]
+
+
+def test_dependabot_can_see_every_docker_base_it_watches():
+    """Every base image in every Dependabot-watched Dockerfile is on a literal FROM line, so the docker
+    entry really refreshes it. FAILS on the pre-fix tree (gateway pinned only via `ARG PYTHON_BASE`)."""
+    files = dependabot_docker_files(_load_yaml(DEPENDABOT))
+    rels = {str(p.relative_to(REPO)) for p in files}
+    assert {"gateway/Dockerfile", "engine/crucible/framework/v2/aegis/Dockerfile"} <= rels, rels
+    invisible = [x for p in files for x in dependabot_invisible_pins(p, REPO)]
+    assert not invisible, (
+        "these pinned base images are reached only through an ARG, which Dependabot's docker parser never "
+        "substitutes, so they get no refresh PRs. Pin the image on a literal `FROM … AS <stage>` and point "
+        f"the ARG's default at that stage (see gateway/Dockerfile): {invisible}"
+    )
+
+
+def test_negative_control_arg_only_pin_is_invisible_to_dependabot(tmp_path):
+    digest = "sha256:" + "a" * 64
+    df = tmp_path / "Dockerfile"
+    df.write_text(f"ARG BASE=python:3.13-slim@{digest}\nFROM ${{BASE}}\n", encoding="utf-8")
+    assert dependabot_invisible_pins(df, tmp_path), "an ARG-only base pin was not flagged"
+    df.write_text(f"ARG BASE=pinned\nFROM python:3.13-slim@{digest} AS pinned\nFROM ${{BASE}}\n", encoding="utf-8")
+    assert dependabot_invisible_pins(df, tmp_path) == [], "the literal-stage form was wrongly flagged"
+
+
+def test_negative_control_guard_discovers_every_file_dependabot_scans(tmp_path):
+    """Discovery must match Dependabot's name rule, not a narrower list: an ARG-only pin in `Dockerfile-dev` or
+    a lowercase `dockerfile` in a watched directory is scanned by Dependabot, so the guard must see it too."""
+    watched = tmp_path / "svc"
+    watched.mkdir()
+    arg_only = "ARG BASE=python:3.13-slim@sha256:" + "a" * 64 + "\nFROM ${BASE}\n"
+    for name in ("Dockerfile-dev", "dockerfile", "build.containerfile"):
+        (watched / name).write_text(arg_only, encoding="utf-8")
+    (watched / "README.md").write_text("FROM ${BASE}\n", encoding="utf-8")
+    config = {"updates": [{"package-ecosystem": "docker", "directories": ["/svc"], "schedule": {"interval": "weekly"}}]}
+    found = dependabot_docker_files(config, root=tmp_path)
+    assert {p.name for p in found} == {"Dockerfile-dev", "dockerfile", "build.containerfile"}, found
+    assert all(dependabot_invisible_pins(p, tmp_path) for p in found)
 
 
 # ------------------------------------------------------------------------------------------------

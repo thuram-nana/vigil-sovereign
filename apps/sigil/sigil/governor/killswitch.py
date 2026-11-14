@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.fold_cache import FoldCache
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
-from .identity import owner_keypair, owner_pubkey
+from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey
 
 SIGNAL = "governor.killswitch"
 # `issued_at` MUST be inside the core: outside it, an attacker could rewrite a captured release's
@@ -45,7 +45,7 @@ _CORE = ("signal", "state", "issued_at")
 # bare `store.path.stat()` — which would raise/freeze once a migration renames spine.jsonl away and then
 # serve a STALE (un-halting) verdict indefinitely. Keyed on the pubkey too, so instances with different
 # trust roots never share an entry. Shared across ALL callers on a path.
-_STATE_CACHE: dict[tuple[str, Optional[str]], tuple[tuple, bool]] = {}
+_STATE_CACHE: dict[tuple[str, Optional[str], Optional[str]], tuple[tuple, bool]] = {}
 _CACHE_GUARD = threading.Lock()
 
 
@@ -121,7 +121,7 @@ class KillSwitch:
                           reader=lambda latch: latch.engaged)
         if hit is not _UNCACHED:
             return hit                          # Front C S0d: O(new records) even while the spine is appended to
-        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey)
+        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey, genesis_owner_pubkey())  # + a re-pin
         token = self.store.change_token()
         with _CACHE_GUARD:
             cached = _STATE_CACHE.get(key)
@@ -135,7 +135,7 @@ class KillSwitch:
     def _seed(self, st) -> "tuple[_Latch, int]":
         """(latch, since): the latch seeded from the folded snapshot prefix, or the genesis start when the trusted
         anchor differs from the snapshot's (see `_scan_engaged`)."""
-        if self.trusted_pubkey != st.trusted_pubkey:
+        if not seed_applies(st, self.trusted_pubkey, self.store):
             return _Latch(False, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
         return _Latch(st.killswitch_engaged,      # seed from the folded prefix (scalar bool; no mutation)
                       NO_HIGHWATER if st.killswitch_issued_hw is None    # None ⇒ no release honored in the
@@ -148,7 +148,8 @@ class KillSwitch:
         Hard-prune fold (Slice C): seed the latch from the folded snapshot prefix `[0..base_seq)` and fold
         only the LIVE window `[base_seq..T]` forward. The latch is PUBKEY-DEPENDENT (a release un-halts only
         under the trusted pubkey it verifies against), so a caller whose trust anchor differs from the one
-        the snapshot was folded under BYPASSES the snapshot and re-scans from genesis. Under the Slice-C
+        the snapshot was folded under BYPASSES the snapshot and re-scans from genesis — only when nothing is pruned;
+        on a pruned spine `seed_applies` carries the seed across a validated rotation or RAISES. Under the Slice-C
         empty snapshot (base_seq==0, killswitch_engaged=False, trusted_pubkey=""), BOTH branches seed False
         and window since_seq=-1 (the current full genesis scan), so this is BYTE-IDENTICAL to the old scan.
 

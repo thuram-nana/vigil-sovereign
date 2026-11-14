@@ -30,11 +30,11 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.fold_cache import FoldCache
-from ..spine.snapshot import SnapshotState
+from ..spine.snapshot import SnapshotState, seed_applies
 from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .fold_read import UNCACHED as _UNCACHED, cached_read
-from .identity import owner_keypair, owner_pubkey
+from .identity import genesis_owner_pubkey, owner_keypair, owner_pubkey
 
 SIGNAL = "governor.capability"
 # gesture / voice are physical-input capabilities; `autolearn` gates the Knowledge Engine's
@@ -53,7 +53,7 @@ _CORE = ("signal", "capability", "state", "issued_at")
 # re-runs; a matching token ⇒ no new records ⇒ the cached verdict is exact. Keyed on the pubkey so instances
 # with different trust roots never share an entry. The FAIL-CLOSED error path is NEVER cached (a transient
 # read error must not poison the cache into serving a stale disabled/enabled verdict).
-_CAP_CACHE: dict[tuple[str, Optional[str], str], tuple[tuple, bool]] = {}
+_CAP_CACHE: dict[tuple[str, Optional[str], Optional[str], str], tuple[tuple, bool]] = {}
 _CACHE_GUARD = threading.Lock()
 
 
@@ -148,7 +148,7 @@ class CapabilityGate:
             token = self.store.change_token()
         except Exception:  # noqa: BLE001 — cannot even read the store ⇒ fail-closed toward disabled
             return False
-        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey, capability)
+        key = (str(Path(self.store.path).resolve()), self.trusted_pubkey, genesis_owner_pubkey(), capability)
         with _CACHE_GUARD:
             cached = _CAP_CACHE.get(key)
             if cached is not None and cached[0] == token:
@@ -172,7 +172,7 @@ class CapabilityGate:
         """(latch, since) for `capability`: seeded from the folded snapshot prefix (default ENABLED; a missing
         high-water row means no enable was honored for it in the pruned prefix), or the genesis start when the
         trusted anchor differs from the snapshot's (see `_scan_enabled`)."""
-        if self.trusted_pubkey != st.trusted_pubkey:
+        if not seed_applies(st, self.trusted_pubkey, self.store):
             return _Latch(True, NO_HIGHWATER), -1  # pubkey mismatch: folded latch AND high-water invalid
         return (_Latch(st.capability_latch_map().get(capability, True),
                        st.capability_issued_map().get(capability, NO_HIGHWATER)), st.base_seq - 1)

@@ -520,10 +520,13 @@ jobs:
         run: |
           set -euo pipefail
           # Reuse the gateway's own pinned base (already pulled by the build step) so the fixture needs
-          # no extra registry pull. grep/cut, not a heredoc: an un-indented heredoc body breaks the YAML
-          # block scalar this step lives in.
-          BASE="$(grep -oE 'ARG PYTHON_BASE=\S+' gateway/Dockerfile | head -1 | cut -d= -f2-)"
-          if [ -z "${BASE}" ]; then echo "::error::could not read PYTHON_BASE from gateway/Dockerfile"; exit 1; fi
+          # no extra registry pull. The pin is the literal `FROM python:…@sha256:… AS pinned-python`
+          # stage (literal so Dependabot can refresh it); the ARG only names that stage. grep/awk, not a
+          # heredoc: an un-indented heredoc body breaks the YAML block scalar this step lives in.
+          # `|| true` inside the substitution: under pipefail a no-match grep would otherwise end the step
+          # on this line, before the named error below could say why.
+          BASE="$({ grep -E '^FROM[[:space:]]+python:[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+pinned-python' gateway/Dockerfile || true; } | head -1 | awk '{print $2}')"
+          if [ -z "${BASE}" ]; then echo "::error::could not read the pinned-python base from gateway/Dockerfile"; exit 1; fi
           mkdir -p /tmp/a14-image-negative-control
           printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/a14-image-negative-control/requirements.txt
           # Build the fixture Dockerfile with printf (no heredoc: an indented closing token inside a

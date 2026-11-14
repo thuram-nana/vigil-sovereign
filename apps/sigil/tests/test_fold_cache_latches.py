@@ -29,11 +29,12 @@ from sigil.governor.authn import signed_payload
 from sigil.governor.identity import ensure_owner_keypair
 from sigil.reuse import generate_keypair
 from sigil.spine import fold_cache
-from sigil.spine.snapshot import SnapshotState, build
-from sigil.spine.store import SpineStore
+from sigil.spine.snapshot import SnapshotError, SnapshotState, build
+from sigil.spine.store import SpineError, SpineStore
 from sigil.ui import assessments as am
 from sigil.ui import margin as mg
 from sigil.ui.target_authorization import _customer_slug
+from test_spine_store_integrity import write_chained_line
 
 ATTACKER = generate_keypair()
 ORGS = ["acme", "globex"]
@@ -143,6 +144,16 @@ def _finding(store, slug, i):
     return store.append(kind="finding", source="receiver", actor="oracle", payload={"certificate": cert})
 
 
+def _fails_closed_both_ways(monkeypatch, *reads):
+    """Every read RAISES `SnapshotError`, with the fold cache ON and OFF alike (never an answer from an empty start)."""
+    for flag in ("1", ""):
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        for read in reads:
+            with pytest.raises(SnapshotError, match="does not succeed"):
+                read()
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+
+
 @pytest.mark.parametrize("seed", [61, 62, 63])
 def test_randomized_equivalence_with_the_full_scans(tmp_path, seed, monkeypatch, no_full_scan):
     rng = random.Random(seed)
@@ -246,7 +257,9 @@ def test_a_corrupt_record_fails_the_capability_gate_closed_in_both_paths(tmp_pat
     raises — with the flag on exactly as with it off, and the error is never cached."""
     regs = _Regs(SpineStore(str(tmp_path / "spine.jsonl")))
     assert regs.caps.is_enabled("voice") and not regs.kill.is_engaged()       # warm
-    regs.store.append(kind="event", source="t", actor="u", payload=["not", "a", "dict"])
+    with pytest.raises(SpineError, match="payload is not a JSON object"):     # no append can write it ...
+        regs.store.append(kind="event", source="t", actor="u", payload=["not", "a", "dict"])
+    write_chained_line(regs.store, ["not", "a", "dict"], kind="event", source="t", actor="u")   # ... a hand edit can
     for flag in ("1", ""):
         monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
         assert regs.caps.is_enabled("voice") is False
@@ -349,11 +362,16 @@ def test_a_seeded_prune_keeps_the_latches_and_the_consumed_settles(tmp_path, mon
     assert mg._settle_events(regs.store, regs.pub) == {}
 
 
-def test_the_pubkey_bypass_folds_the_live_window_only(tmp_path, monkeypatch, no_full_scan):
+def test_a_foreign_key_reader_of_a_pruned_snapshot_fails_closed(tmp_path, monkeypatch):
+    """A PRUNED snapshot folded under a key the reader's owner-key succession does not reach (a swapped key, a
+    re-genesis) is never trusted, and an empty start over the deleted prefix is not an answer either: every read
+    fails CLOSED, cached and uncached alike."""
     _store, regs, _snap, _captured = _pruned(tmp_path, monkeypatch)
     reader = _Regs(regs.store, key=generate_keypair())
-    _assert_equivalent(reader, monkeypatch, no_full_scan)
-    assert not reader.kill.is_engaged() and reader.caps.is_enabled("gesture")
+    _fails_closed_both_ways(monkeypatch, reader.kill.is_engaged)
+    for flag in ("1", ""):                     # the capability gate maps any read error to DISABLED (its fail-safe)
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", flag)
+        assert reader.caps.is_enabled("gesture") is False and reader.caps.is_enabled("voice") is False
 
 
 @pytest.mark.parametrize("value", ["", "0", "off"])

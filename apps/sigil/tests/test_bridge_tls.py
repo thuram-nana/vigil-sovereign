@@ -189,3 +189,39 @@ def test_serve_pins_the_tls_floor_explicitly():
     src = inspect.getsource(server.serve)
     i = src.index("ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)")
     assert "ctx.minimum_version = ssl.TLSVersion.TLSv1_2" in src[i:src.index("wrap_socket", i)]
+
+
+def test_serve_wraps_the_listener_under_an_explicit_tls12_floor(monkeypatch):
+    """Behavioural twin of the check above: the context serve() wraps its listener with has minimum_version ==
+    TLSv1_2 AT wrap_socket time, even where the interpreter / OpenSSL build would default lower (simulated
+    here by every new context starting at MINIMUM_SUPPORTED) — so only serve()'s own floor can pass this."""
+    import ssl
+    from types import SimpleNamespace
+
+    import pytest
+
+    from sigil.bridge import server
+
+    class _Wrapped(Exception):
+        pass
+
+    seen = {}
+    real_new = ssl.SSLContext.__new__
+
+    def _permissive_new(cls, *args, **kwargs):
+        ctx = real_new(cls, *args, **kwargs)
+        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED     # a build whose default floor is low
+        return ctx
+
+    def _wrap(self, sock, *args, **kwargs):
+        seen["minimum_version"] = self.minimum_version
+        raise _Wrapped
+
+    monkeypatch.setattr(ssl.SSLContext, "__new__", staticmethod(_permissive_new))   # undone to the original
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _wrap)
+    monkeypatch.setattr(server, "build_server",
+                        lambda **kw: SimpleNamespace(server_address=("127.0.0.1", 0), socket=object()))
+    with temp_home():
+        with pytest.raises(_Wrapped):
+            server.serve(addr="127.0.0.1", port=0, tls=True)
+    assert seen["minimum_version"] == ssl.TLSVersion.TLSv1_2

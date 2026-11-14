@@ -87,6 +87,13 @@ moves with its root).
 never breached; no paid job stranded by a migration or node loss; exactly-once across the fleet. Production
 multi-shard stays flag-held until it is green (the owner flips it, like `VIGIL_CUSTOMER_PROD_EXECUTION`).
 
+**S0 retroactive review (2026-11-11).** Eight independent lenses, each finding verified by a refuter and a
+reproducer. Kept on full scans by design and confirmed sound: the sovereign `OffenseGate` and the eval
+capability-grant / offense-attestation folds (owner ceremonies, off the per-request path; no cached read feeds a
+decision they gate). Contract made explicit: a cached read must equal the full verified fold on the same bytes —
+the same answer, or the same raise — so a read that is not contiguous and complete is never cached, and a reader
+returns an immutable value or a copy.
+
 ## 5. The six invariants
 
 | Invariant | Recommended design |

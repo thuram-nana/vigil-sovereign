@@ -66,7 +66,7 @@ assert_no_offense()
 # surface). vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
 from vigil_core.rbac import PERMISSIONS, ROLES, role_can  # noqa: E402,F401  (re-exported)
 
-from ..spine.snapshot import SnapshotState  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (W9-1 succession-aware owner-key resolver)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
@@ -612,7 +612,7 @@ class AccountsRegistry:
     def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
         """((state, accts, issued), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when the
         trusted pubkey differs from the snapshot's (the pubkey-DEPENDENT bypass — see `_fold`)."""
-        if self.trusted_pubkey != snap.trusted_pubkey:
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
             return ({}, {}, {}), -1
         # PER-USERNAME state / high-water / Account, seeded from the SAME snapshot under the SAME pubkey
         # condition — otherwise the first hard prune would reset them and re-open the replay HIGH.

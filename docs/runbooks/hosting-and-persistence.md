@@ -40,7 +40,93 @@ the spine** — never the source of truth.
   Qdrant/graph/CVE, the customer session/token ledgers. **This is the one directory that must be on
   durable, backed‑up storage.**
 - `VIGIL_BASE_DIR` (default `.vigil-live`) — published owner‑signed artifacts + the cross‑plane seam
-  (credit leases, monitoring authorities). Durable, but rebuildable from the spine.
+  (credit leases and their settlement + pause markers, monitoring authorities, the offense engine's own
+  keys and state). Durable, and **not** rebuildable from the spine: the sovereign `sigil backup`
+  deliberately excludes it, and the offense `vigil backup` captures it only when its `--base-dir` is this
+  directory (`vigil doctor` notes a mismatch). Launch settlement does not rely on it alone: a settle is
+  decided under a cross‑process lock beside the spine (`<stem>.settle.lock`), and a settle that moved
+  money (a refund, or any postpaid settle) is on the spine. With `VIGIL_SETTLE_SPINE_RECORD=1` (default
+  off) every fresh settle — a completed run's zero‑refund settle included — first writes an
+  owner‑signed `governor.launch_settled` record carrying its whole decision (mode, reservation,
+  consumption and the exact plan / wallet / postpaid refund split), and a later settle that finds it
+  finishes it at the recorded amounts. **Set the flag identically for the cockpit, the customer
+  server, the settle drain and `ops-sweep`.** A lost or stale settlement marker then cannot re‑open the
+  refund of a settled launch — but only while BOTH hold: the launch was settled by a process with the
+  flag on (or a refund of it landed), and its owner‑signed evidence is still in the LIVE spine. A hard
+  prune past the settle removes that evidence (the scan is live, not snapshot‑seeded), after which a lost
+  marker is again the only record.
+
+  **Settle locks.** Every lock on the settle path is a bounded wait that ends in a retry, never a hang:
+  the settle lock waits `VIGIL_SETTLE_LOCK_WAIT_S` seconds (default 10, clamped to 0.1–120), then a
+  settle answers "busy; retry" — the settle drain defers the completion (back to `incoming/`), the
+  sweep reports `deferred`, a customer cancel / start is refused with a retry hint. A pause waits at
+  most 2 s and then records the halt anyway (`linearized: false`) — as it also does when the settle
+  lock cannot be opened or, with the flag on, the spine cannot be read (only the seam settlement
+  marker then decides whether the launch is already settled); a resume never takes the settle
+  lock. With the flag on, a start on a host whose previous launch has a recorded settlement with
+  money still to land is refused with a retry until that settlement is finished through the previous
+  launch's lease on the seam, which a start would otherwise replace. The settle drain finishes it on
+  its next pass, with no operator: with the flag on, every pass finishes each recorded settle of a
+  lease in its scope that was interrupted — whatever decided it (a completion, a cancel, a sweep, an
+  expired pause) — moving only the recorded decision, exactly once, then retires the lease, and prints
+  `interrupted settles: N finished, M left for the next pass` when it acted. `ops-sweep reservations
+  --apply` finishes it too. A settle the drain cannot finish (a busy lock, a ledger, the seam or the spine
+  not writable — its seam marker never written included) is named on stderr every pass and recorded,
+  with when it was first left unfinished, beside the completion spool (`.settle-unfinished.json`); once
+  it has stayed unfinished for more than 10 minutes — or the finish pass itself has kept failing that
+  long (an unreadable spine) — the drain prints an `ALARM` and exits non‑zero, so its unit stays FAILED
+  and the dead‑man alarms. `vigil doctor` (with the flag on in its environment or `sigil.env`) reads the
+  same record (the spool from `VIGIL_SETTLE_SPOOL`, else `~/.config/vigil/settle-drain.env`, else
+  `~/.sigil/spool/settle`) and reports both as hard issues (`launch_settlements.drain_unfinished` /
+  `drain_error`), and also reports a lease still published more than 10 minutes after its settlement
+  marker was written (`launch_settlements.unfinished`) — so such a hold is never silent, whether or not
+  the marker exists. A lease whose settle landed all its money but that cannot be retired from the seam
+  (its bundle cannot be removed by the drain's user) is named `tombstone_failed` every pass and recorded
+  and alarmed the same way; the drain re-drives it at most once every 10 minutes and keeps when it last
+  did beside the spool (`.settle-retire.json`), so it is retired within 10 minutes of the cause being
+  fixed. Each pass reads only the spine records appended since the previous one, from a
+  checkpoint beside the spool (`.settle-scan.json`), and the whole spine at least once an hour (so a lease
+  restored onto the seam from a backup is found then); a missing or unreadable checkpoint, one from
+  another spine or a spine reset, restored or pruned since means one full read. The lock files are transients that
+  both backup legs skip: `<stem>.settle.lock` beside the spine, the settlement, pause and
+  paused‑past‑expiry `<slug>.json.lock` files beside their markers, and `<spool>/.spool.lock` in the
+  completion spool (created by the settle drain). **Run `ops-sweep reservations --apply` as the service
+  user.** As root it refuses to run unless the seam, the spine and (where they exist) the
+  settlement‑marker, completion‑spool and model‑meter directories are owned by root: a root sweep would
+  create settlement markers, their locks and spine files the services can no longer write. A root
+  report‑only `ops-sweep` that must create `<spool>/.spool.lock` hands it to the owner of the spool.
+
+  **`ops-sweep reservations` statuses** added by this: `completion_pending` / `completion_unknown` /
+  `pause_changed` / `pause_unknown` when the settle's in‑lock re‑check of the spool or the pause state
+  refuses it (nothing written; the next pass decides), `deferred` for a busy lock or meter,
+  `settle_completed` (with the amounts moved) when a settle finished a recorded decision a crash
+  interrupted, and — with the flag on — `settle_interrupted` (report only) for a listed lease whose
+  recorded decision has entries not yet landed; `--apply` finishes it. Do **not** move files from the
+  completion spool's `rejected/` back to `incoming/` by hand while a `sweep --apply` is running. A
+  completion whose own launch is already settled while a later launch holds the seam is archived as a
+  no‑op (a stderr line names it), not quarantined.
+
+  **One launch per host, superseded reservations.** With `VIGIL_ONE_LAUNCH_PER_HOST=1` (default off) a
+  customer holds at most one outstanding launch per (org, host): a second reserve is refused while an
+  earlier one is unsettled and may still run, and a start never replaces another launch's unsettled lease
+  on the seam, whatever the billing mode (decided under the settle lock). `ops-sweep reservations` also
+  reads launch reservations from the spine and lists one that a later launch of the same target replaced
+  on the seam (`superseded`), past its longest lease window plus `--ttl`; `--apply` refunds it through the
+  same exactly‑once settle (`released`). It is never released while a completion that could charge it is
+  anywhere in the completion spool (`completion_pending` / `completion_unknown`), when the spine and the
+  seam disagree about the target (`outcome_recorded` / `seam_inconsistent`), or when it was published
+  metered (`metered` / `metered_unknown`: it is charged for what it used, through its completion or a
+  cancel). With the settle record on, a release a crash interrupted is finished by `--apply`
+  (`settle_completed`) and reported `settle_interrupted` without it.
+
+  **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
+  after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace
+  (`VIGIL_PAUSED_EXPIRY_SETTLE_GRACE_SECONDS`, default 86400, from the later of the window end, the pause
+  and the late resume) has passed and nothing settled it. `ops-sweep reservations --apply` settles it by
+  the paused‑launch rule (metered: charged for what it used; flat: refunded); with
+  `VIGIL_PAUSED_EXPIRY_SETTLE=1` (default off; set it for the settle‑drain unit) the settle drain does the
+  same after each pass's completions, re‑checking the completion spool, the pause state and that it is
+  still due inside the settle lock, and prints `expired paused launches: N settled, M still held`.
 
 ---
 
