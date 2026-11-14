@@ -839,7 +839,8 @@ def _read_journal(home: Path) -> dict:
               and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "started", "done"} <= set(u)
                       and all(isinstance(u[k], str) for k in ("name", "src", "dst", "digest"))
                       and all(isinstance(u[k], bool) for k in ("started", "done")) for u in units)
-              and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging"))))
+              and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging")))
+              and _replaced_shape_ok(j.get("replaced")))
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise BackupError(f"the restore journal at {jp} cannot be read ({e}) — re-run the restore with --force "
                           f"from the backup") from e
@@ -853,7 +854,8 @@ def _read_journal(home: Path) -> dict:
     # unit is exactly <its staging dir>/<its name>, never a symlink
     staging = Path(j["staging"]) if j.get("staging") else None
     arch_staging = Path(j["archive_staging"]) if j.get("archive_staging") else None
-    if any(d is not None and not _restore_own_dir(d) for d in (staging, arch_staging)):
+    replaced_staging = [Path(d) for d in (j.get("replaced") or {}).get("staging", [])]
+    if any(d is not None and not _restore_own_dir(d) for d in (staging, arch_staging, *replaced_staging)):
         raise BackupError(f"the restore journal at {jp} names a staging dir that is not a restore's own — refusing")
     if staging is not None and staging.parent not in (home.parent.resolve(), home.resolve().parent):
         raise BackupError(f"the restore journal at {jp} names a staging dir that is not a restore's own (it is not "
@@ -893,9 +895,28 @@ def _restore_own_dir(d: Path) -> bool:
             and not os.path.islink(d) and d.resolve() == d)
 
 
+def _replaced_shape_ok(rep: Any) -> bool:
+    """The ``replaced`` record of a journal: absent, or ``{restore_id, touched, staging}`` where ``touched`` is the
+    list of unit names the replaced restore(s) had begun swapping in (None when that could not be read) and
+    ``staging`` the replaced restore's staging dirs."""
+    if rep is None:
+        return True
+    return (isinstance(rep, dict) and (rep.get("restore_id") is None or isinstance(rep.get("restore_id"), str))
+            and (rep.get("touched") is None
+                 or (isinstance(rep.get("touched"), list) and all(isinstance(n, str) for n in rep["touched"])))
+            and isinstance(rep.get("staging", []), list) and all(isinstance(d, str) for d in rep.get("staging", [])))
+
+
+def _staging_dirs(journal: dict) -> "list[Path]":
+    """Every staging dir a journal owns: its own (the home's and a relocated archive's) and those of the interrupted
+    restore(s) it replaced."""
+    dirs = [journal.get("staging"), journal.get("archive_staging"), *(journal.get("replaced") or {}).get("staging", [])]
+    return [Path(d) for d in dirs if d]
+
+
 def _drop_staging(journal: dict) -> None:
-    for d in (journal.get("staging"), journal.get("archive_staging")):
-        if d and _restore_own_dir(Path(d)):
+    for d in _staging_dirs(journal):
+        if _restore_own_dir(d):
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -971,13 +992,6 @@ def _new_journal(src: Path, staged: Path, placed: "dict | None", units: "list[tu
             "units": rows}
 
 
-def _read_journal_or_empty(home: Path) -> dict:
-    try:
-        return _read_journal(home)
-    except BackupError:
-        return {}
-
-
 def restore_resume(home: "str | Path") -> dict:
     """``sigil restore --resume <home>``: complete a restore into ``home`` that was interrupted between its swaps,
     from its journal (no passphrase needed: every unit was verified, and its secrets re-sealed, before the journal
@@ -1003,11 +1017,36 @@ def _touched_units(journal: dict) -> "list[str]":
     return out
 
 
+def _replaced_touched(journal: dict) -> "list[str] | None":
+    """The units the interrupted restore(s) ``journal`` replaced had begun swapping in: [] when it replaced none (or
+    one that had touched nothing), None when the replaced journal could not be read (anything may have been)."""
+    rep = journal.get("replaced")
+    return [] if rep is None else rep.get("touched")
+
+
+def _replaced_record(home: Path) -> "dict | None":
+    """What a restore into ``home`` that replaces the interrupted one standing there records of it, read from that
+    journal and the disk BEFORE anything of it is dropped: the units it (or any restore it had itself replaced) had
+    begun swapping in — the home is then no longer entirely its old self, whatever the new restore's own units show —
+    and its staging dirs, which the new restore drops. None when no restore journal stands in ``home``."""
+    if not (home / _JOURNAL_NAME).exists():
+        return None
+    try:
+        prior = _read_journal(home)
+    except BackupError:
+        return {"restore_id": None, "touched": None, "staging": []}        # unreadable: assume it touched the home
+    touched = _touched_units(prior)
+    earlier = _replaced_touched(prior)
+    return {"restore_id": prior.get("restore_id") if isinstance(prior.get("restore_id"), str) else None,
+            "touched": None if earlier is None else touched + [n for n in earlier if n not in touched],
+            "staging": [str(d) for d in _staging_dirs(prior)]}
+
+
 def restore_abort(home: "str | Path") -> dict:
-    """``sigil restore --abort <home>``: discard an interrupted restore into ``home`` — only while none of its units
-    has been touched (the home is then still entirely its old self). Once a swap has begun, only ``--resume`` (the
-    home is then entirely the backup's) or a fresh ``--force`` restore from the backup leaves the home consistent;
-    abort then refuses and deletes nothing."""
+    """``sigil restore --abort <home>``: discard an interrupted restore into ``home`` — only while the home is still
+    entirely its old self: none of its units has been touched, and the interrupted restore it replaced (if any) had
+    touched none either. Once a swap has begun, only ``--resume`` (the home is then entirely the backup's) or a fresh
+    ``--force`` restore from the backup leaves the home consistent; abort then refuses and deletes nothing."""
     home = Path(home)
     journal = _read_journal(home)
     touched = _touched_units(journal)
@@ -1015,6 +1054,13 @@ def restore_abort(home: "str | Path") -> dict:
         raise BackupError(f"cannot abort: the restore into {home} had begun swapping {touched} in — finish it with "
                           f"`sigil restore --resume {home}`, or replace it with a fresh `sigil restore --force` from "
                           f"the backup; nothing was discarded")
+    earlier = _replaced_touched(journal)
+    if earlier is None or earlier:
+        what = (f"the interrupted restore it replaced had begun swapping {earlier} in" if earlier
+                else "it replaced an interrupted restore whose journal could not be read")
+        raise BackupError(f"cannot abort: the home {home} is no longer its old self ({what}) — finish this restore "
+                          f"with `sigil restore --resume {home}`, or replace it with a fresh `sigil restore --force` "
+                          f"from the backup; nothing was discarded")
     _drop_staging(journal)
     (home / _JOURNAL_NAME).unlink()
     from .spine.atomicio import fsync_dir
@@ -1106,7 +1152,9 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     verifies (:func:`_verify_staged_pruned_unit`); the archive is placed per :func:`_place_staged_archive`
     (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). Its swap is JOURNALED (resumable, see
     :func:`restore_resume`), and so is the swap of ANY restore that replaces (``--force``) an interrupted one: its
-    journal replaces the interrupted restore's before its first swap. ``verify_only`` runs every check into a
+    journal replaces the interrupted restore's before its first swap and carries the units that one had already begun
+    swapping in, so it can then only be finished (``--resume``), never aborted onto a home that is no longer entirely
+    its old self. ``verify_only`` runs every check into a
     throwaway staging dir and swaps nothing (``vault`` may then be None); given ``new_home`` it also refuses whatever
     the restore into that home with the same ``force`` would (existing units, an interrupted restore, an existing
     archive dir)."""
@@ -1270,13 +1318,21 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # back into the one it replaced
             journal = _new_journal(src, staged_dir, placed, units, sh, pruned=pruned)
             with _target_writers_quiet(new_home):
-                if stale_journal:
-                    _drop_staging(_read_journal_or_empty(new_home))
+                # what the interrupted restore had already done to the home is read BEFORE its journal is replaced
+                # and carried in this one: an abort is then refused while the home holds any of its swapped units
+                replaced = _replaced_record(new_home)
+                if replaced is not None:
+                    if not force:
+                        raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore "
+                                          f"--resume {new_home}`, or replace it with a fresh restore (--force)")
+                    journal["replaced"] = replaced
                 # the journal is durable BEFORE the first swap: from here on a crash is resumed, never left mixed
                 _write_journal(new_home / _JOURNAL_NAME, journal)
                 staged = None                                # the journal owns the staging dirs now
                 placed = None
                 _maybe_crash("restore_after_journal")
+                if replaced is not None:                     # the replaced restore's staging goes once this stands
+                    _drop_staging({"replaced": replaced})
                 _complete_journaled_swap(new_home, journal)
         else:
             # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured

@@ -63,7 +63,20 @@ def world(tmp_path_factory):
     plain = signed_home(root, pruned=False, world=True, name="plain")  # a home that was never pruned
     bk_plain = root / "plain.sglbk"
     assert "error" not in backup_home(plain, bk_plain, SIGIL_SPINE_ARCHIVE_DIR=None)
-    return {"bk": bk, "old": old, "plain": plain, "bk_plain": bk_plain}
+    # a pruned home that also holds budget caps and model meters (money data), and an OLD home that holds its own
+    metered = signed_home(root, pruned=True, world=True, name="metered")
+    (metered / "budgets.json").write_text('{"caps": "at backup time"}')
+    (metered / "model_meter").mkdir()
+    (metered / "model_meter" / "run-1.jsonl").write_text('{"meter": "at backup time"}\n')
+    bk_metered = root / "metered.sglbk"
+    assert "error" not in backup_home(metered, bk_metered, SIGIL_SPINE_ARCHIVE_DIR=None)
+    old_metered = root / "old-metered"
+    shutil.copytree(old, old_metered)
+    (old_metered / "budgets.json").write_text('{"caps": "old home"}')
+    (old_metered / "model_meter").mkdir()
+    (old_metered / "model_meter" / "run-1.jsonl").write_text('{"meter": "old home"}\n')
+    return {"bk": bk, "old": old, "plain": plain, "bk_plain": bk_plain, "bk_metered": bk_metered,
+            "old_metered": old_metered}
 
 
 def _tree(root: Path) -> dict:
@@ -418,6 +431,119 @@ def test_a_new_restore_over_an_interrupted_one_needs_force(world, tmp_path):
     assert plain.returncode != 0 and "was interrupted" in plain.stderr
     assert _kill_at(world, target, "never").returncode == 0
     _assert_restored(target)
+
+
+def _units_of(home: Path) -> dict:
+    """Each captured top-level unit of ``home`` (and the restore journal) by content."""
+    return {n: (hashlib.sha256((home / n).read_bytes()).hexdigest() if (home / n).is_file()
+                else _tree(home / n) if (home / n).is_dir() else None)
+            for n in ("spine", "floor.json", "budgets.json", "model_meter", "restore-journal.json")}
+
+
+def _assert_is_the_plain_backup(world, target: Path) -> None:
+    """``target`` is entirely the never-pruned backup's: no journal, no staging or old copy left in the home's dir,
+    its spine and floor are that backup's, and its signed head verifies and signs."""
+    assert not (target / "restore-journal.json").exists()
+    assert not [p for p in target.parent.iterdir() if p.name.startswith(".restore-")]
+    assert not [p for p in target.iterdir() if p.name.startswith(".restore-old-")]
+    plain = _units_of(world["plain"])
+    now = _units_of(target)
+    assert now["spine"] == plain["spine"] and now["floor.json"] == plain["floor.json"]
+    seen = read_home(target)
+    assert seen["verify_checkpoint"][0] is True and seen["wallet_acme"] == 100, seen
+    r = _cli(target, "sign")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+
+
+# How the interrupted restore had already touched the home when a --force restore replaced it: its spine landed
+# and its floor did not (its spine's old copy already dropped); its spine and floor landed and a third unit had not;
+# its relocated archive was moved aside (a unit the replacing restore has no row for).
+REPLACED_TOUCHED = {"spine in, floor pending": ("restore_unit_started:floor.json", "old", None, ["spine"]),
+                    "spine and floor in, budgets pending": ("restore_unit_started:budgets.json", "old_metered", None,
+                                                            ["spine", "floor.json"]),
+                    "relocated archive moved aside": ("restore_moved_aside:archive", "old", "ebs", ["archive"])}
+
+
+@pytest.mark.parametrize("case", sorted(REPLACED_TOUCHED))
+def test_a_restore_that_replaced_a_touched_one_cannot_be_aborted_and_resumes_entirely(world, tmp_path, case):
+    """A --force restore that replaces an interrupted restore which had already swapped units in records that in its
+    own journal before it replaces the interrupted one's. Killed before it touched anything itself, its abort is
+    refused — the home is no longer its old self — and deletes nothing; the home fails closed until `--resume` makes it
+    entirely the new backup's (verified and signable). Nothing the interrupted restore moved aside is removed."""
+    barrier, old, ext, names = REPLACED_TOUCHED[case]
+    target = tmp_path / "target"
+    shutil.copytree(world[old], target)
+    arch = None
+    if ext:
+        arch = tmp_path / ext / "archive"
+        shutil.copytree(world["old"] / "spine" / "archive", arch)
+    old_archive = (arch / "archive.manifest.json").read_bytes() if arch else None
+    backup = "bk_metered" if old == "old_metered" else "bk"
+    assert _kill_at(world, target, barrier, archive_dir=arch, backup=backup).returncode == KILLED
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1, r.stderr                                    # the interrupted restore had touched it
+    assert _kill_at(world, target, "restore_after_journal", backup="bk_plain").returncode == KILLED
+    j = json.loads((target / "restore-journal.json").read_text())
+    assert j["backup_sha256"] == hashlib.sha256(world["bk_plain"].read_bytes()).hexdigest()
+    assert all(n in j["replaced"]["touched"] for n in names), j["replaced"]
+    before = _tree(tmp_path)
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "no longer its old self" in r.stderr and "--resume" in r.stderr, r.stderr
+    assert all(repr(n) in r.stderr for n in names) and "nothing was discarded" in r.stderr, r.stderr
+    assert _tree(tmp_path) == before
+    _assert_fails_closed(target)
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    _assert_is_the_plain_backup(world, target)
+    if old == "old_metered":                       # not in the new backup, never renamed: left as the restore found it
+        assert (target / "budgets.json").read_text() == '{"caps": "old home"}'
+        assert (target / "model_meter" / "run-1.jsonl").read_text() == '{"meter": "old home"}\n'
+    if arch is not None:                                                  # the old archive is kept, never removed
+        assert (arch.parent / ".restore-old-archive" / "archive.manifest.json").read_bytes() == old_archive
+
+
+def test_a_restore_that_replaced_an_untouched_one_aborts_to_the_old_home(world, tmp_path):
+    """The restore it replaced had touched nothing: aborting the replacing restore leaves the home exactly its old
+    self and drops both restores' staging dirs."""
+    target = tmp_path / "target"
+    shutil.copytree(world["old_metered"], target)
+    before = _tree(target)
+    assert _kill_at(world, target, "restore_after_journal", backup="bk_metered").returncode == KILLED
+    assert _kill_at(world, target, "restore_after_journal", backup="bk_plain").returncode == KILLED
+    assert json.loads((target / "restore-journal.json").read_text())["replaced"]["touched"] == []
+    assert len([p for p in tmp_path.iterdir() if p.name.startswith(".restore-staging-")]) == 2
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 0 and "discarded" in r.stdout, r.stderr
+    assert _tree(target) == before
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+    assert read_home(target)["verify_checkpoint"][0] is True
+
+
+@pytest.mark.parametrize("first", ["touched", "unreadable journal"])
+def test_what_a_replaced_restore_did_is_carried_through_every_later_replacement(world, tmp_path, first):
+    """A restore replaced, in turn, by another: the units the first one had swapped in are carried by every journal
+    that follows, and a journal that cannot be read counts as one that touched the home — the last restore's abort
+    is refused and its resume makes the home entirely its backup's."""
+    target = _target(world, tmp_path)
+    if first == "touched":
+        assert _kill_at(world, target, "restore_unit_started:floor.json").returncode == KILLED
+    else:
+        assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+        (target / "restore-journal.json").write_text("{}")
+    assert _kill_at(world, target, "restore_after_journal", backup="bk_plain").returncode == KILLED
+    assert _kill_at(world, target, "restore_after_journal", backup="bk_plain").returncode == KILLED
+    touched = json.loads((target / "restore-journal.json").read_text())["replaced"]["touched"]
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "no longer its old self" in r.stderr, r.stderr
+    if first == "touched":
+        assert "spine" in touched and "['spine'" in r.stderr, (touched, r.stderr)
+    else:
+        assert touched is None and "could not be read" in r.stderr, (touched, r.stderr)
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    assert (target / "spine" / "head.json").read_bytes() == (world["plain"] / "spine" / "head.json").read_bytes()
+    assert not (target / "restore-journal.json").exists()
+    assert read_home(target)["verify_checkpoint"][0] is True
 
 
 @pytest.mark.parametrize("barrier", ["restore_after_journal", "restore_after_unit:spine",
