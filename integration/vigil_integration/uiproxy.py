@@ -1870,6 +1870,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._plane_json({"ok": False, "error": f"plane control refused ({why})"},
                              status=403, drained=True)
             return
+        # 3b) the bundle build id answers BEFORE sign-in: a tab sitting on the login gate must learn of a redeploy
+        #     too, and the answer is a content hash of files every visitor is served anyway (no secret, nothing
+        #     per-user). It stays behind the private-peer and Host/Origin guards above, GET/HEAD only, no-store.
+        if path == PLANE_VERSION_PATH:
+            if self.command not in ("GET", "HEAD"):
+                self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
+                return
+            build = ""
+            try:
+                build = (self.server.serve_dir / ".build-id").read_text(encoding="utf-8").strip()
+            except (OSError, AttributeError):
+                build = ""
+            self._plane_json({"ok": True, "build": build}, drained=True)
+            return
         # 4) per-user authentication (Claim 6) — the SAME sovereign-delegated identity the forwarded routes
         #    use. Fail-closed: an unresolved bearer is 401 before anything is inspected or spawned. Plane
         #    control talks to the SOVEREIGN plane (which is up even when the offense backends are down), so
@@ -1900,20 +1914,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
                 return
             self._plane_json(plane_status(pc, getattr(self.server, "backends", None)), drained=True)
-            return
-        if path == PLANE_VERSION_PATH:
-            # The current bundle build id (a content hash), so a long-open tab can notice a redeploy and
-            # offer to reload. Read-only, non-secret (just a hash); GET only. Guarded like every plane
-            # route (private peer + Host/Origin + token), so it is never a cross-site read.
-            if self.command not in ("GET", "HEAD"):
-                self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
-                return
-            build = ""
-            try:
-                build = (self.server.serve_dir / ".build-id").read_text(encoding="utf-8").strip()
-            except (OSError, AttributeError):
-                build = ""
-            self._plane_json({"ok": True, "build": build}, drained=True)
             return
         if path == PLANE_START_OFFENSE_PATH:
             # POST only: a GET/HEAD must never start anything (no side effect on a safe method).
