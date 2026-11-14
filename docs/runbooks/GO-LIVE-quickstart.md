@@ -168,6 +168,48 @@ Edit each vhost's `server_name` + cert paths, obtain certs (`certbot certonly --
 vhost (done in the template) or its gates fail closed. Confirm every listener is loopback/private
 (`ss -ltnp` shows nothing on the public interface except the proxy).
 
+## 7b. Customer sign-in: email, Google, and the installed iPhone app
+
+Everything below goes in the env files from §6; restart both units after a change
+(`systemctl --user restart sigil-cockpit sigil-customer`). `vigil doctor` reads those files and reports a Google
+setting that differs between the cockpit and the customer edge, a missing Google setting, or Google sign-in without
+the installed-app hand-off (values are never printed).
+
+**Email (sign-up confirmation and password reset).** In `cockpit.env` set `SIGIL_EMAIL_HOST`, `SIGIL_EMAIL_PORT`
+(587, STARTTLS), `SIGIL_EMAIL_FROM`, `SIGIL_EMAIL_USER` and `SIGIL_EMAIL_PASSWORD` (the password from your secret
+manager; never in `customer.env`, never in git). With `SIGIL_EMAIL_HOST` unset no email is sent at all, so nobody
+can confirm a sign-up or reset a password. Amazon SES works well: verify the sending domain, add its DKIM CNAME
+records in Cloudflare DNS with SPF and DMARC, and request production access before launch.
+
+With `VIGIL_CUSTOMER_EMAIL_CODE=1` (the production example) each sign-up and reset email carries a **6-digit code**
+beside the single-use token, so a person in the installed app types the code instead of following the email into
+a browser. A code works once, for 10 minutes, for that address and that purpose only (a sign-up code is not a reset
+code); its 5th wrong entry ends it, wrong codes are also limited per address across re-sent codes and per client
+IP, and it is stored only as a salted hash. The token in the same email (valid 1 hour) keeps working.
+
+**Google ("Continue with Google").** In Google Cloud console create an OAuth client of type *Web application* and
+add the authorized redirect URI exactly `https://app.<your-domain>/api/customer/oidc/callback`. Set
+`VIGIL_CUSTOMER_OIDC_ENABLED=1`, `VIGIL_CUSTOMER_OIDC_CLIENT_ID` and `VIGIL_CUSTOMER_OIDC_REDIRECT_URI` to the
+**same** values in `cockpit.env` and `customer.env` (or once in `$SIGIL_HOME/sigil.env`), and
+`VIGIL_CUSTOMER_OIDC_CLIENT_SECRET` in `cockpit.env` only — the customer edge never holds it. The sign-in and
+sign-up screens show the button only while the switch is on and the client id and redirect URI are set (read when
+the edge starts). A first Google sign-in creates a passwordless account for that Google identity; an address that
+already has a password account is refused, never linked by email.
+
+**Google inside the installed iPhone app.** `VIGIL_CUSTOMER_IOS_INSTALL_BANNER=1` (in `customer.env`) shows iPhone
+and iPad visitors in the browser a guide to *Share → Add to Home Screen*; it disappears once the app runs from the
+Home Screen and remembers a dismissal. An installed app runs standalone, and iOS finishes Google sign-in in a
+separate browser with its own cookies, so with `VIGIL_CUSTOMER_OIDC_HANDOFF=1` (in `customer.env`) the app starts
+the sign-in with a one-time challenge, the page where Google sign-in finished shows a 6-digit pairing code ("Only
+enter it in the VIGIL app on this phone"), and the app exchanges its secret verifier plus that code for its own
+session. The pairing code works once, for about 2 minutes; its 5th wrong entry ends it, and failed exchanges are
+limited per client IP. Outside an installed app the normal browser sign-in is used.
+
+Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
+to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to
+VIGIL and type the code — you are signed in inside the app. Then sign up a second address with the emailed 6-digit
+code, and reset its password with the code from the reset email.
+
 ## 8. Pricing ↔ real Flutterwave plan-id binding (owner confirms)
 
 The owner catalog (`apps/sigil/sigil/governor/catalog.py`) is the **sole money anchor** — no on-the-wire

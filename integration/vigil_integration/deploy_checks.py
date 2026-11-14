@@ -486,3 +486,68 @@ def must_match_report(home: Path, repo: Path, ops_env: dict) -> "tuple[dict, lis
                       f"`sigil ops-sweep`. Restart the units after the change.")
     section = {"configured": True, "processes": where, "flags": flags, "ok": not issues}
     return section, issues, []
+
+
+# ── customer sign-in: Google, and Google inside the installed app ───────────────────────────────────────────────────
+#: Read by BOTH the customer edge (the button, the redirect to Google) and the cockpit's provisioner (the token
+#: exchange): with different values in the two, the button is shown and every Google sign-in fails, or the reverse.
+_OIDC_SHARED = ("VIGIL_CUSTOMER_OIDC_ENABLED", "VIGIL_CUSTOMER_OIDC_CLIENT_ID", "VIGIL_CUSTOMER_OIDC_REDIRECT_URI")
+_OIDC_FILES = {"customer": "~/.sigil/customer.env", "cockpit": "~/.sigil/cockpit.env"}
+
+
+def customer_signin_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
+    """(section, issues, notes) for customer Google sign-in, from the env files the customer edge and the cockpit
+    units load (values are never printed). Silent until one of the two takes part.
+
+    HARD: the Google switch, client id or redirect URI differ between the edge and the cockpit; Google sign-in is on
+    in one of them without its client id or redirect URI; on in the cockpit without the client secret.
+    NOTE: Google sign-in is on at the edge without VIGIL_CUSTOMER_OIDC_HANDOFF — in an app installed to an iPhone
+    Home Screen, Google sign-in then finishes in another browser and the person is not signed in to the app."""
+    envs, _where = process_environments(home, repo, {})
+    procs = [p for p in ("customer", "cockpit") if p in envs]
+    if not procs:
+        return {"configured": False}, [], []
+
+    def get(proc: str, name: str) -> "str | None":
+        v = (envs[proc].get(name) or "").strip()
+        return v or None
+
+    google = {p: _norm("switch", get(p, "VIGIL_CUSTOMER_OIDC_ENABLED")) for p in procs}
+    issues: list = []
+    notes: list = []
+    if len(procs) == 2:
+        for name in _OIDC_SHARED:
+            a = _norm("switch", get("customer", name)) if name == _OIDC_SHARED[0] else get("customer", name)
+            b = _norm("switch", get("cockpit", name)) if name == _OIDC_SHARED[0] else get("cockpit", name)
+            if name != _OIDC_SHARED[0] and "on" not in google.values():
+                continue
+            if a != b:
+                state = (f"{a} in the customer edge, {b} in the cockpit" if name == _OIDC_SHARED[0]
+                         else "set differently in the customer edge and the cockpit" if a and b
+                         else f"set in the {'customer edge' if a else 'cockpit'} only")
+                issues.append(f"{name} must be the same for the customer edge and the cockpit, and it is not "
+                              f"({state}). The edge shows the Google button and sends people to Google; the cockpit "
+                              f"finishes the sign-in: with different values every Google sign-in fails or the button "
+                              f"is missing. Set it once in $SIGIL_HOME/sigil.env, or the same value in "
+                              f"{_OIDC_FILES['customer']} and {_OIDC_FILES['cockpit']}; restart both units.")
+    for proc in procs:
+        if google[proc] != "on":
+            continue
+        need = ["VIGIL_CUSTOMER_OIDC_CLIENT_ID", "VIGIL_CUSTOMER_OIDC_REDIRECT_URI"]
+        if proc == "cockpit":
+            need.append("VIGIL_CUSTOMER_OIDC_CLIENT_SECRET")
+        missing = [n for n in need if get(proc, n) is None]
+        if missing:
+            issues.append(f"Customer Google sign-in is on in the {'customer edge' if proc == 'customer' else 'cockpit'} "
+                          f"but {', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not set there "
+                          f"({_OIDC_FILES[proc]}): Google sign-in cannot complete. Set "
+                          f"{'it' if len(missing) == 1 else 'them'} (the client secret in the cockpit only, from your "
+                          f"secret manager) and restart the unit, or turn VIGIL_CUSTOMER_OIDC_ENABLED off.")
+    handoff = "customer" in procs and _norm("switch", get("customer", "VIGIL_CUSTOMER_OIDC_HANDOFF")) == "on"
+    if google.get("customer") == "on" and not handoff:
+        notes.append("Customer Google sign-in is on but VIGIL_CUSTOMER_OIDC_HANDOFF is off in "
+                     f"{_OIDC_FILES['customer']}: in an app installed to an iPhone Home Screen, Google sign-in finishes "
+                     "in another browser and the person is not signed in to the app. Set VIGIL_CUSTOMER_OIDC_HANDOFF=1 "
+                     "there and restart the customer edge.")
+    section = {"configured": True, "google": google, "handoff": handoff, "ok": not issues}
+    return section, issues, notes
