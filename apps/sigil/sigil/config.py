@@ -766,6 +766,17 @@ def customer_oidc_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_oidc_handoff_enabled() -> bool:
+    """True iff Google sign-in may complete inside an INSTALLED customer app through the app hand-off
+    (`VIGIL_CUSTOMER_OIDC_HANDOFF` affirmative; ui/oidc_handoff.py). OFF by default. Read by the customer edge only,
+    and only together with `customer_oidc_enabled()`: with it on, an app running standalone (added to a Home Screen)
+    starts Google sign-in with a hand-off challenge, the edge shows a pairing code where the Google sign-in
+    finished, and the app redeems verifier + code for its session. With it off, the edge refuses a hand-off login
+    and the installed app uses the browser flow (which on an iPhone lands the session outside the app). Read when
+    the edge starts (it is written into the page) and on each hand-off request."""
+    return (os.environ.get("VIGIL_CUSTOMER_OIDC_HANDOFF") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def _customer_oidc_base() -> dict:
     """The NON-SECRET customer-OIDC settings (Google-pinned by default, overridable via `VIGIL_CUSTOMER_OIDC_*`).
     NEVER reads the client secret. `username_claim` is fixed to the immutable `sub` — the customer binding is

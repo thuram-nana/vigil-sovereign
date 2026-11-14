@@ -506,10 +506,14 @@ class OidcLoginRecord(NamedTuple):
       • `verifier` — the PKCE (RFC 7636 S256) `code_verifier`; sent at token exchange so an intercepted /
                      injected authorization code cannot be redeemed by anyone else.
       • `sid_hash` — sha256 of the HttpOnly session cookie set at `/api/oidc/login`; the callback proves the
-                     browser presenting the response is the SAME one that started the flow (defeats login-CSRF)."""
+                     browser presenting the response is the SAME one that started the flow (defeats login-CSRF).
+      • `handoff`  — the customer edge's installed-app hand-off challenge (base64url(sha256(app verifier))),
+                     bound INSTEAD of `sid_hash` when an installed app starts the login (ui/oidc_handoff.py);
+                     "" for every other login. The operator plane never sets it."""
     nonce: str
     verifier: str
     sid_hash: str
+    handoff: str = ""
 
 
 class OidcStateStore:
@@ -561,11 +565,12 @@ class OidcStateStore:
                 live += 1
         return live
 
-    def issue(self, state: str, nonce: str, *, verifier: str = "", sid_hash: str = "",
+    def issue(self, state: str, nonce: str, *, verifier: str = "", sid_hash: str = "", handoff: str = "",
               now: "float | None" = None) -> None:
         """Record a freshly-minted login `state` as OUTSTANDING (single-use), binding to it the `nonce`, the
-        PKCE `verifier`, and the `sid_hash` of the initiating browser session. Sweeps expired markers first
-        (the bound), refuses at capacity, then `O_CREAT | O_EXCL`-creates the marker storing all three + the
+        PKCE `verifier`, and the `sid_hash` of the initiating browser session — or, for the customer edge's
+        installed-app hand-off, the `handoff` challenge instead of a sid_hash. Sweeps expired markers first
+        (the bound), refuses at capacity, then `O_CREAT | O_EXCL`-creates the marker storing them + the
         issue time. Raises on a blank state/nonce, a full ledger, or a real I/O error."""
         st = str(state or "").strip()
         nc = str(nonce or "").strip()
@@ -577,7 +582,8 @@ class OidcStateStore:
             raise RuntimeError(f"OIDC state ledger at capacity ({self.max_outstanding}); retry shortly")
         marker = self._marker(st)
         payload = json.dumps({"iat": t, "nonce": nc, "verifier": str(verifier or ""),
-                              "sid_hash": str(sid_hash or "")}, ensure_ascii=False)
+                              "sid_hash": str(sid_hash or ""), "handoff": str(handoff or "")},
+                             ensure_ascii=False)
         fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # FileExistsError on a dup
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
@@ -609,7 +615,8 @@ class OidcStateStore:
         if t - issued_at > self.ttl:                      # expired (marker now cleaned) → refuse
             return None
         return OidcLoginRecord(nonce=nonce, verifier=str(rec.get("verifier", "") or ""),
-                               sid_hash=str(rec.get("sid_hash", "") or ""))
+                               sid_hash=str(rec.get("sid_hash", "") or ""),
+                               handoff=str(rec.get("handoff", "") or ""))
 
     def _fsync_dir(self) -> None:
         try:

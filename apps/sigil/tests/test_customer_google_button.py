@@ -39,8 +39,9 @@ def _fn(src: str, name: str) -> str:
 
 
 def _google_section(src: str) -> str:
+    """The "Continue with Google" block through the installed-app hand-off it branches to (app.js, verbatim)."""
     a = src.index("  // ---- Continue with Google")
-    b = src.index("\n  }\n", src.index("  function startGoogle(", a))
+    b = src.index("\n  }\n", src.index("  async function doHandoff(", a))
     return src[a:b + 4]
 
 
@@ -98,7 +99,8 @@ function h(spec, props, kids) {
   (Array.isArray(kids) ? kids : (kids ? [kids] : [])).forEach(c => c && e.appendChild(c));
   return e;
 }
-const ctx = { document, h, API: "api/customer", out,
+const ctx = { document, h, API: "api/customer", out, navigator: { standalone: false },
+  window: { matchMedia: () => ({ matches: false }) },
   location: { hash: cfg.hash || "", pathname: "/", search: "", assign: (u) => out.assigned.push(u) },
   history: { replaceState: (_s, _t, u) => { out.replaced.push(u); ctx.location.hash = u.slice(u.indexOf("#")); } },
   clearErr: () => {}, err: (m) => out.errors.push(m) };

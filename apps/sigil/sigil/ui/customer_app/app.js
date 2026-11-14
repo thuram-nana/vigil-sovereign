@@ -15,6 +15,14 @@
  * the sign-in and sign-up screens show "Continue with Google": a top-level GET of api/customer/oidc/login (relative),
  * which the edge answers with the redirect to Google. A Google sign-in that does not complete lands back on the app
  * as #oidc=err, shown as one generic message (the edge never says why).
+ *
+ * GOOGLE IN THE INSTALLED APP. An app added to a Home Screen runs standalone, and iOS finishes Google sign-in in a
+ * separate browser with its own cookies, so a session set there never reaches the app. When the edge has the hand-off
+ * on (data-oidc-handoff="1") and the app runs standalone, the button instead makes a random 32-byte verifier, keeps
+ * it in this app (IndexedDB, else sessionStorage; never a cookie or a URL) and starts the login with
+ * ?handoff=<base64url(sha256(verifier))>. The page where Google sign-in finished shows a 6-digit code; back in the
+ * app, a code box asks for it and POSTs {verifier, code} to api/customer/oidc/handoff, which sets the session
+ * cookie in the app's own cookie jar. Outside a standalone app the normal flow is used, unchanged.
  */
 (function () {
   "use strict";
@@ -129,7 +137,131 @@
   }
   function startGoogle() {
     clearErr();
+    if (handoffOn()) { startHandoff(); return; }
     location.assign(API + "/oidc/login");          // relative: the edge answers with the redirect to Google
+  }
+
+  // ---- Google sign-in inside the installed app: the hand-off ----------------------------------------------
+  var HANDOFF_KEY = "vigil.oidc.handoff";
+  var HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;         // the edge keeps a finished sign-in ~2 min; the login ~10 min
+  function standaloneApp() {
+    return navigator.standalone === true
+      || !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  }
+  function handoffOn() { return googleOn() && pageFlag("oidcHandoff") && standaloneApp(); }
+  function b64u(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  // The pending verifier lives in this app only: IndexedDB (survives iOS ending the app in the background), else
+  // sessionStorage. Every access is guarded; nothing here ever goes into a cookie or a URL.
+  function idbRun(mode, fn) {
+    return new Promise(function (resolve, reject) {
+      if (typeof indexedDB === "undefined" || !indexedDB) { reject(new Error("no IndexedDB")); return; }
+      var open = indexedDB.open("vigil-app", 1);
+      open.onupgradeneeded = function () { open.result.createObjectStore("kv"); };
+      open.onerror = function () { reject(open.error || new Error("IndexedDB")); };
+      open.onsuccess = function () {
+        var db = open.result, tx, req;
+        try { tx = db.transaction("kv", mode); req = fn(tx.objectStore("kv")); }
+        catch (e) { db.close(); reject(e); return; }
+        tx.oncomplete = function () { db.close(); resolve(req ? req.result : undefined); };
+        tx.onerror = tx.onabort = function () { db.close(); reject(tx.error || new Error("IndexedDB")); };
+      };
+    });
+  }
+  function ssGet() { try { return JSON.parse(sessionStorage.getItem(HANDOFF_KEY) || "null"); } catch (e) { return null; } }
+  function pendingSave(rec) {
+    return idbRun("readwrite", function (st) { return st.put(rec, HANDOFF_KEY); })
+      .catch(function () { sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(rec)); });   // throws if neither works
+  }
+  function pendingLoad() {
+    return idbRun("readonly", function (st) { return st.get(HANDOFF_KEY); })
+      .catch(function () { return null; })
+      .then(function (rec) {
+        rec = rec || ssGet();
+        var fresh = rec && typeof rec.verifier === "string" && /^[A-Za-z0-9_-]{43}$/.test(rec.verifier)
+          && typeof rec.at === "number" && Date.now() - rec.at < HANDOFF_MAX_AGE_MS;
+        return fresh ? rec : null;
+      });
+  }
+  function pendingClear() {
+    try { sessionStorage.removeItem(HANDOFF_KEY); } catch (e) { /* storage off */ }
+    return idbRun("readwrite", function (st) { return st.delete(HANDOFF_KEY); }).catch(function () {});
+  }
+  async function startHandoff() {
+    try {
+      var raw = new Uint8Array(32);
+      crypto.getRandomValues(raw);
+      var verifier = b64u(raw);
+      var digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      var challenge = b64u(new Uint8Array(digest));
+      await pendingSave({ verifier: verifier, at: Date.now() });
+      nav("#/google-code");                          // the code box is waiting when the person comes back
+      location.assign(API + "/oidc/login?handoff=" + challenge);
+    } catch (e) {
+      err("Google sign-in could not start in this app. Sign in with your email, or try again.");
+    }
+  }
+  // Coming back to the app (from the browser where Google sign-in finished): a sign-in in progress shows the box.
+  async function resumeHandoff() {
+    if (authed() || !pageFlag("oidcHandoff") || here() === "#/google-code") return;
+    if (await pendingLoad()) nav("#/google-code");
+  }
+  function viewGoogleCode() {
+    var holder = h("div#gc-body", {}, h("p.cust-muted", { text: "Checking for a Google sign-in on this device…" }));
+    pendingLoad().then(function (rec) {
+      if (here() !== "#/google-code") return;
+      if (!rec) {
+        VUI.mount(holder, [
+          h("p", { text: "No Google sign-in is waiting in this app. Open VIGIL from your Home Screen and start "
+            + "with Continue with Google there." }),
+          h("div.row", {}, [h("button.btn", { type: "button", text: "Back to sign in",
+            onClick: function () { nav("#/login"); } })]),
+        ]);
+        return;
+      }
+      var input = h("input#gc-code.cust-code-input", { type: "text", inputmode: "numeric", pattern: "[0-9 ]*",
+        autocomplete: "one-time-code", maxlength: "7", "aria-label": "6-digit code", spellcheck: "false" });
+      input.addEventListener("keydown", function (e) { if (e.key === "Enter") doHandoff(); });
+      VUI.mount(holder, [
+        h("p", { text: "Enter the 6-digit code shown after you signed in with Google." }),
+        h("label", { for: "gc-code", text: "Code" }), input,
+        h("div.row", {}, [
+          h("button.btn.btn-primary", { type: "button", text: "Continue", onClick: doHandoff }),
+          h("button.cust-nav-link", { type: "button", text: "Start again", onClick: function () {
+            pendingClear().then(startGoogle); } }),
+        ]),
+        h("p.muted", { text: "Only enter a code that VIGIL showed you after you signed in with Google on this phone." }),
+      ]);
+      try { input.focus(); } catch (e) { /* no focus outside a gesture */ }
+    });
+    return shell(h("div.card.cust-auth", {}, [h("h2", { text: "Finish signing in with Google" }), holder]),
+      "#/google-code");
+  }
+  async function doHandoff() {
+    clearErr();
+    var code = val("gc-code").replace(/\s+/g, "");
+    if (!/^[0-9]{6}$/.test(code)) { return err("Enter the 6 digits of the code."); }
+    var rec = await pendingLoad();
+    if (!rec) { render(); return err("This sign-in has expired. Start again with Continue with Google."); }
+    try {
+      var r = await VUI.postJSON(API + "/oidc/handoff", { verifier: rec.verifier, code: code });
+      await pendingClear();
+      if (r && r.ok) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); }
+      else { err("Sign-in failed."); }
+    } catch (e) {
+      var d = (e && e.data) || {};
+      if (e && e.status === 401 && d.retry) { return err(d.error || "That code does not match."); }
+      if (e && e.status === 429) { return err("Too many attempts — wait a moment and try again."); }
+      if (e && e.status === 401) {
+        await pendingClear();
+        nav("#/login");
+        return err(d.error || "This sign-in is no longer valid. Start again with Continue with Google.");
+      }
+      err(authMsg(e, "Sign-in could not finish. Try again."));
+    }
   }
 
   async function doLogin() {
@@ -802,6 +934,7 @@
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/login": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
+    "#/google-code": function () { return authed() ? viewDashboard() : viewGoogleCode(); },
     "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
     "#/billing/return": function () { return authed() ? viewBillingReturn() : viewLogin(); },
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
@@ -842,6 +975,9 @@
   }
 
   window.addEventListener("hashchange", render);
+  // back in the installed app after Google sign-in finished in the browser: show the code box
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) resumeHandoff(); });
+  window.addEventListener("pageshow", function () { resumeHandoff(); });
   window.addEventListener("resize", setTopbarVar);   // keep the fixed notification panel pinned below the topbar
   state.sub(render);
 
@@ -849,5 +985,6 @@
   (async function boot() {
     render();            // "Loading…" shell (VUI is guaranteed present — guarded at module init above)
     await refreshWho();  // flips booted -> render() via the store subscription
+    resumeHandoff();     // a Google sign-in started in this installed app and not yet finished: the code box
   })();
 })();

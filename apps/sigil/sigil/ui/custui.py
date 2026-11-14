@@ -90,6 +90,10 @@ def _hop_timeout(action: str) -> float:
     return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
 
 
+# The installed-app Google hand-off: failed redemptions (wrong code, unknown or expired record) per client IP.
+_HANDOFF_IP_FAILS = 10
+_HANDOFF_IP_WINDOW_S = 15 * 60.0
+
 # How much longer than its slowest hop a stopping edge waits for the requests it accepted (ui/graceful.py).
 _DRAIN_MARGIN_S = 15.0
 
@@ -154,15 +158,18 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
     the iOS install flag (the banner and the iOS tags) and whether customer Google sign-in is on (the "Continue
-    with Google" button). Each is a non-secret on/off value and each counts in the build id."""
+    with Google" button) and whether an installed app finishes it through the app hand-off. Each is a non-secret
+    on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled()
+    handoff = google and _config.customer_oidc_handoff_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
                                      _IOS_TAGS_SLOT: _IOS_TAGS if ios else "",
-                                     "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0"})
+                                     "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
+                                     "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -280,6 +287,10 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         self.oidc_state_dir = Path(str(sessions_dir)).parent / "customer-oidc-state"
         # E3b-2 — the edge's single-use WebAuthn challenge ledger (passkey enroll + login), a SIBLING dir.
         self.passkey_challenge_dir = Path(str(sessions_dir)).parent / "customer-passkey-challenges"
+        # The installed-app Google hand-off (ui/oidc_handoff.py): completed sign-ins waiting for the app, and the
+        # per-IP limit on redeeming them — SIBLING dirs, like the two above.
+        self.oidc_handoff_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff"
+        self.oidc_handoff_limit_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff-limit"
         # the app, read ONCE: what this process serves until it stops (one consistent build; see static_site)
         self.app = build_app_snapshot()
         port = self.server_address[1]
@@ -609,11 +620,24 @@ class CustomerHandler(BaseHTTPRequestHandler):
         """GET /api/customer/oidc/login — 302 to Google's authorize endpoint with a fresh single-use
         state+nonce+PKCE-S256 challenge, setting the HttpOnly SameSite=Lax sid cookie whose hash binds the
         state to THIS browser. Built from the NON-SECRET public config only (the client secret never reaches
-        this keyless edge). Same-origin/Host gated like every edge route; a misconfigured OIDC fails LOUD (500)."""
+        this keyless edge). Same-origin/Host gated like every edge route; a misconfigured OIDC fails LOUD (500).
+
+        `?handoff=<challenge>` (an installed app, ui/oidc_handoff.py; only while VIGIL_CUSTOMER_OIDC_HANDOFF is on,
+        else 404): the state is bound to that challenge INSTEAD of a sid cookie, and no cookie is set — the
+        browser that finishes the Google sign-in is not the app, so a cookie set here could never prove anything."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         from .. import config as _config
         from . import oidc as _oidc
+        from .oidc_handoff import valid_challenge
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)   # an empty handoff= is malformed, not absent
+        handoff = None
+        if "handoff" in q:
+            if not _config.customer_oidc_handoff_enabled():
+                return self._deny(404, "not found")
+            handoff = q["handoff"][0] if len(q["handoff"]) == 1 else ""
+            if not valid_challenge(handoff):
+                return self._deny(400, "bad request: malformed hand-off")
         try:
             cfg = _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
         except _oidc.OidcError:
@@ -625,7 +649,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
         sid = secrets.token_urlsafe(32)
         sid_hash = hashlib.sha256(sid.encode("utf-8")).hexdigest()
         try:
-            self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
+            if handoff:
+                self._oidc_state_store().issue(state, nonce, verifier=verifier, handoff=handoff)
+            else:
+                self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
         except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
             return self._deny(500, "could not mint an oidc login state")
         location = _oidc.build_authorize_url(cfg, state, nonce, code_challenge=challenge)
@@ -634,7 +661,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        self.send_header("Set-Cookie", cookie)
+        if not handoff:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")       # the state/nonce never leak via Referer
@@ -662,6 +690,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if rec is None:
             return self._json({"authenticated": False,
                                "error": "unknown, expired, or already-used oidc state"}, 401)
+        if rec.handoff:
+            return self._oidc_handoff_callback(code, rec)    # an installed app started it: no cookie here
         presented = self._oidc_sid_cookie()
         if not rec.sid_hash or not presented or not hmac.compare_digest(
                 hashlib.sha256(presented.encode("utf-8")).hexdigest(), rec.sid_hash):
@@ -677,6 +707,105 @@ class CustomerHandler(BaseHTTPRequestHandler):
             self._mint(r["username"], active)                # sets the CUSTOMER session cookie (never operator)
             return self._redirect_to_app()                   # 302 into the hash-routed SPA, carrying the session
         return self._redirect_to_app(ok=False)               # a refusal lands the browser back on the app
+
+    # --- the installed-app hand-off (ui/oidc_handoff.py) ---------------------------------------------------
+    def _oidc_handoff_store(self):
+        from .oidc_handoff import HandoffStore
+        return HandoffStore(self.server.oidc_handoff_dir)
+
+    def _oidc_handoff_callback(self, code: str, rec):
+        """The callback of a login an installed app started (the state is bound to its hand-off challenge, not to a
+        cookie of this browser). After the provisioner's oidc_finish verifies the Google sign-in, NO session cookie
+        is set here: the verified sign-in is stored for the app (single use, about 2 minutes) with a 6-digit pairing
+        code, and this page shows the code. The username and org come from the provisioner's answer only."""
+        from .. import config as _config
+        from .oidc_handoff import HandoffBusy, HandoffExists
+        if not _config.customer_oidc_handoff_enabled():   # switched off since the login started
+            return self._handoff_page(None, 404)
+        c, r = self._provision("oidc_finish", "", {"code": code, "code_verifier": rec.verifier,
+                                                   "nonce": rec.nonce, "ip": self._ip()})
+        if not (c == 200 and isinstance(r, dict) and r.get("username")):
+            return self._handoff_page(None, 401)
+        orgs = r.get("orgs") or []
+        try:
+            pairing = self._oidc_handoff_store().complete(rec.handoff, str(r["username"]), orgs[0] if orgs else None)
+        except HandoffExists:
+            return self._handoff_page(None, 409)
+        except (HandoffBusy, ValueError):
+            return self._handoff_page(None, 503)
+        return self._handoff_page(pairing, 200)
+
+    def _handoff_page(self, pairing: "str | None", status: int):
+        """The static page shown where the Google sign-in finished: the pairing code, or why there is none. Strict
+        CSP: the app's own stylesheets and one same-origin script (handoff.js), referenced relative to this route so
+        it works at the origin's root and under a mount; no inline script or style."""
+        from .oidc_handoff import format_code
+        app = self.server.app
+
+        def ref(rel: str) -> str:
+            a = app.get(rel)
+            return f"../../../{rel}" + (f"?v={a.digest}" if a is not None and a.versioned else "")
+
+        if pairing:
+            shown = format_code(pairing)
+            title = "Signed in"
+            body = (f'<h1>Signed in.</h1>\n'
+                    f'<p>Go back to the VIGIL app and enter this code:</p>\n'
+                    f'<p class="cust-handoff-code" aria-label="{" ".join(pairing)}">{shown}</p>\n'
+                    f'<p class="cust-handoff-warn">Only enter it in the VIGIL app on this phone — VIGIL will never '
+                    f'ask you for it anywhere else.</p>\n'
+                    f'<p class="cust-muted">The code works once, for about 2 minutes. If it runs out, start again '
+                    f'with Continue with Google in the app.</p>\n'
+                    f'<p id="handoff-continue" hidden><a class="btn primary" href="../../../#/google-code">'
+                    f'Continue in VIGIL</a></p>')
+        else:
+            title = "Sign-in did not complete"
+            why = {409: "This Google sign-in was already finished once.",
+                   503: "VIGIL is busy right now.",
+                   404: "Google sign-in for the installed app is turned off."}.get(
+                       status, "Google could not confirm the sign-in for VIGIL.")
+            body = (f'<h1>Sign-in did not complete.</h1>\n<p>{why}</p>\n'
+                    f'<p>Go back to the VIGIL app and start again with Continue with Google.</p>')
+        page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n'
+                '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n'
+                '<meta name="color-scheme" content="dark light" />\n<meta name="robots" content="noindex" />\n'
+                f'<title>VIGIL — {title}</title>\n'
+                f'<link rel="stylesheet" href="{ref("tokens.css")}" />\n'
+                f'<link rel="stylesheet" href="{ref("components.css")}" />\n'
+                f'<link rel="stylesheet" href="{ref("app.css")}" />\n</head>\n'
+                '<body data-plane="customer" class="cust-handoff-page">\n'
+                f'<main class="card cust-handoff">\n{body}\n</main>\n'
+                f'<script src="{ref("handoff.js")}"></script>\n</body>\n</html>\n')
+        return self._send(status, page.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _oidc_handoff(self, body: dict):
+        """POST /api/customer/oidc/handoff {verifier, code} — the installed app redeems a completed Google sign-in
+        (CSRF/Origin-gated like every POST). The record is found by sha256(verifier) and the code checked in
+        constant time; a right code consumes it and mints the session in THIS (the app's) cookie jar from the
+        username/org the provisioner returned at the callback — never from the request. A wrong code counts (5 per
+        record, then the record is gone); every failure counts against the caller's IP (10 per 15 minutes)."""
+        from .. import config as _config
+        from .login_ratelimit import LoginRateLimiter
+        from .oidc_handoff import Redeemed, WrongCode
+        if not (_config.customer_oidc_enabled() and _config.customer_oidc_handoff_enabled()):
+            return self._deny(404, "unknown action")
+        limiter = LoginRateLimiter(self.server.oidc_handoff_limit_dir, max_fails=_HANDOFF_IP_FAILS,
+                                   window_s=_HANDOFF_IP_WINDOW_S, base_lock_s=60.0, max_lock_s=3600.0)
+        key = f"handoff:ip:{self._ip()}"
+        locked = limiter.locked(key)
+        if locked is not None:
+            self._pending_retry_after = str(int(max(1, locked)))
+            return self._deny(429, "too many attempts; wait and try again")
+        out = self._oidc_handoff_store().redeem(str(body.get("verifier", "")), str(body.get("code", "")))
+        if isinstance(out, Redeemed):
+            self._mint(out.username, out.org_id)           # the IP's failures are not cleared: they age out
+            return self._json({"ok": True, "username": out.username, "active_org": out.org_id})
+        limiter.record_failure(key)
+        if isinstance(out, WrongCode) and out.remaining > 0:
+            return self._json({"error": "That code does not match. Check the code on the page where you signed in "
+                                        "with Google.", "retry": True}, 401)
+        return self._json({"error": "This sign-in is no longer valid. Start again with Continue with Google.",
+                           "retry": False}, 401)
 
     def _redirect_to_app(self, *, ok: bool = True):
         """End the top-level OIDC flow with a 302 into the SPA root. On success the `_mint`-set session cookie
@@ -774,6 +903,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
                       "passkey/login/challenge", "passkey/login/verify"):
             return self._passkey(action, body)
+        if action == "oidc/handoff":                  # 404 unless Google sign-in AND the hand-off are on
+            return self._oidc_handoff(body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
