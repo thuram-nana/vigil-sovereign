@@ -301,52 +301,59 @@ def test_one_audit_record_per_committed_source(trees):
 
 # ── crash safety ──────────────────────────────────────────────────────────────────────────────────────────────
 
-def _template(tmp: Path, monkeypatch) -> "tuple[Path, Path]":
-    """A legacy tree with every carried class, and its spine."""
+def _template(tmp: Path, monkeypatch) -> "tuple[Path, Path, Path]":
+    """A legacy tree with every carried class, its spine, and a completion spool holding the archived completion of
+    an expired launch (requeued) while another expired launch has none (held)."""
+    from tests.test_seam_migrate_requeue import _archived_noop, _deleg  # type: ignore
     s = SpineStore(tmp / "spine.jsonl")
-    legacy = tmp / "legacy"
+    legacy, spool = tmp / "legacy", tmp / "spool"
     monkeypatch.setenv("VIGIL_BASE_DIR", str(legacy))
     _seat(s)
     r1 = _reserve(s)
     assert _settle(s, r1, 30)["ok"]
     r2 = _reserve(s, now=NOW + 100)
+    gov, deleg = _deleg()
+    _archived_noop(s, spool, gov, deleg, r2, "completed", tmp / "wrong-tree")
+    (spool / ".settle-scan.json").write_text("{}")
     record_lease_pause(str(legacy), r2["slug"], r2["nonce"])
     record_paused_past_expiry(str(legacy), "cust_old", "p1")
     _floor_file(legacy, 7)
     (legacy / "offense-governance.key").write_bytes(b"k")
     (legacy / "approval-nonces").mkdir()
     (legacy / "approval-nonces" / ("ab" * 32)).write_text("n\n")
-    return legacy, tmp / "spine.jsonl"
+    return legacy, tmp / "spine.jsonl", spool
 
 
-def _clone(tmp: Path, legacy: Path, spine: Path, k: Any = "ref") -> "tuple[Path, Path, SpineStore]":
+def _clone(tmp: Path, legacy: Path, spine: Path, spool: Path, k: Any = "ref") -> "tuple[Path, Path, SpineStore, Path]":
     d = tmp / f"run-{k}"
     shutil.copytree(legacy, d / "legacy", symlinks=True)
+    shutil.copytree(spool, d / "spool", symlinks=True)
     shutil.copy(spine, d / "spine.jsonl")
     (d / "seam").mkdir()
-    return d / "legacy", d / "seam", SpineStore(d / "spine.jsonl")
+    return d / "legacy", d / "seam", SpineStore(d / "spine.jsonl"), d / "spool"
 
 
-def _normalized(seam: Path, legacy: Path) -> "tuple[dict, dict]":
+def _normalized(seam: Path, legacy: Path, spool: Path) -> "tuple[dict, dict, dict]":
     tree = {k: v for k, v in _tree_bytes(seam).items() if not k.startswith(".seam-migration/")}
     j = sm.read_journal(seam)
     src = j["sources"][os.path.realpath(legacy)]
     src = {k: v for k, v in src.items() if k not in ("started_at", "completed_at")}
-    return tree, src
+    return tree, src, {k: v for k, v in _tree_bytes(spool).items() if not k.endswith(".lock")}
 
 
 def test_a_failure_at_any_write_is_finished_by_a_rerun(tmp_path, monkeypatch, trees):
     tmpl = tmp_path / "tmpl"
     tmpl.mkdir()
-    legacy0, spine0 = _template(tmpl, monkeypatch)
-    ref_l, ref_d, ref_s = _clone(tmp_path, legacy0, spine0)
+    legacy0, spine0, spool0 = _template(tmpl, monkeypatch)
+    ref_l, ref_d, ref_s, ref_sp = _clone(tmp_path, legacy0, spine0, spool0)
     labels: "list[str]" = []
     monkeypatch.setattr(seam_migrate, "_fault", labels.append)
-    assert _apply(ref_s, ref_d, ref_l)[0] == 1                             # the expired launch is held
-    ref = _normalized(ref_d, ref_l)
-    assert len(labels) >= 8, labels
+    code, rep = _apply(ref_s, ref_d, ref_l, spool=ref_sp)
+    assert code == 0 and len(rep["sources"][0]["requeue"]) == 1, rep          # the expired launch is requeued
+    ref = _normalized(ref_d, ref_l, ref_sp)
+    assert any(x.startswith("requeue:") for x in labels) and "checkpoint" in labels, labels
     for k in range(len(labels)):
-        lk, dk, sk = _clone(tmp_path, legacy0, spine0, k)
+        lk, dk, sk, spk = _clone(tmp_path, legacy0, spine0, spool0, k)
         calls = {"n": 0}
 
         def _boom(label, _k=k, _c=calls):
@@ -354,13 +361,34 @@ def test_a_failure_at_any_write_is_finished_by_a_rerun(tmp_path, monkeypatch, tr
             if _c["n"] == _k + 1:
                 raise OSError(f"injected at {label}")
         monkeypatch.setattr(seam_migrate, "_fault", _boom)
-        with pytest.raises(OSError, match="injected"):
-            _apply(sk, dk, lk)
+        code, rep = _apply(sk, dk, lk, spool=spk)
+        assert code == 1 and rep["sources"][0]["status"] == "aborted" and "injected" in rep["sources"][0]["error"]
         j = sm.read_journal(dk) if sm.journal_path(dk).exists() else None
         assert j is None or j["sources"][os.path.realpath(lk)]["state"] == "applying"
         monkeypatch.setattr(seam_migrate, "_fault", lambda label: None)
-        _apply(sk, dk, lk)
-        assert _normalized(dk, lk)[0] == ref[0], labels[k]
-        assert _normalized(dk, lk)[1] == {**ref[1]}, labels[k]
+        _apply(sk, dk, lk, spool=spk)
+        got = _normalized(dk, lk, spk)
+        assert got[0] == ref[0], labels[k]
+        assert got[1] == ref[1], labels[k]
+        assert got[2] == ref[2], labels[k]
         audits = [r for r in sk.iter_records() if (r.payload or {}).get("signal") == seam_migrate.AUDIT_SIGNAL]
         assert len(audits) == 1, labels[k]
+
+
+def test_no_settle_interleaves_with_the_migration(trees, monkeypatch):
+    """The migration holds the settle lock from its re-plan to its commit: a settle in between is told to retry."""
+    legacy, seam, _ = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    monkeypatch.setenv("VIGIL_SETTLE_LOCK_WAIT_S", "0.2")
+    _move(monkeypatch, seam)
+    got = []
+
+    def _concurrent_settle(label):
+        if label.startswith("copy:credit-launch-leases/"):
+            got.append(LaunchGate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=LATE))
+    monkeypatch.setattr(seam_migrate, "_fault", _concurrent_settle)
+    assert _apply(s, seam, legacy)[0] == 1                                 # migrated; the expired launch is held
+    assert len(got) == 1 and got[0]["ok"] is False and got[0].get("retry") is True, got
+    assert _avail(s) == 70                                                  # nothing moved

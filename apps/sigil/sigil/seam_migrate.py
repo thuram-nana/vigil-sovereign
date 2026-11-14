@@ -380,7 +380,7 @@ def _sha(p: Path) -> str:
 
 
 def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *,
-           env: "Optional[Mapping[str, str]]" = None) -> dict:
+           env: "Optional[Mapping[str, str]]" = None, spool: Any = None) -> dict:
     """APPLY then VERIFY then COMMIT one planned source (the caller holds the journal lock and the settle lock). Every
     step is idempotent and atomic; a crash or an error leaves the source ``applying`` and a re-run finishes it."""
     from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease, record_lease_settlement
@@ -463,16 +463,62 @@ def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *
         if _bytes_or_none(seam / rel) != _bytes_or_none(src / rel):
             raise MigrateAborted(f"verify: {rel} is not on the seam with the former directory's content")
         srcj["copied"][rel] = _sha(seam / rel)
+    # REQUEUE (after every lease is on the seam, so the drain always finds the lease it settles)
+    requeued, held = _requeue(seam_s, plan, journal, srcj, spool)
     # COMMIT: one owner-signed audit record (no nonce, no amount), then the journal entry
     counts = {k: v.get("files", 0) for k, v in plan["classes"].items()}
     _fault("audit")
     _audit_once(store, owner_key, src=plan["from"], seam=seam_s, digest=plan["digest"], counts=counts,
-                requeued=0, held=len(plan["held"]))
-    srcj.update(state="complete", completed_at=time.time(), classes=counts, held=plan["held"],
+                requeued=len(requeued), held=len(held))
+    srcj.update(state="complete", completed_at=time.time(), classes=counts, held=held, requeued=requeued,
                 left_in_place=[x["path"] for x in plan["left_in_place"]])
     _fault("journal:complete")
     write_journal(seam_s, journal)
-    return {"status": "migrated", "held": plan["held"]}
+    return {"status": "migrated", "requeue": requeued, "held": held}
+
+
+def _requeue(seam_s: str, plan: dict, journal: dict, srcj: dict, spool: Any) -> "tuple[list[str], list[dict]]":
+    """Hand each EXPIRED, UNSETTLED legacy launch's archived completion back to the settle drain: under the
+    completion spool's exclusive lock (taken after the settle lock, the sweep's order), journal the move, then move
+    ``<spool>/processed/<name>`` to ``incoming/<name>``. The drain verifies it under its delegation and settles the
+    launch on the seam at the completion's outcome; settle idempotency per (slug, nonce) is the backstop. A settled
+    launch's completion is never selected. An expired, unsettled launch with no completion anywhere in the spool is
+    HELD for the owner (``legacy_hold`` in both reservation sweeps; no money moves). The settle drain's scan
+    checkpoint is removed, so its next pass reads the whole spine (lease bundles reached the seam without a publish).
+    Returns ``(requeued names, held)``."""
+    from vigil_integration.live.seam_lock import LockBusy, locked_file
+    from vigil_integration.seam_migration import write_journal
+    expired = [x for x in plan.get("_leases", []) if x["state"] == "expired_unsettled"]
+    if spool is None:
+        return [], _completion_plan(None, expired)[1]
+    sp = Path(spool)
+    if not sp.is_dir():
+        return [], _completion_plan(None, expired)[1]
+    lock = locked_file(sp / ".spool.lock", wait_s=5.0)
+    try:
+        lock.__enter__()
+    except (LockBusy, OSError) as e:
+        raise MigrateAborted(f"the completion spool {sp} is locked or unusable ({type(e).__name__}); stop the settle "
+                             f"drain and retry") from e
+    try:
+        names, held = _completion_plan(sp, expired)
+        planned = sorted(set(srcj.get("requeue_planned") or []) | set(names))
+        if planned != (srcj.get("requeue_planned") or []):
+            srcj["requeue_planned"] = planned
+            _fault("journal:requeue")
+            write_journal(seam_s, journal)
+        for name in names:
+            _fault(f"requeue:{name}")
+            (sp / "incoming").mkdir(exist_ok=True)
+            os.replace(sp / "processed" / name, sp / "incoming" / name)
+        requeued = [n for n in planned if (sp / "incoming" / n).is_file()]
+        ck = sp / ".settle-scan.json"
+        if ck.exists():
+            _fault("checkpoint")
+            ck.unlink()
+    finally:
+        lock.__exit__(None, None, None)
+    return requeued, held
 
 
 def _publisher(cls: str, store: Any, owner_key: Any, seam_s: str) -> Any:
@@ -591,9 +637,11 @@ def _run_apply(store: Any, owner_key: Any, seam_s: str, sources: "list[str]", *,
                 rep = public_report(plan)
                 if plan["status"] == "planned":
                     try:
-                        rep.update(_apply(store, owner_key, seam_s, plan, journal, env=env))
+                        rep.update(_apply(store, owner_key, seam_s, plan, journal, env=env, spool=spool))
                     except MigrateAborted as e:
                         rep.update(status="aborted", error=str(e))
+                    except OSError as e:                # an I/O failure mid-run: the source stays `applying`
+                        rep.update(status="aborted", error=f"{type(e).__name__}: {e}; fix it and run again")
                 if rep["status"] in ("conflict", "unsafe", "too_large", "aborted") or rep.get("held"):
                     code = 1
                 out["sources"].append(rep)

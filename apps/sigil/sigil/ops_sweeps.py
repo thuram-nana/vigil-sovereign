@@ -238,9 +238,13 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     With ``VIGIL_SETTLE_SPINE_RECORD`` on, a listed lease whose settlement marker is present (its tombstone pending:
     possibly a settle interrupted after the marker) is FINISHED under ``apply`` (``settle_launch(finish_only=True)``:
     only a recorded decision, never a fresh refund; no TTL or spool check) and reported ``settle_interrupted`` with
-    its pending amounts without it. With the flag off such a lease is skipped, as before."""
+    its pending amounts without it. With the flag off such a lease is skipped, as before.
+
+    A launch the seam migration held for the owner (listed in ``<seam>/.seam-migration/journal.json``) is reported
+    ``legacy_hold`` and never settled, with or without ``apply``."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
+    from vigil_integration.seam_migration import held_launches
     from . import config
 
     if ttl_s < 0:
@@ -255,6 +259,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     root = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
+    held = held_launches(base)
     rows: list[dict] = []
     leases = list_credit_leases(base)
     record = config.settle_spine_record_enabled()
@@ -302,6 +307,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "completion_unknown"})
             continue
         slug_, nonce_ = str(doc.engagement_slug), str(doc.nonce)
+        if (slug_, nonce_) in held:
+            rows.append({**row, "status": "legacy_hold"})  # held for the owner by the seam migration: never settled
+            continue
         try:
             metered = bool(gate._launch_was_metered(slug_, nonce_))
         except OSError as e:
@@ -424,7 +432,7 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
     def _scan(keys: Any) -> Any:
         return settle_checkpoint.scan(gate.store, kp.public_key_b64, keys=keys,
                                       path=Path(checkpoint) if checkpoint is not None else None, scope=scope,
-                                      listed_from=listed_from, listing_clean=clean, now=float(now))
+                                      listed_from=listed_from, listing_clean=clean, now=float(now), seam=base)
 
     pending = gate.interrupted_settlements([b.signed_lease for b in leases], strict=True, scan=_scan)
     retire_path = Path(retire) if retire is not None else None
@@ -565,8 +573,10 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     the amounts it moved. With ``VIGIL_SETTLE_SPINE_RECORD`` on, a SETTLED reservation the seam holds no lease for
     whose recorded decision has an entry that has not landed is finished under ``apply`` (``settle_completed``) and
     reported ``settle_interrupted`` with its pending amounts without it (as ``sweep_abandoned_reservations`` does
-    for a lease on the seam)."""
+    for a lease on the seam). A launch the seam migration held for the owner is reported ``legacy_hold`` and never
+    released."""
     from vigil_integration.live.credit_lease_broker import is_lease_settled
+    from vigil_integration.seam_migration import held_launches
 
     from . import config
     from .governor.launch_reservations import scan_reservations
@@ -581,6 +591,7 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     spool = Path(completion_spool) if completion_spool is not None else None
     charging, spool_unreadable = _charging_completions(spool) if spool is not None else (set(), False)
     base = gate._seam_base()
+    held = held_launches(base)
     record = config.settle_spine_record_enabled()
     # ONE pass over the spine: the reservations and, with the settle record on, every settled launch's settlement
     # evidence (its recorded decision and the entries that landed), so no launch is ever re-scanned on its own here
@@ -623,6 +634,9 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
             continue
         if spool_unreadable:
             rows.append({**row, "status": "completion_unknown"})
+            continue
+        if (slug, nonce) in held:
+            rows.append({**row, "status": "legacy_hold"})  # held for the owner by the seam migration: never released
             continue
         if not apply:
             rows.append({**row, "status": "superseded"})
