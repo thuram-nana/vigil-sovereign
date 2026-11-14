@@ -141,7 +141,8 @@ def test_e2e_password_journey_with_stepup_and_billing_not_testing(tmp_path, monk
 
 def test_e2e_founder_flag_signup_registers_a_target_without_owner_promotion(tmp_path, monkeypatch):
     # With the founder flag on, the signing-up customer is a founder: it registers a target straight away (no
-    # owner promotion), cannot hand testing to a teammate, and the kill switch (flag off) refuses its next request.
+    # owner promotion), cannot hand testing to a teammate, and with the kill switch (the flag off in the cockpit's
+    # environment) its next testing request is refused.
     sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
     monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
     monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")              # the founder role needs the preview on

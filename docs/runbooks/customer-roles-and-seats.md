@@ -58,9 +58,19 @@ Code default: OFF. Production value: `1`, set in `apps/sigil/deploy/cockpit.env.
 | ON | `founder` (with the trial preview on), else `org_admin` | admitted as `founder` |
 | OFF | `org_admin` | admitted as `org_admin`: billing and members kept, no testing |
 
-Turning the flag OFF is the kill switch. It writes nothing to the spine and takes effect on the next request;
-setting it again restores the founders' testing. While it is OFF a founder cannot prove a host or reserve,
-start, pause or resume a launch.
+To switch founder testing off (the kill switch), set the flag to 0 in `~/.sigil/cockpit.env` and restart the
+cockpit:
+
+```bash
+systemctl --user restart sigil-cockpit
+```
+
+The cockpit reads the flag from its own environment, which systemd loads from `cockpit.env` only when the
+service starts, so the switch applies from that restart on. It writes nothing to the spine. Set the value to
+`0` rather than deleting the line, and keep the flag out of `~/.sigil/sigil.env`: a value there applies
+whenever the cockpit's environment does not set the variable. Setting it to `1` again and restarting the
+cockpit restores the founders' testing. While it is OFF a founder cannot prove a host or reserve, start, pause
+or resume a launch.
 
 A reservation can always be released. A reserved launch that has not started can be cancelled by anyone in
 its org who holds `run_engagement` or `manage_billing` (an org admin, a founder, an operator), so a founder can
@@ -86,7 +96,14 @@ administrator. Both verbs print ids and counts only.
 
 ## Rollback
 
-Before rolling back to a build that has no `founder` role, run `sigil org demote-founders --reason "rollback"`.
+Before rolling back to a build that has no `founder` role, in this order:
+
+1. Set `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=0` in `~/.sigil/cockpit.env` and run
+   `systemctl --user restart sigil-cockpit`. From then on no sign-up is granted `founder`.
+2. Run `sigil org demote-founders --reason "rollback"`. A second run reports `demoted 0`.
+3. Roll back.
+
 An earlier build gives the `founder` role no permission, so an org whose only administrator is a founder would
-have no administrator on that build. After upgrading again, grant `founder` back with `set-member-role` where
-wanted.
+have no administrator on that build. Step 1 first means no founder is created between the demote and the
+rollback. After upgrading again, set the flag back to `1`, restart the cockpit, and grant `founder` back with
+`set-member-role` where wanted.
