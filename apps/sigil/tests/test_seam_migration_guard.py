@@ -15,11 +15,15 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the guard predicate always returns []             -> every refusal test
   * the guard default ON                              -> test_with_the_guard_off_every_verb_is_unchanged
   * revoke wired to the guard                         -> test_eval_grant_revoke_is_never_refused
+  * an operator shell not following the units' guard   -> test_an_operator_shell_follows_the_units_guard
+  * an explicit value in the shell not honoured        -> test_an_explicit_shell_value_is_deliberate
+  * a unit without the guard line turning it on        -> test_units_without_the_guard_leave_it_off
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -196,3 +200,71 @@ def test_upgrade_check_reports_an_unmigrated_former_tree_whatever_the_flag(host,
     _migrated(host)
     cli.main(["upgrade", "--check"])                                       # up to date: returns normally
     assert "up to date" in capsys.readouterr().out
+
+
+# ── the guard follows the configured units (a verb run from an operator's shell) ─────────────────────────────────
+
+_REPO = Path(__file__).resolve().parents[3]
+_UNITS = ("apps/sigil/deploy/systemd/sigil-cockpit.service", "infra/systemd/vigil-settle-drain.service")
+
+
+def _install_units(home: Path, *, guard: bool = True) -> None:
+    """The shipped cockpit and settle-drain units, re-copied (``guard=False``: a copy without the guard line)."""
+    d = home / ".config" / "systemd" / "user"
+    d.mkdir(parents=True, exist_ok=True)
+    for u in _UNITS:
+        shutil.copy(_REPO / u, d / Path(u).name)
+        if not guard:
+            t = (d / Path(u).name).read_text()
+            (d / Path(u).name).write_text(t.replace("Environment=VIGIL_SEAM_MIGRATION_GUARD=1\n", ""))
+
+
+def _spool(h) -> Path:
+    spool = h["tmp"] / "spool"
+    for sub in ("incoming", "working", "processed", "rejected"):
+        (spool / sub).mkdir(parents=True, exist_ok=True)
+    return spool
+
+
+@pytest.mark.parametrize("verb", ["sweep_apply", "sweep_report", "eval_grant_arm", "monitoring_secret"])
+def test_an_operator_shell_follows_the_units_guard(host, monkeypatch, capsys, verb):
+    """The units carry the guard; the operator's shell does not export it: every guarded verb is still refused (the
+    report-only sweep still runs, with the warning) and nothing is written."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home")
+    ensure_owner_keypair()
+    tip = host["store"].next_seq
+    if verb == "sweep_apply":
+        monkeypatch.setenv("VIGIL_OPS_SWEEP_APPLY_ENABLED", "1")
+        assert _exit(["ops-sweep", "reservations", "--apply", "--completion-spool", str(_spool(host))]) == 2
+        assert "ops-sweep reservations --apply: refused" in capsys.readouterr().err
+    elif verb == "sweep_report":
+        cli.main(["ops-sweep", "reservations"])
+        assert "WARNING" in capsys.readouterr().err
+    elif verb == "eval_grant_arm":
+        assert _exit(["eval-grant", "arm", "--engagement", "eng-x", "--target", "https://x.example"]) == 2
+        assert "eval-grant arm: refused" in capsys.readouterr().err
+    else:
+        monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
+        secrets = host["tmp"] / "secrets"
+        assert _exit(["monitoring-secret", "--org", "org_a", "--host", "apme.cm", "--secrets-dir", str(secrets)]) == 2
+        assert not secrets.exists() and "monitoring-secret: refused" in capsys.readouterr().err
+    assert host["store"].next_seq == tip
+
+
+def test_an_explicit_shell_value_is_deliberate(host, monkeypatch, capsys):
+    """An explicit VIGIL_SEAM_MIGRATION_GUARD in this environment decides (the override the env examples document)."""
+    _install_units(host["tmp"] / "home")
+    ensure_owner_keypair()
+    monkeypatch.setenv("VIGIL_SEAM_MIGRATION_GUARD", "0")
+    cli.main(["ops-sweep", "reservations"])
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_units_without_the_guard_leave_it_off(host, monkeypatch, capsys):
+    """Units configured without the guard line and nothing exported: the code default (off) is unchanged."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home", guard=False)
+    ensure_owner_keypair()
+    cli.main(["ops-sweep", "reservations"])
+    assert "WARNING" not in capsys.readouterr().err

@@ -36,6 +36,8 @@ SEAM_UNITS: "tuple[tuple[str, str], ...]" = (
     ("vigil-command.service", "infra/systemd"),
 )
 _LEGACY_ALIAS = "VIGIL_SETTLE_BASE_DIR"
+#: The seam-migration guard a unit sets for its process (the shipped cockpit and settle-drain units set it to 1).
+GUARD_ENV = "VIGIL_SEAM_MIGRATION_GUARD"
 #: The configured units that WRITE the money seam (the backup units only capture it). Their working directories are
 #: where a CWD-relative ``.vigil-live`` default would have put an earlier seam (``seam_migration.legacy_candidates``).
 WRITER_SEAM_UNITS: "tuple[str, ...]" = ("sigil-cockpit.service", "vigil-settle-drain.service", "vigil-command.service")
@@ -95,7 +97,7 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
                    *, installed: bool = False) -> "Optional[dict]":
     """The seam base the process of the unit ``text`` would use, or ``None`` when the unit is not configured
     here. Returns ``{"seam": <abs path>, "legacy": <abs VIGIL_SETTLE_BASE_DIR or None>, "workdir": <abs working
-    directory>}``."""
+    directory>, "guard": <the VIGIL_SEAM_MIGRATION_GUARD value its process gets, "" when unset>}``."""
     env: dict = {}
     files: "list[Path]" = []
     workdir = str(home)
@@ -138,7 +140,8 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
 
     raw = (_subst(base_arg, env) if base_arg is not None else "") or env.get("VIGIL_BASE_DIR") or ".vigil-live"
     legacy = env.get(_LEGACY_ALIAS) or ""
-    return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None, "workdir": _abs(workdir)}
+    return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None, "workdir": _abs(workdir),
+            "guard": str(env.get(GUARD_ENV) or "").strip()}
 
 
 def unit_details(repo: "Path | str | None" = None, home: "Path | None" = None, *,

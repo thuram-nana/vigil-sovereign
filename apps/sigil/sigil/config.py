@@ -373,7 +373,8 @@ def seam_migration_guard_enabled() -> bool:
     """``VIGIL_SEAM_MIGRATION_GUARD`` — refuse to serve, settle, sweep with ``--apply``, arm an eval grant or provision
     a monitoring secret while a former seam directory of this host holds launch-seam records the seam lacks (until
     ``sigil seam migrate --apply`` commits them). DEFAULT OFF in code; the shipped ``sigil-cockpit.service`` and
-    ``vigil-settle-drain.service`` set it to 1, so the seam move and the guard always arrive together."""
+    ``vigil-settle-drain.service`` set it to 1, so the seam move and the guard always arrive together. When this
+    environment does not set it, a guarded verb follows the configured seam units' value (``cli._seam_guard_on``)."""
     return (os.environ.get("VIGIL_SEAM_MIGRATION_GUARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 

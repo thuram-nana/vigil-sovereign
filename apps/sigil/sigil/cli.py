@@ -1282,12 +1282,28 @@ def _migrate_hint(verb: str, seam: str, left: list) -> str:
     return "\n".join(lines)
 
 
-def _refuse_unmigrated_seam(verb: str, seam: str) -> None:
-    """With ``VIGIL_SEAM_MIGRATION_GUARD`` on, exit 2 (before anything is written) while a former seam directory of
-    this host holds launch-seam records ``seam`` lacks; the guard state cannot be read ⇒ refused too. Off (the code
-    default): nothing."""
+def _seam_guard_on() -> bool:
+    """Whether the seam-migration guard applies here: ``VIGIL_SEAM_MIGRATION_GUARD`` when this environment sets it
+    (a deliberate value, either way); else ON when a configured seam unit sets it for its process (the shipped
+    cockpit and settle-drain units do) — so a verb run from an operator's shell is guarded exactly as the units are.
+    Neither set (no unit configured, nothing exported): off, the code default."""
+    import os
+
     from . import config
-    if not config.seam_migration_guard_enabled():
+    if (os.environ.get("VIGIL_SEAM_MIGRATION_GUARD") or "").strip():
+        return config.seam_migration_guard_enabled()
+    try:
+        from vigil_integration.seam_base_units import unit_details
+    except ImportError:          # the unit model is not installed here: nothing configured to follow
+        return False
+    return any(str(u.get("guard") or "").lower() in config._OIDC_AFFIRMATIVE for u in unit_details().values())
+
+
+def _refuse_unmigrated_seam(verb: str, seam: str) -> None:
+    """With the seam-migration guard on (:func:`_seam_guard_on`), exit 2 (before anything is written) while a former
+    seam directory of this host holds launch-seam records ``seam`` lacks; the guard state cannot be read ⇒ refused
+    too. Off (the code default): nothing."""
+    if not _seam_guard_on():
         return
     try:
         left = _unmigrated_seam(seam)
@@ -1557,8 +1573,7 @@ def cmd_ops_sweep(a) -> None:
         if a.apply:
             _refuse_unmigrated_seam("ops-sweep reservations --apply", gate._seam_base())
         else:
-            from . import config as _cfg
-            if _cfg.seam_migration_guard_enabled():
+            if _seam_guard_on():
                 try:
                     _left = _unmigrated_seam(gate._seam_base())
                 except Exception:  # noqa: BLE001 — a report never fails on the advisory
