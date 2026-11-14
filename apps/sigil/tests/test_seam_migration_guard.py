@@ -21,6 +21,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * a sweep --apply aimed at a former seam directory   -> test_a_sweep_apply_never_targets_a_former_seam_directory
   * an unreadable guard state lets a verb run          -> test_an_unreadable_migration_state_refuses
   * an unreadable journal hides a former tree          -> test_an_unreadable_journal_never_hides_a_former_tree
+  * upgrade --check / migrate without units use the cwd -> test_with_no_seam_unit_nothing_is_compared_or_guessed
 """
 from __future__ import annotations
 
@@ -213,6 +214,7 @@ def test_seam_migrate_itself_is_never_refused(host, capsys):
 
 def test_upgrade_check_reports_an_unmigrated_former_tree_whatever_the_flag(host, monkeypatch, capsys):
     monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home", guard=False)                      # the units name the seam
     seam_before, tip = _listing(host["seam"]), host["store"].next_seq
     assert _exit(["upgrade", "--check"]) == 3
     out = capsys.readouterr().out
@@ -310,3 +312,20 @@ def test_a_sweep_apply_never_targets_a_former_seam_directory(host, monkeypatch, 
     else:
         cli.main(argv)
         assert json.loads(capsys.readouterr().out)["applied"] is True
+
+
+def test_with_no_seam_unit_nothing_is_compared_or_guessed(host, monkeypatch, capsys):
+    """No seam unit configured: `upgrade --check` reports no seam migration (as `vigil doctor`), and `seam migrate`
+    without --to refuses instead of migrating into a working-directory default; with the units it uses theirs."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    ensure_owner_keypair()
+    cli.main(["upgrade", "--check"])
+    assert "seam migration" not in capsys.readouterr().out
+    monkeypatch.chdir(host["tmp"])
+    monkeypatch.delenv("VIGIL_BASE_DIR")
+    assert _exit(["seam", "migrate", "--from", str(host["legacy"])]) == 2
+    assert "--to" in capsys.readouterr().err and not (host["tmp"] / ".vigil-live").exists()
+    _install_units(host["tmp"] / "home")
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(host["seam"]))
+    assert _exit(["seam", "migrate", "--from", str(host["legacy"]), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["to"] == os.path.realpath(host["seam"])

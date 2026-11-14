@@ -1612,7 +1612,15 @@ def cmd_seam(a) -> None:
     if a.to:
         seam = os.path.abspath(os.path.expanduser(a.to))
     else:
-        from vigil_integration.seam_base_units import MONEY_SEAM_UNITS
+        try:
+            from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, unit_details
+            configured = bool(unit_details(only=MONEY_SEAM_UNITS))
+        except ImportError:
+            configured = False
+        if not configured:                  # no unit names the seam here: never a working-directory default
+            print("seam migrate: refused — no seam unit is configured on this host; name the seam with --to DIR",
+                  file=sys.stderr)
+            sys.exit(2)
         seam = _writer_seam_base("seam migrate", units=MONEY_SEAM_UNITS)
     if a.sources:
         sources = [os.path.abspath(os.path.expanduser(s)) for s in a.sources]
@@ -2566,18 +2574,17 @@ def cmd_spine(a) -> None:
 
 def _upgrade_seam_check() -> "tuple[str, list]":
     """``(seam, unmigrated former trees)`` for ``upgrade --check`` — read-only, whatever the guard flag says. The seam
-    is the one the configured seam units agree on, else this environment's; units that disagree are `vigil doctor`'s
-    to report (nothing listed here)."""
+    is the one the configured seam units agree on; with no seam unit configured there is nothing to compare (nothing
+    listed, as in `vigil doctor`), and units that disagree are `vigil doctor`'s to report (nothing listed here)."""
     import os
     try:
-        from vigil_core.seam_base import resolve_seam_base
         from vigil_integration.seam_base_units import unit_details
         from vigil_integration.seam_migration import legacy_candidates, unmigrated_legacy
         units = unit_details()
         seams = {os.path.realpath(u["seam"]) for u in units.values()}
-        if len(seams) > 1:
+        if len(seams) != 1:
             return "", []
-        seam = next(iter(units.values()))["seam"] if units else resolve_seam_base()
+        seam = next(iter(units.values()))["seam"]
         return seam, unmigrated_legacy(seam, legacy_candidates(seam, units=units))
     except ImportError:
         return "", []
@@ -3579,7 +3586,8 @@ def main(argv=None) -> None:
     psmm.add_argument("--from", dest="sources", action="append", default=[],
                       help="a former seam directory (repeatable; default: the ones this host's units and "
                            "$SIGIL_HOME left)")
-    psmm.add_argument("--to", default="", help="the seam (default: the one the configured units use)")
+    psmm.add_argument("--to", default="", help="the seam (default: the one the configured units use; required when "
+                                               "no seam unit is configured)")
     psmm.add_argument("--completion-spool", default="",
                       help="the settle drain's completion spool (default: VIGIL_SETTLE_SPOOL, else the drain's env "
                            "file, else ~/.sigil/spool/settle)")
