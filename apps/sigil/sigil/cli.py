@@ -716,11 +716,15 @@ def cmd_eval_grant(a) -> None:
         }, indent=2))
         return
 
-    # arm / revoke / reconcile publish to the seam the offense plane reads: refuse before anything is appended
-    # or published when this shell would write a different tree than the configured units use.
-    _eval_seam = _writer_seam_base(f"eval-grant {a.action}")
-    if a.action == "arm":
-        _refuse_unmigrated_seam("eval-grant arm", _eval_seam)
+    # arm / reconcile publish to the seam the offense plane reads: refuse before anything is appended or published
+    # when this shell would write a different tree than the configured units use. A revoke (the safe direction) is
+    # never refused for that: it is published to every configured writer unit's seam.
+    if a.action == "revoke":
+        _revoke_targets = _revoke_seam_targets("eval-grant revoke")
+    else:
+        _eval_seam = _writer_seam_base(f"eval-grant {a.action}")
+        if a.action == "arm":
+            _refuse_unmigrated_seam("eval-grant arm", _eval_seam)
 
     # Fail CLOSED on a locked/tampered vault (mirror `mesh`): never mint a fresh owner identity over an
     # existing one — that would FORK the trust root and sign under a key no verifier trusts.
@@ -747,9 +751,37 @@ def cmd_eval_grant(a) -> None:
         return
 
     if a.action == "revoke":
-        seq = g.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
+        import os as _os
+
+        from vigil_core.seam_base import resolve_seam_base as _resolve
+        same = _os.path.realpath(_revoke_targets[0]) == _os.path.realpath(_resolve())
+        g0 = g if same else EvalCapabilityGrant(store, owner_key=owner, base_dir=_revoke_targets[0])
+        first_error: "BaseException | None" = None
+        try:
+            seq = g0.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
+        except Exception as e:  # noqa: BLE001 — every other seam is still tried, then this re-raises
+            first_error = e
+        unconfirmed = []
+        for extra in _revoke_targets[1:]:               # the same spine record, published to each other unit's seam
+            gx = EvalCapabilityGrant(store, owner_key=owner, base_dir=extra)
+            try:
+                gx._retract(str(a.engagement))
+                gx._publish(str(a.engagement))
+            except Exception as e:  # noqa: BLE001 — every target is tried; an unconfirmed one raises the alarm
+                from .governor.seam_publish import raise_close_alarm
+                raise_close_alarm(f"a revoke of eval-capability grant {a.engagement!r} could not be confirmed on the "
+                                  f"seam {extra}", cause="seam_unreconciled", failed=[f"grant:{a.engagement}"])
+                unconfirmed.append(f"{extra} ({type(e).__name__})")
+        if first_error is not None:
+            raise first_error
         print(f"eval-capability-grant REVOKED for engagement {a.engagement!r} (seq {seq}); every gate "
-              f"enforces again until a fresh owner+evaluator grant lands.")
+              f"enforces again until a fresh owner+evaluator grant lands."
+              + (f" Published to {len(_revoke_targets)} seams: {', '.join(_revoke_targets)}."
+                 if len(_revoke_targets) > 1 else ""))
+        if unconfirmed:
+            print(f"!! the revoke could not be confirmed on: {'; '.join(unconfirmed)} — `sigil eval-grant reconcile` "
+                  f"once it is reachable", file=sys.stderr)
+            sys.exit(1)
         return
 
     # arm
@@ -1232,11 +1264,13 @@ def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> s
     """The seam base for an operator-run command that WRITES the cross-plane seam (an eval grant / attestation
     publication, its rollback floor, a reservation refund's markers). The ONE resolver picks it ($VIGIL_BASE_DIR,
     else ./.vigil-live); this refuses (exit 2), before anything is written, when that is not the directory the
-    configured seam units use — e.g. a shell without the VIGIL_BASE_DIR the shipped units set. Written there, a
-    revoke or withdrawal would never reach the publication the offense plane reads, and a reconcile would clear
-    the `vigil doctor` alarm over the wrong tree. Nothing configured on this host (no installed seam unit, no env
-    file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for the settle drain. ``units``
-    narrows the units compared (default: every seam unit)."""
+    configured seam WRITER units use (``seam_base_units.WRITER_SEAM_UNITS``: the cockpit, the settle drain, the
+    console; the backup units only capture the seam and `vigil doctor` reports theirs) — e.g. a shell without the
+    VIGIL_BASE_DIR the shipped units set. Written there, an arm would publish where the offense plane never reads
+    and a reconcile would clear the `vigil doctor` alarm over the wrong tree. Nothing configured on this host (no
+    installed seam unit, no env file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for
+    the settle drain. ``units`` narrows the units compared further. A revoke never comes here: it is published to
+    every writer unit's seam (:func:`_revoke_seam_targets`)."""
     import os
 
     from vigil_core.seam_base import SeamBaseError, require_seam_base
@@ -1246,10 +1280,10 @@ def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> s
         print(f"{verb}: {e}", file=sys.stderr)
         sys.exit(2)
     try:
-        from vigil_integration.seam_base_units import seam_base_agreement
+        from vigil_integration.seam_base_units import WRITER_SEAM_UNITS, seam_base_agreement
     except ImportError:          # the unit-agreement probe is not installed here: nothing to compare against
         return base
-    units = seam_base_agreement(only=units)[0]["units"]
+    units = seam_base_agreement(only=units if units is not None else WRITER_SEAM_UNITS)[0]["units"]
     seams = {os.path.realpath(s) for s in units.values()}
     if len(seams) > 1:
         print(f"{verb}: refusing — the configured units disagree on the seam base "
@@ -1263,6 +1297,38 @@ def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> s
               f"offense plane reads it.", file=sys.stderr)
         sys.exit(2)
     return base
+
+
+def _revoke_seam_targets(verb: str) -> "list[str]":
+    """Where an eval-grant REVOKE (the safe direction) is published: the seam of every configured seam writer unit,
+    each distinct directory once — so the revoke reaches whichever tree an offense plane reads, even while the units
+    disagree or this shell resolves another directory (a WARNING names them; `vigil doctor` reports the
+    disagreement). Nothing configured ⇒ this shell's seam, unchanged. Never refuses on a disagreement; contradictory
+    settings in this shell are still refused, as for every writer."""
+    import os
+
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        base = require_seam_base()
+    except SeamBaseError as e:
+        print(f"{verb}: {e}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_integration.seam_base_units import WRITER_SEAM_UNITS, seam_base_agreement
+    except ImportError:          # the unit-agreement probe is not installed here: this shell's seam
+        return [base]
+    units = seam_base_agreement(only=WRITER_SEAM_UNITS)[0]["units"]
+    targets: "list[str]" = []
+    for s in units.values():
+        if os.path.realpath(s) not in {os.path.realpath(t) for t in targets}:
+            targets.append(s)
+    if not targets:
+        return [base]
+    if len(targets) > 1 or os.path.realpath(base) != os.path.realpath(targets[0]):
+        print(f"{verb}: WARNING — this shell resolves the seam base to {base}; the configured units use "
+              f"{'; '.join(f'{u} -> {s}' for u, s in units.items())}. Publishing the revoke to each unit's seam "
+              f"({', '.join(targets)}); `vigil doctor` names the disagreement.", file=sys.stderr)
+    return targets
 
 
 def _unmigrated_seam(seam: str) -> list:

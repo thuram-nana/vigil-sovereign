@@ -2,16 +2,20 @@
 
 `sigil eval-grant arm|revoke|reconcile` publish the eval grant / attestation (and raise its rollback floor) under
 the seam base this process resolves; the keyless offense plane reads the one the shipped units set
-(VIGIL_BASE_DIR=%h/.sigil/credit-lease). Run from a shell without that export, a revoke would land in another tree
-(the offense plane keeps honouring the old publication) and a reconcile would confirm an empty tree and clear the
-`vigil doctor` alarm. `sigil ops-sweep reservations` without --base-dir would read settlement markers from the
-wrong tree. Each now refuses — before anything is appended, published or cleared — when the seam it resolves is
-not the one the configured units agree on; with nothing configured on the host it behaves exactly as before.
+(VIGIL_BASE_DIR=%h/.sigil/credit-lease). An arm or a reconcile writes only to the tree the configured seam WRITER
+units agree on (the cockpit, the settle drain, the console; the backup units only capture the seam): run from a
+shell that resolves another tree, or while those units disagree, it refuses — before anything is appended,
+published or cleared — and `sigil ops-sweep reservations` without --base-dir does too. A REVOKE (the safe direction)
+is never refused for that: it is published to every writer unit's seam, so it reaches whichever tree an offense
+plane reads. With nothing configured on the host every verb behaves exactly as before.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * the "not the units' seam" refusal in ``_writer_seam_base``   -> test_*_refuses_*_the_units_seam
   * the "units disagree" refusal                                 -> test_units_that_disagree_refuse_every_writer
+  * the backup units compared as writers                         -> test_a_backup_units_seam_never_blocks_a_writer
   * the eval-grant wiring                                        -> test_eval_grant_*_refuses_*
+  * a revoke refused, or published to one seam only             -> test_a_revoke_reaches_every_writer_units_seam
+  * one failing seam stops the others / reports success          -> test_a_revoke_is_tried_on_every_seam_when_one_fails
   * the ops-sweep wiring (only without an explicit --base-dir)   -> test_ops_sweep_*
   * the eval publishers' ``_base_dir`` through the shared resolver -> test_the_eval_publishers_write_the_tree_*
 """
@@ -30,6 +34,7 @@ from sigil import cli
 _REPO = Path(__file__).resolve().parents[3]
 _COCKPIT = _REPO / "apps/sigil/deploy/systemd/sigil-cockpit.service"
 _SETTLE = _REPO / "infra/systemd/vigil-settle-drain.service"
+_BACKUP = _REPO / "infra/systemd/vigil-backup.service"
 
 
 @pytest.fixture
@@ -107,7 +112,7 @@ def _ns(action, **kw):
     return SimpleNamespace(**base)
 
 
-@pytest.mark.parametrize("action", ["arm", "revoke", "reconcile"])
+@pytest.mark.parametrize("action", ["arm", "reconcile"])
 def test_eval_grant_writers_refuse_away_from_the_units_seam(home, monkeypatch, tmp_path, capsys, action):
     _install(home, _COCKPIT)
     store = _store(monkeypatch, tmp_path)
@@ -117,6 +122,103 @@ def test_eval_grant_writers_refuse_away_from_the_units_seam(home, monkeypatch, t
     assert ei.value.code == 2 and f"eval-grant {action}: refusing" in capsys.readouterr().err
     assert sum(1 for _ in store.iter_records()) == before               # nothing appended (no owner key minted)
     assert not (tmp_path / ".vigil-live").exists()                      # nothing published in the wrong tree
+
+
+def _revoked_on(seam: str, slug: str = "eng-x") -> bool:
+    """The seam carries an owner-sealed publication of ``slug`` (at or above its floor) holding the revoke."""
+    from sigil.governor.identity import owner_pubkey
+    from sigil.seam_migrate import _publication_verifies
+    from vigil_integration.live.eval_capability_grant import read_eval_capability_grants
+    return (_publication_verifies("eval_grants", seam, slug, owner_pubkey())
+            and any(r.get("state") == "revoked" for r in read_eval_capability_grants(seam, slug)))
+
+
+def test_a_revoke_lands_on_the_units_seam_from_any_shell(home, monkeypatch, tmp_path, capsys):
+    """A shell without the export: the revoke is published where the units (and so the offense plane) read, with a
+    warning, and nothing lands in the shell's own tree."""
+    _install(home, _COCKPIT)
+    store = _store(monkeypatch, tmp_path)
+    cli.cmd_eval_grant(_ns("revoke"))
+    err = capsys.readouterr().err
+    assert "WARNING" in err and _units_seam(home) in err
+    assert any((r.payload or {}).get("state") == "revoked" for r in store.iter_records())
+    assert _revoked_on(_units_seam(home)) and not (tmp_path / ".vigil-live").exists()
+
+
+def test_a_revoke_reaches_every_writer_units_seam(home, monkeypatch, tmp_path, capsys):
+    """While the cockpit and the settle drain disagree, an arm or a reconcile still refuses, and a revoke is
+    published to both seams (one spine record)."""
+    _install(home, _COCKPIT, _SETTLE)
+    other = home / "elsewhere"
+    env = home / ".config" / "vigil" / "settle-drain.env"
+    env.parent.mkdir(parents=True)
+    env.write_text(f"VIGIL_BASE_DIR={other}\n", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+    store = _store(monkeypatch, tmp_path)
+    for action in ("arm", "reconcile"):
+        with pytest.raises(SystemExit) as ei:
+            cli.cmd_eval_grant(_ns(action))
+        assert ei.value.code == 2 and "disagree on the seam base" in capsys.readouterr().err
+    cli.cmd_eval_grant(_ns("revoke"))
+    out = capsys.readouterr()
+    assert "WARNING" in out.err and "Published to 2 seams" in out.out
+    assert sum(1 for r in store.iter_records() if (r.payload or {}).get("state") == "revoked") == 1
+    assert _revoked_on(_units_seam(home)) and _revoked_on(str(other))
+
+
+@pytest.mark.parametrize("fails", ["first", "other"])
+def test_a_revoke_is_tried_on_every_seam_when_one_fails(home, monkeypatch, tmp_path, capsys, fails):
+    """One seam failing never stops the revoke reaching the others: the failure raises the close alarm (`vigil
+    doctor`) and the command fails (exit 1 / the first seam's error) — never a silent success."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from sigil.governor.seam_publish import read_close_alarm
+    _install(home, _COCKPIT, _SETTLE)
+    other = home / "elsewhere"
+    env = home / ".config" / "vigil" / "settle-drain.env"
+    env.parent.mkdir(parents=True)
+    env.write_text(f"VIGIL_BASE_DIR={other}\n", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+    _store(monkeypatch, tmp_path)
+    if fails == "first":
+        real_revoke = EvalCapabilityGrant.revoke
+
+        def _revoke(self, **kw):
+            real_revoke(self, **kw)
+            raise RuntimeError("the first seam's publish failed")
+        monkeypatch.setattr(EvalCapabilityGrant, "revoke", _revoke)
+        with pytest.raises(RuntimeError):
+            cli.cmd_eval_grant(_ns("revoke"))
+        assert _revoked_on(str(other))
+    else:
+        real_retract = EvalCapabilityGrant._retract
+
+        def _retract(self, slug, **kw):
+            if self._seam_override == str(other):
+                raise RuntimeError("unreachable seam")
+            return real_retract(self, slug, **kw)
+        monkeypatch.setattr(EvalCapabilityGrant, "_retract", _retract)
+        with pytest.raises(SystemExit) as ei:
+            cli.cmd_eval_grant(_ns("revoke"))
+        assert ei.value.code == 1 and str(other) in capsys.readouterr().err
+        assert _revoked_on(_units_seam(home)) and read_close_alarm() is not None
+
+
+def test_a_backup_units_seam_never_blocks_a_writer(home, monkeypatch, tmp_path, capsys):
+    """A backup unit still on an older env file resolves another tree: `vigil doctor` reports that, but it only
+    captures the seam — a revoke, an arm's seam check and a reconcile run on the writer units' seam."""
+    from vigil_integration.seam_base_units import seam_base_agreement
+    _install(home, _COCKPIT, _SETTLE, _BACKUP)
+    env = home / ".config" / "vigil" / "backup.env"
+    env.parent.mkdir(parents=True)
+    env.write_text("VIGIL_BACKUP_PASSPHRASE=x\nVIGIL_BASE_DIR=.vigil-live\n", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+    assert any("disagree on the seam base" in i for i in seam_base_agreement()[1])     # doctor still reports it
+    _store(monkeypatch, tmp_path)
+    assert cli._writer_seam_base("eval-grant arm") == _units_seam(home)
+    cli.cmd_eval_grant(_ns("revoke"))
+    assert "WARNING" not in capsys.readouterr().err and _revoked_on(_units_seam(home))
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_eval_grant_reconcile_refuses_to_clear_the_alarm_from_the_wrong_tree(home, monkeypatch, tmp_path):
