@@ -164,9 +164,9 @@ keyless "replay" runs and *the provable layer never depends on the model*).
 
 ---
 
-## 3. Build / test / CI workflow — the 13 CI jobs
+## 3. Build / test / CI workflow — the 14 CI jobs
 
-CI (`.github/workflows/ci.yml`) runs **13 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
+CI (`.github/workflows/ci.yml`) runs **14 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
 kernel), one per trust seam or gate. Run the matching commands locally before you push. The key discipline:
 **framework (offense) and `sigil.governor` (sovereign) tests run in separate processes** — running them in
 one process trips the `assert_no_offense` boundary check (which is the boundary *working*). Two further jobs
@@ -187,6 +187,7 @@ checks** is enumerated in [`.github/required-status-checks.txt`](.github/require
 | 10 | `sigil-lint` | lint/type gate: `ruff` (blocking) + `mypy` (can-complete) over the sovereign tree | `ruff check sigil` |
 | 11 | `formal-verification` | TLA+ (TLC) model-check of the four core invariants + their mutants (F1) | `bash formal/check.sh` |
 | 12 | `warden-kernel` | Rust WARDEN kernel durability (A10): chain/head/anti-rollback/tiers/router/registry/crypto | `cd apps/sigil/kernel && cargo test` |
+| 13 | `sigil-fold-cache-on` | the whole SIGIL suite again with Front C's verified fold cache ON (its production configuration), on the sovereign lock; advisory until the operator makes it required | `VIGIL_FOLD_CACHE_ENABLED=1 PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/` |
 
 The exact, copy-pasteable per-component command list is also in [`README.md`](README.md) §Setup and is the
 authority; `ci.yml` is the machine source. When you add a test, add it to the job for its trust seam — never
