@@ -16,7 +16,8 @@ Workflows:
     service owner-signs {customer account, org, founding membership, trial credit} atomically. The trial
     (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant. The founding
     membership is `org_admin`, or `founder` (org_admin plus self-serve testing on hosts the org proves) while
-    VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on — server-set, never a client value (`_signup_role`).
+    VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED and VIGIL_TRIAL_PREVIEW_ENABLED are both on — server-set, never a client
+    value (`_signup_role`).
   * login — email+password (constant-time via the decoy), rate-limited + locked out on abuse.
   * request_recover / confirm_recover — single-use recovery token → owner-signed password reset.
   * grant_member / revoke_member — an `org_admin` (or the founder) manages THEIR org's team: the service checks
@@ -106,10 +107,17 @@ def _signup_org_id(token: str) -> str:
 
 def _signup_role() -> str:
     """The per-org role a sign-up grants its founding customer, on BOTH sign-up paths (email confirm and Google
-    auto-provision): `founder` while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on, else `org_admin` (the default,
-    unchanged). Server-decided at the committing attempt — never a client value."""
+    auto-provision): `founder` while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED AND VIGIL_TRIAL_PREVIEW_ENABLED are both
+    on, else `org_admin` (the default, unchanged). Server-decided at the committing attempt — never a client value.
+
+    The founder role needs the preview trial: with the preview on, the only credits a sign-up grants are the
+    preview trial, which keeps the trial rules (the trial product only, one registrable domain, the daily cap)
+    until the org buys credits. With the preview off a sign-up grants `org_admin`, whose trial credits cannot fund
+    a scan; the owner can still grant `founder` to an existing member (`owner_set_member_role`)."""
     from .. import config
-    return _FOUNDER_ROLE if config.signup_founder_tester_enabled() else "org_admin"
+    if config.signup_founder_tester_enabled() and config.trial_preview_enabled():
+        return _FOUNDER_ROLE
+    return "org_admin"
 
 
 def _signup_username(token: str) -> str:

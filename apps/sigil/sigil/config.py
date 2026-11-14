@@ -258,10 +258,11 @@ def trial_preview_enabled() -> bool:
 
 
 def signup_founder_tester_enabled() -> bool:
-    """True iff a customer sign-up makes its founding customer a `founder` (`VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED`
-    affirmative). OFF by default: both sign-up paths grant `org_admin` exactly as before (billing and members, no
-    testing). ON: they grant `founder` (org_admin plus run_engagement and view_assessments), so the founder can
-    prove a host it controls and scan it; every launch gate still applies. Also the instant kill switch: while it
+    """True iff the founder role is switched on (`VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` affirmative). OFF by
+    default: both sign-up paths grant `org_admin` exactly as before (billing and members, no testing). ON, together
+    with `trial_preview_enabled()`: they grant `founder` (org_admin plus run_engagement and view_assessments), so
+    the founder can prove a host it controls and scan it; every launch gate still applies. ON with the preview OFF:
+    sign-ups still grant `org_admin` (the founder role needs the rule-bound preview trial). Also the instant kill switch: while it
     is OFF, an existing founder membership is admitted as `org_admin` (no testing, billing kept), with no spine
     write. Read by the provisioner process (the cockpit)."""
     return (os.environ.get("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE

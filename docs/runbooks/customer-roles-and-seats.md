@@ -10,8 +10,8 @@ one org only, and none of them is a global account role.
 |---|---|---|---|
 | `viewer` | an org admin or the founder | no | no |
 | `analyst` | an org admin or the founder | no | no |
-| `org_admin` | sign-up (founder flag off), an org admin, the founder | yes | no |
-| `founder` | sign-up (founder flag on), the service owner | yes | yes, on hosts the org proves |
+| `org_admin` | sign-up (founder flag or trial preview off), an org admin, the founder | yes | no |
+| `founder` | sign-up (founder flag and trial preview on), the service owner | yes | yes, on hosts the org proves |
 | `operator` | the service owner only | read only | yes, on hosts the org proves |
 
 A customer org admin (or the founder) can grant only `viewer`, `analyst` and `org_admin`. `operator`,
@@ -19,8 +19,11 @@ A customer org admin (or the founder) can grant only `viewer`, `analyst` and `or
 
 ## The founder
 
-The founder is the customer who signed the org up. With `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` on, both
-sign-up paths (email and Google) grant the founding customer `founder` instead of `org_admin`.
+The founder is the customer who signed the org up. With `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` and
+`VIGIL_TRIAL_PREVIEW_ENABLED` both on, both sign-up paths (email and Google) grant the founding customer
+`founder` instead of `org_admin`. The founder role needs the trial preview: the only credits a sign-up then
+grants are the preview trial, which keeps the trial rules below until the org buys credits. With the preview
+off, a sign-up grants `org_admin` whatever the founder flag says.
 
 - **Permissions:** everything `org_admin` carries (billing, members, defensive monitoring requests) plus
   `run_engagement` and `view_assessments`.
@@ -52,7 +55,7 @@ Code default: OFF. Production value: `1`, set in `apps/sigil/deploy/cockpit.env.
 
 | State | Sign-up grants | Existing founder memberships |
 |---|---|---|
-| ON | `founder` | admitted as `founder` |
+| ON | `founder` (with the trial preview on), else `org_admin` | admitted as `founder` |
 | OFF | `org_admin` | admitted as `org_admin`: billing and members kept, no testing |
 
 Turning the flag OFF is the kill switch. It writes nothing to the spine and takes effect on the next request;

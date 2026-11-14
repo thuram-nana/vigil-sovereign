@@ -144,6 +144,7 @@ def test_e2e_founder_flag_signup_registers_a_target_without_owner_promotion(tmp_
     # owner promotion), cannot hand testing to a teammate, and the kill switch (flag off) refuses its next request.
     sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
     monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")              # the founder role needs the preview on
     try:
         op = _opener()
         conf = _signup(op, ep, "founder@acme.com")

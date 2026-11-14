@@ -2,10 +2,12 @@
 
 Load-bearing invariants (each a mutation target):
   * flag OFF (code default): both sign-up paths grant `org_admin` exactly as before — no testing;
-  * flag ON: both sign-up paths grant `founder` (server-set, read at the committing attempt); the founder can
-    request a challenge, verify ONLY with the inline authorization affirmation, and reserve a launch on a host
-    the org proved and the owner key authorized. No proof / no authority is still refused. A trial-preview org
-    stays limited to the trial product and one registrable domain;
+  * flag ON (with the trial preview on, the production pair): both sign-up paths grant `founder` (server-set, read
+    at the committing attempt); with the preview off they grant `org_admin`, so a sign-up trial that can fund a
+    scan is always the rule-bound preview trial. The founder can request a challenge, verify ONLY with the inline
+    authorization affirmation, and reserve a launch on a host the org proved and the owner key authorized. No
+    proof / no authority is still refused. A trial-preview org stays limited to the trial product and one
+    registrable domain;
   * changing or revoking a founder is owner-only: customer member management refuses a founder target (the
     founder included, on themself), never grants `founder`/`operator`, and counts the founder as an
     administrator for the last-admin rule; every member verb canonicalises the target name once and uses only
@@ -32,6 +34,7 @@ from sigil.governor.orgs import MEMBERSHIP_SIGNAL
 from sigil.ui.email_channel import PURPOSE_VERIFY
 
 FLAG = "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED"
+PREVIEW = "VIGIL_TRIAL_PREVIEW_ENABLED"
 _clock = itertools.count(1)
 _PW = "customer-pw-123"
 
@@ -41,14 +44,16 @@ def _iso(monkeypatch):
     monkeypatch.setenv("VIGIL_BASE_DIR", tempfile.mkdtemp())      # the shared authority seam
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
-    for var in (FLAG, "VIGIL_CUSTOMER_STEPUP_REQUIRED", "VIGIL_TRIAL_PREVIEW_ENABLED", "VIGIL_TIERED_PRODUCTS",
+    for var in (FLAG, "VIGIL_CUSTOMER_STEPUP_REQUIRED", PREVIEW, "VIGIL_TIERED_PRODUCTS",
                 "VIGIL_TRIAL_PRODUCT_ID", "VIGIL_ONE_LAUNCH_PER_HOST"):
         monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture
 def flag_on(monkeypatch):
+    """The production pair: a sign-up grants `founder` only while the trial preview is on as well."""
     monkeypatch.setenv(FLAG, "1")
+    monkeypatch.setenv(PREVIEW, "1")
 
 
 class _Fetcher:
@@ -104,6 +109,12 @@ def _prov(*, store=None, idp=None, trial=False):
     return p, s
 
 
+def _fund(p, org, credits=100):
+    """Bought credits for `org`: an owner-signed top-up grant, as a verified payment mints (not a trial)."""
+    p.wallet.grant(org, credits, "topup", entry_id=f"topup:{org}:{next(_clock)}", source_ref="test-payment",
+                   issued_at=1000.0 + float(next(_clock)))
+
+
 def _signup(p, email="founder@acme-founder.io", org="Acme"):
     tok = p.email_tokens.issue(email, PURPOSE_VERIFY)
     return p.confirm_signup(tok, password=_PW, org_name=org)
@@ -155,6 +166,7 @@ def test_flag_on_email_signup_founder_proves_a_host_and_reserves_a_launch(flag_o
     p, s = _prov()
     a = _signup(p)
     u, org = a["username"], a["org_id"]
+    _fund(p, org)
     assert p.orgs.membership_role(u, org) == "founder"
     assert [r.get("role") for r in _audits(s, "signup")] == ["founder"]
     # the challenge is allowed; verify WITHOUT the affirmation is refused and mints nothing
@@ -178,6 +190,7 @@ def test_flag_on_founder_launch_still_needs_proof_and_authority(flag_on):
     p, s = _prov()
     a = _signup(p)
     u, org = a["username"], a["org_id"]
+    _fund(p, org)                                                   # credits are never the reason for a refusal
     with pytest.raises(ProvisionDenied):                            # no proof at all
         p.launch_reserve(u, org, "unproven-founder.io")
     reg = AssetOwnershipRegistry(s)                                 # a proof with NO minted authority
@@ -188,6 +201,7 @@ def test_flag_on_founder_launch_still_needs_proof_and_authority(flag_on):
         p.launch_reserve(u, org, "proof-only-founder.io")
     # another org's founder cannot use this org's proof
     b = _signup(p, email="other@beta-founder.io", org="Beta")
+    _fund(p, b["org_id"])
     _prove(p, u, org, "acme-founder.io")
     with pytest.raises(ProvisionDenied):
         p.launch_reserve(b["username"], b["org_id"], "acme-founder.io")
@@ -200,6 +214,29 @@ def test_flag_on_google_signup_grants_founder(flag_on):
     assert p.orgs.membership_role(u, org) == "founder"
     assert p.target_challenge(u, org, "acme-founder.io")["dns_name"] == "_vigil-challenge.acme-founder.io"
     assert [r.get("role") for r in _audits(s, "signup")] == ["founder"]
+
+
+def test_the_founder_flag_without_the_trial_preview_signs_up_an_org_admin(monkeypatch):
+    # The founder role needs the preview trial on: with the founder flag on and the preview off, both sign-up paths
+    # grant `org_admin`, so the sign-up trial cannot fund a scan (no trial product, domain or daily-cap rule would
+    # hold it otherwise).
+    from sigil.ui.provision import ProvisionDenied
+    monkeypatch.setenv(FLAG, "1")
+    p, s = _prov(idp=_StubIdP(), trial=True)
+    a = _signup(p)
+    g = p.oidc_finish(code="c", code_verifier="v", nonce="n", ip="1.2.3.4")
+    for user, org in ((a["username"], a["org_id"]), (g["username"], g["orgs"][0])):
+        assert p.orgs.membership_role(user, org) == "org_admin"
+        assert p.wallet.has_grant_entry(org, f"trial:{org}") and p.wallet.available(org) == 100
+        with pytest.raises(ProvisionDenied):
+            p.target_challenge(user, org, "acme-founder.io")
+        with pytest.raises(ProvisionDenied):
+            p.launch_reserve(user, org, "acme-founder.io")
+    assert [r.get("role") for r in _audits(s, "signup")] == ["org_admin", "org_admin"]
+    # the same sign-up with the preview on as well is a founder held to the trial rules
+    monkeypatch.setenv(PREVIEW, "1")
+    f = _signup(p, email="pair@pair-founder.io", org="Pair")
+    assert p.orgs.membership_role(f["username"], f["org_id"]) == "founder" and p._preview_locked(f["org_id"])
 
 
 def test_a_locked_trial_founder_keeps_the_trial_product_and_one_domain(flag_on, monkeypatch):
@@ -312,7 +349,8 @@ def test_a_padded_target_never_removes_the_last_administrator(monkeypatch, pad):
         p.grant_member(u, org, pad.format(u), "viewer")
     assert p.orgs.membership_role(u, org) == "org_admin"
     monkeypatch.setenv(FLAG, "1")
-    f = _signup(p, email="sole@sole-founder.io", org="Sole")       # flag on: the sole admin is the founder
+    monkeypatch.setenv(PREVIEW, "1")
+    f = _signup(p, email="sole@sole-founder.io", org="Sole")       # flags on: the sole admin is the founder
     with pytest.raises(ProvisionDenied, match="service owner"):
         p.revoke_member(f["username"], f["org_id"], pad.format(f["username"]))
     assert p.orgs.membership_role(f["username"], f["org_id"]) == "founder"
@@ -390,6 +428,7 @@ def test_a_founders_unstarted_reservation_is_always_releasable_for_a_full_refund
     p, s = _prov()
     a = _signup(p)
     u, org = a["username"], a["org_id"]
+    _fund(p, org)
     _prove(p, u, org, "acme-founder.io")
     before = p.wallet.available(org)
     lease = p.launch_reserve(u, org, "acme-founder.io")
@@ -413,6 +452,7 @@ def test_a_billing_admin_releases_a_reservation_but_a_reader_cannot(flag_on):
     u, org, mate = _founder_and_mate(p)
     reader = _signup(p, email="reader@reader-founder.io", org="Reader")["username"]
     p.grant_member(u, org, reader, "viewer")
+    _fund(p, org)
     _prove(p, u, org, "acme-founder.io")
     before = p.wallet.available(org)
     lease = p.launch_reserve(u, org, "acme-founder.io")
@@ -433,6 +473,7 @@ def test_a_billing_admin_never_refunds_a_started_launch(flag_on, monkeypatch):
     p, s = _prov()
     u, org, mate = _founder_and_mate(p)
     p.grant_member(u, org, mate, "org_admin")
+    _fund(p, org)
     _prove(p, u, org, "acme-founder.io")
     lease = p.launch_reserve(u, org, "acme-founder.io")
     held = p.wallet.available(org)
@@ -444,11 +485,14 @@ def test_a_billing_admin_never_refunds_a_started_launch(flag_on, monkeypatch):
     assert p.wallet.available(org) == held
 
 
-@pytest.mark.parametrize("first, second, want", [("1", "0", "org_admin"), ("0", "1", "founder")])
-def test_signup_retry_across_a_flag_flip_commits_one_trial_with_the_committing_role(monkeypatch, first, second,
-                                                                                    want):
+@pytest.mark.parametrize("preview, first, second, want, entry", [
+    ("1", "1", "0", "org_admin", "trial-preview"), ("1", "0", "1", "founder", "trial-preview"),
+    ("", "1", "0", "org_admin", "trial"), ("", "0", "1", "org_admin", "trial")])
+def test_signup_retry_across_a_flag_flip_commits_one_trial_with_the_committing_role(monkeypatch, preview, first,
+                                                                                    second, want, entry):
     from sigil.ui.provision import Provisioner
-    p, s = _prov()
+    monkeypatch.setenv(PREVIEW, preview)
+    p, s = _prov(trial=True)
     tok = p.email_tokens.issue("retry@acme-founder.io", PURPOSE_VERIFY)
     real = Provisioner._audit
     armed = [True]
@@ -467,7 +511,7 @@ def test_signup_retry_across_a_flag_flip_commits_one_trial_with_the_committing_r
     out = p.confirm_signup(tok, password=_PW, org_name="Retry")            # the same token: the retry commits
     assert p.orgs.membership_role(out["username"], out["org_id"]) == want
     assert p.wallet.available(out["org_id"]) == 100                      # exactly one trial
-    assert p.wallet.has_grant_entry(out["org_id"], f"trial:{out['org_id']}")
+    assert p.wallet.has_grant_entry(out["org_id"], f"{entry}:{out['org_id']}")
     assert [r.get("role") for r in _audits(s, "signup")] == [want]       # one committed sign-up, its role
 
 
@@ -646,9 +690,10 @@ def test_a_verified_topup_and_a_trial_grant_write_no_membership_record(flag_on):
     from sigil.governor.metering import PlanCreditLedger
     from sigil.governor.subscription import SubscriptionRegistry
     from sigil.governor.wallet import WalletRegistry
-    p, s = _prov()
+    p, s = _prov(trial=True)
     a = _signup(p)
     org = a["org_id"]
+    assert p.wallet.has_grant_entry(org, f"trial-preview:{org}")
     before = sum(1 for _ in s.iter_records())
     signer = BillingSigner(MockBillingProvider("sek"), wallet=WalletRegistry(s), subscriptions=SubscriptionRegistry(s),
                            plan=PlanCreditLedger(s), catalog=cat.mintable_entitlements(),
@@ -688,5 +733,6 @@ def test_the_env_example_ships_the_production_value_and_leaves_step_up_unset():
     text = open(os.path.join(root, "deploy", "cockpit.env.example"), encoding="utf-8").read()
     lines = [ln.strip() for ln in text.splitlines()]
     assert "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1" in lines
+    assert "VIGIL_TRIAL_PREVIEW_ENABLED=1" in lines                # the founder role needs the preview on
     assert not any(ln.startswith(("VIGIL_CUSTOMER_STEPUP_REQUIRED=", "VIGIL_CUSTOMER_PROD_EXECUTION=",
                                   "VIGIL_SETTLE_SPINE_RECORD=")) for ln in lines)
