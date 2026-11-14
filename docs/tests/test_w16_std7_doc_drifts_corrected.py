@@ -84,6 +84,7 @@ FORBIDDEN: list[tuple[Path, str]] = [
     (CAMPAIGN, "browser path is deferred until a CDP request-allowlist gates that egress"),
     (PATCHER, "framework/playbooks/03-surface-mapping.md"),
     (CI_YAML, "branch-protected with 13 required status"),
+    (CI_YAML, "branch-protected with 14 required status"),
 ]
 
 ANCHORS: list[tuple[Path, str]] = [
@@ -98,7 +99,7 @@ ANCHORS: list[tuple[Path, str]] = [
     (AS_BUILT_LIVE, "Signed per-action operator approval token**: **built**"),
     (CAMPAIGN, "that egress is now GATED at the resolver layer rather than deferred"),
     (PATCHER, "framework/playbooks/03-attack-surface-mapping.md"),
-    (CI_YAML, "branch-protected with 14 required status"),
+    (CI_YAML, "branch-protected with 15 required status"),
 ]
 
 

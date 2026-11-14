@@ -41,6 +41,7 @@ livefire smoke (per-PR subset)
 loopback engagement (end-to-end + offline re-verify)
 SIGIL governor gates (P7 — offense gate + authn)
 SIGIL lint (ruff blocking + mypy can-complete)
+SIGIL suite with the fold cache ON (Front C production configuration)
 strix Claude-runtime (P8)
 the briefing explains every agent and capability
 vigil_core — shared integrity substrate

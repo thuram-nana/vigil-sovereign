@@ -152,7 +152,7 @@ jobs:
       # workflow's critical path (~8m, every other job <4m), so eval runs HERE, in
       # parallel — coverage added at ~zero wall-clock cost instead of dropped.
       #
-      # NOTE FOR THE OPERATOR: `main` is branch-protected with 14 required status
+      # NOTE FOR THE OPERATOR: `main` is branch-protected with 15 required status
       # checks (committed in .github/required-status-checks.txt), and this job —
       # `CRUCIBLE eval + benchmark corpus` — is now one of them, so it BLOCKS a merge.
       # crucible-core (also required) still carries the security-critical half —
@@ -1025,9 +1025,9 @@ jobs:
     # A separate job, not a matrix leg of the governor job: a matrix appends "(…)" to the job name, so the
     # required check "SIGIL governor gates (P7 — offense gate + authn)" would stop reporting under that exact
     # name and every PR would block. It runs in parallel (the governor's whole-suite step takes ~6 min on the
-    # runner; the critical path is P5 at ~38 min), far under the 45-minute job cap. It is NOT a required check
-    # until the operator adds it to .github/required-status-checks.txt; docs/tests/test_required_checks_canonical.py
-    # records why.
+    # runner; the critical path is P5), far under the job cap. It IS a required check: it is listed in
+    # .github/required-status-checks.txt, which tools/governance/require-checks.sh --apply makes live and
+    # docs/tests/test_required_checks_canonical.py keeps every doc count in step with.
     # apps/sigil/tests/test_ci_suite_legs.py fails if no ci.yml step runs the whole suite with the flag ON.
     runs-on: ubuntu-latest
     timeout-minutes: 30

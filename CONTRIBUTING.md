@@ -36,7 +36,7 @@ ends up claiming guarantees it does not have.
 
 **Enforced by the branch ruleset — a pull request cannot merge unless all hold:**
 
-- all **14 required status checks are green** — the exact set is committed in
+- all **15 required status checks are green** — the exact set is committed in
   [`.github/required-status-checks.txt`](./.github/required-status-checks.txt), and any drift is
   caught offline by `docs/tests/test_required_checks_canonical.py` and against the live settings by
   the `branch-protection-verify` workflow;

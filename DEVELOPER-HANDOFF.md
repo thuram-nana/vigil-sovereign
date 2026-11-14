@@ -187,7 +187,7 @@ checks** is enumerated in [`.github/required-status-checks.txt`](.github/require
 | 10 | `sigil-lint` | lint/type gate: `ruff` (blocking) + `mypy` (can-complete) over the sovereign tree | `ruff check sigil` |
 | 11 | `formal-verification` | TLA+ (TLC) model-check of the four core invariants + their mutants (F1) | `bash formal/check.sh` |
 | 12 | `warden-kernel` | Rust WARDEN kernel durability (A10): chain/head/anti-rollback/tiers/router/registry/crypto | `cd apps/sigil/kernel && cargo test` |
-| 13 | `sigil-fold-cache-on` | the whole SIGIL suite again with Front C's verified fold cache ON (its production configuration), on the sovereign lock; advisory until the operator makes it required | `VIGIL_FOLD_CACHE_ENABLED=1 PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/` |
+| 13 | `sigil-fold-cache-on` | the whole SIGIL suite again with Front C's verified fold cache ON (its production configuration), on the sovereign lock, closure required, golden-embedding test offline on a warmed model cache; a REQUIRED check (`.github/required-status-checks.txt`; live protection follows `tools/governance/require-checks.sh --apply`) | `VIGIL_FOLD_CACHE_ENABLED=1 PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/` |
 
 The exact, copy-pasteable per-component command list is also in [`README.md`](README.md) §Setup and is the
 authority; `ci.yml` is the machine source. When you add a test, add it to the job for its trust seam — never
