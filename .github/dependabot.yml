@@ -8,8 +8,11 @@
 # .github/workflows/scheduled-supply-chain-scan.yml is the other half — it surfaces a finding as an
 # issue even when nobody opens a PR at all.
 #
-# ECOSYSTEMS. All five the repository actually contains: pip (Python), cargo (the WARDEN Rust
-# kernel), npm, github-actions (the workflow files themselves), and docker (the service images).
+# ECOSYSTEMS. All four the repository actually contains: pip (Python), cargo (the WARDEN Rust
+# kernel), github-actions (the workflow files themselves), and docker (the service images). npm is
+# not declared: the repository ships no runtime npm project, and an npm entry with no package.json
+# fails every Dependabot run. integration/tests/test_dependency_automation.py fails the build the
+# moment a runtime package.json lands without an npm entry for its directory.
 # The deliberately-vulnerable eval-corpus fixtures under
 # engine/crucible/framework/v2/eval/corpus_apps/_cve/ are NOT listed on purpose — they are meant to
 # stay vulnerable so the engine can prove it detects the CVE, and a Dependabot PR "fixing" one would
@@ -59,26 +62,6 @@ updates:
       - "supply-chain"
     groups:
       cargo-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
-
-  # -------------------------------------------------------------------------- npm
-  # Declared at the root so a production package.json is watched the moment one lands. The repository
-  # currently ships no runtime npm project (the only package.json is the deliberately-vulnerable
-  # st-2014-3744 eval fixture, excluded above), so today this entry is a no-op guard rather than an
-  # active watch — see docs/supply-chain-scheduled-scan.md, which states this plainly.
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "supply-chain"
-    groups:
-      npm-minor-and-patch:
         update-types:
           - "minor"
           - "patch"
