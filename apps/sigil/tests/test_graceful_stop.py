@@ -1,7 +1,7 @@
 """The cockpit, the customer edge and the public site stop GRACEFULLY on SIGTERM (what `systemctl stop|restart`
-sends): a request already accepted finishes and gets its answer, the cockpit's SSE feeds end, new connections
-are refused at once, and the process exits 0 — all within a drain deadline shorter than the units'
-TimeoutStopSec. A second signal ends the drain at once.
+sends): a request already accepted finishes and gets its answer, a connection still waiting in the listen queue is
+served (never reset), the cockpit's SSE feeds end, new connections are refused, and the process exits 0 — all
+within a drain deadline shorter than the units' TimeoutStopSec. A second signal ends the drain at once.
 
 The subprocess tests run the real `python -m sigil serve*` entry points and send real signals.
 
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from sigil.ui import graceful
+from sigil.ui import custui, graceful, pubui
 from sigil.ui.custui import CustomerServer
 from sigil.ui.pubui import PublicServer
 from sigil.ui.server import UIServer
@@ -310,6 +310,164 @@ def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit):
     assert m, f"{unit} sets no TimeoutStopSec"
     assert graceful.DRAIN_DEADLINE_S + 5 <= int(m.group(1)), (unit, m.group(1))
     assert re.search(r"^KillSignal=SIGTERM\s*$", text, re.M)
+
+
+class _Quick(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):  # noqa: N802
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.dumps({"got": self.rfile.read(n).decode()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _read_all(s: socket.socket) -> bytes:
+    data = b""
+    try:
+        while chunk := s.recv(65536):
+            data += chunk
+    except OSError as exc:                               # the pre-fix outcome: the queued connection is reset
+        return data + f"<{type(exc).__name__}>".encode()
+    return data
+
+
+def test_connections_waiting_in_the_listen_queue_are_served_not_reset():
+    # The kernel completes a handshake before the server accepts it, so a client (nginx) may already have sent its
+    # POST into the listen queue when the stop begins; closing the listener then would reset it, and nginx never
+    # re-sends a POST. Here no accept loop runs at all: every request below is in the queue when the stop starts.
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    port = srv.server_address[1]
+    clients = []
+    for i in range(4):
+        c = socket.create_connection(("127.0.0.1", port), timeout=10)
+        body = f'{{"n": {i}}}'.encode()
+        c.sendall(b"POST /api/customer/launch/reserve HTTP/1.0\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        clients.append((c, body))
+    assert graceful.graceful_stop(srv, drain_deadline_s=5, log=lambda _m: None, serving=False) is True
+    for c, body in clients:
+        data = _read_all(c)
+        c.close()
+        assert data.startswith(b"HTTP/1.0 200 "), data[:80]
+        assert json.loads(data.split(b"\r\n\r\n", 1)[1]) == {"got": body.decode()}
+    assert _refused(port)
+    srv.server_close()
+
+
+def test_a_client_that_gave_up_in_the_queue_does_not_strand_the_ones_behind_it():
+    # accept() can report a connection its client aborted while queued (ECONNABORTED); the connections queued
+    # behind it are still served
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    c = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=10)
+    c.sendall(b"POST / HTTP/1.0\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+    real, calls = srv.get_request, []
+
+    def _aborted_first():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionAbortedError("the client gave up while queued")
+        return real()
+
+    srv.get_request = _aborted_first
+    assert graceful.graceful_stop(srv, drain_deadline_s=5, log=lambda _m: None, serving=False) is True
+    data = _read_all(c)
+    c.close()
+    assert data.startswith(b"HTTP/1.0 200 "), data[:80]
+    srv.server_close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the SYN filter is Linux-only")
+def test_a_stopping_listener_takes_no_new_connection_but_keeps_the_ones_queued():
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    port = srv.server_address[1]
+    queued = socket.create_connection(("127.0.0.1", port), timeout=5)       # handshake done before the hold
+    assert graceful._hold_new_connections(srv) is True
+    t0 = time.monotonic()
+    with pytest.raises(socket.timeout):                                     # a new attempt is not taken ...
+        socket.create_connection(("127.0.0.1", port), timeout=0.5)
+    assert time.monotonic() - t0 >= 0.45
+    late: dict = {}
+
+    def _late():
+        t = time.monotonic()
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=5).close()
+            late["r"] = "connected"
+        except OSError as exc:
+            late["r"], late["s"] = type(exc).__name__, time.monotonic() - t
+
+    th = threading.Thread(target=_late)
+    th.start()
+    time.sleep(0.2)
+    assert graceful._serve_waiting_connections(srv) == 1                     # ... the queued one still is
+    graceful._close_listener(srv)
+    th.join(5)
+    assert late.get("r") == "ConnectionRefusedError", late                  # ... and the held one is refused
+    queued.close()
+    srv.server_close()
+
+
+def test_the_stop_holds_new_connections_then_serves_the_queue_then_closes(monkeypatch):
+    # the order is what makes the stop lose nothing: once new attempts are held, nothing can join the queue between
+    # the last accept and the close
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    order: list = []
+    for name in ("_hold_new_connections", "_serve_waiting_connections", "_close_listener"):
+        def _spy(s, _real=getattr(graceful, name), _name=name):
+            order.append(_name)
+            return _real(s)
+        monkeypatch.setattr(graceful, name, _spy)
+    assert graceful.graceful_stop(srv, drain_deadline_s=1, log=lambda _m: None, serving=False) is True
+    assert order == ["_hold_new_connections", "_serve_waiting_connections", "_close_listener"]
+    srv.server_close()
+
+
+# ── a new edge listens only once it can serve ────────────────────────────────────────────────────────────────
+def _build(edge: str, port: int, tmp_path):
+    if edge == "customer":
+        return CustomerServer(("127.0.0.1", port), custui.CustomerHandler, hop_key="k",
+                              provision_base="http://127.0.0.1:1", sessions_dir=str(tmp_path / "s"))
+    return PublicServer(("127.0.0.1", port), pubui.PublicHandler)
+
+
+@pytest.mark.parametrize("edge,module,name", [("customer", "custui", "build_app_snapshot"),
+                                              ("public", "pubui", "SiteSnapshot")])
+def test_a_new_edge_refuses_connections_until_it_can_serve(tmp_path, monkeypatch, edge, module, name):
+    # During an edge swap nginx sends requests to the new edge's port as soon as it accepts connections; a request
+    # handed to an edge whose startup then fails is reset (a POST is never re-sent). So the port refuses until the
+    # app is read, and a startup that fails leaves the port refusing and free.
+    mod = {"custui": custui, "pubui": pubui}[module]
+    real = getattr(mod, name)
+    port = _free_port()
+    seen: dict = {}
+
+    def _spy(*a, **k):
+        seen["refused"] = _refused(port)
+        return real(*a, **k)
+
+    monkeypatch.setattr(mod, name, _spy)
+    srv = _build(edge, port, tmp_path / "ok")
+    try:
+        assert seen == {"refused": True}, "the edge accepted connections before it could serve"
+        assert not _refused(port)                                    # and it listens once it can
+    finally:
+        srv.server_close()
+
+    def _fails(*_a, **_k):
+        raise ValueError("customer_app/sw.js must carry exactly one BUILD and one SHELL placeholder line")
+
+    monkeypatch.setattr(mod, name, _fails)
+    with pytest.raises(ValueError, match="placeholder"):
+        _build(edge, port, tmp_path / "bad")
+    assert _refused(port)
+    s = socket.socket()
+    s.bind(("127.0.0.1", port))                                      # the failed edge released its port
+    s.close()
 
 
 class _Crashing(_Srv):

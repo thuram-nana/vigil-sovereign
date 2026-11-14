@@ -2,10 +2,11 @@
 
 The script runs here against stand-in `systemctl`, `curl` and `sleep` (a state directory records which units run
 and which loopback ports answer /healthz), so the ORDER is checked exactly:
-  start the new instance on the free port -> its /healthz answers -> settle -> enable new -> stop old -> disable old;
-a new edge that never answers (or dies) is stopped and the old one is never touched; nothing running, a busy
-port or a wrong argument changes nothing. The template units are pinned to the plain units' lifecycle, env file
-and hardening, and the release runbook's stop list covers their instances.
+  start the new instance on the free port -> its /healthz answers -> settle -> it still answers -> enable new ->
+  stop old -> disable old;
+a new edge that never answers, dies, or stops answering during the settle is stopped and the old one is never
+touched; nothing running, a busy port or a wrong argument changes nothing. The template units are pinned to the
+plain units' lifecycle, env file and hardening, and the release runbook's stop list covers their instances.
 """
 from __future__ import annotations
 
@@ -46,10 +47,16 @@ echo "curl $port" >> "$FAKE_STATE/log"
 """
 _SLEEP = """#!/usr/bin/env bash
 echo "sleep $1" >> "$FAKE_STATE/log"
+# the settle (any wait but the 1 s health polls): the new edge may fail now
+if [ "$1" != 1 ]; then
+  for u in $(cat "$FAKE_STATE/settle_exits"); do rm -f "$FAKE_STATE/active/$u"; done
+  for p in $(cat "$FAKE_STATE/settle_mute"); do rm -f "$FAKE_STATE/listening/$p"; done
+fi
 """
 
 
-def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), env=None):
+def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), settle_exits=(), settle_mute=(),
+          env=None):
     state, bin_ = tmp_path / "state", tmp_path / "bin"
     for d in (state / "active", state / "listening", bin_):
         d.mkdir(parents=True, exist_ok=True)
@@ -59,6 +66,8 @@ def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), env=No
         (state / "listening" / str(p)).touch()
     (state / "broken").write_text("".join(f"{u}\n" for u in broken))
     (state / "dies").write_text("".join(f"{u}\n" for u in dies))
+    (state / "settle_exits").write_text("".join(f"{u}\n" for u in settle_exits))
+    (state / "settle_mute").write_text("".join(f"{p}\n" for p in settle_mute))
     for name, body in (("systemctl", _SYSTEMCTL), ("curl", _CURL), ("sleep", _SLEEP)):
         (bin_ / name).write_text(body)
         (bin_ / name).chmod(0o755)
@@ -110,6 +119,17 @@ def test_a_new_edge_whose_unit_dies_is_given_up_at_once(tmp_path):
     assert running == ["sigil-public@8745.service"]
 
 
+@pytest.mark.parametrize("how", ["exits", "stops answering"])
+def test_a_new_edge_that_fails_during_the_settle_is_stopped_and_the_old_one_keeps_serving(tmp_path, how):
+    # the old edge is only stopped once the new one has stayed up for the whole settle
+    fail = ({"settle_exits": ["sigil-customer@8734.service"], "settle_mute": [8734]} if how == "exits"
+            else {"settle_mute": [8734]})
+    r, acts, running = _swap(tmp_path, "customer", active=["sigil-customer@8744.service"], listening=[8744], **fail)
+    assert r.returncode == 1 and "during the 3s settle" in r.stderr and "keeps serving" in r.stderr
+    assert acts == ["start sigil-customer@8734.service", "sleep 3", "stop sigil-customer@8734.service"]
+    assert running == ["sigil-customer@8744.service"]
+
+
 def test_nothing_running_a_busy_port_or_a_wrong_argument_changes_nothing(tmp_path):
     r, acts, _ = _swap(tmp_path / "a", "customer")
     assert r.returncode == 1 and acts == [] and "no customer edge is running" in r.stderr
@@ -153,7 +173,7 @@ def test_the_swap_names_the_vhost_ports():
     rp = REPO / "apps" / "sigil" / "deploy" / "reverse-proxy"
     for vhost, a, b in (("vigil-customer.nginx.conf", 8734, 8744), ("vigil-public.nginx.conf", 8735, 8745)):
         conf = (rp / vhost).read_text(encoding="utf-8")
-        assert re.search(rf"server 127\.0\.0\.1:{a} max_fails=1 fail_timeout=2s;", conf)
-        assert f"server 127.0.0.1:{b} backup;" in conf
+        assert f"server 127.0.0.1:{a} max_fails=0;" in conf
+        assert f"server 127.0.0.1:{b} backup max_fails=0;" in conf
         assert f":-{a}}}" in script and f":-{b}}}" in script
-    assert 'settle_s="${VIGIL_EDGE_SWAP_SETTLE_S:-3}"' in script     # longer than fail_timeout=2s
+    assert 'settle_s="${VIGIL_EDGE_SWAP_SETTLE_S:-3}"' in script

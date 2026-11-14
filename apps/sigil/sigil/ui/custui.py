@@ -225,7 +225,20 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         ip = ipaddress.ip_address(host)
         if ip.version == 6:
             self.address_family = socket.AF_INET6
-        super().__init__(addr, handler)
+        # Bind now, LISTEN LAST (server_activate below). Until this edge can serve, a connection to its port is
+        # refused — nginx then sends it to the other port — so a startup step that fails (the app snapshot, a ledger
+        # directory) never drops a request that had already been handed to a half-started edge.
+        super().__init__(addr, handler, bind_and_activate=False)
+        try:
+            self.server_bind()
+            self._setup(host, ip, hop_key=hop_key, provision_base=provision_base, sessions_dir=sessions_dir,
+                        extra_hosts=extra_hosts, extra_origins=extra_origins)
+            self.server_activate()
+        except BaseException:
+            self.server_close()
+            raise
+
+    def _setup(self, host, ip, *, hop_key, provision_base, sessions_dir, extra_hosts, extra_origins) -> None:
         self.hop_key = str(hop_key or "")
         self.provision_base = str(provision_base).rstrip("/")
         self.sessions = SessionLedger(sessions_dir)
@@ -652,6 +665,14 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        # As do_GET: an unexpected fault answers one clean JSON 500 (no internals). A connection closed with no
+        # answer is the worst outcome here — nginx never re-sends a POST, so the customer sees "unavailable".
+        try:
+            return self._route_post()
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._deny(500, "request failed")
+
+    def _route_post(self):
         path = urlparse(self.path).path
         if not path.startswith("/api/customer/"):
             return self._deny(404, "not found")
@@ -662,6 +683,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             body = self._read_body()
         except (ValueError, OSError) as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception:  # noqa: BLE001 — e.g. RecursionError: JSON nested deeper than the parser follows
+            return self._deny(400, "bad request: the body could not be read")
         try:
             return self._dispatch(action, body)
         except Exception as e:  # noqa: BLE001 — never 500-leak internals

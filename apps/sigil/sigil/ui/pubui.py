@@ -57,6 +57,15 @@ _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site i
 #   * /version.json, the probes, every 404: no-store.
 _PAGE_CACHE = "public, max-age=0, s-maxage=60"
 
+# A number in a query string: ASCII digits only and at most 9 of them. str.isdigit() also accepts '²' and other
+# digits int() refuses, and int() refuses a string of more than 4300 digits; either used to end the request
+# with no answer at all.
+_NUMBER = re.compile(r"[0-9]{1,9}")
+
+
+def _number(raw: str, default: "int | None") -> "int | None":
+    return int(raw) if _NUMBER.fullmatch(raw) else default
+
 
 class PublicServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
@@ -71,13 +80,21 @@ class PublicServer(GracefulMixin, ThreadingHTTPServer):
         ip = ipaddress.ip_address(host)
         if ip.version == 6:
             self.address_family = socket.AF_INET6
-        super().__init__(addr, handler)
-        self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
-        # the whole site, read ONCE: what this process serves until it stops (one consistent build)
-        self.site = SiteSnapshot(self.root, _CTYPES, max_file=_MAX_BYTES)
-        # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
-        # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
-        self.catalog_path = Path(catalog_path) if catalog_path else None
+        # Bind now, LISTEN LAST (server_activate below): until the site is read, a connection to this port is
+        # refused — nginx then sends it to the other port — so a startup that fails never drops a request.
+        super().__init__(addr, handler, bind_and_activate=False)
+        try:
+            self.server_bind()
+            self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
+            # the whole site, read ONCE: what this process serves until it stops (one consistent build)
+            self.site = SiteSnapshot(self.root, _CTYPES, max_file=_MAX_BYTES)
+            # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
+            # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
+            self.catalog_path = Path(catalog_path) if catalog_path else None
+            self.server_activate()
+        except BaseException:
+            self.server_close()
+            raise
 
 
 class PublicHandler(BaseHTTPRequestHandler):
@@ -154,7 +171,34 @@ class PublicHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+    def _fault(self, head: bool) -> None:
+        """One clean 500 (no internals, no-store) for a fault no route expected — never a connection closed with no
+        answer, which nginx would count against this edge."""
+        api = urlparse(self.path).path.startswith("/api/")
+        body = b'{"error": "request failed"}' if api else b"VIGIL could not answer this request.\n"
+        try:
+            self._send_headers(500, "application/json; charset=utf-8" if api else "text/plain; charset=utf-8",
+                               len(body), cache="no-store")
+            if not head:
+                self.wfile.write(body)
+        except OSError:
+            pass
+
     def do_GET(self):
+        try:
+            return self._route_get()
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._fault(head=False)
+
+    def do_HEAD(self):
+        try:
+            if urlparse(self.path).path == "/version.json":
+                return self._version(head=True)
+            return self._serve(head=True)
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._fault(head=True)
+
+    def _route_get(self):
         path = urlparse(self.path).path
         if path == "/healthz":
             return self._probe_json({"ok": True})
@@ -169,12 +213,7 @@ class PublicHandler(BaseHTTPRequestHandler):
             return self._serve(head=False, override="cve/_detail.html")
         if re.fullmatch(r"/cve/year/\d{4}/?", path):
             return self._serve(head=False, override="cve/_year.html")
-        self._serve(head=False)
-
-    def do_HEAD(self):
-        if urlparse(self.path).path == "/version.json":
-            return self._version(head=True)
-        self._serve(head=True)
+        return self._serve(head=False)
 
     # -- read-only public CVE API (offense-free; reads the local catalog; no egress at request time) ---
     def _json(self, obj, code: int = 200):
@@ -215,10 +254,10 @@ class PublicHandler(BaseHTTPRequestHandler):
             one = lambda k: (q.get(k, [""])[0] or "").strip()  # noqa: E731
             kev = one("kev")
             res = store.query(
-                page=int(one("page") or 1) if one("page").isdigit() else 1,
-                per_page=int(one("per_page") or 50) if one("per_page").isdigit() else 50,
+                page=_number(one("page"), 1) or 1,
+                per_page=_number(one("per_page"), 50) or 50,
                 severity=one("severity") or None, q=one("q") or None,
-                year=int(one("year")) if one("year").isdigit() else None,
+                year=_number(one("year"), None),
                 kev=(True if kev in ("1", "true", "yes") else (False if kev in ("0", "false", "no") else None)),
                 order=one("order") or "published_desc")
             res["populated"] = True

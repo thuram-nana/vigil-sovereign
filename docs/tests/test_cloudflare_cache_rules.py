@@ -97,7 +97,7 @@ def test_the_optional_purge_is_zone_scoped_purge_only_and_kept_on_the_host():
 
 def test_the_edge_swap_runbook_names_what_it_relies_on():
     for needle in ("tools/deploy/edge-swap.sh customer", "tools/deploy/edge_only.py", "sigil-customer@8734",
-                   "sigil-public@8745", "VIGIL_EDGE_SWAP_SETTLE_S", "fail_timeout=2s", "/healthz",
+                   "sigil-public@8745", "VIGIL_EDGE_SWAP_SETTLE_S", "max_fails=0", "/healthz",
                    "RELEASE-UPGRADE-ROLLBACK.md` §2.1", "`AWS-DEPLOY.md` §3.5", "`AWS-DEPLOY.md` §3.6"):
         assert needle in SWAP, needle
     for rel in ("tools/deploy/edge-swap.sh", "tools/deploy/edge_only.py",

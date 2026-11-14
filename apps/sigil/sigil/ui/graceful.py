@@ -3,11 +3,16 @@
 
 On SIGTERM (what `systemctl stop|restart` sends) or SIGINT the server:
   1. sets ``server.stopping`` — every long-lived stream loop (the cockpit's SSE feeds) checks it and ends;
-  2. stops accepting and closes its listening socket, so a new connection is refused at once (the reverse proxy
-     in front answers it) instead of queueing behind a server that is going away;
-  3. waits for every request already accepted to finish, up to :data:`DRAIN_DEADLINE_S` — shorter than the
-     units' ``TimeoutStopSec=20``, so a drain always ends before systemd would SIGKILL;
-  4. closes the server (the cockpit writes its pending failed-login counts there) and returns.
+  2. stops its accept loop, then serves every connection already waiting in the listen queue. The kernel completes
+     a TCP handshake before the server accepts it, so the client (nginx) may already have sent its request there;
+     closing the listener with those connections queued would reset them, and nginx never re-sends a POST it has
+     sent. On Linux the listener first drops new connection attempts (a socket filter on SYN; handshakes already
+     under way still complete), so nothing can join the queue between the last accept and the close;
+  3. closes its listening socket, so a new connection is refused (on Linux, the client's second SYN about a second
+     later) — the reverse proxy sends it to the other edge port, or answers it;
+  4. waits for every request accepted to finish, up to :data:`DRAIN_DEADLINE_S` — shorter than the units'
+     ``TimeoutStopSec=20``, so a drain always ends before systemd would SIGKILL;
+  5. closes the server (the cockpit writes its pending failed-login counts there) and returns.
 A second signal during the drain ends the wait at once.
 
 Request threads stay daemon threads, so a request still running at the deadline cannot hold the process past it.
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import signal
 import socket
+import struct
 import sys
 import threading
 import time
@@ -25,6 +31,21 @@ from typing import Any, Callable, Optional
 #: How long a stopping server waits for accepted requests to finish. The sigil-cockpit, sigil-customer and
 #: sigil-public units allow TimeoutStopSec=20 (a test pins DRAIN_DEADLINE_S below every one of them).
 DRAIN_DEADLINE_S = 10.0
+
+#: Once new connection attempts are dropped, how long a stop waits for the handshakes already under way to land in
+#: the listen queue before it serves the queue and closes (a loopback handshake takes microseconds).
+HANDSHAKE_GRACE_S = 0.2
+
+_SO_ATTACH_FILTER = 26                     # Linux, <asm-generic/socket.h>
+# A classic-BPF socket filter that drops a TCP segment with SYN set and ACK clear — a new connection attempt — and
+# passes every other one. A TCP socket filter sees the segment from its TCP header; byte 13 holds the flags.
+_DROP_NEW_CONNECTIONS = (
+    (0x30, 0, 0, 13),                      # ldb [13]          A = TCP flags
+    (0x54, 0, 0, 0x12),                    # and #0x12         keep SYN|ACK
+    (0x15, 0, 1, 0x02),                    # jeq #0x02         SYN without ACK ?
+    (0x06, 0, 0, 0),                       # ret #0            yes: drop it
+    (0x06, 0, 0, 0xFFFFFFFF),              # ret #-1           no: pass the whole segment
+)
 
 
 class GracefulMixin:
@@ -79,6 +100,63 @@ class GracefulMixin:
             return True
 
 
+def _hold_new_connections(srv: Any) -> bool:
+    """Linux: make the listening socket drop new connection attempts while the handshakes already under way still
+    complete. The client's kernel sends its SYN again about a second later, by when the listener is closed and the
+    attempt is refused before any byte of a request was sent — so nginx gives even a POST to the other port. The
+    filter is cloned into a connection accepted after this, where it never matches (an established connection
+    carries no SYN without ACK). Returns False where this is unavailable: the stop then closes right after
+    serving the queue, and a connection whose handshake completes in between is reset."""
+    sock = getattr(srv, "socket", None)
+    if sock is None or not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes  # stdlib; only needed to hand the kernel the filter program's address
+        raw = b"".join(struct.pack("HBBI", *ins) for ins in _DROP_NEW_CONNECTIONS)
+        prog = ctypes.create_string_buffer(raw, len(raw))
+        fprog = struct.pack("HP", len(_DROP_NEW_CONNECTIONS), ctypes.addressof(prog))
+        sock.setsockopt(socket.SOL_SOCKET, _SO_ATTACH_FILTER, fprog)
+        return True
+    except (OSError, ValueError, ImportError, AttributeError):
+        return False
+
+
+def _serve_waiting_connections(srv: Any) -> int:
+    """Accept every connection waiting in the listen queue and hand each to the server as its accept loop would
+    (counted in flight, served on its own thread). Returns how many were taken."""
+    sock = getattr(srv, "socket", None)
+    if sock is None:
+        return 0
+    try:
+        sock.setblocking(False)
+    except OSError:
+        return 0
+    taken = 0
+    while True:
+        try:
+            request, client_address = srv.get_request()
+        except BlockingIOError:
+            break                           # the queue is empty
+        except ConnectionAbortedError:
+            continue                        # that client gave up while queued; the next one may still be there
+        except OSError:
+            break
+        taken += 1
+        try:
+            request.setblocking(True)       # a BSD accept() hands out a non-blocking socket from a non-blocking one
+        except OSError:
+            pass
+        if not srv.verify_request(request, client_address):
+            srv.shutdown_request(request)
+            continue
+        try:
+            srv.process_request(request, client_address)
+        except Exception:  # noqa: BLE001 — as socketserver's own loop: report, close that connection, go on
+            srv.handle_error(request, client_address)
+            srv.shutdown_request(request)
+    return taken
+
+
 def _close_listener(srv: Any) -> None:
     """Close the listening socket so new connections are refused at once (the server's own `server_close` still
     runs after the drain; closing twice is harmless)."""
@@ -110,7 +188,13 @@ def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
 
     srv.stopping.set()
     if serving:
-        srv.shutdown()                  # serve_forever returns; nothing new is accepted
+        srv.shutdown()                  # serve_forever returns; the listen queue may still hold connections
+    if _hold_new_connections(srv):      # Linux: nothing new joins the queue from here on
+        if abort is not None:
+            abort.wait(HANDSHAKE_GRACE_S)
+        else:
+            time.sleep(HANDSHAKE_GRACE_S)
+    _serve_waiting_connections(srv)     # every connection the kernel accepted is served, never reset
     _close_listener(srv)
     n = srv.inflight()
     if n:

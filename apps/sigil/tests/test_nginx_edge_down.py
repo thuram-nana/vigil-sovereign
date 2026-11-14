@@ -2,10 +2,12 @@
 small no-store page instead of a bare 502 — and ONLY then: a response the edge sends (its own 503
 `{"error":"updating"}`, a 502, anything) passes through untouched, and nginx sends each request to the edge once.
 
-The edge runs on one of TWO loopback ports (the edge swap, tools/deploy/edge-swap.sh): nginx sends every request
-to the primary while it accepts connections and to the backup port when it does not; a request moves to the
-other port only when it could not be delivered (or, for a GET, when the connection broke before an answer) — a
-POST that reached an edge is never sent again — and a swap done the way the script does it loses no request.
+The edge runs on one of TWO loopback ports (the edge swap, tools/deploy/edge-swap.sh): nginx tries the primary for
+every request and the backup port when the primary does not take the connection; a request moves to the other
+port only when it could not be delivered (or, for a GET, when the connection broke before an answer) — a POST that
+reached an edge is never sent again. Neither port is ever marked unavailable, so a request an edge drops costs that
+request only. A swap done the way the script does it, with the edges' own graceful stop, loses no request: no
+GET, and no POST (each POST reaches exactly one edge, exactly once).
 
 The static checks always run; the behavioural ones run the shipped `upstream` and `location` blocks, verbatim
 except for the two upstream ports, under a real nginx on loopback.
@@ -15,6 +17,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -24,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from sigil.ui.graceful import GracefulMixin, graceful_stop
 
 _RP = Path(__file__).resolve().parents[1] / "deploy" / "reverse-proxy"
 # edge -> (vhost, primary port, backup port, upstream name), as shipped
@@ -62,22 +67,43 @@ def test_the_vhost_answers_edge_down_errors_and_nothing_else(edge):
     assert f"proxy_pass http://{up};" in loc
     assert "proxy_next_upstream error timeout;" in loc                      # never http_5xx, never non_idempotent
     assert not any("non_idempotent" in d or "http_50" in d for d in _directives(text))
-    assert _directives(_block(text, f"upstream {up} {{"))[1:3] == [
-        f"server 127.0.0.1:{a} max_fails=1 fail_timeout=2s;", f"server 127.0.0.1:{b} backup;"]
+    # max_fails=0 on both: nginx never marks a port unavailable (one dropped request must not take the edge out)
+    assert _directives(_block(text, f"upstream {up} {{"))[1:] == [
+        f"server 127.0.0.1:{a} max_fails=0;", f"server 127.0.0.1:{b} backup max_fails=0;", "}"]
+    assert not any("fail_timeout" in d for d in _directives(text))
     assert "add_header Retry-After 5 always;" in named
     assert 'add_header Cache-Control "no-store" always;' in named
     assert 'add_header Strict-Transport-Security "max-age=31536000" always;' in named
     assert any(d.startswith("return 503 '") for d in named)
 
 
+def test_the_customer_vhost_outwaits_the_edges_longest_cockpit_hop():
+    # nginx's default 60 s read timeout was not longer than the edge's 60 s budget for a sign-up / recovery email:
+    # nginx gave up first and answered "unavailable" for an action that could still complete
+    from sigil.ui import custui
+    loc = _directives(_block(_CONFS["customer"][0].read_text(encoding="utf-8"), "location / {"))
+    found = [d for d in loc if d.startswith("proxy_read_timeout ")]
+    assert len(found) == 1, found
+    m = re.fullmatch(r"proxy_read_timeout (\d+)s;", found[0])
+    assert m, found[0]
+    longest = max([custui._HOP_TIMEOUT_S, *custui._SLOW_HOP_TIMEOUTS_S.values()])
+    assert int(m.group(1)) >= longest + 15, (found[0], longest)
+
+
 # ── behaviour under a real nginx ─────────────────────────────────────────────────────────────────────────────
+class _EdgeServer(GracefulMixin, ThreadingHTTPServer):
+    daemon_threads = True
+
+
 class _Upstream:
     """A stand-in edge. mode: 'ok' answers 200 {"edge": name}; 'updating' answers 503 {"error":"updating"} +
-    Retry-After; 'bad' answers its own 502; 'break' reads the request then closes without answering. Counts the
-    requests it received. close() stops it the way a graceful stop does: the listener is closed (refused)."""
+    Retry-After; 'bad' answers its own 502; 'break' (or a request for `break_path`) reads the request then closes
+    without answering. Counts the requests it received and records the "id" of every POST body. close() is the
+    edges' own graceful stop (ui/graceful.py, what SIGTERM runs in custui and pubui)."""
 
-    def __init__(self, mode: str, name: str = "edge", port: int = 0):
+    def __init__(self, mode: str, name: str = "edge", port: int = 0, *, break_path: "str | None" = None):
         self.hits = 0
+        self.post_ids: list = []
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -85,9 +111,14 @@ class _Upstream:
                 pass
 
             def _any(self):
-                self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+                raw_body = self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
                 outer.hits += 1
-                if mode == "break":
+                if self.command == "POST":
+                    try:
+                        outer.post_ids.append(json.loads(raw_body or b"{}").get("id"))
+                    except ValueError:
+                        pass
+                if mode == "break" or self.path == break_path:
                     self.close_connection = True
                     self.connection.close()
                     return
@@ -105,12 +136,12 @@ class _Upstream:
 
             do_GET = do_POST = _any  # noqa: N815
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+        self.srv = _EdgeServer(("127.0.0.1", port), H)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def close(self):
-        self.srv.shutdown()
+        graceful_stop(self.srv, drain_deadline_s=5, log=lambda _m: None)
         self.srv.server_close()
 
 
@@ -134,7 +165,7 @@ def nginx(tmp_path):
         backup_port = backup_port or _free_port()                # by default nothing listens on the backup port
         ups = (_block(text, f"upstream {up} {{")
                .replace(f"server 127.0.0.1:{primary} ", f"server 127.0.0.1:{upstream_port} ")
-               .replace(f"server 127.0.0.1:{backup} backup;", f"server 127.0.0.1:{backup_port} backup;"))
+               .replace(f"server 127.0.0.1:{backup} backup ", f"server 127.0.0.1:{backup_port} backup "))
         assert f"127.0.0.1:{upstream_port} " in ups and f"127.0.0.1:{backup_port} backup" in ups
         loc = _block(text, "location / {")
         named = _block(text, "location @vigil_unavailable {")
@@ -219,6 +250,29 @@ def test_the_edges_own_error_answers_pass_through_untouched(nginx, edge, mode, c
         up.close()
 
 
+# ── one failed request never takes the edge out ─────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("edge", sorted(_CONFS))
+@pytest.mark.parametrize("on", ["primary", "backup"])
+def test_one_broken_connection_never_takes_the_only_edge_out(nginx, edge, on):
+    # Normally ONE edge runs, on either port (after the first swap it is on the backup port). A request it drops
+    # (a handler fault, a slow answer) must cost that request only: nginx never marks a server unavailable, so the
+    # next requests reach the same edge at once instead of nginx's "no live upstreams" for seconds.
+    up = _Upstream("ok", "A", break_path="/api/customer/broken")
+    try:
+        port = nginx(edge, up.port) if on == "primary" else nginx(edge, _free_port(), up.port)
+        status, _h, text = _req(port, "POST", "/api/customer/broken", {"x": 1})
+        assert status == 503 and "VIGIL is briefly unavailable" in text
+        for method, body in (("GET", None), ("POST", {"x": 2}), ("GET", None), ("GET", None)):
+            status, _h, text = _req(port, method, "/api/customer/whoami", body)
+            assert status == 200 and json.loads(text) == {"edge": "A"}, (status, text[:80])
+        status, _h, text = _req(port, "GET", "/api/customer/broken")      # a broken GET: the other port refuses
+        assert status == 503
+        status, _h, text = _req(port, "GET", "/api/customer/whoami")
+        assert status == 200 and json.loads(text) == {"edge": "A"}
+    finally:
+        up.close()
+
+
 # ── the two ports: the edge swap ─────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("edge", sorted(_CONFS))
 def test_the_primary_takes_every_request_while_it_is_up(nginx, edge):
@@ -273,41 +327,62 @@ def test_a_get_whose_connection_broke_is_answered_by_the_other_port(nginx, edge)
         b.close()
 
 
-def _hammer(port, stop, results):
+def _client(port, method, tag, stop, results):
+    i = 0
     while not stop.is_set():
+        i += 1
+        rid = f"{tag}-{i}"
         try:
-            status, _h, text = _req(port, "GET", "/api/customer/whoami")
-            results.append((status, text))
+            if method == "POST":
+                status, _h, text = _req(port, "POST", "/api/customer/launch/reserve", {"id": rid})
+            else:
+                status, _h, text = _req(port, "GET", "/api/customer/whoami")
+            results.append((method, rid, status, text))
         except OSError as e:                                     # nginx itself never refuses here
-            results.append((0, repr(e)))
-        time.sleep(0.02)
+            results.append((method, rid, 0, repr(e)))
+        if method == "GET":
+            time.sleep(0.01)
 
 
 @pytest.mark.parametrize("edge", sorted(_CONFS))
 def test_a_swap_done_like_the_script_loses_no_request(nginx, edge):
-    # Both directions of tools/deploy/edge-swap.sh: start the new edge on the free port, wait until it answers,
-    # wait VIGIL_EDGE_SWAP_SETTLE_S (3 s, longer than fail_timeout=2s), then stop the old edge (listener closed).
+    # tools/deploy/edge-swap.sh in both directions, three times over: start the new edge on the free port, let it
+    # answer, then stop the old one with the edges' graceful stop — under four clients sending POSTs back to back
+    # and one sending GETs. Every request is answered by an edge (never nginx's unavailable page), and every POST
+    # reaches exactly one edge exactly once (nginx never re-sends one, so none may be lost on the way).
     pa, pb = _free_port(), _free_port()
-    b = _Upstream("ok", "B", pb)                                 # the edge currently runs on the BACKUP port
+    edges = {"B": _Upstream("ok", "B", pb)}                     # the edge currently runs on the BACKUP port
     port = nginx(edge, pa, pb)
-    stop, results = threading.Event(), []
-    t = threading.Thread(target=_hammer, args=(port, stop, results), daemon=True)
-    t.start()
+    stop, results, received = threading.Event(), [], []
+    clients = [threading.Thread(target=_client, args=(port, m, f"{m}{n}", stop, results), daemon=True)
+               for n, m in enumerate(("POST", "POST", "POST", "POST", "GET"))]
+    for t in clients:
+        t.start()
     try:
-        time.sleep(1.0)                                          # nginx has learnt the primary is down
-        a = _Upstream("ok", "A", pa)                             # swap back to the primary port ...
-        time.sleep(3.0)
-        b.close()                                                # ... and stop the old edge
-        time.sleep(1.0)
-        b = _Upstream("ok", "B", pb)                             # and forward again: new edge on the backup port
-        time.sleep(3.0)
-        a.close()
-        time.sleep(1.0)
+        time.sleep(0.3)
+        for _ in range(3):
+            edges["A"] = _Upstream("ok", "A", pa)                # new edge on the primary port ...
+            time.sleep(0.4)
+            old = edges.pop("B")
+            old.close()                                          # ... and the old one (backup port) stops
+            received += old.post_ids
+            time.sleep(0.2)
+            edges["B"] = _Upstream("ok", "B", pb)                # new edge on the backup port ...
+            time.sleep(0.4)
+            old = edges.pop("A")
+            old.close()                                          # ... and the old one (primary port) stops
+            received += old.post_ids
+            time.sleep(0.2)
     finally:
         stop.set()
-        t.join(5)
-        b.close()
-    statuses = [s for s, _t in results]
-    assert len(statuses) > 100 and set(statuses) == {200}, [r for r in results if r[0] != 200][:3]
-    served = {json.loads(t)["edge"] for _s, t in results}
-    assert served == {"A", "B"}
+        for t in clients:
+            t.join(15)
+        for e in edges.values():
+            e.close()
+            received += e.post_ids
+    bad = [r for r in results if r[2] != 200]
+    assert not bad, (len(bad), bad[:3])
+    posts = [rid for m, rid, _s, _t in results if m == "POST"]
+    assert len(posts) > 100 and len(results) - len(posts) > 20
+    assert sorted(received) == sorted(posts), "a POST was lost on the way or reached an edge twice"
+    assert {json.loads(t)["edge"] for _m, _r, _s, t in results} == {"A", "B"}

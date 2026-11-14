@@ -11,16 +11,24 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   (`apps/sigil/deploy/systemd/sigil-{customer,public}@.service`; same env file, drain and hardening as the
   plain units).
 - The shipped nginx vhosts (`apps/sigil/deploy/reverse-proxy/vigil-{customer,public}.nginx.conf`) name both
-  ports in one `upstream`: every request goes to the first port while it accepts connections and to the
-  second (`backup`) when it does not. A request moves to the other port only when it could not be delivered,
-  or — for a GET — when the connection broke before an answer. A POST that reached an edge is never sent again.
+  ports in one `upstream`: nginx tries the first port for every request and the second (`backup`) when the first
+  does not take the connection. A request moves to the other port only when it could not be delivered, or — for
+  a GET — when the connection broke before an answer. A POST that reached an edge is never sent again. Both
+  servers carry `max_fails=0`: nginx never marks a port unavailable, so a request an edge drops costs that one
+  request, never the next seconds of traffic.
 - An edge reads its whole tree once at startup and serves those bytes until it stops (`ui/static_site.py`), so a
   checkout under a running edge changes nothing it serves; the new process serves the new files.
+- A new edge accepts connections only once it has read its files; until then its port refuses them and nginx
+  keeps using the old edge, so a new edge that fails at startup drops nothing.
+- A stopping edge (SIGTERM, `ui/graceful.py`) serves every connection it accepted, including the ones still waiting
+  in its listen queue, then closes. On Linux it first stops taking new connection attempts; such an attempt is
+  refused about a second later and nginx gives it to the other port before any byte of the request was sent, so
+  this holds for a POST too.
 - `tools/deploy/edge-swap.sh customer|public` starts the new instance on the free port, waits for its
-  `/healthz` (not `/readyz`, which is 503 while the cockpit restarts), waits `VIGIL_EDGE_SWAP_SETTLE_S` (3 s,
-  longer than the vhost's `fail_timeout=2s`, so nginx has seen the new edge), then stops the old one — which
-  finishes the requests it accepted — and leaves the new instance enabled for boot. If the new edge does not
-  answer within `VIGIL_EDGE_SWAP_HEALTH_S` (30 s) it is stopped and the old one keeps serving.
+  `/healthz` (not `/readyz`, which is 503 while the cockpit restarts), waits `VIGIL_EDGE_SWAP_SETTLE_S` (3 s) with
+  both edges up and checks the new one still runs and answers, then stops the old one and leaves the new instance
+  enabled for boot. If the new edge does not answer within `VIGIL_EDGE_SWAP_HEALTH_S` (30 s), or stops answering
+  during the settle, it is stopped and the old one keeps serving.
 
 The Caddy examples (`*.Caddyfile`) name one port only, so behind Caddy do not swap: an edge moved to the second
 port would never be reached. Restart the plain unit there instead (`systemctl --user restart
