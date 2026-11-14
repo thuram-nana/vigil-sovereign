@@ -18,11 +18,13 @@ never persisted or returned. Mirrors ``authority.py`` exactly (same canonical fo
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
-from typing import Final
+from typing import Any, Final, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer,
+                      model_validator)
 
 from .canonical import canonical_json
 from .crypto import IntegrityError, sign, verify_threshold
@@ -55,6 +57,12 @@ def _env_int(name: str, default: int) -> int:
 # staging. The cost ledger it feeds is default-OFF (not wired into the live launch-gate money path yet).
 ENVELOPE_TOKENS_PER_CREDIT: Final[int] = _env_int("VIGIL_ENVELOPE_TOKENS_PER_CREDIT", 100_000)
 
+#: The OPTIONAL lease fields added after the first lease format. A field whose value is None is omitted from the
+#: serialized document and from the signing bytes (the precedent: the version-conditional chain-head payload), so
+#: every lease that sets none of them serializes, signs and verifies byte-identically to a pre-v2 lease. A set field
+#: is part of the signed document: changing, adding or stripping it breaks the owner signature.
+LEASE_V2_OPTIONAL_FIELDS: Final[tuple[str, ...]] = ("run_tier", "plan_reserved", "plan_period_end", "continue_of")
+
 
 class CreditLaunchLease(BaseModel):
     """The per-launch credit reservation an offense launch is checked against (alongside its authority)."""
@@ -71,12 +79,50 @@ class CreditLaunchLease(BaseModel):
     not_after: datetime
     nonce: str = Field(min_length=1, description="Single-use uniqueness so two launches cannot share a lease.")
     issued_at: float = Field(default=0.0, description="Mint anchor (anti-replay high-water on the minting spine).")
+    # --- optional v2 fields (see ``LEASE_V2_OPTIONAL_FIELDS``) -----------------------------------------------
+    # Each is None unless the minting code stamps it. A None field is left out of the serialized document AND out
+    # of the signing bytes, so a lease that stamps none of them is byte-identical to a lease minted before they
+    # existed (an older verifier keeps accepting it); a stamped field is covered by the owner signature.
+    run_tier: Optional[str] = Field(default=None, description="The launch product's run tier (a run_tier.RUN_TIERS "
+                                    "value), when the lease names it explicitly.")
+    plan_reserved: Optional[int] = Field(default=None, ge=0, description="How many of units_reserved the reserve "
+                                         "took from the tenant's plan-credit tranche (the rest came from the wallet); "
+                                         "None when the lease does not record the split.")
+    plan_period_end: Optional[float] = Field(default=None, description="The period_end of the plan tranche the "
+                                             "plan share came from; set exactly when plan_reserved > 0.")
+    continue_of: Optional[str] = Field(default=None, min_length=1, description="The nonce of the same engagement's "
+                                       "earlier launch this one continues, when it is a continuation.")
 
     @model_validator(mode="after")
     def _check_window(self) -> "CreditLaunchLease":
         if self.not_after <= self.not_before:
             raise ValueError("not_after must be strictly after not_before")
         return self
+
+    @model_validator(mode="after")
+    def _check_v2_fields(self) -> "CreditLaunchLease":
+        if self.run_tier is not None:
+            from .run_tier import RUN_TIERS
+            if self.run_tier not in RUN_TIERS:
+                raise ValueError(f"run_tier must be one of {RUN_TIERS}")
+        if self.plan_reserved is not None and self.plan_reserved > self.units_reserved:
+            raise ValueError("plan_reserved cannot exceed units_reserved")
+        if self.plan_reserved:                              # a plan share names the tranche it came from
+            pe = self.plan_period_end
+            if pe is None or not math.isfinite(pe) or pe <= 0.0:
+                raise ValueError("plan_period_end must be a finite positive number when plan_reserved > 0")
+        elif self.plan_period_end is not None:
+            raise ValueError("plan_period_end is set only together with plan_reserved > 0")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_v2_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in LEASE_V2_OPTIONAL_FIELDS:
+                if key in data and data[key] is None:
+                    del data[key]
+        return data
 
 
 class SignedCreditLaunchLease(BaseModel):
@@ -91,7 +137,9 @@ class SignedCreditLaunchLease(BaseModel):
 
 def credit_lease_signing_bytes(lease: CreditLaunchLease) -> bytes:
     """The exact bytes a signer signs / a verifier checks: the domain tag followed by the compact, sorted-key
-    UTF-8 JSON of the document (byte-identical shape to ``authority_signing_bytes``)."""
+    UTF-8 JSON of the document (byte-identical shape to ``authority_signing_bytes``). The document's serializer
+    leaves out every ``LEASE_V2_OPTIONAL_FIELDS`` entry whose value is None, so a lease without them signs the
+    same bytes as a pre-v2 lease, and a lease with one of them set covers it with the signature."""
     return _LEASE_DOMAIN + canonical_json(lease.model_dump(mode="json"))
 
 

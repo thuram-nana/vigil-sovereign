@@ -56,6 +56,21 @@ def test_valid_lease_verifies_and_binds(monkeypatch):
     assert ok, reason
 
 
+def test_a_lease_carrying_the_optional_v2_fields_verifies_binds_and_is_single_use(monkeypatch):
+    """A lease whose owner-signed document carries the optional v2 fields (the plan/wallet split, the run tier,
+    a continuation) passes the same keyless verify + bind, and is consumed exactly once."""
+    owner = generate_keypair()
+    t = datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=10,
+                            not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=8), nonce="n1",
+                            issued_at=1000.0, run_tier="quick", plan_reserved=4, plan_period_end=1_900_000_000.0,
+                            continue_of="n0")
+    base = _rig(monkeypatch, owner, sign_credit_launch_lease(doc, {"owner": owner.private_key_b64}))
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0)
+    assert ok, reason
+    assert not LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0)[0]   # single-use
+
+
 def test_single_use_second_consume_refuses(monkeypatch):
     owner = generate_keypair()
     base = _rig(monkeypatch, owner, _lease(owner))

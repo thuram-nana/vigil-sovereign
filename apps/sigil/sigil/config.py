@@ -481,6 +481,17 @@ def settle_spine_record_enabled() -> bool:
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def lease_plan_split_enabled() -> bool:
+    """True iff a prepaid launch lease records, under the owner signature, the plan/wallet split its reserve
+    debited (``plan_reserved`` and ``plan_period_end``), so its settle restores each bucket from the lease itself,
+    whatever the live spine window still holds of the reserve records. OFF by default (``VIGIL_LEASE_PLAN_SPLIT``
+    unset / non-affirmative): leases are minted exactly as before, byte-identical. Read by the process that reserves
+    (the cockpit's provisioner). Turn it on only once the offense plane runs a build that accepts these optional
+    lease fields: an older verifier refuses a lease that carries them (the launch does not run, and its reservation
+    is refunded like any launch that never started). Resolved at call time."""
+    return (os.environ.get("VIGIL_LEASE_PLAN_SPLIT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 #: The default and the bounds of :func:`settle_lock_wait_s` (OWNER DECISION OD-7).
 SETTLE_LOCK_WAIT_DEFAULT_S = 10.0
 _SETTLE_LOCK_WAIT_BOUNDS = (0.1, 120.0)

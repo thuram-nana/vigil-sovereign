@@ -119,6 +119,18 @@ the spine** — never the source of truth.
   cancel). With the settle record on, a release a crash interrupted is finished by `--apply`
   (`settle_completed`) and reported `settle_interrupted` without it.
 
+  **Plan/wallet split across a hard prune.** A prepaid reserve takes credits from the tenant's current plan
+  tranche first, then from the wallet, and its settle refunds each bucket its own share (the plan share to the
+  same tranche, which still expires at its period end). With `VIGIL_LEASE_PLAN_SPLIT=1` (default off; set it
+  for the cockpit, which reserves, once both planes run the same release — an older offense build refuses a
+  lease that carries the split) the owner‑signed lease records that split, so the settle takes it from the lease
+  and a hard prune of the reserve records changes nothing. A lease minted without it settles from the reserve's
+  plan debit record on the live spine; if a hard prune has removed that record before the launch settled, the
+  settle moves nothing and is held: `ops-sweep reservations` reports it as `plan_debit_pruned` and the settle
+  drain quarantines its completion (and alarms). The pruned record is kept in the prune archive; settling such a
+  launch is an owner action from that record. Only launches minted before the flag was turned on and still open
+  when a prune runs can be held this way.
+
   **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
   after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace
   (`VIGIL_PAUSED_EXPIRY_SETTLE_GRACE_SECONDS`, default 86400, from the later of the window end, the pause

@@ -140,6 +140,14 @@ an upgrade is: get the new code, rebuild the venvs, then run the crash-safe **da
    vigil up
    ```
 
+**Launch leases with optional fields.** A launch lease can carry optional owner‑signed fields (with
+`VIGIL_LEASE_PLAN_SPLIT=1`, its plan/wallet split). An offense build older than the release that defines them
+refuses such a lease, so upgrade both planes from the same checkout before turning the flag on, and turn it
+off before rolling the offense plane back (a lease it cannot read never runs; `sigil ops-sweep reservations --apply` refunds
+its reservation once its window closes). Independently of the flag, a settle whose lease does not record the split and whose
+reserve plan debit record a hard prune has removed is held as `plan_debit_pruned` (nothing moves; see
+hosting-and-persistence) rather than refunded.
+
 ---
 
 ## 3. Rollback — undo a bad upgrade

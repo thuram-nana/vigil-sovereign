@@ -1,0 +1,24 @@
+{
+ "_comment": "A credit-launch lease signed by the lease code before the optional v2 fields existed. It must keep its exact serialized form and signing bytes, and keep verifying.",
+ "owner_public_key_b64": "X8/B99MqgOyR9atri6lJ0Tw+VaNOGRlaDsKcW5duQx0=",
+ "signed_lease": {
+  "document": {
+   "engagement_slug": "cust_golden",
+   "issued_at": 1767225600.0,
+   "nonce": "golden-nonce-1",
+   "not_after": "2026-01-01T08:00:00Z",
+   "not_before": "2026-01-01T00:00:00Z",
+   "org_id": "org_golden",
+   "scope_host": "golden.example",
+   "units_reserved": 10
+  },
+  "signatures": [
+   {
+    "key_id": "owner",
+    "signature_b64": "PYLQyzqPPbBNfcXIrK2z8o1/4fefc3QRJtMMs24q0OFqmyXC96v56M7lnY6cyP6N8NmQBYlEVg+tgYRkDCuRAw=="
+   }
+  ]
+ },
+ "signed_lease_json": "{\"document\":{\"engagement_slug\":\"cust_golden\",\"org_id\":\"org_golden\",\"scope_host\":\"golden.example\",\"units_reserved\":10,\"not_before\":\"2026-01-01T00:00:00Z\",\"not_after\":\"2026-01-01T08:00:00Z\",\"nonce\":\"golden-nonce-1\",\"issued_at\":1767225600.0},\"signatures\":[{\"key_id\":\"owner\",\"signature_b64\":\"PYLQyzqPPbBNfcXIrK2z8o1/4fefc3QRJtMMs24q0OFqmyXC96v56M7lnY6cyP6N8NmQBYlEVg+tgYRkDCuRAw==\"}]}",
+ "signing_bytes_b64": "dmlnaWwtY3JlZGl0LWxhdW5jaC1sZWFzZS12MQB7ImVuZ2FnZW1lbnRfc2x1ZyI6ImN1c3RfZ29sZGVuIiwiaXNzdWVkX2F0IjoxNzY3MjI1NjAwLjAsIm5vbmNlIjoiZ29sZGVuLW5vbmNlLTEiLCJub3RfYWZ0ZXIiOiIyMDI2LTAxLTAxVDA4OjAwOjAwWiIsIm5vdF9iZWZvcmUiOiIyMDI2LTAxLTAxVDAwOjAwOjAwWiIsIm9yZ19pZCI6Im9yZ19nb2xkZW4iLCJzY29wZV9ob3N0IjoiZ29sZGVuLmV4YW1wbGUiLCJ1bml0c19yZXNlcnZlZCI6MTB9"
+}

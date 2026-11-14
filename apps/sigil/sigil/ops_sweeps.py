@@ -235,6 +235,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     late completion / pause refuses it as ``completion_pending`` / ``completion_unknown`` / ``pause_changed`` /
     ``pause_unknown`` (nothing written; the next pass decides); a busy settle lock or meter is ``deferred``; a
     settle that finished a recorded decision a crash interrupted is ``settle_completed`` with the amounts it moved.
+    A lease that does not record its plan/wallet split, whose reserve plan debit record a hard prune removed from
+    the live spine, is held as ``plan_debit_pruned`` (nothing moved; an owner action, never retried into the wallet).
     With ``VIGIL_SETTLE_SPINE_RECORD`` on, a listed lease whose settlement marker is present (its tombstone pending:
     possibly a settle interrupted after the marker) is FINISHED under ``apply`` (``settle_launch(finish_only=True)``:
     only a recorded decision, never a fresh refund; no TTL or spool check) and reported ``settle_interrupted`` with

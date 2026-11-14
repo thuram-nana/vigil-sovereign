@@ -203,6 +203,15 @@ class CompletionSpoolWatcher:
         if not result.get("ok"):
             if result.get("retry"):                    # a request still in flight, a meter / lock busy right now
                 raise CompletionSpoolDeferred(f"settle_launch deferred: {result.get('error')}")
+            from ..ui.launch_gate import PLAN_DEBIT_PRUNED
+            if result.get("refused") == PLAN_DEBIT_PRUNED:
+                # no retry can settle it: the lease does not carry its plan/wallet split and the reserve's plan
+                # debit record has left the live spine window. Quarantined (the drain alarms; the sweep treats a
+                # quarantined completion as pending, so it never refunds the run) until the owner restores it.
+                raise CompletionSpoolError(
+                    f"settle refused: {PLAN_DEBIT_PRUNED} — the reservation's plan debit record is no longer on the "
+                    f"live spine and the lease does not record its plan/wallet split; nothing was moved. This needs "
+                    f"the owner (runbook: hosting-and-persistence, held settles)")
             if result.get("refused"):                  # the in-lock pricing guard changed: re-priced next drain
                 raise CompletionSpoolDeferred(f"settle refused: {result.get('refused')}")
             raise CompletionSpoolError(f"settle_launch refused: {result.get('error')}")
