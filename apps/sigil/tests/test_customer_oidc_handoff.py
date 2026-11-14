@@ -448,6 +448,8 @@ def _page(tmp_path):
 
 
 def test_the_page_flag_needs_google_and_the_handoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_CLIENT_ID", "client-123")
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_REDIRECT_URI", "https://app.example/api/customer/oidc/callback")
     monkeypatch.delenv("VIGIL_CUSTOMER_OIDC_ENABLED", raising=False)
     monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_HANDOFF", "1")
     page, b1 = _page(tmp_path / "a")

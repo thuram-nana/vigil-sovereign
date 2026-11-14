@@ -60,7 +60,13 @@ def _page_and_build(tmp_path):
         srv.server_close()
 
 
+def _google_settings(monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_CLIENT_ID", "client-123")
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_REDIRECT_URI", "https://app.example/api/customer/oidc/callback")
+
+
 def test_the_edge_writes_the_google_flag_into_the_page_and_the_build(tmp_path, monkeypatch):
+    _google_settings(monkeypatch)
     monkeypatch.delenv("VIGIL_CUSTOMER_OIDC_ENABLED", raising=False)
     off, build_off = _page_and_build(tmp_path / "a")
     assert 'data-google-signin="0"' in off and "__VIGIL_GOOGLE_SIGNIN__" not in off
@@ -71,6 +77,16 @@ def test_the_edge_writes_the_google_flag_into_the_page_and_the_build(tmp_path, m
     for v in ("0", "no", "maybe"):
         monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_ENABLED", v)
         assert 'data-google-signin="0"' in _page_and_build(tmp_path / f"c{v}")[0], v
+
+
+@pytest.mark.parametrize("missing", ["VIGIL_CUSTOMER_OIDC_CLIENT_ID", "VIGIL_CUSTOMER_OIDC_REDIRECT_URI"])
+def test_no_button_while_the_edge_cannot_send_people_to_google(tmp_path, monkeypatch, missing):
+    _google_settings(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_OIDC_HANDOFF", "1")
+    monkeypatch.delenv(missing)
+    page, _b = _page_and_build(tmp_path)
+    assert 'data-google-signin="0"' in page and 'data-oidc-handoff="0"' in page
 
 
 # --- the screens (static) ----------------------------------------------------------------------------------------

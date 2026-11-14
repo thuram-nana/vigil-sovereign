@@ -153,16 +153,28 @@ _IOS_TAGS = ('<meta name="apple-mobile-web-app-capable" content="yes" />\n'
              '  <meta name="apple-mobile-web-app-title" content="VIGIL" />')
 
 
+def _google_redirect_ready(_config) -> bool:
+    """Whether this edge can send a person to Google: the non-secret settings it builds the redirect from are complete
+    (client id, redirect URI, endpoints). While they are not, the page shows no Google button (the login route still
+    answers that sign-in is misconfigured, and `vigil doctor` names the missing setting)."""
+    from . import oidc as _oidc
+    try:
+        _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
+    except _oidc.OidcError:
+        return False
+    return True
+
+
 def build_app_snapshot(root=None) -> SiteSnapshot:
     """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
     asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
-    the iOS install flag (the banner and the iOS tags) and whether customer Google sign-in is on (the "Continue
-    with Google" button) and whether an installed app finishes it through the app hand-off. Each is a non-secret
-    on/off value and each counts in the build id."""
+    the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
+    "Continue with Google" button) and whether an installed app finishes it through the app hand-off. Each is a
+    non-secret on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
-    google = _config.customer_oidc_enabled()
+    google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
     handoff = google and _config.customer_oidc_handoff_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
