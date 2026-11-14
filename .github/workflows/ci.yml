@@ -876,6 +876,9 @@ jobs:
     name: SIGIL governor gates (P7 — offense gate + authn)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # where sigil/vectors/embed.py caches the pinned model files (outside the throwaway SIGIL_HOME)
+      SIGIL_EMBED_CACHE_DIR: /tmp/sigil-embed-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -897,9 +900,34 @@ jobs:
           pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      # The golden-embedding test (apps/sigil/tests/test_embed_backend.py) needs the PINNED bge model files.
+      # Keep them across runs: the key is derived from sigil/vectors/embed.py, which carries the revision and
+      # sha256 pins, so a pin change busts the cache, and embed.py re-verifies both hashes on whatever is
+      # restored, so the pins stay authoritative regardless of the cache. The prefetch step fetches on a miss
+      # (bounded retries) and fails the job on a hard miss — never a skip; the suite then runs with
+      # HF_HUB_OFFLINE=1, so pytest itself never touches the network.
+      - name: Cache the pinned embedding model files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/sigil-embed-cache
+          key: bge-onnx-${{ hashFiles('apps/sigil/sigil/vectors/embed.py') }}
+      - name: prefetch + verify the pinned embedding model (bounded retries)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+        run: |
+          mkdir -p /tmp/sigil-ci
+          for attempt in 1 2 3 4; do
+            if PYTHONPATH=apps/sigil python -c "from sigil.vectors.embed import prefetch; print(prefetch())"; then
+              exit 0
+            fi
+            echo "prefetch attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::the pinned embedding model could not be fetched and verified"; exit 1
       - name: offense gate + hardening + finding receiver (P7 governance + P10 two-anchor ingest)
         env:
           SIGIL_HOME: /tmp/sigil-ci
+          HF_HUB_OFFLINE: "1"
           # The suite executes shipped JS under node (test_js_untrusted_key_parsing, test_customer_checkout_ui,
           # test_bridge_webapp). The runner image ships node; with this set a missing node FAILS those tests
           # instead of skipping them green (apps/sigil/tests/test_ci_suite_legs.py pins it).
@@ -1003,6 +1031,9 @@ jobs:
     # apps/sigil/tests/test_ci_suite_legs.py fails if no ci.yml step runs the whole suite with the flag ON.
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # the same model cache as the governor job
+      SIGIL_EMBED_CACHE_DIR: /tmp/sigil-embed-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -1013,9 +1044,29 @@ jobs:
           pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      # The same pinned-model cache + prefetch as the governor job (see there).
+      - name: Cache the pinned embedding model files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/sigil-embed-cache
+          key: bge-onnx-${{ hashFiles('apps/sigil/sigil/vectors/embed.py') }}
+      - name: prefetch + verify the pinned embedding model (bounded retries)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+        run: |
+          mkdir -p /tmp/sigil-ci
+          for attempt in 1 2 3 4; do
+            if PYTHONPATH=apps/sigil python -c "from sigil.vectors.embed import prefetch; print(prefetch())"; then
+              exit 0
+            fi
+            echo "prefetch attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::the pinned embedding model could not be fetched and verified"; exit 1
       - name: the whole apps/sigil/tests suite with VIGIL_FOLD_CACHE_ENABLED=1
         env:
           SIGIL_HOME: /tmp/sigil-ci
+          HF_HUB_OFFLINE: "1"
           VIGIL_FOLD_CACHE_ENABLED: "1"
           VIGIL_REQUIRE_NODE: "1"
           # the same closure requirement as the governor job's whole-suite step (see there)

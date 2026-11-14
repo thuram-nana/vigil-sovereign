@@ -37,6 +37,11 @@ that executes node FAILS — never skips — in every ci.yml job that runs it.
     the shell). The two legs must use IDENTICAL selection options (``-k``, ``-m``, ``--deselect``, ``-p no:*``,
     ``--ignore``, ``-x``/``--maxfail``, …), and ``--co`` counts as collect-only, i.e. not a run.
 
+    Each whole-suite leg also runs OFFLINE against a warmed, pinned model cache: an ``actions/cache`` step keyed
+    on ``sigil/vectors/embed.py`` (which carries the model pins), then a step that calls
+    ``sigil.vectors.embed.prefetch()`` with the same ``SIGIL_EMBED_CACHE_DIR``, then the suite with
+    ``HF_HUB_OFFLINE=1`` — so the golden-embedding test runs on every PR and pytest never touches the network.
+
 (e) NO BROAD SKIP. No apps/sigil test may turn ANY error into a skip (``except Exception`` / bare / BaseException
     whose body skips): a broken module or a bad model file must fail.
 
@@ -161,9 +166,18 @@ def _logical(lines: list[str]) -> list[str]:
     return out
 
 
+def _yaml_scalar(raw: str) -> str:
+    """A plain or quoted YAML scalar, without a trailing ``# comment``."""
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end > 0 else raw[1:]
+    return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+
+
 def _yaml_env(lines: list[str], name: str) -> str | None:
     """The last ``NAME: value`` mapping entry in these lines (a job's or a step's ``env:``), unquoted."""
-    vals = [m.group(1).strip().strip("\"'") for ln in lines
+    vals = [_yaml_scalar(m.group(1)) for ln in lines
             for m in [re.match(rf"^\s+{re.escape(name)}:\s*(.*?)\s*$", ln)] if m]
     return vals[-1] if vals else None
 
@@ -370,6 +384,9 @@ def test_the_workflow_reader_resolves_what_each_pytest_step_runs():
     ], [r.targets for r in runs]
     assert [r.ignores for r in runs] == [["apps/sigil/tests/test_x.py"], ["engine/crucible/framework/v2/eval"], []]
     assert [r.env("FLAG") for r in runs] == ["0", "yes", "1"]
+    commented = _pytest_runs(f'jobs:\n  j:\n    env:\n      FLAG: "1"  # on\n      CACHE: /tmp/c   # where\n'
+                             f"    steps:\n      - run: pytest {SUITE}/\n")
+    assert commented[0].env("FLAG") == "1" and commented[0].env("CACHE") == "/tmp/c", "a trailing comment was read"
     assert _covers("range/tests/test_anything.py", runs[2].targets), "a `pytest .` target must cover every file"
     # each value-taking pytest option's separate VALUE is never mistaken for a run target (listed HERE, not read
     # back from _VALUE_OPTS, so dropping one from the reader is caught)
@@ -801,6 +818,8 @@ def _perturb_on_leg(text: str, old: str, new: str) -> str:
 
 
 _ON_PYTEST = "python -m pytest -p pytest_require_planes"
+_ON_STEP = "      - name: the whole apps/sigil/tests suite with VIGIL_FOLD_CACHE_ENABLED=1\n"
+_ON_LINE = "          PYTHONPATH=apps/sigil:integration:.github/scripts python -m pytest"
 
 
 def test_negative_controls_whole_suite_legs(real_fold_flag):
@@ -829,14 +848,11 @@ def test_negative_controls_whole_suite_legs(real_fold_flag):
         text, "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    continue-on-error: true\n")))
     assert any("job-level `if:`" in b for b in integrity(_perturb_on_leg(
         text, "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    if: false\n")))
-    assert any("step-level `if:`" in b for b in integrity(_perturb_on_leg(
-        text, "        env:\n          SIGIL_HOME", "        if: false\n        env:\n          SIGIL_HOME")))
-    assert any("set +e" in b for b in integrity(_perturb_on_leg(
-        text, "          mkdir -p /tmp/sigil-ci\n", "          mkdir -p /tmp/sigil-ci\n          set +e\n")))
+    assert any("step-level `if:`" in b for b in integrity(_perturb_on_leg(text, _ON_STEP, _ON_STEP + "        if: false\n")))
+    assert any("set +e" in b for b in integrity(_perturb_on_leg(text, _ON_LINE, "          set +e\n" + _ON_LINE)))
     # an in-shell export / unset of the fold flag before pytest
     for override in (f"export {FOLD_FLAG}=0", f"unset {FOLD_FLAG}", f"{FOLD_FLAG}=0"):
-        got = integrity(_perturb_on_leg(text, "          mkdir -p /tmp/sigil-ci\n",
-                                        f"          mkdir -p /tmp/sigil-ci\n          {override}\n"))
+        got = integrity(_perturb_on_leg(text, _ON_LINE, f"          {override}\n" + _ON_LINE))
         assert any("sets/unsets" in b for b in got), (override, got)
     # the closure requirement dropped from the governor job, the plugin dropped, the planes narrowed
     gov = "sigil-governor"
@@ -875,4 +891,72 @@ def test_negative_control_broad_except_skip_detector():
     assert broad_except_skips("import pytest\ntry:\n    import x\nexcept:\n    pytest.skip('x')\n")
     assert broad_except_skips("import pytest\ntry:\n    f()\nexcept (ValueError, Exception):\n    pytest.skip('x')\n")
     assert not broad_except_skips("import pytest\ntry:\n    import x\nexcept ImportError:\n    pytest.skip('x')\n")
+
+
+# --------------------------------------------------------------------------------------------------------------
+# (f) the golden-embedding test runs offline against a warmed, pinned model cache on every whole-suite leg
+# --------------------------------------------------------------------------------------------------------------
+_EMBED_SRC = "apps/sigil/sigil/vectors/embed.py"
+_EMBED_CACHE_ENV = "SIGIL_EMBED_CACHE_DIR"
+
+
+def _step_env(head: list[str], step: list[str], name: str) -> str | None:
+    v = _yaml_env(step, name)
+    return v if v is not None else _yaml_env(head, name)
+
+
+def model_cache_violations(text: str, run: Run) -> list[str]:
+    bad: list[str] = []
+    if run.env("HF_HUB_OFFLINE") != "1":
+        bad.append(f"{run.job}: the whole-suite run is not HF_HUB_OFFLINE=1 (pytest could reach the network)")
+    cache = run.env(_EMBED_CACHE_ENV)
+    if not cache:
+        bad.append(f"{run.job}: no {_EMBED_CACHE_ENV} on the whole-suite run")
+        return bad
+    head, steps = _jobs(text)[run.job]
+    here = steps.index(run.step) if run.step in steps else len(steps)
+    before = steps[:here]
+    prefetch = [i for i, st in enumerate(before)
+                if any("sigil.vectors.embed" in ln and "prefetch(" in ln for ln in _logical(_run_script(st)))]
+    if not prefetch:
+        bad.append(f"{run.job}: no step before the suite calls sigil.vectors.embed.prefetch()")
+    elif _step_env(head, before[prefetch[-1]], _EMBED_CACHE_ENV) != cache:
+        bad.append(f"{run.job}: the prefetch step warms a different {_EMBED_CACHE_ENV} than the suite reads")
+    elif _step_env(head, before[prefetch[-1]], "HF_HUB_OFFLINE") == "1":
+        bad.append(f"{run.job}: the prefetch step is offline, so it can never fetch")
+    cached = [i for i, st in enumerate(before)
+              if any(re.search(r"uses:\s*actions/cache@", ln) for ln in st)
+              and _yaml_env(st, "path") == cache
+              and f"hashFiles('{_EMBED_SRC}')" in (_yaml_env(st, "key") or "")]
+    if not cached or (prefetch and cached[-1] > prefetch[-1]):
+        bad.append(f"{run.job}: no actions/cache of {cache} keyed on {_EMBED_SRC} before the prefetch step")
+    return bad
+
+
+def test_every_whole_suite_leg_runs_the_embedding_test_offline_on_a_warmed_cache():
+    text = _CI.read_text(encoding="utf-8")
+    runs = whole_suite_runs(text)
+    assert {r.job for r in runs} >= {"sigil-governor", "sigil-fold-cache-on"}
+    bad = [b for r in runs for b in model_cache_violations(text, r)]
+    assert not bad, "\n  ".join(bad)
+
+
+def test_negative_controls_model_cache():
+    text = _CI.read_text(encoding="utf-8")
+
+    def bad(t: str) -> list[str]:
+        return [b for r in whole_suite_runs(t) for b in model_cache_violations(t, r)]
+
+    assert not bad(text), "precondition: the real ci.yml is clean"
+    on = "sigil-fold-cache-on"
+    no_offline = _perturb_job(text, on, '          HF_HUB_OFFLINE: "1"\n', "")
+    assert any(on in b and "HF_HUB_OFFLINE" in b for b in bad(no_offline))
+    no_prefetch = _perturb_job(text, on, "from sigil.vectors.embed import prefetch; print(prefetch())", "print(1)")
+    assert any(on in b and "prefetch()" in b for b in bad(no_prefetch))
+    gov = "sigil-governor"
+    no_cache = _perturb_job(text, gov, f"key: bge-onnx-${{{{ hashFiles('{_EMBED_SRC}') }}}}", "key: bge-onnx-static")
+    assert any(gov in b and "actions/cache" in b for b in bad(no_cache))
+    elsewhere = _perturb_job(text, gov, f"      {_EMBED_CACHE_ENV}: /tmp/sigil-embed-cache\n",
+                             f"      {_EMBED_CACHE_ENV}: /tmp/elsewhere\n")
+    assert any(gov in b for b in bad(elsewhere)), "a suite reading a cache the cache step does not persist passed"
 
