@@ -41,3 +41,53 @@ def test_an_explicit_arg_overrides_the_env_and_the_default(monkeypatch):
     assert B._resolve_wait(10.0) == 10.0        # caller-provided wins over env
     monkeypatch.delenv("VIGIL_APPROVAL_WAIT_SECONDS", raising=False)
     assert B._resolve_wait(0.0) == 0.0          # an explicit arg of 0 is honoured, not replaced by the default
+
+
+# --- the SUITE default (integration/conftest.py ``_no_human_approval_wait``) -----------------------------
+# A test has no human to sign, so the suite defaults the window to 0 s; the PRODUCT default above is
+# unchanged and still proven (the first test here delenv's and reads 300.0).
+
+
+def test_the_suite_defaults_the_window_to_zero_unless_the_shell_set_it(request):
+    import os
+
+    shell = getattr(request.config, "_vigil_shell_approval_wait", None)
+    if shell is None or shell.strip() == "":
+        # the shell was silent -> the conftest default applies inside every test
+        assert os.environ.get("VIGIL_APPROVAL_WAIT_SECONDS") == "0"
+        assert B._resolve_wait(None) == 0.0
+    else:
+        # an explicit shell value is NEVER overridden by the suite default
+        assert os.environ.get("VIGIL_APPROVAL_WAIT_SECONDS") == shell
+
+
+def test_the_suite_default_does_not_hide_the_product_default(monkeypatch):
+    # removing the variable in a test body (applied AFTER the autouse fixture) restores the 300 s product
+    # default — the suite default is a test-environment convenience, never a product change
+    monkeypatch.delenv("VIGIL_APPROVAL_WAIT_SECONDS", raising=False)
+    assert B._resolve_wait(None) == 300.0
+
+
+def test_an_explicit_test_value_beats_the_suite_default(monkeypatch):
+    # the shape test_strix_approver_is_concurrency_safe relies on (it sets 20 s explicitly)
+    monkeypatch.setenv("VIGIL_APPROVAL_WAIT_SECONDS", "20")
+    assert B._resolve_wait(None) == 20.0
+
+
+def test_an_explicit_shell_value_is_never_overridden_by_the_suite_default():
+    # The in-process test above takes its ``else`` branch only when the invoking shell exported a value, which
+    # CI never does — so prove the "never override" half in a child pytest run whose shell DOES export one.
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    here = pathlib.Path(__file__).resolve()
+    env = dict(os.environ, VIGIL_APPROVAL_WAIT_SECONDS="7", PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         f"{here}::test_the_suite_defaults_the_window_to_zero_unless_the_shell_set_it"],
+        cwd=str(here.parents[2]), env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "1 passed" in proc.stdout, proc.stdout[-2000:]

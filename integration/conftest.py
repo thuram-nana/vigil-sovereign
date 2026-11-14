@@ -2,6 +2,7 @@
 pin the ONE thing in the executor that reads the host box: which security tool binary a tool NAME means.
 """
 
+import os
 import pathlib
 import sys
 
@@ -10,6 +11,9 @@ import pytest
 _ROOT = pathlib.Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# the human-approval poll window env (see ``_no_human_approval_wait`` at the end of this file)
+_APPROVAL_WAIT_ENV = "VIGIL_APPROVAL_WAIT_SECONDS"
 
 
 def pytest_configure(config):
@@ -35,6 +39,10 @@ def pytest_configure(config):
         "keyed: requires a real external credential (e.g. ANTHROPIC_API_KEY) for a LIVE call; "
         "skips cleanly without it",
     )
+    # What the invoking shell said about the human-approval window BEFORE any fixture ran — read by the
+    # meta-test of ``_no_human_approval_wait`` below, so it can prove the default is applied when the shell
+    # is silent AND that an explicit shell value is never overridden.
+    config._vigil_shell_approval_wait = os.environ.get(_APPROVAL_WAIT_ENV)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -198,4 +206,26 @@ def _isolate_evidence_keys_dir(tmp_path_factory, monkeypatch):
     framework-free (sovereign) leg and for tests that pass ``EvidenceKeyring(keys_dir=...)`` explicitly. A test
     that needs a specific dir sets ``CRUCIBLE_EVIDENCE_KEYS_DIR`` in its own body (applied after, so it wins)."""
     monkeypatch.setenv("CRUCIBLE_EVIDENCE_KEYS_DIR", str(tmp_path_factory.mktemp("evidence-keys")))
+    yield
+
+
+# ---------------------------------------------------------------------------------------------------
+# the human-approval poll window — a test suite has no human to sign
+# ---------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_human_approval_wait(monkeypatch):
+    """Default the human-approval poll window to 0 s inside the suite (instant deny when no token is signed).
+
+    The PRODUCT default is a 5-minute window (``approval_broker._DEFAULT_WAIT_SECONDS``), so a queued action
+    gives the operator time to sign. A test has no operator: any test that drives the real approver without
+    signing during the window would otherwise sit out the full window per denied call for the SAME verdict
+    it gets at 0 s. This sets 0 only when the variable is unset or blank — an explicit value (from the shell
+    or from a test's own ``monkeypatch.setenv``, applied after this fixture) always wins. A test that needs a
+    real window, or the product default, MUST set or ``delenv`` it explicitly in its own body
+    (``tests/test_approval_wait_default.py`` does exactly that to prove the 300 s default). Env-only, so it
+    behaves the same in the sovereign and offense legs."""
+    if os.environ.get(_APPROVAL_WAIT_ENV, "").strip() == "":
+        monkeypatch.setenv(_APPROVAL_WAIT_ENV, "0")
     yield
