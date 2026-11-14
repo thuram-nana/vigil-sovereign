@@ -158,6 +158,38 @@ def test_e2e_founder_flag_signup_registers_a_target_without_owner_promotion(tmp_
         sov.shutdown(); edge.shutdown()
 
 
+def test_e2e_a_teammate_admin_cannot_remove_the_founder_under_any_spelling_of_its_name(tmp_path, monkeypatch):
+    # Over the real edge -> hop -> cockpit path, with the production settings (founder flag on, step-up unset): a
+    # teammate org_admin's member/revoke and member/grant of the founder are refused whatever whitespace surrounds
+    # the founder's username, and the founder keeps its org.
+    sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
+    monkeypatch.delenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", raising=False)
+    monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")
+    try:
+        fop = _opener()
+        f = _signup(fop, ep, "founder@acme.com")
+        reg = OrgRegistry(sov.store())
+        assert reg.membership_role(f["username"], f["org_id"]) == "founder"
+        mop = _opener()
+        m = _signup(mop, ep, "mate@acme.com", org="Mate")
+        c, r = _post(fop, ep, "/api/customer/member/grant", {"member_username": m["username"], "role": "org_admin"})
+        assert c == 200, (c, r)
+        reg.revoke_org(m["org_id"])            # the mate's next login binds the founder's org (its only one)
+        mop2 = _opener()
+        c, r = _post(mop2, ep, "/api/customer/login", {"email": "mate@acme.com", "password": "customer-pw-123"})
+        assert c == 200 and r["active_org"] == f["org_id"], (c, r)
+        for name in (f["username"], " " + f["username"], f["username"] + " ", "\t" + f["username"] + "\n"):
+            c, r = _post(mop2, ep, "/api/customer/member/revoke", {"member_username": name})
+            assert c == 403 and "service owner" in r.get("error", ""), (name, c, r)
+            c, r = _post(mop2, ep, "/api/customer/member/grant", {"member_username": name, "role": "viewer"})
+            assert c == 403 and "service owner" in r.get("error", ""), (name, c, r)
+        assert reg.membership_role(f["username"], f["org_id"]) == "founder"
+        assert _get(fop, ep, "/api/customer/billing")[0] == 200
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 def test_e2e_oidc_and_passkey_logins_are_customer_sessions_never_operator(tmp_path, monkeypatch):
     sov, edge, ep, sp, spine = _full_stack(tmp_path, monkeypatch)
     store = sov.store()

@@ -8,7 +8,8 @@ Load-bearing invariants (each a mutation target):
     stays limited to the trial product and one registrable domain;
   * changing or revoking a founder is owner-only: customer member management refuses a founder target (the
     founder included, on themself), never grants `founder`/`operator`, and counts the founder as an
-    administrator for the last-admin rule;
+    administrator for the last-admin rule; every member verb canonicalises the target name once and uses only
+    that value, so surrounding whitespace never reaches a different membership than the one it writes;
   * the kill switch: flag OFF admits an existing founder as `org_admin` (no testing, billing kept), with no spine
     write; flag ON restores it;
   * the owner verbs (`sigil org set-member-role`, `sigil org demote-founders`) change a founder with a critical
@@ -265,6 +266,67 @@ def test_the_founder_counts_as_an_administrator_for_the_last_admin_rule(flag_on)
     p.grant_member(u, org, mate, "org_admin")
     p.revoke_member(mate, org, mate)
     assert p.orgs.membership_role(mate, org) is None and p.orgs.membership_role(u, org) == "founder"
+
+
+_PADS = (" {}", "{} ", "\t{}", "{}\n", " {}\t")
+
+
+@pytest.mark.parametrize("pad", _PADS)
+def test_every_member_verb_reads_a_padded_target_as_the_same_member(flag_on, pad):
+    # Every member verb canonicalises the target ONCE and uses only that value, so surrounding whitespace never
+    # names a different membership than the one the write would change: the founder refusal holds for both
+    # customer verbs, from a teammate admin and from the founder itself, and the audit names the real member.
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov()
+    u, org, mate = _founder_and_mate(p)
+    p.grant_member(u, org, mate, "org_admin")
+    for requester in (mate, u):
+        for role in ("viewer", "analyst", "org_admin"):
+            with pytest.raises(ProvisionDenied, match="service owner"):
+                p.grant_member(requester, org, pad.format(u), role)
+        with pytest.raises(ProvisionDenied, match="service owner"):
+            p.revoke_member(requester, org, pad.format(u))
+    assert p.orgs.membership_role(u, org) == "founder"
+    denied = [a for a in _audits(s, "grant_member") + _audits(s, "revoke_member")
+              if a.get("reason") == "founder_owner_only"]
+    assert len(denied) == 8 and {a["target"] for a in denied} == {u}
+    # a padded teammate name is that teammate: the change lands on the real membership and is audited as such
+    assert p.grant_member(u, org, pad.format(mate), "viewer")["username"] == mate
+    assert p.orgs.membership_role(mate, org) == "viewer"
+    assert p.revoke_member(u, org, pad.format(mate))["username"] == mate
+    assert p.orgs.membership_role(mate, org) is None
+    assert _audits(s, "grant_member")[-1]["target"] == mate and _audits(s, "revoke_member")[-1]["target"] == mate
+
+
+@pytest.mark.parametrize("pad", _PADS)
+def test_a_padded_target_never_removes_the_last_administrator(monkeypatch, pad):
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov()
+    a = _signup(p)                                                  # flag off: the sole admin is an org_admin
+    u, org = a["username"], a["org_id"]
+    with pytest.raises(ProvisionDenied, match="last administrator"):
+        p.revoke_member(u, org, pad.format(u))
+    with pytest.raises(ProvisionDenied, match="last administrator"):
+        p.grant_member(u, org, pad.format(u), "viewer")
+    assert p.orgs.membership_role(u, org) == "org_admin"
+    monkeypatch.setenv(FLAG, "1")
+    f = _signup(p, email="sole@sole-founder.io", org="Sole")       # flag on: the sole admin is the founder
+    with pytest.raises(ProvisionDenied, match="service owner"):
+        p.revoke_member(f["username"], f["org_id"], pad.format(f["username"]))
+    assert p.orgs.membership_role(f["username"], f["org_id"]) == "founder"
+    assert [m.username for m in p.orgs.memberships(f["org_id"])] == [f["username"]]
+
+
+@pytest.mark.parametrize("pad", _PADS)
+def test_the_owner_verb_reads_a_padded_target_as_the_same_member(flag_on, pad):
+    from sigil.ui.provision import owner_set_member_role
+    p, s = _prov()
+    a = _signup(p)
+    u, org = a["username"], a["org_id"]
+    r = owner_set_member_role(s, org, pad.format(u), "org_admin", reason="support", issued_at=9e9)
+    assert r["username"] == u and r["previous_role"] == "founder"
+    assert p.orgs.membership_role(u, org) == "org_admin"
+    assert _audits(s, "owner_set_member_role")[-1]["target"] == u
 
 
 def test_last_admin_rule_still_holds_without_a_founder():

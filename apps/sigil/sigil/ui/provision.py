@@ -201,6 +201,15 @@ def _publish_monitoring(base, org_id: str, host: str, data: bytes):
     return final
 
 
+def _member_target(username) -> str:
+    """The CANONICAL member username every member verb uses for all of its checks, its audit row and its
+    owner-signed write. It is the value the org registry itself stores and looks up (`_check_member_username`:
+    surrounding whitespace removed, then the username charset enforced), so a check can never read a different
+    membership than the write changes. Raises ValueError for a value that is no member username."""
+    from ..governor.orgs import _check_member_username
+    return _check_member_username(username)
+
+
 def _member_admins(orgs, org_id: str) -> "set[str]":
     """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (per-org predicate on the stored
     role) — `org_admin` and `founder` today. The last-admin (anti-orphan) rules count these."""
@@ -241,8 +250,8 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
     change that would leave the org with no member holding `manage_members` is refused. A CRITICAL audit row is
     written before the owner-signed grant. Returns {org_id, username, role, previous_role, seq}."""
     from ..governor.customers import CustomerRegistry
-    from ..governor.orgs import OrgRegistry, _check_member_role, _check_member_username, _check_org_id
-    oid, u, r = _check_org_id(org_id), _check_member_username(username), _check_member_role(role)
+    from ..governor.orgs import OrgRegistry, _check_member_role, _check_org_id
+    oid, u, r = _check_org_id(org_id), _member_target(username), _check_member_role(role)
     why = str(reason or "").strip()
     if not why:
         raise ValueError("a reason is required (it is recorded in the audit)")
@@ -981,10 +990,15 @@ class Provisioner:
         cannot sign through a stale check; the target must be a real active customer; a change that would
         orphan the org (leave no member holding `manage_members`) is refused; the op is rate-limited per org.
         A target whose CURRENT role is `founder` is refused (the founder included, on themself): changing a
-        founder's role is an owner act (`owner_set_member_role`)."""
+        founder's role is an owner act (`owner_set_member_role`).
+
+        The target is canonicalised ONCE, before anything else (`_member_target`), and only that canonical
+        username is used afterwards — by the founder check, the customer lookup, the last-admin rule, the audit
+        and the owner-signed grant — so every check reads the exact membership the grant writes."""
         t = self._now() if now is None else float(now)
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
+        member_username = _member_target(member_username)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
@@ -1024,10 +1038,13 @@ class Provisioner:
         revoke of the requester's own admin membership); the org's SOLE administrator (member holding
         `manage_members`) cannot be revoked (anti-orphan — the tenant must retain at least one administrator);
         and a `founder` membership is never revoked here (the founder included, on themself): that is an
-        owner act."""
+        owner act.
+
+        The target is canonicalised ONCE, before any audit (`_member_target`), and only that canonical username
+        is used afterwards — by the founder check, the last-admin rule, the audit and the owner-signed revoke —
+        so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
-        from ..governor.orgs import _check_member_username
-        _check_member_username(member_username)          # NH-3 prep: validate target shape before any audit
+        member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
