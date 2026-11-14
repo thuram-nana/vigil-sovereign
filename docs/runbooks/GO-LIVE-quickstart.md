@@ -136,17 +136,40 @@ vigil doctor                                        # HARD issue if the installe
 Every `vigil` verb's `--base-dir` defaults to `$VIGIL_BASE_DIR` (else `./.vigil-live`), and `vigil up` hands its
 base to every backend it starts, so one export covers the console, the engines and the cockpit `vigil up`
 spawns. `vigil up` refuses an explicit `--base-dir` that names a different directory than `$VIGIL_BASE_DIR`. The
-operator console unit (`vigil-command.service`) reads `<repo>/.vigil-live/service.env`: add the same absolute
-`VIGIL_BASE_DIR=` line there. Those `sigil` seam writers refuse to run when the seam they would write is not the
-one the configured units use, and print the `export` to run first.
+operator console unit (`vigil-command.service`) keeps the offense engine's own home — its vault, operator key and
+attestation log — in `<repo>/.vigil-live`: do not add a `VIGIL_BASE_DIR=` line to its `service.env` to move it
+(`sigil seam migrate` carries launch-seam records only, never the engine's own state); `vigil doctor` reports when
+its seam differs from the other units'. `sigil eval-grant arm|reconcile` and `sigil ops-sweep reservations` refuse
+to run when the seam they would write is not the one the configured units use, and print the `export` to run
+first; `sigil eval-grant revoke` is published to every unit's seam instead.
 
 To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
-`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`, the console's `service.env`) or drop-in
-(`systemctl --user edit <unit>`) — never in only some of them. The settle drain refuses to start when a leftover
-`VIGIL_SETTLE_BASE_DIR` names a different directory. If an earlier install left a `~/.sigil/.vigil-live`
-directory (the cockpit's old working-directory default), the cockpit published there: reconcile its
-reservations (`sigil ops-sweep reservations --base-dir ~/.sigil/.vigil-live`) before you rely on the new seam.
-Never delete that directory: it also holds the cockpit's own passkey store and bootstrap token.
+`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`) or drop-in (`systemctl --user edit <unit>`) —
+never in only some of them. The settle drain refuses to start when a leftover `VIGIL_SETTLE_BASE_DIR` names a
+different directory.
+
+**Upgrading a host whose cockpit used another seam directory.** An earlier install's cockpit kept its launch
+records (published leases, settlement and pause markers, single-use floors) in its working-directory default
+`~/.sigil/.vigil-live`. Carry them into the seam before anything serves or settles on it — as the service user:
+
+```bash
+systemctl --user stop sigil-cockpit sigil-customer vigil-settle-drain.timer vigil-settle-drain
+# re-copy the shipped units (they bring VIGIL_BASE_DIR and VIGIL_SEAM_MIGRATION_GUARD=1), then:
+systemctl --user daemon-reload
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"
+sigil seam migrate             # report only: what it carries, requeues to the settle drain, or holds for the owner
+sigil seam migrate --apply     # exit 1 lists any conflict, or a launch held for the owner (`legacy_hold`)
+vigil doctor                   # no `seam migration` issue left
+systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
+```
+
+Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
+eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an
+unsettled launch back to the settle drain, which settles it at its outcome, and holds for the owner a launch it
+cannot settle (no money moves for it). **Never run `sigil ops-sweep reservations --apply` against the former
+directory** (`--base-dir ~/.sigil/.vigil-live`). Run the migration before you remove a leftover
+`VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and
+it holds the cockpit's own passkey store and bootstrap token.
 
 ## 7. Reverse proxy + TLS (three separate origins)
 
