@@ -504,6 +504,54 @@ class EvalCapabilityGrant:
                     raise   # never report success while a stale publication may still be honoured
 
 
+def revoke_on_seams(store, *, owner_key, engagement_slug: str, seams: "list[str]", by: str = "owner",
+                    reason: str = "") -> "tuple[int, list[str]]":
+    """Revoke every grant for ``engagement_slug`` with ONE spine record and publish it to each directory in ``seams``
+    (the trees an offense plane may read). Every seam is retracted AHEAD of the append (its floor raised above the
+    next seq and a publication sealed below it removed, as :meth:`EvalCapabilityGrant.revoke` does for one seam), so
+    a revoke stopped at any point has already un-granted every seam. A seam is published to only AFTER the append
+    landed, so no seam ever receives a list read from a spine without the revoke. The append failing re-raises,
+    leaving every seam retracted (a seam whose retract could not be confirmed raises the close alarm first). A seam
+    whose publish fails raises the close alarm and is returned in ``not_confirmed``; the others are still tried.
+    Returns ``(seq, not_confirmed)``."""
+    slug = str(engagement_slug)
+    if not slug:
+        raise ValueError("revoke requires the engagement_slug to un-grant")
+    grants = [(seam, EvalCapabilityGrant(store, owner_key=owner_key, base_dir=seam)) for seam in seams]
+
+    def _alarm(seam: str) -> None:
+        raise_close_alarm(f"a revoke of eval-capability grant {slug!r} could not be confirmed on the seam {seam}",
+                          cause="seam_unreconciled", failed=[f"grant:{slug}"])
+
+    retracted: "list[str]" = []
+    for seam, g in grants:
+        try:
+            if g._retract(slug, ahead=True):
+                retracted.append(seam)
+        except Exception:  # noqa: BLE001 — every seam is still tried; the publish below is the guarantee
+            pass
+    try:
+        seq = grants[0][1]._append_revoke(slug, by=by, reason=reason)
+    except BaseException:
+        for seam, g in grants:          # the record never landed: each seam stays retracted (default-ungranted)
+            if seam not in retracted:
+                with contextlib.suppress(Exception):
+                    if g._retract(slug, ahead=True):
+                        continue
+                with contextlib.suppress(Exception):
+                    _alarm(seam)
+        raise
+    not_confirmed: "list[str]" = []
+    for seam, g in grants:
+        try:
+            g._retract(slug)
+            g._publish(slug)
+        except Exception as e:  # noqa: BLE001 — every seam is tried; an unconfirmed one raises the alarm
+            _alarm(seam)
+            not_confirmed.append(f"{seam} ({type(e).__name__})")
+    return seq, not_confirmed
+
+
 def revoke_grants_on_close(store, *, owner_key=None, trusted_pubkey: Optional[str] = None,
                            by: str = "owner", reason: str = "offense-gate/engagement close") -> list:
     """FIX C1: on an offense close, revoke EVERY eval-capability grant that is live on the spine and confirm the

@@ -751,29 +751,9 @@ def cmd_eval_grant(a) -> None:
         return
 
     if a.action == "revoke":
-        import os as _os
-
-        from vigil_core.seam_base import resolve_seam_base as _resolve
-        same = _os.path.realpath(_revoke_targets[0]) == _os.path.realpath(_resolve())
-        g0 = g if same else EvalCapabilityGrant(store, owner_key=owner, base_dir=_revoke_targets[0])
-        first_error: "BaseException | None" = None
-        try:
-            seq = g0.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
-        except Exception as e:  # noqa: BLE001 — every other seam is still tried, then this re-raises
-            first_error = e
-        not_confirmed: "list[str]" = []
-        for extra in _revoke_targets[1:]:               # the same spine record, published to each other unit's seam
-            gx = EvalCapabilityGrant(store, owner_key=owner, base_dir=extra)
-            try:
-                gx._retract(str(a.engagement))
-                gx._publish(str(a.engagement))
-            except Exception as e:  # noqa: BLE001 — every target is tried; an unconfirmed one raises the alarm
-                from .governor.seam_publish import raise_close_alarm
-                raise_close_alarm(f"a revoke of eval-capability grant {a.engagement!r} could not be confirmed on the "
-                                  f"seam {extra}", cause="seam_unreconciled", failed=[f"grant:{a.engagement}"])
-                not_confirmed.append(f"{extra} ({type(e).__name__})")
-        if first_error is not None:
-            raise first_error
+        from .governor.eval_capability_grant import revoke_on_seams
+        seq, not_confirmed = revoke_on_seams(store, owner_key=owner, engagement_slug=str(a.engagement),
+                                             seams=_revoke_targets, reason=(a.reason or ""))
         print(f"eval-capability-grant REVOKED for engagement {a.engagement!r} (seq {seq}); every gate "
               f"enforces again until a fresh owner+evaluator grant lands."
               + (f" Published to {len(_revoke_targets)} seams: {', '.join(_revoke_targets)}."
@@ -1323,8 +1303,8 @@ def _revoke_seam_targets(verb: str) -> "list[str]":
         if os.path.realpath(s) not in {os.path.realpath(t) for t in targets}:
             targets.append(s)
     if not targets:
-        return [base]
-    if len(targets) > 1 or os.path.realpath(base) != os.path.realpath(targets[0]):
+        targets = [base]
+    elif len(targets) > 1 or os.path.realpath(base) != os.path.realpath(targets[0]):
         print(f"{verb}: WARNING — this shell resolves the seam base to {base}; the configured units use "
               f"{'; '.join(f'{u} -> {s}' for u, s in units.items())}. Publishing the revoke to each unit's seam "
               f"({', '.join(targets)}); `vigil doctor` names the disagreement.", file=sys.stderr)

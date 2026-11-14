@@ -16,6 +16,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the eval-grant wiring                                        -> test_eval_grant_*_refuses_*
   * a revoke refused, or published to one seam only             -> test_a_revoke_reaches_every_writer_units_seam
   * one failing seam stops the others / reports success          -> test_a_revoke_is_tried_on_every_seam_when_one_fails
+  * a seam published from a spine without the revoke            -> test_a_revoke_whose_append_fails_publishes_nothing_and_ungrants_every_seam
+  * another seam retracted only after the append                 -> test_every_seam_is_ungranted_before_the_revoke_is_appended
   * the ops-sweep wiring (only without an explicit --base-dir)   -> test_ops_sweep_*
   * the eval publishers' ``_base_dir`` through the shared resolver -> test_the_eval_publishers_write_the_tree_*
 """
@@ -180,15 +182,17 @@ def test_a_revoke_is_tried_on_every_seam_when_one_fails(home, monkeypatch, tmp_p
     monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
     _store(monkeypatch, tmp_path)
     if fails == "first":
-        real_revoke = EvalCapabilityGrant.revoke
+        real_publish = EvalCapabilityGrant._publish
 
-        def _revoke(self, **kw):
-            real_revoke(self, **kw)
-            raise RuntimeError("the first seam's publish failed")
-        monkeypatch.setattr(EvalCapabilityGrant, "revoke", _revoke)
-        with pytest.raises(RuntimeError):
+        def _publish(self, slug):
+            if self._seam_override == _units_seam(home):
+                raise RuntimeError("the first seam's publish failed")
+            return real_publish(self, slug)
+        monkeypatch.setattr(EvalCapabilityGrant, "_publish", _publish)
+        with pytest.raises(SystemExit) as ei:
             cli.cmd_eval_grant(_ns("revoke"))
-        assert _revoked_on(str(other))
+        assert ei.value.code == 1 and _units_seam(home) in capsys.readouterr().err
+        assert _revoked_on(str(other)) and read_close_alarm() is not None
     else:
         real_retract = EvalCapabilityGrant._retract
 
@@ -201,6 +205,88 @@ def test_a_revoke_is_tried_on_every_seam_when_one_fails(home, monkeypatch, tmp_p
             cli.cmd_eval_grant(_ns("revoke"))
         assert ei.value.code == 1 and str(other) in capsys.readouterr().err
         assert _revoked_on(_units_seam(home)) and read_close_alarm() is not None
+
+
+def _two_seams(home, monkeypatch):
+    """The cockpit on the units' seam, the settle drain's env file naming another tree: ``(seam_a, seam_b)``."""
+    _install(home, _COCKPIT, _SETTLE)
+    other = home / "elsewhere"
+    env = home / ".config" / "vigil" / "settle-drain.env"
+    env.parent.mkdir(parents=True)
+    env.write_text(f"VIGIL_BASE_DIR={other}\n", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+    for k in ("VIGIL_EVAL_GRANT_HIGHWATER_DIR", "VIGIL_EVAL_OFFENSE_HIGHWATER_DIR", "VIGIL_SEAM_MIGRATION_GUARD"):
+        monkeypatch.delenv(k, raising=False)
+    return _units_seam(home), str(other)
+
+
+def _granted_on(rig):
+    from tests.test_eval_publish_fail_closed import SLUG, TGT  # type: ignore
+    from vigil_integration.live import eval_capability_grant as live
+    pinned = [rig.owner.public_key_b64]
+    return lambda b: live.verify_eval_capability_grant(str(b), engagement_slug=SLUG, target=TGT,
+                                                       trusted_owner_pubkeys=pinned).granted
+
+
+@pytest.mark.parametrize("retract", ["confirmed", "unconfirmed"])
+def test_a_revoke_whose_append_fails_publishes_nothing_and_ungrants_every_seam(home, monkeypatch, tmp_path, retract):
+    """The revoke record never lands (a full disk): no seam receives a publication read from a spine without the
+    revoke, and every seam — the one that honoured the grant included — reads default-ungranted; the error stands. A
+    seam whose retraction cannot be confirmed raises the close alarm (`vigil doctor`)."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from sigil.governor.seam_publish import read_close_alarm
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    rig = _Rig("grant")                                                  # armed on the units' seam A only
+    ok = _granted_on(rig)
+    assert ok(seam_a) and not ok(seam_b)
+    if retract == "unconfirmed":
+        real_retract = EvalCapabilityGrant._retract
+
+        def _retract(self, slug, **kw):
+            done = real_retract(self, slug, **kw)
+            return done and self._seam_override != seam_b
+        monkeypatch.setattr(EvalCapabilityGrant, "_retract", _retract)
+    store = rig.store
+    real_append = store.append
+
+    def _append(*a, **kw):
+        if (kw.get("payload") or {}).get("state") == "revoked":
+            raise OSError(28, "No space left on device")
+        return real_append(*a, **kw)
+    monkeypatch.setattr(store, "append", _append)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    with pytest.raises(OSError):
+        cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))
+    assert not ok(seam_a) and not ok(seam_b)
+    from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+    assert not eval_capability_grant_path(seam_b, SLUG).exists()       # nothing published from that spine
+    alarm = read_close_alarm()
+    assert (alarm is not None and seam_b in alarm.get("reason", "") + json.dumps(alarm)) == (retract == "unconfirmed")
+
+
+def test_every_seam_is_ungranted_before_the_revoke_is_appended(home, monkeypatch, tmp_path):
+    """Each seam's publication of the grant is retracted before the one spine append, so a revoke stopped right after
+    it (the cockpit ceremony stops a CLI after 60 s) has already un-granted every seam."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    rig = _Rig("grant")
+    EvalCapabilityGrant(rig.store, owner_key=rig.owner, base_dir=seam_b)._publish(SLUG)   # B honours it too
+    ok = _granted_on(rig)
+    assert ok(seam_a) and ok(seam_b)
+    store = rig.store
+    real_append, at_append = store.append, []
+
+    def _append(*a, **kw):
+        if (kw.get("payload") or {}).get("state") == "revoked":
+            at_append.append((ok(seam_a), ok(seam_b)))
+        return real_append(*a, **kw)
+    monkeypatch.setattr(store, "append", _append)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))
+    assert at_append == [(False, False)]
+    assert _revoked_on(seam_a, SLUG) and _revoked_on(seam_b, SLUG)
 
 
 def test_a_backup_units_seam_never_blocks_a_writer(home, monkeypatch, tmp_path, capsys):
