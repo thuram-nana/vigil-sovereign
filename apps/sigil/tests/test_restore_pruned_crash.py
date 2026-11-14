@@ -176,6 +176,56 @@ def test_abort_before_any_unit_is_in_leaves_the_old_home(world, tmp_path):
     assert read_home(target)["verify_checkpoint"][0] is True
 
 
+# `sigil restore --abort` killed at a barrier, or while it removes the staging (part of it already gone).
+ABORT_KILLED = """
+import os, shutil, sys
+from pathlib import Path
+from sigil import backup
+barrier = sys.argv[1]
+def hook(name):
+    if name == barrier:
+        os._exit(77)
+backup._crash_hook = hook
+real = shutil.rmtree
+def rmtree(p, *k, **kw):
+    if barrier == "mid-drop" and ".restore-staging-" in str(p):
+        real(Path(p) / "spine", ignore_errors=True)
+        os._exit(77)
+    return real(p, *k, **kw)
+shutil.rmtree = rmtree
+from sigil.cli import main
+main(sys.argv[2:])
+"""
+
+
+@pytest.mark.parametrize("killed,then", [("restore_abort_marked", "abort again"), ("mid-drop", "abort again"),
+                                         ("mid-drop", "replace and abort")])
+def test_an_interrupted_abort_is_finished_by_running_it_again(world, tmp_path, killed, then):
+    """An abort that found the home untouched marks the journal before it drops anything: killed after that (even with
+    part of the staging already gone) the home is still its old self and stays fail-closed, `--resume` refuses and
+    names `--abort`, and running the abort again — or aborting a --force restore that replaced it — finishes it,
+    leaving the old home and no staging behind."""
+    target = _target(world, tmp_path)
+    before = _tree(target)
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    r = run_in_home(target, ABORT_KILLED, killed, "restore", "--abort", str(target), check=False,
+                    SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    assert r.returncode == KILLED, (r.returncode, r.stderr[-800:])
+    assert (target / "restore-journal.json").is_file()
+    assert {k: v for k, v in _tree(target).items() if k != "restore-journal.json"} == before
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 1 and "itself interrupted" in r.stderr and "--abort" in r.stderr, r.stderr
+    _assert_fails_closed(target)
+    if then == "replace and abort":
+        assert _kill_at(world, target, "restore_after_journal", backup="bk_plain").returncode == KILLED
+        assert json.loads((target / "restore-journal.json").read_text())["replaced"]["touched"] == []
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 0 and "discarded" in r.stdout, r.stderr
+    assert _tree(target) == before
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+    assert read_home(target)["verify_checkpoint"][0] is True
+
+
 @pytest.mark.parametrize("barrier", TOUCHED)
 def test_abort_is_refused_once_a_unit_swap_has_begun_and_resume_completes_it(world, tmp_path, barrier):
     """Killed while the spine unit was being swapped in — marked started, its old copy moved aside, the new copy

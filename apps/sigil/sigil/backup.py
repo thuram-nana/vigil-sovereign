@@ -840,7 +840,7 @@ def _read_journal(home: Path) -> dict:
                       and all(isinstance(u[k], str) for k in ("name", "src", "dst", "digest"))
                       and all(isinstance(u[k], bool) for k in ("started", "done")) for u in units)
               and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging")))
-              and _replaced_shape_ok(j.get("replaced")))
+              and _replaced_shape_ok(j.get("replaced")) and isinstance(j.get("aborting", False), bool))
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise BackupError(f"the restore journal at {jp} cannot be read ({e}) — re-run the restore with --force "
                           f"from the backup") from e
@@ -997,8 +997,12 @@ def restore_resume(home: "str | Path") -> dict:
     from its journal (no passphrase needed: every unit was verified, and its secrets re-sealed, before the journal
     was written). Each pending unit's staged copy must still be the one the restore verified."""
     home = Path(home)
-    journal = _read_journal(home)
+    _read_journal(home)                                  # nothing to resume: refuse before touching the home
     with _target_writers_quiet(home):
+        journal = _read_journal(home)
+        if journal.get("aborting"):
+            raise BackupError(f"an abort of the interrupted restore into {home} was itself interrupted — finish it "
+                              f"with `sigil restore --abort {home}`")
         _complete_journaled_swap(home, journal)
     return {"home": str(home), "units": [u["name"] for u in journal["units"]], "resumed": True}
 
@@ -1006,12 +1010,14 @@ def restore_resume(home: "str | Path") -> dict:
 def _touched_units(journal: dict) -> "list[str]":
     """The units of ``journal`` whose swap has begun, by name: marked started or done in the journal (written ahead
     of the first rename), or — independently of the marks — whose staged copy has left the staging or whose
-    destination has an old copy moved aside beside it."""
+    destination has an old copy moved aside beside it. Once an abort has marked the journal ``aborting`` (after it
+    found nothing touched, before it drops a staged copy), a staged copy that is gone is that abort's doing."""
+    staged_evidence = not journal.get("aborting")
     out = []
     for u in journal["units"]:
         src, dst = Path(u["src"]), Path(u["dst"])
         aside = _aside_of(dst)
-        if (u["started"] or u["done"] or not (src.exists() or src.is_symlink())
+        if (u["started"] or u["done"] or (staged_evidence and not (src.exists() or src.is_symlink()))
                 or aside.exists() or aside.is_symlink()):
             out.append(u["name"])
     return out
@@ -1046,25 +1052,36 @@ def restore_abort(home: "str | Path") -> dict:
     """``sigil restore --abort <home>``: discard an interrupted restore into ``home`` — only while the home is still
     entirely its old self: none of its units has been touched, and the interrupted restore it replaced (if any) had
     touched none either. Once a swap has begun, only ``--resume`` (the home is then entirely the backup's) or a fresh
-    ``--force`` restore from the backup leaves the home consistent; abort then refuses and deletes nothing."""
-    home = Path(home)
-    journal = _read_journal(home)
-    touched = _touched_units(journal)
-    if touched:
-        raise BackupError(f"cannot abort: the restore into {home} had begun swapping {touched} in — finish it with "
-                          f"`sigil restore --resume {home}`, or replace it with a fresh `sigil restore --force` from "
-                          f"the backup; nothing was discarded")
-    earlier = _replaced_touched(journal)
-    if earlier is None or earlier:
-        what = (f"the interrupted restore it replaced had begun swapping {earlier} in" if earlier
-                else "it replaced an interrupted restore whose journal could not be read")
-        raise BackupError(f"cannot abort: the home {home} is no longer its old self ({what}) — finish this restore "
-                          f"with `sigil restore --resume {home}`, or replace it with a fresh `sigil restore --force` "
-                          f"from the backup; nothing was discarded")
-    _drop_staging(journal)
-    (home / _JOURNAL_NAME).unlink()
+    ``--force`` restore from the backup leaves the home consistent; abort then refuses and deletes nothing. Its verdict
+    is written to the journal (``aborting``) before anything is dropped and the journal goes last, so an abort that is
+    interrupted is finished by running it again; ``--resume`` refuses such a journal."""
     from .spine.atomicio import fsync_dir
-    fsync_dir(home)
+    home = Path(home)
+    jp = home / _JOURNAL_NAME
+    _read_journal(home)                                  # nothing to abort: refuse before touching the home
+    with _target_writers_quiet(home):
+        journal = _read_journal(home)
+        touched = _touched_units(journal)
+        if touched:
+            raise BackupError(f"cannot abort: the restore into {home} had begun swapping {touched} in — finish it "
+                              f"with `sigil restore --resume {home}`, or replace it with a fresh `sigil restore "
+                              f"--force` from the backup; nothing was discarded")
+        earlier = _replaced_touched(journal)
+        if earlier is None or earlier:
+            what = (f"the interrupted restore it replaced had begun swapping {earlier} in" if earlier
+                    else "it replaced an interrupted restore whose journal could not be read")
+            raise BackupError(f"cannot abort: the home {home} is no longer its old self ({what}) — finish this "
+                              f"restore with `sigil restore --resume {home}`, or replace it with a fresh `sigil "
+                              f"restore --force` from the backup; nothing was discarded")
+        # the verdict is durable before anything is dropped: an abort interrupted from here on is finished by
+        # running it again (a resume refuses it), however much of the staging it had removed
+        if not journal.get("aborting"):
+            journal["aborting"] = True
+            _write_journal(jp, journal)
+            _maybe_crash("restore_abort_marked")
+        _drop_staging(journal)
+        jp.unlink()
+        fsync_dir(home)
     return {"home": str(home), "aborted": True}
 
 
