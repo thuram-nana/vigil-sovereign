@@ -514,6 +514,39 @@ def test_an_archive_dir_inside_the_spine_travels_with_the_spine_unit(world, tmp_
     assert read_home(new, archive_dir=new / "spine" / "cold")["verify_archive"][0] is True
 
 
+def test_the_swap_waits_for_the_floor_lock(world, tmp_path, flag):
+    """A restore swaps under the target's floor lock (the lock a signer takes to write the head and the floor): while
+    another holder has it, the verified restore waits — nothing is journaled or swapped — and goes ahead once it is
+    released."""
+    import fcntl
+    import threading
+    import time
+    new = tmp_path / "restored"
+    _restore(world["good"], new)
+
+    def state() -> dict:
+        return {k: v for k, v in _tree(new).items() if not k.endswith(".lock")}
+    before = state()
+    fd = os.open(str(new / "floor.json.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.update(res=_restore(world["good"], new, force=True)), daemon=True)
+    try:
+        t.start()
+        deadline = time.monotonic() + 120
+        while not list(tmp_path.glob(".restore-staging-*/spine/keys/owner.priv")) and time.monotonic() < deadline:
+            time.sleep(0.05)                                   # verified and re-sealed: next is the locked swap
+        assert list(tmp_path.glob(".restore-staging-*/spine/keys/owner.priv")), "the restore never got to its swap"
+        time.sleep(2)
+        assert t.is_alive() and "res" not in out
+        assert state() == before                               # nothing journaled, nothing swapped
+    finally:
+        os.close(fd)
+    t.join(120)
+    assert not t.is_alive() and out["res"]["verified"] is True
+    assert not list(tmp_path.glob(".restore-*"))
+
+
 def test_a_spine_being_written_is_not_restored_over(world, tmp_path, flag):
     """Restoring onto a home whose spine writer lock is held (the services are running) is refused."""
     import fcntl

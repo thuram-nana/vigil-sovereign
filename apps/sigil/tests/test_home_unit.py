@@ -294,9 +294,12 @@ def _child(home: Path, work: Path, *, nonce_ok=True, sigil_home=None, tmpdir=Non
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("scope", ["ok", "wrong_nonce", "wrong_home", "tmp_outside", "wrong_archive", "private_key"])
+@pytest.mark.parametrize("scope", ["ok", "wrong_nonce", "wrong_home", "tmp_outside", "wrong_archive", "private_key",
+                                   "data_key"])
 def test_the_child_refuses_unless_scoped_to_its_unit(homes, tmp_path, scope):
     home = _copy(homes, tmp_path, public_only=(scope != "private_key"))
+    if scope == "data_key":                                   # the spine DEK is key material too
+        (home / "spine" / "keys" / "spine.dek").write_text("a data key")
     other = tmp_path / "other-home"
     other.mkdir()
     res = _child(home, tmp_path / "w", nonce_ok=scope != "wrong_nonce",
@@ -308,7 +311,7 @@ def test_the_child_refuses_unless_scoped_to_its_unit(homes, tmp_path, scope):
         return
     assert res["ok"] is False and res["checks"] == [] and "not scoped to its unit" in res["refused"], res
     phrase = {"wrong_nonce": "nonce", "wrong_home": "SIGIL_HOME", "tmp_outside": "TMPDIR",
-              "wrong_archive": "SIGIL_SPINE_ARCHIVE_DIR", "private_key": "owner.priv"}[scope]
+              "wrong_archive": "SIGIL_SPINE_ARCHIVE_DIR", "private_key": "owner.priv", "data_key": "spine.dek"}[scope]
     assert phrase in res["refused"]
 
 
