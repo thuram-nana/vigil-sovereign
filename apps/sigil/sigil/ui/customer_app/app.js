@@ -21,6 +21,18 @@
   if (!VUI) { if (root) { root.textContent = "VIGIL could not load its interface. Please reload."; } return; }
   // Cookie-auth plane: no embedded/sessionStorage token. VUI.postJSON still sends X-Requested-With + cookie.
   window.VIGIL_CFG = { token: "", api: {} };
+  // A 404 may mean the edge now runs a newer build than this page (a route or file this build expected): let
+  // pwa.js ask the edge — it shows the "new version" notice only when the build really changed.
+  (function () {
+    var P = window.VIGIL_PWA;
+    if (!P || typeof P.notFound !== "function") return;
+    ["getJSON", "postJSON"].forEach(function (k) {
+      var f = VUI[k];
+      VUI[k] = function () {
+        return f.apply(VUI, arguments).catch(function (e) { if (e && e.status === 404) P.notFound(); throw e; });
+      };
+    });
+  })();
   var API = "api/customer"; // relative to the mount
   var state = VUI.store({ who: null, booted: false });
 

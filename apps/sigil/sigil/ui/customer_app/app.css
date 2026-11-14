@@ -120,3 +120,15 @@ body[data-plane="customer"] #app { display: block; }
 .cust-offer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 0;
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); flex-wrap: wrap; }
 .cust-offer p { margin: 2px 0 0; }
+
+/* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
+#vigil-update {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 32px);
+  padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border-strong);
+  background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-2); font-size: 0.92rem;
+}
+#vigil-update button {
+  font: inherit; font-weight: 600; cursor: pointer; padding: 4px 12px; border-radius: 999px; border: 0;
+  background: var(--primary-bg); color: var(--primary-fg);
+}
