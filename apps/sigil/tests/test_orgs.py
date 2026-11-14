@@ -452,6 +452,21 @@ def test_admit_default_deny_non_member_wrong_org_revoked_and_unmapped():
     assert reg.admit(global_role="viewer", username="alice", org_id="acme", permission="view_billing") is False
 
 
+def test_admit_global_leg_counts_only_the_global_roles():
+    # The global leg ignores org_id, so it must admit only the four GLOBAL roles. A per-org role name in the
+    # global position admits nothing — with no membership it reaches no org, not even for `read`.
+    reg = _reg(_store())
+    _seed_member(reg, "acme", "alice", "analyst")
+    for perm in ("read", "view_billing", "view_invoices", "manage_billing", "manage_members", "manage_monitoring"):
+        assert reg.admit(global_role="org_admin", username="mallory", org_id="acme", permission=perm) is False
+        assert reg.admit(global_role="org_admin", username="mallory", org_id="ghost", permission=perm) is False
+    # negative controls: a real global role still passes the global leg with no membership, and the org leg
+    # still admits a member whatever (non-global) role string the caller presents
+    assert reg.admit(global_role="viewer", username="mallory", org_id="acme", permission="read") is True
+    assert reg.admit(global_role="owner", username="owner", org_id="ghost", permission="manage_billing") is True
+    assert reg.admit(global_role="org_admin", username="alice", org_id="acme", permission="read") is True
+
+
 def test_admit_billing_authority_never_implies_testing_authority():
     # THE hard requirement: registering/paying/administering billing must NEVER authorize an assessment.
     # Testing authority is the separate owner-signed, infra-bound target authority (`target_add` /

@@ -7,9 +7,15 @@ default-deny, and that exact keys win over the wildcard patterns.
 """
 from __future__ import annotations
 
+import vigil_core
+from vigil_core import rbac
 from vigil_core.rbac import (
-    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
+    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can, role_can_global,
 )
+
+# Every permission string the vocabulary defines, plus the default-deny probes.
+_ALL_PERMS = sorted(frozenset().union(*PERMISSIONS.values()))
+_PROBES = [*_ALL_PERMS, None, "", "no-such-permission"]
 
 
 # --- role_can / cumulative ordering ------------------------------------------------------------
@@ -146,3 +152,62 @@ def test_org_admin_is_tenant_billing_and_member_admin_never_testing():
     assert PERMISSIONS["org_admin"] <= PERMISSIONS["owner"]   # owner remains the ceiling
     # the four cumulative roles are unchanged by the addition
     assert PERMISSIONS["operator"] <= PERMISSIONS["owner"] and PERMISSIONS["viewer"] <= PERMISSIONS["analyst"]
+
+
+# --- role_can_global: the predicate for a GLOBAL account role ------------------------------------
+def test_role_can_global_matches_role_can_for_every_global_role():
+    # For the four global roles the two predicates agree on every permission (and on the default-deny
+    # probes), so switching a global-role call site to role_can_global changes nothing for them.
+    for role in ROLES:
+        for perm in _PROBES:
+            assert role_can_global(role, perm) == role_can(role, perm), (role, perm)
+
+
+def test_role_can_global_refuses_every_per_org_and_unknown_role():
+    per_org = [r for r in PERMISSIONS if r not in ROLES]
+    assert "org_admin" in per_org
+    for role in [*per_org, "root", "Owner", "", None]:
+        for perm in _PROBES:
+            assert role_can_global(role, perm) is False, (role, perm)
+    # the per-org predicate still answers for a membership role (the org fold binds it to one org)
+    assert role_can("org_admin", "read") is True and role_can("org_admin", "manage_billing") is True
+
+
+def test_role_can_global_refuses_a_per_org_role_that_carries_the_permission(monkeypatch):
+    # Even a per-org role whose permission set includes run_engagement carries nothing in a global position.
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    assert role_can("tenant_tester", "run_engagement") is True
+    assert role_can_global("tenant_tester", "run_engagement") is False
+    assert role_can_global("tenant_tester", "read") is False
+
+
+def test_role_can_global_is_exported_by_the_package():
+    assert vigil_core.role_can_global is rbac.role_can_global
+    assert "role_can_global" in vigil_core.__all__
+
+
+# --- the per-org founder role (owner-approved self-serve testing) ------------------------------------
+def test_founder_is_exactly_org_admin_plus_the_two_testing_permissions():
+    assert "founder" not in ROLES                         # per-org only — never a global account role
+    assert PERMISSIONS["founder"] == frozenset({
+        "read", "view_billing", "view_usage", "view_invoices", "manage_billing", "manage_members",
+        "manage_monitoring", "run_engagement", "view_assessments"})
+    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {"run_engagement", "view_assessments"}
+    assert PERMISSIONS["founder"] <= PERMISSIONS["owner"]  # owner remains the ceiling
+
+
+def test_founder_never_carries_authority_approval_config_or_secrets():
+    for forbidden in ("offense_authority", "approve_a2", "approve_a3", "toggle_guard", "toggle_protected_guard",
+                      "config_nonsecret", "queue_proposal", "manage_org", "manage_users", "secrets", "promote",
+                      "kill_release"):
+        assert role_can("founder", forbidden) is False, f"founder must NOT carry {forbidden}"
+
+
+def test_founder_carries_nothing_in_a_global_position():
+    for perm in _PROBES:
+        assert role_can_global("founder", perm) is False, perm
+    # inside its own org (the per-org predicate) it runs and reads its own assessments
+    assert role_can("founder", "run_engagement") is True and role_can("founder", "view_assessments") is True
+    # and the operator-tier offense routes are therefore never reachable by a founder stamp
+    for path in ("/api/v1/tool/invoke", "/api/launch/preview", "/api/launch/assessment", "/api/killswitch/s/trip"):
+        assert role_can_global("founder", offense_perm_for(path)) is False

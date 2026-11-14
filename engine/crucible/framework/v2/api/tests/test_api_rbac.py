@@ -6,7 +6,7 @@ action to a human. This suite drives the API's HTTP surface directly and proves 
 multi-user model as the offense console: the `vigil up` proxy resolves the caller against the owner-signed
 sovereign accounts spine and STAMPS a hop-signed `X-VIGIL-Role` (bound under the per-run
 `VIGIL_CONSOLE_HOP_KEY`, shared ONLY with the offense children), and the API enforces
-`role_can(stamped_role, offense_perm_for(path))` and ATTRIBUTES the action to the authenticated principal.
+`role_can_global(stamped_role, offense_perm_for(path))` and ATTRIBUTES the action to the authenticated principal.
 
   * NEGATIVE CONTROL: a viewer/analyst-stamped (validly HMAC'd) POST to an operator route → 403, the
     refusal NAMES the principal, and the tool NEVER runs (the gate is not a no-op);
@@ -154,6 +154,26 @@ def test_owner_stamped_invoke_reaches_handler():
         st, body = _post(base, INVOKE, body=_REVERIFY_BODY,
                          extra_headers=_hop_headers("owner", INVOKE))
         assert st == 200 and body["actor"]["role"] == "owner"
+
+
+# --- a per-org role name in the stamped (global) position carries nothing ----------------------------
+def test_per_org_role_stamp_is_refused_even_when_it_carries_the_permission(monkeypatch):
+    # The stamped role is a GLOBAL account role. A per-org role name (the founder, which carries run_engagement
+    # inside its own org; org_admin; a synthetic per-org role carrying run_engagement) is refused under a VALID
+    # hop signature, and the tool never runs.
+    from vigil_core import rbac
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    reg, spy = _registry_with_spy()
+    with _running(registry=reg) as base:
+        for role in ("founder", "org_admin", "tenant_tester"):
+            st, body = _post(base, INVOKE, body={"slug": "x", "tool": "spy_scan", "args": {}},
+                             extra_headers=_hop_headers(role, INVOKE))
+            assert st == 403, f"a per-org role {role!r} must be refused on the gated api, got {st}"
+            assert body["role"] == role and "forbidden" in body["error"]
+        # negative control: an operator stamp under the same key reaches the handler
+        st, body = _post(base, INVOKE, body=_REVERIFY_BODY, extra_headers=_hop_headers("operator", INVOKE))
+        assert st == 200 and "gate" in body
+    assert spy.ran is False
 
 
 # --- forgery / replay: a stamped role that does not verify never lifts -------------------------------

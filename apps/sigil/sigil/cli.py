@@ -2327,6 +2327,33 @@ def cmd_reports(a) -> None:
           f"{'unlocked' if reg.is_unlocked(a.org_id) else 'locked'}")
 
 
+def cmd_org_roles(a) -> None:
+    """`sigil org set-member-role <org> <username> <role> --reason` — owner-sign a member's per-org role (any
+    assignable role, `founder` included; the only way a founder's role is granted or changed).
+    `sigil org demote-founders [--org ORG] --reason` — re-grant `org_admin` to every active founder membership
+    (idempotent; run it before rolling back to a build without the founder role). Each change writes a critical
+    audit row before its owner-signed grant. Prints ids and counts only (never a mailbox)."""
+    import time as _time
+
+    from . import config
+    from .ui.provision import owner_demote_founders, owner_set_member_role
+    store = SpineStore()
+    try:
+        if a.org_cmd == "set-member-role":
+            r = owner_set_member_role(store, a.org_id, a.username, a.role, reason=a.reason, issued_at=_time.time())
+            print(f"  {r['username']} in {r['org_id']}: {r['previous_role'] or '(no membership)'} -> {r['role']} "
+                  f"(owner-signed, seq {r['seq']})")
+            if r["role"] == "founder" and not config.signup_founder_tester_enabled():
+                print("  note: VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is off in this environment; while it is off in "
+                      "the cockpit a founder is admitted as org_admin (no testing)")
+        else:
+            r = owner_demote_founders(store, reason=a.reason, issued_at=_time.time(), org_id=a.org)
+            print(f"  demoted {r['demoted']} founder membership(s) to org_admin in {r['orgs']} org(s)")
+    except ValueError as exc:
+        print(f"  refused: {exc}")
+        sys.exit(2)
+
+
 def cmd_trial(a) -> None:
     """`sigil trial backfill-claims` — owner-sign an email trial claim for every existing customer account
     (active or revoked) whose canonical mailbox is not yet claimed, so an existing account cannot take a
@@ -3738,6 +3765,20 @@ def main(argv=None) -> None:
         _p.add_argument("org_id")
         _p.add_argument("--reason", required=True, help="why (recorded in the owner-signed record)")
         _p.set_defaults(fn=cmd_reports)
+    _p = porg_sub.add_parser("set-member-role",
+                             help="owner-sign a member's per-org role (any per-org role, founder included; the only "
+                                  "way to grant or change a founder)")
+    _p.add_argument("org_id")
+    _p.add_argument("username")
+    _p.add_argument("role", help="viewer | analyst | operator | org_admin | founder")
+    _p.add_argument("--reason", required=True, help="why (recorded in the audit)")
+    _p.set_defaults(fn=cmd_org_roles)
+    _p = porg_sub.add_parser("demote-founders",
+                             help="re-grant org_admin to every active founder membership (idempotent; run before "
+                                  "rolling back to a build without the founder role)")
+    _p.add_argument("--org", default=None, help="only this org (default: every active org)")
+    _p.add_argument("--reason", required=True, help="why (recorded in the audit)")
+    _p.set_defaults(fn=cmd_org_roles)
     ptr = sub.add_parser("trial", help="free-trial owner operations (pricing)")
     ptr_sub = ptr.add_subparsers(dest="trial_cmd", required=True)
     ptr_bf = ptr_sub.add_parser("backfill-claims",

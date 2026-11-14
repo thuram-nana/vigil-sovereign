@@ -108,6 +108,14 @@ fails signup/login **closed**. In `customer.env` also set `VIGIL_CUSTOMER_ALLOWE
 `VIGIL_CUSTOMER_ALLOWED_ORIGINS` to your customer domain (the edge sets a cookie, so its anti-rebind +
 CSRF gates must know the public host/origin).
 
+`cockpit.env.example` ships `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1` together with
+`VIGIL_TRIAL_PREVIEW_ENABLED=1`: a sign-up makes its founding customer a `founder`, who can prove a host it
+controls and scan it; every launch gate still applies. The founder role needs both lines: with the preview
+off, a sign-up grants `org_admin`. On an existing install whose `cockpit.env` predates the preview line, add
+both. To switch founder testing off, set the flag to `0` in `cockpit.env` and run
+`systemctl --user restart sigil-cockpit` (the cockpit reads `cockpit.env` only when it starts). Roles, owner
+verbs and the rollback order: `customer-roles-and-seats.md`.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now sigil-cockpit sigil-customer sigil-public sigil-checkpoint.timer

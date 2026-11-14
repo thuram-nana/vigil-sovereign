@@ -257,6 +257,18 @@ def trial_preview_enabled() -> bool:
     return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def signup_founder_tester_enabled() -> bool:
+    """True iff the founder role is switched on (`VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` affirmative). OFF by
+    default: both sign-up paths grant `org_admin` exactly as before (billing and members, no testing). ON, together
+    with `trial_preview_enabled()`: they grant `founder` (org_admin plus run_engagement and view_assessments), so
+    the founder can prove a host it controls and scan it; every launch gate still applies. ON with the preview OFF:
+    sign-ups still grant `org_admin` (the founder role needs the rule-bound preview trial). Also the kill switch:
+    while it is OFF, an existing founder membership is admitted as `org_admin` (no testing, billing kept), with no
+    spine write. Read on each request by the provisioner process (the cockpit) from its own environment, which
+    systemd loads from cockpit.env when the service starts: a change applies once the cockpit restarts."""
+    return (os.environ.get("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def trial_ip_limit_enabled() -> bool:
     """True iff the opt-in per-IP soft limit on preview trial grants is ON (`VIGIL_TRIAL_IP_LIMIT_ENABLED`
     affirmative; default OFF)."""

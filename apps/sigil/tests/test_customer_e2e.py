@@ -81,6 +81,7 @@ def _full_stack(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_RP_ID", PK_RP)
     monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ORIGINS", PK_ORIGIN)
     monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")
+    monkeypatch.delenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", raising=False)   # code default: org_admin sign-up
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
                  "CUSTOMER_MFA_REPLAY_DIR", "CUSTOMER_PASSKEY_SIGNCOUNT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
@@ -134,6 +135,59 @@ def test_e2e_password_journey_with_stepup_and_billing_not_testing(tmp_path, monk
         # now (still stepped-up) the founder can register a target; the challenge binds the SESSION org
         c, ch = _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})
         assert c == 200 and ch["dns_name"] == "_vigil-challenge.acme.example", (c, ch)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_e2e_founder_flag_signup_registers_a_target_without_owner_promotion(tmp_path, monkeypatch):
+    # With the founder flag on, the signing-up customer is a founder: it registers a target straight away (no
+    # owner promotion), cannot hand testing to a teammate, and with the kill switch (the flag off in the cockpit's
+    # environment) its next testing request is refused.
+    sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
+    monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")              # the founder role needs the preview on
+    try:
+        op = _opener()
+        conf = _signup(op, ep, "founder@acme.com")
+        assert OrgRegistry(sov.store()).membership_role(conf["username"], conf["org_id"]) == "founder"
+        assert _get(op, ep, "/api/customer/billing")[1]["org_id"] == conf["org_id"]
+        c, ch = _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})
+        assert c == 200 and ch["dns_name"] == "_vigil-challenge.acme.example", (c, ch)
+        monkeypatch.delenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED")
+        assert _post(op, ep, "/api/customer/target/challenge", {"host": "acme.example"})[0] == 403
+        assert _get(op, ep, "/api/customer/billing")[1]["org_id"] == conf["org_id"]   # billing kept
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_e2e_a_teammate_admin_cannot_remove_the_founder_under_any_spelling_of_its_name(tmp_path, monkeypatch):
+    # Over the real edge -> hop -> cockpit path, with the production settings (founder flag on, step-up unset): a
+    # teammate org_admin's member/revoke and member/grant of the founder are refused whatever whitespace surrounds
+    # the founder's username, and the founder keeps its org.
+    sov, edge, ep, _sp, spine = _full_stack(tmp_path, monkeypatch)
+    monkeypatch.delenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", raising=False)
+    monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")
+    try:
+        fop = _opener()
+        f = _signup(fop, ep, "founder@acme.com")
+        reg = OrgRegistry(sov.store())
+        assert reg.membership_role(f["username"], f["org_id"]) == "founder"
+        mop = _opener()
+        m = _signup(mop, ep, "mate@acme.com", org="Mate")
+        c, r = _post(fop, ep, "/api/customer/member/grant", {"member_username": m["username"], "role": "org_admin"})
+        assert c == 200, (c, r)
+        reg.revoke_org(m["org_id"])            # the mate's next login binds the founder's org (its only one)
+        mop2 = _opener()
+        c, r = _post(mop2, ep, "/api/customer/login", {"email": "mate@acme.com", "password": "customer-pw-123"})
+        assert c == 200 and r["active_org"] == f["org_id"], (c, r)
+        for name in (f["username"], " " + f["username"], f["username"] + " ", "\t" + f["username"] + "\n"):
+            c, r = _post(mop2, ep, "/api/customer/member/revoke", {"member_username": name})
+            assert c == 403 and "service owner" in r.get("error", ""), (name, c, r)
+            c, r = _post(mop2, ep, "/api/customer/member/grant", {"member_username": name, "role": "viewer"})
+            assert c == 403 and "service owner" in r.get("error", ""), (name, c, r)
+        assert reg.membership_role(f["username"], f["org_id"]) == "founder"
+        assert _get(fop, ep, "/api/customer/billing")[0] == 200
     finally:
         sov.shutdown(); edge.shutdown()
 

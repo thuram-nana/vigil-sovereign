@@ -83,7 +83,7 @@ no framework/strix/sigil) — proven by `test_importing_api_server_loads_no_sigi
 <!-- CLAIM:W16-12 -->
 The offense gated API (framework.v2.api) enforces per-action RBAC against the same owner-signed
 multi-user model as the offense console: a proxy-forwarded per-user request carries a hop-signed role
-(VIGIL_CONSOLE_HOP_KEY) that the API verifies and enforces via role_can(role, offense_perm_for(path)),
+(VIGIL_CONSOLE_HOP_KEY) that the API verifies and enforces via role_can_global(role, offense_perm_for(path)),
 attributing each permitted action to the authenticated principal, and refusing-with-attribution a role that
 lacks the required permission (fail-closed on a forged or unverifiable role assertion). Residual: a direct
 on-host loopback credential-holder presenting no role assertion is owner-equivalent, and identity is only
