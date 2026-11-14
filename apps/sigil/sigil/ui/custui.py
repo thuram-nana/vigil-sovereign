@@ -109,10 +109,28 @@ _APP_CTYPES = {
 _APP_PAGE_CACHE = "no-cache"
 
 
+# The service worker (customer_app/sw.js) keeps ONE stable URL (never ?v=) so the browser can find its update;
+# the edge writes the build id and the shell list into it, so every build is a new worker script.
+_WORKER = "sw.js"
+
+
+def _render_worker(text: str, snap: SiteSnapshot) -> str:
+    """sw.js with its BUILD (the cache name) and SHELL: the root page, then exactly the ?v= files the page names.
+    Built from the edge's own file list, so it can only ever name this build's static files."""
+    build_line, shell_line = 'var BUILD = "__VIGIL_BUILD__";', 'var SHELL = ["__VIGIL_SHELL__"];'
+    if text.count(build_line) != 1 or text.count(shell_line) != 1:
+        # fail at startup: a worker without its build would keep one cache name across every release
+        raise ValueError("customer_app/sw.js must carry exactly one BUILD and one SHELL placeholder line")
+    shell = ["./"] + snap.versioned_refs("index.html")
+    return (text.replace(build_line, f"var BUILD = {json.dumps(snap.build)};")
+                .replace(shell_line, f"var SHELL = {json.dumps(shell)};"))
+
+
 def build_app_snapshot(root=None) -> SiteSnapshot:
     """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
-    asset URLs in the page stamped with their digests, the build id written into the page."""
-    return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES)
+    asset URLs in the page stamped with their digests, the build id written into the page and the worker."""
+    return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
+                        stable=(_WORKER,), templates={_WORKER: _render_worker})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
