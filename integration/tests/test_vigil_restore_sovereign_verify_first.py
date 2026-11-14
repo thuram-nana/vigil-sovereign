@@ -80,6 +80,19 @@ def test_both_planes_verify_the_sovereign_part_before_the_offense_leg(tmp_path, 
     assert calls[2][1] == ["restore", str(src / "sovereign.sglbk"), home, "--archive-dir", str(tmp_path / "ebs")]
 
 
+def test_the_sovereign_part_is_verified_with_the_same_force_its_leg_runs_with(tmp_path, monkeypatch):
+    """`sigil restore --verify-only … HOME` refuses what the restore into HOME would, so it gets the same --force."""
+    src = _two_plane_backup(tmp_path, monkeypatch)
+    home = str(tmp_path / "sigil-home")
+    calls = _record(monkeypatch)
+    assert cli._cmd_restore(_restore_ns(tmp_path, src, force=True)) == 0
+    assert calls[0][1] == ["restore", "--verify-only", str(src / "sovereign.sglbk"), home, "--force"]
+    assert calls[2][1] == ["restore", str(src / "sovereign.sglbk"), home, "--force"]
+    calls.clear()
+    assert cli._cmd_restore(_restore_ns(tmp_path, src)) == 0
+    assert "--force" not in calls[0][1] and "--force" not in calls[2][1]
+
+
 def test_a_sovereign_part_that_does_not_verify_leaves_both_planes_untouched(tmp_path, monkeypatch):
     src = _two_plane_backup(tmp_path, monkeypatch)
     calls = _record(monkeypatch, verify_rc=1)

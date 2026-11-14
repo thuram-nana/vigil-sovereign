@@ -449,6 +449,43 @@ def test_verify_only_checks_the_unit_and_swaps_nothing(world, tmp_path, flag):
         restore_backup(bad, None, PW, vault=None, verify_only=True)
 
 
+def test_verify_only_into_a_home_refuses_what_the_restore_into_it_would(world, tmp_path, flag):
+    """`--verify-only SRC HOME` (what `vigil restore` runs before the offense leg) refuses exactly what the restore into
+    HOME with the same --force would: existing units, an interrupted restore, an existing archive dir, a dir that holds
+    no archive. It writes nothing either way."""
+    home = tmp_path / "home"
+    _restore(world["good"], home)
+    before = _tree(home)
+
+    def vo(target, **kw):
+        return restore_backup(world["good"], target, PW, vault=None, verify_only=True, **kw)
+    with pytest.raises(BackupError, match="refusing to overwrite existing SIGIL state"):
+        vo(home)
+    assert vo(home, force=True)["swapped"] is False
+    assert _tree(home) == before
+    cli = run_in_home(tmp_path, "import sys\nfrom sigil.cli import main\nmain(sys.argv[1:])\n", "restore",
+                      "--verify-only", str(world["good"]), str(home), check=False, SIGIL_PRUNED_RESTORE="1",
+                      SIGIL_SPINE_ARCHIVE_DIR=None, SIGIL_BACKUP_PASSPHRASE=PW)
+    assert cli.returncode == 1 and "refusing to overwrite existing SIGIL state" in cli.stderr, cli.stderr
+    interrupted = tmp_path / "interrupted"
+    interrupted.mkdir()
+    (interrupted / "restore-journal.json").write_text("{}")
+    with pytest.raises(BackupError, match="was interrupted"):
+        vo(interrupted)
+    fresh, ext = tmp_path / "fresh", tmp_path / "ext" / "archive"
+    shutil.copytree(world["src"] / "spine" / "archive", ext)
+    with pytest.raises(BackupError, match="existing archive"):
+        vo(fresh, archive_dir=ext)
+    assert vo(fresh, archive_dir=ext, force=True)["archive_mode"] == "relocated"
+    other = tmp_path / "ext" / "data"
+    other.mkdir()
+    (other / "keep").write_text("live")
+    with pytest.raises(BackupError, match="holds no archive"):
+        vo(fresh, archive_dir=other, force=True)
+    assert not fresh.exists() and (other / "keep").read_text() == "live"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+
+
 def test_an_archive_dir_inside_the_spine_travels_with_the_spine_unit(world, tmp_path, flag):
     new = tmp_path / "restored"
     res = _restore(world["good"], new, archive_dir=new / "spine" / "cold")

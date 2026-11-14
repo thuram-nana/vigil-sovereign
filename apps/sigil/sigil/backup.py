@@ -700,14 +700,14 @@ def _place_archive(staged: Path, staged_arch: Path, carried: bool, new_home: "Pa
         return {"read": in_stage, "target": target, "unit": None, "cleanup": None, "mode": "in-spine"}
     if not carried:
         return {"read": target, "target": target, "unit": None, "cleanup": None, "mode": "adopt"}
-    if verify_only:
-        return {"read": staged_arch, "target": target, "unit": None, "cleanup": None, "mode": "relocated"}
     if (target.exists() or target.is_symlink()) and not force:
         raise BackupError(f"refusing to overwrite the existing archive at {target} — pass force=True (--force) to "
                           f"replace it with the backup's archive")
     if (target.exists() or target.is_symlink()) and not _replaceable_archive_dir(target):
         raise BackupError(f"refusing to replace {target}: it is not empty and holds no archive (no "
                           f"archive.manifest.json) — --archive-dir names the archive's own dir, or a new or empty one")
+    if verify_only:
+        return {"read": staged_arch, "target": target, "unit": None, "cleanup": None, "mode": "relocated"}
     target.parent.mkdir(parents=True, exist_ok=True)
     arch_stage = Path(tempfile.mkdtemp(prefix=".restore-staging-archive-", dir=str(target.parent)))
     shutil.move(str(staged_arch), str(arch_stage / "archive"))
@@ -1033,7 +1033,9 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). Its swap is JOURNALED (resumable, see
     :func:`restore_resume`), and so is the swap of ANY restore that replaces (``--force``) an interrupted one: its
     journal replaces the interrupted restore's before its first swap. ``verify_only`` runs every check into a
-    throwaway staging dir and swaps nothing (``vault`` may then be None)."""
+    throwaway staging dir and swaps nothing (``vault`` may then be None); given ``new_home`` it also refuses whatever
+    the restore into that home with the same ``force`` would (existing units, an interrupted restore, an existing
+    archive dir)."""
     if new_home is None and not verify_only:
         raise BackupError("a restore needs a target home")
     src = Path(src)
@@ -1113,13 +1115,14 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     captured_units = set(rel.split("/", 1)[0] for rel in files)
     if body.get("secrets_kv_b64") is not None:      # re-wrapped (not a file entry) but lands as a top-level unit
         captured_units.add(_SECRETS_KV_FILE)
-    stale_journal = (new_home is not None and not verify_only and (new_home / _JOURNAL_NAME).exists())
+    # the target gates run for --verify-only with a home too: it refuses exactly what the restore into that home
+    # (with the same --force) would refuse, so a caller that verifies first never starts a restore that is refused
+    stale_journal = new_home is not None and (new_home / _JOURNAL_NAME).exists()
     if stale_journal and not force:
         raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore --resume "
                           f"{new_home}`, or replace it with a fresh restore (--force); `sigil restore --abort "
                           f"{new_home}` discards it only while none of its units has been touched")
-    present_units = (sorted(u for u in captured_units if (new_home / u).exists())
-                     if new_home is not None and not verify_only else [])
+    present_units = sorted(u for u in captured_units if (new_home / u).exists()) if new_home is not None else []
     if not force and present_units:
         raise BackupError(
             f"refusing to overwrite existing SIGIL state {present_units} under {new_home} (a restore must not "

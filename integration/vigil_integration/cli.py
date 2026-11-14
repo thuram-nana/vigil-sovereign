@@ -4856,6 +4856,8 @@ def _cmd_restore(args: argparse.Namespace) -> int:
                       file=sys.stderr)
                 return 2
             vargs = ["restore", "--verify-only", str(sov_pre), pre_home]
+            if getattr(args, "force", False):
+                vargs.append("--force")        # verified against the same override the sovereign leg will run with
             if sov_archive_dir:
                 vargs += ["--archive-dir", sov_archive_dir]
             rc = _run_sovereign_leg(vargs, pw)

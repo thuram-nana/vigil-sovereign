@@ -3187,7 +3187,8 @@ def main(argv=None) -> None:
                            "<home>/spine/archive — never this process's SIGIL_SPINE_ARCHIVE_DIR); a backup that "
                            "carries no archive adopts the one already here if it verifies")
     pres.add_argument("--verify-only", dest="verify_only", action="store_true",
-                      help="decrypt and verify the backup (for a hard-pruned home: as one unit) and write nothing")
+                      help="decrypt and verify the backup (for a hard-pruned home: as one unit) and write nothing; "
+                           "with HOME, also refuse whatever the restore into HOME (with the same --force) would")
     pres.add_argument("--resume", default=None, metavar="HOME",
                       help="complete a restore into HOME that was interrupted between its swaps")
     pres.add_argument("--abort", default=None, metavar="HOME",
