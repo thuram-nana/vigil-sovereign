@@ -8,7 +8,8 @@
       "square": true,
       "targets": [
         "apps/sigil/sigil/ui/public_site/assets/favicon.svg",
-        "apps/sigil/sigil/ui/customer_app/brand/favicon.svg"
+        "apps/sigil/sigil/ui/customer_app/brand/favicon.svg",
+        "packages/vigil-ui/brand/favicon.svg"
       ]
     },
     {
@@ -17,7 +18,8 @@
       "ico_sizes": [16, 32, 48, 64],
       "targets": [
         "apps/sigil/sigil/ui/public_site/assets/favicon.ico",
-        "apps/sigil/sigil/ui/customer_app/brand/favicon.ico"
+        "apps/sigil/sigil/ui/customer_app/brand/favicon.ico",
+        "packages/vigil-ui/brand/favicon.ico"
       ]
     },
     {
@@ -70,14 +72,18 @@
       "type": "image/svg+xml",
       "fills": ["#111827"],
       "square": true,
-      "targets": []
+      "targets": [
+        "packages/vigil-ui/brand/vigil-mark.svg"
+      ]
     },
     {
       "name": "vigil-mark-white.svg",
       "type": "image/svg+xml",
       "fills": ["#FFFFFF"],
       "square": true,
-      "targets": []
+      "targets": [
+        "packages/vigil-ui/brand/vigil-mark-white.svg"
+      ]
     }
   ]
 }

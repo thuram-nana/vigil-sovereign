@@ -415,7 +415,13 @@ _STATIC_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".webmanifest": "application/manifest+json; charset=utf-8",
+    # the owner's logo (packages/vigil-ui/brand/, copied from packages/vigil-brand): favicon + header mark
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
 }
+# The brand files the serve dir carries (assemble_serve_dir copies brand/<name> for these suffixes only).
+_BRAND_SUFFIXES = (".svg", ".png", ".ico")
 
 # Text assets worth gzipping on the wire: js/css/html/json compress ~5x and dominate time-to-first-
 # paint over a high-latency link. Anything not listed (images, fonts, already-compressed blobs) is
@@ -768,6 +774,20 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     for name in BUNDLE_JS:                       # deterministic order (BUNDLE_JS is a fixed tuple)
         _digest.update(b"\0" + name.encode("utf-8") + b"\0")
         _digest.update(js_blobs[name].encode("utf-8"))
+    # The owner's logo (favicon + header mark), copied byte-for-byte into serve_dir/brand/ and part of the build id,
+    # so a new logo is a new build. Regular files with an image suffix only; a missing brand/ dir is no logo.
+    brand_src = src_dir / "brand"
+    brand_files: list[Path] = []
+    if brand_src.is_dir():
+        brand_files = sorted(p for p in brand_src.iterdir()
+                             if p.is_file() and not p.is_symlink() and p.suffix.lower() in _BRAND_SUFFIXES)
+    if brand_files:
+        (serve_dir / "brand").mkdir(exist_ok=True)
+    for p in brand_files:
+        blob = p.read_bytes()
+        (serve_dir / "brand" / p.name).write_bytes(blob)
+        _digest.update(b"\0brand/" + p.name.encode("utf-8") + b"\0")
+        _digest.update(blob)
     build_id = _digest.hexdigest()[:12]
     try:
         (serve_dir / ".build-id").write_text(build_id, encoding="utf-8")

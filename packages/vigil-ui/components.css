@@ -29,8 +29,18 @@ button { font: inherit; }
 #brand { grid-area: brand; display: flex; align-items: center; gap: var(--sp-3);
          padding: 0 var(--sp-4); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
          background: var(--bg-1); }
-#brand .logo { width: 30px; height: 30px; border-radius: var(--r-1); flex: 0 0 auto;
-  background: var(--text-0); color: var(--bg-0); display: grid; place-items: center; font-weight: 800; font-size: 15px; }
+#brand .logo { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; }
+#brand .logo img { width: 30px; height: 30px; }
+
+/* the owner's logo (packages/vigil-brand): .for-dark is the white artwork shown on the dark theme, .for-light the
+   dark artwork shown on the light theme — the same two triggers as tokens.css (the toggle, then the OS setting) */
+.vigil-logo.for-light { display: none; }
+:root[data-theme="light"] .vigil-logo.for-dark { display: none; }
+:root[data-theme="light"] .vigil-logo.for-light { display: block; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .vigil-logo.for-dark { display: none; }
+  :root:not([data-theme="dark"]) .vigil-logo.for-light { display: block; }
+}
 #brand .name { font-weight: 700; letter-spacing: .02em; font-size: var(--fs-md); white-space: nowrap; }
 #app.nav-collapsed #brand .name { display: none; }
 

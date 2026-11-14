@@ -8,6 +8,8 @@
   <!-- self-contained, strict-CSP: only same-origin app.js/style.css; no CDN, no inline script -->
   <!-- ?v=__VIGIL_BUILD__ is a per-deploy content hash: a redeploy changes the URL, so a warm browser
        cache can never serve a stale bundle after `vigil up` republishes it. -->
+  <link rel="icon" href="brand/favicon.ico?v=__VIGIL_BUILD__" sizes="any" />
+  <link rel="icon" href="brand/favicon.svg?v=__VIGIL_BUILD__" type="image/svg+xml" />
   <link rel="stylesheet" href="style.css?v=__VIGIL_BUILD__" />
 </head>
 <!-- the server rewrites these placeholders per deployment (token + federated base paths).
