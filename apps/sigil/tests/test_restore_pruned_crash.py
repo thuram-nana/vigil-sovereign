@@ -1,5 +1,6 @@
-"""A restore that swaps a HARD-PRUNED unit in is journaled: the journal is durable before the first swap, every unit
-is marked done after it lands, and the journal goes only after the last. A restore killed at any point between leaves
+"""A restore that swaps a HARD-PRUNED unit in — and any restore that replaces a unit the home already holds — is
+journaled: the journal is durable before the first swap, every unit is marked done after it lands, and the journal
+goes only after the last. A restore killed at any point between leaves
 a home that fails closed (signed-head verification and signing refuse, the CLI refuses everything but `sigil restore`
 and `sigil doctor`) until `sigil restore --resume` completes it — or, before any unit is in, `--abort` discards it.
 
@@ -75,8 +76,9 @@ def world(tmp_path_factory):
     (old_metered / "budgets.json").write_text('{"caps": "old home"}')
     (old_metered / "model_meter").mkdir()
     (old_metered / "model_meter" / "run-1.jsonl").write_text('{"meter": "old home"}\n')
+    old_plain = signed_home(root, pruned=False, name="old-plain")    # an OLD home that was never pruned either
     return {"bk": bk, "old": old, "plain": plain, "bk_plain": bk_plain, "bk_metered": bk_metered,
-            "old_metered": old_metered}
+            "old_metered": old_metered, "old_plain": old_plain}
 
 
 def _tree(root: Path) -> dict:
@@ -622,6 +624,41 @@ def test_a_force_restore_over_an_interrupted_one_is_resumed_into_itself(world, t
     assert not [p for p in target.iterdir() if p.name.startswith(".restore-old-")]
     seen = read_home(target)
     assert seen["verify_checkpoint"][0] is True and seen["wallet_acme"] == 100, seen
+
+
+@pytest.mark.parametrize("old", ["old", "old_plain"])
+@pytest.mark.parametrize("flag", ["1", None])
+def test_every_restore_that_replaces_existing_units_is_journaled(world, tmp_path, flag, old):
+    """A --force restore of a backup that was never pruned, over a home that already holds its units (pruned or not,
+    SIGIL_PRUNED_RESTORE on or off), is journaled too. Killed between moving the old spine aside and renaming the new
+    one in, the home fails closed: nothing signs and no owner key is minted in the spine's place; abort refuses, the
+    old spine is kept aside, and `--resume` makes the home entirely the backup's, signing under the backup's key."""
+    target = tmp_path / "target"
+    shutil.copytree(world[old], target)
+    old_pub = (target / "spine" / "keys" / "owner.pub").read_text()
+    host = tmp_path / "restoring-host"
+    host.mkdir()
+    r = run_in_home(host, RESTORE_KILLED, json.dumps({"src": str(world["bk_plain"]), "home": str(target),
+                                                      "barrier": "restore_moved_aside:spine", "archive_dir": None}),
+                    check=False, SIGIL_PRUNED_RESTORE=flag, SIGIL_SPINE_ARCHIVE_DIR=None)
+    assert r.returncode == KILLED, (r.returncode, r.stderr[-800:])
+    assert (target / "restore-journal.json").is_file() and not (target / "spine").exists()
+    assert (target / ".restore-old-spine" / "keys" / "owner.pub").read_text() == old_pub
+
+    def cli(*args):
+        return run_in_home(target, CLI, *args, check=False, SIGIL_PRUNED_RESTORE=flag, SIGIL_SPINE_ARCHIVE_DIR=None)
+    r = cli("sign")
+    assert r.returncode == 3 and "sigil restore --resume" in r.stderr, (r.returncode, r.stderr)
+    _assert_fails_closed(target)
+    assert not (target / "spine" / "keys" / "owner.pub").exists()          # no owner key minted in its place
+    assert not (target / "spine" / "keys" / "owner.priv").exists()
+    r = cli("restore", "--abort", str(target))
+    assert r.returncode == 1 and "had begun swapping ['spine']" in r.stderr, r.stderr
+    r = cli("restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    assert ((target / "spine" / "keys" / "owner.pub").read_text()
+            == (world["plain"] / "spine" / "keys" / "owner.pub").read_text())
+    _assert_is_the_plain_backup(world, target)
 
 
 def test_cli_verify_only_and_usage(world, tmp_path):

@@ -606,8 +606,9 @@ def _swap_units(units: "list[tuple[Path, Path]]") -> None:
     a WHITELIST — exactly the units the backup captured — so nothing else that turns up in the staging dir (a
     reader's lockfile, a stray entry) ever reaches the target, and every top-level entry already under the target
     that the backup did NOT capture (cache/models/agent journals, other SIGIL_HOME state) is left untouched: a
-    ``--force`` restore can NEVER delete live, un-captured home content. Units are swapped sequentially — each
-    atomic; the set is not jointly atomic (a crash leaves some new, some old, none torn)."""
+    ``--force`` restore can NEVER delete live, un-captured home content. Units are swapped sequentially, each atomic.
+    Only a restore into a home that holds none of the captured units swaps this way (a crash leaves each unit complete
+    or absent, nothing old to lose); one that replaces an existing unit is journaled (:func:`_complete_journaled_swap`)."""
     for staged_unit, dest_unit in units:
         _atomic_swap_unit(staged_unit, dest_unit)
 
@@ -1158,23 +1159,24 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     renamed into place, each atomically. The backup is a strict SUBSET of ``SIGIL_HOME``, so restore replaces
     ONLY those units; every un-captured top-level entry already under ``new_home`` (vector/cursor/config caches,
     other home state) is LEFT INTACT — even under ``--force``. The force-gate fires only when a captured unit
-    already exists, never merely because the home is non-empty. Honest limits: a mid-restore crash leaves each
-    unit complete-old-or-complete-new (never torn) but the set of units is not jointly atomic; and the swap is
-    atomic against a CRASH, not against a concurrent WRITER already mutating ``new_home``. Exactly the captured units
-    are swapped (a whitelist), never whatever else turns up in the staging dir.
+    already exists, never merely because the home is non-empty. A restore that replaces any existing unit swaps them
+    JOURNALED (write-ahead, resumable, see :func:`restore_resume`): a crash during the swap leaves a home that fails
+    closed until ``--resume`` makes it entirely the backup's (or, while none of its units was touched, ``--abort``
+    leaves it entirely its old self); into a fresh home each unit lands complete or not at all. The swap holds the
+    target's floor lock and refuses while its spine writer lock is held (stop the services first). Exactly the
+    captured units are swapped (a whitelist), never whatever else turns up in the staging dir.
 
     HARD-PRUNED spine (SIGIL_PRUNED_RESTORE on; refused before anything is written while it is off): the spine, its
     signed head, the floor, the owner public key(s) and the archive are verified as ONE unit by the real readers in a
     child process scoped to the staged home, holding back the private keys, the KV store and ``sigil.env`` until it
     verifies (:func:`_verify_staged_pruned_unit`); the archive is placed per :func:`_place_staged_archive`
-    (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). Its swap is JOURNALED (resumable, see
-    :func:`restore_resume`), and so is the swap of ANY restore that replaces (``--force``) an interrupted one: its
-    journal replaces the interrupted restore's before its first swap and carries the units that one had already begun
-    swapping in, so it can then only be finished (``--resume``), never aborted onto a home that is no longer entirely
-    its old self. ``verify_only`` runs every check into a
-    throwaway staging dir and swaps nothing (``vault`` may then be None); given ``new_home`` it also refuses whatever
-    the restore into that home with the same ``force`` would (existing units, an interrupted restore, an existing
-    archive dir)."""
+    (``archive_dir``, never this process's ``SIGIL_SPINE_ARCHIVE_DIR``). Its swap is always JOURNALED, and so is the
+    swap of ANY restore that replaces (``--force``) an interrupted one: its journal replaces the interrupted restore's
+    before its first swap and carries the units that one had already begun swapping in, so it can then only be
+    finished (``--resume``), never aborted onto a home that is no longer entirely its old self. ``verify_only`` runs
+    every check into a throwaway staging dir and swaps nothing (``vault`` may then be None); given ``new_home`` it also
+    refuses whatever the restore into that home with the same ``force`` would (existing units, an interrupted restore,
+    an existing archive dir)."""
     if new_home is None and not verify_only:
         raise BackupError("a restore needs a target home")
     src = Path(src)
@@ -1329,10 +1331,12 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             os.chmod(env_path, 0o600)
         units = _captured_swap_list(staged_dir, new_home, captured_units)
         new_home.mkdir(parents=True, exist_ok=True)
-        if pruned or stale_journal:
-            # JOURNALED: a hard-pruned unit always; and any restore that replaces an interrupted one, whose journal
-            # this one's replaces BEFORE the first swap — a crash from here on is resumed into THIS restore, never
-            # back into the one it replaced
+        replaces_units = any((new_home / u).exists() or (new_home / u).is_symlink() for u in captured_units)
+        if pruned or stale_journal or replaces_units:
+            # JOURNALED: a hard-pruned unit always; any restore that replaces an existing unit (a crash between moving
+            # the old unit aside and renaming the new one in must never leave a home with no guard); and any restore
+            # that replaces an interrupted one, whose journal this one's replaces BEFORE the first swap — a crash from
+            # here on is resumed into THIS restore, never back into the one it replaced
             journal = _new_journal(src, staged_dir, placed, units, sh, pruned=pruned)
             with _target_writers_quiet(new_home):
                 # what the interrupted restore had already done to the home is read BEFORE its journal is replaced

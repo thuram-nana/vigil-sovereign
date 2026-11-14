@@ -2924,8 +2924,9 @@ def cmd_restore(a) -> None:
     """Restore a `sigil backup` onto a fresh SIGIL_HOME. VERIFIES the manifest owner-signature + every file
     hash BEFORE writing, and re-verifies the restored spine's chain/binding after; fail-closed on a wrong
     passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.) A backup of a
-    HARD-PRUNED home (SIGIL_PRUNED_RESTORE=1) is verified as one unit before anything is swapped in, and its swap is
-    journaled: `--resume HOME` completes an interrupted one, `--abort HOME` discards one before any unit is in.
+    HARD-PRUNED home (SIGIL_PRUNED_RESTORE=1) is verified as one unit before anything is swapped in. Its swap is
+    journaled, and so is the swap of any restore that replaces existing units: `--resume HOME` completes an
+    interrupted one, `--abort HOME` discards one while the home is still entirely its old self.
     `--verify-only` runs every check and writes nothing."""
     from pathlib import Path
 

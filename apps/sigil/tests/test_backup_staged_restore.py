@@ -112,6 +112,7 @@ def test_force_replaces_captured_units_but_preserves_uncaptured(tmp_path):
     assert (new / "vectors" / "embeddings.db").read_text() == "expensive cache"
     assert (new / "config.json").read_text() == '{"live":"config"}'
     assert _staging_litter(tmp_path) == [], "a successful restore must clean up its staging/aside dirs"
+    assert not (new / "restore-journal.json").exists(), "a completed (journaled) swap leaves no journal behind"
 
 
 def test_a_stray_entry_at_the_staging_root_is_never_swapped_into_the_target(tmp_path, monkeypatch):
