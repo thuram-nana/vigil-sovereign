@@ -792,20 +792,35 @@ def _read_journal(home: Path) -> dict:
         units = j["units"]
         ok = (j.get("schema") == _JOURNAL_SCHEMA and isinstance(units, list)
               and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "started", "done"} <= set(u)
-                      for u in units))
+                      and all(isinstance(u[k], str) for k in ("name", "src", "dst", "digest"))
+                      and all(isinstance(u[k], bool) for k in ("started", "done")) for u in units)
+              and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging"))))
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise BackupError(f"the restore journal at {jp} cannot be read ({e}) — re-run the restore with --force "
                           f"from the backup") from e
     if not ok:
         raise BackupError(f"the restore journal at {jp} is not one this build wrote — re-run the restore with "
                           f"--force from the backup")
-    staging = [Path(d) for d in (j.get("staging"), j.get("archive_staging")) if d]
-    for u in units:                       # every rename the journal names stays inside the restore's own dirs
-        src, dst = Path(u["src"]), Path(u["dst"])
-        if not any(src.is_relative_to(d) for d in staging) or not all(
-                d.name.startswith(".restore-staging-") for d in staging):
+    # every rename the journal names stays inside the restore's own dirs: a unit of the home is one captured
+    # top-level entry of THIS home, staged in the restore's staging dir; a relocated archive is staged in its own
+    # staging dir, which a restore always creates beside the archive's destination
+    staging = Path(j["staging"]) if j.get("staging") else None
+    arch_staging = Path(j["archive_staging"]) if j.get("archive_staging") else None
+    if any(d is not None and not d.name.startswith(".restore-staging-") for d in (staging, arch_staging)):
+        raise BackupError(f"the restore journal at {jp} names a staging dir that is not a restore's own — refusing")
+    for u in units:
+        name, src, dst = u["name"], Path(u["src"]), Path(u["dst"])
+        own = arch_staging if name == "archive" else staging
+        if own is None or not src.is_relative_to(own):
             raise BackupError(f"the restore journal at {jp} names a staged unit outside its staging dirs — refusing")
-        if u["name"] != "archive" and dst.resolve() != (home / u["name"]).resolve():
+        if name == "archive":
+            if dst.resolve().parent != own.resolve().parent:
+                raise BackupError(f"the restore journal at {jp} names an archive destination that is not beside its "
+                                  f"staging dir — refusing")
+        elif name not in CAPTURED_TOP_LEVEL:
+            raise BackupError(f"the restore journal at {jp} names a unit {name!r} that a backup never captures — "
+                              f"refusing")
+        elif dst.resolve() != (home / name).resolve():
             raise BackupError(f"the restore journal at {jp} names a destination outside {home} — refusing")
     return j
 

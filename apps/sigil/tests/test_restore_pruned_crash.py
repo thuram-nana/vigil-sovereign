@@ -268,19 +268,37 @@ def test_resume_refuses_a_swapped_unit_that_changed_before_it_completed(world, t
     _assert_fails_closed(target)
 
 
-@pytest.mark.parametrize("field", ["dst", "src"])
-def test_resume_refuses_a_journal_that_names_paths_outside_the_restore(world, tmp_path, field):
+FORGED = {"dst": "destination outside", "src": "outside its staging", "unit name": "a backup never captures",
+          "staging dir": "not a restore's own", "archive dst": "not beside its staging dir"}
+
+
+@pytest.mark.parametrize("forgery", sorted(FORGED))
+def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(world, tmp_path, forgery):
+    """Every rename a journal names stays inside the restore's own dirs: a unit of the home is one captured top-level
+    entry of THIS home (never a path like ``../x``), staged in a ``.restore-staging-*`` dir; a relocated archive is
+    staged in its own staging dir beside its destination. A journal that says otherwise is refused, and nothing is
+    renamed or removed."""
     target = _target(world, tmp_path)
-    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    arch = tmp_path / "ebs" / "archive" if forgery == "archive dst" else None
+    assert _kill_at(world, target, "restore_after_journal", archive_dir=arch).returncode == KILLED
     jp = target / "restore-journal.json"
     j = json.loads(jp.read_text())
-    unit = next(u for u in j["units"] if u["name"] == "floor.json")
-    unit[field] = str(tmp_path / "elsewhere" / "floor.json")
+    elsewhere = tmp_path / "elsewhere"
+    floor = next(u for u in j["units"] if u["name"] == "floor.json")
+    if forgery in ("dst", "src"):
+        floor[forgery] = str(elsewhere / "floor.json")
+    elif forgery == "unit name":
+        floor["name"], floor["dst"] = "../elsewhere", str(elsewhere)        # resolves to (home / name)
+    elif forgery == "staging dir":
+        j["staging"] = str(tmp_path)                                         # still holds every staged unit
+    else:
+        next(u for u in j["units"] if u["name"] == "archive")["dst"] = str(elsewhere / "archive")
     jp.write_text(json.dumps(j))
-    r = _cli(target, "restore", "--resume", str(target))
-    assert r.returncode == 1 and "refusing" in r.stderr and ("destination outside" if field == "dst"
-                                                              else "outside its staging") in r.stderr, r.stderr
-    assert not (tmp_path / "elsewhere").exists()
+    before = _tree(tmp_path)
+    for action in ("--resume", "--abort"):
+        r = _cli(target, "restore", action, str(target))
+        assert r.returncode == 1 and "refusing" in r.stderr and FORGED[forgery] in r.stderr, (action, r.stderr)
+    assert not elsewhere.exists() and _tree(tmp_path) == before
 
 
 def test_a_new_restore_over_an_interrupted_one_needs_force(world, tmp_path):
