@@ -193,10 +193,8 @@ def seam_base_agreement(repo: "Path | str | None" = None, home: "Path | None" = 
     if len({os.path.realpath(s) for s in seams.values()}) > 1:
         listed = "; ".join(f"{u} -> {display(s)}" for u, s in seams.items())
         issues.append(
-            f"seam base: the configured units disagree on the seam base ({listed}). A lease the cockpit "
-            f"publishes in one tree is never seen by a drain or engine reading another: completions settle "
-            f"nothing (credits held), a cancel's started-check and settlement marker land in a different tree, "
-            f"and backups miss the live one. Set VIGIL_BASE_DIR to ONE absolute directory for all of them (the "
-            f"shipped units default it to %h/.sigil/credit-lease) and re-copy any unit installed from an older "
-            f"checkout.")
+            f"seam base: the configured units disagree on the seam base ({listed}). Every unit must use the "
+            f"one seam: the cockpit's leases and markers, the settle drain's settles, the engine and the backups "
+            f"all read and write it. Set VIGIL_BASE_DIR to ONE absolute directory for all of them (the shipped "
+            f"units default it to %h/.sigil/credit-lease) and re-copy any unit installed from an older checkout.")
     return section, issues

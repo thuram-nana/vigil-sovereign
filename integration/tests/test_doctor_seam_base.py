@@ -1,7 +1,6 @@
 """E3a — `vigil doctor` REFUSES (a HARD issue, `ok` False) when the configured money-seam units disagree on the
-seam base. A lease the cockpit publishes in one tree is never seen by a drain reading another: every completion
-becomes a no-op (credits held), a cancel's started-check + settlement marker land in another tree, and backups
-miss the live one. The check reconstructs each unit's process environment from the unit text the way systemd
+seam base: every unit must use the one seam (the cockpit's leases and markers, the settle drain's settles, the
+engine and the backups all read and write it). The check reconstructs each unit's process environment from the unit text the way systemd
 does (Environment= expands %h, EnvironmentFile values are literal and override it, WorkingDirectory anchors a
 relative value, ExecStart's --base-dir ${VAR} wins) and the shared resolver picks. DEFAULT-OFF: a host with no
 installed seam unit and none of their env files reports nothing.
