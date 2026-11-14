@@ -260,6 +260,27 @@ def test_pause_substrate_default_base_is_the_lease_readers_default(monkeypatch, 
     assert _clp._seam_base("explicit") == "explicit"            # only None is defaulted
 
 
+@pytest.mark.parametrize("env", ["", "rel/seam", "/abs/seam"], ids=["unset", "relative", "absolute"])
+def test_every_plane_resolves_one_absolute_seam_base(monkeypatch, tmp_path, env):
+    # E3a: the keyless engine (lease verify, in-flight pause halt, AEGIS publish dir) and the both-plane glue
+    # (pause substrate, WARDEN/strix base) resolve the seam through the ONE vigil_core resolver — ABSOLUTE, so a
+    # process started from another working directory (every shipped unit has its own) cannot drift to another tree.
+    from framework.v2 import engage as E
+    from framework.v2 import launch_lease as LL
+    from framework.v2.aegis import monitoring_authority_check as MAC
+    from vigil_core.seam_base import resolve_seam_base
+    from vigil_integration import strix_runtime, warden_gate
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VIGIL_BASE_DIR", env)
+    monkeypatch.delenv("VIGIL_MONITORING_PUBLISH_DIR", raising=False)
+    want = str(Path(env) if Path(env).is_absolute() else tmp_path / (env or ".vigil-live"))
+    assert resolve_seam_base() == want
+    got = {"launch_lease": LL._base_dir(), "engage_pause": E._engage_pause_base(),
+           "aegis": str(MAC.published_dir().parent.parent), "pause_substrate": str(_clp._seam_base(None)),
+           "warden": warden_gate._strix_base_dir(), "strix_runtime": strix_runtime.resolve_base_dir()}
+    assert got == dict.fromkeys(got, want), got
+
+
 def _live_rig(monkeypatch, owner, tmp_path):
     """The production shape: ONE seam (``VIGIL_BASE_DIR``) both planes agree on, a lease + authority valid on the
     REAL clock (the default-argument runner and poller read ``time.time()``), and a process sharded for ORG."""

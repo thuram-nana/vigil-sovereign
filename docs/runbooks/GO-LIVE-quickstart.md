@@ -118,6 +118,36 @@ systemctl --user status sigil-cockpit sigil-customer sigil-public
 The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — start it
 on this host and keep it **private** (SSO/VPN), never a public face.
 
+**One money-seam directory (`VIGIL_BASE_DIR`).** Every process that touches a customer launch — the
+cockpit (`sigil serve`, which publishes the credit lease and writes pause/settlement markers), the settle
+drain, the offense engine (`vigil up`, `vigil launch-drain`) and the offense backup — must use the SAME
+seam directory, or a lease published in one tree is never seen by the drain reading another (every
+completion settles nothing and the credits stay held). The shipped `sigil-*` / `vigil-settle-drain` /
+`vigil-backup*` units all set `VIGIL_BASE_DIR=%h/.sigil/credit-lease`; in any shell that runs a `vigil` command,
+or a `sigil` command that writes the seam (`sigil eval-grant arm|revoke|reconcile`, `sigil ops-sweep
+reservations`), export the same value:
+
+```bash
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"   # the value the shipped units set — keep ONE value
+mkdir -p "$VIGIL_BASE_DIR" && chmod 700 "$VIGIL_BASE_DIR"
+vigil doctor                                        # HARD issue if the installed units disagree on it
+```
+
+Every `vigil` verb's `--base-dir` defaults to `$VIGIL_BASE_DIR` (else `./.vigil-live`), and `vigil up` hands its
+base to every backend it starts, so one export covers the console, the engines and the cockpit `vigil up`
+spawns. `vigil up` refuses an explicit `--base-dir` that names a different directory than `$VIGIL_BASE_DIR`. The
+operator console unit (`vigil-command.service`) reads `<repo>/.vigil-live/service.env`: add the same absolute
+`VIGIL_BASE_DIR=` line there. Those `sigil` seam writers refuse to run when the seam they would write is not the
+one the configured units use, and print the `export` to run first.
+
+To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
+`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`, the console's `service.env`) or drop-in
+(`systemctl --user edit <unit>`) — never in only some of them. The settle drain refuses to start when a leftover
+`VIGIL_SETTLE_BASE_DIR` names a different directory. If an earlier install left a `~/.sigil/.vigil-live`
+directory (the cockpit's old working-directory default), the cockpit published there: reconcile its
+reservations (`sigil ops-sweep reservations --base-dir ~/.sigil/.vigil-live`) before you rely on the new seam.
+Never delete that directory: it also holds the cockpit's own passkey store and bootstrap token.
+
 ## 7. Reverse proxy + TLS (three separate origins)
 
 Each surface gets its own TLS vhost (templates in `apps/sigil/deploy/reverse-proxy/`), forwarding to the

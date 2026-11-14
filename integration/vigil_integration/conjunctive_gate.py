@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 # existing `from vigil_integration.conjunctive_gate import ...` keeps working, byte-identical semantics.
 from vigil_core.gate import CrucibleResult, DestructionOutcome, GateVerdict, conjunctive_decide
 from vigil_core.metrics import record_gate_verdict
+from vigil_core.seam_base import resolve_seam_base
 
 from .warden_gate import DEFAULT_CEILING, DEFAULT_FLOOR, ToolDecision, decide_tool
 
@@ -258,7 +259,7 @@ def build_offense_gate(
                     owner_pubkeys_of,
                     verify_live_offense_attested,
                 )
-                _base = base_dir or os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+                _base = resolve_seam_base(base_dir)
                 _ok_att, _att_reason = verify_live_offense_attested(
                     _base, engagement_slug=slug,
                     trusted_owner_pubkeys=owner_pubkeys_of(trust_root), now=_as_epoch(now))
@@ -302,7 +303,7 @@ def build_offense_gate(
             # (never a witness_quorum_fn — fix D). Absent/expired/revoked ⇒ no acks ⇒ the 6b/6c vetoes ENFORCE
             # (fail-closed). A grant can lift ONLY the CLOSED-ENUM 6b/6c vetoes; the never-liftable floors
             # (egress / m-of-n destruction quorum / GET-only write) are separate conjuncts it never feeds.
-            _grant_base = base_dir or os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            _grant_base = resolve_seam_base(base_dir)
             wq_ack = None
             bl_ack = None
             try:

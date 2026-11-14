@@ -3600,6 +3600,10 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     base = Path(base_dir)
     ui_dir = base.joinpath(*_LIVE_UI_SUBDIR)
     logs = ui_dir / "logs"
+    # Every backend this process tree spawns gets THIS base as its VIGIL_BASE_DIR (the cross-plane seam), so the
+    # cockpit publishes leases / authorizations / eval grants where the console and the engines it launches
+    # (handed the same directory as VIGIL_LIVE_DIR / --base-dir) read them — whatever the ambient env or CWD.
+    seam_env = {"VIGIL_BASE_DIR": str(base.resolve())}
 
     # resolve the subsystem console-scripts (in their own venvs) — never import the subsystems.
     try:
@@ -3650,7 +3654,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                     pass
 
     def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
-        return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env=extra_env)
+        return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env={**(extra_env or {}), **seam_env})
 
     # E1 — mint the edge→provisioner hop secret ONCE per `vigil up --with-saas`, BEFORE the cockpit spawn
     # so the cockpit's /api/provision/* routes verify under it. Handed ONLY to the cockpit (here) and the
@@ -3663,7 +3667,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                     "--allow-host", authority, "--allow-origin", origin]
     cockpit, cockpit_q = _spawn_capture(
         cockpit_argv, logs / "sovereign-cockpit.log",
-        extra_env=({"VIGIL_PROVISION_HOP_KEY": provision_hop_key} if with_saas else None))
+        extra_env={**({"VIGIL_PROVISION_HOP_KEY": provision_hop_key} if with_saas else {}), **seam_env})
     procs.append(("sovereign-cockpit", cockpit))
     token = _await_token(cockpit_q, cockpit)
     if not token:
@@ -3701,7 +3705,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # never SILENTLY falls back to the non-graph engine when `vigil` isn't on the child's inherited PATH.
     vigil_bin = _console_vigil_bin(crucible_bin)
     console_static = {"VIGIL_LIVE_DIR": str(base.resolve()),
-                      "VIGIL_CONSOLE_TOKEN": token, _CONSOLE_HOP_KEY_ENV: hop_key}
+                      "VIGIL_CONSOLE_TOKEN": token, _CONSOLE_HOP_KEY_ENV: hop_key, **seam_env}
     if vigil_bin:
         console_static["VIGIL_BIN"] = vigil_bin
     console_env = {**offense_llm_env, **console_static}
@@ -3713,7 +3717,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # refuse EVERY proxy-forwarded per-user request (role present, unverifiable) — so the key must reach it
     # exactly as it reaches the console. It carries NO session token: the api gates on loopback + same-origin
     # (+ optional CRUCIBLE_API_KEY), ignoring VIGIL_CONSOLE_TOKEN.
-    api_static = {_CONSOLE_HOP_KEY_ENV: hop_key}
+    api_static = {_CONSOLE_HOP_KEY_ENV: hop_key, **seam_env}
     api_env = {**offense_llm_env, **api_static}
     if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=api_env):
         return 1

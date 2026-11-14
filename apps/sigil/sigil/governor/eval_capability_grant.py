@@ -41,10 +41,11 @@ SEAL signs under ``eval-capability-grant-seal``.
 from __future__ import annotations
 
 import contextlib
-import os
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+
+from vigil_core.seam_base import resolve_seam_base
 
 from ..reuse import IntegrityError, assert_no_offense, canonical_json, verify_one
 from . import key_history as _kh
@@ -428,7 +429,7 @@ class EvalCapabilityGrant:
     # -- seam publication (so the OFFENSE plane can verify the public signed material) -----------------
 
     def _base_dir(self) -> str:
-        return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+        return resolve_seam_base()
 
     def _seam_path(self, engagement_slug: str) -> Optional[Path]:
         from vigil_integration.live.eval_capability_grant import eval_capability_grant_path

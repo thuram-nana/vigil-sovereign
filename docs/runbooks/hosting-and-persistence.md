@@ -39,11 +39,15 @@ the spine** — never the source of truth.
 - `SIGIL_HOME` (default `~/.sigil`) — private state: spine, owner keys, the sealed DEK, embedded
   Qdrant/graph/CVE, the customer session/token ledgers. **This is the one directory that must be on
   durable, backed‑up storage.**
-- `VIGIL_BASE_DIR` (default `.vigil-live`) — published owner‑signed artifacts + the cross‑plane seam
+- `VIGIL_BASE_DIR` (default `.vigil-live`, relative to the process's working directory; the shipped
+  units all set `%h/.sigil/credit-lease`) — published owner‑signed artifacts + the cross‑plane seam
   (credit leases and their settlement + pause markers, monitoring authorities, the offense engine's own
   keys and state). Durable, and **not** rebuildable from the spine: the sovereign `sigil backup`
   deliberately excludes it, and the offense `vigil backup` captures it only when its `--base-dir` is this
-  directory (`vigil doctor` notes a mismatch). Launch settlement does not rely on it alone: a settle is
+  directory (`vigil doctor` notes a mismatch). Every plane resolves it through one resolver
+  (`vigil_core.seam_base`), and every process on the launch path must see the SAME value — `vigil doctor`
+  refuses when the installed units disagree. Every `vigil` verb's `--base-dir` defaults to it, and
+  `vigil up` passes its base to every backend it starts. Launch settlement does not rely on it alone: a settle is
   decided under a cross‑process lock beside the spine (`<stem>.settle.lock`), and a settle that moved
   money (a refund, or any postpaid settle) is on the spine. With `VIGIL_SETTLE_SPINE_RECORD=1` (default
   off) every fresh settle — a completed run's zero‑refund settle included — first writes an

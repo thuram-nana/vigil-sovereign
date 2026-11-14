@@ -716,6 +716,10 @@ def cmd_eval_grant(a) -> None:
         }, indent=2))
         return
 
+    # arm / revoke / reconcile publish to the seam the offense plane reads: refuse before anything is appended
+    # or published when this shell would write a different tree than the configured units use.
+    _writer_seam_base(f"eval-grant {a.action}")
+
     # Fail CLOSED on a locked/tampered vault (mirror `mesh`): never mint a fresh owner identity over an
     # existing one — that would FORK the trust root and sign under a key no verifier trusts.
     owner = owner_keypair()
@@ -1220,6 +1224,42 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
+def _writer_seam_base(verb: str) -> str:
+    """The seam base for an operator-run command that WRITES the cross-plane seam (an eval grant / attestation
+    publication, its rollback floor, a reservation refund's markers). The ONE resolver picks it ($VIGIL_BASE_DIR,
+    else ./.vigil-live); this refuses (exit 2), before anything is written, when that is not the directory the
+    configured seam units use — e.g. a shell without the VIGIL_BASE_DIR the shipped units set. Written there, a
+    revoke or withdrawal would never reach the publication the offense plane reads, and a reconcile would clear
+    the `vigil doctor` alarm over the wrong tree. Nothing configured on this host (no installed seam unit, no env
+    file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for the settle drain."""
+    import os
+
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        base = require_seam_base()
+    except SeamBaseError as e:
+        print(f"{verb}: {e}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_integration.seam_base_units import seam_base_agreement
+    except ImportError:          # the unit-agreement probe is not installed here: nothing to compare against
+        return base
+    units = seam_base_agreement()[0]["units"]
+    seams = {os.path.realpath(s) for s in units.values()}
+    if len(seams) > 1:
+        print(f"{verb}: refusing — the configured units disagree on the seam base "
+              f"({'; '.join(f'{u} -> {s}' for u, s in units.items())}); `vigil doctor` names them. Set ONE "
+              f"VIGIL_BASE_DIR for every unit first, then re-run with it exported.", file=sys.stderr)
+        sys.exit(2)
+    if seams and os.path.realpath(base) not in seams:
+        (unit_seam,) = seams
+        print(f"{verb}: refusing — this shell resolves the seam base to {base}, but the configured units use "
+              f"{unit_seam}. Re-run with `export VIGIL_BASE_DIR={unit_seam}` so the publication lands where the "
+              f"offense plane reads it.", file=sys.stderr)
+        sys.exit(2)
+    return base
+
+
 def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
     """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
     Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
@@ -1328,6 +1368,16 @@ def cmd_settle_drain(a) -> None:
     # and the dead-man alarms.
     _require_expanded_path(a.spool, "--spool", required=True)
     _require_expanded_path(a.base_dir, "--base-dir", required=False)
+    # E3a: the seam comes from the ONE resolver the cockpit publishes the lease through (--base-dir >
+    # $VIGIL_BASE_DIR > .vigil-live). Settings that disagree (a legacy VIGIL_SETTLE_BASE_DIR naming another tree,
+    # or --base-dir vs $VIGIL_BASE_DIR) are refused here, before anything is claimed or archived — a drain
+    # pointed at the wrong tree finds no lease and archives every completion unsettled.
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        require_seam_base(a.base_dir or None)
+    except SeamBaseError as e:
+        print(f"settle-drain: {e}", file=sys.stderr)
+        sys.exit(2)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1411,7 +1461,9 @@ def cmd_ops_sweep(a) -> None:
                   file=sys.stderr)
             sys.exit(2)
         from .ui.launch_gate import LaunchGate
-        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or None))
+        # An explicit --base-dir is the operator's deliberate tree (e.g. an older install's); without one the
+        # sweep must read the markers where the configured units write them.
+        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or _writer_seam_base("ops-sweep reservations")))
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
@@ -3283,7 +3335,8 @@ def main(argv=None) -> None:
                           "* only if the delegation itself is wildcard-scoped)")
     psd.add_argument("--base-dir", default="",
                      help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
-                          "(default: $VIGIL_BASE_DIR)")
+                          "(default: $VIGIL_BASE_DIR, else ./.vigil-live; must agree with $VIGIL_BASE_DIR "
+                          "and any legacy $VIGIL_SETTLE_BASE_DIR, or the drain refuses)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
     pos = sub.add_parser("ops-sweep",
@@ -3295,7 +3348,9 @@ def main(argv=None) -> None:
     pos.add_argument("--ttl", type=float, default=86400.0,
                      help="grace seconds past lease not_after / checkout start before an item is flagged")
     pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")
-    pos.add_argument("--base-dir", default="", help="(reservations) the credit-lease seam root")
+    pos.add_argument("--base-dir", default="",
+                     help="(reservations) the credit-lease seam root (default: $VIGIL_BASE_DIR, which must name the "
+                          "seam the configured units use, or the sweep refuses)")
     pos.add_argument("--completion-spool", default="",
                      help="(reservations) the settle-drain completion spool; leases with a pending completion "
                           "are never refunded (required with --apply)")

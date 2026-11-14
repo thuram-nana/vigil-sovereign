@@ -31,6 +31,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from vigil_core.seam_base import resolve_seam_base
+
 from .model import SecurityJob
 
 _ATTEMPTS_DIRNAME = ".engage-attempts"
@@ -59,7 +61,7 @@ def _mark_attempt(base_dir: Any, slug: str, nonce: str) -> "tuple[int, bool]":
     paths that mint NO slot — the FAIL-SAFE OSError (``(1, False)``) and SATURATED (``(MAX+1, False)``) returns —
     so a later in-flight-pause rollback (:func:`_release_attempt`) can be gated on it and never unlink a slot
     THIS attempt did not create (which would be a PRIOR attempt's, silently eroding crash budget)."""
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     key = hashlib.sha256((str(slug) + "\x00" + str(nonce)).encode("utf-8")).hexdigest()
     try:
         d = Path(base) / _ATTEMPTS_DIRNAME
@@ -97,7 +99,7 @@ def _release_attempt(base_dir: Any, slug: str, nonce: str, attempt: int) -> None
     or a lost refund). No nonce / bad attempt ⇒ no-op."""
     if not nonce or attempt < 1:
         return
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     with contextlib.suppress(OSError):
         (Path(base) / _ATTEMPTS_DIRNAME / f"{_attempt_key(slug, nonce)}.{attempt}.json").unlink()
 
@@ -110,7 +112,7 @@ def _record_resume_required(base_dir: Any, slug: str, nonce: str) -> None:
     on the next re-drive (``attempt > 1`` then holds) — money-safe (never a double-charge)."""
     if not nonce:
         return
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     with contextlib.suppress(OSError):
         d = Path(base) / _ATTEMPTS_DIRNAME
         d.mkdir(parents=True, exist_ok=True)
@@ -126,7 +128,7 @@ def _resume_required(base_dir: Any, slug: str, nonce: str) -> bool:
     consume and leave the floor un-burned (a replayable lease). No nonce ⇒ False."""
     if not nonce:
         return False
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     try:
         return (Path(base) / _ATTEMPTS_DIRNAME / f"{_attempt_key(slug, nonce)}.{_RESUME_MARK_SUFFIX}.json").is_file()
     except OSError:
@@ -228,7 +230,7 @@ def _launch_governance_signers(base_dir: Any) -> "list[tuple[str, str]]":
     from vigil_integration.live.governance_identity import (
         DEFAULT_GOVERNANCE_KEY_FILE, GOVERNANCE_KEY_ID, load_or_create_governance_keypair,
     )
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     kp = load_or_create_governance_keypair(path=str(Path(base) / DEFAULT_GOVERNANCE_KEY_FILE))
     return [(GOVERNANCE_KEY_ID, kp.private_key_b64)]
 
@@ -241,7 +243,7 @@ def _completion_spool(base_dir: Any, completion_spool_dir: Any, slug: str) -> st
     completion out of a shared incoming/ dir."""
     if completion_spool_dir is not None:
         return str(completion_spool_dir)
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     return str(Path(base) / "completion-spool" / str(slug))
 
 
@@ -250,7 +252,7 @@ def _finding_spool(base_dir: Any, finding_spool_dir: Any, slug: str) -> str:
     (``base/finding-spool/<slug>/``) for the same per-tenant isolation as the completion spool."""
     if finding_spool_dir is not None:
         return str(finding_spool_dir)
-    base = base_dir if base_dir is not None else (os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+    base = base_dir if base_dir is not None else resolve_seam_base()
     return str(Path(base) / "finding-spool" / str(slug))
 
 

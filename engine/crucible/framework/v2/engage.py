@@ -456,7 +456,8 @@ def _engage_authority_trust_root(slug: str) -> object | None:
             owner_pubkeys_of as _owner_pubkeys_of,
             verify_live_offense_attested as _verify_live_offense_attested,
         )
-        _base = _os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+        from vigil_core.seam_base import resolve_seam_base as _resolve_seam_base
+        _base = _resolve_seam_base()
         _ok_att, _att_reason = _verify_live_offense_attested(
             _base, engagement_slug=slug, trusted_owner_pubkeys=_owner_pubkeys_of(trust_root),
             now=_time.time())
@@ -508,7 +509,8 @@ def _engage_pause_base() -> str:
     """pause/resume PR-3 — the cross-plane seam base the pause substrate + the lease verify SHARE (matches
     ``launch_lease._base_dir()``), so the in-flight halt looks a pause up under the SAME base the lease was
     published to."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
 
 
 def _engage_lease_nonce(slug: str, seed_url: str, *, launch_nonce: "str | None" = None) -> "str | None":
@@ -2284,7 +2286,8 @@ def prompt_callback_from_args(args: argparse.Namespace) -> PromptCallback | None
     # The shared engagement base dir both planes agree on (``vigil up`` exports VIGIL_BASE_DIR for both);
     # matches apps/sigil offense_approvals._base_dir + the console. The authority is the owner's PUBLIC key
     # only (safe to load offense-side); absent/malformed ⇒ None ⇒ the fail-closed default (GET-only) stands.
-    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base_dir = resolve_seam_base()
     authority = load_authority(base_dir)
     if authority is None:
         return None  # no owner authority provisioned ⇒ fail-closed default (destructive default-deny)
