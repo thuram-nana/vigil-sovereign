@@ -15,7 +15,8 @@ body[data-plane="customer"] #app { display: block; }
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 16px 0; border-bottom: 1px solid var(--border, #2a2a2a); margin-bottom: 24px;
 }
-.cust-topbar .brand { font-weight: 700; letter-spacing: 0.08em; }
+.cust-topbar .brand { display: flex; align-items: center; }
+.cust-topbar .brand img { height: 22px; width: auto; }
 .cust-topbar nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .cust-topbar .spacer { flex: 1 1 auto; }
 

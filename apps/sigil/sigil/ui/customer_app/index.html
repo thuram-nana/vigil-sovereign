@@ -4,7 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark light" />
+  <!-- the browser chrome takes the app background (tokens.css --bg-0, dark and light) -->
+  <meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f5f7fb" media="(prefers-color-scheme: light)" />
   <title>VIGIL</title>
+  <!-- installable app (PWA): the manifest, the owner's icons, and the iOS home-screen tags -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="brand/favicon.ico" sizes="any" />
+  <link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="brand/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <meta name="apple-mobile-web-app-title" content="VIGIL" />
   <!-- Self-contained + strict-CSP. The CSP / nosniff / no-referrer headers are set by the edge as RESPONSE
        HEADERS (never a <meta>). Asset refs are RELATIVE (no leading slash) so they resolve against the mount
        in dev (served under /customer/) and in prod (served at / on the separate customer origin). No CDN, no
@@ -15,7 +27,7 @@
   <link rel="stylesheet" href="app.css" />
 </head>
 <!-- Config via CSP-safe data-* attributes (read by the external app.js at boot — no inline script). -->
-<body data-plane="customer">
+<body data-plane="customer" data-build="__VIGIL_BUILD__">
   <noscript>VIGIL requires JavaScript. It talks only to this site (no external calls).</noscript>
   <div id="app" aria-live="polite"></div>
   <script src="ui.js"></script>

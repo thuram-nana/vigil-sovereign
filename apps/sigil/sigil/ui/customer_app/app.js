@@ -696,7 +696,11 @@
       : h("button.cust-nav-link", { type: "button", text: "Sign in", onClick: function () { nav("#/login"); } });
     return h("div.cust-shell", {}, [
       h("div.cust-topbar", {}, [
-        h("span.brand", { text: "VIGIL" }),
+        // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
+        h("span.brand", {}, [
+          h("img.vigil-logo.for-dark", { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" }),
+          h("img.vigil-logo.for-light", { src: "brand/vigil-wordmark.svg", alt: "VIGIL", width: "99", height: "22" }),
+        ]),
         h("nav", {}, links),
         h("span.spacer"),
         authed() ? ntfWidget() : null,
