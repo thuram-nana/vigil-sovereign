@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -46,6 +46,7 @@ from vigil_core.posture import is_production_posture  # noqa: E402
 from ..bridge.daemon import bind_ok  # noqa: E402
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
+from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
 #: Seconds a customer is told to wait (`Retry-After`) when the provisioner is not listening — the cockpit restarts
@@ -98,7 +99,20 @@ _APP_CTYPES = {
     ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
     ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
     ".wav": "audio/wav",   # the notification chime (same-origin media; strict CSP's default-src 'self' covers it)
+    ".webmanifest": "application/manifest+json",   # the install manifest (served under default-src 'self')
 }
+# Cache policy for the app (read ONCE at startup into a content-hashed snapshot — ui/static_site.py):
+#   * index.html and any asset requested WITHOUT ?v=: `no-cache` + ETag — revalidated on every load, so a release
+#     is picked up at the next load (a 304 costs no body);
+#   * an asset requested with ?v=<its current digest>: immutable for a year; with any other v: 404 + no-store;
+#   * /version.json, /api/*, the probes and every JSON answer: no-store (see _no_store).
+_APP_PAGE_CACHE = "no-cache"
+
+
+def build_app_snapshot(root=None) -> SiteSnapshot:
+    """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
+    asset URLs in the page stamped with their digests, the build id written into the page."""
+    return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES)
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -200,6 +214,8 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         self.oidc_state_dir = Path(str(sessions_dir)).parent / "customer-oidc-state"
         # E3b-2 — the edge's single-use WebAuthn challenge ledger (passkey enroll + login), a SIBLING dir.
         self.passkey_challenge_dir = Path(str(sessions_dir)).parent / "customer-passkey-challenges"
+        # the app, read ONCE: what this process serves until it stops (one consistent build; see static_site)
+        self.app = build_app_snapshot()
         port = self.server_address[1]
 
         def _hp(h: str) -> str:
@@ -232,15 +248,23 @@ class CustomerHandler(BaseHTTPRequestHandler):
         set to do. The static SPA assets keep their own caching."""
         return urlparse(self.path).path.startswith("/api/") or ctype.startswith("application/json")
 
-    def _send(self, code: int, body: bytes, ctype="application/json"):
+    def _send(self, code: int, body: bytes, ctype="application/json", *, cache: "str | None" = None,
+              etag: "str | None" = None):
+        """One response. ``cache``/``etag`` are the static app's (ignored where `_no_store` applies); a 304 carries
+        the full representation's length and no body."""
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Vigil-Build", self.server.app.build)
         if self._no_store(ctype):
             self.send_header("Cache-Control", "no-store")
+        elif cache:
+            self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
         ra = getattr(self, "_pending_retry_after", None)
         if ra:
             self.send_header("Retry-After", ra)
@@ -248,6 +272,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if sc:
             self.send_header("Set-Cookie", sc)
         self.end_headers()
+        if code == 304:
+            return
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -421,6 +447,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path == "/readyz":
             return self._readyz()
+        if path == "/version.json":
+            # the build this edge serves (a content hash of the app): no auth, no cookie read, no-store (JSON)
+            return self._json({"build": self.server.app.build})
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:
@@ -453,37 +482,31 @@ class CustomerHandler(BaseHTTPRequestHandler):
         return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
 
     def _resolve_app(self, urlpath: str):
-        """Map a URL path to a safe file under `_APP_ROOT`, or None. "/" -> index.html; any other path is an
+        """Map a URL path to an asset of the app snapshot, or None. "/" -> index.html; any other path is an
         EXACT static asset (the SPA is hash-routed, so there are no deep routes and NO index.html fallback —
-        an unknown path returns None -> 404, never a masked shell). Path-traversal is refused: the candidate
-        must `resolve()` to within the resolved root. Returns (abs_path, content_type) or None."""
-        rel = unquote(urlparse(urlpath).path).lstrip("/")
-        root = _APP_ROOT
-        cand = (root / "index.html") if rel in ("", "/") else (root / rel)
-        try:
-            rp = cand.resolve()
-        except (OSError, RuntimeError, ValueError):
+        an unknown path returns None -> 404, never a masked shell). Only files read into the snapshot at
+        startup can be served, and a path is clamped inside the app root before it is looked up."""
+        rel = normalize_rel(urlparse(urlpath).path)
+        if rel is None:
             return None
-        if rp != root and not rp.is_relative_to(root):
-            return None                        # traversal guard — must stay within the content root
-        if rp.is_file():
-            return rp, _APP_CTYPES.get(rp.suffix.lower(), "application/octet-stream")
-        return None
+        return self.server.app.get(rel or "index.html")
 
     def _serve_app(self, path: str):
-        """Serve the self-contained customer SPA (static, traversal-safe, strict-CSP, size-capped). The edge
+        """Serve the self-contained customer SPA (static, strict-CSP, size-capped, content-hashed). The edge
         holds no key and the SPA carries no token — it authenticates by the `vigil_customer_session` cookie."""
+        app = self.server.app
         hit = self._resolve_app(path)
         if hit is None:
+            rel = normalize_rel(urlparse(path).path)
+            if rel is not None and rel in app.too_large:
+                return self._deny(413, "asset too large")
             return self._deny(404, "not found")
-        rp, ctype = hit
-        try:
-            data = rp.read_bytes()
-        except OSError:
-            return self._deny(404, "not found")
-        if len(data) > _MAX_APP_BYTES:
-            return self._deny(413, "asset too large")
-        self._send(200, data, ctype)           # same strict CSP / nosniff / no-referrer headers as every response
+        state = app.version_state(hit, urlparse(self.path).query)
+        if state == "mismatch":
+            return self._deny(404, "not found")    # another build's URL: 404 + no-store, never today's bytes
+        cache = IMMUTABLE if state == "immutable" else _APP_PAGE_CACHE
+        code = 304 if not_modified(self.headers.get("If-None-Match", ""), hit.etag) else 200
+        self._send(code, hit.body, hit.ctype, cache=cache, etag=hit.etag)   # + strict CSP / nosniff / no-referrer
 
     def _customer_read_relay(self, action: str):
         """Relay a customer-plane READ to the provisioner over the hop, carrying the SESSION org (never a
@@ -549,6 +572,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")       # the state/nonce never leak via Referer
+        self.send_header("X-Vigil-Build", self.server.app.build)
         self.end_headers()
 
     def _oidc_callback(self):
@@ -602,6 +626,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", sc)
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Vigil-Build", self.server.app.build)
         self.end_headers()
 
     def do_POST(self):
