@@ -228,6 +228,34 @@ def test_an_interrupted_abort_is_finished_by_running_it_again(world, tmp_path, k
     assert read_home(target)["verify_checkpoint"][0] is True
 
 
+def test_abort_waits_for_the_swap_lock(world, tmp_path):
+    """An abort decides and drops under the target's floor lock, the lock a resume and a restore swap under: while
+    another holder has it, the abort waits — nothing is marked or dropped — and goes ahead once it is released."""
+    import fcntl
+    import threading
+    import time
+
+    from sigil import backup
+    target = _target(world, tmp_path)
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    fd = os.open(str(target / "floor.json.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.update(res=backup.restore_abort(target)), daemon=True)
+    try:
+        t.start()
+        time.sleep(2)
+        assert t.is_alive() and "res" not in out
+        assert "aborting" not in json.loads((target / "restore-journal.json").read_text())
+        assert _staging(target).is_dir()
+    finally:
+        os.close(fd)
+    t.join(60)
+    assert not t.is_alive() and out["res"]["aborted"] is True
+    assert not (target / "restore-journal.json").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+
+
 @pytest.mark.parametrize("barrier", TOUCHED)
 def test_abort_is_refused_once_a_unit_swap_has_begun_and_resume_completes_it(world, tmp_path, barrier):
     """Killed while the spine unit was being swapped in — marked started, its old copy moved aside, the new copy
@@ -337,7 +365,8 @@ def test_resume_refuses_a_swapped_unit_that_changed_before_it_completed(world, t
 
 FORGED = {"dst": "destination outside", "src": "outside its staging", "unit name": "a backup never captures",
           "staging dir": "not a restore's own", "archive dst": "not beside its staging dir",
-          "symlinked unit": "destination outside", "archive dst '..'": "not beside its staging dir"}
+          "symlinked unit": "destination outside", "archive dst '..'": "not beside its staging dir",
+          "replaced staging dir": "not a restore's own"}
 
 
 @pytest.mark.parametrize("forgery", sorted(FORGED))
@@ -365,6 +394,10 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         (target / "floor.json").unlink()
         (target / "floor.json").symlink_to(elsewhere)
         floor["dst"] = str(elsewhere.resolve())
+    elif forgery == "replaced staging dir":                                # a dir a replaced restore never staged
+        elsewhere.mkdir()
+        (elsewhere / "keep").write_text("not the restore's")
+        j["replaced"] = {"restore_id": None, "touched": [], "staging": [str(elsewhere.resolve())]}
     elif forgery == "archive dst '..'":                                     # beside its staging dir, but not a name
         next(u for u in j["units"] if u["name"] == "archive")["dst"] = str(tmp_path / "ebs" / "..")
     else:
@@ -375,7 +408,10 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         r = _cli(target, "restore", action, str(target))
         assert r.returncode == 1 and "refusing" in r.stderr and FORGED[forgery] in r.stderr, (action, r.stderr)
     assert _tree(tmp_path) == before
-    assert (elsewhere / "keep").read_text() == "not the restore's" if forgery == "symlinked unit" else not elsewhere.exists()
+    if forgery in ("symlinked unit", "replaced staging dir"):
+        assert (elsewhere / "keep").read_text() == "not the restore's"
+    else:
+        assert not elsewhere.exists()
 
 
 ALIASED = {"'..' in a staged unit": "outside its staging", "staging dir is a symlink": "not a restore's own",
@@ -423,6 +459,7 @@ def test_resume_and_abort_compare_the_real_entries_a_journal_names(world, tmp_pa
         (planted / "qdrant").symlink_to(victim)
         j["staging"] = str(planted.resolve())
         home_row["src"] = str(planted.resolve() / "qdrant")
+        home_row["digest"] = unit_digest(planted / "qdrant")             # the digest of the entry as staged
         j["units"] = [home_row]
     elif forgery == "staging dir not beside the home":
         elsewhere = etc / ".restore-staging-elsewhere"
