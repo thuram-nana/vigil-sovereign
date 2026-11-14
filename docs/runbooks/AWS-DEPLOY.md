@@ -206,9 +206,55 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      inbound 443/80.
 
    Cloudflare's *shared* AOP cert alone is **not** a sufficient origin lock.
-5. **Cloudflare → caching / rules:** the public plane is static + read-only JSON, so a cache rule on
-   `vigilguard.net/*` is safe and desirable; **do not** cache `app.vigilguard.net` (authenticated, cookies) —
-   add a bypass rule. Turn on the WAF managed ruleset.
+5. **Cloudflare → Caching → Cache Rules — exactly these two, each matching exact host names.** Never write a
+   rule whose expression could match `app.vigilguard.net`: no `*.vigilguard.net`, no
+   `ends_with(http.host, "vigilguard.net")`, no `contains`, no URL pattern without the host. The two host sets
+   below do not overlap, so their order does not matter.
+
+   Cloudflare's labels (EXTERNAL) may be worded slightly differently; the settings are what matter.
+
+   | Rule name | When incoming requests match (expression editor) | Then |
+   |---|---|---|
+   | `VIGIL app — bypass` | `(http.host eq "app.vigilguard.net")` | Cache eligibility: **Bypass cache** |
+   | `VIGIL public site — cache` | `(http.host in {"vigilguard.net" "www.vigilguard.net"})` | Cache eligibility: **Eligible for cache**; Edge TTL: **Use cache-control header if present, bypass cache if not**; Browser TTL: **Respect origin TTL** |
+
+   - Never set "Ignore cache-control header and use this TTL" (an override TTL) on anything that matches `app`.
+   - **Caching → Configuration → Browser Cache TTL: Respect Existing Headers.** EXTERNAL (Cloudflare
+     behaviour): with any other value Cloudflare may raise a response's browser `max-age` to that value, which
+     would keep the public pages (`max-age=0`) in browsers for hours.
+   - What the origins send, which these rules respect: the public site's pages `public, max-age=0,
+     s-maxage=60` + ETag (a page is at most 60 s old at the edge), its `?v=<hash>` assets
+     `public, max-age=31536000, immutable` (any other `v` is a 404 + `no-store`), its `/version.json` and 404s
+     `no-store`; the customer origin's `/api/*`, `/version.json` and probes `no-store`, its page and bare
+     assets `no-cache` + ETag. EXTERNAL: Cloudflare caches `.js`/`.css` by default even without origin headers —
+     the bypass rule is what keeps `app` out of the edge cache, and the origin's `no-store` on every tenant
+     response is the backstop if that rule is ever missing (the customer vhost has no Authenticated Origin Pulls
+     block, so the origin's headers, not Cloudflare, are the real control).
+   - Turn on the WAF managed ruleset.
+6. **Optional — purge the public pages after a release.** Without it a page is at most 60 s old at the edge
+   (`s-maxage=60`); assets never go stale because each page names them by content hash, and the customer app is
+   never cached. To purge at once from the host:
+   - In Cloudflare → My Profile → API Tokens, create a **custom token** with one permission,
+     **Zone → Cache Purge → Purge**, and **Zone Resources: Include → Specific zone → vigilguard.net**. Nothing
+     else: it cannot read or change DNS, rules or settings.
+   - Keep it **on the host only** (never in this repository, never in GitHub secrets or Actions), as a curl
+     header file readable by the deploy user alone, so the token is never typed into the shell history or seen
+     in a process list (paste it at the silent prompt):
+     ```
+     install -m 600 /dev/null ~/.sigil/cloudflare-purge.header
+     read -rs CF_TOKEN && printf 'Authorization: Bearer %s\n' "$CF_TOKEN" > ~/.sigil/cloudflare-purge.header
+     unset CF_TOKEN
+     ```
+   - After a release (or an edge swap of the public site, `EDGE-SWAP.md`), purge the pages by URL
+     (`<zone-id>` is on the zone's Overview page; it is not a secret):
+     ```
+     curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/<zone-id>/purge_cache" \
+       -H @"$HOME/.sigil/cloudflare-purge.header" -H "Content-Type: application/json" \
+       --data '{"files":["https://vigilguard.net/","https://www.vigilguard.net/",
+                "https://vigilguard.net/vs","https://vigilguard.net/tools","https://vigilguard.net/cve",
+                "https://vigilguard.net/trust","https://vigilguard.net/blog","https://vigilguard.net/support"]}'
+     ```
+     Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare
