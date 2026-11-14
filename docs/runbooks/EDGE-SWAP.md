@@ -22,7 +22,9 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   finishes the requests it accepted — and leaves the new instance enabled for boot. If the new edge does not
   answer within `VIGIL_EDGE_SWAP_HEALTH_S` (30 s) it is stopped and the old one keeps serving.
 
-The Caddy examples (`*.Caddyfile`) name one port only; behind Caddy a swap leaves a gap of about a second.
+The Caddy examples (`*.Caddyfile`) name one port only, so behind Caddy do not swap: an edge moved to the second
+port would never be reached. Restart the plain unit there instead (`systemctl --user restart
+sigil-customer.service`), which leaves the edge unreachable for a few seconds.
 
 ## One-time setup
 
