@@ -3,7 +3,7 @@
 The `vigil up` proxy is the per-user auth boundary: it resolves the caller against the sovereign accounts
 spine and STAMPS `X-VIGIL-Role` on the offense hop, bound under a per-run hop secret it shares ONLY with
 the console child (`VIGIL_CONSOLE_HOP_KEY`). This suite drives the console HTTP surface directly and proves
-`do_POST` enforces `role_can(stamped_role, required)` per route:
+`do_POST` enforces `role_can_global(stamped_role, required)` per route:
 
   * a viewer-stamped (validly HMAC'd) POST to an OWNER route → 403;
   * an operator-stamped (validly HMAC'd) POST to an operator route → reaches the handler (not 403);

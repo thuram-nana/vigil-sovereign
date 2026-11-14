@@ -45,8 +45,8 @@ python3 -m framework.v2 api [--port 8799] [--host 127.0.0.1]      # equivalent, 
   W16-12): the shared bearer is **not** the only path. When the `vigil up` proxy forwards a per-user
   request it stamps a **hop-signed** role (`X-VIGIL-Principal/Role/Role-Sig/Role-Ts`, HMAC under the per-run
   `VIGIL_CONSOLE_HOP_KEY` — the SAME sovereign owner-signed accounts model the console uses), and the API
-  enforces `role_can(role, offense_perm_for(path))`: `/api/v1/tool/invoke` and `/api/v1/import` require
-  **operator-tier `run_engagement`**. A role lacking it is **`403` naming the principal** (the attributed
+  enforces `role_can_global(role, offense_perm_for(path))` (only the four global roles carry a permission):
+  `/api/v1/tool/invoke` and `/api/v1/import` require **operator-tier `run_engagement`**. A role lacking it is **`403` naming the principal** (the attributed
   refusal); a permitted action's response carries an `actor` object. A **forged/unverifiable** stamped role
   is refused (fail-closed). **Honest bound:** a **direct** on-host client presenting **no** role assertion is
   **owner-equivalent** (the local operator / CLI / legacy path) — the per-user gate protects the

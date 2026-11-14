@@ -6,7 +6,7 @@ action to a human. This suite drives the API's HTTP surface directly and proves 
 multi-user model as the offense console: the `vigil up` proxy resolves the caller against the owner-signed
 sovereign accounts spine and STAMPS a hop-signed `X-VIGIL-Role` (bound under the per-run
 `VIGIL_CONSOLE_HOP_KEY`, shared ONLY with the offense children), and the API enforces
-`role_can(stamped_role, offense_perm_for(path))` and ATTRIBUTES the action to the authenticated principal.
+`role_can_global(stamped_role, offense_perm_for(path))` and ATTRIBUTES the action to the authenticated principal.
 
   * NEGATIVE CONTROL: a viewer/analyst-stamped (validly HMAC'd) POST to an operator route → 403, the
     refusal NAMES the principal, and the tool NEVER runs (the gate is not a no-op);

@@ -7,8 +7,8 @@ authority of its own**:
   * the tool LIST is generated from the one authoritative operation registry (``platform_tools``);
   * a tool CALL is translated into an authenticated **loopback** HTTP request to ``vigil up`` (the uiproxy)
     carrying the operator's OWN bearer token — the proxy does whoami → role → hop-stamp → and the EXISTING
-    console gate ``role_can(role, offense_perm_for(path))`` runs unchanged. The adapter never stamps a role,
-    never holds the hop key, and never presents the shared console token (which would resolve to the
+    console gate ``role_can_global(role, offense_perm_for(path))`` runs unchanged. The adapter never stamps a
+    role, never holds the hop key, and never presents the shared console token (which would resolve to the
     owner-equivalent branch and silently escalate every caller).
 
 Safety invariants (asserted in ``tests/test_platform_server.py``):
