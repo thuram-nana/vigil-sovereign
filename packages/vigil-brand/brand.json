@@ -9,7 +9,8 @@
       "targets": [
         "apps/sigil/sigil/ui/public_site/assets/favicon.svg",
         "apps/sigil/sigil/ui/customer_app/brand/favicon.svg",
-        "packages/vigil-ui/brand/favicon.svg"
+        "packages/vigil-ui/brand/favicon.svg",
+        "apps/sigil/sigil/bridge/webapp/brand/favicon.svg"
       ]
     },
     {
@@ -28,7 +29,8 @@
       "size": [192, 192],
       "opaque": true,
       "targets": [
-        "apps/sigil/sigil/ui/customer_app/brand/icon-192.png"
+        "apps/sigil/sigil/ui/customer_app/brand/icon-192.png",
+        "apps/sigil/sigil/bridge/webapp/brand/icon-192.png"
       ]
     },
     {
@@ -37,7 +39,8 @@
       "size": [512, 512],
       "opaque": true,
       "targets": [
-        "apps/sigil/sigil/ui/customer_app/brand/icon-512.png"
+        "apps/sigil/sigil/ui/customer_app/brand/icon-512.png",
+        "apps/sigil/sigil/bridge/webapp/brand/icon-512.png"
       ]
     },
     {
@@ -47,7 +50,8 @@
       "opaque": true,
       "targets": [
         "apps/sigil/sigil/ui/public_site/assets/apple-touch-icon.png",
-        "apps/sigil/sigil/ui/customer_app/brand/apple-touch-icon.png"
+        "apps/sigil/sigil/ui/customer_app/brand/apple-touch-icon.png",
+        "apps/sigil/sigil/bridge/webapp/brand/apple-touch-icon.png"
       ]
     },
     {
