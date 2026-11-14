@@ -291,10 +291,10 @@
       field("su-email", "Work email", "email"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Send verification", onClick: doSignupRequest }),
-        h("button.cust-nav-link", { type: "button", text: "I already have a code",
-          onClick: function () { VUI.mount(VUI.$("#su-confirm"), confirmBlock(true, true, "", "")); } }),
       ]),
       h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#su-confirm"), confirmBlock(true, true, "", "")); } }),
         h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
       ]),
       h("div#su-confirm"),
@@ -396,10 +396,10 @@
       field("rc-email", "Email", "email"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Send reset email", onClick: doRecoverRequest }),
-        h("button.cust-nav-link", { type: "button", text: "I already have a code",
-          onClick: function () { VUI.mount(VUI.$("#rc-confirm"), recoverBlock(true, true, "", "")); } }),
       ]),
       h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#rc-confirm"), recoverBlock(true, true, "", "")); } }),
         h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
       ]),
       h("div#rc-confirm"),

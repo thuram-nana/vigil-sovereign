@@ -35,6 +35,9 @@ body[data-plane="customer"] #app { display: block; }
 .cust-auth input { width: 100%; box-sizing: border-box; }
 .cust-auth .row { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-top: 16px; }
 .cust-auth .muted { font-size: 0.82rem; opacity: 0.7; }
+/* the shared kit styles text/url/password inputs but not email ones: the same look for the email fields here */
+.cust-auth input[type=email] { width: 100%; background: var(--bg-2); border: 1px solid var(--border-strong);
+  color: var(--text-0); border-radius: var(--r-2); padding: 11px 14px; font-size: var(--fs-md); font-family: inherit; }
 
 /* "Continue with Google" (shown only while the edge has customer Google sign-in on): a full-width button with
    Google's mark, then an "or use your email" rule above the email form */
@@ -159,11 +162,42 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
   font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border-strong);
   background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-1);
 }
+/* the iOS guide: a card above Safari's bottom toolbar (iPhone) or below the top bar (iPad / other iOS browsers), with
+   an arrow toward the Share button. Safe-area aware so it clears the home indicator. */
 #vigil-ios-install {
-  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 55;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border-strong);
-  background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-1); font-size: 0.92rem;
+  position: fixed; left: 12px; right: 12px; z-index: 55; max-width: 440px; margin: 0 auto;
+  padding: 14px 16px 12px; border-radius: 16px; border: 1px solid var(--border-strong);
+  background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-2); font-size: 0.92rem; line-height: 1.4;
 }
-#vigil-ios-install button { font: inherit; font-size: 1.2rem; line-height: 1; cursor: pointer; border: 0;
-  background: none; color: var(--text-1); padding: 2px 6px; }
+#vigil-ios-install.vigil-ios-down { bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
+/* iPad and other iOS browsers: Share is at the top right, so the card sits there, under its arrow */
+#vigil-ios-install.vigil-ios-up { top: calc(48px + env(safe-area-inset-top, 0px)); left: auto; right: 12px;
+  width: min(380px, calc(100vw - 24px)); margin: 0; }
+/* while the guide is open the page can scroll everything above it */
+body.vigil-ios-guide-open .cust-shell { padding-bottom: 320px; }
+.vigil-ios-head { display: flex; align-items: center; gap: 12px; }
+.vigil-ios-icon { width: 40px; height: 40px; border-radius: 10px; flex: 0 0 auto; }
+.vigil-ios-titles { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.vigil-ios-titles strong { font-size: 1rem; }
+.vigil-ios-titles span { color: var(--text-1); font-size: 0.84rem; }
+.vigil-ios-close { align-self: flex-start; font: inherit; font-size: 1.4rem; line-height: 1; cursor: pointer;
+  border: 0; background: none; color: var(--text-1); padding: 2px 6px; margin: -4px -6px 0 0; }
+.vigil-ios-steps { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.vigil-ios-step { display: flex; align-items: flex-start; gap: 10px; }
+.vigil-ios-n { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 999px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 700;
+  background: var(--primary-bg); color: var(--primary-fg); }
+.vigil-ios-txt b { font-weight: 650; }
+.vigil-ios-glyph { width: 18px; height: 18px; vertical-align: -3px; margin: 0 3px; color: var(--st-running, #5b9bd5); }
+.vigil-ios-arrow { display: flex; justify-content: center; color: var(--st-running, #5b9bd5); }
+.vigil-ios-arrow .vigil-ios-glyph { width: 26px; height: 26px; margin: 0; }
+.vigil-ios-down .vigil-ios-arrow { margin: 6px 0 -6px; animation: vigil-ios-nudge-down 1.6s ease-in-out infinite; }
+/* iPad / other iOS browsers: Share is at the top right — the arrow sits above the card, pointing up and right */
+.vigil-ios-up .vigil-ios-arrow { position: absolute; top: -36px; right: 18px; width: 26px; height: 26px;
+  transform: rotate(180deg); }
+.vigil-ios-up .vigil-ios-arrow .vigil-ios-glyph { animation: vigil-ios-nudge-up 1.6s ease-in-out infinite; }
+@keyframes vigil-ios-nudge-down { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
+@keyframes vigil-ios-nudge-up { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) {
+  .vigil-ios-down .vigil-ios-arrow, .vigil-ios-up .vigil-ios-arrow .vigil-ios-glyph { animation: none; }
+}

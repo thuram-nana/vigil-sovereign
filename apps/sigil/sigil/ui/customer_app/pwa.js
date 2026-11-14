@@ -16,8 +16,11 @@
  * shown (root mount only); the browser's own dialog does the rest. Away from the origin's root (under /customer/ on
  * the console origin) the page drops its manifest link, so the browser's own install entry offers nothing there
  * either — no standalone "VIGIL" app scoped to the console origin. Safari on iOS has no such event: when the edge
- * enables it (VIGIL_CUSTOMER_IOS_INSTALL_BANNER, off by default — pending the owner's sign-in test in the installed
- * app on a real iPhone) a dismissible "Share -> Add to Home Screen" banner is shown instead.
+ * enables it (VIGIL_CUSTOMER_IOS_INSTALL_BANNER; off in code, on in the production env example) an iPhone or iPad
+ * visitor gets a dismissible guide instead — three steps (Share, Add to Home Screen, Add) with the iOS glyphs, and
+ * an arrow toward the Share button (Safari's bottom toolbar on an iPhone; the top right on an iPad or in another
+ * iOS browser). It never shows once the app runs from the Home Screen (navigator.standalone / display-mode
+ * standalone, also if that changes while the page is open), and a dismissal is remembered on this device.
  *
  * CSP-native: no inline script or style, the DOM is built with createElement/textContent, same-origin only.
  * Exposes window.VIGIL_PWA for app.js.
@@ -161,37 +164,112 @@
   });
   window.addEventListener("appinstalled", function () { installEvt = null; hideInstall(); });
 
-  // ---- install: iOS (behind the edge's flag, off by default) -------------------------------------------------
+  // ---- install: iOS — the "Add to Home Screen" guide (behind the edge's flag) -----------------------------------
   var IOS_DISMISSED = "vigil.ios_install.dismissed";
-  function isIOS() {
-    var ua = String(navigator.userAgent || "");
-    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function ua() { return String(navigator.userAgent || ""); }
+  function isIPad() { return /iPad/.test(ua()) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); }
+  function isIOS() { return /iPhone|iPod/.test(ua()) || isIPad(); }
+  // Safari on an iPhone keeps Share in its bottom toolbar; an iPad, and Chrome/Firefox/Edge on iOS, at the top right.
+  function sharePointsUp() { return isIPad() || /CriOS|FxiOS|EdgiOS/.test(ua()); }
   function standalone() {
     return navigator.standalone === true
       || !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
   }
   function iosDismissed() { try { return localStorage.getItem(IOS_DISMISSED) === "1"; } catch (e) { return false; } }
-  function showIosBanner() {
-    var bar = document.createElement("div");
+  // The iOS glyphs, drawn as DOM (no inline markup): Share (a box with an arrow out of it), Add to Home Screen (a plus
+  // in a rounded square), and the arrow toward the Share button.
+  function glyph(kind) {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("class", "vigil-ios-glyph vigil-ios-g-" + kind);
+    var d = { share: ["M12 15V3", "M8 7l4-4 4 4", "M7 10H5.5A1.5 1.5 0 004 11.5v8A1.5 1.5 0 005.5 21h13a1.5 1.5 0 001.5-1.5v-8A1.5 1.5 0 0018.5 10H17"],
+              add: ["M6 3h12a3 3 0 013 3v12a3 3 0 01-3 3H6a3 3 0 01-3-3V6a3 3 0 013-3z", "M12 8v8", "M8 12h8"],
+              arrow: ["M12 3v17", "M5 13l7 7 7-7"] }[kind] || [];
+    d.forEach(function (one) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", one);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", kind === "arrow" ? "2.2" : "1.8");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text) e.textContent = text;
+    return e;
+  }
+  function step(n, parts) {
+    var li = el("li", "vigil-ios-step");
+    li.appendChild(el("span", "vigil-ios-n", String(n)));
+    var txt = el("span", "vigil-ios-txt");
+    parts.forEach(function (p) { txt.appendChild(typeof p === "string" ? document.createTextNode(p) : p); });
+    li.appendChild(txt);
+    return li;
+  }
+  var iosGuide = null;
+  function guideOpen(on) {
+    var cl = document.body && document.body.classList;
+    if (cl) { if (on) cl.add("vigil-ios-guide-open"); else cl.remove("vigil-ios-guide-open"); }
+  }
+  function hideIosGuide() { if (iosGuide) { iosGuide.remove(); iosGuide = null; guideOpen(false); } }
+  function showIosGuide() {
+    var up = sharePointsUp();
+    var bar = el("div", "vigil-ios-guide " + (up ? "vigil-ios-up" : "vigil-ios-down"));
     bar.id = "vigil-ios-install";
-    bar.setAttribute("role", "note");
-    var msg = document.createElement("span");
-    msg.textContent = "Install VIGIL: tap Share, then Add to Home Screen.";
-    var close = document.createElement("button");
+    bar.setAttribute("role", "dialog");
+    bar.setAttribute("aria-labelledby", "vigil-ios-title");
+    var head = el("div", "vigil-ios-head");
+    var icon = el("img", "vigil-ios-icon");
+    icon.setAttribute("src", "brand/apple-touch-icon.png");
+    icon.setAttribute("alt", "");
+    icon.setAttribute("width", "40");
+    icon.setAttribute("height", "40");
+    var titles = el("div", "vigil-ios-titles");
+    var title = el("strong", "", "Install VIGIL on your " + (isIPad() ? "iPad" : "iPhone"));
+    title.id = "vigil-ios-title";
+    titles.appendChild(title);
+    titles.appendChild(el("span", "", "It opens full screen from your Home Screen, like an app."));
+    var close = el("button", "vigil-ios-close", "×");
     close.type = "button";
     close.setAttribute("aria-label", "Dismiss");
-    close.textContent = "×";
     close.addEventListener("click", function () {
       try { localStorage.setItem(IOS_DISMISSED, "1"); } catch (e) { /* storage off: hidden for this load only */ }
-      bar.remove();
+      hideIosGuide();
     });
-    bar.appendChild(msg);
-    bar.appendChild(close);
+    head.appendChild(icon);
+    head.appendChild(titles);
+    head.appendChild(close);
+    var steps = el("ol", "vigil-ios-steps");
+    steps.appendChild(step(1, ["Tap ", glyph("share"), el("b", "", "Share"),
+      up ? " at the top of the screen." : " in Safari's toolbar (on newer iPhones, tap ••• first)."]));
+    steps.appendChild(step(2, ["Choose ", glyph("add"), el("b", "", "Add to Home Screen"), "."]));
+    steps.appendChild(step(3, ["Tap ", el("b", "", "Add"), ", then open VIGIL from your Home Screen."]));
+    var arrow = el("div", "vigil-ios-arrow");
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.appendChild(glyph("arrow"));
+    bar.appendChild(head);
+    bar.appendChild(steps);
+    bar.appendChild(arrow);
     document.body.appendChild(bar);
+    iosGuide = bar;
+    if (!up) guideOpen(true);                      // the card covers the bottom of the page: leave room to scroll
   }
   if (ds.iosInstall === "1" && location.pathname === "/" && isIOS() && !standalone() && !iosDismissed()) {
-    showIosBanner();
+    showIosGuide();
+    // installed while this page is open (the display mode changes): the guide has done its job
+    try {
+      var mq = window.matchMedia && window.matchMedia("(display-mode: standalone)");
+      if (mq && typeof mq.addEventListener === "function") {
+        mq.addEventListener("change", function (e) { if (e.matches) hideIosGuide(); });
+      }
+    } catch (e) { /* no matchMedia events: the check at load stands */ }
   }
 
   checkVersion(true);
