@@ -223,6 +223,8 @@ def test_the_cli_reports_and_exits_by_status(trees, monkeypatch, capsys):
     legacy, seam, spool = trees
     s = _store()
     monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: s)
+    from sigil import config                                # cli.main()'s startup gate: this test's own spine path
+    monkeypatch.setattr(config, "SPINE_PATH", legacy.parent / "default-spine" / "spine.jsonl")
     _legacy_launches(s, legacy)
     _move(monkeypatch, seam)
     with pytest.raises(SystemExit) as ex:

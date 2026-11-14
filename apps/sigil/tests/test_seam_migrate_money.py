@@ -287,14 +287,15 @@ def test_a_former_tree_changed_during_apply_is_not_committed(trees, monkeypatch)
 def test_one_audit_record_per_committed_source(trees):
     legacy, seam, _ = trees
     s = _store()
-    record_lease_settlement(str(legacy), "cust_a", "n1")
+    record_lease_settlement(str(legacy), "cust_a", "nonce-qz-1")
     assert _apply(s, seam, legacy)[0] == 0
     assert _apply(s, seam, legacy)[1]["sources"][0]["status"] == "migrated"     # a re-run: nothing new
     recs = [r.payload for r in s.iter_records() if (r.payload or {}).get("signal") == seam_migrate.AUDIT_SIGNAL]
     assert len(recs) == 1
     p = recs[0]
     assert p["from"] == str(legacy) and p["to"] == str(seam) and p["counts"] == {"settlements": 1}
-    assert "nonce" not in json.dumps(p) and "n1" not in json.dumps(p) and p["sig"]
+    assert not {"nonce", "nonces", "amount", "refunded"} & set(p) and p["sig"]       # no nonce, no amount
+    assert "nonce-qz-1" not in json.dumps(p)
     j = sm.read_journal(seam)["sources"][str(legacy)]
     assert j["state"] == "complete" and j["inventory"]["digest"] == sm.inventory(legacy)["digest"]
 

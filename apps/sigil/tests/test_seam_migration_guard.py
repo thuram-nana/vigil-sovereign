@@ -49,6 +49,10 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setenv("VIGIL_SEAM_MIGRATION_GUARD", "1")
     store = SpineStore(tmp_path / "spine.jsonl")
     monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    # cli.main()'s startup gate checks the store at config.SPINE_PATH: point it at this test's own fresh home, never
+    # the process-wide default an earlier test may have left in another layout
+    from sigil import config
+    monkeypatch.setattr(config, "SPINE_PATH", tmp_path / "default-spine" / "spine.jsonl")
     return {"legacy": legacy, "seam": seam, "store": store, "tmp": tmp_path}
 
 
