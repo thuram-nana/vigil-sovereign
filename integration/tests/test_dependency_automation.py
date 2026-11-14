@@ -8,8 +8,9 @@ pin that keeps both true of the code, OFFLINE, in the REQUIRED `integration two-
 job (which collects the whole `integration/tests` tree and has PyYAML installed).
 
 WHAT IT PROVES:
-  1. Dependabot config parses and covers all five ecosystems the repo contains: pip, cargo, npm,
-     github-actions, docker — and every update entry carries a schedule.
+  1. Dependabot config parses and covers all four ecosystems the repo contains: pip, cargo,
+     github-actions, docker — every update entry carries a schedule, and a runtime package.json never
+     lands without an npm entry watching its directory.
   2. The scheduled scan workflow parses, has a `schedule:` (daily cron) trigger, declares
      `issues: write`, and actually opens an issue on findings (`gh issue create`) via the pinned
      decision script.
@@ -34,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,7 @@ WORKFLOW = REPO / ".github" / "workflows" / "scheduled-supply-chain-scan.yml"
 SCAN_SCRIPT = REPO / ".github" / "scripts" / "supply_chain_scan.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-REQUIRED_ECOSYSTEMS = {"pip", "cargo", "npm", "github-actions", "docker"}
+REQUIRED_ECOSYSTEMS = {"pip", "cargo", "github-actions", "docker"}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -113,7 +115,7 @@ def test_dependabot_parses_and_is_v2():
     assert isinstance(cfg.get("updates"), list) and cfg["updates"], "no updates declared"
 
 
-def test_dependabot_covers_all_five_ecosystems():
+def test_dependabot_covers_all_four_ecosystems():
     cfg = _load_yaml(DEPENDABOT)
     missing = missing_ecosystems(cfg, REQUIRED_ECOSYSTEMS)
     assert not missing, f"dependabot.yml does not cover: {sorted(missing)}"
@@ -134,6 +136,51 @@ def _dependabot_directories(config: dict) -> list[str]:
         for d in u.get("directories") or []:
             dirs.append(str(d))
     return dirs
+
+
+# A package.json that is NOT a runtime npm project: the deliberately-vulnerable eval corpus, quarantined
+# vendor source, and installed node_modules trees. Anything else is a runtime project Dependabot must watch.
+_NON_RUNTIME_NPM = ("engine/crucible/framework/v2/eval/corpus_apps/", "vendor/")
+
+
+def runtime_package_jsons(tracked: list[str]) -> list[str]:
+    """Tracked package.json paths that belong to a runtime npm project."""
+    return sorted(p for p in tracked
+                  if p.rsplit("/", 1)[-1] == "package.json"
+                  and "node_modules/" not in p
+                  and not p.startswith(_NON_RUNTIME_NPM))
+
+
+def npm_dirs_without_entry(config: dict, package_jsons: list[str]) -> list[str]:
+    """Directories (Dependabot form, leading '/') of runtime package.json files no npm entry watches."""
+    watched: set[str] = set()
+    for u in config.get("updates") or []:
+        if u.get("package-ecosystem") != "npm":
+            continue
+        for d in ([u["directory"]] if isinstance(u.get("directory"), str) else []) + list(u.get("directories") or []):
+            watched.add("/" + str(d).strip("/"))
+    need = {"/" + (p.rsplit("/", 1)[0] if "/" in p else "").strip("/") for p in package_jsons}
+    return sorted(d for d in need if d not in watched)
+
+
+def test_a_runtime_package_json_is_watched_by_an_npm_entry():
+    """No npm entry is declared while the repository ships no runtime npm project (an entry with no
+    package.json fails every Dependabot run). The moment one lands, its directory must be watched."""
+    tracked = subprocess.run(["git", "ls-files", "*package.json"], cwd=REPO, capture_output=True,
+                             text=True, check=True).stdout.split()
+    missing = npm_dirs_without_entry(_load_yaml(DEPENDABOT), runtime_package_jsons(tracked))
+    assert not missing, f"runtime package.json without a Dependabot npm entry for: {missing}"
+
+
+def test_negative_control_an_unwatched_runtime_package_json_is_caught():
+    cfg = {"updates": [{"package-ecosystem": "pip", "directory": "/"}]}
+    jsons = runtime_package_jsons(["web/package.json", "vendor/x/package.json",
+                                   "engine/crucible/framework/v2/eval/corpus_apps/_cve/a/package.json",
+                                   "web/node_modules/y/package.json"])
+    assert jsons == ["web/package.json"]
+    assert npm_dirs_without_entry(cfg, jsons) == ["/web"]
+    cfg["updates"].append({"package-ecosystem": "npm", "directory": "/web"})
+    assert npm_dirs_without_entry(cfg, jsons) == []
 
 
 def test_dependabot_does_not_watch_the_vulnerable_eval_corpus():

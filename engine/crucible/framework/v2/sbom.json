@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:b200d8da-44d4-5b1e-bcbf-c41a977743f4",
+  "serialNumber": "urn:uuid:0d636ea6-2d5c-5a57-adf4-15431ccd56c4",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-11T16:47:39Z",
+    "timestamp": "2026-11-14T06:02:13Z",
     "tools": [
       {
         "vendor": "OBSIDIAN / CRUCIBLE",
@@ -3253,17 +3253,17 @@
       "type": "library",
       "bom-ref": "soupsieve",
       "name": "soupsieve",
-      "version": "2.9.2",
-      "purl": "pkg:pypi/soupsieve@2.9.2",
+      "version": "4.1",
+      "purl": "pkg:pypi/soupsieve@4.1",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "4a55d8cf158a9c2e587fa4922f1bbb91d68ac829e2d6f25403a85747c71daf74"
+          "content": "ca9abf7126667010d8f6e9b39bfc1bc3b23c8aed9bcb0f54a754dde969bb8aab"
         },
         {
           "alg": "SHA-256",
-          "content": "8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823"
+          "content": "e4d667b3974ce6e038e7390486b8093369854a1d345ffdd4c121dfc4a782e809"
         }
       ],
       "properties": [

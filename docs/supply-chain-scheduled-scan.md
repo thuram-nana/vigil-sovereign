@@ -21,7 +21,6 @@ pull request when an update is available:
 | --- | --- |
 | `pip` | `/`, `/apps/sigil`, `/gateway`, `/integration`, `/engine/crucible`, `/engine/crucible/framework/v2`, `/packages/core/vigil_core` |
 | `cargo` | `/apps/sigil/kernel` (the WARDEN Rust kernel) |
-| `npm` | `/` (see note below) |
 | `github-actions` | `/` (the pinned action SHAs in `.github/workflows/*`) |
 | `docker` | `/gateway`, `/engine/crucible/framework/v2/aegis` |
 
@@ -33,10 +32,10 @@ security-relevant bump still surfaces the same day through the scan below.
 so the engine can prove it detects the CVE, and a "fix" pull request would break the corpus.
 `vendor/` is quarantined third-party source and is likewise left alone.
 
-**npm note (honest limit).** The `npm` entry is declared at the repository root so a production
-`package.json` is watched the moment one lands. Today the repository ships no runtime npm project —
-the only `package.json` is the excluded `st-2014-3744` eval fixture — so this entry is currently a
-standing guard rather than an active watch.
+**npm.** The repository ships no runtime npm project — the only `package.json` is the excluded
+`st-2014-3744` eval fixture — so no npm entry is declared (Dependabot fails a run whose directory has no
+`package.json`). `integration/tests/test_dependency_automation.py` fails the build the moment a runtime
+`package.json` lands without an npm entry watching its directory, so the watch is added with it.
 
 ## 2. The daily scan — `.github/workflows/scheduled-supply-chain-scan.yml`
 
