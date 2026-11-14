@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
+from sigil.spine.consistent_copy import unit_digest
 from tests._real_home import backup_home, read_home, run_in_home, signed_home  # type: ignore
 
 KILLED = 77
@@ -309,6 +311,87 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         assert r.returncode == 1 and "refusing" in r.stderr and FORGED[forgery] in r.stderr, (action, r.stderr)
     assert _tree(tmp_path) == before
     assert (elsewhere / "keep").read_text() == "not the restore's" if forgery == "symlinked unit" else not elsewhere.exists()
+
+
+ALIASED = {"'..' in a staged unit": "outside its staging", "staging dir is a symlink": "not a restore's own",
+           "staged unit is a symlink": "outside its staging", "staging dir not beside the home": "not beside",
+           "archive staging is a symlink": "not a restore's own", "archive dst holds no archive": "holds no archive"}
+
+
+@pytest.mark.parametrize("forgery", sorted(ALIASED))
+def test_resume_and_abort_compare_the_real_entries_a_journal_names(world, tmp_path, forgery):
+    """A journal's paths are compared as the real directory entries they name, never as spelled: a staging dir is a
+    real dir beside its destination (not a symlink, no ``..``), a staged unit is exactly <staging>/<name> and not a
+    symlink, and a relocated archive replaces only an archive. A planted journal whose rows would reach a dir outside
+    the restore (moving it into the home, or replacing it with content from the home) is refused, and nothing outside
+    is moved, replaced or removed."""
+    target = _target(world, tmp_path)
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    etc = tmp_path / "etc"                                       # dirs outside the home and outside any staging
+    (etc / "default").mkdir(parents=True)
+    victim = etc / "sshd_config.d"
+    victim.mkdir()
+    (victim / "10-hardening.conf").write_text("PasswordAuthentication no\n")
+    profile = etc / "profile.d"
+    profile.mkdir()
+    (profile / "vendor.sh").write_text("# sourced at login\n")
+    payload = target / "payload"                                  # content a writer of the home controls
+    payload.mkdir()
+    (payload / "evil.sh").write_text("echo replaced\n")
+    jp = target / "restore-journal.json"
+    j = json.loads(jp.read_text())
+    home_row = {"name": "qdrant", "dst": str(target.resolve() / "qdrant"), "digest": unit_digest(victim),
+                "started": False, "done": False}
+    planted = target.parent / ".restore-staging-planted"
+    if forgery == "'..' in a staged unit":
+        planted.mkdir()
+        j["staging"] = str(planted.resolve())
+        home_row["src"] = str(planted.resolve() / ".." / "etc" / "sshd_config.d")
+        j["units"] = [home_row]
+    elif forgery == "staging dir is a symlink":
+        planted.symlink_to(etc)
+        j["staging"] = str(planted)
+        home_row["src"] = str(planted / "sshd_config.d")
+        j["units"] = [home_row]
+    elif forgery == "staged unit is a symlink":
+        planted.mkdir()
+        (planted / "qdrant").symlink_to(victim)
+        j["staging"] = str(planted.resolve())
+        home_row["src"] = str(planted.resolve() / "qdrant")
+        j["units"] = [home_row]
+    elif forgery == "staging dir not beside the home":
+        elsewhere = etc / ".restore-staging-elsewhere"
+        elsewhere.mkdir()
+        shutil.move(str(victim), str(elsewhere / "qdrant"))
+        victim = elsewhere / "qdrant"
+        j["staging"] = str(elsewhere.resolve())
+        home_row["src"] = str(elsewhere.resolve() / "qdrant")
+        j["units"] = [home_row]
+    else:                                                         # a relocated-archive row aimed at etc/profile.d
+        ast = target / ".restore-staging-archive-planted"
+        if forgery == "archive staging is a symlink":
+            ast.symlink_to(etc / "default")                       # resolves beside profile.d
+            src = ast / ".." / os.path.relpath(payload, etc)
+        else:
+            ast = etc / ".restore-staging-archive-planted"        # a real staging dir beside profile.d
+            ast.mkdir()
+            shutil.move(str(payload), str(ast / "archive"))
+            ast = ast.resolve()
+            payload = ast / "archive"
+            src = ast / "archive"
+        j["archive_staging"] = str(ast)
+        j["units"] = [{"name": "archive", "src": str(src), "dst": str(profile.resolve()),
+                       "digest": unit_digest(payload), "started": False, "done": False}]
+        victim = profile
+    jp.write_text(json.dumps(j))
+    before = _tree(tmp_path)
+    for action in ("--resume", "--abort"):
+        r = _cli(target, "restore", action, str(target))
+        assert r.returncode == 1 and "refusing" in r.stderr and ALIASED[forgery] in r.stderr, (action, r.stderr)
+    assert _tree(tmp_path) == before
+    assert jp.is_file() and victim.is_dir() and any(victim.iterdir())
+    assert (profile / "vendor.sh").is_file() and not (profile / "evil.sh").exists()
+    assert not (target / "qdrant").exists()
 
 
 def test_a_unit_entry_that_is_a_symlink_is_replaced_never_its_target(world, tmp_path):

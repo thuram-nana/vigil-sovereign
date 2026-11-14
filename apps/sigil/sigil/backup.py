@@ -847,26 +847,34 @@ def _read_journal(home: Path) -> dict:
         raise BackupError(f"the restore journal at {jp} is not one this build wrote — re-run the restore with "
                           f"--force from the backup")
     # every rename the journal names stays inside the restore's own dirs: a unit of the home is one captured
-    # top-level entry of THIS home, staged in the restore's staging dir; a relocated archive is staged in its own
-    # staging dir, which a restore always creates beside the archive's destination
+    # top-level entry of THIS home, staged in the restore's staging dir (created beside the home); a relocated archive
+    # is staged in its own staging dir, which a restore always creates beside the archive's destination. Every path is
+    # compared as the real directory entry it names: a staging dir is a real dir spelled as it resolves, and a staged
+    # unit is exactly <its staging dir>/<its name>, never a symlink
     staging = Path(j["staging"]) if j.get("staging") else None
     arch_staging = Path(j["archive_staging"]) if j.get("archive_staging") else None
-    if any(d is not None and not d.name.startswith(".restore-staging-") for d in (staging, arch_staging)):
+    if any(d is not None and not _restore_own_dir(d) for d in (staging, arch_staging)):
         raise BackupError(f"the restore journal at {jp} names a staging dir that is not a restore's own — refusing")
+    if staging is not None and staging.parent not in (home.parent.resolve(), home.resolve().parent):
+        raise BackupError(f"the restore journal at {jp} names a staging dir that is not a restore's own (it is not "
+                          f"beside {home}) — refusing")
     for u in units:
         name, src, dst = u["name"], Path(u["src"]), Path(u["dst"])
+        if name != "archive" and name not in CAPTURED_TOP_LEVEL:
+            raise BackupError(f"the restore journal at {jp} names a unit {name!r} that a backup never captures — "
+                              f"refusing")
         own = arch_staging if name == "archive" else staging
-        if own is None or not src.is_relative_to(own):
+        if own is None or src != own / name or os.path.islink(src):
             raise BackupError(f"the restore journal at {jp} names a staged unit outside its staging dirs — refusing")
         # a destination is the ENTRY itself (its parent resolved, its last component never followed): a swap
         # replaces that entry, so a symlink at it is replaced, never the dir it points to
         if name == "archive":
-            if dst.name in ("", ".", "..") or dst.parent != own.resolve().parent:
+            if dst.name in ("", ".", "..") or dst.parent != own.parent:
                 raise BackupError(f"the restore journal at {jp} names an archive destination that is not beside its "
                                   f"staging dir — refusing")
-        elif name not in CAPTURED_TOP_LEVEL:
-            raise BackupError(f"the restore journal at {jp} names a unit {name!r} that a backup never captures — "
-                              f"refusing")
+            if (dst.exists() or dst.is_symlink()) and not _replaceable_archive_dir(dst):
+                raise BackupError(f"the restore journal at {jp} names an archive destination {dst} that holds no "
+                                  f"archive — refusing")
         elif dst != _entry_path(home / name):
             raise BackupError(f"the restore journal at {jp} names a destination outside {home} — refusing")
     return j
@@ -877,9 +885,17 @@ def _entry_path(p: Path) -> Path:
     return Path(p).parent.resolve() / Path(p).name
 
 
+def _restore_own_dir(d: Path) -> bool:
+    """Whether ``d`` can name a restore's own staging dir: named as one, absolute, spelled exactly as it resolves (no
+    ``..`` and no symlink anywhere along it), and not itself a symlink."""
+    d = Path(d)
+    return (d.is_absolute() and d.name.startswith(".restore-staging-") and ".." not in d.parts
+            and not os.path.islink(d) and d.resolve() == d)
+
+
 def _drop_staging(journal: dict) -> None:
     for d in (journal.get("staging"), journal.get("archive_staging")):
-        if d and Path(d).name.startswith(".restore-staging-"):
+        if d and _restore_own_dir(Path(d)):
             shutil.rmtree(d, ignore_errors=True)
 
 
