@@ -126,10 +126,19 @@ def test_config_refuses_overlap_with_product_data_root_negative_control(tmp_path
     ok = vscp_config.VscpConfig.resolve(data_dir=str(tmp_path / "ok-home"))
     assert ok.data_dir == (tmp_path / "ok-home").resolve()
 
-    # And the default sovereign/host planes are refused too (independent of the env above).
-    monkeypatch.delenv("VIGIL_BASE_DIR", raising=False)
+    # And the default sovereign/host planes are refused too (independent of the env above). Clear EVERY env
+    # override product_data_roots() honours, so the DEFAULT layout is what is checked whatever the invoking
+    # shell exports (a sovereign run sets SIGIL_HOME, which would move the sovereign root elsewhere).
+    for var in ("VIGIL_BASE_DIR", "VIGIL_LIVE_DIR", "SIGIL_HOME", "SIGIL_WARDEN_HOME"):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(vscp_config.VscpIsolationError):
         vscp_config.VscpConfig.resolve(data_dir="~/.sigil/vscp")
+
+    # ... and an overridden sovereign home is refused at its overridden location.
+    sovereign_home = tmp_path / "sigil-home"
+    monkeypatch.setenv("SIGIL_HOME", str(sovereign_home))
+    with pytest.raises(vscp_config.VscpIsolationError):
+        vscp_config.VscpConfig.resolve(data_dir=str(sovereign_home / "vscp"))
 
 
 # ==========================================================================================
