@@ -167,12 +167,15 @@ class EvalOffenseAttestation:
     Construction mirrors :class:`OffenseGate`: the owner signing key and trusted pubkey default to the
     persisted owner identity."""
 
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
+    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None,
+                 base_dir: Optional[str] = None):
         self.store = store
         # Signing key is the OWNER's (may be None → cannot attest anything, the desired default).
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         # Verification is PINNED to the persisted owner identity, never a caller-supplied key.
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        # The seam this instance publishes to; None (every existing caller) is the shared resolver's answer.
+        self._seam_override = base_dir
 
     # -- owner transitions (both A0/auto so they are never themselves offense-gated) -------------------
 
@@ -429,7 +432,7 @@ class EvalOffenseAttestation:
     # -- seam publication (so the OFFENSE plane can verify the public signed material) -----------------
 
     def _base_dir(self) -> str:
-        return resolve_seam_base()
+        return resolve_seam_base(self._seam_override)
 
     def _seam_path(self, engagement_slug: str):
         from vigil_integration.live.eval_attestation import eval_attestation_path

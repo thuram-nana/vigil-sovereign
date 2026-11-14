@@ -430,7 +430,17 @@ def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *
             got = _copy_if_absent(src / rel, seam / rel)
             if got == "differs" and rules.get(cls) != "union_files":
                 raise MigrateAborted(f"{rel} appeared on the seam with different content during the migration")
+    # g. owner-sealed eval publications: REBUILT from the spine (the truth), never copied — a grant the spine shows
+    # revoked stays revoked whatever the former directory published
+    for cls, kind, slug, _ in ops:
+        if kind == "rederive":
+            _fault(f"rederive:{cls}:{slug}")
+            _publisher(cls, store, owner_key, seam_s)._publish(slug)
     # VERIFY
+    for cls, kind, slug, _ in ops:
+        if kind == "rederive" and not _publication_verifies(cls, seam_s, slug, owner_key.public_key_b64):
+            raise MigrateAborted(f"verify: the {cls} publication of {slug} on the seam does not verify under the "
+                                 f"owner key")
     for cls, kind, slug, nonce in ops:
         if kind == "marker" and not (is_lease_settled(seam_s, slug, nonce) if cls == "settlements"
                                      else paused_past_expiry(seam_s, slug, nonce)):
@@ -463,6 +473,31 @@ def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *
     _fault("journal:complete")
     write_journal(seam_s, journal)
     return {"status": "migrated", "held": plan["held"]}
+
+
+def _publisher(cls: str, store: Any, owner_key: Any, seam_s: str) -> Any:
+    if cls == "eval_grants":
+        from .governor.eval_capability_grant import EvalCapabilityGrant
+        return EvalCapabilityGrant(store, owner_key=owner_key, trusted_pubkey=owner_key.public_key_b64, base_dir=seam_s)
+    from .governor.eval_offense_attestation import EvalOffenseAttestation
+    return EvalOffenseAttestation(store, owner_key=owner_key, trusted_pubkey=owner_key.public_key_b64, base_dir=seam_s)
+
+
+def _publication_verifies(cls: str, seam_s: str, slug: str, owner_pub: str) -> bool:
+    """The seam's publication of ``slug`` carries an owner seal that verifies over its record list, at or above the
+    seam's publication floor (what the offense reader enforces)."""
+    if cls == "eval_grants":
+        from vigil_integration.live import eval_capability_grant as mod
+    else:
+        from vigil_integration.live import eval_attestation as mod  # type: ignore[no-redef]
+    obj = mod._read_published(seam_s, slug)
+    if obj is None or not isinstance(obj.get("records"), list):
+        return False
+    ok, seq, _ = mod._verify_seal(obj.get("seal"), slug, [r for r in obj["records"] if isinstance(r, dict)],
+                                  frozenset({owner_pub}))
+    path = mod._shared_floor_path(seam_s, slug)
+    floor = _floor(path) if path is not None else None
+    return bool(ok) and (floor is None or seq >= floor[1])
 
 
 def _audit_once(store: Any, owner_key: Any, *, src: str, seam: str, digest: str, counts: dict, requeued: int,
