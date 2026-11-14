@@ -128,7 +128,8 @@ def test_report_only_writes_nothing(trees, monkeypatch):
     s = _store()
     done, started = _legacy_launches(s, legacy)
     _move(monkeypatch, seam)
-    (spool / "processed").mkdir(parents=True)
+    for sub in seam_migrate.DRAIN_SPOOL_SUBDIRS:                    # the settle drain's spool, as it lays it out
+        (spool / sub).mkdir(parents=True)
     before_legacy, before_spool = _tree_bytes(legacy), _tree_bytes(spool)
     tip = s.next_seq
     code, report = _run(s, seam, legacy, spool)
@@ -227,6 +228,8 @@ def test_the_cli_reports_and_exits_by_status(trees, monkeypatch, capsys):
     monkeypatch.setattr(config, "SPINE_PATH", legacy.parent / "default-spine" / "spine.jsonl")
     _legacy_launches(s, legacy)
     _move(monkeypatch, seam)
+    for sub in seam_migrate.DRAIN_SPOOL_SUBDIRS:                    # the settle drain's spool, as it lays it out
+        (spool / sub).mkdir(parents=True)
     with pytest.raises(SystemExit) as ex:
         cli.main(["seam", "migrate", "--from", str(legacy), "--to", str(seam), "--completion-spool", str(spool),
                   "--json"])

@@ -16,6 +16,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * accept a source whose state is not complete          -> test_an_uncommitted_migration_is_incomplete
   * follow symlinks                                      -> test_a_symlink_in_a_class_path_is_unsafe
   * doctor wiring ``_issue`` (-> ``_note``)               -> test_doctor_reports_an_unmigrated_tree_as_a_hard_issue
+  * a drop-in's ExecStart= reset keeping the old --spool -> test_the_settle_drains_spool_is_what_systemd_gives_it
 """
 from __future__ import annotations
 
@@ -199,6 +200,25 @@ def test_the_shipped_units_report_their_working_directories(tmp_path):
     assert units["sigil-cockpit.service"]["workdir"] == str(tmp_path / ".sigil")
     assert units["vigil-settle-drain.service"]["workdir"] == str(tmp_path / ".sigil")
     assert units["vigil-command.service"]["workdir"] == "/home/kali/vigil"
+
+
+def test_the_settle_drains_spool_is_what_systemd_gives_it(tmp_path):
+    """The settle drain's ``--spool`` as its process gets it: the unit default, then a drop-in's ``Environment=``, then
+    its env file (which overrides), and a drop-in that resets ``ExecStart=`` and passes no ``--spool`` names none."""
+    home = tmp_path / "home"
+    _install(home, "vigil-settle-drain.service")
+    u = "vigil-settle-drain.service"
+    assert unit_details(_REPO, home)[u]["spool"] == str(home / ".sigil" / "spool" / "settle")
+    dropins = home / ".config" / "systemd" / "user" / f"{u}.d"
+    dropins.mkdir()
+    (dropins / "a.conf").write_text(f"[Service]\nEnvironment=VIGIL_SETTLE_SPOOL={tmp_path / 'dropin-spool'}\n")
+    assert unit_details(_REPO, home)[u]["spool"] == str(tmp_path / "dropin-spool")
+    env = home / ".config" / "vigil" / "settle-drain.env"
+    env.parent.mkdir(parents=True)
+    env.write_text(f"VIGIL_SETTLE_SPOOL={tmp_path / 'env-spool'}\n")
+    assert unit_details(_REPO, home)[u]["spool"] == str(tmp_path / "env-spool")
+    (dropins / "b.conf").write_text("[Service]\nExecStart=\nExecStart=/bin/true --scope x\n")
+    assert unit_details(_REPO, home)[u]["spool"] is None
 
 
 def test_writer_units_working_directory_default_is_a_candidate(tmp_path):

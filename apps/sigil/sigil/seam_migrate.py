@@ -286,14 +286,29 @@ def _spool_names(d: Path) -> "list[str]":
         return []
 
 
+#: The subdirectories the settle drain creates in its completion spool when it starts
+#: (``CompletionSpoolWatcher``): a directory lacking any of them is not that spool.
+DRAIN_SPOOL_SUBDIRS = ("incoming", "working", "processed", "rejected")
+
+
+def is_drain_spool(spool: Any) -> bool:
+    """Whether ``spool`` is a directory laid out as the settle drain's completion spool (every one of
+    :data:`DRAIN_SPOOL_SUBDIRS` is a directory in it)."""
+    if spool is None:
+        return False
+    p = Path(spool)
+    return p.is_dir() and all((p / sub).is_dir() for sub in DRAIN_SPOOL_SUBDIRS)
+
+
 def _completion_plan(spool: Any, unsettled: "list[dict]") -> "tuple[list, list]":
     """For each UNSETTLED legacy launch — its window open or closed — the archived completions in
     ``<spool>/processed`` that name it, to requeue: a completion a drain archived as a no-op while it read another
     directory reaches the drain again once the lease is on the seam, so a run that ended is settled at its outcome
     whenever the migration runs. A launch whose completion is already waiting (``incoming`` / ``working`` /
     ``rejected``) is left to the drain. HELD for the owner (``legacy_hold``; no money moves): an EXPIRED launch with
-    no completion anywhere in the spool, and — when the spool is absent or cannot be read in full — every unsettled
-    launch with no completion found, since an archived completion of it cannot be ruled out. Returns
+    no completion anywhere in the spool, and every unsettled launch with no completion found when the spool is absent,
+    is not laid out as the settle drain's completion spool (:func:`is_drain_spool` — nothing is requeued from it), or
+    cannot be read in full, since an archived completion of it cannot be ruled out. Returns
     ``(requeue names, held)``."""
     want = {(x["slug"], x["nonce"]): x["state"] for x in unsettled}
     if not want:
@@ -301,7 +316,9 @@ def _completion_plan(spool: Any, unsettled: "list[dict]") -> "tuple[list, list]"
     found: "dict[tuple[str, str], list[str]]" = {}
     pending: "set[tuple[str, str]]" = set()
     present = spool is not None and Path(spool).is_dir()
-    clean = present
+    clean = is_drain_spool(spool)
+    why = ("the completion spool cannot be read in full" if clean else
+           f"{spool} is not the settle drain's completion spool" if present else "no completion spool to inspect")
     for sub in ("processed", "incoming", "working", "rejected") if clean else ():
         d = Path(spool) / sub
         try:
@@ -322,8 +339,7 @@ def _completion_plan(spool: Any, unsettled: "list[dict]") -> "tuple[list, list]"
                 else:
                     pending.add(t)
     requeue = sorted(n for t, ns in found.items() if t not in pending for n in ns)
-    why = ("no archived completion" if clean else
-           "the completion spool cannot be read in full" if present else "no completion spool to inspect")
+    why = "no archived completion" if clean else why
     held = [{"slug": s, "nonce": n, "why": why} for (s, n), state in sorted(want.items())
             if (s, n) not in found and (s, n) not in pending and (state == "expired_unsettled" or not clean)]
     return requeue, held
@@ -505,16 +521,17 @@ def _requeue(seam_s: str, plan: dict, journal: dict, srcj: dict, spool: Any) -> 
     then move ``<spool>/processed/<name>`` to ``incoming/<name>``. The drain verifies it under its delegation and
     settles the launch on the seam at the completion's outcome; settle idempotency per (slug, nonce) is the backstop.
     A settled launch's completion is never selected. A launch :func:`_completion_plan` holds (expired with no
-    completion anywhere in the spool; any unsettled one without a completion when the spool cannot be read in full)
-    is HELD for the owner (``legacy_hold`` in both reservation sweeps and the drain's expired-pause pass; no money
-    moves). The settle drain's scan checkpoint is removed, so its next pass reads the whole spine (lease bundles
-    reached the seam without a publish). Returns ``(requeued names, held)``."""
+    completion anywhere in the spool; any unsettled one without a completion when the spool is absent, is not laid out
+    as the settle drain's spool, or cannot be read in full) is HELD for the owner (``legacy_hold`` in both reservation sweeps and the drain's expired-pause pass; no money
+    moves); nothing is written to a directory that is not the drain's spool. The settle drain's scan checkpoint is
+    removed, so its next pass reads the whole spine (lease bundles reached the seam without a publish). Returns
+    ``(requeued names, held)``."""
     from vigil_integration.live.seam_lock import LockBusy, locked_file
     from vigil_integration.seam_migration import write_journal
     unsettled = [x for x in plan.get("_leases", []) if x["state"] != "settled"]
-    sp = Path(spool) if spool is not None else None
-    if sp is None or not sp.is_dir():
-        return [], _completion_plan(None, unsettled)[1]
+    if not is_drain_spool(spool):              # nothing to requeue from it, and nothing is written there
+        return [], _completion_plan(spool, unsettled)[1]
+    sp = Path(spool)
     lock = locked_file(sp / ".spool.lock", wait_s=5.0)
     try:
         lock.__enter__()

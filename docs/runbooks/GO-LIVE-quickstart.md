@@ -166,7 +166,8 @@ systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
 Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
 eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an
 unsettled launch back to the settle drain, which settles it at its outcome, and holds for the owner a launch it
-cannot settle (no money moves for it). **Never run `sigil ops-sweep reservations --apply` against the former
+cannot settle (no money moves for it). It reads the completion spool the configured settle drain drains (its unit,
+drop-ins and env file); a `--completion-spool` naming any other directory is refused. **Never run `sigil ops-sweep reservations --apply` against the former
 directory** (`--base-dir ~/.sigil/.vigil-live`); with the units' guard on it is refused, before and after the
 migration. Run the migration before you remove a leftover
 `VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and

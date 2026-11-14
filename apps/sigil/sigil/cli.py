@@ -1585,20 +1585,37 @@ def cmd_settle_drain(a) -> None:
             sys.exit(1)
 
 
-def _settle_spool_default() -> str:
-    """The settle drain's completion spool: ``VIGIL_SETTLE_SPOOL``, else ``~/.config/vigil/settle-drain.env``'s,
-    else the unit default ``~/.sigil/spool/settle`` (what ``vigil doctor`` reads)."""
+def _settle_spool(verb: str, given: "str | None") -> str:
+    """The settle drain's completion spool a seam migration reads. The configured ``vigil-settle-drain`` unit's
+    ``--spool`` — its installed copy, drop-ins and env file, as systemd builds its environment, so the directory the
+    drain drains — else ``VIGIL_SETTLE_SPOOL``, else the unit default ``~/.sigil/spool/settle``. A spool named here
+    (``--completion-spool``, or ``VIGIL_SETTLE_SPOOL`` in this shell) is used only when it is the configured drain's
+    and is laid out as a completion spool (``seam_migrate.is_drain_spool``); otherwise exit 2 before anything is read,
+    so archived completions are never looked for in another directory."""
     import os
     from pathlib import Path
-    v = (os.environ.get("VIGIL_SETTLE_SPOOL") or "").strip()
-    if not v:
-        try:
-            from vigil_integration.seam_base_units import parse_env_file
-            v = ((parse_env_file(Path.home() / ".config" / "vigil" / "settle-drain.env") or {})
-                 .get("VIGIL_SETTLE_SPOOL") or "").strip()
-        except ImportError:
-            v = ""
-    return str(Path(v).expanduser() if v else Path.home() / ".sigil" / "spool" / "settle")
+
+    from .seam_migrate import DRAIN_SPOOL_SUBDIRS, is_drain_spool
+    try:
+        from vigil_integration.seam_base_units import unit_details
+        drain = unit_details(only=("vigil-settle-drain.service",)).get("vigil-settle-drain.service") or {}
+    except ImportError:          # the unit model is not installed here: nothing configured to follow
+        drain = {}
+    unit_spool = str(drain.get("spool") or "")
+    named = (given or os.environ.get("VIGIL_SETTLE_SPOOL") or "").strip()
+    if not named:
+        return unit_spool or str(Path.home() / ".sigil" / "spool" / "settle")
+    path = os.path.abspath(os.path.expanduser(named))
+    if unit_spool and os.path.realpath(path) != os.path.realpath(unit_spool):
+        print(f"{verb}: refused — the configured settle drain drains {unit_spool}, not {path}; run it without "
+              f"--completion-spool (and without VIGIL_SETTLE_SPOOL), or set the drain's spool first.", file=sys.stderr)
+        sys.exit(2)
+    if not is_drain_spool(path):
+        print(f"{verb}: refused — {path} is not the settle drain's completion spool (it has no "
+              f"{'/'.join(DRAIN_SPOOL_SUBDIRS)} directories); name the directory the drain's --spool names.",
+              file=sys.stderr)
+        sys.exit(2)
+    return path
 
 
 def cmd_seam(a) -> None:
@@ -1628,7 +1645,7 @@ def cmd_seam(a) -> None:
         from vigil_integration.seam_base_units import unit_details
         from vigil_integration.seam_migration import legacy_candidates
         sources = legacy_candidates(seam, units=unit_details())
-    spool = a.completion_spool or _settle_spool_default()
+    spool = _settle_spool("seam migrate", a.completion_spool)
     try:
         code, report = seam_migrate.run(SpineStore(), owner_keypair(), seam=seam, sources=sources, spool=spool,
                                         apply=a.apply)
@@ -3589,8 +3606,9 @@ def main(argv=None) -> None:
     psmm.add_argument("--to", default="", help="the seam (default: the one the configured units use; required when "
                                                "no seam unit is configured)")
     psmm.add_argument("--completion-spool", default="",
-                      help="the settle drain's completion spool (default: VIGIL_SETTLE_SPOOL, else the drain's env "
-                           "file, else ~/.sigil/spool/settle)")
+                      help="the settle drain's completion spool (default: the configured settle-drain unit's "
+                           "--spool, else VIGIL_SETTLE_SPOOL, else ~/.sigil/spool/settle); refused unless it is that "
+                           "drain's spool")
     psmm.add_argument("--apply", action="store_true",
                       help="carry the records (run as the service user, with the cockpit, the customer server and "
                            "the settle drain stopped); without it nothing is written")

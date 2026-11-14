@@ -7,9 +7,10 @@ charged, canceled or failed is refunded. Every UNSETTLED legacy launch's complet
 still open when the migration ran or had closed, so a run that ended is settled at its outcome exactly once whenever
 the upgrade happens; a settled launch's completion stays archived. An expired, unsettled launch with no completion
 anywhere in the spool is HELD for the owner, and so is every unsettled launch without a completion found when the spool
-is absent or cannot be read in full: both reservation sweeps report it ``legacy_hold`` and never settle it. The drain's
-scan checkpoint is removed (the next pass reads the whole spine), and a checkpoint naming another seam is never
-continued.
+is absent, is not laid out as the settle drain's spool, or cannot be read in full: both reservation sweeps report it
+``legacy_hold`` and never settle it. The drain's scan checkpoint is removed (the next pass reads the whole spine), and a
+checkpoint naming another seam is never continued. `sigil seam migrate` reads the spool the configured settle drain
+drains (its unit, drop-ins and env file) and refuses a spool named on the command line that is not that one.
 
 Sovereign leg: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core.
 
@@ -23,6 +24,12 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * legacy_hold not honoured by the sweep                    -> test_a_held_launch_is_never_settled_by_the_sweep
   * the scan checkpoint kept                                 -> test_the_scan_checkpoint_is_removed
   * the checkpoint's seam identity dropped                   -> test_a_checkpoint_from_another_seam_is_not_continued
+  * a directory that is not the drain's spool read as clean  -> test_a_directory_that_is_not_the_drains_spool_holds_every_unsettled_launch
+  * any one drain subdirectory taken for the spool          -> test_a_directory_that_is_not_the_drains_spool_holds_every_unsettled_launch
+  * the report not holding what --apply holds                -> test_the_report_holds_what_the_apply_holds
+  * a quarantined completion not counted as waiting          -> test_a_launch_with_a_quarantined_completion_is_neither_requeued_nor_held
+  * the CLI ignoring the drain unit's spool (drop-in)        -> test_the_cli_reads_the_spool_the_configured_drain_drains
+  * a named spool that is not the drain's accepted          -> test_the_cli_refuses_a_spool_that_is_not_the_drains
 """
 from __future__ import annotations
 
@@ -327,3 +334,159 @@ def test_a_settled_launch_with_its_bundle_left_keeps_its_completion_archived(tre
     assert code == 0 and rep["sources"][0]["leases"][0]["state"] == "settled"
     assert rep["sources"][0]["requeue"] == [] and (spool / "processed" / name).is_file()
     assert _avail(s) == 100
+
+
+@pytest.mark.parametrize("window", ["open", "closed"])
+@pytest.mark.parametrize("where", ["empty_dir", "spool_parent", "partial_layout"])
+def test_a_directory_that_is_not_the_drains_spool_holds_every_unsettled_launch(trees, monkeypatch, tmp_path, window,
+                                                                               where):
+    """The migration is handed a directory that is not the settle drain's completion spool (an empty directory, or
+    the spool's parent): an archived completion of any unsettled launch cannot be ruled out, so every one is HELD for
+    the owner — never left for the abandoned sweep to refund a run that completed — and nothing is written there. A
+    directory with only some of the drain's subdirectories was never laid out by the drain: not its spool either."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    gov, deleg = _deleg()
+    name = _archived_noop(s, spool, gov, deleg, r, "completed", tmp_path / "wrong-tree")   # the real spool's archive
+    wrong = spool.parent if where == "spool_parent" else tmp_path / "not-a-spool"
+    wrong.mkdir(exist_ok=True)
+    if where == "partial_layout":
+        for sub in ("incoming", "processed"):
+            (wrong / sub).mkdir()
+    before = sorted(p.name for p in wrong.iterdir())
+    _move(monkeypatch, seam)
+    for apply in (False, True):
+        code, rep = seam_migrate.run(s, ensure_owner_keypair(), seam=seam, sources=[str(legacy)], spool=wrong,
+                                     apply=apply, now=NOW + 60 if window == "open" else LATE)
+        src = rep["sources"][0]
+        assert code == (1 if apply else 0) and src["requeue"] == [], rep
+        assert [(h["slug"], h["nonce"]) for h in src["held"]] == [(r["slug"], r["nonce"])]
+        assert "is not the settle drain's completion spool" in src["held"][0]["why"]
+    assert sm.held_launches(seam) == {(r["slug"], r["nonce"])}
+    assert sorted(p.name for p in wrong.iterdir()) == before                # no lock, no move, no checkpoint there
+    assert (spool / "processed" / name).is_file()
+    _drain(s, spool, deleg, seam, now=LATE + 10)
+    out = ops_sweeps.sweep_abandoned_reservations(LaunchGate(s), now=LATE + 90_000, ttl_s=50, apply=True,
+                                                  completion_spool=str(spool))
+    assert [x["status"] for x in out["items"] if x["slug"] == r["slug"]] == ["legacy_hold"], out
+    assert _avail(s) == 70 and not is_lease_settled(str(seam), r["slug"], r["nonce"])     # still debited: held
+
+
+@pytest.mark.parametrize("where", ["no_spool", "not_a_spool"])
+def test_the_report_holds_what_the_apply_holds(trees, monkeypatch, tmp_path, where):
+    """Report-only lists a live launch as held for an absent spool, or a directory that is not the drain's spool,
+    exactly as --apply then holds it."""
+    legacy, seam, _ = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    spool = tmp_path / "no-such-spool"
+    if where == "not_a_spool":
+        spool.mkdir()
+    _move(monkeypatch, seam)
+    seen = []
+    for apply in (False, True):
+        code, rep = seam_migrate.run(s, ensure_owner_keypair(), seam=seam, sources=[str(legacy)], spool=spool,
+                                     apply=apply, now=NOW + 60)
+        seen.append([(h["slug"], h["nonce"]) for h in rep["sources"][0]["held"]])
+    assert seen == [[(r["slug"], r["nonce"])]] * 2
+
+
+def test_a_launch_with_a_quarantined_completion_is_neither_requeued_nor_held(trees, monkeypatch, tmp_path):
+    """A live launch whose completion sits in rejected/ (quarantined: the drain's unit stays failed until the operator
+    clears it) besides an archived copy in processed/ is left to the drain and the operator: nothing is requeued,
+    nothing held, and the abandoned sweep refunds nothing while the quarantined completion is there."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    gov, deleg = _deleg()
+    name = _archived_noop(s, spool, gov, deleg, r, "completed", tmp_path / "wrong-tree")
+    (spool / "rejected" / name).write_bytes((spool / "processed" / name).read_bytes())
+    _move(monkeypatch, seam)
+    code, rep = _apply(s, seam, legacy, spool, now=NOW + 60)
+    src = rep["sources"][0]
+    assert code == 0 and src["requeue"] == [] and src["held"] == [], rep
+    assert (spool / "processed" / name).is_file() and not list((spool / "incoming").glob("*.json"))
+    out = ops_sweeps.sweep_abandoned_reservations(LaunchGate(s), now=LATE + 90_000, ttl_s=50, apply=True,
+                                                  completion_spool=str(spool))
+    assert [x["status"] for x in out["items"] if x["slug"] == r["slug"]] == ["completion_pending"], out
+    assert _avail(s) == 70
+
+
+def _cli_host(monkeypatch, tmp_path, spool, *, dropin: bool, unit: bool = True):
+    """A test HOME with the shipped settle-drain unit installed (``unit``); ``dropin``: its spool set by a drop-in."""
+    import shutil
+    from pathlib import Path
+    home = tmp_path / "home-cli"
+    d = home / ".config" / "systemd" / "user"
+    d.mkdir(parents=True)
+    repo = Path(__file__).resolve().parents[3]
+    if unit:
+        shutil.copy(repo / "infra/systemd/vigil-settle-drain.service", d / "vigil-settle-drain.service")
+    if unit and dropin:
+        (d / "vigil-settle-drain.service.d").mkdir()
+        (d / "vigil-settle-drain.service.d" / "spool.conf").write_text(
+            f"[Service]\nEnvironment=VIGIL_SETTLE_SPOOL={spool}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("VIGIL_SETTLE_SPOOL", raising=False)
+
+
+def _cli_exit(monkeypatch, store, tmp_path, argv) -> int:
+    from sigil import cli, config
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    monkeypatch.setattr(config, "SPINE_PATH", tmp_path / "default-spine" / "spine.jsonl")
+    with pytest.raises(SystemExit) as ex:
+        cli.main(argv)
+    return int(ex.value.code or 0)
+
+
+def test_the_cli_reads_the_spool_the_configured_drain_drains(trees, monkeypatch, tmp_path, capsys):
+    """The drain's spool is set by a drop-in: `sigil seam migrate --apply` reads THAT spool (what systemd gives the
+    drain), so the archived completion is requeued and settled at its outcome — never held, never refunded."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    gov, deleg = _deleg()
+    name = _archived_noop(s, spool, gov, deleg, r, "completed", tmp_path / "wrong-tree")
+    _cli_host(monkeypatch, tmp_path, spool, dropin=True)
+    _move(monkeypatch, seam)
+    argv = ["seam", "migrate", "--from", str(legacy), "--to", str(seam), "--apply", "--json"]
+    assert _cli_exit(monkeypatch, s, tmp_path, argv) == 0, capsys.readouterr().err
+    src = __import__("json").loads(capsys.readouterr().out)["sources"][0]
+    assert src["requeue"] == [name] and src["held"] == []
+    assert _drain(s, spool, deleg, seam, now=NOW + 120)["settled"] == 1
+    assert _avail(s) == 70 and is_lease_settled(str(seam), r["slug"], r["nonce"])          # charged, exactly once
+
+
+@pytest.mark.parametrize("named", ["not_a_spool", "not_the_units", "env_not_the_units"])
+def test_the_cli_refuses_a_spool_that_is_not_the_drains(trees, monkeypatch, tmp_path, capsys, named):
+    """A completion spool named on the command line (or exported) that is not laid out as the drain's spool, or is
+    not the one the configured drain drains, is refused (exit 2) before anything is read or written."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    _reserve(s)
+    for sub in seam_migrate.DRAIN_SPOOL_SUBDIRS:
+        (spool / sub).mkdir(parents=True)
+    other = tmp_path / ("plain-dir" if named == "not_a_spool" else "other-spool")
+    other.mkdir()
+    if named != "not_a_spool":
+        for sub in seam_migrate.DRAIN_SPOOL_SUBDIRS:
+            (other / sub).mkdir()
+    _cli_host(monkeypatch, tmp_path, spool, dropin=True, unit=named != "not_a_spool")
+    _move(monkeypatch, seam)
+    argv = ["seam", "migrate", "--from", str(legacy), "--to", str(seam), "--apply"]
+    if named == "env_not_the_units":
+        monkeypatch.setenv("VIGIL_SETTLE_SPOOL", str(other))
+    else:
+        argv += ["--completion-spool", str(other)]
+    tip = s.next_seq
+    assert _cli_exit(monkeypatch, s, tmp_path, argv) == 2
+    err = capsys.readouterr().err
+    assert ("is not the settle drain's completion spool" if named == "not_a_spool" else "the configured settle "
+            "drain drains") in err
+    assert not sm.journal_path(seam).exists() and s.next_seq == tip and list(seam.iterdir()) == []

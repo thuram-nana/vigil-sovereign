@@ -97,11 +97,13 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
                    *, installed: bool = False) -> "Optional[dict]":
     """The seam base the process of the unit ``text`` would use, or ``None`` when the unit is not configured
     here. Returns ``{"seam": <abs path>, "legacy": <abs VIGIL_SETTLE_BASE_DIR or None>, "workdir": <abs working
-    directory>, "guard": <the VIGIL_SEAM_MIGRATION_GUARD value its process gets, "" when unset>}``."""
+    directory>, "guard": <the VIGIL_SEAM_MIGRATION_GUARD value its process gets, "" when unset>, "spool": <the
+    ``--spool`` its ExecStart passes, after ``${VAR}`` substitution, as given; None when it passes none>}``."""
     env: dict = {}
     files: "list[Path]" = []
     workdir = str(home)
     base_arg: Optional[str] = None
+    spool_arg: Optional[str] = None
     for key, value in _directives(text):
         if key == "Environment":
             if not value:
@@ -120,7 +122,7 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
             workdir = str(home) if wd == "~" else wd
         elif key == "ExecStart":
             if not value:
-                base_arg = None            # `ExecStart=` clears the command a drop-in then replaces
+                base_arg = spool_arg = None  # `ExecStart=` clears the command a drop-in then replaces
                 continue
             words = shlex.split(value)
             for i, w in enumerate(words):
@@ -128,6 +130,10 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
                     base_arg = words[i + 1]
                 elif w.startswith("--base-dir="):
                     base_arg = w.split("=", 1)[1]
+                elif w == "--spool" and i + 1 < len(words):
+                    spool_arg = words[i + 1]
+                elif w.startswith("--spool="):
+                    spool_arg = w.split("=", 1)[1]
     present = [f for f in files if f.is_file()]
     if not installed and not present:
         return None
@@ -140,8 +146,9 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
 
     raw = (_subst(base_arg, env) if base_arg is not None else "") or env.get("VIGIL_BASE_DIR") or ".vigil-live"
     legacy = env.get(_LEGACY_ALIAS) or ""
+    spool = _subst(spool_arg, env).strip() if spool_arg is not None else ""
     return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None, "workdir": _abs(workdir),
-            "guard": str(env.get(GUARD_ENV) or "").strip()}
+            "guard": str(env.get(GUARD_ENV) or "").strip(), "spool": spool or None}
 
 
 def unit_details(repo: "Path | str | None" = None, home: "Path | None" = None, *,
