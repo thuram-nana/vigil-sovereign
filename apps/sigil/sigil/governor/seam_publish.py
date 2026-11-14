@@ -225,9 +225,10 @@ def settle_close_alarm(failed: Iterable[str], *, checked: Iterable[str], detail:
                        seams_checked: Iterable[str] = (), seams_failed: Iterable[str] = ()) -> bool:
     """Finish a full reconcile's alarm, under the alarm lock: the result is ``failed`` plus any name another revoke
     added while the reconcile ran (it was not in ``checked``, so it was not re-checked). With nothing left the alarm
-    is cleared. The seams it names are ``seams_failed`` plus those it named before that this reconcile did not run on
-    (``seams_checked``). Returns True when the alarm now says what the reconcile found."""
-    done = {str(c)[:96] for c in checked} | {IN_PROGRESS}
+    is cleared. The seams it names are ``seams_failed`` plus each existing seam directory it named before that this
+    reconcile did not run on (``seams_checked``); while one is left, every name the alarm held stays too (this
+    reconcile did not confirm that seam), so only a reconcile that ran on every seam the alarm names clears it (`sigil
+    eval-grant reconcile` runs on them). Returns True when the alarm now says what the reconcile found."""
     names = {str(f)[:96] for f in failed}
     ran = {os.path.realpath(str(s)) for s in seams_checked}
     try:
@@ -235,12 +236,15 @@ def settle_close_alarm(failed: Iterable[str], *, checked: Iterable[str], detail:
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with _alarm_lock(p):
             cur = read_close_alarm() or {}
+            unrun = {s for s in _alarm_seams(cur)
+                     if os.path.isabs(s) and os.path.isdir(s) and os.path.realpath(s) not in ran}
+            done = {IN_PROGRESS} | (set() if unrun else {str(c)[:96] for c in checked})
             names |= {str(f)[:96] for f in cur.get("failed") or [] if isinstance(f, str) and str(f)[:96] not in done}
             if not names:
                 p.unlink(missing_ok=True)
                 return True
             ordered = sorted(names)
-            seams = {str(s) for s in seams_failed} | {s for s in _alarm_seams(cur) if os.path.realpath(s) not in ran}
+            seams = {str(s) for s in seams_failed} | unrun
             tmp = p.parent / (p.name + ".tmp")
             tmp.write_text(json.dumps({"detail": str(detail)[:500], "cause": "seam_unreconciled",
                                        "failed": ordered[:200], "failed_total": len(ordered), "at": time.time(),

@@ -23,6 +23,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * a seam not floored again after the revoke lands             -> test_a_close_over_two_seams_floors_every_seam_above_a_concurrent_append
   * a tree holding a publication left out of a reconcile         -> test_a_reconcile_reaches_another_tree_that_holds_a_publication
   * the close alarm's seams not merged / kept / dropped          -> test_the_alarm_keeps_the_seams_a_reconcile_did_not_confirm
+  * a one-seam close clearing names another seam still holds    -> test_an_offense_close_never_clears_the_alarm_for_a_seam_it_did_not_run_on
   * one failing seam stops the others / reports success          -> test_a_revoke_is_tried_on_every_seam_when_one_fails
   * a seam published from a spine without the revoke            -> test_a_revoke_whose_append_fails_publishes_nothing_and_ungrants_every_seam
   * another seam retracted only after the append                 -> test_every_seam_is_ungranted_before_the_revoke_is_appended
@@ -552,20 +553,62 @@ def test_a_close_over_two_seams_floors_every_seam_above_a_concurrent_append(home
     assert floors == [store.next_seq, store.next_seq]
 
 
-def test_the_alarm_keeps_the_seams_a_reconcile_did_not_confirm(home):
-    """The close alarm's seams: merged by every revoke; a reconcile keeps those it did not run on and those it could
-    not confirm, and drops those it confirmed; cleared with the last name."""
+def test_the_alarm_keeps_the_seams_a_reconcile_did_not_confirm(home, tmp_path):
+    """The close alarm's seams: merged by every revoke; a reconcile keeps those it did not run on — and, while one is
+    left, every name the alarm held — and those it could not confirm, and drops those it confirmed; cleared with the
+    last name. A seam directory that is gone (nothing left to authorize there) or a relative entry holds nothing."""
     from sigil.governor.seam_publish import raise_close_alarm, read_close_alarm, settle_close_alarm
-    assert raise_close_alarm("a", cause="seam_unreconciled", failed=["grant:a"], seams=["/s1"])
-    assert raise_close_alarm("b", cause="seam_unreconciled", failed=["grant:b"], seams=["/s2"])
-    assert read_close_alarm().get("seams") == ["/s1", "/s2"]
-    settle_close_alarm({"grant:a": "x"}, checked={"grant:a"}, detail="d", seams_checked=["/s1"], seams_failed=["/s1"])
-    assert read_close_alarm().get("seams") == ["/s1", "/s2"]
-    settle_close_alarm({"grant:b": "x"}, checked={"grant:a", "grant:b"}, detail="d", seams_checked=["/s1", "/s2"],
-                       seams_failed=["/s2"])
-    assert read_close_alarm().get("seams") == ["/s2"] and read_close_alarm()["failed"] == ["grant:b"]
-    settle_close_alarm({}, checked={"grant:b"}, detail="d", seams_checked=["/s2"])
+    s1, s2, s3 = (str(tmp_path / n) for n in ("s1", "s2", "s3"))
+    for s in (s1, s2, s3, "rel"):
+        Path(s).mkdir()                                                  # "rel": relative to this shell's directory
+    assert raise_close_alarm("a", cause="seam_unreconciled", failed=["grant:a"], seams=[s1])
+    assert raise_close_alarm("b", cause="seam_unreconciled", failed=["grant:b"], seams=[s2])
+    assert read_close_alarm().get("seams") == [s1, s2]
+    settle_close_alarm({"grant:a": "x"}, checked={"grant:a", "grant:b"}, detail="d", seams_checked=[s1],
+                       seams_failed=[s1])
+    assert read_close_alarm().get("seams") == [s1, s2] and read_close_alarm()["failed"] == ["grant:a", "grant:b"]
+    settle_close_alarm({"grant:b": "x"}, checked={"grant:a", "grant:b"}, detail="d", seams_checked=[s1, s2],
+                       seams_failed=[s2])
+    assert read_close_alarm().get("seams") == [s2] and read_close_alarm()["failed"] == ["grant:b"]
+    settle_close_alarm({}, checked={"grant:b"}, detail="d", seams_checked=[s2])
     assert read_close_alarm() is None
+    assert raise_close_alarm("c", cause="seam_unreconciled", failed=["grant:c"],
+                             seams=[s3, str(tmp_path / "gone"), "rel"])
+    settle_close_alarm({}, checked={"grant:c"}, detail="d", seams_checked=[s1])     # s3 not run on: kept
+    assert read_close_alarm()["failed"] == ["grant:c"] and read_close_alarm().get("seams") == [s3]
+    settle_close_alarm({}, checked={"grant:c"}, detail="d", seams_checked=[s3])
+    assert read_close_alarm() is None
+
+
+def test_an_offense_close_never_clears_the_alarm_for_a_seam_it_did_not_run_on(home, monkeypatch, tmp_path, capsys):
+    """A revoke could not be confirmed on the settle drain's seam; an offense close (one seam: the cockpit's) then
+    confirms its own seam, but the alarm keeps naming the grant and the other seam until a reconcile
+    runs on it — `sigil eval-grant reconcile` does, and clears it."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant, revoke_grants_on_close
+    from sigil.governor.seam_publish import read_close_alarm
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    rig = _Rig("grant")
+    EvalCapabilityGrant(rig.store, owner_key=rig.owner, base_dir=seam_b)._publish(SLUG)
+    real_publish = EvalCapabilityGrant._publish
+
+    def _publish(self, slug):
+        if self._seam_override == seam_b:
+            raise RuntimeError("the drain's seam is not reachable")
+        return real_publish(self, slug)
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _publish)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: rig.store)
+    with pytest.raises(SystemExit):
+        cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))
+    assert read_close_alarm()["failed"] == [f"grant:{SLUG}"] and read_close_alarm().get("seams") == [seam_b]
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", real_publish)
+    revoke_grants_on_close(rig.store, owner_key=rig.owner)                # the cockpit's close: its own seam only
+    alarm = read_close_alarm()
+    assert alarm is not None and alarm["failed"] == [f"grant:{SLUG}"] and alarm.get("seams") == [seam_b]
+    capsys.readouterr()
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    assert json.loads(capsys.readouterr().out)["ok"] is True and read_close_alarm() is None
+    assert _revoked_on(seam_b, SLUG)
 
 
 def test_eval_grant_status_reads_only_and_is_not_guarded(home, monkeypatch, tmp_path, capsys):
