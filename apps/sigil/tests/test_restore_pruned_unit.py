@@ -407,20 +407,50 @@ def test_an_archive_dir_overlapping_another_unit_or_this_home_is_refused(world, 
     assert _tree(tmp_path) == before
 
 
-def test_a_unit_that_cannot_be_searched_for_mount_points_is_refused(world, tmp_path, flag, monkeypatch):
-    """Whether an entry the swap replaces holds a mount point is read off the whole of it: a dir inside it that cannot
-    be listed refuses the restore (and `--verify-only`) before anything is written."""
+# How a restore reads the mounts: from the kernel's mount list (Linux), or off the filesystem by device (elsewhere).
+MOUNT_MODES = ["kernel mount list", "by device"]
+
+
+def _mount_mode(monkeypatch, mode: str) -> None:
+    if mode == "kernel mount list":
+        assert backup._PROC_MOUNTS, "these tests run where the kernel lists its mounts"
+    else:
+        monkeypatch.setattr(backup, "_PROC_MOUNTS", False)
+
+
+def _listed_as_mounted(monkeypatch, *paths: Path) -> None:
+    """The kernel's mount list also names each of ``paths`` as a mount point (as a bind mount of the same filesystem
+    is: the dir itself has its parent's device, so os.path.ismount says no). A space in a path is escaped as the kernel
+    escapes it."""
+    real = backup._read_mountinfo
+    extra = b"".join(b"%d 1 0:%d / %s rw - ext4 /dev/vdz rw\n" % (900 + i, 90 + i,
+                                                                os.fsencode(p).replace(b" ", b"\\040"))
+                     for i, p in enumerate(paths))
+    monkeypatch.setattr(backup, "_read_mountinfo", lambda: real() + extra)
+
+
+@pytest.mark.parametrize("mode", MOUNT_MODES)
+def test_a_unit_that_cannot_be_searched_for_mount_points_is_refused(world, tmp_path, flag, monkeypatch, mode):
+    """Whether an entry the swap replaces holds a mount point is read off the whole of it: the kernel's mount list
+    that cannot be read — or, read by device, a dir inside the entry that cannot be listed — refuses the restore (and
+    `--verify-only`) before anything is written."""
     home = tmp_path / "home"
     _restore(world["good"], home)
     before = _tree(tmp_path)
-    real = os.scandir
-    unreadable = str(home / "spine" / "keys")
+    _mount_mode(monkeypatch, mode)
+    if mode == "kernel mount list":
+        def unreadable_list() -> bytes:
+            raise PermissionError(13, "Permission denied", backup._MOUNTINFO)
+        monkeypatch.setattr(backup, "_read_mountinfo", unreadable_list)
+    else:
+        real = os.scandir
+        unreadable = str(home / "spine" / "keys")
 
-    def scandir(p=".", *a, **kw):
-        if not isinstance(p, int) and os.fspath(p) == unreadable:
-            raise PermissionError(13, "Permission denied", unreadable)
-        return real(p, *a, **kw)
-    monkeypatch.setattr(os, "scandir", scandir)
+        def scandir(p=".", *a, **kw):
+            if not isinstance(p, int) and os.fspath(p) == unreadable:
+                raise PermissionError(13, "Permission denied", unreadable)
+            return real(p, *a, **kw)
+        monkeypatch.setattr(os, "scandir", scandir)
     for verify_only in (True, False):
         with pytest.raises(BackupError, match="cannot check that the restore's renames"):
             restore_backup(world["good"], home, PW, vault=None if verify_only else Vault(tmp_path / "vault"),
@@ -494,9 +524,16 @@ def test_a_swap_whose_units_would_nest_is_refused_before_its_journal_is_written(
     assert not list(tmp_path.rglob(".restore-*"))
 
 
-def _on_another_filesystem(monkeypatch, path: Path) -> None:
-    """``path`` reads as a mount point to os.stat: its device is another than its parent's (a home that is a mount
-    point has its restore staging beside it, on the parent's filesystem)."""
+def _on_another_mount(monkeypatch, path: Path, mode: str) -> None:
+    """``path`` is a mount point of its own: by the kernel, the mount it is on is another than its parent's — a bind
+    mount of the same filesystem included, whose device is its parent's; by device, os.stat reads another device for
+    it (a home that is a mount point has its restore staging beside it, on the parent's mount)."""
+    _mount_mode(monkeypatch, mode)
+    if mode == "kernel mount list":
+        real_of = backup._mount_of
+        monkeypatch.setattr(backup, "_mount_of",
+                            lambda p: real_of(p) + (1 << 40 if Path(p).absolute() == path.absolute() else 0))
+        return
     real = os.stat
 
     def stat(p, *a, **kw):
@@ -507,22 +544,24 @@ def _on_another_filesystem(monkeypatch, path: Path) -> None:
     monkeypatch.setattr(os, "stat", stat)
 
 
+@pytest.mark.parametrize("mode", MOUNT_MODES)
 @pytest.mark.parametrize("which,pruned_restore", [("good", "1"), ("unpruned", "1"), ("unpruned", None)])
-def test_a_home_on_another_filesystem_than_its_parent_is_refused_before_anything_is_written(world, tmp_path, flag,
-                                                                                            monkeypatch, which,
-                                                                                            pruned_restore):
-    """A home that is a mount point (its parent on another filesystem): no rename can move a unit into it from the
-    staging dir beside it. The restore — and `--verify-only` into it — refuses before anything is written: no journal,
-    no unit touched, no staging left; the home is its old self and signs. Whether the backup is pruned or not, and
-    whether SIGIL_PRUNED_RESTORE is on or off."""
+def test_a_home_on_another_mount_than_its_parent_is_refused_before_anything_is_written(world, tmp_path, flag,
+                                                                                       monkeypatch, which,
+                                                                                       pruned_restore, mode):
+    """A home that is a mount point (its parent on another mount — by the kernel's mount list a bind mount of the
+    same filesystem too, which has its parent's device): no rename can move a unit into it from the staging dir beside
+    it. The restore — and `--verify-only` into it — refuses before anything is written: no journal, no unit touched, no
+    staging left; the home is its old self and signs. Whether the backup is pruned or not, and whether
+    SIGIL_PRUNED_RESTORE is on or off."""
     if pruned_restore is None:
         monkeypatch.delenv("SIGIL_PRUNED_RESTORE")
     home = tmp_path / "home"
     _restore(world[which], home)
     before = _tree(home)
-    _on_another_filesystem(monkeypatch, home)
+    _on_another_mount(monkeypatch, home, mode)
     for verify_only in (True, False):
-        with pytest.raises(BackupError, match="not on the filesystem of the restore's staging dir"):
+        with pytest.raises(BackupError, match="not on the mount of the restore's staging dir"):
             restore_backup(world[which], home, PW, vault=None if verify_only else Vault(tmp_path / "vault"),
                            force=True, verify_only=verify_only)
     assert _tree(home) == before
@@ -533,11 +572,13 @@ def test_a_home_on_another_filesystem_than_its_parent_is_refused_before_anything
     assert r.returncode == 0, (r.returncode, r.stderr)
 
 
+@pytest.mark.parametrize("mode", MOUNT_MODES)
 @pytest.mark.parametrize("where", ["the archive dir", "the archive inside the spine"])
 def test_an_entry_the_swap_replaces_that_is_or_holds_a_mount_point_is_refused(world, tmp_path, flag, monkeypatch,
-                                                                             where):
+                                                                             where, mode):
     """A restore renames whole units aside and drops them: one whose archive dir is a mount point, or whose old spine
-    holds one (an archive volume mounted inside it), is refused — `--verify-only` too — before anything is written."""
+    holds one (an archive volume mounted inside it — by the kernel's mount list a bind mount of the same filesystem
+    too, which os.path.ismount does not see), is refused — `--verify-only` too — before anything is written."""
     home = tmp_path / "home"
     if where == "the archive dir":
         arch = tmp_path / "vol" / "archive"
@@ -547,13 +588,125 @@ def test_an_entry_the_swap_replaces_that_is_or_holds_a_mount_point_is_refused(wo
         _restore(world["good"], home)
         mount, archive_dir = home / "spine" / "archive", None
     before = _tree(tmp_path)
-    real = os.path.ismount
-    monkeypatch.setattr(os.path, "ismount", lambda p: os.fspath(p) == str(mount) or real(p))
+    _mount_mode(monkeypatch, mode)
+    if mode == "kernel mount list":
+        assert not os.path.ismount(mount)                          # a plain dir on disk: only the kernel's list says
+        _listed_as_mounted(monkeypatch, mount.resolve())
+        mount = mount.resolve()
+    else:
+        real = os.path.ismount
+        monkeypatch.setattr(os.path, "ismount", lambda p: os.fspath(p) == str(mount) or real(p))
     for verify_only in (True, False):
         with pytest.raises(BackupError, match=re.escape(f"{mount} is a mount point")):
             restore_backup(world["good"], home, PW, vault=None if verify_only else Vault(tmp_path / "vault"),
                            force=True, archive_dir=archive_dir, verify_only=verify_only)
     assert _tree(tmp_path) == before
+
+
+def test_the_mounts_are_read_from_this_kernel(tmp_path, monkeypatch):
+    """The kernel's own mount list and mount IDs, read for real: /proc is a mount point of its own, on another mount
+    than /, and the mount a path is on is the one the kernel lists by its ID; a path that does not exist yet is on the
+    mount of its nearest existing ancestor. A mount point is read as
+    the kernel escapes it, and a list that cannot be read whole is an error (never an empty answer)."""
+    assert backup._PROC_MOUNTS
+    points = backup._mount_points()
+    assert Path("/proc") in points and Path("/") in points
+    assert backup._mount_of(Path("/proc")) != backup._mount_of(Path("/"))
+    listed: dict = {}
+    for line in backup._read_mountinfo().splitlines():
+        listed.setdefault(line.split(b" ")[4], []).append(int(line.split(b" ")[0]))
+    assert backup._mount_of(Path("/proc")) in listed[b"/proc"]           # the kernel's mount ID, not a device number
+    assert backup._mount_of(Path("/proc/self")) == backup._mount_of(Path("/proc"))
+    assert backup._mount_of(tmp_path / "not" / "yet") == backup._mount_of(tmp_path)
+    spaced = tmp_path / "a vol" / "archive"
+    spaced.mkdir(parents=True)
+    _listed_as_mounted(monkeypatch, spaced)
+    assert spaced in backup._mount_points()
+    assert backup._mount_at_or_in(tmp_path / "a vol") == spaced
+    monkeypatch.setattr(backup, "_read_mountinfo", lambda: b"36 35 98:0 /mnt1 /mnt2 rw - ext3 /dev/root rw\nbroken\n")
+    with pytest.raises(OSError, match="cannot read"):
+        backup._mount_points()
+
+
+def test_a_dir_that_is_or_holds_a_mount_point_is_never_dropped(tmp_path, monkeypatch):
+    """What is mounted inside a dir is not a restore's to drop: a dir that is, or holds, a mount point by the kernel's
+    list (a bind mount of the same filesystem included) — or whose mounts cannot be read — is left whole. Any other
+    dir is dropped."""
+    def populated(name: str) -> Path:
+        d = tmp_path / name
+        (d / "vol").mkdir(parents=True)
+        (d / "vol" / "kept").write_text("outside the home")
+        (d / "own").write_text("x")
+        return d
+    holds, is_one, plain = populated("holds"), populated("is-one"), populated("plain")
+    _listed_as_mounted(monkeypatch, holds / "vol", is_one)
+    backup._drop_path(holds)
+    backup._drop_path(is_one)
+    assert (holds / "vol" / "kept").read_text() == "outside the home" and (holds / "own").is_file()
+    assert (is_one / "vol" / "kept").is_file()
+    backup._drop_path(plain)
+    assert not plain.exists()
+    unreadable = populated("unreadable")
+
+    def no_list() -> bytes:
+        raise PermissionError(13, "Permission denied", backup._MOUNTINFO)
+    monkeypatch.setattr(backup, "_read_mountinfo", no_list)
+    backup._drop_path(unreadable)
+    assert (unreadable / "vol" / "kept").is_file()
+
+
+@pytest.mark.parametrize("mode", MOUNT_MODES)
+def test_an_old_copy_left_aside_that_holds_a_mount_point_is_refused_and_kept(world, tmp_path, flag, monkeypatch,
+                                                                             mode):
+    """An old copy an earlier restore left beside a unit (``.restore-old-spine``) that is, or holds, a mount point:
+    the restore — and `--verify-only` — refuses before anything is written, naming it, and never drops it (what is
+    mounted there lies outside the home)."""
+    home = tmp_path / "home"
+    _restore(world["good"], home)
+    aside = home / ".restore-old-spine"
+    shutil.copytree(home / "spine", aside)
+    mount = aside / "archive"
+    before = _tree(tmp_path)
+    _mount_mode(monkeypatch, mode)
+    if mode == "kernel mount list":
+        _listed_as_mounted(monkeypatch, mount.resolve())
+        mount = mount.resolve()
+    else:
+        real = os.path.ismount
+        monkeypatch.setattr(os.path, "ismount", lambda p: os.fspath(p) == str(mount) or real(p))
+    for verify_only in (True, False):
+        with pytest.raises(BackupError, match=re.escape(f"{mount} is a mount point")) as ei:
+            restore_backup(world["good"], home, PW, vault=None if verify_only else Vault(tmp_path / "vault"),
+                           force=True, verify_only=verify_only)
+        assert "an earlier restore left beside it" in str(ei.value) and "nothing was written" in str(ei.value)
+    assert _tree(tmp_path) == before
+
+
+def test_an_old_copy_left_aside_that_cannot_be_removed_refuses_before_the_journal(world, tmp_path, flag,
+                                                                                  monkeypatch):
+    """A restore removes an old copy an earlier restore left beside a unit before it writes its journal (so an old
+    copy aside after that is its own). One that cannot be removed refuses the restore, naming it: no journal is
+    written, nothing is swapped in, the home is as it was and signs. Once it can be removed, the restore completes."""
+    home = tmp_path / "home"
+    _restore(world["good"], home)
+    aside = home / ".restore-old-spine"
+    (aside / "keys").mkdir(parents=True)
+    (aside / "keys" / "left").write_text("an earlier restore's")
+    before = _tree(tmp_path)
+    real = backup._drop_path
+    monkeypatch.setattr(backup, "_drop_path", lambda p: None if Path(p) == aside else real(p))
+    with pytest.raises(BackupError, match=re.escape(f"cannot remove {aside}")) as ei:
+        _restore(world["good"], home, force=True)
+    assert "it wrote no journal" in str(ei.value) and "its old copy is at" not in str(ei.value), str(ei.value)
+    assert _tree(tmp_path) == before
+    monkeypatch.undo()
+    r = run_in_home(home, "import sys\nfrom sigil.cli import main\nmain(sys.argv[1:])\n", "sign", check=False,
+                    SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    monkeypatch.setenv("SIGIL_PRUNED_RESTORE", "1")
+    _restore(world["good"], home, force=True)
+    assert not aside.exists() and not (home / "restore-journal.json").exists()
+    assert not list(tmp_path.rglob(".restore-*"))
 
 
 def test_adopt_an_existing_archive_for_a_backup_that_carries_none(world, tmp_path, flag):

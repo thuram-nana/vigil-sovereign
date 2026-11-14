@@ -49,10 +49,13 @@ it and the backup is unrecoverable BY DESIGN (that is the off-box confidentialit
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
+import re
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -555,23 +558,75 @@ def _new_staging_dir(dest: Path) -> Path:
     return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
 
 
-def _fs_of(p: Path) -> int:
-    """The filesystem (device) ``p`` is on — that of its nearest existing ancestor while it does not exist yet (it is
-    made there)."""
+# Whether this platform lists its mounts in /proc/self/mountinfo (Linux, Android). The mount points under a path, and
+# the mount a path is on, are then read from the kernel: a bind mount of the same filesystem included, which neither
+# os.path.ismount nor a device number tells apart (it has its parent's device), yet no rename crosses it and rmtree
+# descends into it. Elsewhere they are read off the filesystem: a mount point by its device, as os.path.ismount does.
+_PROC_MOUNTS = sys.platform.startswith("linux") or sys.platform == "android"
+_MOUNTINFO = "/proc/self/mountinfo"
+
+
+def _read_mountinfo() -> bytes:
+    return Path(_MOUNTINFO).read_bytes()
+
+
+def _mount_points() -> "list[Path]":
+    """Every mount point of this process's mount namespace, as the kernel lists it (octal escapes undone). An OSError
+    when the list cannot be read whole: a caller that cannot see the mounts refuses."""
+    points = []
+    for line in _read_mountinfo().splitlines():
+        fields = line.split(b" ")
+        if len(fields) < 5 or not fields[4].startswith(b"/"):
+            raise OSError(f"{_MOUNTINFO} holds a line this build cannot read: {line[:200]!r}")
+        points.append(Path(os.fsdecode(re.sub(rb"\\([0-7]{3})", lambda m: bytes([int(m.group(1), 8) & 0xFF]),
+                                              fields[4]))))
+    if not points:
+        raise OSError(f"{_MOUNTINFO} lists no mount")
+    return points
+
+
+def _mount_of(p: Path) -> int:
+    """The mount ``p`` is on — that of its nearest existing ancestor while it does not exist yet (it is made there).
+    A rename never crosses two mounts, even two of one filesystem (a bind mount): where the kernel lists its mounts
+    this is its mount ID, read off an O_PATH descriptor of ``p`` (symlinks followed, as a rename into ``p`` follows
+    them); elsewhere the filesystem's device."""
     p = Path(p).absolute()
     for a in (p, *p.parents):
         try:
-            return os.stat(a).st_dev
+            if not _PROC_MOUNTS:
+                return os.stat(a).st_dev
+            fd = os.open(a, os.O_PATH)
         except (FileNotFoundError, NotADirectoryError):
             continue
+        try:
+            info = Path(f"/proc/self/fdinfo/{fd}").read_text()
+        finally:
+            os.close(fd)
+        for line in info.splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "mnt_id":
+                return int(value)
+        raise OSError(f"the kernel names no mount for {a} (no mnt_id in /proc/self/fdinfo)")
     raise FileNotFoundError(f"no existing ancestor of {p}")
 
 
 def _mount_at_or_in(p: Path) -> "Path | None":
-    """A mount point at ``p``, or anywhere inside it when ``p`` is a real dir (symlinks never followed); else None."""
+    """A mount point at the entry ``p``, or anywhere inside it when it is a real dir; else None. A symlink at ``p`` is
+    never followed (a restore renames or drops the entry, never what it points to). Where the kernel lists its mounts,
+    read from that list (a bind mount of the same filesystem included); elsewhere by device, walking the dir (a dir
+    that cannot be listed raises)."""
+    p = Path(p)
+    if p.is_symlink() or not p.exists():
+        return None
+    if _PROC_MOUNTS:
+        real = p.resolve()
+        for mp in _mount_points():
+            if mp == real or real in mp.parents:
+                return mp
+        return None
     if os.path.ismount(p):
-        return Path(p)
-    if Path(p).is_symlink() or not Path(p).is_dir():
+        return p
+    if not p.is_dir():
         return None
 
     def refuse(e: OSError) -> None:
@@ -585,32 +640,48 @@ def _mount_at_or_in(p: Path) -> "Path | None":
 
 def _refuse_unrenamable(renames: "list[tuple[Path, Path]]") -> None:
     """Refuse, before anything of the home is touched, a swap the filesystem cannot do — so no restore begins a swap
-    whose renames are bound to fail. ``renames`` pairs the dir each staged unit is renamed from with the entry it
-    replaces. Each staged unit must be on the filesystem of the dir it is renamed into (a home, or an archive dir, that
-    is a mount point has its staging beside it on another one), and no entry the swap replaces may be, or hold, a mount
-    point (a restore renames whole units aside and drops them; a mount point is never renamed or dropped with one)."""
+    whose renames are bound to fail, and none drops what is mounted inside a home. ``renames`` pairs the dir each
+    staged unit is renamed from with the entry it replaces. Each staged unit must be on the MOUNT of the dir it is
+    renamed into (a home, or an archive dir, that is a mount point — a bind mount of the same filesystem included —
+    has its staging beside it on another mount, and no rename crosses two mounts). No entry the swap replaces may be,
+    or hold, a mount point, and neither may the old copy an earlier restore left beside it (a restore renames whole
+    units aside and drops them, and drops such a leftover before its swap; it never renames or drops a mount point)."""
     try:
         for staging, dst in renames:
-            if _fs_of(staging) != _fs_of(dst.parent):
-                raise BackupError(f"refusing to restore into {dst.parent}: it is not on the filesystem of the "
-                                  f"restore's staging dir {staging} beside it — a restore renames each unit into "
-                                  f"place, so the home (and an archive dir) must be a dir on its parent's filesystem, "
-                                  f"not a mount point itself (mount the volume one level up, or name a dir inside it); "
-                                  f"nothing was written")
+            if _mount_of(staging) != _mount_of(dst.parent):
+                raise BackupError(f"refusing to restore into {dst.parent}: it is not on the mount of the restore's "
+                                  f"staging dir {staging} beside it — a restore renames each unit into place, and no "
+                                  f"rename crosses two mounts (a bind mount of one filesystem included), so the home "
+                                  f"(and an archive dir) must be a dir on its parent's mount, not a mount point itself "
+                                  f"(mount the volume one level up, or name a dir inside it); nothing was written")
             mount = _mount_at_or_in(dst)
             if mount is not None:
                 raise BackupError(f"refusing to replace {dst}: {mount} is a mount point — a restore renames whole "
                                   f"units aside and drops them, and never a mount point with one (unmount it, or pass "
                                   f"a dir on that volume, mounted outside the home, as --archive-dir); nothing was "
                                   f"written")
+            aside = _aside_of(dst)
+            mount = _mount_at_or_in(aside)
+            if mount is not None:
+                raise BackupError(f"refusing to restore over {aside}, the old copy of {dst.name!r} an earlier restore "
+                                  f"left beside it: {mount} is a mount point — a restore drops that leftover before "
+                                  f"its swap, and never a mount point with it (unmount it, then remove {aside}); "
+                                  f"nothing was written")
     except OSError as e:
-        raise BackupError(f"cannot check that the restore's renames stay on one filesystem ({e}) — nothing was "
+        raise BackupError(f"cannot check that the restore's renames stay on one mount ({e}) — nothing was "
                           f"written") from e
 
 
 def _drop_path(p: Path) -> None:
-    """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink."""
+    """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink — but never a dir that is
+    or holds a mount point (what is mounted there is not the restore's to drop; nor one whose mounts cannot be read):
+    that is left in place, as is anything that cannot be removed. A caller for which it matters checks."""
     if p.is_dir() and not p.is_symlink():
+        try:
+            if _mount_at_or_in(p) is not None:
+                return
+        except OSError:
+            return
         shutil.rmtree(p, ignore_errors=True)
     elif p.exists() or p.is_symlink():
         try:
@@ -624,14 +695,22 @@ def _aside_of(dest_unit: Path) -> Path:
     return dest_unit.parent / (".restore-old-" + dest_unit.name)
 
 
+class _AsideInTheWay(FileExistsError):
+    """A swap stopped BEFORE its first rename: an old copy left at the aside of its destination (not this swap's)
+    could not be removed. Nothing of the unit moved."""
+
+
 def _swap_in(staged_unit: Path, dest_unit: Path) -> "Path | None":
     """Move the old ``dest_unit`` aside and rename ``staged_unit`` into its place (each rename atomic, same
     filesystem). The old copy is NOT dropped: returns the aside that holds it (None for a fresh slot), so a journaled
-    caller can record the new unit as in place before the old one goes."""
+    caller can record the new unit as in place before the old one goes. A leftover at the aside that cannot be removed
+    stops the swap before its first rename (:class:`_AsideInTheWay`): a rename never lands on it."""
     dest_unit.parent.mkdir(parents=True, exist_ok=True)
     if dest_unit.exists() or dest_unit.is_symlink():
         aside = _aside_of(dest_unit)
         _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
+        if aside.exists() or aside.is_symlink():
+            raise _AsideInTheWay(errno.EEXIST, "a leftover that cannot be removed holds the aside", str(aside))
         os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
         _maybe_crash(f"restore_moved_aside:{dest_unit.name}")
         try:
@@ -916,7 +995,9 @@ def _read_journal(home: Path) -> dict:
         ok = (j.get("schema") == _JOURNAL_SCHEMA and isinstance(units, list)
               and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "started", "done"} <= set(u)
                       and all(isinstance(u[k], str) for k in ("name", "src", "dst", "digest"))
-                      and all(isinstance(u[k], bool) for k in ("started", "done")) for u in units)
+                      and all(isinstance(u[k], bool) for k in ("started", "done"))
+                      and isinstance(u.get("aside_foreign", False), bool)
+                      and not (u.get("aside_foreign") and (u["started"] or u["done"])) for u in units)
               and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging")))
               and _replaced_shape_ok(j.get("replaced")) and isinstance(j.get("aborting", False), bool))
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1030,6 +1111,7 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
                                       f"refusing to swap it in; re-run the restore with --force from the backup")
                 if not u["started"]:
                     u["started"] = True
+                    u.pop("aside_foreign", None)             # an aside from here on may be this swap's own
                     _write_journal(jp, journal)
                     _maybe_crash(f"restore_unit_started:{u['name']}")
                 try:
@@ -1059,15 +1141,24 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
 
 
 def _swap_failed(home: Path, journal: dict, u: dict, err: OSError) -> NoReturn:
-    """A unit's swap failed with an OSError. When nothing of it moved — the staged copy is still staged and no old
-    copy is aside (the first rename failed, or the second did and its old copy was renamed back) — its ``started``
-    mark goes back durably: the home then reads as what it is, untouched by this unit. Raises a BackupError that says
-    what the home now is and how to leave the state the journal keeps it in."""
-    began = _swap_began_on_disk(u)
+    """A unit's swap failed with an OSError. When nothing of it moved — it stopped before its first rename (an old copy
+    an earlier restore left at its aside could not be removed), or the staged copy is still staged and no old copy is
+    aside (the first rename failed, or the second did and its old copy was renamed back) — its ``started`` mark goes
+    back durably: the home then reads as what it is, untouched by this unit. A leftover in the way is marked
+    ``aside_foreign`` with it, so it is never read as this restore's old copy. Raises a BackupError that says what the
+    home now is and how to leave the state the journal keeps it in."""
+    aside = _aside_of(Path(u["dst"]))
+    foreign = isinstance(err, _AsideInTheWay)
+    began = not foreign and _swap_began_on_disk(u)
     if not began:
         u["started"] = False
+        if foreign:
+            u["aside_foreign"] = True
         _write_journal(home / _JOURNAL_NAME, journal)
-    where = (f"its old copy is at {_aside_of(Path(u['dst']))}" if began else f"{u['dst']} was left as it was")
+    where = (f"its old copy is at {aside}" if began else
+             f"{u['dst']} was left as it was; {aside}, an old copy this restore did not put there, is in the way of "
+             f"its swap and cannot be removed — remove it" if foreign else
+             f"{u['dst']} was left as it was")
     if not _touched_units(journal) and _replaced_touched(journal) == []:
         nxt = (f"the home is still entirely its old self — `sigil restore --abort {home}` discards this restore, or "
                f"`sigil restore --resume {home}` finishes it once the cause is fixed")
@@ -1075,6 +1166,24 @@ def _swap_failed(home: Path, journal: dict, u: dict, err: OSError) -> NoReturn:
         nxt = (f"the home is no longer entirely its old self — fix the cause and finish it with `sigil restore "
                f"--resume {home}`, or replace it with a fresh `sigil restore --force` from the backup")
     raise BackupError(f"could not swap {u['name']!r} into place ({err}): {where}; {nxt}") from err
+
+
+def _drop_leftover_asides(journal: dict) -> None:
+    """Remove the old copy an earlier restore left at the aside of any destination of ``journal``, before it is
+    written — or refuse, with nothing of this restore swapped in and its journal not written, naming the leftover
+    that cannot be removed (one that is or holds a mount point is refused before this, by
+    :func:`_refuse_unrenamable`, and never dropped)."""
+    from .spine.atomicio import fsync_dir
+    for u in journal["units"]:
+        aside = _aside_of(Path(u["dst"]))
+        if not (aside.exists() or aside.is_symlink()):
+            continue
+        _drop_path(aside)
+        if aside.exists() or aside.is_symlink():
+            raise BackupError(f"cannot remove {aside}, an old copy of {u['name']!r} an earlier restore left beside "
+                              f"{u['dst']} — remove it, then run the restore again; nothing of this restore was "
+                              f"swapped in and it wrote no journal")
+        fsync_dir(aside.parent)
 
 
 def _new_journal(src: Path, staged: Path, placed: "dict | None", units: "list[tuple[Path, Path]]", shape: dict, *,
@@ -1132,9 +1241,12 @@ def _touched_units(journal: dict) -> "list[str]":
 
 def _swap_began_on_disk(u: dict, *, staged_evidence: bool = True) -> bool:
     """Whether the disk shows that a journal unit's swap began, whatever its marks say: its staged copy has left the
-    staging (when ``staged_evidence``), or an old copy is moved aside beside its destination."""
+    staging (when ``staged_evidence``), or an old copy is moved aside beside its destination. No old copy is at an
+    aside when the journal is written (a restore removes any leftover first), so one there is this restore's own —
+    except a leftover that stopped the swap before its first rename, which the journal marks ``aside_foreign``."""
     src, aside = Path(u["src"]), _aside_of(Path(u["dst"]))
-    return (staged_evidence and not (src.exists() or src.is_symlink())) or aside.exists() or aside.is_symlink()
+    moved_aside = not u.get("aside_foreign") and (aside.exists() or aside.is_symlink())
+    return (staged_evidence and not (src.exists() or src.is_symlink())) or moved_aside
 
 
 def _replaced_touched(journal: dict) -> "list[str] | None":
@@ -1278,9 +1390,12 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     its old self, ``--abort`` leaves it so); into a fresh home each unit lands complete or not at all. The journaled
     swap holds the target's floor lock and refuses while its spine writer lock is held (stop the services first).
     Exactly the captured units are swapped (a whitelist), never whatever else turns up in the staging dir. A swap the
-    filesystem cannot do by renames (a home or archive dir that is a mount point, a unit that holds one) is refused
-    before anything is written (:func:`_refuse_unrenamable`); a unit whose rename still fails with nothing of it moved
-    is left unmarked in the journal, so a restore that touched nothing can still be discarded with ``--abort``.
+    filesystem cannot do by renames (a home or archive dir that is a mount point, a bind mount of the same filesystem
+    included; a unit, or an old copy an earlier restore left beside one, that is or holds a mount point) is refused
+    before anything is written (:func:`_refuse_unrenamable`, read from the kernel's mount list); such a leftover is
+    removed before the journal is written, or the restore refuses with nothing swapped in. A unit whose rename still
+    fails with nothing of it moved is left unmarked in the journal, so a restore that touched nothing can still be
+    discarded with ``--abort``.
 
     HARD-PRUNED spine (SIGIL_PRUNED_RESTORE on; refused before anything is written while it is off): the spine, its
     signed head, the floor, the owner public key(s) and the archive are verified as ONE unit by the real readers in a
@@ -1473,6 +1588,10 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
                         raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore "
                                           f"--resume {new_home}`, or replace it with a fresh restore (--force)")
                     journal["replaced"] = replaced
+                # an old copy an earlier restore left beside a destination goes BEFORE the journal is written (what
+                # it says of the restore it replaced is read above), so an old copy aside from here on is this
+                # restore's own; one that cannot be removed refuses the restore with nothing swapped in
+                _drop_leftover_asides(journal)
                 # the journal is durable BEFORE the first swap: from here on a crash is resumed, never left mixed
                 _write_journal(new_home / _JOURNAL_NAME, journal)
                 staged = None                                # the journal owns the staging dirs now

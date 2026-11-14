@@ -423,6 +423,28 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         assert not elsewhere.exists()
 
 
+@pytest.mark.parametrize("forgery", ["not a bool", "on a unit marked started", "on a unit marked done"])
+def test_resume_and_abort_refuse_a_journal_whose_foreign_aside_mark_is_malformed(world, tmp_path, forgery):
+    """A unit's ``aside_foreign`` mark (the old copy at its aside is not this restore's) is written only with the unit
+    unmarked: a journal that carries it otherwise — or as anything but a bool — is not one this build wrote, and
+    `--resume` and `--abort` refuse it with nothing renamed or removed."""
+    target = _target(world, tmp_path)
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    jp = target / "restore-journal.json"
+    j = json.loads(jp.read_text())
+    spine = next(u for u in j["units"] if u["name"] == "spine")
+    spine["aside_foreign"] = {"not a bool": "yes", "on a unit marked started": True,
+                              "on a unit marked done": True}[forgery]
+    spine["started"] = forgery != "not a bool"
+    spine["done"] = forgery == "on a unit marked done"
+    jp.write_text(json.dumps(j))
+    before = _tree(tmp_path)
+    for action in ("--resume", "--abort"):
+        r = _cli(target, "restore", action, str(target))
+        assert r.returncode == 1 and "is not one this build wrote" in r.stderr, (action, r.stderr)
+    assert _tree(tmp_path) == before
+
+
 ALIASED = {"'..' in a staged unit": "outside its staging", "staging dir is a symlink": "not a restore's own",
            "staged unit is a symlink": "outside its staging", "staging dir not beside the home": "not beside",
            "archive staging is a symlink": "not a restore's own", "archive dst holds no archive": "holds no archive"}
@@ -849,6 +871,108 @@ def test_a_swap_that_fails_with_its_old_copy_aside_keeps_it_marked_and_resumes(w
     assert not (target / "spine").exists()
     assert (target / ".restore-old-spine" / "head.json").read_bytes() == old_head
     _assert_fails_closed(target)
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "had begun swapping ['spine']" in r.stderr, r.stderr
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    _assert_restored(target)
+
+
+# A restore (or a resume) of the spine unit that finds, at the aside of its destination, an old copy it did not put
+# there — planted after the journal is written ("plant": by the restore once its journal stands, by the test before a
+# resume) — that cannot be removed; optionally, the staged spine then cannot be renamed in nor the old one back
+# ("in, not back").
+ASIDE_IN_THE_WAY = """
+import errno, json, os, sys
+from pathlib import Path
+from sigil import backup
+from vigil_core.vault import Vault
+a = json.loads(sys.argv[1])
+home = Path(a["home"])
+aside = os.path.realpath(home / ".restore-old-spine")
+real_drop = backup._drop_path
+backup._drop_path = lambda p: None if a["plant"] and os.path.realpath(p) == aside else real_drop(p)
+def plant(name):
+    if a["plant"] and name == "restore_after_journal":
+        os.makedirs(os.path.join(aside, "keys"))
+        Path(aside, "keys", "left").write_text("not this restore's")
+backup._crash_hook = plant
+real = os.replace
+def replace(s, d, *k, **kw):
+    s, d = Path(s), Path(d)
+    if a["fail"] == "in, not back" and d.name == "spine" and ".restore-staging-" in str(s):
+        raise OSError(errno.EXDEV, "injected", str(s))
+    if a["fail"] == "in, not back" and s.name == ".restore-old-spine":
+        raise OSError(errno.EIO, "injected", str(s))
+    return real(s, d, *k, **kw)
+os.replace = replace
+try:
+    if a["how"] == "restore":
+        backup.restore_backup(a["src"], home, "pw-test-only", vault=Vault(home / "vault"), force=True)
+    else:
+        backup.restore_resume(home)
+    print(json.dumps({"ok": True}))
+except backup.BackupError as e:
+    print(json.dumps({"error": str(e)}))
+"""
+
+
+def _aside_in_the_way(world, target: Path, how: str, *, plant: bool, fail: "str | None" = None) -> str:
+    host = target.parent / "restoring-host"
+    host.mkdir(exist_ok=True)
+    r = run_in_home(host, ASIDE_IN_THE_WAY, json.dumps({"src": str(world["bk"]), "home": str(target), "how": how,
+                                                         "plant": plant, "fail": fail}),
+                    check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    out = json.loads(r.stdout.splitlines()[-1])
+    return out.get("error", "")
+
+
+@pytest.mark.parametrize("then", ["abort", "resume once it is removed"])
+@pytest.mark.parametrize("how", ["restore", "resume"])
+def test_an_old_copy_in_the_way_that_cannot_be_removed_stops_the_swap_before_it_moves_anything(world, tmp_path, how,
+                                                                                               then):
+    """After the journal is written, an old copy this restore did not put there turns up at the aside of the spine's
+    destination and cannot be removed: the swap stops before its first rename. Nothing of the home moved, and the
+    journal says so (the unit unmarked, the leftover marked as not this restore's), so the error does not claim an old
+    copy of the home is aside, and `--abort` discards the restore — the home entirely its old self, signing again, the
+    leftover left as it was. Or, once the leftover is removed, the restore resumes; a rename that then fails with the
+    old copy aside keeps the unit marked (that aside is this restore's own), so `--abort` refuses and `--resume`
+    completes it."""
+    target = _target(world, tmp_path)
+    before = _tree(target)
+    aside = target / ".restore-old-spine"
+    if how == "resume":                                                   # killed with its journal written
+        assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+        (aside / "keys").mkdir(parents=True)
+        (aside / "keys" / "left").write_text("not this restore's")
+    err = _aside_in_the_way(world, target, how, plant=True)
+    assert "could not swap 'spine'" in err and "an old copy this restore did not put there" in err, err
+    assert str(aside) in err and "its old copy is at" not in err, err
+    assert "still entirely its old self" in err and "--abort" in err, err
+    j = json.loads((target / "restore-journal.json").read_text())
+    spine = next(u for u in j["units"] if u["name"] == "spine")
+    assert spine["started"] is False and spine["aside_foreign"] is True, spine
+    assert not any(u["started"] or u["done"] for u in j["units"]), j["units"]
+    left = {k: v for k, v in _tree(target).items() if not k.startswith(".restore-old-spine")}
+    assert {k: v for k, v in left.items() if k != "restore-journal.json"} == before
+    assert _cli(target, "sign").returncode == 3                           # the journal stands until it is left
+    if then == "abort":
+        r = _cli(target, "restore", "--abort", str(target))
+        assert r.returncode == 0 and "discarded" in r.stdout, (r.returncode, r.stderr)
+        assert (aside / "keys" / "left").read_text() == "not this restore's"
+        assert {k: v for k, v in _tree(target).items() if not k.startswith(".restore-old-spine")} == before
+        assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+        assert read_home(target)["verify_checkpoint"][0] is True
+        r = _cli(target, "sign")
+        assert r.returncode == 0, (r.returncode, r.stderr)
+        return
+    shutil.rmtree(aside)
+    err = _aside_in_the_way(world, target, "resume", plant=False, fail="in, not back")
+    assert "could not swap 'spine'" in err and f"its old copy is at {aside}" in err, err
+    j = json.loads((target / "restore-journal.json").read_text())
+    spine = next(u for u in j["units"] if u["name"] == "spine")
+    assert spine["started"] is True and "aside_foreign" not in spine, spine
+    assert not (target / "spine").exists() and (aside / "head.json").is_file()
     r = _cli(target, "restore", "--abort", str(target))
     assert r.returncode == 1 and "had begun swapping ['spine']" in r.stderr, r.stderr
     r = _cli(target, "restore", "--resume", str(target))
