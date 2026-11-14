@@ -123,6 +123,29 @@ the spine** — never the source of truth.
   cancel). With the settle record on, a release a crash interrupted is finished by `--apply`
   (`settle_completed`) and reported `settle_interrupted` without it.
 
+  **Plan/wallet split across a hard prune.** A prepaid reserve takes credits from the tenant's current plan
+  tranche first, then from the wallet, and its settle refunds each bucket its own share (the plan share to the
+  same tranche, which still expires at its period end). With `VIGIL_LEASE_PLAN_SPLIT=1` (default off; set it
+  for the cockpit, which reserves, once both planes run the same release — an older offense build refuses a
+  lease that carries the split) the owner‑signed lease records that split, so the settle takes it from the lease
+  and a hard prune of the reserve records changes nothing. A lease minted without it settles from the reserve's
+  plan debit record on the live spine; if a hard prune has removed that record before the launch settled, the
+  settle moves nothing and is held. A superseded reservation (no lease: it is released from its live reserve
+  records) is held the same way. Only a launch minted without the split, or a superseded reservation, still
+  unsettled when a prune runs can be held this way.
+
+  **Held settles.** Whichever path meets a held settle — the customer's cancel (the customer is told the credits
+  stay reserved until the operator returns them; the audit row is `refund_held`), `ops-sweep reservations`
+  (row status `plan_debit_pruned`), the settle drain (it quarantines the completion and alarms) or the
+  superseded release — the launch is named in `$SIGIL_HOME/alarms/launch-settle-held.json`, and `vigil doctor`
+  reports every named launch (by slug) as a hard issue (`launch_settlements.held`). The pruned record is kept in
+  the prune archive; settling such a launch is an owner action from that record, under the launch's own settle
+  entry ids (`settle-plan:<slug>:<nonce>` to the plan tranche, `settle-wallet:<slug>:<nonce>` to the wallet), so
+  any later settle of the launch finds it already settled and never refunds it twice. A launch leaves the alarm
+  when its next settle finds it settled, or at the next `ops-sweep reservations --apply` once the spine (or its
+  seam settlement marker) shows it settled; the file goes when it names none. Never edit the file by hand while
+  a launch it names is unsettled.
+
   **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
   after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace
   (`VIGIL_PAUSED_EXPIRY_SETTLE_GRACE_SECONDS`, default 86400, from the later of the window end, the pause

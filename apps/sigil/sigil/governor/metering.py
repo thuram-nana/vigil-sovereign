@@ -276,6 +276,20 @@ class PlanCreditLedger:
             return bool(hit)
         return key in self._fold()[2]
 
+    def has_debit_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed plan DEBIT with this (org_id, entry_id) has been folded — membership of the
+        fold's own seen-set, so it survives a hard prune (the seen-set is part of the snapshot seed), unlike
+        ``debited_entry``'s live scan. The launch settle uses it to tell a reservation that took nothing from the
+        plan bucket from one whose plan debit record has left the live window. Fail-closed (False) on an empty
+        id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (PLAN_DEBIT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        return key in self._fold()[2]
+
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
         """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when

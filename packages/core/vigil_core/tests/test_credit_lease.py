@@ -114,3 +114,110 @@ def test_signing_bytes_carry_the_distinct_domain_tag():
     body = credit_lease_signing_bytes(_lease())
     assert body.startswith(DOMAIN_TAGS["credit-launch-lease"])
     assert body != credit_lease_signing_bytes(_lease(units_reserved=11))   # units are in the signed bytes
+
+
+# --- the optional v2 fields (run_tier, plan_reserved, plan_period_end, continue_of) --------------------------
+# A lease that sets none of them is byte-identical to a lease minted before they existed: the same serialized
+# document, the same signing bytes, the same signature. A set field is inside the signed bytes.
+import base64  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from vigil_core.credit_lease import LEASE_V2_OPTIONAL_FIELDS  # noqa: E402
+
+_GOLDEN = Path(__file__).parent / "fixtures" / "legacy_credit_lease_v1.json"
+_V2 = dict(run_tier="deep", plan_reserved=4, plan_period_end=1_900_000_000.0, continue_of="n-0")
+
+
+def _golden():
+    g = json.loads(_GOLDEN.read_text(encoding="utf-8"))
+    root = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=g["owner_public_key_b64"])])
+    return g, SignedCreditLaunchLease.model_validate(g["signed_lease"]), root
+
+
+def test_a_lease_signed_before_the_v2_fields_keeps_its_bytes_and_verifies():
+    g, signed, root = _golden()
+    assert signed.model_dump(mode="json") == g["signed_lease"]
+    assert signed.model_dump_json() == g["signed_lease_json"]
+    assert credit_lease_signing_bytes(signed.document) == base64.b64decode(g["signing_bytes_b64"])
+    ok, reason = verify_credit_launch_lease(signed, root)
+    assert ok, reason
+
+
+def test_a_lease_without_v2_fields_serializes_without_them():
+    doc = _lease().model_dump(mode="json")
+    assert not set(doc) & set(LEASE_V2_OPTIONAL_FIELDS)
+    assert set(json.loads(_lease().model_dump_json())) == set(doc)
+
+
+def test_a_v2_lease_roundtrips_and_carries_its_fields_in_the_signed_bytes():
+    signed = _signed(**_V2)
+    ok, reason = verify_credit_launch_lease(signed, _owner_root())
+    assert ok, reason
+    again = SignedCreditLaunchLease.model_validate(json.loads(signed.model_dump_json()))
+    assert again.document == signed.document and verify_credit_launch_lease(again, _owner_root())[0]
+    body = credit_lease_signing_bytes(signed.document)
+    for key in LEASE_V2_OPTIONAL_FIELDS:
+        assert f'"{key}":'.encode() in body
+
+
+@pytest.mark.parametrize("field,newval", [
+    ("run_tier", "quick"), ("plan_reserved", 3), ("plan_period_end", 1_900_000_001.0), ("continue_of", "n-9"),
+])
+def test_tampering_a_v2_field_breaks_the_signature(field, newval):
+    signed = _signed(**_V2)
+    tampered = SignedCreditLaunchLease(document=signed.document.model_copy(update={field: newval}),
+                                       signatures=list(signed.signatures))
+    assert verify_credit_launch_lease(tampered, _owner_root())[0] is False
+
+
+@pytest.mark.parametrize("field", ["run_tier", "continue_of", "plan_reserved"])
+def test_stripping_a_signed_v2_field_breaks_the_signature(field):
+    signed = _signed(**_V2)
+    raw = json.loads(signed.model_dump_json())
+    del raw["document"][field]
+    if field == "plan_reserved":
+        del raw["document"]["plan_period_end"]          # a lease cannot keep a period without a plan share
+    stripped = SignedCreditLaunchLease.model_validate(raw)
+    assert verify_credit_launch_lease(stripped, _owner_root())[0] is False
+
+
+def test_adding_a_v2_field_to_a_signed_lease_breaks_the_signature():
+    signed = _signed()
+    raw = json.loads(signed.model_dump_json())
+    raw["document"]["plan_reserved"] = 0
+    assert verify_credit_launch_lease(SignedCreditLaunchLease.model_validate(raw), _owner_root())[0] is False
+
+
+def test_a_zero_plan_share_is_signed_and_not_dropped():
+    signed = _signed(plan_reserved=0)
+    assert signed.document.model_dump(mode="json")["plan_reserved"] == 0
+    assert b'"plan_reserved":0' in credit_lease_signing_bytes(signed.document)
+
+
+@pytest.mark.parametrize("bad", [
+    dict(plan_reserved=11, plan_period_end=1_900_000_000.0),  # more than the reservation
+    dict(plan_reserved=-1),
+    dict(plan_reserved=4),                                   # a plan share without its tranche
+    dict(plan_reserved=4, plan_period_end=0.0),
+    dict(plan_reserved=4, plan_period_end=float("inf")),
+    dict(plan_reserved=4, plan_period_end=float("nan")),
+    dict(plan_period_end=1_900_000_000.0),                   # a tranche without a plan share
+    dict(plan_reserved=0, plan_period_end=1_900_000_000.0),
+    dict(run_tier="ultra"),
+    dict(continue_of=""),
+])
+def test_v2_field_validation_rejects(bad):
+    with pytest.raises(ValueError):
+        _lease(**bad)
+
+
+def test_a_plan_share_of_the_whole_reservation_is_accepted():
+    assert _lease(plan_reserved=10, plan_period_end=1_900_000_000.0).plan_reserved == 10
+
+
+def test_every_run_tier_is_accepted():
+    from vigil_core.run_tier import RUN_TIERS
+    for tier in RUN_TIERS:
+        assert _lease(run_tier=tier).run_tier == tier

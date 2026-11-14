@@ -54,6 +54,10 @@ _LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part
                         "in Billing to unlock it.")
 _LOCKED_COMPLETED_BODY = ("An assessment run completed. Every finding is listed in your assessments; buy credits in "
                           "Billing to unlock the full proof and fix.")
+# A customer cancel whose settle is HELD for the owner (launch_gate.PLAN_DEBIT_PRUNED): nothing moved, and the owner is
+# alarmed (`vigil doctor`); the customer is told exactly that.
+LAUNCH_REFUND_HELD_DETAIL = ("this reservation cannot be released automatically right now: its credits stay "
+                             "reserved, not spent, until the operator returns them (the operator has been alerted)")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
 # The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` and `founder` (which
@@ -1535,7 +1539,7 @@ class Provisioner:
         founder while founder testing is switched off, or after the owner changed its role — can therefore always
         release a reservation: credits never stay held because nobody left in the org may run tests."""
         t = self._now() if now is None else float(now)
-        from .launch_gate import LaunchGate
+        from .launch_gate import PLAN_DEBIT_PRUNED, LaunchGate
         with self._lock:
             if not any(self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission=perm)
                        for perm in ("run_engagement", "manage_billing")):
@@ -1577,6 +1581,14 @@ class Provisioner:
                 "this launch has been started and must settle through its completion; it cannot be cancelled")
         r = gate.settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
                                expect_org_id=requester_org_id, refuse_if=_started, basis="cancel")
+        if r.get("refused") == PLAN_DEBIT_PRUNED:
+            # HELD for the owner (nothing moved): the settle cannot tell this reservation's plan share from its wallet
+            # share. The gate has named it in the held-settle alarm `vigil doctor` reports; the customer is told the
+            # truth (not "started"), and the audit is critical.
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(_cdoc.engagement_slug), outcome="refund_held", reason=PLAN_DEBIT_PRUNED,
+                        critical=True)
+            raise ProvisionDenied(LAUNCH_REFUND_HELD_DETAIL)
         if r.get("refused"):
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refused_started")

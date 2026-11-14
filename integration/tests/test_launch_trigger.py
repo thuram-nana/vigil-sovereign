@@ -71,6 +71,17 @@ def test_one_valid_lease_produces_one_api_job_keyed_to_the_cust_slug(monkeypatch
     assert j.extra["nonce"] == "n1" and j.extra["org_id"] == ORG
 
 
+def test_a_lease_carrying_the_optional_v2_fields_produces_its_job(monkeypatch):
+    owner = generate_keypair()
+    t = datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=10,
+                            not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=8), nonce="n1",
+                            issued_at=1000.0, plan_reserved=4, plan_period_end=1_900_000_000.0)
+    base = _rig(monkeypatch, owner, sign_credit_launch_lease(doc, {"owner": owner.private_key_b64}))
+    jobs = launch_jobs_from_seam(base, now=1000.0)
+    assert [(j.engagement_slug, j.extra["nonce"]) for j in jobs] == [(SLUG, "n1")]
+
+
 def test_absent_seam_produces_no_job(monkeypatch):
     owner = generate_keypair()
     monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda: _owner_root(owner))

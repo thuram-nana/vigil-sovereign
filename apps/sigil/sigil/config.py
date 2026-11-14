@@ -312,6 +312,14 @@ def billing_plan_alarm_enabled() -> bool:
         (os.environ.get("VIGIL_BILLING_PLAN_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE)
 
 
+def billing_topup_alarm_enabled() -> bool:
+    """Whether the Flutterwave billing drain QUARANTINES (alarms on) a verified paid TOP-UP it cannot credit at the
+    catalog price — a price not in the catalog, no verified currency, or less than / another currency than the
+    catalog price — instead of archiving it as a no-op (``VIGIL_BILLING_TOPUP_ALARM`` affirmative; default OFF:
+    unchanged). The Stripe drain always alarms. Read by the billing drain process."""
+    return (os.environ.get("VIGIL_BILLING_TOPUP_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_billing_return_url() -> "str | None":
     """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
     ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value
@@ -505,6 +513,17 @@ def settle_spine_record_enabled() -> bool:
     server, the settle-drain and ``ops-sweep`` — or a process with it off settles without a record its crash
     could be finished from."""
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def lease_plan_split_enabled() -> bool:
+    """True iff a prepaid launch lease records, under the owner signature, the plan/wallet split its reserve
+    debited (``plan_reserved`` and ``plan_period_end``), so its settle restores each bucket from the lease itself,
+    whatever the live spine window still holds of the reserve records. OFF by default (``VIGIL_LEASE_PLAN_SPLIT``
+    unset / non-affirmative): leases are minted exactly as before, byte-identical. Read by the process that reserves
+    (the cockpit's provisioner). Turn it on only once the offense plane runs a build that accepts these optional
+    lease fields: an older verifier refuses a lease that carries them (the launch does not run, and its reservation
+    is refunded like any launch that never started). Resolved at call time."""
+    return (os.environ.get("VIGIL_LEASE_PLAN_SPLIT") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 #: The default and the bounds of :func:`settle_lock_wait_s` (OWNER DECISION OD-7).
@@ -955,6 +974,11 @@ def _redact(name: str, value):
     return _strip_url_credentials(value)
 
 
+def _provider_key_source() -> str:
+    from .provider_key import key_source
+    return key_source()
+
+
 def effective_config() -> dict:
     """The fully-resolved runtime configuration (env → sigil.env → default), secrets REDACTED.
     Re-reads the environment at call time, so it reflects overrides applied after import — this is
@@ -986,6 +1010,10 @@ def effective_config() -> dict:
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
         "ANTHROPIC_API_KEY": "***redacted***" if api_key_set else "",
+        # Where the model gateway's provider key comes from ("ssm" | "env" | ""), and the SSM parameter NAME when
+        # it is SSM (sigil.provider_key: SSM is then the only source). Never the key itself.
+        "MODEL_PROVIDER_SOURCE": _provider_key_source(),
+        "MODEL_PROVIDER_SSM_PARAMETER": (os.environ.get("VIGIL_ANTHROPIC_KEY_SSM_PARAMETER") or "").strip(),
         # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
         # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
         # SECRET name-hint below (and is not placed here at all).

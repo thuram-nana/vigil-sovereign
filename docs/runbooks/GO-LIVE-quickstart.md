@@ -221,7 +221,16 @@ amount decides money. Before go-live, confirm the three owner inputs (hosting ru
    payment_plan id** you create in your Flutterwave dashboard; each top-up `price_id` must be set as the
    checkout `meta.price_id`. VIGIL cannot mint these; `amount_minor` is the cross-check, not the charge.
 
-A price change is an owner-reviewed commit + deploy (catalog validated fail-closed at import).
+A price change is an owner-reviewed commit + deploy (catalog validated fail-closed at import). **Never edit a
+sold entry's amount, currency or credits in place**: mark it `retired=True` and add a new `price_id`, so a
+checkout opened before the deploy still credits at its own price (retired entries stay mintable).
+
+**A paid top-up the drain cannot credit.** With `VIGIL_BILLING_TOPUP_ALARM=1` in the billing drain's env (the
+Stripe drain always does this), a verified top-up whose price is not in the catalog, that carries no verified
+currency, or that paid less than (or another currency than) the catalog price is quarantined in `rejected/`
+with a `.reason`, nothing is minted, and the drain unit stays FAILED until `rejected/` is empty. Refund the
+payment in the processor dashboard, then move the envelope and its `.reason` out of `rejected/` into a record
+folder outside the spool (it minted nothing).
 
 ## 9. Flutterwave webhook drain + transaction verifier (payments; default-OFF)
 
@@ -285,7 +294,11 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    with no credit.
 
 `sigil ops-sweep tx-refs --provider stripe --spool <stripe spool> --checkouts <file>` reports Stripe checkouts
-that never reached a drained webhook. Webhook-driven cancellation is not acted on: a cancelled plan expires at
+nothing has credited. The drain records what each webhook it archives did (`<spool>/outcomes/`, beside
+`processed/`), and a checkout is left out only when a webhook for it minted; the others are reported as `noop`
+(archived without crediting anything — the row names why, e.g. `underpaid_or_currency`, `unknown_price`),
+`processed_unrecorded` (archived before outcomes were recorded), `quarantined`, `retrying` or `no_webhook`. The
+same applies to the Flutterwave spool (without `--provider`). Webhook-driven cancellation is not acted on: a cancelled plan expires at
 the end of its paid period, as with Flutterwave.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

@@ -76,11 +76,17 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
-from ..governor.billing import BillingSigner  # noqa: E402  (the EVIDENCE->owner-signed-FACT boundary this feeds)
+from ..governor.billing import (  # noqa: E402  (the EVIDENCE->owner-signed-FACT boundary this feeds)
+    OUTCOME_MINTED, BillingSigner, IngestOutcome,
+)
 
 _MAX_BYTES = 256 * 1024                     # mirror the proxy's envelope cap; a larger file is rejected unread
 _ENVELOPE_SCHEMA = "vigil.webhook.billing.v1"
 _STRIPE_ENVELOPE_SCHEMA = "vigil.webhook.stripe.v1"
+#: Where the drain records what each archived envelope did (``BillingSpoolWatcher._write_outcome``; report-only):
+#: ``<spool>/outcomes/<sha256>.outcome`` beside ``<spool>/processed/<sha256>.json``.
+OUTCOMES_DIRNAME = "outcomes"
+OUTCOME_SUFFIX = ".outcome"
 _STRIPE_SIG_MAX = 2048                      # mirrors the proxy's Stripe-Signature cap
 _RECEIVED_AT_FUTURE_SKEW_S = 300.0          # a receive time later than the drain's clock by more than this is refused
 _MAX_DECODED_BODY = 192 * 1024              # decoded-body cap: the proxy caps the raw body at 128K, whose base64
@@ -230,10 +236,11 @@ class BillingSpoolWatcher:
         self.retry = self.spool / "retry"
 
     # -- ingest one envelope (fail-closed) ---------------------------------------------------------
-    def _ingest_text(self, text: str) -> Optional[int]:
+    def _ingest_text(self, text: str) -> IngestOutcome:
         """Parse one inert billing envelope, decode the raw body, and run it through the signer. Returns the
-        appended spine seq, or None when the signer mints nothing (unverified / unknown price / no-op — NOT an
-        error). Raises BillingSpoolError on a malformed envelope (a refusal; nothing is spined)."""
+        signer's ``IngestOutcome``: the appended spine seq, or None when the signer mints nothing (unverified /
+        unknown price / no-op — NOT an error), and why. Raises BillingSpoolError on a malformed envelope (a refusal;
+        nothing is spined)."""
         try:
             obj = json.loads(text)
         except ValueError as exc:
@@ -247,7 +254,46 @@ class BillingSpoolWatcher:
         # vs the injected secret) + the MANDATORY server-side re-verify + the owner-signed mint, and is itself
         # idempotent by event_id. None ⇒ the webhook did not re-verify / carried no catalog entitlement ⇒ nothing
         # minted (safe no-op).
-        return self.signer.ingest(raw, sig_header, now=float(now))
+        ingest_outcome = getattr(self.signer, "ingest_outcome", None)
+        if ingest_outcome is None:                   # a signer without outcomes: the seq alone, reason unrecorded
+            seq = self.signer.ingest(raw, sig_header, now=float(now))
+            return IngestOutcome(seq, None, OUTCOME_MINTED if seq is not None else "unrecorded")
+        return ingest_outcome(raw, sig_header, now=float(now))
+
+    def _write_outcome(self, marker: Path, out: IngestOutcome) -> None:
+        """REPORT-ONLY: record what the envelope archived as the dedup marker ``processed/<sha256>.json`` did, as
+        ``outcomes/<sha256>.outcome`` — canonical JSON ``{v, outcome: minted|noop, reason, kind, tx_ref}``. Written
+        atomically (a ``.tmp-`` file renamed in) after the signer returned and before the envelope is archived. It
+        lives in its own directory (created on the first outcome), so ``processed/`` stays exactly the drain's dedup
+        ledger and nothing that reads envelopes ever reads it. Inert to money: a write that fails is reported on
+        stderr and changes neither the mint nor the drain's counts."""
+        import sys as _sys
+        ev = out.event
+        tx_ref = (ev.data or {}).get("tx_ref") if ev is not None else None
+        doc = {"v": 1, "outcome": "minted" if out.minted else "noop", "reason": str(out.reason),
+               "kind": str(ev.kind) if ev is not None else "",
+               "tx_ref": tx_ref if isinstance(tx_ref, str) else ""}
+        outcomes = self.spool / OUTCOMES_DIRNAME
+        dest = outcomes / (marker.stem + OUTCOME_SUFFIX)
+        tmp = outcomes / (".tmp-" + marker.stem + OUTCOME_SUFFIX)
+        try:
+            if not outcomes.is_dir():
+                outcomes.mkdir(mode=0o700, exist_ok=True)
+            data = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, dest)
+        except Exception as exc:  # noqa: BLE001 — report-only: never changes the money outcome
+            _sys.stderr.write(f"vigil billing-drain: WARNING could not record the outcome of {marker.name}: "
+                              f"{type(exc).__name__}\n")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def _quarantine(self, path: Path, reason: str) -> None:
         dest = self.rejected / path.name
@@ -518,7 +564,7 @@ class BillingSpoolWatcher:
                 deduped += 1
                 continue
             try:
-                seq = self._ingest_text(text)
+                ingested = self._ingest_text(text)
             except BillingSpoolError as exc:
                 self._quarantine(claimed, f"rejected (fail-closed): {exc}")
                 self._clear_state(claimed.name)
@@ -536,9 +582,11 @@ class BillingSpoolWatcher:
                 self._clear_state(claimed.name)
                 rejected += 1
                 continue
-            # handled (minted or a safe no-op). Archive to the dedup marker. If the archive fails the record is
-            # already spined (if it minted) AND the file is in working/ (NOT incoming/), so it is never
-            # re-drained -> no double-ingest either way.
+            # handled (minted or a safe no-op). Record what it did beside the marker (report-only), then archive
+            # to the dedup marker. If the archive fails the record is already spined (if it minted) AND the file is
+            # in working/ (NOT incoming/), so it is never re-drained -> no double-ingest either way.
+            seq = ingested.seq
+            self._write_outcome(marker, ingested)
             try:
                 os.replace(claimed, marker)
             except OSError:
