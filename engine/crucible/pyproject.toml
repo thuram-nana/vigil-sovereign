@@ -59,7 +59,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic   = ["anthropic>=0.40,<1"]
 embeddings  = ["sentence-transformers>=2,<6"]
-analysis    = ["semgrep>=1.184.0"]
+analysis    = ["semgrep>=1.185.0"]
 smt         = ["z3-solver>=4.12,<5"]
 numerics    = ["numpy>=2.4.6,<3"]
 saml        = ["signxml>=5.2.0,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
