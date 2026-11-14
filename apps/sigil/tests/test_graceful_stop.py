@@ -67,12 +67,20 @@ def _wait_listening(port: int, proc, timeout=30.0) -> None:
     raise AssertionError(f"nothing listening on {port}")
 
 
-def _refused(port: int) -> bool:
-    try:
-        socket.create_connection(("127.0.0.1", port), timeout=1).close()
-        return False
-    except OSError:
-        return True
+def _refused(port: int, within: float = 1.5) -> bool:
+    """True once a connection to ``port`` is REFUSED (nothing listens), polling for up to ``within`` seconds. A
+    connection that is accepted, or that times out in a full listen backlog, is not a refusal."""
+    end = time.monotonic() + within
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            pass
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.2)
 
 
 # ── the customer edge: an accepted request (a slow provisioner hop) completes across SIGTERM ─────────────────
@@ -85,7 +93,7 @@ class _SlowProvisioner(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         type(self).received.set()
-        time.sleep(2.0)
+        time.sleep(3.0)
         body = json.dumps({"ok": True, "marker": "the-slow-answer"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -337,3 +345,30 @@ def test_a_log_line_that_cannot_be_written_never_breaks_the_stop():
     t.join(5)
     assert out == {"status": 204}
     srv.server_close()
+
+
+class _Interrupted(_Srv):
+    def service_actions(self):            # an interrupt raised inside the serve loop
+        raise KeyboardInterrupt
+
+
+def test_an_interrupt_inside_the_serve_loop_is_a_clean_stop():
+    srv = _Interrupted(("127.0.0.1", 0), _Hold)
+    assert graceful.serve_until_signal(srv, stop=threading.Event(), log=lambda _m: None) is True
+    assert _refused(srv.server_address[1])
+
+
+def test_an_idle_server_stops_promptly(tmp_path):
+    port = _free_port()
+    proc = _spawn(tmp_path, ["serve-public", "--host", "127.0.0.1", "--port", str(port)])
+    try:
+        _wait_listening(port, proc)
+        time.sleep(0.5)                                  # idle: no connection wakes the serve loop
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(10) == 0
+        assert time.monotonic() - t0 < 2.5, "an idle server must notice a stop within its poll interval"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

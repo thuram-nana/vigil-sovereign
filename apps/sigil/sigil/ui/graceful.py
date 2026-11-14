@@ -15,6 +15,7 @@ stdlib only (FATAL-2).
 """
 from __future__ import annotations
 
+import inspect
 import signal
 import socket
 import sys
@@ -95,6 +96,13 @@ def _close_listener(srv: Any) -> None:
         pass
 
 
+def _takes_poll_interval(srv: Any) -> bool:
+    try:
+        return "poll_interval" in inspect.signature(srv.serve_forever).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
                   abort: Optional[threading.Event] = None, log: Callable[[str], None] = print,
                   serving: bool = True) -> bool:
@@ -108,10 +116,14 @@ def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
         except Exception:  # noqa: BLE001 — the stop must complete whatever happened to the log stream
             pass
 
-    srv.stopping.set()
+    stopping = getattr(srv, "stopping", None)
+    if stopping is not None:
+        stopping.set()
     if serving:
         srv.shutdown()                  # serve_forever returns; nothing new is accepted
     _close_listener(srv)
+    if not hasattr(srv, "wait_drained"):
+        return True                     # a server without GracefulMixin keeps no count: nothing to wait for
     n = srv.inflight()
     if n:
         _say(f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
@@ -145,7 +157,12 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
 
     def _serve() -> None:
         try:
-            srv.serve_forever(poll_interval=0.25)
+            if _takes_poll_interval(srv):
+                srv.serve_forever(poll_interval=0.25)   # a stop is noticed within a quarter second
+            else:
+                srv.serve_forever()
+        except KeyboardInterrupt:       # an interrupt raised inside the loop is a stop request, as on the main thread
+            stop.set()
         except BaseException as exc:  # noqa: BLE001 — re-raised on the calling thread below
             failure.append(exc)
 
