@@ -130,9 +130,12 @@ puts `VIGIL_ANTHROPIC_KEY_SSM_PARAMETER=/vigil/anthropic-api-key` and `VIGIL_AWS
 of the process that runs the gateway (`infra/systemd/vigil-calibration.env.example`) and restarts it. With the
 parameter set, SSM is the gateway's only key source: a key in the environment or `sigil.env` is ignored, and a
 missing region or `aws` CLI, a parameter that is not a SecureString, or one the role cannot read stops the gateway
-from starting (metered runs then fail closed). `vigil doctor` checks the parameter's type and access without
-reading the key. **Rotate** by editing the parameter's value, then restart that process (the key is read at
-start). The cockpit's own gateway stays off in production; this parameter does not go in `cockpit.env`.
+from starting (metered runs then fail closed), so for the process that runs the gateway its start is the check.
+`vigil doctor` reads only its own environment and `$SIGIL_HOME/sigil.env`: it checks the parameter's type and
+access, without reading the key, when the gateway is enabled there with the parameter set — not for a gateway
+configured in another environment file (such as the calibration one). **Rotate** by editing the parameter's value, then restart that
+process (the key is read at start). The cockpit's own gateway stays off in production; this parameter does not go
+in `cockpit.env`.
 
 ### 2c. nginx for the public origin
 

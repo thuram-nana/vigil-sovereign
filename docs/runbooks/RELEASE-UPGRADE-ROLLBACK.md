@@ -141,12 +141,18 @@ an upgrade is: get the new code, rebuild the venvs, then run the crash-safe **da
    ```
 
 **Launch leases with optional fields.** A launch lease can carry optional owner‑signed fields (with
-`VIGIL_LEASE_PLAN_SPLIT=1`, its plan/wallet split). An offense build older than the release that defines them
-refuses such a lease, so upgrade both planes from the same checkout before turning the flag on, and turn it
-off before rolling the offense plane back (a lease it cannot read never runs; `sigil ops-sweep reservations --apply` refunds
-its reservation once its window closes). Independently of the flag, a settle whose lease does not record the split and whose
-reserve plan debit record a hard prune has removed is held as `plan_debit_pruned` (nothing moves; see
-hosting-and-persistence) rather than refunded.
+`VIGIL_LEASE_PLAN_SPLIT=1`, its plan/wallet split). A build older than the release that defines them cannot
+read such a lease — neither the offense plane (the launch never runs) nor the sovereign plane (its settle,
+cancel and reservations sweep refuse or skip it) — so upgrade both planes from the same checkout before turning
+the flag on. To roll back below that release (section 3a rolls back both planes): first turn the flag off and
+restart the cockpit, then wait until no unsettled lease carries the split — past the longest lease window (one
+week) plus the sweep `--ttl` from the moment the flag went off, with `sigil ops-sweep reservations --apply` run
+after that, and no file under the seam's `credit-launch-leases/` directory still containing `plan_reserved` —
+and only then roll the code back. A lease carrying the split that is still unsettled at the rollback (one
+reserved and never started or cancelled, say) stays unsettled, its credits reserved and nothing lost, until
+the release is re‑applied; it then settles normally. Independently of the flag, a settle whose lease does not
+record the split and whose reserve plan debit record a hard prune has removed is held as `plan_debit_pruned`
+(nothing moves; `vigil doctor` reports it; see hosting-and-persistence, held settles) rather than refunded.
 
 ---
 
