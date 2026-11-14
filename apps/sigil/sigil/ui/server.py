@@ -111,6 +111,8 @@ class FailedTokenCache:
 # serves the last projected value. Not a scale target: it bounds how often an anonymous caller triggers work.
 METRICS_PROJECTION_TTL_S = 10.0
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+#: The content types of the cockpit's two static assets (`_serve_static`); every other response is no-store.
+_STATIC_CTYPES = ("application/javascript", "text/css")
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
 # bytes. The tag (a versioned, NUL-terminated label) namespaces the signature so a login proof can never be
@@ -383,6 +385,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Every answer but the two token-free static assets (app.js, style.css) is no-store: the JSON plane, the
+        # probes and the token-bearing page are never kept by a browser or an intermediary.
+        if not ctype.startswith(_STATIC_CTYPES):
+            self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)   # Slice 1c-ii: a queued session Set-Cookie, if any
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -406,6 +412,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1189,6 +1196,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         # Bind `state` to THIS browser: an HttpOnly, SameSite=Lax cookie set here and re-checked at the
         # callback. SameSite=Lax still rides the IdP's top-level GET redirect back to us, but a cross-site
         # POST/subresource cannot carry it; HttpOnly keeps script from reading it; Path scopes it to /api/oidc.

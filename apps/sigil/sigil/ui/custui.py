@@ -222,6 +222,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
         pass
 
     # --- response + session helpers ----------------------------------------------------------------
+    def _no_store(self, ctype: str = "") -> bool:
+        """True for every `/api/*` response and every JSON answer (the probes and the error bodies): tenant data,
+        session state and refusals are never kept by a browser or an intermediary, whatever the CDN in front is
+        set to do. The static SPA assets keep their own caching."""
+        return urlparse(self.path).path.startswith("/api/") or ctype.startswith("application/json")
+
     def _send(self, code: int, body: bytes, ctype="application/json"):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -229,6 +235,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if self._no_store(ctype):
+            self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -521,6 +529,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
         self.send_header("Set-Cookie", cookie)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")       # the state/nonce never leak via Referer
         self.end_headers()
@@ -570,6 +579,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/" if ok else "/#oidc=err")
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)
         if ok and sc:
             self.send_header("Set-Cookie", sc)
