@@ -56,7 +56,10 @@ What it does, in order (`uiproxy.run_down` → `_contain_service_unit` then `_ki
    - a **clean** `systemctl --user stop` → unlike a raw kill, a clean stop does **not** trigger
      `Restart=`, so the stack stays down.
    - Recursion-safe: when `vigil down` runs as the unit's own `ExecStop` (systemd sets
-     `$SERVICE_RESULT` there), it skips the stop — systemd is already stopping it.
+     `$SERVICE_RESULT` there), it skips the stop — systemd is already stopping it — and it leaves the
+     unit's boot start unchanged: systemd runs `ExecStop` for `systemctl --user stop`, for
+     `systemctl --user restart` and after a crash, so a restart or a crash never removes the boot start.
+     Run `vigil down` from a shell to contain the unit.
    - No-op when `vigil up` was started **by hand** (no unit) or there is no user manager.
 2. **Kill the tracked pids** in `.vigil-live/ui/pids` (SIGTERM → 5 s grace → SIGKILL). Under a managed
    unit this is mop-up (the stop already took them via `KillMode=control-group`); started-by-hand it is

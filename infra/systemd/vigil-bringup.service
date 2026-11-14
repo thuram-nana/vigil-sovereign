@@ -31,7 +31,7 @@
 
 [Unit]
 Description=VIGIL BRING-UP — docker services + engine images (best-effort, parallel to the UI)
-Documentation=file:/home/kali/vigil/docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md
+Documentation=file:%h/vigil/docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md
 After=network-online.target
 Wants=network-online.target
 # DELIBERATELY no Before=/After=/Requires= against vigil-command.service: the two run in PARALLEL so a
@@ -45,12 +45,12 @@ StartLimitBurst=5
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/kali/vigil
-EnvironmentFile=-/home/kali/vigil/.vigil-live/service.env
+WorkingDirectory=%h/vigil
+EnvironmentFile=-%h/vigil/.vigil-live/service.env
 # BEST-EFFORT: the leading `-` ignores a non-zero exit so a docker hiccup / a build failure never fails
 # the unit (and never blocks the parallel UI). `--all` = gateway + qdrant + neo4j + otel AND build the
 # strix/aegis engine images if absent.
-ExecStart=-/home/kali/vigil/.venv-offense/bin/vigil services up --all
+ExecStart=-%h/vigil/.venv-offense/bin/vigil services up --all
 # A from-scratch Kali/AEGIS build is minutes; give it room. It runs in parallel, so a long start never
 # delays the UI. Bounded so a genuinely wedged build eventually gives up rather than hanging forever.
 TimeoutStartSec=3600

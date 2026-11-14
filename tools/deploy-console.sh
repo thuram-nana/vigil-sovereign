@@ -6,12 +6,12 @@
 #
 # Safe by construction: it mirrors a FIXED MANIFEST (the served UI, the console backend, the integration
 # live engine, the evidence-branch registry) — never the whole tree — and --delete is confined to those
-# code subtrees. Configurable: VIGIL_DEPLOY_DIR (default /home/kali/vigil), VIGIL_DEPLOY_UNIT (default
+# code subtrees. Configurable: VIGIL_DEPLOY_DIR (default $HOME/vigil), VIGIL_DEPLOY_UNIT (default
 # vigil-command.service). Set VIGIL_DEPLOY_NO_RESTART=1 to mirror without restarting.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${VIGIL_DEPLOY_DIR:-/home/kali/vigil}"
+DEST="${VIGIL_DEPLOY_DIR:-$HOME/vigil}"
 UNIT="${VIGIL_DEPLOY_UNIT:-vigil-command.service}"
 
 if [ ! -d "$DEST" ]; then

@@ -74,13 +74,45 @@ def test_manual_down_disables_and_stops_a_managed_active_unit(monkeypatch):
 def test_execstop_skips_the_stop_to_avoid_a_recursive_deadlock():
     # NEGATIVE CONTROL: a naive "always stop" implementation would deadlock when run as the unit's own
     # ExecStop (systemd is already stopping us, TimeoutStopSec would elapse). When $SERVICE_RESULT is
-    # present we must DISABLE but NOT issue `stop` (and not even probe is-active).
+    # present we must NOT issue `stop` (and not even probe is-active).
     ctl = FakeSystemctl(known=True, active=True)
     actions = uiproxy._contain_service_unit(mask=False, run=ctl, env={"SERVICE_RESULT": "success"})
-    assert "disable" in ctl.verbs
     assert "stop" not in ctl.verbs
     assert "is-active" not in ctl.verbs
     assert any("ExecStop" in a for a in actions)
+
+
+@pytest.mark.parametrize("result", ["success", "exit-code", "signal"])
+def test_execstop_keeps_the_boot_start_on_restart_stop_and_crash(result):
+    # systemd runs ExecStop (`vigil down`) for `systemctl stop`, for `systemctl restart`, and after the main
+    # process exits on its own — a crash that Restart=always picks up ($SERVICE_RESULT=exit-code/signal). None
+    # of those may change the unit's boot start: under ExecStop `vigil down` issues no disable and no mask.
+    ctl = FakeSystemctl(known=True, active=True)
+    actions = uiproxy._contain_service_unit(mask=False, run=ctl, env={"SERVICE_RESULT": result})
+    assert ctl.verbs == ["cat"], ctl.verbs            # only the existence probe ran
+    assert not any(a.startswith(("disabled", "masked", "stopped")) for a in actions)
+    assert any("boot start is unchanged" in a for a in actions)
+
+
+def test_panic_under_execstop_still_disables_and_masks():
+    # Panic keeps its full containment in every context: even with $SERVICE_RESULT in the environment it
+    # disables and masks the unit (it only skips the recursive stop).
+    ctl = FakeSystemctl(known=True, active=True)
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl, env={"SERVICE_RESULT": "success"})
+    assert "disable" in ctl.verbs and "mask" in ctl.verbs
+    assert "stop" not in ctl.verbs
+    assert any("masked" in a for a in actions)
+
+
+def test_run_down_under_execstop_reports_the_boot_start_unchanged(tmp_path, monkeypatch, capsys):
+    # `systemctl --user restart vigil-command` runs `vigil down` as ExecStop: it must neither disable the unit
+    # nor claim it did.
+    monkeypatch.setenv("SERVICE_RESULT", "success")
+    ctl = FakeSystemctl(known=True, active=True)
+    assert uiproxy.run_down(base_dir=str(tmp_path), run=ctl) == 0
+    out = capsys.readouterr().out
+    assert "disable" not in ctl.verbs
+    assert "boot start is unchanged" in out and "disabled + stopped" not in out
 
 
 def test_unknown_unit_issues_no_disable_or_stop(monkeypatch):

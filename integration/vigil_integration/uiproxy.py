@@ -3221,15 +3221,26 @@ def _contain_service_unit(*, mask: bool = False,
     Order and rationale:
       1. If systemd does not know the unit (started by hand / no user manager), return [] — the caller's
          pid-kill is the entire containment.
-      2. `disable` — removes the boot-time restore. Idempotent, never recurses; always safe.
-      3. `mask` (panic only) — the strongest form: even a manual `systemctl start` is refused until a
+      2. Under ExecStop (`vigil down` run BY systemd, not by a person) and not panicking: change nothing.
+         systemd runs ExecStop for a `systemctl stop`, a `systemctl restart` AND after the main process
+         exits on its own (a crash that `Restart=always` will pick up), and the unit cannot tell these
+         apart. Disabling there would silently remove the boot start on every restart and every crash, so
+         the unit's enablement stays exactly what the operator set; `vigil down` from a shell is the
+         containment verb. Panic keeps its full containment in every context.
+      3. `disable` — removes the boot-time restore. Idempotent, never recurses; always safe.
+      4. `mask` (panic only) — the strongest form: even a manual `systemctl start` is refused until a
          deliberate `unmask`.
-      4. `stop` — ONLY when the unit is up AND we are not our own ExecStop. A clean systemctl stop does
+      5. `stop` — ONLY when the unit is up AND we are not our own ExecStop. A clean systemctl stop does
          not trigger `Restart=`; skipping it under ExecStop avoids a recursive-stop deadlock (systemd is
          already stopping us there, so `Restart=` will not fire regardless)."""
     if not _unit_is_known(run=run):
         return []
     actions: list[str] = []
+
+    if not mask and _running_as_execstop(env):
+        actions.append(f"under ExecStop — systemd is completing the stop of {_SERVICE_UNIT}; its boot start "
+                       f"is unchanged (run `vigil down` from a shell to contain it)")
+        return actions
 
     rc, _out, err = _systemctl("disable", _SERVICE_UNIT, run=run)
     actions.append(
@@ -3987,7 +3998,8 @@ def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
       1. Stop-and-disable the `vigil-command.service` user unit if systemd is keeping it alive — a bare
          pid-kill would otherwise be undone by `Restart=always` within ~RestartSec. A clean systemctl
          stop does not trigger `Restart=`; disabling stops the next boot from restoring it. No-op when
-         `vigil up` was started by hand / there is no user manager.
+         `vigil up` was started by hand / there is no user manager. Run BY systemd as the unit's ExecStop
+         (a `systemctl stop`/`restart`, or the stop after a crash) it leaves the boot start unchanged.
       2. Terminate the backend children + orchestrator tracked in ``.vigil-live/ui/pids``. Under a
          managed unit step 1 already took them down (KillMode=control-group); this is the mop-up, and it
          is the WHOLE containment when there is no unit.
@@ -3999,7 +4011,12 @@ def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
     stopped, rc = _kill_tracked_pids(base_dir, label="vigil down")
     if rc:
         return rc
-    tail = "the service unit is disabled + stopped" if contained else "no systemd unit to contain"
+    if not contained:
+        tail = "no systemd unit to contain"
+    elif any(a.startswith("under ExecStop") for a in contained):
+        tail = "systemd is stopping the service unit; its boot start is unchanged"
+    else:
+        tail = "the service unit is disabled + stopped"
     print(f"vigil down: stopped {stopped} process(es); {tail}.")
     return 0
 
