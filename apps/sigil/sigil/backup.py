@@ -696,27 +696,33 @@ def _aside_of(dest_unit: Path) -> Path:
 
 
 class _AsideInTheWay(FileExistsError):
-    """A swap stopped BEFORE its first rename: an old copy left at the aside of its destination (not this swap's)
-    could not be removed. Nothing of the unit moved."""
+    """A swap stopped BEFORE its first rename: an entry stands at the aside of its destination. Nothing of the unit
+    moved."""
 
 
-def _swap_in(staged_unit: Path, dest_unit: Path) -> "Path | None":
+def _swap_in(staged_unit: Path, dest_unit: Path, moved: "list[Path] | None" = None) -> "Path | None":
     """Move the old ``dest_unit`` aside and rename ``staged_unit`` into its place (each rename atomic, same
     filesystem). The old copy is NOT dropped: returns the aside that holds it (None for a fresh slot), so a journaled
-    caller can record the new unit as in place before the old one goes. A leftover at the aside that cannot be removed
-    stops the swap before its first rename (:class:`_AsideInTheWay`): a rename never lands on it."""
+    caller can record the new unit as in place before the old one goes. An entry already at the aside is never dropped
+    nor renamed over — it may be the only old copy of the unit, moved there by an earlier attempt — and stops the swap
+    before its first rename (:class:`_AsideInTheWay`); a caller that has proven it a leftover removes it first.
+    ``moved`` collects what this call moved and did not move back (the aside, while the old unit stays there): it is
+    empty whenever the call stopped with nothing of the unit moved."""
+    moved = [] if moved is None else moved
     dest_unit.parent.mkdir(parents=True, exist_ok=True)
     if dest_unit.exists() or dest_unit.is_symlink():
         aside = _aside_of(dest_unit)
-        _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
         if aside.exists() or aside.is_symlink():
-            raise _AsideInTheWay(errno.EEXIST, "a leftover that cannot be removed holds the aside", str(aside))
+            raise _AsideInTheWay(errno.EEXIST, "an entry holds the aside", str(aside))
         os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
+        moved.append(aside)
         _maybe_crash(f"restore_moved_aside:{dest_unit.name}")
         try:
             os.replace(str(staged_unit), str(dest_unit))  # atomic: staged unit → dest_unit
         except OSError:
+            _maybe_crash(f"restore_rolling_back:{dest_unit.name}")
             os.replace(str(aside), str(dest_unit))        # best-effort rollback
+            moved.remove(aside)
             raise
         return aside
     os.replace(str(staged_unit), str(dest_unit))          # atomic into a fresh slot
@@ -727,7 +733,7 @@ def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
     """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
     leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Move-aside → rename-in → drop-old (each rename
     atomic, same filesystem), so a crash leaves ``dest_unit`` as the complete OLD unit, absent, or the complete
-    NEW unit — never torn."""
+    NEW unit — never torn. A leftover at the aside stops it before its first rename (:class:`_AsideInTheWay`)."""
     aside = _swap_in(staged_unit, dest_unit)
     if aside is not None:
         _drop_path(aside)                                 # drop the old unit
@@ -997,7 +1003,8 @@ def _read_journal(home: Path) -> dict:
                       and all(isinstance(u[k], str) for k in ("name", "src", "dst", "digest"))
                       and all(isinstance(u[k], bool) for k in ("started", "done"))
                       and isinstance(u.get("aside_foreign", False), bool)
-                      and not (u.get("aside_foreign") and (u["started"] or u["done"])) for u in units)
+                      and not (u.get("aside_foreign") and (u["started"] or u["done"]))
+                      and _identity_shape_ok(u.get("old")) for u in units)
               and all(d is None or isinstance(d, str) for d in (j.get("staging"), j.get("archive_staging")))
               and _replaced_shape_ok(j.get("replaced")) and isinstance(j.get("aborting", False), bool))
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1042,6 +1049,39 @@ def _read_journal(home: Path) -> dict:
     if nested is not None:
         raise BackupError(f"the restore journal at {jp} names {nested} — refusing")
     return j
+
+
+def _entry_identity(p: Path) -> "list | None":
+    """What stands at the entry ``p`` (never followed if it is a symlink): None when nothing does, else the file-system
+    object — ``[device, inode, content digest]`` (:func:`unit_digest`). A journal unit records it for its
+    destination when it is marked started, ahead of its first rename, so the disk can later prove that destination
+    still holds what the restore found there (the same object, of the same content) — never one recreated over a
+    freed inode, nor one changed in place."""
+    from .spine.consistent_copy import unit_digest
+    try:
+        st = os.lstat(p)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return [st.st_dev, st.st_ino, unit_digest(p)]
+
+
+def _identity_shape_ok(v: Any) -> bool:
+    return v is None or (isinstance(v, list) and len(v) == 3
+                         and all(isinstance(x, int) and not isinstance(x, bool) for x in v[:2])
+                         and isinstance(v[2], str))
+
+
+def _old_unit_in_place(u: dict) -> bool:
+    """Whether the disk proves that the destination of a journal unit marked started still holds what the restore
+    found there when it marked it (its ``old`` record, :func:`_entry_identity`) — still no entry, for a slot that was
+    empty. So no attempt at its swap, this one or an earlier interrupted one, has left the old unit moved. Not proven
+    (False) when the unit holds no such record or its destination cannot be read."""
+    if "old" not in u:
+        return False
+    try:
+        return _entry_identity(Path(u["dst"])) == u["old"]
+    except OSError:
+        return False
 
 
 def _nested_unit(rows: "list[dict]") -> "str | None":
@@ -1094,11 +1134,13 @@ def _drop_staging(journal: dict) -> None:
 
 def _complete_journaled_swap(home: Path, journal: dict) -> None:
     """Swap every not-yet-done unit of ``journal`` into place, in order, write-ahead: a unit is marked ``started``
-    (atomic journal rewrite) before its first rename, and ``done`` as soon as the new unit is in place — before its
-    old copy is dropped. Then prove every destination is the unit the restore verified, drop the journal and the
-    staging. Idempotent: a unit whose staged copy is gone but whose destination already IS the verified unit (a
-    crash after its swap, before it was marked) is marked done, and an old copy left aside is dropped; a staged copy
-    that changed since it was verified, or a unit that is neither staged nor in place, is refused."""
+    (atomic journal rewrite), with what stands at its destination (``old``, :func:`_entry_identity`), before its first
+    rename, and ``done`` as soon as the new unit is in place — before its old copy is dropped. Then prove every
+    destination is the unit the restore verified, drop the journal and the staging. Idempotent: a unit whose staged
+    copy is gone but whose destination already IS the verified unit (a crash after its swap, before it was marked) is
+    marked done, and an old copy left aside is dropped; a staged copy that changed since it was verified, or a unit
+    that is neither staged nor in place, is refused. An old copy at a unit's aside is never dropped before the new
+    unit is marked in place, unless its destination is proven to still hold the old unit (:func:`_clear_the_way`)."""
     from .spine.atomicio import fsync_dir
     from .spine.consistent_copy import unit_digest
     jp = home / _JOURNAL_NAME
@@ -1110,14 +1152,24 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
                     raise BackupError(f"the staged copy of {u['name']!r} changed since the restore verified it — "
                                       f"refusing to swap it in; re-run the restore with --force from the backup")
                 if not u["started"]:
+                    try:
+                        old = _entry_identity(dst)           # what the swap replaces, recorded ahead of its renames
+                    except OSError as e:
+                        raise BackupError(f"could not swap {u['name']!r} into place: {dst} cannot be read to record "
+                                          f"what the swap replaces ({e}) — nothing of it was moved; "
+                                          f"{_next_step(home, journal)}") from e
                     u["started"] = True
+                    u["old"] = old
                     u.pop("aside_foreign", None)             # an aside from here on may be this swap's own
                     _write_journal(jp, journal)
                     _maybe_crash(f"restore_unit_started:{u['name']}")
+                if os.path.lexists(dst) and os.path.lexists(_aside_of(dst)):
+                    _clear_the_way(home, journal, u)
+                moved: "list[Path]" = []
                 try:
-                    _swap_in(src, dst)
+                    _swap_in(src, dst, moved)
                 except OSError as e:
-                    _swap_failed(home, journal, u, e)
+                    _swap_failed(home, journal, u, e, moved)
                 _maybe_crash(f"restore_swapped_in:{u['name']}")
             elif unit_digest(dst) != u["digest"]:
                 raise BackupError(f"cannot complete the interrupted restore: the staged copy of {u['name']!r} is gone "
@@ -1140,32 +1192,71 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
     _drop_staging(journal)
 
 
-def _swap_failed(home: Path, journal: dict, u: dict, err: OSError) -> NoReturn:
-    """A unit's swap failed with an OSError. When nothing of it moved — it stopped before its first rename (an old copy
-    an earlier restore left at its aside could not be removed), or the staged copy is still staged and no old copy is
-    aside (the first rename failed, or the second did and its old copy was renamed back) — its ``started`` mark goes
-    back durably: the home then reads as what it is, untouched by this unit. A leftover in the way is marked
-    ``aside_foreign`` with it, so it is never read as this restore's old copy. Raises a BackupError that says what the
-    home now is and how to leave the state the journal keeps it in."""
-    aside = _aside_of(Path(u["dst"]))
+def _clear_the_way(home: Path, journal: dict, u: dict) -> None:
+    """Both the destination of a unit marked started and the aside beside it hold an entry. While the destination still
+    holds what the restore found there when it marked the unit (:func:`_old_unit_in_place`), no attempt has left the
+    old unit moved, so the entry at the aside is a leftover and not its old copy: it is removed (one that cannot be
+    removed stops the swap before its first rename, :class:`_AsideInTheWay`). Otherwise the aside may hold the only old
+    copy of the unit, moved there by an earlier attempt, and the destination was recreated after that attempt was
+    interrupted: the aside is kept. An empty dir recreated there holds nothing to lose: it is removed, and the new unit
+    is renamed into the empty slot. Anything else stops the swap with nothing moved and the unit still marked started."""
+    from .spine.atomicio import fsync_dir
+    dst = Path(u["dst"])
+    aside = _aside_of(dst)
+    if _old_unit_in_place(u):
+        _drop_path(aside)
+        return
+    if dst.is_dir() and not dst.is_symlink():
+        try:
+            os.rmdir(dst)                                # only an EMPTY dir goes: nothing in it is lost
+        except OSError:
+            pass
+        else:
+            fsync_dir(dst.parent)
+            _maybe_crash(f"restore_cleared_destination:{u['name']}")
+            return
+    raise BackupError(f"could not swap {u['name']!r} into place: {aside} may hold the old copy of it this restore "
+                      f"moved aside, and {dst} is not what the restore found there when it began this swap (it was "
+                      f"made after the restore was interrupted) — nothing was moved; move {dst} out of the home (the "
+                      f"old copy at {aside} is kept); {_next_step(home, journal)}")
+
+
+def _swap_failed(home: Path, journal: dict, u: dict, err: OSError, moved: "list[Path]") -> NoReturn:
+    """A unit's swap failed with an OSError. Its ``started`` mark goes back durably only on positive evidence that no
+    attempt has left anything of the unit moved: this attempt moved nothing it did not move back (``moved``, from
+    :func:`_swap_in`, is empty), and the destination still holds what the restore found there when it marked the unit
+    started (:func:`_old_unit_in_place` — an earlier, interrupted attempt that moved the old unit aside, or renamed the
+    new one in, leaves it false, whatever was made at the destination since). The home then reads as what it is,
+    untouched by this unit; a leftover in the way (:class:`_AsideInTheWay`) is marked ``aside_foreign`` with it, so it
+    is never read as this restore's old copy. Otherwise every mark stays. Raises a BackupError that says what the home
+    now is and how to leave the state the journal keeps it in."""
+    dst = Path(u["dst"])
+    aside = _aside_of(dst)
     foreign = isinstance(err, _AsideInTheWay)
-    began = not foreign and _swap_began_on_disk(u)
-    if not began:
+    untouched = not moved and _old_unit_in_place(u)
+    if untouched:
         u["started"] = False
+        u.pop("old", None)
         if foreign:
             u["aside_foreign"] = True
         _write_journal(home / _JOURNAL_NAME, journal)
-    where = (f"its old copy is at {aside}" if began else
-             f"{u['dst']} was left as it was; {aside}, an old copy this restore did not put there, is in the way of "
-             f"its swap and cannot be removed — remove it" if foreign else
-             f"{u['dst']} was left as it was")
-    if not _touched_units(journal) and _replaced_touched(journal) == []:
-        nxt = (f"the home is still entirely its old self — `sigil restore --abort {home}` discards this restore, or "
-               f"`sigil restore --resume {home}` finishes it once the cause is fixed")
+    if untouched:
+        where = (f"{dst} was left as it was; {aside}, an old copy this restore did not put there, is in the way of "
+                 f"its swap and cannot be removed — remove it" if foreign else f"{dst} was left as it was")
+    elif os.path.lexists(aside):
+        where = f"its old copy is at {aside}"
     else:
-        nxt = (f"the home is no longer entirely its old self — fix the cause and finish it with `sigil restore "
-               f"--resume {home}`, or replace it with a fresh `sigil restore --force` from the backup")
-    raise BackupError(f"could not swap {u['name']!r} into place ({err}): {where}; {nxt}") from err
+        where = f"{dst} cannot be proven to be what the restore found there when it began this swap"
+    raise BackupError(f"could not swap {u['name']!r} into place ({err}): {where}; {_next_step(home, journal)}") from err
+
+
+def _next_step(home: Path, journal: dict) -> str:
+    """What the home is while ``journal`` stands, and how to leave that state."""
+    if not _touched_units(journal) and _replaced_touched(journal) == []:
+        return (f"the home is still entirely its old self — `sigil restore --abort {home}` discards this restore, or "
+                f"`sigil restore --resume {home}` finishes it once the cause is fixed")
+    return (f"the home is no longer entirely its old self — fix the cause and finish it with `sigil restore --resume "
+            f"{home}`, or replace it with a fresh `sigil restore --force` from the backup")
 
 
 def _drop_leftover_asides(journal: dict) -> None:
