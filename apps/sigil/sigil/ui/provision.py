@@ -526,24 +526,27 @@ class Provisioner:
                                    commit=lambda: codes.consume_code(email_l, PURPOSE_VERIFY))
 
     def _code_check(self, email: str, purpose: str, code, *, ip: str, t: float, consume: bool) -> "tuple[str, dict]":
-        """Check a typed email code. Refused before the check while the caller's IP (`rate_limiter`) or this
-        email+purpose (`email_code_limiter`) is locked out; a wrong, malformed, expired or unknown code counts on
-        both and is one generic refusal (no hint whether the email has an account). Returns (email, bound values)."""
+        """Check a typed email code. EVERY attempt is counted BEFORE the code is hashed, in one atomic step per leg
+        (`LoginRateLimiter.admit`, under the limiter's flock, across threads and processes): per caller IP
+        (`rate_limiter`) and per email+purpose (`email_code_limiter`, 5 an hour across re-sent codes) — so no burst
+        of concurrent guesses gets more evaluations than the limit, and a locked leg refuses before any hash. Both
+        legs count whether or not the address has a live code: the answer (and the lock) never hint whether it has
+        an account. A wrong, malformed, expired or unknown code is one generic refusal. Returns (email, bound
+        values)."""
         if self.email_codes is None:
             raise ProvisionError("email codes are not enabled on this deployment")
         email_l = str(email or "").strip().lower()
         ikey, ekey = f"code:ip:{ip}", f"code:{purpose}:{email_l}"
-        self._rate_guard(ikey, now=t)
+        wait = self.rate_limiter.admit(ikey, now=t)
+        if wait is not None:
+            raise ProvisionRateLimited(wait)
         if self.email_code_limiter is not None:
-            locked = self.email_code_limiter.locked(ekey, now=t)
-            if locked is not None:
-                raise ProvisionRateLimited(locked)
+            wait = self.email_code_limiter.admit(ekey, now=t)
+            if wait is not None:
+                raise ProvisionRateLimited(wait)
         res = self.email_codes.check(email_l, purpose, code, consume=consume, now=t) if email_l else None
         if isinstance(res, CodeOk):
             return email_l, res.bind
-        self.rate_limiter.record_failure(ikey, now=t)
-        if self.email_code_limiter is not None:
-            self.email_code_limiter.record_failure(ekey, now=t)
         self._audit(f"{purpose}_code", target=email_l, outcome="denied")
         raise ProvisionDenied("invalid or expired code")
 
@@ -937,6 +940,8 @@ class Provisioner:
         on that return before completing the response (wired in the E1 HTTP transport). We also drop every
         outstanding verify/recover token for the email here, so no sibling token survives the reset."""
         t = self._now() if now is None else float(now)
+        from ..governor.accounts import check_password_policy
+        check_password_policy(new_password)            # a refused password must not spend the token
         email = self.email_tokens.consume(str(token or ""), PURPOSE_RECOVER, now=t)
         if not email:
             raise ProvisionDenied("invalid or expired recovery token")
@@ -944,10 +949,15 @@ class Provisioner:
 
     def confirm_recover_code(self, email: str, code: str, *, new_password: str, ip: str = "",
                              now: "Optional[float]" = None) -> dict:
-        """The password reset with the 6-digit code from the reset email instead of its token. The code is checked
-        and consumed in one step (single use; wrong codes count: 5 per email, then it is gone; plus the per-IP
-        limit), then the same owner-signed reset and session-revocation contract as confirm_recover."""
+        """The password reset with the 6-digit code from the reset email instead of its token. The new password is
+        checked first (a refused one does not spend the code), then the code is checked and consumed in one step
+        (single use; wrong codes count: 5 per email, then it is gone; plus the per-IP limit), then the same
+        owner-signed reset and session-revocation contract as confirm_recover."""
         t = self._now() if now is None else float(now)
+        if self.email_codes is None:
+            raise ProvisionError("email codes are not enabled on this deployment")
+        from ..governor.accounts import check_password_policy
+        check_password_policy(new_password)
         email_l, _bind = self._code_check(email, PURPOSE_RECOVER, code, ip=ip, t=t, consume=True)
         return self._recover_commit(email_l, new_password)
 

@@ -4,13 +4,16 @@ browser.
 
 Pinned here:
   * the ledger: bound to the email AND the purpose, single use, 10 minutes, the 5th wrong code destroys it, a new
-    email replaces the previous code, raw code never on disk (hash-named, salted scrypt), bounded, exactly one winner
-    under concurrency;
+    email replaces the previous code and inherits its wrong-code count, a guess is compared only with the code it
+    was hashed for, raw code never on disk (hash-named, salted scrypt), bounded, exactly one winner under
+    concurrency; every check costs one scrypt with or without a code (no timing tell), and at most 4 run at once;
   * the provisioner: OFF by default (the emails and answers exactly as before, the code confirmations refused);
     ON, the emails carry the code beside the token, the code completes the SAME sign-up the token would (same
     username and org), either path ends the other, wrong codes are limited per email+purpose ACROSS re-sent codes
-    and per IP, a reset by code sets the password and asks the edge to sever sessions, the answers never reveal
-    whether an address has an account;
+    and per IP — every attempt counted before it is hashed, so a concurrent burst mixed with re-sends gets at most
+    5 guesses evaluated —, a reset by code sets the password and asks the edge to sever sessions, a refused new
+    password spends neither the code nor the token, the answers (and the lock) never reveal whether an address has
+    an account; consuming the code is the sign-up's commit marker;
   * over the real edge -> cockpit hop: sign-up and reset by code; the reset severs a live session;
   * the app: "Enter the 6-digit code from your email", the code goes with the email address, a reset screen.
 """
@@ -181,6 +184,123 @@ def test_concurrent_right_codes_consume_once_even_when_they_overlap(tmp_path):
     assert sum(isinstance(r, CodeOk) for r in out) == 1
 
 
+def test_a_resent_code_inherits_the_wrong_code_count(tmp_path):
+    led = EmailCodeLedger(tmp_path)
+    first = led.issue("a@acme.com", PURPOSE_RECOVER, now=100.0)
+    wrong = f"{(int(first) + 1) % 1_000_000:06d}"
+    assert [led.check("a@acme.com", PURPOSE_RECOVER, wrong, now=101.0) for _ in range(3)] == \
+        [CodeWrong(4), CodeWrong(3), CodeWrong(2)]
+    second = led.issue("a@acme.com", PURPOSE_RECOVER, now=102.0)            # re-sent: 3 wrong codes carried over
+    wrong = f"{(int(second) + 1) % 1_000_000:06d}"
+    assert led.check("a@acme.com", PURPOSE_RECOVER, wrong, now=103.0) == CodeWrong(1)
+    assert led.check("a@acme.com", PURPOSE_RECOVER, wrong, now=103.0) == CodeWrong(0)
+    assert led.check("a@acme.com", PURPOSE_RECOVER, second, now=103.0) == CodeGone()
+    # an EXPIRED earlier code hands nothing on: a fresh email starts a fresh count
+    third = led.issue("a@acme.com", PURPOSE_RECOVER, now=200.0)
+    led.check("a@acme.com", PURPOSE_RECOVER, f"{(int(third) + 1) % 1_000_000:06d}", now=201.0)
+    fourth = led.issue("a@acme.com", PURPOSE_RECOVER, now=900.0)
+    assert led.check("a@acme.com", PURPOSE_RECOVER, f"{(int(fourth) + 1) % 1_000_000:06d}", now=901.0) == CodeWrong(4)
+
+
+class _ReplacedWhileHashing(EmailCodeLedger):
+    """A new email for the address arrives while a check is hashing its guess (a re-send racing a guess)."""
+
+    def __init__(self, path, **kw):
+        super().__init__(path, **kw)
+        self.armed = False
+        self.new_code = None
+
+    def _hash(self, code, salt, email, purpose):
+        out = EmailCodeLedger._hash(code, salt, email, purpose)
+        if self.armed:
+            self.armed = False
+            self.new_code = EmailCodeLedger(self.dir).issue(email, purpose)
+        return out
+
+
+def test_a_guess_is_compared_only_with_the_code_it_was_hashed_for(tmp_path):
+    led = _ReplacedWhileHashing(tmp_path)
+    old = led.issue("a@acme.com", PURPOSE_VERIFY)
+    led.armed = True
+    # the guess (even the old right code) meets a code that was replaced meanwhile: gone — it is not re-hashed
+    # against the new code, and it does not count against the new code either
+    assert led.check("a@acme.com", PURPOSE_VERIFY, old) == CodeGone()
+    assert led.new_code is not None
+    wrong = f"{(int(led.new_code) + 1) % 1_000_000:06d}"
+    assert led.check("a@acme.com", PURPOSE_VERIFY, wrong) == CodeWrong(4)
+    assert led.check("a@acme.com", PURPOSE_VERIFY, led.new_code) == CodeOk({})
+
+
+class _CountingHash(EmailCodeLedger):
+    calls = 0
+
+    @staticmethod
+    def _hash(code, salt, email, purpose):
+        _CountingHash.calls += 1
+        return EmailCodeLedger._hash(code, salt, email, purpose)
+
+
+@pytest.mark.parametrize("live,typed", [(True, "wrong"), (True, "malformed"), (False, "wrong"), (False, "malformed")])
+def test_every_check_costs_one_hash_with_or_without_a_code(tmp_path, live, typed):
+    # an address with a live code and one without answer after the same work (the review's timing tell: a wrong
+    # code took ~80 ms where a code existed and ~4 ms where none did)
+    led = _CountingHash(tmp_path)
+    code = led.issue("a@acme.com", PURPOSE_RECOVER, now=100.0) if live else "123456"
+    guess = f"{(int(code) + 1) % 1_000_000:06d}" if typed == "wrong" else "12x456"
+    _CountingHash.calls = 0
+    out = led.check("a@acme.com" if live else "ghost@acme.com", PURPOSE_RECOVER, guess, now=101.0)
+    assert _CountingHash.calls == 1
+    assert out == (CodeWrong(4) if live else CodeGone())
+
+
+def test_at_most_four_code_hashes_run_at_once(tmp_path, monkeypatch):
+    import sigil.ui.email_channel as ec
+    state = {"now": 0, "peak": 0}
+    gate = threading.Lock()
+    real = ec.hashlib.scrypt
+
+    def slow_scrypt(*a, **kw):
+        with gate:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        try:
+            time.sleep(0.02)
+            return real(*a, **kw)
+        finally:
+            with gate:
+                state["now"] -= 1
+
+    led = EmailCodeLedger(tmp_path)
+    led.issue("victim@acme.com", PURPOSE_RECOVER)
+    monkeypatch.setattr(ec.hashlib, "scrypt", slow_scrypt)
+    barrier = threading.Barrier(24)
+
+    def go(k):
+        barrier.wait()
+        EmailCodeLedger(tmp_path).check("victim@acme.com" if k % 2 else f"ghost{k}@acme.com", PURPOSE_RECOVER,
+                                        f"{k:06d}")
+
+    ts = [threading.Thread(target=go, args=(k,)) for k in range(24)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert 1 <= state["peak"] <= 4
+
+
+def test_no_free_hash_slot_fails_closed(tmp_path, monkeypatch):
+    import sigil.ui.email_channel as ec
+    led = EmailCodeLedger(tmp_path)
+    code = led.issue("a@acme.com", PURPOSE_RECOVER)
+    monkeypatch.setattr(ec, "_HASH_WAIT_S", 0.05)
+    held = [ec._HASH_SLOTS.acquire() for _ in range(ec._HASH_CONCURRENCY)]
+    try:
+        assert led.check("a@acme.com", PURPOSE_RECOVER, code) == CodeGone()     # the right code: refused, not run
+        assert led.issue("b@acme.com", PURPOSE_RECOVER) is None
+    finally:
+        for _ in held:
+            ec._HASH_SLOTS.release()
+    assert led.check("a@acme.com", PURPOSE_RECOVER, code) == CodeOk({})        # nothing was spent meanwhile
+
+
 def test_normalize_code():
     assert normalize_code(" 123 456 ") == "123456" and normalize_code("000000") == "000000"
     for bad in ("12345", "1234567", "12a456", "１２３４５６", None):
@@ -301,6 +421,104 @@ def test_without_the_cross_resend_limiter_each_code_still_dies_at_its_fifth_wron
     with pytest.raises(ProvisionDenied):
         p.confirm_signup_code("a@acme.com", r["dev_code"], password="pw-123456", org_name="A", ip="9.9.9.9",
                               now=102.0)
+
+
+def test_a_burst_of_guesses_mixed_with_resends_gets_at_most_five_evaluated():
+    """The review's burst: 80 concurrent wrong guesses for one address from 80 IPs, while 12 other IPs re-send the
+    reset email 3 times each. Every guess is counted (atomically) BEFORE it is hashed, so at most 5 are compared
+    with a live code — before the fix, 34-43 were."""
+    p, _c, _o, _m = _prov(ip_fails=10_000)
+    tok = p.request_signup("victim@acme.com", ip="1.1.1.1")["dev_token"]
+    p.confirm_signup(tok, password="pw-123456", org_name="Acme")
+    p.request_recover("victim@acme.com", ip="2.2.2.0")
+    evaluated = []
+    real_check = p.email_codes.check
+
+    def counting_check(*a, **kw):
+        r = real_check(*a, **kw)
+        if not isinstance(r, CodeGone):
+            evaluated.append(r)
+        return r
+
+    p.email_codes.check = counting_check
+    go = threading.Barrier(80 + 12)
+    out = {"denied": 0, "limited": 0}
+    lock = threading.Lock()
+
+    def guess(k):
+        go.wait()
+        try:
+            p.confirm_recover_code("victim@acme.com", f"{(k * 7919) % 1_000_000:06d}", new_password="x-pass-123",
+                                   ip=f"10.0.{k // 250}.{k % 250}")
+        except ProvisionDenied:
+            with lock:
+                out["denied"] += 1
+        except ProvisionRateLimited:
+            with lock:
+                out["limited"] += 1
+
+    def resend(k):
+        go.wait()
+        for _ in range(3):
+            p.request_recover("victim@acme.com", ip=f"20.0.0.{k}")
+
+    ts = [threading.Thread(target=guess, args=(k,)) for k in range(80)]
+    ts += [threading.Thread(target=resend, args=(k,)) for k in range(12)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(evaluated) <= 5 and out["denied"] + out["limited"] == 80 and out["limited"] >= 75
+
+
+def test_the_lock_never_tells_which_addresses_have_a_code_and_the_token_still_works():
+    """Every attempt counts for the email+purpose whether or not a code is live, so a locked address and a
+    never-sent one look the same (counting only guesses at a live code would make the lock itself say which
+    addresses have one, i.e. an account). The price: anyone can lock an address out of the CODE for the hour;
+    the token in the same email is untouched by that lock."""
+    p, custs, _o, _m = _prov()
+    t = p.request_signup("a@acme.com", ip="1.1.1.1", now=100.0)["dev_token"]
+    p.confirm_signup(t, password="old-password-1", org_name="Acme", now=100.0)
+    for addr in ("a@acme.com", "ghost@acme.com"):                          # no code is live for either
+        for k in range(5):
+            with pytest.raises(ProvisionDenied):
+                p.confirm_recover_code(addr, "000000", new_password="new-password-2", ip=f"6.6.{k}.1", now=101.0)
+    rr = p.request_recover("a@acme.com", ip="1.1.1.2", now=102.0)
+    for addr, code in (("a@acme.com", rr["dev_code"]), ("ghost@acme.com", "123456")):
+        with pytest.raises(ProvisionRateLimited):                          # the same answer for both
+            p.confirm_recover_code(addr, code, new_password="new-password-2", ip="6.6.9.1", now=103.0)
+    out = p.confirm_recover(rr["dev_token"], new_password="new-password-2", now=104.0)
+    assert out["username"] == custs.by_email("a@acme.com").username
+
+
+def test_a_refused_new_password_spends_neither_the_reset_code_nor_the_token():
+    p, custs, _o, _m = _prov()
+    t = p.request_signup("a@acme.com", ip="1.1.1.1", now=100.0)["dev_token"]
+    p.confirm_signup(t, password="old-password-1", org_name="Acme", now=100.0)
+    rr = p.request_recover("a@acme.com", ip="1.1.1.1", now=101.0)
+    for bad in ("", "short"):
+        with pytest.raises(ValueError, match="at least 8"):
+            p.confirm_recover_code("a@acme.com", rr["dev_code"], new_password=bad, ip="2.2.2.2", now=102.0)
+        with pytest.raises(ValueError, match="at least 8"):
+            p.confirm_recover(rr["dev_token"], new_password=bad, now=102.0)
+    out = p.confirm_recover_code("a@acme.com", rr["dev_code"], new_password="new-password-2", ip="2.2.2.2",
+                                 now=103.0)
+    assert out["username"] == custs.by_email("a@acme.com").username
+    rr = p.request_recover("a@acme.com", ip="1.1.1.1", now=104.0)
+    with pytest.raises(ValueError):
+        p.confirm_recover(rr["dev_token"], new_password="x", now=105.0)
+    assert p.confirm_recover(rr["dev_token"], new_password="new-password-3", now=106.0)["username"]
+
+
+def test_consuming_the_signup_code_is_the_commit_marker(monkeypatch):
+    # the sign-up drops every token and code for the address after it commits; the code must be gone even when that
+    # sweep does not run (a crash right after the commit), or a replay finds it live
+    p, _c, _o, _m = _prov()
+    r = p.request_signup("a@acme.com", ip="1.1.1.1", now=100.0)
+    monkeypatch.setattr(p.email_codes, "revoke_for_email", lambda email: 0)
+    monkeypatch.setattr(p.email_tokens, "revoke_for_email", lambda email: 0)
+    p.confirm_signup_code("a@acme.com", r["dev_code"], password="pw-123456", org_name="Acme", ip="2.2.2.2",
+                          now=101.0)
+    assert EmailCodeLedger(p.email_codes.dir).check("a@acme.com", PURPOSE_VERIFY, r["dev_code"],
+                                                    now=102.0) == CodeGone()          # inside the code's 10 minutes
 
 
 def test_wrong_codes_are_limited_per_ip():

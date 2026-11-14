@@ -21,9 +21,13 @@ TTL — each a path to account takeover / trial-credit farming):
 EMAIL CODES (`EmailCodeLedger`, OFF unless the provisioner is given one): a 6-digit code sent in the same email as
 the token, so a person in the installed app can type it instead of following the email into a browser. A code is
 bound to the email address and the purpose, used once, lives 10 minutes, and is gone after 5 wrong codes; one live
-code per (email, purpose) — a new email replaces the previous code. Stored hash-named only: the record name is
-sha256 of (purpose, email) and the code is kept as a salted scrypt hash, never the raw code. A code proves the
-same thing as the token in that email — control of the mailbox — and nothing more.
+code per (email, purpose) — a new email replaces the previous code and inherits its count of wrong codes, so
+re-sending does not buy more guesses. A guess is compared only with the code it was hashed for: a code replaced
+while a guess was being hashed answers "gone". Stored hash-named only: the record name is sha256 of (purpose,
+email) and the code is kept as a salted scrypt hash, never the raw code. Every check costs one scrypt whether or
+not a code exists (no timing tell), and at most `_HASH_SLOTS` hashes run at once in a process, so a burst of
+checks cannot make it hold many 16 MiB hash buffers at the same time. A code proves the same thing as the token in
+that email — control of the mailbox — and nothing more.
 
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
 """
@@ -35,6 +39,7 @@ import json
 import os
 import secrets
 import smtplib
+import threading
 import time
 from contextlib import contextmanager
 from email.message import EmailMessage
@@ -262,6 +267,14 @@ _CODE_LOCK = ".codes.lock"
 # scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
 # directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1
+# At most this many code hashes run at once in one process (each holds a ~16 MiB buffer); the others wait their
+# turn, up to _HASH_WAIT_S, and then fail closed (a check answers "gone", an issue returns no code).
+_HASH_CONCURRENCY = 4
+_HASH_SLOTS = threading.BoundedSemaphore(_HASH_CONCURRENCY)
+_HASH_WAIT_S = 30.0
+# The salt a check hashes with when there is no code to compare with: the same work as a real check, so the answer
+# takes as long for an address with a code as for one without.
+_ABSENT_SALT = "0" * 32
 
 
 def normalize_code(value) -> str:
@@ -301,8 +314,16 @@ class EmailCodeLedger:
 
     @staticmethod
     def _hash(code: str, salt: str, email: str, purpose: str) -> str:
-        return hashlib.scrypt(code.encode("ascii"), salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
-                              n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32).hex()
+        """The salted scrypt of `code` bound to (purpose, email). Runs in one of `_HASH_SLOTS`; raises TimeoutError
+        (an OSError) when no slot frees up within `_HASH_WAIT_S`."""
+        if not _HASH_SLOTS.acquire(timeout=_HASH_WAIT_S):
+            raise TimeoutError("too many email-code checks at once")
+        try:
+            return hashlib.scrypt(code.encode("ascii"),
+                                  salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
+                                  n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32).hex()
+        finally:
+            _HASH_SLOTS.release()
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -366,7 +387,9 @@ class EmailCodeLedger:
     def issue(self, email: str, purpose: str, *, bind: "Optional[dict]" = None,
               now: "Optional[float]" = None) -> "Optional[str]":
         """A fresh code for (`email`, `purpose`), replacing any earlier one, with `bind` stored beside it (returned by
-        a right `check`). Returns the raw code (never stored), or None when the ledger is full or cannot be written."""
+        a right `check`). A live earlier code hands its count of wrong codes on to the new one (re-sending the email
+        does not reset the 5). Returns the raw code (never stored), or None when the ledger is full or cannot be
+        written."""
         if purpose not in _PURPOSES:
             raise ValueError(f"purpose must be one of {sorted(_PURPOSES)}")
         if not isinstance(email, str) or not email:
@@ -374,49 +397,59 @@ class EmailCodeLedger:
         t = time.time() if now is None else float(now)
         code = f"{secrets.randbelow(1_000_000):06d}"
         salt = secrets.token_hex(16)
-        rec = {"exp": t + self.ttl_s, "salt": salt, "hash": self._hash(code, salt, email, purpose),
-               "attempts": 0, "bind": dict(bind or {})}
         try:
+            rec = {"exp": t + self.ttl_s, "salt": salt, "hash": self._hash(code, salt, email, purpose),
+                   "attempts": 0, "bind": dict(bind or {})}
             with self._locked():
                 p = self._name(email, purpose)
-                if not p.exists() and self._sweep(t) >= self.max_records:
+                prev = self._read(p)
+                if self._live(prev, t):
+                    rec["attempts"] = self._attempts(prev)
+                elif self._sweep(t) >= self.max_records:
                     return None
                 self._write(p, rec)
         except OSError:
             return None
         return code
 
+    @staticmethod
+    def _attempts(rec: "Optional[dict]") -> int:
+        a = rec.get("attempts") if rec else 0
+        return a if isinstance(a, int) and not isinstance(a, bool) and a > 0 else 0
+
     def check(self, email: str, purpose: str, code, *, consume: bool = False,
               now: "Optional[float]" = None):
         """Check a typed code for (`email`, `purpose`). Right: CodeOk(bind), and the code is removed when `consume`
         (a caller that commits later removes it with `consume_code`). Wrong: the attempt is counted and the
-        `max_attempts`-th wrong code removes the code (CodeWrong(0)). No live code: CodeGone. A malformed code counts
-        as wrong. Never raises; an I/O error is CodeGone (fail closed)."""
+        `max_attempts`-th wrong code removes the code (CodeWrong(0)). No live code, or a code replaced while the guess
+        was hashed: CodeGone — after the same scrypt a real check costs. A malformed code counts as wrong. Never
+        raises; an I/O error, or no free hash slot, is CodeGone (fail closed)."""
         if purpose not in _PURPOSES or not isinstance(email, str) or not email:
             return CodeGone()
         typed = normalize_code(code)
         t = time.time() if now is None else float(now)
         p = self._name(email, purpose)
         first = self._read(p)
-        if first is None or not self._live(first, t):
-            return CodeGone()
-        # the slow hash outside the lock (so one check does not hold up every other), compared under it
-        guess = self._hash(typed, str(first["salt"]), email, purpose) if typed else ""
         try:
+            if first is None or not self._live(first, t):
+                self._hash(typed or "000000", _ABSENT_SALT, email, purpose)    # the same work: no timing tell
+                return CodeGone()
+            # the slow hash outside the lock (so one check does not hold up every other), compared under it; a
+            # malformed code is hashed too (as "000000", never a match), so it costs what a real check costs
+            guess = self._hash(typed or "000000", str(first["salt"]), email, purpose)
             with self._locked():
                 rec = self._read(p)
                 if rec is None or not self._live(rec, t):
                     self._unlink(p)
                     return CodeGone()
-                if rec["salt"] != first["salt"] and typed:              # replaced meanwhile: hash for the new one
-                    guess = self._hash(typed, str(rec["salt"]), email, purpose)
+                if rec["salt"] != first["salt"]:
+                    return CodeGone()          # replaced meanwhile: the guess was hashed for a code that is gone
                 if typed and hmac.compare_digest(guess, str(rec["hash"])):
                     if consume:
                         self._unlink(p)
                     bind = rec.get("bind")
                     return CodeOk(dict(bind) if isinstance(bind, dict) else {})
-                attempts = rec.get("attempts")
-                attempts = (attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0) + 1
+                attempts = self._attempts(rec) + 1
                 if attempts >= self.max_attempts:
                     self._unlink(p)
                     return CodeWrong(0)

@@ -184,8 +184,13 @@ records in Cloudflare DNS with SPF and DMARC, and request production access befo
 With `VIGIL_CUSTOMER_EMAIL_CODE=1` (the production example) each sign-up and reset email carries a **6-digit code**
 beside the single-use token, so a person in the installed app types the code instead of following the email into
 a browser. A code works once, for 10 minutes, for that address and that purpose only (a sign-up code is not a reset
-code); its 5th wrong entry ends it, wrong codes are also limited per address across re-sent codes and per client
-IP, and it is stored only as a salted hash. The token in the same email (valid 1 hour) keeps working.
+code); its 5th wrong entry ends it, and a re-sent email's code inherits the wrong entries of the one it replaces.
+Every entry is counted before it is checked, however many arrive at once: 5 per address and purpose, then that
+address's code entry is locked for an hour (each later lock doubles, up to a day); 5 per client IP, then that IP
+is locked for a minute (doubling, up to an hour). The lock counts every entry for the address, so it never tells
+whether the address has an account; a person whose code entry is locked uses the token from the same email (valid
+1 hour), which the lock does not touch. A new password that is too short is refused before the code or token is
+used, so the person can correct it and use the same email. A code is stored only as a salted hash.
 
 **Google ("Continue with Google").** In Google Cloud console create an OAuth client of type *Web application* and
 add the authorized redirect URI exactly `https://app.<your-domain>/api/customer/oidc/callback`. Set
@@ -214,7 +219,6 @@ and says to close the page unless the person just tapped *Continue with Google* 
 most 3 sign-ins per account and 16 per network wait at once. The network rule does not tell apart two clients on the
 same network (one Wi-Fi, one office or carrier address range): there, the code and the page's warning are what
 stand in the way. A person whose phone changes network mid-way (Wi-Fi to mobile data) is asked to start again.
-
 
 Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
 to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to
