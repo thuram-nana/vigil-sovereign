@@ -51,7 +51,7 @@ def _restore_interrupted() -> str:
         return ""
     home = RESTORE_JOURNAL_PATH.parent
     return (f"a restore into this home was interrupted — finish it with `sigil restore --resume {home}` (`sigil "
-            f"restore --abort {home}` discards it only while none of its units has been touched)")
+            f"restore --abort {home}` discards it only while the home is still entirely its old self)")
 
 
 def _atomic_write_text(path: Path, data: str) -> None:

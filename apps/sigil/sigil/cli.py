@@ -2948,8 +2948,8 @@ def cmd_restore(a) -> None:
             print(f"restore into {res['home']} completed ({', '.join(res['units'])} swapped in).")
             print(f"next:  SIGIL_HOME={res['home']} sigil spine verify-unit --deep")
         else:
-            print(f"the interrupted restore into {res['home']} was discarded (none of its units had been touched; "
-                  f"the home is unchanged).")
+            print(f"the interrupted restore into {res['home']} was discarded; the home is unchanged (still entirely "
+                  f"its old self).")
         return
     if not a.src or (not a.home and not verify_only):
         print("restore: needs the backup file and the home to restore into (sigil restore SRC HOME)", file=sys.stderr)
@@ -3689,7 +3689,7 @@ def _assert_no_restore_journal_or_exit(cmd: str) -> None:
     if RESTORE_JOURNAL_PATH.exists():
         print(f"sigil: refusing to run `{cmd}` — a restore into {SIGIL_HOME} was interrupted; finish it with "
               f"`sigil restore --resume {SIGIL_HOME}` (`sigil restore --abort {SIGIL_HOME}` discards it only while "
-              f"none of its units has been touched)", file=sys.stderr)
+              f"the home is still entirely its old self)", file=sys.stderr)
         sys.exit(3)
 
 

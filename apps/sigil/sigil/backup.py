@@ -1159,12 +1159,12 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     renamed into place, each atomically. The backup is a strict SUBSET of ``SIGIL_HOME``, so restore replaces
     ONLY those units; every un-captured top-level entry already under ``new_home`` (vector/cursor/config caches,
     other home state) is LEFT INTACT — even under ``--force``. The force-gate fires only when a captured unit
-    already exists, never merely because the home is non-empty. A restore that replaces any existing unit swaps them
-    JOURNALED (write-ahead, resumable, see :func:`restore_resume`): a crash during the swap leaves a home that fails
-    closed until ``--resume`` makes it entirely the backup's (or, while none of its units was touched, ``--abort``
-    leaves it entirely its old self); into a fresh home each unit lands complete or not at all. The swap holds the
-    target's floor lock and refuses while its spine writer lock is held (stop the services first). Exactly the
-    captured units are swapped (a whitelist), never whatever else turns up in the staging dir.
+    already exists, never merely because the home is non-empty. A restore into a home that already holds any captured
+    unit swaps its units JOURNALED (write-ahead, resumable, see :func:`restore_resume`): a crash during the swap leaves
+    a home that fails closed until ``--resume`` makes it entirely the backup's (or, while the home is still entirely
+    its old self, ``--abort`` leaves it so); into a fresh home each unit lands complete or not at all. The journaled
+    swap holds the target's floor lock and refuses while its spine writer lock is held (stop the services first).
+    Exactly the captured units are swapped (a whitelist), never whatever else turns up in the staging dir.
 
     HARD-PRUNED spine (SIGIL_PRUNED_RESTORE on; refused before anything is written while it is off): the spine, its
     signed head, the floor, the owner public key(s) and the archive are verified as ONE unit by the real readers in a
@@ -1262,7 +1262,7 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     if stale_journal and not force:
         raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore --resume "
                           f"{new_home}`, or replace it with a fresh restore (--force); `sigil restore --abort "
-                          f"{new_home}` discards it only while none of its units has been touched")
+                          f"{new_home}` discards it only while the home is still entirely its old self")
     present_units = sorted(u for u in captured_units if (new_home / u).exists()) if new_home is not None else []
     if not force and present_units:
         raise BackupError(
