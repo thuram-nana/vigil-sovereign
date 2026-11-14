@@ -1413,7 +1413,7 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
 _AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.config's affirmative set (a test pins it)
 
 
-def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list, list]":
+def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "tuple[dict, list, list]":
     """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
     (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
 
@@ -1426,7 +1426,13 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     AI cost only (payment fees and hosting are outside it); its value is never printed. A retired pricing setting
     (``VIGIL_BILLING_MARKUP_K`` / ``VIGIL_MARGIN_MULTIPLIER_K``) is a HARD issue whether or not either flag is on:
     the margin is the only pricing input. ``probe(url) -> bool | None`` checks the gateway answers (tests inject
-    one); the default sends one unauthenticated request and expects the gateway's own 401."""
+    one); the default sends one unauthenticated request and expects the gateway's own 401.
+
+    With ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set (the gateway's key comes ONLY from that AWS SSM SecureString,
+    ``sigil.provider_key``) and the gateway enabled, the key check is the parameter instead: HARD when the region is
+    missing or invalid, the ``aws`` CLI is missing, or the parameter cannot be read or is not a SecureString;
+    ``ssm_probe(region, name) -> type`` (tests inject one; the default asks AWS for the parameter's TYPE only,
+    without decryption, so doctor never handles the key). A key also in the environment is a note (SSM wins)."""
     e = _runtime_env() if env is None else env
     metered = (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE
     gateway_on = (e.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _AFFIRMATIVE
@@ -1450,7 +1456,14 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
         issues.append("VIGIL_METERED_BILLING is on but VIGIL_MODEL_GATEWAY_ENABLED is not: no customer run can reach "
                       "a model gateway, so every metered launch fails. Enable the gateway in the cockpit's "
                       "environment.")
-    if gateway_on and not ((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip()):
+    env_key = bool((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip())
+    ssm_name = (e.get(_SSM_KEY_PARAMETER_ENV) or "").strip()
+    if gateway_on and ssm_name:
+        section["key_source"] = "ssm"
+        _ssm_issues, _ssm_notes = _ssm_provider_key_report(e, ssm_name, ssm_probe, env_key)
+        issues += _ssm_issues
+        notes += _ssm_notes
+    elif gateway_on and not env_key:
         issues.append("the model gateway is enabled but no provider key (SIGIL_ANTHROPIC_API_KEY / "
                       "ANTHROPIC_API_KEY) is in this environment, so it will not start.")
     try:
@@ -1512,6 +1525,50 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
                 f"VIGIL_MODEL_GATEWAY_PORT?), so metered runs cannot reach the gateway.")
     section["ok"] = not issues
     return section, issues, notes
+
+
+_SSM_KEY_PARAMETER_ENV = "VIGIL_ANTHROPIC_KEY_SSM_PARAMETER"
+
+
+def _probe_ssm_parameter_type(region: str, name: str) -> str:
+    """The TYPE of SSM parameter ``name`` (read without decryption: doctor never handles the key). Raises
+    ``ValueError`` (``vigil_core.aws_ssm.SsmParameterError``) with a fixed message when it cannot be read."""
+    from vigil_core.aws_ssm import SsmParameterError, parameter_type
+    if shutil.which("aws") is None:
+        raise SsmParameterError("the aws CLI is not installed or not on PATH (install awscli v2 on this host)")
+    return parameter_type(region, name)
+
+
+def _ssm_provider_key_report(e: dict, name: str, ssm_probe, env_key: bool) -> "tuple[list, list]":
+    """(issues, notes) for a gateway whose provider key comes only from SSM parameter ``name``."""
+    issues: list = []
+    notes: list = []
+    if env_key:
+        notes.append(f"{_SSM_KEY_PARAMETER_ENV} is set, so the model gateway reads its key only from SSM; the provider "
+                     f"key also present in this environment (SIGIL_ANTHROPIC_API_KEY / ANTHROPIC_API_KEY) is ignored.")
+    try:
+        from vigil_core.aws_ssm import SECURE_STRING, check_parameter_name, check_region
+    except ImportError:
+        notes.append("vigil_core is not importable here, so the SSM provider key was not checked.")
+        return issues, notes
+    try:
+        check_parameter_name(name)
+        region = check_region(e.get("VIGIL_AWS_REGION") or "")
+    except ValueError as exc:
+        issues.append(f"the model gateway's provider key comes from SSM but cannot be read: {exc}. The gateway will "
+                      f"not start.")
+        return issues, notes
+    try:
+        ptype = (ssm_probe or _probe_ssm_parameter_type)(region, name)
+    except Exception as exc:  # noqa: BLE001 — every probe failure is a refusal with its fixed message
+        issues.append(f"the model gateway's provider key comes from SSM but cannot be read: "
+                      f"{exc if isinstance(exc, ValueError) else type(exc).__name__}. The gateway will not start "
+                      f"(check the host's instance role allows ssm:GetParameter on it).")
+        return issues, notes
+    if ptype != SECURE_STRING:
+        issues.append(f"SSM parameter {name} is a {ptype}, not a SecureString: the gateway refuses it. Re-create it as "
+                      f"a SecureString (AWS-DEPLOY.md).")
+    return issues, notes
 
 
 def _runtime_env() -> dict:

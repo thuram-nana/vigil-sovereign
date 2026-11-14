@@ -1779,16 +1779,16 @@ def _daily_limit_nano() -> Optional[int]:
 
 def config_from_env() -> GatewayConfig:
     """The gateway's configuration from the sovereign environment: the ONE provider key
-    (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``), the owner public key, the meter directory, the
+    (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``, or — with ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set —
+    only that AWS SSM SecureString: ``sigil.provider_key``), the owner public key, the meter directory, the
     sovereignty tier as the egress check, and the account protections (design §5.2):
     ``VIGIL_GATEWAY_TENANT_CONCURRENCY`` (default 4), ``VIGIL_GATEWAY_GLOBAL_CONCURRENCY`` (default 32) and
     ``VIGIL_GATEWAY_DAILY_LIMIT_USD`` (unset = no ceiling). Raises ``ValueError`` on a missing key, no owner key or
     a bad value."""
     from . import config, sovereignty
     from .governor.identity import owner_pubkey
-    key = (os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if not key:
-        raise ValueError("the model gateway needs the provider key (SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY)")
+    from .provider_key import provider_key
+    key = provider_key()                      # ProviderKeyError (a ValueError) when it cannot be obtained
 
     owner = owner_pubkey()
     if not owner:

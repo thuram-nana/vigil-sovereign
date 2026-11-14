@@ -44,7 +44,9 @@ It creates, each least-privilege:
 3. **IAM role + instance profile** `vigil-host` — the EC2 host assumes it (NO static keys on disk). Policy:
    `kms:Encrypt`/`Decrypt`/`GenerateDataKey`/`DescribeKey` on **that CMK only** (S3 SSE-KMS uploads call
    `GenerateDataKey` under the host's own identity — without it every backup PUT is denied),
-   `s3:PutObject`/`GetObject` on **that bucket only**, `s3:ListBucket` on the bucket. Nothing else.
+   `s3:PutObject`/`GetObject` on **that bucket only**, `s3:ListBucket` on the bucket, and `ssm:GetParameter` on
+   **the one provider-key parameter** (`/vigil/anthropic-api-key`, or `PROVIDER_KEY_PARAMETER`; §2b′ creates
+   it). Nothing else.
 4. **Security group** `vigil-edge` — inbound **443 + 80 only from Cloudflare's current IP ranges** (fetched
    live from `cloudflare.com/ips`), **22 only from `ADMIN_SSH_CIDR`**. So the origin is unreachable except
    through Cloudflare (and your admin IP for SSH). Everything else is denied.
@@ -111,6 +113,26 @@ vigil restore ./restore-check --base-dir ./restore-base --crucible-root ./restor
 engagement + its evidence) at the root, and the proof db, runs, MLS learning memory (every `tenants/<t>` shard),
 entitlement trust root, DestructionAuthority (kill-switches) and authority root under `framework/v2/`. The
 crypto-shred evidence keystore (`framework/v2/.evidence-keys`) is never in a backup (W16-8).
+
+### 2b′. The model provider key in AWS SSM (from a phone browser)
+
+The model gateway's provider key lives in AWS SSM Parameter Store as a **SecureString**, never in a file on the
+host. The owner creates it once from the AWS console (a phone browser is enough):
+
+1. **Systems Manager → Parameter Store → Create parameter.**
+2. Name `/vigil/anthropic-api-key`, tier **Standard**, type **SecureString**, KMS key `alias/aws/ssm` (the
+   default) or `alias/vigil-owner-kek`; paste the key as the value; **Create parameter**. Never paste the key
+   into a chat, a ticket, an email or any file on the host.
+
+`provision.sh` already lets the host's instance role read that one parameter (`ssm:GetParameter`, statement
+`ProviderKeyParameter`; re-run it on an existing setup to add the statement). Someone with server access then
+puts `VIGIL_ANTHROPIC_KEY_SSM_PARAMETER=/vigil/anthropic-api-key` and `VIGIL_AWS_REGION` in the environment file
+of the process that runs the gateway (`infra/systemd/vigil-calibration.env.example`) and restarts it. With the
+parameter set, SSM is the gateway's only key source: a key in the environment or `sigil.env` is ignored, and a
+missing region or `aws` CLI, a parameter that is not a SecureString, or one the role cannot read stops the gateway
+from starting (metered runs then fail closed). `vigil doctor` checks the parameter's type and access without
+reading the key. **Rotate** by editing the parameter's value, then restart that process (the key is read at
+start). The cockpit's own gateway stays off in production; this parameter does not go in `cockpit.env`.
 
 ### 2c. nginx for the public origin
 

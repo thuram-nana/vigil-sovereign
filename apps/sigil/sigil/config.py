@@ -940,6 +940,11 @@ def _redact(name: str, value):
     return _strip_url_credentials(value)
 
 
+def _provider_key_source() -> str:
+    from .provider_key import key_source
+    return key_source()
+
+
 def effective_config() -> dict:
     """The fully-resolved runtime configuration (env → sigil.env → default), secrets REDACTED.
     Re-reads the environment at call time, so it reflects overrides applied after import — this is
@@ -971,6 +976,10 @@ def effective_config() -> dict:
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
         "ANTHROPIC_API_KEY": "***redacted***" if api_key_set else "",
+        # Where the model gateway's provider key comes from ("ssm" | "env" | ""), and the SSM parameter NAME when
+        # it is SSM (sigil.provider_key: SSM is then the only source). Never the key itself.
+        "MODEL_PROVIDER_SOURCE": _provider_key_source(),
+        "MODEL_PROVIDER_SSM_PARAMETER": (os.environ.get("VIGIL_ANTHROPIC_KEY_SSM_PARAMETER") or "").strip(),
         # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
         # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
         # SECRET name-hint below (and is not placed here at all).
