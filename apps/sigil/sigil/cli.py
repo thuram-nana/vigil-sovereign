@@ -392,56 +392,162 @@ def cmd_capability(a) -> None:
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
-def _switches_read(store) -> dict:
-    """The owner's instant switches as this host reads them: the kill switch and every customer latch with its
-    environment ceiling (``governor.customer_latch``). Needs no private key. A read error is reported, not raised."""
-    from .governor.customer_latch import LATCHES, ceiling_state, state_all
+def _cockpit_process_env() -> "dict | None":
+    """The environment ``sigil-cockpit.service`` starts the cockpit with, read from the files it loads (as `vigil
+    doctor` reads them: ``vigil_integration.deploy_checks.unit_process_environment``), with ``SIGIL_HOME`` always set;
+    None when no cockpit unit is configured for this user. The customer provisioner runs in the cockpit, so this is
+    where the ceilings of the customer latches are set."""
+    from pathlib import Path
+    try:
+        from vigil_integration.deploy_checks import COCKPIT_UNIT, unit_process_environment
+        from vigil_integration.doctor import find_repo_root
+        return unit_process_environment(COCKPIT_UNIT, Path.home(), find_repo_root())
+    except Exception:  # noqa: BLE001 — no readable unit configuration reads as none
+        return None
+
+
+def _latch_home_refusal() -> "str | None":
+    """Why `sigil latch` must not run against this process's SIGIL_HOME, or None. The latches are records on the
+    spine the running service reads, so `sigil latch` reads and writes only that home and never creates a key or a
+    spine. Refused (read-only checks, nothing is written) when:
+
+      * the cockpit unit's environment (``~/.sigil/cockpit.env``, where GO-LIVE §2 persists a moved SIGIL_HOME)
+        names a different SIGIL_HOME than this process's;
+      * this home holds no owner identity (``spine/keys/owner.pub``): the service's home always has one."""
+    import os
+
+    from .config import KEYS_DIR, SIGIL_HOME
+    env = _cockpit_process_env()
+    if env is not None and os.path.realpath(env["SIGIL_HOME"]) != os.path.realpath(str(SIGIL_HOME)):
+        return (f"this shell's SIGIL_HOME ({SIGIL_HOME}) is not the service's: sigil-cockpit.service runs with "
+                f"SIGIL_HOME={env['SIGIL_HOME']} (~/.sigil/cockpit.env). Run it there: "
+                f"SIGIL_HOME={env['SIGIL_HOME']} sigil latch ...")
+    if not (KEYS_DIR / "owner.pub").exists():
+        return (f"SIGIL_HOME ({SIGIL_HOME}) holds no owner identity ({KEYS_DIR / 'owner.pub'}), so it is not the "
+                f"home the service runs from. Export the SIGIL_HOME the units use (set in ~/.sigil/cockpit.env) "
+                f"and retry.")
+    return None
+
+
+def _latch_home_or_exit() -> None:
+    refusal = _latch_home_refusal()
+    if refusal is not None:
+        print(f"  refused: {refusal}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _spine_present(path) -> bool:
+    """True iff a spine exists at ``path``: its data file or (a segmented spine) its manifest."""
+    from pathlib import Path
+
+    from .spine.manifest import SpineLayout
+    p = Path(path)
+    return p.exists() or SpineLayout.for_path(p).manifest_path.exists()
+
+
+def _usable_owner_key() -> "tuple[object | None, str]":
+    """``(owner keypair, "")`` when this home's owner key can sign, else ``(None, why)``. Read-only: never creates a
+    key (``ensure_owner_keypair`` would on a fresh home) and never raises."""
+    from .governor.identity import _public_of, owner_keypair
+    try:
+        kp = owner_keypair()
+    except Exception as e:  # noqa: BLE001 — e.g. a KEK this shell cannot reach
+        return None, f"the owner key could not be read ({type(e).__name__})"
+    if kp is None:
+        return None, "owner.priv is not on this host or cannot be unsealed here"
+    if _public_of(kp.private_key_b64) != kp.public_key_b64:
+        return None, "owner.priv is not the private key of owner.pub"
+    return kp, ""
+
+
+def _switches_read(store, *, ceiling_env: "dict | None" = None, ceilings_from: str = "this process") -> dict:
+    """The owner's instant switches as this host reads them: the kill switch and every customer latch this deployment
+    offers with its environment ceiling (``governor.customer_latch``), read from ``ceiling_env`` (default: this
+    process's environment, named by ``ceilings_from``). Needs no private key. A read error is reported, not raised."""
+    from .governor.customer_latch import LATCHES, NOT_OFFERED, ceiling_state, state_all
     from .governor.killswitch import KillSwitch
     try:
         kill = "engaged" if KillSwitch.reader(store).is_engaged() else "released"
     except Exception as e:  # noqa: BLE001 — the read plane reports, never crashes
         kill = f"unreadable ({type(e).__name__})"
     latches = state_all(store)
-    return {"kill_switch": kill,
-            "customer_latches": {n: {"latch": latches[n], "ceiling": ceiling_state(n)} for n in LATCHES}}
+    return {"kill_switch": kill, "ceilings_from": ceilings_from,
+            "customer_latches": {n: {"latch": latches[n], "ceiling": ceiling_state(n, ceiling_env)} for n in LATCHES},
+            "not_offered": dict(NOT_OFFERED)}
+
+
+#: What the owner is told whenever the kill switch is engaged: it now also holds the customer launch path.
+_KILL_ENGAGED_NOTE = ("new customer launches and starts are refused while it is engaged; `sigil warden release` "
+                      "(owner-signed) when the incident is over")
 
 
 def cmd_latch(a) -> None:
-    """The owner's customer latches (``governor.customer_latch``): ``status`` (no key), ``off`` (honoured at once,
-    owner-signed for provenance), ``on`` (owner-signed with a fresh ``issued_at`` — the anti-replay high-water). A
-    latch gates only NEW launch reservations, sign-ups, checkouts, trial grants/scans and founder-tester grants; the
-    environment flag stays the ceiling. The CLI stamps ``issued_at``; the latch reads no clock."""
+    """The owner's customer latches (``governor.customer_latch``): ``status`` (no key), ``off`` (honoured at once;
+    owner-signed for provenance when the owner key is usable here, recorded unsigned otherwise: an OFF needs no key),
+    ``on`` (owner-signed with a fresh ``issued_at`` — the anti-replay high-water). A latch gates only NEW launch
+    reservations, sign-ups, checkouts and trial grants/scans; the environment flag stays the ceiling. The CLI stamps
+    ``issued_at``; the latch reads no clock.
+
+    It acts only on the home the service runs from (``_latch_home_refusal``), never creates a key or a spine, and
+    prints the spine it read or wrote with its head seq next to every result."""
     import json as _json
     import time as _time
 
-    from .governor.customer_latch import LATCHES, turn_off, turn_on
-    from .governor.identity import ensure_owner_keypair
+    from .governor.customer_latch import LATCHES, NOT_OFFERED, turn_off, turn_on
+    _latch_home_or_exit()
+    if a.action != "status":
+        if a.action == "on" and a.name == "all":
+            print("  refused: turn latches on one at a time (`sigil latch on <name>`)", file=sys.stderr)
+            sys.exit(2)
+        if a.name in NOT_OFFERED:
+            print(f"  refused: {a.name} is {NOT_OFFERED[a.name]}", file=sys.stderr)
+            sys.exit(2)
+        if a.name != "all" and a.name not in LATCHES:
+            print(f"  unknown latch {a.name!r} (expected one of {', '.join(LATCHES)})", file=sys.stderr)
+            sys.exit(2)
     store = SpineStore()
+    if not _spine_present(store.path):
+        print(f"  refused: there is no spine at {store.path}, so this is not the home the service runs from. Export "
+              f"the SIGIL_HOME the units use (set in ~/.sigil/cockpit.env) and retry.", file=sys.stderr)
+        sys.exit(2)
+
+    def _where() -> str:
+        return f"spine {store.path} (head seq {store.next_seq - 1})"
+
     if a.action == "status":
-        rep = _switches_read(store)
+        env = _cockpit_process_env()
+        rep = _switches_read(store, ceiling_env=env,
+                             ceilings_from=("sigil-cockpit.service (the files it loads)" if env is not None
+                                            else "this shell (no cockpit unit is configured for this user)"))
+        rep["spine"] = {"path": str(store.path), "head_seq": store.next_seq - 1}
         if getattr(a, "json", False):
             print(_json.dumps(rep, indent=2, sort_keys=True))
             return
-        print(f"  kill switch: {rep['kill_switch']}")
+        print(f"  {_where()}")
+        print(f"  kill switch: {rep['kill_switch']}"
+              + (f" — {_KILL_ENGAGED_NOTE}" if rep["kill_switch"] == "engaged" else ""))
+        print(f"  ceilings as {rep['ceilings_from']} sets them:")
         for n, v in rep["customer_latches"].items():
             print(f"  {n:16} {v['latch'].upper():4} (ceiling: {v['ceiling']})")
+        for n, why in rep["not_offered"].items():
+            print(f"  {n:16} —    ({why})")
         return
     names = list(LATCHES) if a.name == "all" else [a.name]
-    if a.action == "on" and a.name == "all":
-        print("  refused: turn latches on one at a time (`sigil latch on <name>`)", file=sys.stderr)
+    ok, why = _usable_owner_key()
+    if a.action == "on" and ok is None:
+        print(f"  refused: turning a latch on needs the owner's signature, and the owner key is not usable here "
+              f"({why}). Nothing was switched; `vigil doctor` reports the key's state.", file=sys.stderr)
         sys.exit(2)
-    if a.name != "all" and a.name not in LATCHES:
-        print(f"  unknown latch {a.name!r} (expected one of {', '.join(LATCHES)})", file=sys.stderr)
-        sys.exit(2)
-    ok = ensure_owner_keypair()
     now = _time.time()
     for n in names:
         if a.action == "off":
             seq = turn_off(store, n, owner_key=ok, reason=a.reason)
-            print(f"  {n} OFF (seq {seq}) — new requests are refused now; existing ones are untouched")
+            how = "owner-signed" if ok is not None else f"unsigned: {why}; an OFF needs no key"
+            print(f"  {n} OFF (seq {seq}, {how}) — new requests are refused now; existing ones are untouched")
         else:
             seq = turn_on(store, n, owner_key=ok, issued_at=now, reason=a.reason)
             print(f"  {n} ON (seq {seq}, owner-signed)")
+    print(f"  {_where()}")
 
 
 def _parse_ttl(value):
@@ -1234,6 +1340,8 @@ def cmd_status(a) -> None:
     off = [n for n, v in sw["customer_latches"].items() if v["latch"] != "on"]
     print(f"switches:  kill switch {sw['kill_switch']} | customer latches "
           f"{'all on' if not off else 'OFF: ' + ', '.join(off)}")
+    if sw["kill_switch"] == "engaged":
+        print(f"           kill switch engaged: {_KILL_ENGAGED_NOTE}")
 
 
 def cmd_settings(a) -> None:
@@ -2612,8 +2720,10 @@ def sigil_doctor_report() -> dict:
         _sw = _switches_read(SpineStore())
         _off = [n for n, v in _sw["customer_latches"].items() if v["latch"] != "on"]
         _swok = _sw["kill_switch"] == "released" and not _off
-        _swdetail = (f"kill switch {_sw['kill_switch']}; customer latches "
-                     f"{'all on' if not _off else 'OFF: ' + ', '.join(_off)} (`sigil latch status`)")
+        _swdetail = (f"kill switch {_sw['kill_switch']}"
+                     + (f" ({_KILL_ENGAGED_NOTE})" if _sw["kill_switch"] == "engaged" else "")
+                     + f"; customer latches {'all on' if not _off else 'OFF: ' + ', '.join(_off)} "
+                       f"(`sigil latch status`)")
     except Exception as e:  # noqa: BLE001 — the doctor reports, never crashes
         _swok, _swdetail = False, f"could not read the switches ({type(e).__name__})"
     checks.append(Check(id="switches", ok=_swok, required=False, state=("ON" if _swok else "OFF"),
@@ -3262,7 +3372,8 @@ def main(argv=None) -> None:
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
     plat = sub.add_parser("latch", help="the owner's customer latches (customer_launch, customer_signup, checkout, "
-                                        "trial, founder_tester): status | off <name|all> | on <name>")
+                                        "trial): status | off <name|all> | on <name>. Runs against the "
+                                        "service's SIGIL_HOME only")
     plat.add_argument("action", choices=["status", "off", "on"])
     plat.add_argument("name", nargs="?", default="all", help="a latch name, or `all` (off only)")
     plat.add_argument("--reason", default="", help="reason recorded on the spine")
@@ -3625,6 +3736,8 @@ def main(argv=None) -> None:
     psc.add_argument("--subdomains", action="store_true", help="include subdomains of allowed domains")
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
+    if getattr(a, "fn", None) is cmd_latch:
+        _latch_home_or_exit()      # before the startup gate, which writes an install manifest into SIGIL_HOME
     _assert_store_operable_or_exit(a.cmd)
     try:
         a.fn(a)

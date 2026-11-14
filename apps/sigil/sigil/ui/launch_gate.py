@@ -69,9 +69,10 @@ _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is 
                            "closed, it is charged for what it used")
 
 
-#: What a customer is told while the owner's kill switch is engaged (a new reservation or a start is refused).
-_HALTED = ("new assessment launches are paused right now: the service is halted by its owner. Your existing "
-           "launches can still be cancelled, paused and resumed")
+#: What a customer is told while the owner's kill switch refuses a new reservation or a start — engaged, or (fail-
+#: closed) unreadable. It names no mechanism and no state of the service: the reason stays in the server log.
+_HALTED = ("new assessment launches are paused right now; your existing launches can still be cancelled, paused and "
+           "resumed — please try again later")
 
 
 def _refusal(refuse_if: Optional[Callable[[], Optional[str]]]) -> Optional[str]:
@@ -133,13 +134,17 @@ class LaunchGate:
         return self.owner_key.public_key_b64 if self.owner_key is not None else None
 
     def _halt_refusal(self) -> Optional[str]:
-        """The governor kill switch, read fresh (an engage is honoured at once, no restart): the refusal while it is
-        engaged, else None. A kill switch that cannot be read refuses (fail-closed)."""
+        """The governor kill switch, read fresh (an engage is honoured at once, no restart): the customer-facing
+        refusal while it is engaged, else None. A kill switch that cannot be read refuses (fail-closed) with the same
+        customer-facing text; why it could not be read goes to the server log only."""
         from ..governor.killswitch import KillSwitch
         try:
             engaged = KillSwitch.reader(self.store, trusted_pubkey=self._owner_pub()).is_engaged()
         except Exception as e:  # noqa: BLE001 — an unreadable kill switch never green-lights a new launch
-            return f"new launches are refused: the kill switch could not be read ({type(e).__name__})"
+            import logging
+            logging.getLogger(__name__).warning("a new launch was refused: the kill switch could not be read (%s)",
+                                                type(e).__name__)
+            return _HALTED
         return _HALTED if engaged else None
 
     def _new_launch_refusal(self) -> Optional[str]:

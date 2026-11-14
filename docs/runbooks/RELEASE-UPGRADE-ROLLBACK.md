@@ -121,6 +121,7 @@ Stop here unless the tag's commit is on `origin/main`. When your clone holds the
 
 ```
 vigil doctor
+sigil latch status        # in a shell that exports the units' SIGIL_HOME (the one in ~/.sigil/cockpit.env)
 systemctl --user is-enabled vigil-command.service
 systemctl --user list-units --state=activating,failed --plain --no-legend 'vigil-*' 'sigil-*'
 ```
@@ -133,6 +134,12 @@ again (2.8) — check it in 2.9.
 differ between the cockpit, the customer edge and the settle drain (a note names what the shell running
 `sigil ops-sweep` must export). Do not upgrade a host that `vigil panic` contained (`vigil-command.service`
 reads `masked`); close the incident first.
+
+`sigil latch status` shows the owner's switches. The governor kill switch also refuses every new customer launch
+and the start of a reserved one: if it reads `engaged` (a phone PANIC or a `sigil warden kill` drill that was never
+released), new customer launches are refused until you release it (`sigil warden release`, owner-signed). Release
+it before the upgrade if the incident is over, or keep it engaged on purpose. A customer latch that is OFF stays
+OFF across the upgrade; no latch record means ON.
 
 ### 2.3 Quiesce: let money in flight finish
 

@@ -12,7 +12,12 @@ Guarantees pinned here:
   * ``checkout`` refuses a new checkout before any processor work; the environment flag stays the ceiling;
   * ``trial`` withholds a new sign-up trial and refuses a new trial scan; a trial grant already made stands;
   * the latches carry across a hard prune, and ``sigil latch``, ``sigil status``, ``sigil doctor`` and the dashboard
-    snapshot read them.
+    snapshot read them; ``founder_tester`` is a known name no surface offers (no grant consults it);
+  * ``sigil latch`` acts only on the home the service runs from (a shell whose SIGIL_HOME is not the cockpit's, or a
+    home with no owner identity or no spine, is refused with nothing written anywhere), turns latches OFF with no
+    private key (unsigned when the owner key is not usable), never creates a key, and names the spine and its head
+    with every result; each ceiling is read as the cockpit loads it and shown with what its value means;
+  * a kill switch that is engaged or cannot be read refuses with a customer-facing text that names no mechanism.
 
 Run: SIGIL_HOME=$(mktemp -d) python -m pytest apps/sigil/tests/test_customer_latches.py -q
 """
@@ -56,9 +61,10 @@ def fold_cache(request, monkeypatch):
 # ---------------------------------------------------------------------------------------------------------------
 # the latch itself
 # ---------------------------------------------------------------------------------------------------------------
-def test_the_five_latches_and_no_record_means_on(tmp_path, fold_cache):
+def test_the_offered_latches_and_no_record_means_on(tmp_path, fold_cache):
     s = _store(tmp_path)
-    assert cl.LATCHES == ("checkout", "customer_launch", "customer_signup", "founder_tester", "trial")
+    assert cl.LATCHES == ("checkout", "customer_launch", "customer_signup", "trial")
+    assert set(cl.NOT_OFFERED) == {"founder_tester"} and "not offered" in cl.NOT_OFFERED["founder_tester"]
     assert cl.state_all(s, trusted_pubkey=OP) == {n: "on" for n in cl.LATCHES}
     assert all(cl.refusal(s, n, trusted_pubkey=OP) is None for n in cl.LATCHES)
     assert CapabilityGate(s, owner_key=OWNER, trusted_pubkey=OP).state_all() == {c: "enabled" for c in
@@ -136,13 +142,33 @@ def test_an_off_carries_across_a_hard_prune(tmp_path, monkeypatch):
     assert CapabilityGate.reader(s, trusted_pubkey=OP)._scan_enabled("trial") is False
 
 
-def test_the_ceiling_names_the_environment_setting():
+def test_the_ceiling_names_the_setting_and_what_its_value_means():
     assert cl.ceiling_state("customer_launch") == "none" and cl.ceiling_state("customer_signup") == "none"
     assert cl.ceiling_state("checkout", {"VIGIL_CUSTOMER_CHECKOUT_ENABLED": "1"}) == \
-        "VIGIL_CUSTOMER_CHECKOUT_ENABLED=1"
-    assert cl.ceiling_state("checkout", {}) == "VIGIL_CUSTOMER_CHECKOUT_ENABLED=unset"
-    assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "100"}) == "VIGIL_TRIAL_CREDITS=100"
-    assert cl.ceiling_state("founder_tester", {}) == "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=unset"
+        "VIGIL_CUSTOMER_CHECKOUT_ENABLED=1 (on)"
+    assert cl.ceiling_state("checkout", {}) == "VIGIL_CUSTOMER_CHECKOUT_ENABLED=unset (off)"
+    assert cl.ceiling_state("checkout", {"VIGIL_CUSTOMER_CHECKOUT_ENABLED": "0"}) == \
+        "VIGIL_CUSTOMER_CHECKOUT_ENABLED=0 (off)"
+    assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "300"}) == "VIGIL_TRIAL_CREDITS=300 (on: 300 credits)"
+    assert cl.ceiling_state("trial", {}) == "VIGIL_TRIAL_CREDITS=unset (on: the default 100 credits)"
+    assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "0"}) == "VIGIL_TRIAL_CREDITS=0 (off: no trial credits)"
+    assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "-1"}).startswith("VIGIL_TRIAL_CREDITS=-1 (invalid")
+    assert cl.ceiling_state("founder_tester", {}) == cl.NOT_OFFERED["founder_tester"]
+
+
+def test_the_unset_trial_ceiling_is_the_trial_the_code_grants(monkeypatch):
+    from sigil import config
+    from sigil.ui.provision import _DEFAULT_TRIAL_CREDITS
+    monkeypatch.delenv("VIGIL_TRIAL_CREDITS", raising=False)
+    assert cl.TRIAL_CREDITS_DEFAULT == _DEFAULT_TRIAL_CREDITS == config._int_env("VIGIL_TRIAL_CREDITS", 100)
+
+
+def test_founder_tester_stays_a_known_latch_that_folds(tmp_path, fold_cache):
+    s = _store(tmp_path)
+    assert cl.is_open(s, "founder_tester", trusted_pubkey=OP)
+    cl.turn_off(s, "founder_tester", owner_key=None)
+    assert cl.is_open(s, "founder_tester", trusted_pubkey=OP) is False
+    assert "founder_tester" not in cl.state_all(s, trusted_pubkey=OP)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -242,17 +268,26 @@ def test_the_kill_switch_refuses_new_reservations_and_starts_but_not_cancel_or_p
     assert _reserve(gate)["ok"]
 
 
-def test_a_kill_switch_that_cannot_be_read_refuses_a_new_reservation(tmp_path, launch_env, monkeypatch):
+def test_a_kill_switch_that_cannot_be_read_refuses_a_new_reservation(tmp_path, launch_env, monkeypatch, caplog):
     from sigil.governor.killswitch import KillSwitch
-    from sigil.ui.launch_gate import LaunchGate
+    from sigil.ui.launch_gate import LaunchGate, _HALTED
     s = _store(tmp_path)
     _seat(s)
 
     def boom(self):
         raise OSError("disk")
     monkeypatch.setattr(KillSwitch, "is_engaged", boom)
-    r = _reserve(LaunchGate(s))
-    assert not r["ok"] and "kill switch could not be read" in r["error"] and _avail(s) == 100
+    with caplog.at_level("WARNING", logger="sigil.ui.launch_gate"):
+        r = _reserve(LaunchGate(s))
+    assert r == {"ok": False, "error": _HALTED} and _avail(s) == 100
+    assert "kill switch could not be read (OSError)" in caplog.text           # the reason stays server-side
+
+
+def test_the_halted_refusal_names_no_mechanism():
+    from sigil.ui.launch_gate import _HALTED
+    for word in ("kill", "switch", "halt", "owner", "spine", "read", "Error"):
+        assert word not in _HALTED, word
+    assert _HALTED.startswith("new assessment launches are paused right now")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -388,10 +423,14 @@ def test_checkout_proceeds_once_the_owner_turns_it_back_on(monkeypatch):
 # ---------------------------------------------------------------------------------------------------------------
 @pytest.fixture
 def home(monkeypatch, tmp_path):
-    """The CLI and the doctor open the default spine (`SpineStore()`): point it at this test's own file."""
+    """The CLI and the doctor open the default spine (`SpineStore()`): point it at this test's own file, which holds
+    a record (a live home always has a spine). The user's home is this test's own, so no unit file of the machine
+    running the tests is read."""
     from sigil import cli
     from sigil.governor.identity import ensure_owner_keypair
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
     path = tmp_path / "spine.jsonl"
+    SpineStore(path).append(kind="event", source="test", actor="WARDEN", payload={"summary": "a live home"})
     monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: SpineStore(path))
     return path, ensure_owner_keypair()
 
@@ -409,7 +448,8 @@ def test_sigil_latch_status_off_and_on(home, capsys):
     path, _owner = home
     _cli("off", "checkout", reason="drill")
     _cli("status", as_json=True)
-    rep = json.loads(capsys.readouterr().out.split("\n", 1)[1])      # after the "checkout OFF" line
+    out = capsys.readouterr().out
+    rep = json.loads(out[out.index("{"):])                            # after the "checkout OFF" lines
     assert rep["customer_latches"]["checkout"]["latch"] == "off"
     assert cl.is_open(SpineStore(path), "checkout") is False
     _cli("on", "checkout", reason="drill over")
@@ -433,3 +473,161 @@ def test_status_doctor_and_dashboard_read_the_switches(home, capsys):
     check = next(c for c in sigil_doctor_report()["checks"] if c["id"] == "switches")
     assert check["required"] is False and check["ok"] is False and "OFF: trial" in check["detail"]
     assert snapshot(store)["customer_latches"]["trial"] == "off"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# `sigil latch` acts only on the service's home, needs no key to turn OFF, and names the spine it acted on
+# ---------------------------------------------------------------------------------------------------------------
+def _cockpit_env(text: str) -> None:
+    from pathlib import Path
+    f = Path(os.environ["HOME"]) / ".sigil" / "cockpit.env"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text, encoding="utf-8")
+
+
+def _main(*argv):
+    from sigil.cli import main
+    with pytest.raises(SystemExit) as e:
+        main(list(argv))
+    return e.value.code
+
+
+def test_latch_refuses_a_shell_whose_sigil_home_is_not_the_cockpits(home, capsys, monkeypatch, tmp_path):
+    from sigil import cli
+    path, _owner = home
+    gate: list = []
+    monkeypatch.setattr(cli, "_assert_store_operable_or_exit", lambda cmd: gate.append(cmd))
+    live = tmp_path / "data" / ".sigil"
+    _cockpit_env(f"SIGIL_UI_PORT=8733\nSIGIL_HOME={live}\n")
+    head = SpineStore(path).next_seq
+    for argv in (("latch", "off", "checkout"), ("latch", "off", "all"), ("latch", "status")):
+        assert _main(*argv) == 2
+        err = capsys.readouterr().err
+        assert "is not the service's" in err and f"SIGIL_HOME={live}" in err
+    assert gate == []                       # refused before the startup gate writes anything into this home
+    assert SpineStore(path).next_seq == head and cl.is_open(SpineStore(path), "checkout")
+    assert not live.exists()
+
+
+def test_latch_runs_when_the_shell_exports_the_cockpits_sigil_home(home, capsys):
+    from sigil import config
+    path, _owner = home
+    _cockpit_env(f"SIGIL_HOME={config.SIGIL_HOME}\n")
+    _cli("off", "checkout")
+    assert cl.is_open(SpineStore(path), "checkout") is False
+    assert f"spine {path} (head seq {SpineStore(path).next_seq - 1})" in capsys.readouterr().out
+
+
+def test_latch_refuses_a_home_with_no_owner_identity_and_creates_nothing(home, capsys, monkeypatch, tmp_path):
+    from sigil import cli, config
+    gate: list = []
+    monkeypatch.setattr(cli, "_assert_store_operable_or_exit", lambda cmd: gate.append(cmd))
+    wrong = tmp_path / "wrong"
+    monkeypatch.setattr(config, "SIGIL_HOME", wrong)
+    monkeypatch.setattr(config, "KEYS_DIR", wrong / "spine" / "keys")
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: SpineStore(wrong / "spine" / "spine.jsonl"))
+    for argv in (("latch", "off", "checkout"), ("latch", "on", "checkout"), ("latch", "status")):
+        assert _main(*argv) == 2
+        assert "holds no owner identity" in capsys.readouterr().err
+    assert gate == [] and not wrong.exists()                          # no key, no spine, no install manifest
+
+
+def test_latch_refuses_a_home_with_no_spine_and_creates_none(home, capsys, monkeypatch, tmp_path):
+    from sigil import cli
+    empty = tmp_path / "nospine" / "spine.jsonl"
+    empty.parent.mkdir()
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: SpineStore(empty))
+    for action in ("off", "status"):
+        with pytest.raises(SystemExit) as e:
+            _cli(action, "checkout")
+        assert e.value.code == 2 and "there is no spine" in capsys.readouterr().err
+    assert not empty.exists()
+
+
+@pytest.mark.parametrize("unusable", ["absent", "unreadable", "mismatched"])
+def test_latch_off_needs_no_private_key_and_on_refuses_without_one(home, capsys, monkeypatch, unusable):
+    from sigil.governor import identity
+    from sigil.reuse import KeyPair
+    path, owner = home
+
+    def no_mint():
+        raise AssertionError("an OFF never loads or creates the owner key through the minting loader")
+    monkeypatch.setattr(identity, "ensure_owner_keypair", no_mint)
+    if unusable == "absent":
+        monkeypatch.setattr(identity, "owner_keypair", lambda: None)
+    elif unusable == "unreadable":
+        def boom():
+            raise RuntimeError("the KEK backend is not reachable from this shell")
+        monkeypatch.setattr(identity, "owner_keypair", boom)
+    else:
+        other = generate_keypair()
+        monkeypatch.setattr(identity, "owner_keypair",
+                            lambda: KeyPair(public_key_b64=owner.public_key_b64, private_key_b64=other.private_key_b64))
+    _cli("off")
+    out = capsys.readouterr().out
+    assert cl.state_all(SpineStore(path)) == {n: "off" for n in cl.LATCHES}
+    assert out.count("unsigned:") == len(cl.LATCHES) and "an OFF needs no key" in out
+    last = SpineStore(path).get(SpineStore(path).next_seq - 1).payload
+    assert last["sig"] is None and last["pubkey"] is None                    # recorded unsigned, honoured anyway
+    with pytest.raises(SystemExit) as e:
+        _cli("on", "checkout")
+    assert e.value.code == 2 and "needs the owner's signature" in capsys.readouterr().err
+    assert cl.is_open(SpineStore(path), "checkout") is False
+
+
+def test_latch_off_is_owner_signed_when_the_key_is_usable(home, capsys):
+    path, owner = home
+    _cli("off", "trial")
+    assert "(seq" in capsys.readouterr().out
+    p = SpineStore(path).get(SpineStore(path).next_seq - 1).payload
+    from sigil.governor.authn import verify_signed
+    from sigil.governor.capability import _CORE
+    assert verify_signed(p, _CORE, owner.public_key_b64)
+
+
+def test_founder_tester_is_not_offered_by_the_cli(home, capsys):
+    path, _owner = home
+    for action in ("off", "on"):
+        with pytest.raises(SystemExit) as e:
+            _cli(action, "founder_tester")
+        assert e.value.code == 2 and "not offered on this deployment" in capsys.readouterr().err
+    _cli("off")                                                       # all: every OFFERED latch
+    assert cl.is_open(SpineStore(path), "founder_tester") is True
+    capsys.readouterr()
+    _cli("status")
+    out = capsys.readouterr().out.splitlines()
+    assert any("founder_tester" in ln and "not offered on this deployment" in ln for ln in out)
+    assert not any("founder_tester" in ln and (" ON " in ln or " OFF " in ln) for ln in out)
+
+
+def test_latch_status_reads_each_ceiling_as_the_cockpit_loads_it(home, capsys, monkeypatch):
+    from sigil import config
+    monkeypatch.delenv("VIGIL_CUSTOMER_CHECKOUT_ENABLED", raising=False)
+    monkeypatch.delenv("VIGIL_TRIAL_CREDITS", raising=False)
+    _cockpit_env(f"SIGIL_HOME={config.SIGIL_HOME}\nVIGIL_CUSTOMER_CHECKOUT_ENABLED=1\n")
+    _cli("status", as_json=True)
+    rep = json.loads(capsys.readouterr().out)
+    assert rep["customer_latches"]["checkout"]["ceiling"] == "VIGIL_CUSTOMER_CHECKOUT_ENABLED=1 (on)"
+    assert rep["customer_latches"]["trial"]["ceiling"] == "VIGIL_TRIAL_CREDITS=unset (on: the default 100 credits)"
+    assert rep["ceilings_from"].startswith("sigil-cockpit.service")
+    assert rep["spine"]["path"] == str(home[0]) and rep["spine"]["head_seq"] == SpineStore(home[0]).next_seq - 1
+    assert rep["not_offered"] == cl.NOT_OFFERED
+
+
+def test_with_no_cockpit_unit_the_ceilings_are_labelled_as_this_shells(home, capsys, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_CHECKOUT_ENABLED", "1")
+    _cli("status", as_json=True)
+    rep = json.loads(capsys.readouterr().out)
+    assert rep["ceilings_from"].startswith("this shell")
+    assert rep["customer_latches"]["checkout"]["ceiling"] == "VIGIL_CUSTOMER_CHECKOUT_ENABLED=1 (on)"
+
+
+def test_an_engaged_kill_switch_is_shown_with_what_it_now_refuses(home, capsys):
+    from sigil.cli import sigil_doctor_report
+    from sigil.governor.killswitch import KillSwitch
+    path, owner = home
+    KillSwitch(SpineStore(path), owner_key=owner).engage(reason="drill")
+    _cli("status")
+    assert "new customer launches and starts are refused while it is engaged" in capsys.readouterr().out
+    check = next(c for c in sigil_doctor_report()["checks"] if c["id"] == "switches")
+    assert check["required"] is False and "new customer launches and starts are refused" in check["detail"]

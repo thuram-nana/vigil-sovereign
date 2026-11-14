@@ -18,6 +18,9 @@ on a development checkout with no sovereign unit installed they add at most a no
   not), and a shell running ``sigil ops-sweep`` that reads only ``sigil.env`` under the cockpit's ``SIGIL_HOME``
   agrees with them (a note naming what that shell must export when it does not).
 
+:func:`unit_process_environment` gives one unit's process environment the same way (``sigil latch`` reads the
+cockpit's SIGIL_HOME and the ceilings of its customer latches from it).
+
 Every value is read from the files the units load: the installed unit and its drop-ins under
 ``~/.config/systemd/user`` (``Environment=`` and ``EnvironmentFile=``, ``%h`` expanded), then ``sigil.env`` under
 the process's own ``SIGIL_HOME`` layered beneath it exactly as ``sigil.config`` does at import. Nothing is read
@@ -516,6 +519,24 @@ def _norm(kind: str, raw: "str | None") -> "str | None":
 def _sigil_home_of(env: dict, home: Path) -> Path:
     """The ``SIGIL_HOME`` a process with environment ``env`` reads ``sigil.env`` from (``sigil.config``'s rule)."""
     return Path(env.get("SIGIL_HOME") or (Path(home) / ".sigil"))
+
+
+def unit_process_environment(unit_name: str, home: Path, repo: "Path | None" = None) -> "dict | None":
+    """The environment a process started by ``unit_name`` runs with, read only from the files it loads (the unit and
+    its drop-ins, the user manager's environment.d, its env files, then ``sigil.env`` beneath them), with
+    ``SIGIL_HOME`` always set to the home that process resolves (its environment's, else ``~/.sigil``; ``sigil.env``
+    cannot move it). ``None`` when no such unit is configured for this user: it is not installed and none of the env
+    files it names exists. Never raises."""
+    try:
+        u = UnitView(unit_name, home=Path(home), repo=repo)
+        if not (u.installed or any(p.exists() for p, _o in u.env_files())):
+            return None
+        env = u.environment()
+        out = _layer_sigil_env(env, Path(home))
+        out["SIGIL_HOME"] = str(_sigil_home_of(env, Path(home)))
+        return out
+    except Exception:  # noqa: BLE001 — an unreadable unit reads as not configured
+        return None
 
 
 def process_environments(home: Path, repo: Path) -> "tuple[dict, dict]":

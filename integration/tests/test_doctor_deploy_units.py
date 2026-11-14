@@ -565,3 +565,21 @@ def test_golive_durable_volume_layout_passes_under_vigil_ready(tmp_path, monkeyp
     assert _settle_findings(report) == ([], [])
     assert report["must_match_flags"]["ok"] is True and report["must_match_flags"]["ops_sweep_agrees"] is True
     assert "an ops-sweep shell reading only sigil.env agrees" in _doc.render(report)
+
+
+# ── one unit's process environment (what `sigil latch` reads for the cockpit) ───────────────────────────────
+def test_the_cockpit_process_environment_is_read_from_the_files_it_loads(tmp_path):
+    home = tmp_path
+    assert dc.unit_process_environment(dc.COCKPIT_UNIT, home, _REPO) is None          # nothing configured
+    moved = home / "data" / ".sigil"
+    _write(home / ".sigil" / "cockpit.env", f"SIGIL_HOME={moved}\nVIGIL_CUSTOMER_CHECKOUT_ENABLED=1\n")
+    _write(moved / "sigil.env", "VIGIL_TRIAL_CREDITS=300\nVIGIL_CUSTOMER_CHECKOUT_ENABLED=0\nSIGIL_HOME=/nowhere\n")
+    env = dc.unit_process_environment(dc.COCKPIT_UNIT, home, _REPO)                   # env file present, not installed
+    assert env["SIGIL_HOME"] == str(moved)
+    assert env["VIGIL_CUSTOMER_CHECKOUT_ENABLED"] == "1"                               # the unit's file wins
+    assert env["VIGIL_TRIAL_CREDITS"] == "300"                                         # sigil.env beneath it
+    _install(home, dc.COCKPIT_UNIT)
+    _write(home / ".sigil" / "cockpit.env", "VIGIL_CUSTOMER_CHECKOUT_ENABLED=1\n")
+    _write(home / ".sigil" / "sigil.env", "SIGIL_HOME=/nowhere\n")
+    env = dc.unit_process_environment(dc.COCKPIT_UNIT, home, _REPO)
+    assert env["SIGIL_HOME"] == str(home / ".sigil")       # unset: the default home (sigil.env never moves it)

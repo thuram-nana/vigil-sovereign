@@ -491,7 +491,7 @@ async function onRelay() {
 /* The owner's customer latches: an OFF is the safe direction, so the phone sends it as a device-signed,
  * replay-gated envelope exactly like PANIC (the latch name is INSIDE the signed args). It refuses only NEW
  * launches / sign-ups / purchases / trials; turning a switch back ON is an owner-signed act at the desktop. */
-var LATCHES = ["customer_launch", "customer_signup", "checkout", "trial", "founder_tester"];
+var LATCHES = ["customer_launch", "customer_signup", "checkout", "trial"];
 async function onLatchOff(name) {
   if (name !== "all" && LATCHES.indexOf(name) < 0) { return; }
   var m = $("#latch-msg");
