@@ -3902,6 +3902,8 @@ def _cmd_fleet_kill(args: argparse.Namespace) -> int:
         p, rv = r["panic"], r["revoke"]
         print(f"  {r['instance_id']:<20} panic={p.get('status', '?')} (ok={p.get('ok')})  "
               f"revoke={rv.get('status', '?')} (ok={rv.get('ok')})")
+    for warning in report.get("drains", {}).get("still_running", []):
+        print(f"  {warning}")
     print(f"--- contained {t['panic_ok']}/{t['instances']}; revoked {t['revoke_ok']}/{t['instances']} "
           f"(refused={t['revoke_refused']}, error={t['revoke_error']}) ---")
     # Non-zero exit if any leg did not fully complete, so a script notices a partial fan-out.

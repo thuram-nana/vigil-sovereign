@@ -176,7 +176,9 @@ def test_run_panic_masks_and_stops_the_unit(tmp_path, monkeypatch):
     # XDG_DATA_HOME so the stamp writes land in tmp, never the real ~/.local/share/systemd/timers.
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     ctl = FakeSystemctl(known=True, active=True)
-    rc = uiproxy.run_panic(base_dir=str(tmp_path), run=ctl)
+    now = [0.0]                                   # every unit reads active, drains included: a fake clock keeps the
+    rc = uiproxy.run_panic(base_dir=str(tmp_path), run=ctl,   # bounded drain wait from sleeping for real
+                           sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
     assert rc == 0
     assert {"disable", "mask", "stop"} <= set(ctl.verbs)
 

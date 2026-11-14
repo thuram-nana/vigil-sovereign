@@ -108,23 +108,38 @@ Stricter than `down`. `_cmd_panic` runs in order:
       oneshot service** (to interrupt a run already in flight — stopping a *timer* does not stop a
       running oneshot). Then **stop + disable every live `vigil-witness@<port>` instance**
       (`Restart=on-failure`).
-   3. **The sovereign plane and the drains** (`_contain_sovereign_units`), in this order:
+   3. **Kill the tracked pids** (as `down`).
+   4. **The sovereign plane and the drains** (`_contain_sovereign_units`), in this order:
       - every drain and sovereign **timer** — `vigil-settle-drain`, `vigil-billing-drain`,
         `vigil-billing-drain-stripe`, `vigil-finding-drain`, `sigil-checkpoint`, `sigil-consolidate` — is stopped,
         disabled and its `Persistent=` catch-up stamp reset, so no new pass starts;
       - the **edges** `sigil-customer.service` and `sigil-public.service` (customers then get the nginx
         maintenance page), every live **phone bridge** `sigil-bridge@<addr>.service`, then
-        `sigil-cockpit.service` **last** (the writer) — each stopped and disabled; a clean stop lets the edges
-        and the cockpit finish the requests they already accepted;
+        `sigil-cockpit.service` **last** (the writer) — each stopped and disabled. A clean stop lets the edges
+        and the cockpit finish the requests they already accepted: each `systemctl stop` waits up to 100 s, longer
+        than any of these units' `TimeoutStopSec` (75 s for the cockpit and the customer edge), so the next unit is
+        stopped only once the previous one is down. A stop still draining after that is reported as **still
+        stopping**, never as a failure;
       - the checkpoint and consolidate oneshots are stopped. A **drain pass already in flight** (settle, billing,
-        Stripe billing, findings) is **never interrupted**: panic waits for it (at most 90 s), disables its
-        service, and reports one still running after that bound — it exits on its own, and no further pass starts.
-   4. **Kill the tracked pids** (as `down`).
-   5. **Verify containment held** (`_verify_sidecar_containment`, `_verify_sovereign_containment`): re-query
-      `is-active` / `is-enabled` for every timer, service, witness instance, sovereign unit, bridge and drain. A clean pass prints
-      `containment verified (nothing active or enabled)`; any leak is printed to **stderr** with a
+        Stripe billing, findings) is **never interrupted**: its service is disabled, and no further pass starts.
+   5. **Wait once for a drain pass in flight** (`await_drains`): after everything else is contained, panic waits
+      for it (at most 90 s) and reports one still running after that bound — it exits on its own.
+   6. **Verify containment held** (`_verify_sidecar_containment`, `_verify_sovereign_containment`): re-query
+      `is-active` / `is-enabled` for every timer, service, witness instance, sovereign unit, bridge and drain. A
+      unit still running (`active`, `activating`, `deactivating` or `reloading`) or still enabled is a leak. A clean
+      pass prints `containment verified (nothing active or enabled)`; any leak is printed to **stderr** with a
       `do NOT assume the system is contained` warning so a partial containment is never silently
       assumed.
+
+   **From the console's PANIC button.** The console starts `vigil panic` in its own session but inside
+   `vigil-command.service`'s cgroup, so stopping that unit (`KillMode=control-group`) ends the panic too. Panic
+   recognises this (`/proc/self/cgroup`): it masks and disables the command unit first, contains the sidecars and
+   the sovereign plane with no drain wait, verifies and reports, and only then stops the command unit (which ends
+   the console, its tracked processes and the panic itself).
+
+   **`vigil fleet kill`** runs this containment for every roster instance with no per-instance drain wait, applies
+   each owner-signed revocation straight after its instance's containment, and waits for the drains once, after
+   the last revocation.
 
 Every step is best-effort and idempotent — one stubborn unit's failure is reported and never aborts the
 rest, because a hard-stop must not be blockable.

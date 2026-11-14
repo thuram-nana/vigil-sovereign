@@ -370,10 +370,18 @@ def load_roster(path: str) -> list:
 
 
 def _default_panic(*, base_dir: str) -> int:
-    """The per-box containment primitive: the framework-free process/unit HARD-STOP in ``uiproxy``.
+    """The per-box containment primitive: the framework-free process/unit HARD-STOP in ``uiproxy``, with no wait for
+    a drain pass in flight (the fan-out waits once, after every instance's revocation: ``_default_drain_wait``).
     Lazy-imported so this module stays import-clean."""
     from .uiproxy import run_panic
-    return run_panic(base_dir=base_dir)
+    return run_panic(base_dir=base_dir, drain_wait_s=0.0)
+
+
+def _default_drain_wait() -> "list[str]":
+    """The one bounded wait for a drain pass still in flight, after the whole fan-out (``uiproxy.await_drains``): the
+    warnings for a pass still running after the bound. Lazy-imported, as ``_default_panic``."""
+    from .uiproxy import await_drains
+    return await_drains()
 
 
 def _default_revoke(signed_revocation: Any, revocation_path: str) -> Any:
@@ -418,6 +426,7 @@ def fan_out_kill(
     reason: str = "vigil fleet kill",
     panic_fn: Optional[Callable] = None,
     revoke_fn: Optional[Callable] = None,
+    drain_wait_fn: Optional[Callable[[], "list[str]"]] = None,
 ) -> dict:
     """Drive the fleet kill-switch across a roster: for each instance invoke the per-box containment
     (``run_panic``) and apply the OWNER-SIGNED entitlement revocation.
@@ -428,7 +437,13 @@ def fan_out_kill(
     runs containment but fails the revoke leg closed per instance. Containment never blocks on the revoke
     outcome, and one instance's failure never stops the rest. ``panic_fn``/``revoke_fn`` are injectable for
     tests (defaults call the real primitives). DETERMINISTIC given the injected functions — no wallclock/RNG;
-    instances are reported in ``instance_id`` order."""
+    instances are reported in ``instance_id`` order.
+
+    The default containment does not wait for a drain pass in flight per instance, so no revocation waits behind
+    one: the fan-out waits ONCE, bounded, after every instance (``drain_wait_fn``, default ``_default_drain_wait``
+    with the default containment, none with an injected one) and reports a pass still running under ``drains``."""
+    if drain_wait_fn is None and panic_fn is None:
+        drain_wait_fn = _default_drain_wait
     panic_fn = panic_fn if panic_fn is not None else _default_panic
     revoke_fn = revoke_fn if revoke_fn is not None else _default_revoke
     # Sort the entries by id BEFORE driving them, so the side-effect order (the actual containment calls)
@@ -441,6 +456,12 @@ def fan_out_kill(
             "panic": _panic_leg(entry, panic_fn),
             "revoke": _revoke_leg(entry, signed_revocation, revoke_fn),
         })
+    drains: dict = {"waited": drain_wait_fn is not None, "still_running": []}
+    if drain_wait_fn is not None:
+        try:
+            drains["still_running"] = [str(w) for w in (drain_wait_fn() or [])]
+        except Exception as e:  # noqa: BLE001 — the wait only reports; it never undoes the fan-out
+            drains["still_running"] = [f"could not check the drains: {type(e).__name__}: {e}"]
     totals = {
         "instances": len(results),
         "panic_ok": sum(1 for r in results if r["panic"].get("ok")),
@@ -449,4 +470,4 @@ def fan_out_kill(
         "revoke_error": sum(1 for r in results if r["revoke"].get("status") == "error"),
     }
     return {"schema": _SCHEMA, "reason": str(reason), "revocation_supplied": signed_revocation is not None,
-            "instances": results, "totals": totals}
+            "instances": results, "totals": totals, "drains": drains}

@@ -3212,9 +3212,25 @@ def _running_as_execstop(env: Optional[dict] = None) -> bool:
     return "SERVICE_RESULT" in e
 
 
+def _in_unit_cgroup(unit: str, *, cgroup_text: Optional[str] = None) -> bool:
+    """True iff THIS process runs inside ``unit``'s own cgroup (``/proc/self/cgroup``, cgroup v1 or v2): for example a
+    `vigil panic` the console's PANIC button started under `vigil-command.service` (a new session, the same cgroup).
+    Stopping that unit (``KillMode=control-group``) ends this process too. False when it cannot tell."""
+    if cgroup_text is None:
+        try:
+            cgroup_text = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+    for line in cgroup_text.splitlines():
+        path = line.split(":", 2)[-1]
+        if unit in path.split("/"):
+            return True
+    return False
+
+
 def _contain_service_unit(*, mask: bool = False,
                           run: Callable[..., Any] = subprocess.run,
-                          env: Optional[dict] = None) -> list[str]:
+                          env: Optional[dict] = None, stop: bool = True) -> list[str]:
     """Stop-and-disable the `vigil-command.service` user unit so it cannot restore the stack, returning
     a list of human-readable action strings (empty ⇒ no unit to contain).
 
@@ -3232,7 +3248,8 @@ def _contain_service_unit(*, mask: bool = False,
          deliberate `unmask`.
       5. `stop` — ONLY when the unit is up AND we are not our own ExecStop. A clean systemctl stop does
          not trigger `Restart=`; skipping it under ExecStop avoids a recursive-stop deadlock (systemd is
-         already stopping us there, so `Restart=` will not fire regardless)."""
+         already stopping us there, so `Restart=` will not fire regardless). ``stop=False`` leaves it to the
+         caller (`run_panic` running inside this unit's cgroup stops it last: the stop ends that process too)."""
     if not _unit_is_known(run=run):
         return []
     actions: list[str] = []
@@ -3253,6 +3270,8 @@ def _contain_service_unit(*, mask: bool = False,
             f"masked {_SERVICE_UNIT} (a manual start is refused until `systemctl --user unmask`)"
             if rc == 0 else f"WARNING: could not mask {_SERVICE_UNIT}: {(err.strip() or rc)}")
 
+    if not stop:
+        return actions
     if _running_as_execstop(env):
         actions.append(f"under ExecStop — systemd is completing the stop of {_SERVICE_UNIT}")
     elif _unit_is_active(run=run):
@@ -3429,14 +3448,16 @@ def _verify_sidecar_containment(*, run: Callable[..., Any] = subprocess.run) -> 
 #
 # The sovereign units (`apps/sigil/deploy/systemd/`) and the drain timers (`infra/systemd/`) keep serving customers,
 # the phone bridge and the spine after the command unit and the cadence sidecars are down. `vigil panic` contains
-# them too, in this order:
+# them too (`_contain_sovereign_units`), in this order:
 #   1. every drain / sovereign TIMER: stop + disable + reset its Persistent= catch-up stamp, so no new pass starts;
 #   2. the long-running SERVICES: the customer and public edges first (customers then get the nginx maintenance
-#      page), every live `sigil-bridge@` instance, then the cockpit (the writer) LAST — each a clean systemctl stop,
-#      under which the edges and the cockpit finish the requests they already accepted;
+#      page), every live `sigil-bridge@` instance, then the cockpit (the writer) LAST — each a clean systemctl stop
+#      that waits for the unit's own graceful stop (`_SOVEREIGN_STOP_TIMEOUT_S` outlasts every TimeoutStopSec), under
+#      which the edges and the cockpit finish the requests they already accepted;
 #   3. the oneshot behind each timer: the checkpoint and consolidate passes are stopped; a DRAIN pass already in
-#      flight (settle, billing, Stripe billing, findings) is never interrupted — panic waits for it, bounded by
-#      `_DRAIN_WAIT_S`, and a pass still running after that is reported (it exits on its own; no next pass starts).
+#      flight (settle, billing, Stripe billing, findings) is never interrupted, only disabled.
+# Then, once everything else is contained, `await_drains` waits for a drain pass in flight (bounded by
+# `_DRAIN_WAIT_S`) and reports one still running after that (it exits on its own; no next pass starts).
 # Subprocess `systemctl --user` only — no sovereign or framework import.
 _SOVEREIGN_TIMERS = (
     "vigil-settle-drain.timer",           # settles finished customer launches (money)
@@ -3456,6 +3477,12 @@ _BRIDGE_TEMPLATE = "sigil-bridge@.service"
 _BRIDGE_GLOB = "sigil-bridge@*.service"
 #: How long panic waits for a drain pass that is already running before it reports it and moves on.
 _DRAIN_WAIT_S = 90.0
+#: The client timeout of each sovereign `systemctl stop`: longer than every sovereign unit's own TimeoutStopSec
+#: (75 s for the cockpit and the customer edge, which drain the requests they accepted) and than systemd's default
+#: 90 s for a unit that sets none, so a stop returns when the unit is down, never while it is still draining.
+_SOVEREIGN_STOP_TIMEOUT_S = 100.0
+#: `is-active` states in which a unit's processes are still running (a draining stop reads `deactivating`).
+_STILL_RUNNING = ("active", "activating", "deactivating", "reloading")
 
 
 def _bridge_instances(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
@@ -3478,20 +3505,25 @@ def _bridge_instances(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
 
 def _stop_and_disable(unit: str, note: str, *, run: Callable[..., Any]) -> list[str]:
     out: list[str] = []
-    rc, _o, err = _systemctl("stop", unit, run=run)
-    out.append(f"stopped {unit}{note}" if rc == 0 else f"WARNING: could not stop {unit}: {(err.strip() or rc)}")
+    rc, _o, err = _systemctl("stop", unit, run=run, timeout=_SOVEREIGN_STOP_TIMEOUT_S)
+    if rc == 0:
+        out.append(f"stopped {unit}{note}")
+    elif rc == 124:
+        out.append(f"WARNING: {unit} is still stopping after {int(_SOVEREIGN_STOP_TIMEOUT_S)} s (it finishes the "
+                   f"requests it accepted; systemd ends it at its TimeoutStopSec)")
+    else:
+        out.append(f"WARNING: could not stop {unit}: {(err.strip() or rc)}")
     rc, _o, err = _systemctl("disable", unit, run=run)
     if rc != 0:
         out.append(f"WARNING: could not disable {unit}: {(err.strip() or rc)}")
     return out
 
 
-def _contain_sovereign_units(*, run: Callable[..., Any] = subprocess.run, wait_s: Optional[float] = None,
-                             sleep: Callable[[float], Any] = time.sleep,
-                             clock: Callable[[], float] = time.monotonic) -> list[str]:
+def _contain_sovereign_units(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
     """Stop AND disable the sovereign plane's units and the drains (see the block comment above), returning
-    human-readable action strings (empty ⇒ no user manager to contain). Best-effort and idempotent: one unit's
-    failure is a WARNING and never aborts the rest, and the drain wait is bounded, so panic is never blocked."""
+    human-readable action strings (empty ⇒ no user manager to contain). A drain pass already in flight is disabled,
+    never stopped; `await_drains` waits for it. Best-effort and idempotent: one unit's failure is a WARNING and never
+    aborts the rest."""
     if not _user_manager_reachable(run=run):
         return []
     actions: list[str] = []
@@ -3505,27 +3537,37 @@ def _contain_sovereign_units(*, run: Callable[..., Any] = subprocess.run, wait_s
     actions += _stop_and_disable(_SOVEREIGN_WRITER, " (the writer, last; it finishes accepted requests)", run=run)
     for svc in _SOVEREIGN_ONESHOTS:
         actions += _stop_and_disable(svc, " (interrupts an in-flight run)", run=run)
-    budget = _DRAIN_WAIT_S if wait_s is None else float(wait_s)
-    deadline = clock() + budget
-    while True:
-        busy = [d for d in _DRAIN_SERVICES if _systemctl("is-active", d, run=run)[1].strip()
-                in ("active", "activating", "reloading")]
-        if not busy or clock() >= deadline:
-            break
-        sleep(min(2.0, max(0.0, deadline - clock())))
     for d in _DRAIN_SERVICES:
         rc, _o, err = _systemctl("disable", d, run=run)      # disabling never interrupts a running pass
         if rc != 0:
             actions.append(f"WARNING: could not disable {d}: {(err.strip() or rc)}")
-        if d in busy:
-            actions.append(f"WARNING: {d} is still finishing a pass after {int(budget)} s — it is not interrupted, "
-                           f"it exits on its own and no further pass starts (its timer is stopped and disabled)")
     return actions
+
+
+def await_drains(*, run: Callable[..., Any] = subprocess.run, wait_s: Optional[float] = None,
+                 sleep: Callable[[float], Any] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic) -> list[str]:
+    """After `_contain_sovereign_units`: wait, bounded by ``wait_s`` (default `_DRAIN_WAIT_S`), for a drain pass that
+    is still in flight, and return one WARNING per drain still running after the bound (empty ⇒ none is running, or
+    no user manager). A pass is never interrupted: it exits on its own and its timer is already stopped and
+    disabled, so no further pass starts. Called once, after everything else is contained."""
+    if not _user_manager_reachable(run=run):
+        return []
+    budget = _DRAIN_WAIT_S if wait_s is None else max(0.0, float(wait_s))
+    deadline = clock() + budget
+    while True:
+        busy = [d for d in _DRAIN_SERVICES if _systemctl("is-active", d, run=run)[1].strip() in _STILL_RUNNING]
+        if not busy or clock() >= deadline:
+            break
+        sleep(min(2.0, max(0.0, deadline - clock())))
+    return [f"WARNING: {d} is still finishing a pass after {int(budget)} s — it is not interrupted, it exits on its "
+            f"own and no further pass starts (its timer is stopped and disabled)" for d in busy]
 
 
 def _verify_sovereign_containment(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
     """After `_contain_sovereign_units`: every sovereign timer, service, bridge instance and drain is neither
-    active nor enabled. Returns the leaks (empty ⇒ contained); skips cleanly with no user manager."""
+    running (``deactivating`` included: a unit still draining has not stopped) nor enabled. Returns the leaks (empty
+    ⇒ contained); skips cleanly with no user manager."""
     if not _user_manager_reachable(run=run):
         return []
     leaks: list[str] = []
@@ -3533,7 +3575,7 @@ def _verify_sovereign_containment(*, run: Callable[..., Any] = subprocess.run) -
              + list(_SOVEREIGN_ONESHOTS) + list(_DRAIN_SERVICES))
     for unit in units:
         _rc, active, _e = _systemctl("is-active", unit, run=run)
-        if active.strip() in ("active", "activating", "reloading"):
+        if active.strip() in _STILL_RUNNING:
             leaks.append(f"{unit} is still {active.strip()}")
         _rc, enabled, _e = _systemctl("is-enabled", unit, run=run)
         if enabled.strip() in ("enabled", "enabled-runtime"):
@@ -4138,7 +4180,8 @@ def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
 
 
 def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run, drain_wait_s: Optional[float] = None,
-              sleep: Callable[[float], Any] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
+              sleep: Callable[[float], Any] = time.sleep, clock: Callable[[], float] = time.monotonic,
+              inside_command_unit: Optional[bool] = None) -> int:
     """The process-and-unit half of `vigil panic` — a real HARD-STOP of the running surface (W10-5,
     completed for the cadence sidecars in W10-5b, #478).
 
@@ -4146,27 +4189,38 @@ def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run, drain_
     is refused until a deliberate `unmask`) as well as stopping and disabling it; (2) STOPS + DISABLES
     EVERY cadence sidecar timer AND its oneshot service, resets each timer's `Persistent=` catch-up
     stamp so a re-enable cannot replay the runs missed during the incident, and stops every live
-    `vigil-witness@` instance; (2b) STOPS + DISABLES the sovereign plane and the drains
+    `vigil-witness@` instance; (3) kills every tracked pid; (4) STOPS + DISABLES the sovereign plane and the drains
     (`_contain_sovereign_units`: drain and checkpoint timers, the customer and public edges, every phone bridge,
-    the cockpit last; a drain pass already in flight finishes, bounded by `drain_wait_s`); (3) kills every tracked
-    pid; (4) VERIFIES nothing is left active or enabled and warns LOUDLY on any leak. The gate-level half — tripping every engagement's
+    the cockpit last); (5) waits for a drain pass already in flight, once and bounded by ``drain_wait_s``
+    (`await_drains`; a pass is never interrupted); (6) VERIFIES nothing is left running or enabled and warns LOUDLY
+    on any leak. The gate-level half — tripping every engagement's
     kill-switch so any surviving or later-launched gated action is DENIED — is applied by the caller
     (`_cmd_panic`) BEFORE this runs, because that half needs the offense engine and this module is
     deliberately framework-free.
 
+    A panic running INSIDE the command unit's own cgroup (``inside_command_unit``; default: read from
+    ``/proc/self/cgroup`` — the console's PANIC button starts it there) would be ended by its own stop of that unit
+    (``KillMode=control-group``). So there it masks and disables the unit first, contains everything else with no
+    drain wait, verifies and reports, and only THEN stops the command unit and kills the tracked pids.
+
     Idempotent and always fail-safe: it does as much containment as it can and reports what it did.
     Returns 0 (the hard-stop ran); a verification leak is surfaced as a WARNING, not by refusing to
     complete — the operator must never be left with a half-contained system and no output saying so."""
-    contained = _contain_service_unit(mask=True, run=run)
+    inside = _in_unit_cgroup(_SERVICE_UNIT) if inside_command_unit is None else bool(inside_command_unit)
+    contained = _contain_service_unit(mask=True, run=run, stop=not inside)
     for action in contained:
         print(f"  {action}")
     sidecars = _contain_sidecar_units(run=run)
     for action in sidecars:
         print(f"  {action}")
-    sovereign = _contain_sovereign_units(run=run, wait_s=drain_wait_s, sleep=sleep, clock=clock)
+    stopped = 0
+    if not inside:
+        stopped, _rc = _kill_tracked_pids(base_dir, label="vigil panic")
+    sovereign = _contain_sovereign_units(run=run)
     for action in sovereign:
         print(f"  {action}")
-    stopped, _rc = _kill_tracked_pids(base_dir, label="vigil panic")
+    for action in await_drains(run=run, wait_s=(0.0 if inside else drain_wait_s), sleep=sleep, clock=clock):
+        print(f"  {action}")
     leaks = _verify_sidecar_containment(run=run) + _verify_sovereign_containment(run=run)
     if leaks:
         print("vigil panic: WARNING — containment did NOT fully hold; still active/enabled:",
@@ -4176,11 +4230,23 @@ def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run, drain_
         print("  Investigate and stop/disable these by hand — do NOT assume the system is contained.",
               file=sys.stderr)
     if contained or sidecars or sovereign:
-        tail = ("the command unit is masked + stopped, and every cadence sidecar, sovereign unit and drain "
-                "is stopped + disabled")
+        tail = (("the command unit is masked (it is stopped last)" if inside else
+                 "the command unit is masked + stopped")
+                + ", and every cadence sidecar, sovereign unit and drain is stopped + disabled")
     else:
         tail = "no systemd units to contain"
     verified = ("containment verified (nothing active or enabled)" if not leaks
                 else f"{len(leaks)} unit(s) STILL active/enabled — see the warning above")
-    print(f"vigil panic: killed {stopped} tracked process(es); {tail}; {verified}.")
+    if not inside:
+        print(f"vigil panic: killed {stopped} tracked process(es); {tail}; {verified}.")
+        return 0
+    print(f"vigil panic: {tail}; {verified}. This panic runs inside {_SERVICE_UNIT}: stopping it now ends this "
+          f"process with the unit and its tracked processes.")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if _unit_is_known(run=run) and _unit_is_active(run=run):
+        rc, _out, err = _systemctl("stop", _SERVICE_UNIT, run=run)
+        if rc != 0:
+            print(f"  WARNING: could not stop {_SERVICE_UNIT}: {(err.strip() or rc)}", file=sys.stderr)
+    _kill_tracked_pids(base_dir, label="vigil panic")
     return 0
