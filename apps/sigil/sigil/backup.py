@@ -555,6 +555,59 @@ def _new_staging_dir(dest: Path) -> Path:
     return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
 
 
+def _fs_of(p: Path) -> int:
+    """The filesystem (device) ``p`` is on — that of its nearest existing ancestor while it does not exist yet (it is
+    made there)."""
+    p = Path(p).absolute()
+    for a in (p, *p.parents):
+        try:
+            return os.stat(a).st_dev
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    raise FileNotFoundError(f"no existing ancestor of {p}")
+
+
+def _mount_at_or_in(p: Path) -> "Path | None":
+    """A mount point at ``p``, or anywhere inside it when ``p`` is a real dir (symlinks never followed); else None."""
+    if os.path.ismount(p):
+        return Path(p)
+    if Path(p).is_symlink() or not Path(p).is_dir():
+        return None
+
+    def refuse(e: OSError) -> None:
+        raise e
+    for root, dirs, _files in os.walk(p, onerror=refuse):
+        for d in dirs:
+            if os.path.ismount(os.path.join(root, d)):
+                return Path(root) / d
+    return None
+
+
+def _refuse_unrenamable(renames: "list[tuple[Path, Path]]") -> None:
+    """Refuse, before anything of the home is touched, a swap the filesystem cannot do — so no restore begins a swap
+    whose renames are bound to fail. ``renames`` pairs the dir each staged unit is renamed from with the entry it
+    replaces. Each staged unit must be on the filesystem of the dir it is renamed into (a home, or an archive dir, that
+    is a mount point has its staging beside it on another one), and no entry the swap replaces may be, or hold, a mount
+    point (a restore renames whole units aside and drops them; a mount point is never renamed or dropped with one)."""
+    try:
+        for staging, dst in renames:
+            if _fs_of(staging) != _fs_of(dst.parent):
+                raise BackupError(f"refusing to restore into {dst.parent}: it is not on the filesystem of the "
+                                  f"restore's staging dir {staging} beside it — a restore renames each unit into "
+                                  f"place, so the home (and an archive dir) must be a dir on its parent's filesystem, "
+                                  f"not a mount point itself (mount the volume one level up, or name a dir inside it); "
+                                  f"nothing was written")
+            mount = _mount_at_or_in(dst)
+            if mount is not None:
+                raise BackupError(f"refusing to replace {dst}: {mount} is a mount point — a restore renames whole "
+                                  f"units aside and drops them, and never a mount point with one (unmount it, or pass "
+                                  f"a dir on that volume, mounted outside the home, as --archive-dir); nothing was "
+                                  f"written")
+    except OSError as e:
+        raise BackupError(f"cannot check that the restore's renames stay on one filesystem ({e}) — nothing was "
+                          f"written") from e
+
+
 def _drop_path(p: Path) -> None:
     """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink."""
     if p.is_dir() and not p.is_symlink():
@@ -1187,7 +1240,10 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     a home that fails closed until ``--resume`` makes it entirely the backup's (or, while the home is still entirely
     its old self, ``--abort`` leaves it so); into a fresh home each unit lands complete or not at all. The journaled
     swap holds the target's floor lock and refuses while its spine writer lock is held (stop the services first).
-    Exactly the captured units are swapped (a whitelist), never whatever else turns up in the staging dir.
+    Exactly the captured units are swapped (a whitelist), never whatever else turns up in the staging dir. A swap the
+    filesystem cannot do by renames (a home or archive dir that is a mount point, a unit that holds one) is refused
+    before anything is written (:func:`_refuse_unrenamable`); a unit whose rename still fails with nothing of it moved
+    is left unmarked in the journal, so a restore that touched nothing can still be discarded with ``--abort``.
 
     HARD-PRUNED spine (SIGIL_PRUNED_RESTORE on; refused before anything is written while it is off): the spine, its
     signed head, the floor, the owner public key(s) and the archive are verified as ONE unit by the real readers in a
@@ -1343,6 +1399,13 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
                 raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
         result = _restore_result(new_home, files, body, pruned=pruned, swapped=not verify_only, placed=placed,
                                  owner_key_matches=_owner_key_matches(staged_dir, body), env=held_env)
+        if new_home is not None:
+            # every rename the swap would do is one the filesystem can do (--verify-only checks it too): a restore
+            # never begins a swap whose renames are bound to fail
+            renames = [(staged_dir, new_home / u) for u in sorted(captured_units)]
+            if placed is not None and placed["mode"] == "relocated":
+                renames.append((placed["cleanup"] or placed["target"].parent, placed["target"]))
+            _refuse_unrenamable(renames)
         if verify_only:
             return result
         assert new_home is not None
