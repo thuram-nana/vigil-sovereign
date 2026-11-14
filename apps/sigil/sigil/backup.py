@@ -858,16 +858,23 @@ def _read_journal(home: Path) -> dict:
         own = arch_staging if name == "archive" else staging
         if own is None or not src.is_relative_to(own):
             raise BackupError(f"the restore journal at {jp} names a staged unit outside its staging dirs — refusing")
+        # a destination is the ENTRY itself (its parent resolved, its last component never followed): a swap
+        # replaces that entry, so a symlink at it is replaced, never the dir it points to
         if name == "archive":
-            if dst.resolve().parent != own.resolve().parent:
+            if dst.name in ("", ".", "..") or dst.parent != own.resolve().parent:
                 raise BackupError(f"the restore journal at {jp} names an archive destination that is not beside its "
                                   f"staging dir — refusing")
         elif name not in CAPTURED_TOP_LEVEL:
             raise BackupError(f"the restore journal at {jp} names a unit {name!r} that a backup never captures — "
                               f"refusing")
-        elif dst.resolve() != (home / name).resolve():
+        elif dst != _entry_path(home / name):
             raise BackupError(f"the restore journal at {jp} names a destination outside {home} — refusing")
     return j
+
+
+def _entry_path(p: Path) -> Path:
+    """``p`` with its parent resolved and its last component kept as is (never followed if it is a symlink)."""
+    return Path(p).parent.resolve() / Path(p).name
 
 
 def _drop_staging(journal: dict) -> None:
@@ -930,10 +937,10 @@ def _new_journal(src: Path, staged: Path, placed: "dict | None", units: "list[tu
     rows = []
     if placed is not None and placed["unit"] is not None:
         a_src, a_dst = placed["unit"]
-        rows.append({"name": "archive", "src": str(a_src.resolve()), "dst": str(a_dst.resolve()),
+        rows.append({"name": "archive", "src": str(a_src.resolve()), "dst": str(_entry_path(a_dst)),
                      "digest": unit_digest(a_src), "started": False, "done": False})
     for u_src, u_dst in units:
-        rows.append({"name": u_dst.name, "src": str(u_src.resolve()), "dst": str(u_dst.resolve()),
+        rows.append({"name": u_dst.name, "src": str(u_src.resolve()), "dst": str(_entry_path(u_dst)),
                      "digest": unit_digest(u_src), "started": False, "done": False})
     h = hashlib.sha256()
     with open(src, "rb") as f:

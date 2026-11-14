@@ -269,7 +269,8 @@ def test_resume_refuses_a_swapped_unit_that_changed_before_it_completed(world, t
 
 
 FORGED = {"dst": "destination outside", "src": "outside its staging", "unit name": "a backup never captures",
-          "staging dir": "not a restore's own", "archive dst": "not beside its staging dir"}
+          "staging dir": "not a restore's own", "archive dst": "not beside its staging dir",
+          "symlinked unit": "destination outside", "archive dst '..'": "not beside its staging dir"}
 
 
 @pytest.mark.parametrize("forgery", sorted(FORGED))
@@ -279,7 +280,7 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
     staged in its own staging dir beside its destination. A journal that says otherwise is refused, and nothing is
     renamed or removed."""
     target = _target(world, tmp_path)
-    arch = tmp_path / "ebs" / "archive" if forgery == "archive dst" else None
+    arch = tmp_path / "ebs" / "archive" if forgery.startswith("archive dst") else None
     assert _kill_at(world, target, "restore_after_journal", archive_dir=arch).returncode == KILLED
     jp = target / "restore-journal.json"
     j = json.loads(jp.read_text())
@@ -291,6 +292,14 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         floor["name"], floor["dst"] = "../elsewhere", str(elsewhere)        # resolves to (home / name)
     elif forgery == "staging dir":
         j["staging"] = str(tmp_path)                                         # still holds every staged unit
+    elif forgery == "symlinked unit":                                        # the unit's entry points elsewhere
+        elsewhere.mkdir()
+        (elsewhere / "keep").write_text("not the restore's")
+        (target / "floor.json").unlink()
+        (target / "floor.json").symlink_to(elsewhere)
+        floor["dst"] = str(elsewhere.resolve())
+    elif forgery == "archive dst '..'":                                     # beside its staging dir, but not a name
+        next(u for u in j["units"] if u["name"] == "archive")["dst"] = str(tmp_path / "ebs" / "..")
     else:
         next(u for u in j["units"] if u["name"] == "archive")["dst"] = str(elsewhere / "archive")
     jp.write_text(json.dumps(j))
@@ -298,7 +307,22 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
     for action in ("--resume", "--abort"):
         r = _cli(target, "restore", action, str(target))
         assert r.returncode == 1 and "refusing" in r.stderr and FORGED[forgery] in r.stderr, (action, r.stderr)
-    assert not elsewhere.exists() and _tree(tmp_path) == before
+    assert _tree(tmp_path) == before
+    assert (elsewhere / "keep").read_text() == "not the restore's" if forgery == "symlinked unit" else not elsewhere.exists()
+
+
+def test_a_unit_entry_that_is_a_symlink_is_replaced_never_its_target(world, tmp_path):
+    """A journaled swap replaces the unit's entry in the home: a symlink there is replaced by the restored unit, and
+    the dir it pointed to is left as it was (also when the restore is resumed)."""
+    target = _target(world, tmp_path)
+    outside = tmp_path / "outside-floor"
+    (target / "floor.json").rename(outside)
+    (target / "floor.json").symlink_to(outside)
+    before = outside.read_bytes()
+    assert _kill_at(world, target, "restore_after_journal").returncode == KILLED
+    assert _cli(target, "restore", "--resume", str(target)).returncode == 0
+    assert not (target / "floor.json").is_symlink() and outside.read_bytes() == before
+    _assert_restored(target)
 
 
 def test_a_new_restore_over_an_interrupted_one_needs_force(world, tmp_path):
