@@ -84,12 +84,14 @@ def test_a_completed_launch_stays_settled_after_the_move(trees, monkeypatch):
 
 
 def test_a_started_launch_stays_started_after_the_move(trees, monkeypatch):
-    legacy, seam, _ = trees
+    legacy, seam, spool = trees
     s = _store()
     _seat(s)
     r = _reserve(s)                                                        # started (published), unsettled
+    for sub in ("incoming", "working", "processed", "rejected"):          # the drain's spool: no completion yet
+        (spool / sub).mkdir(parents=True)
     _move(monkeypatch, seam)
-    assert _apply(s, seam, legacy, now=NOW + 60)[0] == 0
+    assert _apply(s, seam, legacy, now=NOW + 60, spool=spool)[0] == 0
     with pytest.raises(ProvisionDenied, match="has been started"):
         _cancel(s, r, now=NOW + 120)
     assert _avail(s) == 70

@@ -260,18 +260,16 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
                       if cls.rule != "key" else "the seam holds a different offense-governance key")
     plan["_rules"] = {c.name: c.rule for c in active_classes(env)}
     plan["classes"] = counts
-    plan["requeue"], plan["held"] = _completion_plan(spool, [x for x in leases if x["state"] == "expired_unsettled"])
+    plan["requeue"], plan["held"] = _completion_plan(spool, [x for x in leases if x["state"] != "settled"])
     plan["status"] = "conflict" if plan["conflicts"] else "planned"
     return plan
 
 
 def _envelope_target(p: Path) -> "Optional[tuple[str, str]]":
-    """``(slug, nonce)`` an archived completion envelope names (UNVERIFIED — the drain verifies it), else None."""
+    """``(slug, nonce)`` an archived completion envelope names (UNVERIFIED — the drain verifies it), else None. Raises
+    ``OSError`` / ``ValueError`` when the file cannot be read as JSON."""
     from .inbound.completion_spool import _SEAM_SCHEMA as COMPLETION_SEAM_SCHEMA
-    try:
-        obj = json.loads(_read_bounded(p).decode("utf-8"))
-    except (OSError, ValueError):
-        return None
+    obj = json.loads(_read_bounded(p).decode("utf-8"))
     doc = obj.get("document") if isinstance(obj, dict) else None
     if not isinstance(doc, dict) or obj.get("schema") != COMPLETION_SEAM_SCHEMA:
         return None
@@ -279,32 +277,55 @@ def _envelope_target(p: Path) -> "Optional[tuple[str, str]]":
     return (str(slug), str(nonce)) if slug and nonce else None
 
 
-def _completion_plan(spool: Any, expired: "list[dict]") -> "tuple[list, list]":
-    """For each expired, unsettled legacy launch: the archived completions in ``<spool>/processed`` that name it
-    (to requeue), or — when no completion names it anywhere in the spool (or there is no spool) — a hold for the
-    owner."""
-    want = {(x["slug"], x["nonce"]) for x in expired}
+def _spool_names(d: Path) -> "list[str]":
+    """The ``*.json`` names in a spool subdirectory: [] when it does not exist; raises ``OSError`` when it exists but
+    cannot be listed."""
+    try:
+        return sorted(n for n in os.listdir(d) if n.endswith(".json") and not n.startswith(".tmp-"))
+    except FileNotFoundError:
+        return []
+
+
+def _completion_plan(spool: Any, unsettled: "list[dict]") -> "tuple[list, list]":
+    """For each UNSETTLED legacy launch — its window open or closed — the archived completions in
+    ``<spool>/processed`` that name it, to requeue: a completion a drain archived as a no-op while it read another
+    directory reaches the drain again once the lease is on the seam, so a run that ended is settled at its outcome
+    whenever the migration runs. A launch whose completion is already waiting (``incoming`` / ``working`` /
+    ``rejected``) is left to the drain. HELD for the owner (``legacy_hold``; no money moves): an EXPIRED launch with
+    no completion anywhere in the spool, and — when the spool is absent or cannot be read in full — every unsettled
+    launch with no completion found, since an archived completion of it cannot be ruled out. Returns
+    ``(requeue names, held)``."""
+    want = {(x["slug"], x["nonce"]): x["state"] for x in unsettled}
     if not want:
         return [], []
     found: "dict[tuple[str, str], list[str]]" = {}
     pending: "set[tuple[str, str]]" = set()
-    subs = ("processed", "incoming", "working", "rejected") if spool is not None else ()
-    for sub in subs:
+    present = spool is not None and Path(spool).is_dir()
+    clean = present
+    for sub in ("processed", "incoming", "working", "rejected") if clean else ():
         d = Path(spool) / sub
         try:
-            names = sorted(f.name for f in d.glob("*.json"))
+            names = _spool_names(d)
         except OSError:
-            names = []
+            clean = False
+            continue
         for name in names:
-            t = _envelope_target(d / name)
+            try:
+                t = _envelope_target(d / name)
+            except (OSError, ValueError):
+                if sub == "processed":          # an archived completion we cannot read could be any launch's
+                    clean = False
+                continue
             if t in want:
                 if sub == "processed":
                     found.setdefault(t, []).append(name)
                 else:
                     pending.add(t)
     requeue = sorted(n for t, ns in found.items() if t not in pending for n in ns)
-    held = [{"slug": s, "nonce": n, "why": "no archived completion"} for s, n in sorted(want)
-            if (s, n) not in found and (s, n) not in pending]
+    why = ("no archived completion" if clean else
+           "the completion spool cannot be read in full" if present else "no completion spool to inspect")
+    held = [{"slug": s, "nonce": n, "why": why} for (s, n), state in sorted(want.items())
+            if (s, n) not in found and (s, n) not in pending and (state == "expired_unsettled" or not clean)]
     return requeue, held
 
 
@@ -479,22 +500,21 @@ def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *
 
 
 def _requeue(seam_s: str, plan: dict, journal: dict, srcj: dict, spool: Any) -> "tuple[list[str], list[dict]]":
-    """Hand each EXPIRED, UNSETTLED legacy launch's archived completion back to the settle drain: under the
-    completion spool's exclusive lock (taken after the settle lock, the sweep's order), journal the move, then move
-    ``<spool>/processed/<name>`` to ``incoming/<name>``. The drain verifies it under its delegation and settles the
-    launch on the seam at the completion's outcome; settle idempotency per (slug, nonce) is the backstop. A settled
-    launch's completion is never selected. An expired, unsettled launch with no completion anywhere in the spool is
-    HELD for the owner (``legacy_hold`` in both reservation sweeps; no money moves). The settle drain's scan
-    checkpoint is removed, so its next pass reads the whole spine (lease bundles reached the seam without a publish).
-    Returns ``(requeued names, held)``."""
+    """Hand each UNSETTLED legacy launch's archived completion (its window open or closed) back to the settle drain:
+    under the completion spool's exclusive lock (taken after the settle lock, the sweep's order), journal the move,
+    then move ``<spool>/processed/<name>`` to ``incoming/<name>``. The drain verifies it under its delegation and
+    settles the launch on the seam at the completion's outcome; settle idempotency per (slug, nonce) is the backstop.
+    A settled launch's completion is never selected. A launch :func:`_completion_plan` holds (expired with no
+    completion anywhere in the spool; any unsettled one without a completion when the spool cannot be read in full)
+    is HELD for the owner (``legacy_hold`` in both reservation sweeps and the drain's expired-pause pass; no money
+    moves). The settle drain's scan checkpoint is removed, so its next pass reads the whole spine (lease bundles
+    reached the seam without a publish). Returns ``(requeued names, held)``."""
     from vigil_integration.live.seam_lock import LockBusy, locked_file
     from vigil_integration.seam_migration import write_journal
-    expired = [x for x in plan.get("_leases", []) if x["state"] == "expired_unsettled"]
-    if spool is None:
-        return [], _completion_plan(None, expired)[1]
-    sp = Path(spool)
-    if not sp.is_dir():
-        return [], _completion_plan(None, expired)[1]
+    unsettled = [x for x in plan.get("_leases", []) if x["state"] != "settled"]
+    sp = Path(spool) if spool is not None else None
+    if sp is None or not sp.is_dir():
+        return [], _completion_plan(None, unsettled)[1]
     lock = locked_file(sp / ".spool.lock", wait_s=5.0)
     try:
         lock.__enter__()
@@ -502,7 +522,7 @@ def _requeue(seam_s: str, plan: dict, journal: dict, srcj: dict, spool: Any) -> 
         raise MigrateAborted(f"the completion spool {sp} is locked or unusable ({type(e).__name__}); stop the settle "
                              f"drain and retry") from e
     try:
-        names, held = _completion_plan(sp, expired)
+        names, held = _completion_plan(sp, unsettled)
         planned = sorted(set(srcj.get("requeue_planned") or []) | set(names))
         if planned != (srcj.get("requeue_planned") or []):
             srcj["requeue_planned"] = planned

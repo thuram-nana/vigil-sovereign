@@ -3,16 +3,23 @@
 A completion the settle drain archived as a no-op because it read another directory than the one the cockpit
 published the lease in (``processed/``) is handed back to the drain (``incoming/``) once the lease is on the seam: the
 drain verifies it under its delegation and settles the launch on the seam at the completion's outcome — completed is
-charged, canceled or failed is refunded. Only an EXPIRED, UNSETTLED legacy launch's completion is selected; a settled
-launch's completion stays archived. An expired, unsettled launch with no completion anywhere in the spool is HELD for
-the owner: both reservation sweeps report it ``legacy_hold`` and never settle it. The drain's scan checkpoint is
-removed (the next pass reads the whole spine), and a checkpoint naming another seam is never continued.
+charged, canceled or failed is refunded. Every UNSETTLED legacy launch's completion is selected, whether its window was
+still open when the migration ran or had closed, so a run that ended is settled at its outcome exactly once whenever
+the upgrade happens; a settled launch's completion stays archived. An expired, unsettled launch with no completion
+anywhere in the spool is HELD for the owner, and so is every unsettled launch without a completion found when the spool
+is absent or cannot be read in full: both reservation sweeps report it ``legacy_hold`` and never settle it. The drain's
+scan checkpoint is removed (the next pass reads the whole spine), and a checkpoint naming another seam is never
+continued.
 
 Sovereign leg: PYTHONPATH=apps/sigil:integration:packages/core/vigil_core.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * requeue before the lease is on the seam                 -> test_a_completed_launch_is_charged_through_its_requeued_completion
   * a settled launch's completion requeued                  -> test_a_settled_launchs_completion_stays_archived
+  * only an expired launch's completion requeued            -> test_a_live_launchs_archived_completion_is_requeued_and_charged
+  * the report plans only an expired launch's requeue        -> test_the_report_lists_a_live_launchs_archived_completion
+  * a live launch held while the spool was read in full     -> test_a_live_launchs_archived_completion_is_requeued_and_charged
+  * an unreadable spool not holding a live launch           -> test_a_live_launch_is_held_when_the_spool_cannot_be_read
   * legacy_hold not honoured by the sweep                    -> test_a_held_launch_is_never_settled_by_the_sweep
   * the scan checkpoint kept                                 -> test_the_scan_checkpoint_is_removed
   * the checkpoint's seam identity dropped                   -> test_a_checkpoint_from_another_seam_is_not_continued
@@ -106,7 +113,35 @@ def test_a_settled_launchs_completion_stays_archived(trees, monkeypatch, tmp_pat
     assert (spool / "processed" / name).is_file() and not list((spool / "incoming").glob("*.json"))
 
 
-def test_a_live_launchs_completion_is_left_for_its_window(trees, monkeypatch, tmp_path):
+@pytest.mark.parametrize("outcome,refund", [("completed", 0), ("canceled", 30)])
+def test_a_live_launchs_archived_completion_is_requeued_and_charged(trees, monkeypatch, tmp_path, outcome, refund):
+    """The run ended (its completion archived as a no-op by a drain that read another directory) while its window was
+    still open at the upgrade: the completion is requeued, the drain settles it on the seam at its outcome, and the
+    abandoned sweep after the window finds it settled — charged exactly once, whenever the migration ran."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    gov, deleg = _deleg()
+    name = _archived_noop(s, spool, gov, deleg, r, outcome, tmp_path / "wrong-tree")
+    _move(monkeypatch, seam)
+    code, rep = _apply(s, seam, legacy, spool, now=NOW + 60)               # the window is still open
+    src = rep["sources"][0]
+    assert code == 0 and src["leases"][0]["state"] == "live", rep
+    assert src["requeue"] == [name] and src["held"] == []
+    assert (spool / "incoming" / name).is_file() and not (spool / "processed" / name).exists()
+    assert _drain(s, spool, deleg, seam, now=NOW + 120)["settled"] == 1
+    assert _avail(s) == 70 + refund and is_lease_settled(str(seam), r["slug"], r["nonce"])
+    gate = LaunchGate(s)
+    out = ops_sweeps.sweep_abandoned_reservations(gate, now=LATE + 90_000, ttl_s=50, apply=True,
+                                                  completion_spool=str(spool))
+    assert [x for x in out["items"] if x["slug"] == r["slug"]] == [], out
+    assert _drain(s, spool, deleg, seam, now=LATE + 90_100)["settled"] == 0
+    assert _avail(s) == 70 + refund                                        # exactly once
+
+
+def test_the_report_lists_a_live_launchs_archived_completion(trees, monkeypatch, tmp_path):
+    """Report-only shows the requeue --apply will make for a launch whose window is still open; nothing moves."""
     legacy, seam, spool = trees
     s = _store()
     _seat(s)
@@ -114,9 +149,58 @@ def test_a_live_launchs_completion_is_left_for_its_window(trees, monkeypatch, tm
     gov, deleg = _deleg()
     name = _archived_noop(s, spool, gov, deleg, r, "completed", tmp_path / "wrong-tree")
     _move(monkeypatch, seam)
-    code, rep = _apply(s, seam, legacy, spool, now=NOW + 60)               # the window is still open
-    assert code == 0 and rep["sources"][0]["requeue"] == []
-    assert (spool / "processed" / name).is_file()
+    code, rep = seam_migrate.run(s, ensure_owner_keypair(), seam=seam, sources=[str(legacy)], spool=spool,
+                                 apply=False, now=NOW + 60)
+    assert code == 0 and rep["sources"][0]["requeue"] == [name] and rep["sources"][0]["held"] == []
+    assert (spool / "processed" / name).is_file() and not list((spool / "incoming").glob("*.json"))
+
+
+def test_a_live_launch_with_no_completion_is_neither_requeued_nor_held(trees, monkeypatch):
+    """A run still going at the upgrade: nothing to requeue, nothing held — its completion reaches the drain on the
+    seam, where its lease now is."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    for sub in ("incoming", "working", "processed", "rejected"):
+        (spool / sub).mkdir(parents=True)
+    _move(monkeypatch, seam)
+    code, rep = _apply(s, seam, legacy, spool, now=NOW + 60)
+    assert code == 0 and rep["sources"][0]["requeue"] == [] and rep["sources"][0]["held"] == []
+    assert sm.held_launches(seam) == set() and read_credit_lease(str(seam), r["slug"]) is not None
+
+
+@pytest.mark.parametrize("damage", ["unreadable_archive", "unlistable_archive", "no_spool"])
+def test_a_live_launch_is_held_when_the_spool_cannot_be_read(trees, monkeypatch, tmp_path, damage):
+    """An archived completion the migration cannot read (or no spool to read) could be this launch's: held for the
+    owner, never left for the abandoned sweep to refund."""
+    legacy, seam, spool = trees
+    s = _store()
+    _seat(s)
+    r = _reserve(s)
+    for sub in ("incoming", "working", "processed", "rejected"):
+        (spool / sub).mkdir(parents=True)
+    if damage == "unreadable_archive":
+        (spool / "processed" / ("0" * 64 + ".json")).write_text("{truncated")
+    if damage == "unlistable_archive":
+        real = seam_migrate._spool_names
+
+        def _names(d):
+            if d.name == "processed":
+                raise PermissionError(13, "Permission denied", str(d))
+            return real(d)
+        monkeypatch.setattr(seam_migrate, "_spool_names", _names)
+    _move(monkeypatch, seam)
+    code, rep = _apply(s, seam, legacy, tmp_path / "no-such-spool" if damage == "no_spool" else spool, now=NOW + 60)
+    src = rep["sources"][0]
+    assert code == 1 and src["status"] == "migrated" and src["requeue"] == []
+    assert [(h["slug"], h["nonce"]) for h in src["held"]] == [(r["slug"], r["nonce"])]
+    assert sm.held_launches(seam) == {(r["slug"], r["nonce"])}
+    gate = LaunchGate(s)
+    out = ops_sweeps.sweep_abandoned_reservations(gate, now=LATE + 90_000, ttl_s=50, apply=True,
+                                                  completion_spool=str(spool))
+    assert [x["status"] for x in out["items"] if x["slug"] == r["slug"]] == ["legacy_hold"], out
+    assert _avail(s) == 70
 
 
 def test_an_expired_launch_without_a_completion_is_held(trees, monkeypatch):
