@@ -110,6 +110,40 @@ class BillingEvent:
     data: Mapping[str, Any] = field(default_factory=dict)   # extra normalised fields (verbatim, untrusted detail)
 
 
+#: Why ``BillingSigner.ingest_outcome`` moved money or not — REPORT-ONLY (the billing drain records it beside each
+#: archived envelope; the dangling-checkout sweep reads it). No money path ever reads it.
+OUTCOME_MINTED = "minted"                    # the mint (or the state change) was appended now
+OUTCOME_ALREADY_MINTED = "already_minted"    # a credit-plan period this event paid for is already delivered
+#: the no-op reasons, one per place the signer mints nothing
+NOOP_REASONS: "tuple[str, ...]" = (
+    "not_mintable",            # the provider verified nothing it mints on (or did not verify)
+    "no_line",                 # a cancel / failed charge for a line this signer does not hold
+    "unknown_price",           # the price is not in the owner catalog
+    "no_verified_amount",      # a priced event without a verified currency (require_verified_amount)
+    "underpaid_or_currency",   # below the catalog price, or in another currency
+    "bad_event_id",            # an event id the ledgers cannot key
+    "no_monitoring_line",      # a monitoring period on a signer without the monitoring line
+    "stale_or_inert",          # a replayed / out-of-order event the fold does not honour
+    "no_entitlement",          # the event kind and the catalog entry do not mint together
+    "unrecorded",              # the signer's ingest was replaced and gave no outcome
+)
+
+
+@dataclass(frozen=True)
+class IngestOutcome:
+    """What one ingested webhook did: the appended spine ``seq`` (None when nothing was appended), the verified
+    ``event`` (None when the provider returned none) and the ``reason`` (``OUTCOME_MINTED``,
+    ``OUTCOME_ALREADY_MINTED`` or one of ``NOOP_REASONS``)."""
+    seq: Optional[int]
+    event: Optional["BillingEvent"]
+    reason: str
+
+    @property
+    def minted(self) -> bool:
+        """True iff the payment this event carries is credited (now, or by an earlier delivery of it)."""
+        return self.reason in (OUTCOME_MINTED, OUTCOME_ALREADY_MINTED)
+
+
 class BillingProvider(ABC):
     """A swappable payment provider. The ONLY trust operation is `verify_and_parse`: authenticate the raw webhook
     bytes against the provider's signature and return a normalised `BillingEvent`, or None if the signature does
@@ -539,7 +573,7 @@ class StripeBillingProvider(BillingProvider):
             return self._unaccounted(f"paid Stripe invoice {iid} for org {org!r} has no currency")
         return BillingEvent(event_id=iid, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                             price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
-                            data={"subscription": sub.get("id")})
+                            data={"subscription": sub.get("id"), "tx_ref": _stripe_meta(meta, "tx_ref")})
 
     def _map_invoice_failed(self, inv: "Mapping[str, Any]") -> Optional[BillingEvent]:
         if inv.get("status") not in ("open", "uncollectible"):
@@ -553,7 +587,8 @@ class StripeBillingProvider(BillingProvider):
         if org is None or created is None:
             return None
         return BillingEvent(event_id=str(inv["id"]), kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
-                            price_id=_stripe_meta(meta, "price_id"), data={"subscription": sub.get("id")})
+                            price_id=_stripe_meta(meta, "price_id"),
+                            data={"subscription": sub.get("id"), "tx_ref": _stripe_meta(meta, "tx_ref")})
 
 
 def _stripe_return_urls(redirect_url: object) -> "tuple[str, str]":
@@ -1151,19 +1186,47 @@ class BillingSigner:
         # bounds the amount. The Flutterwave adapter already enforces this itself (#1093); a signer serving another
         # provider sets it.
         self._require_verified_amount = bool(require_verified_amount)
+        self._last_outcome: Optional[IngestOutcome] = None
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
         catalog entitlement, or maps to a no-op. Idempotent by the provider event_id."""
+        out = self._ingest(raw_body, sig_header, now=now)
+        self._last_outcome = out
+        return out.seq
+
+    def ingest_outcome(self, raw_body: bytes, sig_header: str, *, now: float) -> IngestOutcome:
+        """``ingest``, also returning WHY it minted or not (``IngestOutcome``; report-only). It goes through
+        ``ingest`` itself, so a subclass that wraps ``ingest`` still sees every call; when such a wrapper returns
+        a seq this signer did not produce, the outcome is ``unrecorded`` (or minted, for a seq)."""
+        self._last_outcome = None
+        seq = self.ingest(raw_body, sig_header, now=now)
+        out, self._last_outcome = self._last_outcome, None
+        if out is None or out.seq != seq:
+            return IngestOutcome(seq, None, OUTCOME_MINTED if seq is not None else "unrecorded")
+        return out
+
+    def _ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> IngestOutcome:
         event = self.provider.verify_and_parse(raw_body, sig_header, now=now)
         if event is None:
-            return None                               # unverified / unhandled -> mint nothing
-        return self.apply(event, now=now)
+            return IngestOutcome(None, None, "not_mintable")   # unverified / unhandled -> mint nothing
+        seq, reason = self._apply_outcome(event, now=now)
+        return IngestOutcome(seq, event, reason)
 
     def apply(self, event: BillingEvent, *, now: float) -> Optional[int]:
         """Mint the sovereign record for an ALREADY-VERIFIED event. Separated from `ingest` so a caller that has
         its own verified-event source can reuse the deterministic mapping; external callers use `ingest`, which
         is the only path that enforces signature verification."""
+        return self._apply_outcome(event, now=now)[0]
+
+    @staticmethod
+    def _done(seq: Optional[int]) -> "tuple[Optional[int], str]":
+        """A state change that appended ``seq`` (minted), or nothing the fold would honour (stale_or_inert)."""
+        return seq, (OUTCOME_MINTED if seq is not None else "stale_or_inert")
+
+    def _apply_outcome(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
+        """``apply`` with the reason (``IngestOutcome.reason``) beside the seq. Every money decision is ``apply``'s;
+        the reason only names which of them was taken."""
         oid = event.org_id                            # already validated in verify_and_parse (_parse_org_id)
         ent = self.catalog.get(event.price_id)
         # Route by the FULL, flag-independent catalog (never the flag-filtered entitlements): a down event for a
@@ -1174,13 +1237,13 @@ class BillingSigner:
         monitoring = event.price_id in monitoring_price_ids() or (ent is not None and _is_monitoring_entitlement(ent))
         line = self.monitoring_subscriptions if monitoring else self.subscriptions
         if event.kind in (EVENT_SUBSCRIPTION_CANCELED, EVENT_PAYMENT_FAILED) and line is None:
-            return None
+            return None, "no_line"
         if event.kind == EVENT_SUBSCRIPTION_CANCELED:
-            return line.cancel(oid)                   # safe direction, honored on sight, replay-safe
+            return self._done(line.cancel(oid))       # safe direction, honored on sight, replay-safe
         if event.kind == EVENT_PAYMENT_FAILED:
             # Webhook-driven dunning (H4): carry the provider event's `created` as the down-latch freshness key so
             # a stale / out-of-order / replayed failed-charge cannot re-suspend a tenant who has since recovered.
-            return line.mark_past_due(oid, issued_at=event.created)
+            return self._done(line.mark_past_due(oid, issued_at=event.created))
         # CHK-1b red-pen MED: a verified SUCCESSFUL charge for a catalog SUBSCRIPTION price that arrived WITHOUT
         # payment_plan maps to a top-up and would fall through to "mint nothing" — the charged-for-nothing hole
         # again. With the plan alarm armed it is quarantined (loud), never a silent no-op.
@@ -1194,7 +1257,7 @@ class BillingSigner:
                 raise UnaccountedPayment(f"verified subscription charge {event.event_id} for org {oid!r} names "
                                          f"price {event.price_id!r}, which is not in the owner catalog — paid but "
                                          f"UN-MINTED; reconcile by hand")
-            return None                               # unknown price -> no entitlement -> mint nothing
+            return None, "unknown_price"              # unknown price -> no entitlement -> mint nothing
         # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
         # amount below the owner catalog's expected price (or in the wrong currency): belt-and-suspenders on top of
         # "the price_id we set at checkout". Fires only when (a) an expected price is configured for this price_id
@@ -1208,7 +1271,7 @@ class BillingSigner:
                     raise UnaccountedPayment(
                         f"verified plan charge {event.event_id} for org {oid!r} carries no verified amount/currency "
                         f"for {event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
-                return None                           # no verified amount/currency -> mint nothing (fail-closed)
+                return None, "no_verified_amount"     # no verified amount/currency -> mint nothing (fail-closed)
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
                     if self._alarm_unaccounted_plans and event.kind == EVENT_SUBSCRIPTION_ACTIVE:
@@ -1218,7 +1281,7 @@ class BillingSigner:
                             f"verified plan charge {event.event_id} for org {oid!r} paid "
                             f"{event.amount_minor} {event.currency} but the catalog expects {exp[0]} {exp[1]} for "
                             f"{event.price_id!r} — paid but UN-MINTED; reconcile the processor plan vs the catalog")
-                    return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
+                    return None, "underpaid_or_currency"   # underpaid / wrong currency -> mint nothing (fail-closed)
             # Red-pen FINDING 1: event_id is the idempotency anchor for the wallet entry_id (top-up) AND the
             # invoice_id (both value paths), but verify_and_parse only checks it is a non-empty str. Bound it to
             # the SAME shape the wallet/invoice ledgers require (<= 128, non-control) HERE, so a pathological id
@@ -1231,7 +1294,7 @@ class BillingSigner:
             # this bound closes (red-pen completeness-critic). Stripping fails it CLOSED here, symmetric.
             eid = str(event.event_id or "").strip()
             if not eid or len(eid) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in eid):
-                return None
+                return None, "bad_event_id"
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:
             # idempotent by event_id: a duplicate delivery reuses the same wallet entry_id -> folded once.
             seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
@@ -1239,7 +1302,7 @@ class BillingSigner:
             if seq is not None:                       # record the history line only for a mint that took effect
                 self._maybe_unlock(oid, event, "topup")
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
-            return seq
+            return self._done(seq)
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0 and monitoring:
             return self._apply_monitoring(oid, event, ent)
@@ -1263,14 +1326,17 @@ class BillingSigner:
             # is also written on a re-drive that finds this event's period honoured, active and DELIVERED (its
             # tranche granted) yet not invoiced under any event id — never for a stale event, an undelivered
             # period, or a second distinct event for a period already invoiced.
-            if self._period_delivered_unrecorded(oid, event, ent, period_end):
+            delivered = self._period_delivered_unrecorded(oid, event, ent, period_end)
+            if delivered:
                 self._maybe_unlock(oid, event, "subscription")
                 self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
                                      period_start=event.created, period_end=period_end)
-            return seq
-        return None
+            if seq is None and delivered:
+                return None, OUTCOME_ALREADY_MINTED   # this event's period is the honoured, delivered one
+            return self._done(seq)
+        return None, "no_entitlement"
 
-    def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> Optional[int]:
+    def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> "tuple[Optional[int], str]":
         """A paid AEGIS monitoring period: mint the SEPARATE monitoring line (no credit refill; the credit-plan
         subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /
         replayed period is inert), then hand the change to the provisioner hook."""
@@ -1282,18 +1348,18 @@ class BillingSigner:
                 raise UnaccountedPayment(f"verified monitoring charge {event.event_id} for org {oid!r} "
                                          f"(price {event.price_id!r}) reached a signer with no monitoring line "
                                          f"— paid but UN-MINTED; reconcile by hand")
-            return None
+            return None, "no_monitoring_line"
         period_end = event.created + float(ent.period_s)
         seq = self.monitoring_subscriptions.subscribe(oid, ent.plan_id, 0, period_start=event.created,
                                                       period_end=period_end, issued_at=event.created)
         s = self.monitoring_subscriptions.subscription(oid)
         if s is None or (s.plan_id, s.period_start, s.period_end) != (ent.plan_id, float(event.created), period_end):
-            return None
+            return None, "stale_or_inert"
         self._record_invoice(oid, event, "subscription", credits=0, period_start=event.created,
                              period_end=period_end)
         if self.on_monitoring_change is not None:
             self.on_monitoring_change(oid, event.created)
-        return seq
+        return self._done(seq)
 
     def _period_delivered_unrecorded(self, oid: str, event: BillingEvent, ent: Entitlement,
                                      period_end: float) -> bool:

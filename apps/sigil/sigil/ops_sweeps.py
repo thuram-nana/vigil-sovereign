@@ -11,9 +11,12 @@
 
 2. DANGLING FLUTTERWAVE tx_refs. Nothing on the spine durably records a started checkout, so the operator supplies
    the started set (JSONL of ``{"tx_ref", "created"}``, e.g. the checkout log / a provider export). Each tx_ref
-   older than ``ttl_s`` is classified against the billing spool: ``handled`` (a webhook carrying it was drained to
-   ``processed/``), ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), ``retrying`` (parked in
-   ``retry/`` for a bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``. REPORT
+   older than ``ttl_s`` is classified against the billing spool, by what the drain recorded for each archived
+   envelope (``outcomes/<sha256>.outcome`` beside ``processed/<sha256>.json``): handled (an envelope carrying it MINTED — not reported),
+   ``noop`` (every envelope carrying it was archived without crediting anything; the row names the reasons),
+   ``processed_unrecorded`` (archived with no outcome recorded — e.g. drained before outcomes were recorded),
+   ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), ``retrying`` (parked in ``retry/`` for a
+   bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``, in that precedence. REPORT
    ONLY: this sweep never mints, never calls the provider, and never moves a file.
 
 3. INTERRUPTED RECORDED SETTLES (``finish_interrupted_settles``, run by the settle drain on every pass while
@@ -716,9 +719,9 @@ def sweep_postpaid_reconciliation(postpaid: Any, arrears: Any, invoices: Any, *,
     return {"applied": False, "items": rows}
 
 
-def _iter_spool_bodies(d: Path) -> Iterable[dict]:
-    """Yield every decodable webhook body (JSON object) in a billing-spool subdir. Never follows symlinks,
-    never raises on a hostile/malformed file (it is simply skipped)."""
+def _iter_spool_envelopes(d: Path) -> "Iterable[tuple[Path, object, dict]]":
+    """Yield ``(path, envelope schema, body)`` for every decodable webhook body (JSON object) in a billing-spool
+    subdir. Never follows symlinks, never raises on a hostile/malformed file (it is simply skipped)."""
     if not d.is_dir():
         return
     for fp in sorted(d.glob("*.json")):
@@ -730,7 +733,35 @@ def _iter_spool_bodies(d: Path) -> Iterable[dict]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
         if isinstance(body, dict):
-            yield body
+            yield fp, env.get("schema"), body
+
+
+def _iter_spool_bodies(d: Path) -> Iterable[dict]:
+    """Yield every decodable webhook body (JSON object) in a billing-spool subdir (``_iter_spool_envelopes``)."""
+    for _fp, _schema, body in _iter_spool_envelopes(d):
+        yield body
+
+
+#: The envelope schema each provider's drain archives (a recorded outcome counts only for its own provider).
+_PROVIDER_SCHEMA = {"flutterwave": "vigil.webhook.billing.v1", "stripe": "vigil.webhook.stripe.v1"}
+_MAX_OUTCOME = 4096
+
+
+def _recorded_outcome(fp: Path) -> Optional[dict]:
+    """The outcome the billing drain recorded for archived envelope ``processed/<sha256>.json``
+    (``outcomes/<sha256>.outcome``), or None when there is none or it is unreadable / malformed (reported as
+    unrecorded: noisy, never silently handled)."""
+    from .inbound.billing_spool import OUTCOME_SUFFIX, OUTCOMES_DIRNAME
+    p = fp.parent.parent / OUTCOMES_DIRNAME / (fp.stem + OUTCOME_SUFFIX)
+    try:
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > _MAX_OUTCOME:
+            return None
+        o = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(o, dict) or o.get("outcome") not in ("minted", "noop"):
+        return None
+    return o
 
 
 def _body_tx_ref(body: dict, provider: str = "flutterwave") -> Optional[str]:
@@ -771,7 +802,25 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
     if provider not in ("flutterwave", "stripe"):
         raise ValueError(f"unknown billing provider {provider!r}")
     spool = Path(spool_dir)
-    handled = {r for b in _iter_spool_bodies(spool / "processed") if (r := _body_tx_ref(b, provider))}
+    # processed/: what the drain recorded beside each archived envelope decides. An envelope counts for the refs it
+    # carries — its body's reference and, for this provider's envelopes, the reference its outcome names (a Stripe
+    # plan's invoice names its checkout only through the subscription the drain fetched).
+    minted: set[str] = set()
+    noop: "dict[str, set[str]]" = {}
+    unrecorded: set[str] = set()
+    for fp, schema, body in _iter_spool_envelopes(spool / "processed"):
+        side = _recorded_outcome(fp)
+        refs = {r} if (r := _body_tx_ref(body, provider)) else set()
+        side_ref = side.get("tx_ref") if side is not None and schema == _PROVIDER_SCHEMA[provider] else None
+        if isinstance(side_ref, str) and side_ref:
+            refs.add(side_ref)
+        if side is None:
+            unrecorded |= refs
+        elif side["outcome"] == "minted":
+            minted |= refs
+        else:
+            for ref in refs:
+                noop.setdefault(ref, set()).add(str(side.get("reason") or ""))
     quarantined = {r for b in _iter_spool_bodies(spool / "rejected") if (r := _body_tx_ref(b, provider))}
     # NET-2b: a webhook parked for a bounded transient-verify retry is PENDING, not missing (no retry/ ⇒ unchanged)
     retrying = {r for b in _iter_spool_bodies(spool / "retry") if (r := _body_tx_ref(b, provider))}
@@ -782,9 +831,13 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
         if ref in seen or c["created"] + ttl_s > now:
             continue
         seen.add(ref)
-        if ref in handled:
+        if ref in minted:
+            continue                                     # credited: only a MINTED outcome counts as handled
+        if ref in noop:
+            rows.append({"tx_ref": ref, "created": c["created"], "status": "noop", "reasons": sorted(noop[ref])})
             continue
         rows.append({"tx_ref": ref, "created": c["created"],
-                     "status": ("quarantined" if ref in quarantined else
+                     "status": ("processed_unrecorded" if ref in unrecorded else
+                                "quarantined" if ref in quarantined else
                                 "retrying" if ref in retrying else "no_webhook")})
     return {"applied": False, "items": rows}

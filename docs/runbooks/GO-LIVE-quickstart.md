@@ -209,7 +209,11 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    with no credit.
 
 `sigil ops-sweep tx-refs --provider stripe --spool <stripe spool> --checkouts <file>` reports Stripe checkouts
-that never reached a drained webhook. Webhook-driven cancellation is not acted on: a cancelled plan expires at
+nothing has credited. The drain records what each webhook it archives did (`<spool>/outcomes/`, beside
+`processed/`), and a checkout is left out only when a webhook for it minted; the others are reported as `noop`
+(archived without crediting anything — the row names why, e.g. `underpaid_or_currency`, `unknown_price`),
+`processed_unrecorded` (archived before outcomes were recorded), `quarantined`, `retrying` or `no_webhook`. The
+same applies to the Flutterwave spool (without `--provider`). Webhook-driven cancellation is not acted on: a cancelled plan expires at
 the end of its paid period, as with Flutterwave.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

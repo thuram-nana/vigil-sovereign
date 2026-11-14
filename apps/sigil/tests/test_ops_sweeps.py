@@ -133,12 +133,20 @@ def _env(body: dict) -> str:
                        "body_b64": base64.b64encode(json.dumps(body).encode()).decode()})
 
 
+def _outcome(spool, name: str, outcome: str = "minted", reason: str = "minted", tx_ref: str = "") -> None:
+    """What the billing drain records for the archived envelope ``processed/<name>.json``."""
+    (spool / "outcomes").mkdir(exist_ok=True)
+    (spool / "outcomes" / f"{name}.outcome").write_text(json.dumps(
+        {"v": 1, "outcome": outcome, "reason": reason, "kind": "", "tx_ref": tx_ref}))
+
+
 def test_dangling_tx_refs_report_only(tmp_path):
     spool = tmp_path / "spool"
     for d in ("processed", "rejected", "incoming"):
         (spool / d).mkdir(parents=True)
     (spool / "processed" / "a.json").write_text(_env({"event": "charge.completed",
                                                        "data": {"id": 1, "tx_ref": "vigil:org_a:paid"}}))
+    _outcome(spool, "a")                                     # the drain minted it
     (spool / "rejected" / "b.json").write_text(_env({"event": "charge.completed",
                                                       "data": {"id": 2, "tx_ref": "vigil:org_a:quar"}}))
     (spool / "processed" / "junk.json").write_text("not json")
@@ -168,6 +176,7 @@ def test_dangling_tx_refs_read_stripe_bodies_with_the_stripe_provider(tmp_path):
                            "body_b64": base64.b64encode(json.dumps(
                                {"type": "checkout.session.completed", "data": {"object": obj}}).encode()).decode()})
     (spool / "processed" / "a.json").write_text(stripe({"id": "cs_test_1", "client_reference_id": "vigil:org_a:paid"}))
+    _outcome(spool, "a", tx_ref="vigil:org_a:paid")          # the drain minted it
     (spool / "rejected" / "b.json").write_text(stripe({"id": "in_1", "metadata": {"tx_ref": "vigil:org_a:quar"}}))
     (spool / "retry" / "c.json").write_text(stripe({"id": "cs_test_2", "client_reference_id": "vigil:org_a:wait"}))
     (spool / "processed" / "f.json").write_text(_env({"event": "charge.completed",

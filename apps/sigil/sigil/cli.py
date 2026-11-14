@@ -1394,7 +1394,8 @@ def cmd_ops_sweep(a) -> None:
     (exactly-once per (slug, nonce)) and additionally requires VIGIL_OPS_SWEEP_APPLY_ENABLED=1 (default OFF).
     ``reconcile`` (PP-4): per enterprise-postpaid org, report invoiced-vs-paid against real (net-settled)
     consumption, flagging uninvoiced-consumption / outstanding / overdue -> report only (retire abandoned
-    reserves via ``reservations --apply``). ``tx-refs``: dangling Flutterwave checkouts (no webhook drained) -> report only."""
+    reserves via ``reservations --apply``). ``tx-refs``: started checkouts nothing has credited (no webhook, or only
+    webhooks archived as a no-op / without a recorded outcome, or quarantined / retrying) -> report only."""
     import os
     import time as _time
 
@@ -3299,7 +3300,9 @@ def main(argv=None) -> None:
     pos.add_argument("--completion-spool", default="",
                      help="(reservations) the settle-drain completion spool; leases with a pending completion "
                           "are never refunded (required with --apply)")
-    pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}")
+    pos.add_argument("--checkouts", default="", help="(tx-refs) JSONL of started checkouts {tx_ref, created}; "
+                     "a checkout is reported unless a drained webhook for it minted (statuses: noop, "
+                     "processed_unrecorded, quarantined, retrying, no_webhook)")
     pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
     pos.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
                      help="(tx-refs) which processor's webhook spool --spool is")
