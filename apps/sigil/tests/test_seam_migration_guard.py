@@ -23,6 +23,9 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * an unreadable journal hides a former tree          -> test_an_unreadable_journal_never_hides_a_former_tree
   * upgrade --check / migrate without units use the cwd -> test_with_no_seam_unit_nothing_is_compared_or_guessed
   * the flag's code default ON                         -> test_the_flag_is_off_unless_set
+  * the console unit taken as a migration destination -> test_the_upgrade_procedure_on_a_console_host
+  * a tree carried into the units' seam still guarding the console's own seam
+                                                      -> test_the_upgrade_procedure_on_a_console_host
 """
 from __future__ import annotations
 
@@ -340,3 +343,39 @@ def test_with_no_seam_unit_nothing_is_compared_or_guessed(host, monkeypatch, cap
     monkeypatch.setenv("VIGIL_BASE_DIR", str(host["seam"]))
     assert _exit(["seam", "migrate", "--from", str(host["legacy"]), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["to"] == os.path.realpath(host["seam"])
+
+
+# ── a host with the operator console unit (its engine home stays in <repo>/.vigil-live) ──────────────────────────────
+
+def _install_console(h) -> Path:
+    """vigil-command.service installed beside the re-copied cockpit and settle-drain units; returns its seam."""
+    repo = h["tmp"] / "vigil"
+    (repo / ".vigil-live").mkdir(parents=True)
+    d = h["tmp"] / "home" / ".config" / "systemd" / "user"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "vigil-command.service").write_text(
+        (_REPO / "infra/systemd/vigil-command.service").read_text().replace("/home/kali/vigil", str(repo)))
+    return repo / ".vigil-live"
+
+
+def test_the_upgrade_procedure_on_a_console_host(host, serve_spy, monkeypatch, capsys):
+    """The runbook's upgrade on a host where the operator console unit keeps its engine home: `sigil seam migrate`
+    carries the former cockpit tree into the cockpit's and settle drain's seam (the console's seam is never the
+    destination), after which the cockpit serves; the cockpit the console spawns on its own seam is refused while the
+    former tree is not carried anywhere and serves once it is."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")                       # the operator's shell: units carry it
+    _install_units(host["tmp"] / "home")
+    console = _install_console(host)
+    ensure_owner_keypair()
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(console))                     # `vigil up` hands its base to the cockpit
+    assert _exit(["serve"]) == 2 and serve_spy["serve"] == 0               # nothing carried yet: refused
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(host["seam"]))                # the runbook's export
+    assert _exit(["seam", "migrate", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["to"] == os.path.realpath(host["seam"])
+    assert _exit(["seam", "migrate", "--apply"]) == 0, capsys.readouterr().err
+    assert sm.read_journal(host["seam"])["sources"][os.path.realpath(host["legacy"])]["state"] == "complete"
+    assert not sm.journal_path(console).exists()                           # the console's engine home is untouched
+    cli.main(["serve"])                                                    # the units' cockpit
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(console))
+    cli.main(["serve"])                                                    # the console's cockpit
+    assert serve_spy["serve"] == 2

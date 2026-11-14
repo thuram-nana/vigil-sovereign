@@ -17,6 +17,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * follow symlinks                                      -> test_a_symlink_in_a_class_path_is_unsafe
   * doctor wiring ``_issue`` (-> ``_note``)               -> test_doctor_reports_an_unmigrated_tree_as_a_hard_issue
   * a drop-in's ExecStart= reset keeping the old --spool -> test_the_settle_drains_spool_is_what_systemd_gives_it
+  * a tree carried into another unit's seam kept as this seam's candidate
+                                                         -> test_a_tree_carried_into_another_units_seam_is_not_this_seams_candidate
 """
 from __future__ import annotations
 
@@ -27,6 +29,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from vigil_integration import doctor as _doc
 from vigil_integration import seam_migration as sm
@@ -219,6 +223,33 @@ def test_the_settle_drains_spool_is_what_systemd_gives_it(tmp_path):
     assert unit_details(_REPO, home)[u]["spool"] == str(tmp_path / "env-spool")
     (dropins / "b.conf").write_text("[Service]\nExecStart=\nExecStart=/bin/true --scope x\n")
     assert unit_details(_REPO, home)[u]["spool"] is None
+
+
+@pytest.mark.parametrize("journal", ["complete", "applying", "unreadable"])
+def test_a_tree_carried_into_another_units_seam_is_not_this_seams_candidate(tmp_path, journal):
+    """The cockpit's former tree, migrated into the cockpit's and settle drain's seam, is that seam's former directory:
+    it is no longer a candidate for the console's own seam (its engine home). Until the migration commits, or while
+    that seam's journal cannot be read, it still is (fail-closed); it stays a candidate of the seam it went to."""
+    home, repo = tmp_path / "home", tmp_path / "vigil"
+    _install(home, "sigil-cockpit.service", "vigil-settle-drain.service")
+    d = home / ".config" / "systemd" / "user"
+    d.joinpath("vigil-command.service").write_text(
+        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+    console, seam = repo / ".vigil-live", home / ".sigil" / "credit-lease"
+    console.mkdir(parents=True)
+    former = home / ".sigil" / ".vigil-live"
+    record_lease_settlement(str(former), "cust_a", "n1")
+    units = unit_details(_REPO, home)
+    assert units["vigil-command.service"]["seam"] == str(console)
+    got = lambda s: sm.legacy_candidates(s, units=units, sigil_home=home / ".sigil", env={})  # noqa: E731
+    assert got(console) == [str(former)] and got(seam) == [str(former)]
+    if journal == "unreadable":
+        sm.journal_path(seam).parent.mkdir(parents=True)
+        sm.journal_path(seam).write_text("{truncated")
+    else:
+        _committed(seam, former, state=journal)
+    assert got(console) == ([] if journal == "complete" else [str(former)])
+    assert got(seam) == [str(former)]
 
 
 def test_writer_units_working_directory_default_is_a_candidate(tmp_path):

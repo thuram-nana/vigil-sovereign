@@ -41,8 +41,10 @@ GUARD_ENV = "VIGIL_SEAM_MIGRATION_GUARD"
 #: The configured units that WRITE the money seam (the backup units only capture it). Their working directories are
 #: where a CWD-relative ``.vigil-live`` default would have put an earlier seam (``seam_migration.legacy_candidates``).
 WRITER_SEAM_UNITS: "tuple[str, ...]" = ("sigil-cockpit.service", "vigil-settle-drain.service", "vigil-command.service")
-#: The units whose seam a money writer (``sigil seam migrate``) must agree with — one destination is required.
-MONEY_SEAM_UNITS: "tuple[str, ...]" = WRITER_SEAM_UNITS
+#: The units that publish (the cockpit) and settle (the settle drain) customer launches: ``sigil seam migrate`` carries
+#: a former tree into the seam they agree on. The operator console keeps its engine home in its own working directory
+#: (``vigil doctor`` reports a seam it does not share); it is never a migration destination.
+MONEY_SEAM_UNITS: "tuple[str, ...]" = ("sigil-cockpit.service", "vigil-settle-drain.service")
 
 
 def _spec(value: str, home: Path) -> str:

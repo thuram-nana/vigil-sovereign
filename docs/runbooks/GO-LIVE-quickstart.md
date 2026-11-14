@@ -163,13 +163,19 @@ vigil doctor                   # no `seam migration` issue left
 systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
 ```
 
+On a host where the operator console unit (`vigil-command.service`) is installed, the procedure is the same:
+`sigil seam migrate` carries the former tree into the seam the cockpit and the settle drain use, never into the
+console's engine home, and the cockpit `vigil up` starts on the console's own seam serves again once the migration
+commits. `vigil doctor` keeps reporting that the console's seam differs from the other units' (above); that is not a
+seam migration issue.
+
 Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
 eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an
 unsettled launch back to the settle drain, which settles it at its outcome, and holds for the owner a launch it
 cannot settle (no money moves for it). It reads the completion spool the configured settle drain drains (its unit,
-drop-ins and env file); a `--completion-spool` naming any other directory is refused. **Never run `sigil ops-sweep reservations --apply` against the former
-directory** (`--base-dir ~/.sigil/.vigil-live`); with the units' guard on it is refused, before and after the
-migration. Run the migration before you remove a leftover
+drop-ins and env file); a `--completion-spool` naming any other directory is refused. **Never run `sigil ops-sweep
+reservations --apply` against the former directory** (`--base-dir ~/.sigil/.vigil-live`); with the units' guard on
+it is refused, before and after the migration. Run the migration before you remove a leftover
 `VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and
 it holds the cockpit's own passkey store and bootstrap token.
 

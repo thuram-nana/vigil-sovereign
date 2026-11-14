@@ -313,8 +313,9 @@ def legacy_candidates(seam: Any, *, units: "Optional[Mapping[str, Mapping[str, A
     ``$SIGIL_HOME/.vigil-live``; ``<WorkingDirectory>/.vigil-live`` of each configured WRITER unit
     (``seam_base_units.WRITER_SEAM_UNITS``); a unit's still-set retired ``VIGIL_SETTLE_BASE_DIR`` naming another tree;
     and each absolute path in ``VIGIL_SEAM_LEGACY_DIRS``. Removed: ``seam`` itself, every configured unit's CURRENT
-    seam (units that disagree are reported by ``vigil doctor`` separately) and a running ``vigil up``'s base.
-    ``units`` is ``seam_base_units.unit_details()`` (default: computed here)."""
+    seam (units that disagree are reported by ``vigil doctor`` separately), a tree a committed migration carried into
+    ANOTHER configured unit's seam (it is that seam's former directory: its records are there) and a running ``vigil
+    up``'s base. ``units`` is ``seam_base_units.unit_details()`` (default: computed here)."""
     from .seam_base_units import WRITER_SEAM_UNITS, unit_details
     e = os.environ if env is None else env
     if units is None:
@@ -338,6 +339,7 @@ def legacy_candidates(seam: Any, *, units: "Optional[Mapping[str, Mapping[str, A
             raw.append(part)
     excluded = {os.path.realpath(str(seam))}
     excluded |= {os.path.realpath(str(u["seam"])) for u in units.values() if u.get("seam")}
+    excluded |= _carried_elsewhere(seam, units)
     up = running_up_base(e, home)
     if up:
         excluded.add(os.path.realpath(up))
@@ -347,6 +349,22 @@ def legacy_candidates(seam: Any, *, units: "Optional[Mapping[str, Mapping[str, A
         if real in excluded or real in out or not os.path.isdir(real):
             continue
         out.append(real)
+    return out
+
+
+def _carried_elsewhere(seam: Any, units: "Mapping[str, Mapping[str, Any]]") -> "set[str]":
+    """The real paths of the trees a COMMITTED migration carried into the seam of a configured unit other than
+    ``seam`` (its journal names them ``complete``). A journal that cannot be read names none (they stay candidates)."""
+    out: "set[str]" = set()
+    here = os.path.realpath(str(seam))
+    for other in {os.path.realpath(str(u["seam"])) for u in units.values() if u.get("seam")} - {here}:
+        try:
+            j = read_journal(other)
+        except (OSError, ValueError):
+            continue
+        for src, ent in ((j or {}).get("sources") or {}).items():
+            if isinstance(ent, dict) and ent.get("state") == "complete":
+                out.add(os.path.realpath(str(src)))
     return out
 
 
