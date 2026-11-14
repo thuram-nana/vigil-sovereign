@@ -7,6 +7,8 @@ spool (``<spool>/.settle-scan.json``, written atomically, 0600, at most :data:`M
 records appended since:
 
   ``spine`` / ``owner`` / ``scope``  the spine's path, the owner key the evidence was verified under, the drain scope;
+  ``seam``                           the real path of the seam directory the pass listed (a checkpoint from another
+                                     seam, or one written before this field, is a full scan);
   ``live_from``                      the first seq the spine still holds (a prune moves it);
   ``anchor``                         ``[seq, entry_hash]`` of the last record the pass read (its ``through``);
   ``listed_from``                    the spine tip read BEFORE that pass listed the seam;
@@ -17,9 +19,9 @@ records appended since:
   ``leases`` / ``evidence``          every lease that listing found, and the non-empty evidence of each through the
                                      anchor (``launch_settlement.evidence_to_json``).
 
-A pass CONTINUES from the checkpoint only when it reads back exactly as written and names this spine, owner key, scope
-and live window, and its anchor record is still on the spine with the same ``entry_hash``. Anything else — no file,
-an unreadable or oversized one, another spine, a reset or restored spine, a prune since — is a FULL scan.
+A pass CONTINUES from the checkpoint only when it reads back exactly as written and names this spine, owner key, scope,
+seam and live window, and its anchor record is still on the spine with the same ``entry_hash``. Anything else — no
+file, an unreadable or oversized one, another spine or seam, a reset or restored spine, a prune since — is a FULL scan.
 
 WHY A CONTINUED PASS MISSES NOTHING. A lease the checkpoint carries has its evidence through the anchor, and the pass
 reads every record after it. A lease the checkpoint does NOT carry was not on the seam when that earlier pass listed
@@ -137,9 +139,13 @@ def _key(v: Any) -> "tuple[str, str, str]":
     return (v[0], v[1], v[2])
 
 
-def _load(path: Path, store, pubkey: str, scope: str) -> Optional[_Checkpoint]:
-    """The checkpoint at ``path`` when it is usable for ``store`` / ``pubkey`` / ``scope`` (see the module docstring),
-    else None. A spine read error while checking the anchor propagates (the pass reports it)."""
+def _seam_id(seam: Any) -> Optional[str]:
+    return os.path.realpath(str(seam)) if seam else None
+
+
+def _load(path: Path, store, pubkey: str, scope: str, seam: Any = None) -> Optional[_Checkpoint]:
+    """The checkpoint at ``path`` when it is usable for ``store`` / ``pubkey`` / ``scope`` / ``seam`` (see the module
+    docstring), else None. A spine read error while checking the anchor propagates (the pass reports it)."""
     from .governor.launch_settlement import evidence_from_json
     raw = _read_bounded(path)
     if raw is None:
@@ -149,6 +155,8 @@ def _load(path: Path, store, pubkey: str, scope: str) -> Optional[_Checkpoint]:
         if not isinstance(obj, dict) or obj.get("schema") != _SCHEMA:
             return None
         if obj.get("spine") != str(store.path) or obj.get("owner") != pubkey or obj.get("scope") != scope:
+            return None
+        if obj.get("seam") != _seam_id(seam):             # another seam, or a checkpoint from before the seam field
             return None
         anchor, listed_from, clean = obj["anchor"], obj["listed_from"], obj["listing_clean"]
         if not (isinstance(anchor, list) and len(anchor) == 2 and type(anchor[0]) is int and anchor[0] >= 0
@@ -182,7 +190,8 @@ def _load(path: Path, store, pubkey: str, scope: str) -> Optional[_Checkpoint]:
     return _Checkpoint(through, anchor[1], listed_from, clean, float(full_at), keys, evidence)
 
 
-def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through: int, through_hash: str,
+def _save(path: Path, store, pubkey: str, scope: str, *, seam: Any = None, live_from: int, through: int,
+          through_hash: str,
           listed_from: int, listing_clean: bool, full_at: float,
           evidence: "dict[tuple[str, str, str], Any]") -> None:
     """Replace the checkpoint atomically (best-effort: a write that fails, or would exceed :data:`MAX_BYTES`, leaves
@@ -190,7 +199,8 @@ def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through
     from .governor.launch_settlement import evidence_to_json
     from .spine.atomicio import atomic_write_text
     body = json.dumps({
-        "schema": _SCHEMA, "spine": str(store.path), "owner": pubkey, "scope": scope, "live_from": int(live_from),
+        "schema": _SCHEMA, "spine": str(store.path), "owner": pubkey, "scope": scope, "seam": _seam_id(seam),
+        "live_from": int(live_from),
         "anchor": [int(through), str(through_hash)], "listed_from": int(min(listed_from, through)),
         "listing_clean": bool(listing_clean), "full_at": float(full_at), "leases": sorted([list(k) for k in evidence]),
         "evidence": sorted([[list(k), evidence_to_json(ev)] for k, ev in evidence.items() if ev.settled]),
@@ -207,16 +217,17 @@ def _save(path: Path, store, pubkey: str, scope: str, *, live_from: int, through
 
 
 def scan(store, pubkey: str, *, keys: "Iterable[tuple[str, str, str]]", path: "Optional[Path]", scope: str,
-         listed_from: int, listing_clean: bool, now: float) -> "dict[tuple[str, str, str], Any]":
+         listed_from: int, listing_clean: bool, now: float, seam: Any = None) -> "dict[tuple[str, str, str], Any]":
     """The settlement evidence of every lease in ``keys`` — what ``launch_settlement.scan_settlements`` returns for
     the records the spine holds — reading only what was appended since the checkpoint at ``path`` when it is usable
     (the module docstring), else the whole spine; then the checkpoint is replaced (best-effort). ``listed_from`` is
     the spine tip this pass read before it listed ``keys`` (:func:`spine_tip`) and ``listing_clean`` whether that
     listing read and verified every in-scope lease file; ``now`` is the pass clock (a full read is due every
-    :data:`FULL_RESCAN_S`). ``path=None`` reads the whole spine and keeps nothing. A spine read failure raises."""
+    :data:`FULL_RESCAN_S`). ``seam`` is the seam directory the pass listed (its real path is part of the checkpoint's
+    identity). ``path=None`` reads the whole spine and keeps nothing. A spine read failure raises."""
     from .governor.launch_settlement import scan_settlements_since
     want = {(str(o), str(s), str(n)) for o, s, n in keys}
-    cp = _load(path, store, pubkey, scope) if path is not None else None
+    cp = _load(path, store, pubkey, scope, seam) if path is not None else None
     if cp is not None and not (want <= cp.keys or cp.listing_clean):
         cp = None                                          # a new lease after a listing that was not clean: full
     if cp is not None and not cp.full_at <= now < cp.full_at + FULL_RESCAN_S:
@@ -233,7 +244,7 @@ def scan(store, pubkey: str, *, keys: "Iterable[tuple[str, str, str]]", path: "O
         if through_hash is None and cp is not None and through == cp.through:
             through_hash = cp.anchor_hash                  # nothing appended since the anchor: it still holds
         if through_hash is not None:
-            _save(path, store, pubkey, scope, live_from=_live_from(store), through=through,
+            _save(path, store, pubkey, scope, seam=seam, live_from=_live_from(store), through=through,
                   through_hash=through_hash, listed_from=listed_from, listing_clean=listing_clean,
                   full_at=full_at, evidence=evs)
     return evs

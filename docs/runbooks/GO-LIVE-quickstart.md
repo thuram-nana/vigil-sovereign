@@ -118,6 +118,74 @@ systemctl --user status sigil-cockpit sigil-customer sigil-public
 The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — start it
 on this host and keep it **private** (SSO/VPN), never a public face.
 
+**One money-seam directory (`VIGIL_BASE_DIR`).** Every process that touches a customer launch — the
+cockpit (`sigil serve`, which publishes the credit lease and writes pause/settlement markers), the settle
+drain, the offense engine (`vigil up`, `vigil launch-drain`) and the offense backup — must use the SAME
+seam directory, or a lease published in one tree is never seen by the drain reading another (every
+completion settles nothing and the credits stay held). The shipped `sigil-*` / `vigil-settle-drain` /
+`vigil-backup*` units all set `VIGIL_BASE_DIR=%h/.sigil/credit-lease`; in any shell that runs a `vigil` command,
+or a `sigil` command that writes the seam (`sigil eval-grant arm|revoke|reconcile`, `sigil ops-sweep
+reservations`), export the same value:
+
+```bash
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"   # the value the shipped units set — keep ONE value
+mkdir -p "$VIGIL_BASE_DIR" && chmod 700 "$VIGIL_BASE_DIR"
+vigil doctor                                        # HARD issue if the installed units disagree on it
+```
+
+Every `vigil` verb's `--base-dir` defaults to `$VIGIL_BASE_DIR` (else `./.vigil-live`), and `vigil up` hands its
+base to every backend it starts, so one export covers the console, the engines and the cockpit `vigil up`
+spawns. `vigil up` refuses an explicit `--base-dir` that names a different directory than `$VIGIL_BASE_DIR`. The
+operator console unit (`vigil-command.service`) keeps the offense engine's own home — its vault, operator key and
+attestation log — in `<repo>/.vigil-live`: do not add a `VIGIL_BASE_DIR=` line to its `service.env` to move it
+(`sigil seam migrate` carries launch-seam records only, never the engine's own state); `vigil doctor` reports when
+its seam differs from the other units'. `sigil ops-sweep reservations` (without `--base-dir`) and `sigil seam
+migrate` use the seam the cockpit and the settle drain share — the console's engine home is never compared — and
+when this shell resolves another directory they refuse and print the `export` to run first. `sigil eval-grant
+revoke` and `sigil eval-grant reconcile` run on every unit's seam, the console's included, whatever this shell
+resolves, and a reconcile clears the `vigil doctor` alarm only once every one of them is confirmed. `sigil eval-grant
+arm` publishes a grant to one seam, so it runs only where the cockpit, the settle drain and the console unit name the
+same seam; on a host whose console keeps its engine home in `<repo>/.vigil-live` it refuses and names the console's
+seam (keep that engine home where it is).
+
+To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
+`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`) or drop-in (`systemctl --user edit <unit>`) —
+never in only some of them. The settle drain refuses to start when a leftover `VIGIL_SETTLE_BASE_DIR` names a
+different directory.
+
+**Upgrading a host whose cockpit used another seam directory.** An earlier install's cockpit kept its launch
+records (published leases, settlement and pause markers, single-use floors) in its working-directory default
+`~/.sigil/.vigil-live`. Carry them into the seam before anything serves or settles on it — as the service user:
+
+```bash
+systemctl --user stop sigil-cockpit sigil-customer vigil-settle-drain.timer vigil-settle-drain
+# re-copy the shipped units (they bring VIGIL_BASE_DIR and VIGIL_SEAM_MIGRATION_GUARD=1), then:
+systemctl --user daemon-reload
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"
+sigil seam migrate             # report only: what it carries, requeues to the settle drain, or holds for the owner
+sigil seam migrate --apply     # exit 1 lists any conflict, or a launch held for the owner (`legacy_hold`)
+vigil doctor                   # no `seam migration` issue left
+systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
+```
+
+On a host where the operator console unit (`vigil-command.service`) is installed, the procedure is the same:
+`sigil seam migrate` carries the former tree into the seam the cockpit and the settle drain use, never into the
+console's engine home (a `--to` naming the console's seam is refused), and the cockpit `vigil up` starts on the
+console's own seam serves again once the migration commits. `vigil doctor` and `sigil upgrade --check` check the
+seam the cockpit and the settle drain use and report the former tree until it is committed there; `vigil doctor`
+also keeps reporting that the console's seam differs from the other units' (above), which is not a seam migration
+issue.
+
+Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
+eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an
+unsettled launch back to the settle drain, which settles it at its outcome, and holds for the owner a launch it
+cannot settle (no money moves for it). It reads the completion spool the configured settle drain drains (its unit,
+drop-ins and env file); a `--completion-spool` naming any other directory is refused. **Never run `sigil ops-sweep
+reservations --apply` against the former directory** (`--base-dir ~/.sigil/.vigil-live`); with the units' guard on
+it is refused, before and after the migration. Run the migration before you remove a leftover
+`VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and
+it holds the cockpit's own passkey store and bootstrap token.
+
 ## 7. Reverse proxy + TLS (three separate origins)
 
 Each surface gets its own TLS vhost (templates in `apps/sigil/deploy/reverse-proxy/`), forwarding to the

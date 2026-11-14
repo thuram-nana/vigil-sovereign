@@ -40,7 +40,22 @@ def test_backup_of_a_parent_of_the_seam_is_covered(tmp_path):
     assert sec["covered"] is True and notes == []
 
 
-def test_the_shipped_defaults_do_not_cover_the_seam_and_say_so(tmp_path):
+def test_the_shipped_defaults_cover_the_seam(tmp_path):
+    # E3a: every seam unit (the drain AND the offense backup) defaults VIGIL_BASE_DIR to %h/.sigil/credit-lease
+    _cfg(tmp_path, settle="VIGIL_SETTLE_SCOPE=*\n", backup="VIGIL_BACKUP_PASSPHRASE=x\n")
+    sec, notes = _doc._money_seam_backup_coverage(tmp_path)
+    assert sec["covered"] is True and notes == []
+    assert sec["seam"].endswith(".sigil/credit-lease") and sec["backup_base_dir"].endswith(".sigil/credit-lease")
+
+
+def test_the_seam_follows_the_drains_vigil_base_dir(tmp_path):
+    seam = tmp_path / "mnt" / "seam"
+    _cfg(tmp_path, settle=f"VIGIL_BASE_DIR={seam}\n", backup=f"VIGIL_BASE_DIR={seam}\n")
+    sec, notes = _doc._money_seam_backup_coverage(tmp_path)
+    assert sec["covered"] is True and notes == []
+
+
+def test_a_backup_left_on_the_old_relative_default_does_not_cover_the_seam_and_says_so(tmp_path):
     _cfg(tmp_path, settle="VIGIL_SETTLE_SCOPE=*\n", backup="VIGIL_BACKUP_PASSPHRASE=x\nVIGIL_BASE_DIR=.vigil-live\n")
     sec, notes = _doc._money_seam_backup_coverage(tmp_path)
     assert sec["covered"] is False
@@ -73,7 +88,7 @@ def test_doctor_surfaces_it_as_an_advisory_note_never_an_issue(tmp_path, monkeyp
     (tmp_path / "base").mkdir()
     baseline = _doc.collect(_REPO)
     assert baseline["money_seam_backup"] == {"configured": False}
-    _cfg(home, settle="", backup="VIGIL_BASE_DIR=.vigil-live\n")
+    _cfg(home, settle="")                       # the drain is configured, nothing backs the seam up (#70 note only)
     report = _doc.collect(_REPO)
     assert any("money seam" in n for n in report["notes"])
     assert not any("money seam" in i for i in report["issues"]) and report["issues"] == baseline["issues"]

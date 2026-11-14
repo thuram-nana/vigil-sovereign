@@ -716,6 +716,16 @@ def cmd_eval_grant(a) -> None:
         }, indent=2))
         return
 
+    # An arm publishes a grant to ONE seam, the one the offense plane reads: refused before anything is appended or
+    # published when this shell would write a different tree than the configured units use, or the units name more
+    # than one. A revoke and a reconcile (the safe directions) are never refused for that: they run on every
+    # configured writer unit's seam.
+    if a.action in ("revoke", "reconcile"):
+        _targets = _eval_seam_targets(f"eval-grant {a.action}", str(a.engagement) if a.action == "revoke" else None)
+    else:
+        _eval_seam = _writer_seam_base("eval-grant arm")
+        _refuse_unmigrated_seam("eval-grant arm", _eval_seam)
+
     # Fail CLOSED on a locked/tampered vault (mirror `mesh`): never mint a fresh owner identity over an
     # existing one — that would FORK the trust root and sign under a key no verifier trusts.
     owner = owner_keypair()
@@ -733,17 +743,25 @@ def cmd_eval_grant(a) -> None:
         from .governor.eval_capability_grant import EvalGrantSeamUnreconciled, reconcile_eval_seam
         try:
             out = reconcile_eval_seam(store, owner_key=owner, revoke_live_grants=False, by="owner",
-                                      reason=(a.reason or "eval seam reconcile"))
+                                      reason=(a.reason or "eval seam reconcile"), seams=_targets)
         except EvalGrantSeamUnreconciled as e:
-            print(json.dumps({"ok": False, "unconfirmed": e.failed, "alarm_recorded": e.alarm_recorded}, indent=2))
+            print(json.dumps({"ok": False, "unconfirmed": e.failed, "alarm_recorded": e.alarm_recorded,
+                              "seams": _targets}, indent=2))
             sys.exit(1)
-        print(json.dumps({"ok": True, **out}, indent=2))
+        print(json.dumps({"ok": True, **out, "seams": _targets}, indent=2))
         return
 
     if a.action == "revoke":
-        seq = g.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
+        from .governor.eval_capability_grant import revoke_on_seams
+        seq, not_confirmed = revoke_on_seams(store, owner_key=owner, engagement_slug=str(a.engagement),
+                                             seams=_targets, reason=(a.reason or ""))
         print(f"eval-capability-grant REVOKED for engagement {a.engagement!r} (seq {seq}); every gate "
-              f"enforces again until a fresh owner+evaluator grant lands.")
+              f"enforces again until a fresh owner+evaluator grant lands."
+              + (f" Published to {len(_targets)} seams: {', '.join(_targets)}." if len(_targets) > 1 else ""))
+        if not_confirmed:
+            print(f"!! the revoke could not be confirmed on: {'; '.join(not_confirmed)} — `sigil eval-grant reconcile` "
+                  f"once it is reachable", file=sys.stderr)
+            sys.exit(1)
         return
 
     # arm
@@ -951,6 +969,8 @@ def cmd_serve(a) -> None:
               f"address only — never 0.0.0.0 / an unspecified / a public address. Put a reverse proxy in "
               f"front to serve a real domain (deploy/REMOTE-HOSTING.md).", file=sys.stderr)
         sys.exit(2)
+    from vigil_core.seam_base import resolve_seam_base
+    _refuse_unmigrated_seam("serve", resolve_seam_base())     # before any token is minted or port bound
     allowed_hosts = _multi(a.allow_host, "SIGIL_UI_ALLOWED_HOSTS")
     allowed_origins = _multi(a.allow_origin, "SIGIL_UI_ALLOWED_ORIGINS")
 
@@ -1220,6 +1240,207 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
+def _writer_seam_base(verb: str, *, money: bool = False) -> str:
+    """The seam base for an operator-run command that WRITES the cross-plane seam to ONE directory (an eval grant
+    publication and its rollback floor, a reservation refund's markers, a migration's records). The ONE resolver picks
+    it ($VIGIL_BASE_DIR, else ./.vigil-live); this refuses (exit 2), before anything is written, when that is not the
+    directory the configured seam WRITER units use (``seam_base_units.WRITER_SEAM_UNITS``: the cockpit, the settle
+    drain, the console; the backup units only capture the seam and `vigil doctor` reports theirs) — e.g. a shell
+    without the VIGIL_BASE_DIR the shipped units set; written there, an arm would publish where the offense plane never
+    reads. ``money``: compare only the cockpit and the settle drain (``MONEY_SEAM_UNITS``) — the money verbs (`ops-sweep
+    reservations`, `seam migrate`), which never write the console's engine home. Nothing configured on this host (no
+    installed seam unit, no env file) ⇒ the resolver's answer, unchanged; contradictory settings are refused as for
+    the settle drain. A refusal never asks for a VIGIL_BASE_DIR in the console unit's service.env (that moves its engine
+    home away from its vault and operator key). A revoke or a reconcile never comes here: they run on every writer
+    unit's seam (:func:`_eval_seam_targets`)."""
+    import os
+
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        base = require_seam_base()
+    except SeamBaseError as e:
+        print(f"{verb}: {e}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, WRITER_SEAM_UNITS, seam_base_agreement
+    except ImportError:          # the unit-agreement probe is not installed here: nothing to compare against
+        return base
+    units = seam_base_agreement(only=MONEY_SEAM_UNITS if money else WRITER_SEAM_UNITS)[0]["units"]
+    seams = {os.path.realpath(s) for s in units.values()}
+    if len(seams) > 1:
+        listed = "; ".join(f"{u} -> {s}" for u, s in units.items())
+        money_seams = {os.path.realpath(s) for u, s in units.items() if u in MONEY_SEAM_UNITS}
+        if len(money_seams) == 1:
+            # only the console's engine home differs (the runbook's console host): a grant goes to ONE seam
+            print(f"{verb}: refusing — it publishes to ONE seam, and on this host the operator console keeps its "
+                  f"engine home apart from the seam the cockpit and the settle drain use ({listed}). It runs only where "
+                  f"the cockpit, the settle drain and the console name one seam; keep the console's engine home where "
+                  f"it is (no VIGIL_BASE_DIR in its service.env). `sigil eval-grant revoke` and `sigil eval-grant "
+                  f"reconcile` run on every unit's seam; `vigil doctor` names them.", file=sys.stderr)
+        else:
+            print(f"{verb}: refusing — the configured units disagree on the seam base ({listed}); `vigil doctor` "
+                  f"names them. Give the cockpit and the settle drain ONE VIGIL_BASE_DIR (their env files or "
+                  f"`systemctl --user edit` drop-ins) first, then re-run with it exported.", file=sys.stderr)
+        sys.exit(2)
+    if seams and os.path.realpath(base) not in seams:
+        (unit_seam,) = seams
+        print(f"{verb}: refusing — this shell resolves the seam base to {base}, but the configured units use "
+              f"{unit_seam}. Re-run with `export VIGIL_BASE_DIR={unit_seam}` so it writes the seam the units "
+              f"read.", file=sys.stderr)
+        sys.exit(2)
+    return base
+
+
+def _eval_seam_targets(verb: str, slug: "str | None") -> "list[str]":
+    """Where an eval-grant REVOKE (``slug``: the engagement) or RECONCILE (``slug`` None) — the safe directions — runs:
+    the seam of every configured seam writer unit, each distinct directory once, the console's engine home included —
+    so it reaches whichever tree an offense plane reads, even while the units disagree or this shell resolves another
+    directory (a WARNING names them; `vigil doctor` reports the disagreement). Nothing configured ⇒ this shell's seam,
+    unchanged. Also this shell's seam and a running `vigil up`'s base when either is another directory that holds a
+    publication: of ``slug`` for a revoke (a revoke only un-grants); any eval-grant or eval-attestation publication for
+    a reconcile, which also runs on every seam the close alarm names (a revoke or a reconcile that could not be
+    confirmed there) that still exists — so it never clears the alarm for a tree it did not confirm. Never refuses on a
+    disagreement; contradictory settings in this shell are still refused, as for every writer."""
+    import os
+
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        base = require_seam_base()
+    except SeamBaseError as e:
+        print(f"{verb}: {e}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        from vigil_integration.seam_base_units import WRITER_SEAM_UNITS, seam_base_agreement
+        from vigil_integration.seam_migration import running_up_base
+    except ImportError:          # the unit-agreement probe is not installed here: this shell's seam
+        return [base]
+    units = seam_base_agreement(only=WRITER_SEAM_UNITS)[0]["units"]
+    what = "the revoke" if slug is not None else "the reconcile"
+    targets: "list[str]" = []
+    for s in units.values():
+        if os.path.realpath(s) not in {os.path.realpath(t) for t in targets}:
+            targets.append(s)
+    if not targets:
+        targets = [base]
+    elif len(targets) > 1 or os.path.realpath(base) != os.path.realpath(targets[0]):
+        print(f"{verb}: WARNING — this shell resolves the seam base to {base}; the configured units use "
+              f"{'; '.join(f'{u} -> {s}' for u, s in units.items())}. Running {what} on each unit's seam "
+              f"({', '.join(targets)}); `vigil doctor` names the disagreement.", file=sys.stderr)
+    extras: "list[tuple[str, str]]" = []
+    for extra in (base, running_up_base()):
+        if extra and slug is not None and _holds_grant_publication(extra, slug):
+            extras.append((extra, "holds a publication of this grant"))
+        elif extra and slug is None and _holds_eval_publication(extra):
+            extras.append((extra, "holds an eval publication"))
+    if slug is None:
+        from .governor.seam_publish import read_close_alarm
+        for s in (read_close_alarm() or {}).get("seams") or []:
+            if isinstance(s, str) and os.path.isabs(s) and os.path.isdir(s):
+                extras.append((s, "is named by the eval seam alarm"))
+    for extra, why in extras:
+        if os.path.realpath(extra) not in {os.path.realpath(t) for t in targets}:
+            print(f"{verb}: {extra} also {why}; {what} runs there too.", file=sys.stderr)
+            targets.append(extra)
+    return targets
+
+
+def _holds_grant_publication(base: str, slug: str) -> bool:
+    """Whether ``base`` holds an eval-capability-grant publication of ``slug`` (any file at its path)."""
+    import os
+
+    from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+    try:
+        p = eval_capability_grant_path(base, slug)
+    except Exception:  # noqa: BLE001 — a path that cannot be formed holds nothing to retract
+        return False
+    return p is not None and os.path.lexists(p)
+
+
+def _holds_eval_publication(base: str) -> bool:
+    """Whether ``base`` holds an eval-capability-grant or eval-attestation publication directory (an eval seam
+    publisher wrote there)."""
+    import os
+
+    from vigil_integration.live.eval_attestation import eval_attestations_root
+    from vigil_integration.live.eval_capability_grant import eval_capability_grants_root
+    return any(os.path.lexists(r) for r in (eval_capability_grants_root(base), eval_attestations_root(base)))
+
+
+def _unmigrated_seam(seam: str) -> list:
+    """The former seam directories of this host holding launch-seam records not committed into ``seam``
+    (``vigil_integration.seam_migration``; ``[]`` when every one is migrated or empty)."""
+    from vigil_integration.seam_base_units import unit_details
+    from vigil_integration.seam_migration import legacy_candidates, unmigrated_legacy
+    return unmigrated_legacy(seam, legacy_candidates(seam, units=unit_details()))
+
+
+def _migrate_hint(verb: str, seam: str, left: list) -> str:
+    lines = [f"{verb}: refused — launch-seam records in a former seam directory are not carried into the seam "
+             f"{seam} yet:"]
+    lines += [f"    {x['path']}: {x['files']} record(s), {x['reason']}" for x in left]
+    lines.append("  Stop the cockpit, the customer server and the settle drain, run `sigil seam migrate` (it reports "
+                 "what it will carry), then `sigil seam migrate --apply` as the service user, then start them again.")
+    return "\n".join(lines)
+
+
+def _seam_guard_on() -> bool:
+    """Whether the seam-migration guard applies here: ``VIGIL_SEAM_MIGRATION_GUARD`` when this environment sets it
+    (a deliberate value, either way); else ON when a configured seam unit sets it for its process (the shipped
+    cockpit and settle-drain units do) — so a verb run from an operator's shell is guarded exactly as the units are.
+    Neither set (no unit configured, nothing exported): off, the code default."""
+    import os
+
+    from . import config
+    if (os.environ.get("VIGIL_SEAM_MIGRATION_GUARD") or "").strip():
+        return config.seam_migration_guard_enabled()
+    try:
+        from vigil_integration.seam_base_units import unit_details
+    except ImportError:          # the unit model is not installed here: nothing configured to follow
+        return False
+    return any(str(u.get("guard") or "").lower() in config._OIDC_AFFIRMATIVE for u in unit_details().values())
+
+
+def _refuse_unmigrated_seam(verb: str, seam: str) -> None:
+    """With the seam-migration guard on (:func:`_seam_guard_on`), exit 2 (before anything is written) while a former
+    seam directory of this host holds launch-seam records ``seam`` lacks; the guard state cannot be read ⇒ refused
+    too. Off (the code default): nothing."""
+    if not _seam_guard_on():
+        return
+    try:
+        left = _unmigrated_seam(seam)
+    except Exception as e:  # noqa: BLE001 — the guard is on: an unreadable migration state refuses
+        print(f"{verb}: refused — the seam migration state cannot be read ({type(e).__name__}); run `vigil doctor`",
+              file=sys.stderr)
+        sys.exit(2)
+    if left:
+        print(_migrate_hint(verb, seam, left), file=sys.stderr)
+        sys.exit(2)
+
+
+def _refuse_former_seam(verb: str, base: str) -> None:
+    """With the seam-migration guard on (:func:`_seam_guard_on`), exit 2 (before anything is written) when ``base`` is
+    a FORMER seam directory of this host (``seam_migration.legacy_candidates`` of a configured unit's seam): its
+    launches are settled on the seam the units use — `sigil seam migrate` carries its records there — so nothing is
+    settled or refunded against it directly, before or after the migration. Off: nothing."""
+    import os
+    if not _seam_guard_on():
+        return
+    try:
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates
+        units = unit_details()
+        former = {c for u in units.values() for c in legacy_candidates(u["seam"], units=units)}
+    except Exception as e:  # noqa: BLE001 — the guard is on: an unreadable unit model refuses
+        print(f"{verb}: refused — the configured seam units cannot be read ({type(e).__name__}); run `vigil doctor`",
+              file=sys.stderr)
+        sys.exit(2)
+    if os.path.realpath(base) in former:
+        print(f"{verb}: refused — {base} is a former seam directory of this host; its launches are settled on the "
+              f"seam the configured units use. Carry its records there with `sigil seam migrate --apply` and run the "
+              f"sweep without --base-dir.", file=sys.stderr)
+        sys.exit(2)
+
+
 def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
     """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
     Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
@@ -1328,6 +1549,17 @@ def cmd_settle_drain(a) -> None:
     # and the dead-man alarms.
     _require_expanded_path(a.spool, "--spool", required=True)
     _require_expanded_path(a.base_dir, "--base-dir", required=False)
+    # E3a: the seam comes from the ONE resolver the cockpit publishes the lease through (--base-dir >
+    # $VIGIL_BASE_DIR > .vigil-live). Settings that disagree (a legacy VIGIL_SETTLE_BASE_DIR naming another tree,
+    # or --base-dir vs $VIGIL_BASE_DIR) are refused here, before anything is claimed or archived — a drain
+    # pointed at the wrong tree finds no lease and archives every completion unsettled.
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        seam = require_seam_base(a.base_dir or None)
+    except SeamBaseError as e:
+        print(f"settle-drain: {e}", file=sys.stderr)
+        sys.exit(2)
+    _refuse_unmigrated_seam("settle-drain", seam)            # nothing claimed, reclaimed or archived (unit FAILED)
 
     owner = _owner_pubkey()
     if not owner:
@@ -1388,6 +1620,100 @@ def cmd_settle_drain(a) -> None:
             sys.exit(1)
 
 
+def _settle_spool(verb: str, given: "str | None") -> str:
+    """The settle drain's completion spool a seam migration reads. The configured ``vigil-settle-drain`` unit's
+    ``--spool`` — its installed copy, drop-ins and env file, as systemd builds its environment, so the directory the
+    drain drains — else ``VIGIL_SETTLE_SPOOL``, else the unit default ``~/.sigil/spool/settle``. A spool named here
+    (``--completion-spool``, or ``VIGIL_SETTLE_SPOOL`` in this shell) is used only when it is the configured drain's
+    and is laid out as a completion spool (``seam_migrate.is_drain_spool``); otherwise exit 2 before anything is read,
+    so archived completions are never looked for in another directory."""
+    import os
+    from pathlib import Path
+
+    from .seam_migrate import DRAIN_SPOOL_SUBDIRS, is_drain_spool
+    try:
+        from vigil_integration.seam_base_units import unit_details
+        drain = unit_details(only=("vigil-settle-drain.service",)).get("vigil-settle-drain.service") or {}
+    except ImportError:          # the unit model is not installed here: nothing configured to follow
+        drain = {}
+    unit_spool = str(drain.get("spool") or "")
+    named = (given or os.environ.get("VIGIL_SETTLE_SPOOL") or "").strip()
+    if not named:
+        return unit_spool or str(Path.home() / ".sigil" / "spool" / "settle")
+    path = os.path.abspath(os.path.expanduser(named))
+    if unit_spool and os.path.realpath(path) != os.path.realpath(unit_spool):
+        print(f"{verb}: refused — the configured settle drain drains {unit_spool}, not {path}; run it without "
+              f"--completion-spool (and without VIGIL_SETTLE_SPOOL), or set the drain's spool first.", file=sys.stderr)
+        sys.exit(2)
+    if not is_drain_spool(path):
+        print(f"{verb}: refused — {path} is not the settle drain's completion spool (it has no "
+              f"{'/'.join(DRAIN_SPOOL_SUBDIRS)} directories); name the directory the drain's --spool names.",
+              file=sys.stderr)
+        sys.exit(2)
+    return path
+
+
+def _refuse_non_money_destination(verb: str, seam: str) -> None:
+    """Exit 2 (before anything is read or written) when ``seam`` is the seam of a configured unit other than the
+    cockpit and the settle drain (``seam_base_units.MONEY_SEAM_UNITS``) — the operator console's engine home, a backup
+    unit's tree — and not theirs: a former tree is carried only into the seam the cockpit and the settle drain use."""
+    import os
+    try:
+        from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, unit_details
+    except ImportError:          # the unit model is not installed here: nothing configured to compare against
+        return
+    units = unit_details()
+    money = {os.path.realpath(str(u["seam"])) for n, u in units.items() if n in MONEY_SEAM_UNITS and u.get("seam")}
+    here = os.path.realpath(seam)
+    named = sorted(n for n, u in units.items()
+                   if n not in MONEY_SEAM_UNITS and u.get("seam") and os.path.realpath(str(u["seam"])) == here)
+    if named and here not in money:
+        print(f"{verb}: refused — {seam} is the seam of {', '.join(named)}, not of the cockpit and the settle drain; "
+              f"a former tree is carried only into the seam they use"
+              + (f" ({', '.join(sorted(money))}). Run it without --to." if money else
+                 ". Name the seam the cockpit's VIGIL_BASE_DIR sets with --to."), file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_seam(a) -> None:
+    """``seam migrate``: carry the launch-seam records of a former seam directory into the seam the configured
+    units use (``seam_migrate``). Report-only without ``--apply``. Exit 0 migrated / nothing to carry, 1 conflicts
+    (nothing committed for that source), 2 refused."""
+    import os
+
+    from . import seam_migrate
+    from .governor.identity import owner_keypair
+    if a.to:
+        seam = os.path.abspath(os.path.expanduser(a.to))
+        _refuse_non_money_destination("seam migrate", seam)
+    else:
+        try:
+            from vigil_integration.seam_base_units import MONEY_SEAM_UNITS, unit_details
+            configured = bool(unit_details(only=MONEY_SEAM_UNITS))
+        except ImportError:
+            configured = False
+        if not configured:                  # no unit names the seam here: never a working-directory default
+            print("seam migrate: refused — no seam unit is configured on this host; name the seam with --to DIR",
+                  file=sys.stderr)
+            sys.exit(2)
+        seam = _writer_seam_base("seam migrate", money=True)
+    if a.sources:
+        sources = [os.path.abspath(os.path.expanduser(s)) for s in a.sources]
+    else:
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates
+        sources = legacy_candidates(seam, units=unit_details())
+    spool = _settle_spool("seam migrate", a.completion_spool)
+    try:
+        code, report = seam_migrate.run(SpineStore(), owner_keypair(), seam=seam, sources=sources, spool=spool,
+                                        apply=a.apply)
+    except seam_migrate.MigrateRefused as e:
+        print(f"seam migrate: refused — {e}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(report, indent=2, sort_keys=True) if a.json else seam_migrate.format_report(report))
+    sys.exit(code)
+
+
 def cmd_ops_sweep(a) -> None:
     """Read-only-by-default operator sweeps. ``reservations``: abandoned (unsettled past not_after + TTL) credit
     reservations -> report; ``--apply`` full-refunds them via the existing owner-keyed ``settle_launch`` path
@@ -1411,10 +1737,27 @@ def cmd_ops_sweep(a) -> None:
                   file=sys.stderr)
             sys.exit(2)
         from .ui.launch_gate import LaunchGate
-        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or None))
+        # An explicit --base-dir is the operator's deliberate tree (e.g. an older install's); without one the
+        # sweep must read the markers where the cockpit and the settle drain write them (the money seam; the
+        # operator console's engine home is never compared, as for `seam migrate`).
+        gate = LaunchGate(SpineStore(), base_dir=(a.base_dir or _writer_seam_base("ops-sweep reservations",
+                                                                                  money=True)))
         if gate.owner_key is None:
             print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
             sys.exit(2)
+        if a.apply:
+            _refuse_unmigrated_seam("ops-sweep reservations --apply", gate._seam_base())
+            if a.base_dir:
+                _refuse_former_seam("ops-sweep reservations --apply", gate._seam_base())
+        else:
+            if _seam_guard_on():
+                try:
+                    _left = _unmigrated_seam(gate._seam_base())
+                except Exception:  # noqa: BLE001 — a report never fails on the advisory
+                    _left = []
+                if _left:
+                    print("WARNING: a former seam directory holds launch-seam records not carried into this seam "
+                          "(`sigil seam migrate`); these rows cover this seam only.", file=sys.stderr)
         if a.apply:
             # E3bc: a root --apply would create seam settlement markers + their locks, spine segments and meter state
             # as root inside the services' directories, after which their settles fail. Fail fast instead.
@@ -1934,6 +2277,8 @@ def cmd_monitoring_secret(a) -> None:
     _monitoring_flag_or_exit("monitoring-secret")
     base = a.secrets_dir or config.monitoring_secrets_dir()
     if not a.export_only:
+        from vigil_core.seam_base import resolve_seam_base
+        _refuse_unmigrated_seam("monitoring-secret", resolve_seam_base())
         try:
             provision_report_secret(a.org, a.host, base, rotate=a.rotate)
         except (OSError, ValueError) as e:
@@ -2304,6 +2649,23 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def _upgrade_seam_check() -> "tuple[str, list]":
+    """``(seam, unmigrated former trees)`` for ``upgrade --check`` — read-only, whatever the guard flag says. The seam
+    is the one the configured cockpit and settle drain agree on (``seam_migration.migration_seam``, as in `vigil
+    doctor`; a console keeping its engine home elsewhere does not hide it); with no seam unit configured there is
+    nothing to compare (nothing listed), and units that disagree are `vigil doctor`'s to report (nothing listed here)."""
+    try:
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates, migration_seam, unmigrated_legacy
+        units = unit_details()
+        seam = migration_seam(units)
+        if seam is None:
+            return "", []
+        return seam, unmigrated_legacy(seam, legacy_candidates(seam, units=units))
+    except ImportError:
+        return "", []
+
+
 def cmd_upgrade(a) -> None:
     """`sigil upgrade` — the automated, crash-safe data-migration verb (W5-5, #449):
     verify(before) -> backup -> verify(backup) -> migrate -> verify(after) -> report, ROLLING BACK to the
@@ -2315,8 +2677,14 @@ def cmd_upgrade(a) -> None:
     store = SpineStore()
     if getattr(a, "check", False):
         needed, reason = migration_needed(store)
+        seam, left = _upgrade_seam_check()
         if needed:
             print(f"upgrade REQUIRED: {reason}")
+        for x in left:
+            print(f"seam migration REQUIRED: {x['path']} holds {x['files']} launch-seam record(s) not carried into "
+                  f"the seam {seam} ({x['reason']}) — stop the cockpit, the customer server and the settle drain, "
+                  f"then run `sigil seam migrate` and `sigil seam migrate --apply`")
+        if needed or left:
             sys.exit(3)
         print("up to date: the spine is migrated (or fresh) — no upgrade needed")
         return
@@ -3283,9 +3651,28 @@ def main(argv=None) -> None:
                           "* only if the delegation itself is wildcard-scoped)")
     psd.add_argument("--base-dir", default="",
                      help="the credit-lease seam root — lease READ + settle/tombstone WRITE share it "
-                          "(default: $VIGIL_BASE_DIR)")
+                          "(default: $VIGIL_BASE_DIR, else ./.vigil-live; must agree with $VIGIL_BASE_DIR "
+                          "and any legacy $VIGIL_SETTLE_BASE_DIR, or the drain refuses)")
     psd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     psd.set_defaults(fn=cmd_settle_drain)
+    psm = sub.add_parser("seam", help="the cross-plane seam directory (`seam migrate`)")
+    psm_sub = psm.add_subparsers(dest="seam_cmd", required=True)
+    psmm = psm_sub.add_parser("migrate", help="carry launch-seam records from a former seam directory into the seam "
+                                              "(report only unless --apply)")
+    psmm.add_argument("--from", dest="sources", action="append", default=[],
+                      help="a former seam directory (repeatable; default: the ones this host's units and "
+                           "$SIGIL_HOME left)")
+    psmm.add_argument("--to", default="", help="the seam (default: the one the configured units use; required when "
+                                               "no seam unit is configured)")
+    psmm.add_argument("--completion-spool", default="",
+                      help="the settle drain's completion spool (default: the configured settle-drain unit's "
+                           "--spool, else VIGIL_SETTLE_SPOOL, else ~/.sigil/spool/settle); refused unless it is that "
+                           "drain's spool")
+    psmm.add_argument("--apply", action="store_true",
+                      help="carry the records (run as the service user, with the cockpit, the customer server and "
+                           "the settle drain stopped); without it nothing is written")
+    psmm.add_argument("--json", action="store_true", help="print the report as JSON")
+    psmm.set_defaults(fn=cmd_seam)
     pos = sub.add_parser("ops-sweep",
                          help="read-only operator sweeps: abandoned credit reservations (--apply full-refunds "
                               "via settle_launch; needs VIGIL_OPS_SWEEP_APPLY_ENABLED=1) / postpaid reconcile "
@@ -3295,7 +3682,9 @@ def main(argv=None) -> None:
     pos.add_argument("--ttl", type=float, default=86400.0,
                      help="grace seconds past lease not_after / checkout start before an item is flagged")
     pos.add_argument("--apply", action="store_true", help="(reservations) settle abandoned leases as full refunds")
-    pos.add_argument("--base-dir", default="", help="(reservations) the credit-lease seam root")
+    pos.add_argument("--base-dir", default="",
+                     help="(reservations) the credit-lease seam root (default: $VIGIL_BASE_DIR, which must name the "
+                          "seam the configured units use, or the sweep refuses)")
     pos.add_argument("--completion-spool", default="",
                      help="(reservations) the settle-drain completion spool; leases with a pending completion "
                           "are never refunded (required with --apply)")

@@ -120,10 +120,10 @@ class LaunchGate:
         self._lock = spine_lock(getattr(store, "path", ""))
 
     def _seam_base(self) -> str:
-        if self._base_dir:
-            return self._base_dir
-        from .target_authorization import _base_dir
-        return _base_dir()
+        """This gate's explicit ``base_dir``, else the shared default — through the ONE seam-base resolver every
+        plane uses (``vigil_core.seam_base``), so the cockpit, the offense engine and the drains meet in one tree."""
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base(self._base_dir)
 
     @staticmethod
     def _as_dt(now: Any) -> datetime:
