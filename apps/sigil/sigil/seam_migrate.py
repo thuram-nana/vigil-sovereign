@@ -522,10 +522,10 @@ def _requeue(seam_s: str, plan: dict, journal: dict, srcj: dict, spool: Any) -> 
     settles the launch on the seam at the completion's outcome; settle idempotency per (slug, nonce) is the backstop.
     A settled launch's completion is never selected. A launch :func:`_completion_plan` holds (expired with no
     completion anywhere in the spool; any unsettled one without a completion when the spool is absent, is not laid out
-    as the settle drain's spool, or cannot be read in full) is HELD for the owner (``legacy_hold`` in both reservation sweeps and the drain's expired-pause pass; no money
-    moves); nothing is written to a directory that is not the drain's spool. The settle drain's scan checkpoint is
-    removed, so its next pass reads the whole spine (lease bundles reached the seam without a publish). Returns
-    ``(requeued names, held)``."""
+    as the settle drain's spool, or cannot be read in full) is HELD for the owner (``legacy_hold`` in both
+    reservation sweeps and the drain's expired-pause pass; no money moves); nothing is written to a directory that is
+    not the drain's spool. The settle drain's scan checkpoint is removed, so its next pass reads the whole spine
+    (lease bundles reached the seam without a publish). Returns ``(requeued names, held)``."""
     from vigil_integration.live.seam_lock import LockBusy, locked_file
     from vigil_integration.seam_migration import write_journal
     unsettled = [x for x in plan.get("_leases", []) if x["state"] != "settled"]
