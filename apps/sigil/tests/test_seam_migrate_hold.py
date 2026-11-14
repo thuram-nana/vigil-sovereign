@@ -32,6 +32,7 @@ from tests.test_seam_migrate import LATE, NOW, _avail, _move, _reserve, _seat, _
 from tests.test_seam_migrate_requeue import _apply, _deleg, _drain  # type: ignore
 
 FAR = time.time() + 400_000            # past every window and the expiry grace (the pause record is at the real clock)
+TEST_MARGIN = "0.5"                    # a test fixture (as test_paused_expiry_settle), not a pricing decision
 
 
 @pytest.fixture
@@ -64,9 +65,9 @@ def test_a_held_paused_launch_is_never_settled_by_the_drain(trees, monkeypatch, 
     from vigil_core import model_metering as mm
     from vigil_core.model_grant import meter_id
     _legacy, seam, spool = trees
-    if billing == "metered":                                               # published metered (a test markup)
+    if billing == "metered":                                               # published metered
         monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
-        monkeypatch.setenv(mm.MARGIN_ENV, "0.5")
+        monkeypatch.setenv(mm.MARGIN_ENV, TEST_MARGIN)
         monkeypatch.setenv(mm.CANCEL_ENV, "metered")
     s, r = _held_paused_launch(trees, monkeypatch)
     assert bool(LaunchGate(s)._launch_was_metered(r["slug"], r["nonce"])) is (billing == "metered")
@@ -150,7 +151,7 @@ def test_an_unreadable_journal_settles_nothing(trees, monkeypatch, path, apply, 
     _legacy, seam, spool = trees
     if billing == "metered":
         monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
-        monkeypatch.setenv(mm.MARGIN_ENV, "0.5")
+        monkeypatch.setenv(mm.MARGIN_ENV, TEST_MARGIN)
         monkeypatch.setenv(mm.CANCEL_ENV, "metered")
     s, r = _held_paused_launch(trees, monkeypatch)
     if path == "superseded":
