@@ -993,8 +993,23 @@ def _owner_key_matches(staged: Path, body: dict) -> "bool | None":
     return _public_of(priv) == pub
 
 
+def _env_file_value(raw: "bytes | None", key: str) -> "str | None":
+    """The value ``sigil.env`` bytes give ``key``, parsed the way ``config`` loads the file (``\\n``-separated
+    ``KEY=VALUE`` lines, ``#`` comments skipped, the first assignment wins), or None."""
+    if raw is None:
+        return None
+    for line in raw.decode("utf-8", errors="replace").split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v.strip() or None
+    return None
+
+
 def _restore_result(new_home: "Path | None", files: dict, body: dict, *, pruned: bool, swapped: bool,
-                    placed: "dict | None", owner_key_matches: "bool | None") -> dict:
+                    placed: "dict | None", owner_key_matches: "bool | None", env: "bytes | None" = None) -> dict:
     out = {"home": str(new_home) if new_home is not None else None, "files": len(files),
            "owner_key": bool(body.get("owner_priv_b64")), "dek": bool(body.get("spine_dek_b64")),
            "secrets_kv": bool(body.get("secrets_kv_b64")),
@@ -1004,6 +1019,12 @@ def _restore_result(new_home: "Path | None", files: dict, body: dict, *, pruned:
         out["unit_verified"] = True
         out["archive_dir"] = str(placed["target"])
         out["archive_mode"] = placed["mode"]
+        # the restored sigil.env is what the restored home's services read their archive dir from: when it names
+        # another dir than the one the archive was placed in, they would read (and verify against) the wrong one
+        named = _env_file_value(env, "SIGIL_SPINE_ARCHIVE_DIR")
+        out["archive_env"] = named
+        out["archive_env_mismatch"] = (named is not None and new_home is not None
+                                       and Path(named).resolve() != Path(placed["target"]).resolve())
     return out
 
 
@@ -1178,7 +1199,7 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             if not ok:
                 raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
         result = _restore_result(new_home, files, body, pruned=pruned, swapped=not verify_only, placed=placed,
-                                 owner_key_matches=_owner_key_matches(staged_dir, body))
+                                 owner_key_matches=_owner_key_matches(staged_dir, body), env=held_env)
         if verify_only:
             return result
         assert new_home is not None

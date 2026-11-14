@@ -2970,8 +2970,13 @@ def cmd_restore(a) -> None:
         return
     print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}"
           + ("; hard-pruned unit verified" if res.get("pruned") else "") + ").")
-    if res.get("pruned") and res.get("archive_dir") and home is not None \
-            and Path(res["archive_dir"]).resolve() != (home / "spine" / "archive").resolve():
+    if res.get("pruned") and res.get("archive_env_mismatch"):
+        print(f"fix:   {home}/sigil.env sets SIGIL_SPINE_ARCHIVE_DIR={res['archive_env']}, but this restore placed the "
+              f"archive at {res['archive_dir']} — set SIGIL_SPINE_ARCHIVE_DIR={res['archive_dir']} there before "
+              f"starting the services (or restore again with --archive-dir {res['archive_env']})")
+    elif res.get("pruned") and res.get("archive_dir") and home is not None \
+            and Path(res["archive_dir"]).resolve() != (home / "spine" / "archive").resolve() \
+            and not res.get("archive_env"):
         print(f"set:   SIGIL_SPINE_ARCHIVE_DIR={res['archive_dir']} for the restored home (e.g. in {home}/sigil.env)")
     print(f"next:  SIGIL_HOME={res['home']} sigil verify   # confirms the owner-signed head against the restored key")
     print(f"then:  SIGIL_HOME={res['home']} sigil vault provision   # re-seals the keys to THIS box's TPM")

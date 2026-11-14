@@ -328,6 +328,26 @@ def test_private_keys_and_sigil_env_are_held_back_until_the_unit_verifies(world,
     assert (new / "sigil.env").stat().st_mode & 0o777 == 0o600
 
 
+def test_a_restored_sigil_env_naming_another_archive_dir_is_reported(world, tmp_path, flag):
+    """The restored home's services read their archive dir from its sigil.env: when that names another dir than the
+    one this restore placed the archive in (a source home whose archive was relocated), the restore says so and names
+    the fix."""
+    src_arch = tmp_path / "source-ebs" / "archive"
+    bk = _rewrite(world["good"], tmp_path / "env.sglbk", world["priv"],
+                  files={"sigil.env": f"# relocated\nSIGIL_SPINE_ARCHIVE_DIR={src_arch}\nX=1\n".encode()})
+    res = _restore(bk, tmp_path / "default-placed")
+    assert res["archive_env"] == str(src_arch) and res["archive_env_mismatch"] is True, res
+    res = _restore(bk, tmp_path / "placed-there", archive_dir=src_arch)
+    assert res["archive_env"] == str(src_arch) and res["archive_env_mismatch"] is False, res
+    assert _restore(world["good"], tmp_path / "no-env")["archive_env_mismatch"] is False
+    cli = run_in_home(tmp_path, "import sys\nfrom sigil.cli import main\nmain(sys.argv[1:])\n", "restore", str(bk),
+                      str(tmp_path / "via-cli"), check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None,
+                      SIGIL_BACKUP_PASSPHRASE=PW)
+    assert cli.returncode == 0, cli.stderr
+    assert (f"sets SIGIL_SPINE_ARCHIVE_DIR={src_arch}" in cli.stdout
+            and f"SIGIL_SPINE_ARCHIVE_DIR={tmp_path / 'via-cli' / 'spine' / 'archive'}" in cli.stdout), cli.stdout
+
+
 # ---- archive placement ------------------------------------------------------------------------------------------------
 def test_the_archive_lands_in_the_given_dir_and_never_where_the_environment_points(world, tmp_path, flag,
                                                                                    monkeypatch):
