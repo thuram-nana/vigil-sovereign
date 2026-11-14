@@ -128,9 +128,13 @@ def _render_worker(text: str, snap: SiteSnapshot) -> str:
 
 def build_app_snapshot(root=None) -> SiteSnapshot:
     """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
-    asset URLs in the page stamped with their digests, the build id written into the page and the worker."""
+    asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
+    iOS install-banner flag (read now, at startup) written into the page."""
+    from .. import config as _config
+    ios = "1" if _config.customer_ios_install_banner_enabled() else "0"
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
-                        stable=(_WORKER,), templates={_WORKER: _render_worker})
+                        stable=(_WORKER,), templates={_WORKER: _render_worker},
+                        html_values={"__VIGIL_IOS_INSTALL__": ios})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign

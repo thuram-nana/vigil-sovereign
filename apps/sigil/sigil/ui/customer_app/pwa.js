@@ -12,6 +12,11 @@
  * the page reloads on controllerchange; if this page already is the edge's build (it came from the network), the
  * worker is switched quietly.
  *
+ * INSTALL. Chromium offers installation through beforeinstallprompt: the event is kept and an "Install app" button
+ * shown (root mount only); the browser's own dialog does the rest. Safari on iOS has no such event: when the edge
+ * enables it (VIGIL_CUSTOMER_IOS_INSTALL_BANNER, off by default — pending the owner's sign-in test in the installed
+ * app on a real iPhone) a dismissible "Share -> Add to Home Screen" banner is shown instead.
+ *
  * CSP-native: no inline script or style, the DOM is built with createElement/textContent, same-origin only.
  * Exposes window.VIGIL_PWA for app.js.
  */
@@ -116,6 +121,70 @@
     var t = e && e.target;
     if (t && t !== window && /^(SCRIPT|LINK|IMG)$/.test(String(t.tagName || ""))) checkVersion(false);
   }, true);
+  // ---- install: Chromium ---------------------------------------------------------------------------------------
+  var installEvt = null;
+  var installBtn = null;
+  function hideInstall() { if (installBtn) { installBtn.remove(); installBtn = null; } }
+  function showInstall() {
+    if (installBtn) return;
+    installBtn = document.createElement("button");
+    installBtn.type = "button";
+    installBtn.id = "vigil-install";
+    installBtn.textContent = "Install app";
+    installBtn.addEventListener("click", function () {
+      var e = installEvt;
+      installEvt = null;
+      hideInstall();
+      if (!e || typeof e.prompt !== "function") return;
+      try {
+        var shown = e.prompt();                          // the browser's own install dialog; it may be used once
+        if (shown && typeof shown.catch === "function") shown.catch(noop);
+        if (e.userChoice && typeof e.userChoice.catch === "function") e.userChoice.catch(noop);
+      } catch (err) { /* already shown once: nothing to do */ }
+    });
+    document.body.appendChild(installBtn);
+  }
+  window.addEventListener("beforeinstallprompt", function (e) {
+    e.preventDefault();                                  // never the browser's own banner: our button, or nothing
+    if (location.pathname !== "/") return;              // not under /customer/ on the console origin
+    installEvt = e;
+    showInstall();
+  });
+  window.addEventListener("appinstalled", function () { installEvt = null; hideInstall(); });
+
+  // ---- install: iOS (behind the edge's flag, off by default) -------------------------------------------------
+  var IOS_DISMISSED = "vigil.ios_install.dismissed";
+  function isIOS() {
+    var ua = String(navigator.userAgent || "");
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+  function standalone() {
+    return navigator.standalone === true
+      || !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  }
+  function iosDismissed() { try { return localStorage.getItem(IOS_DISMISSED) === "1"; } catch (e) { return false; } }
+  function showIosBanner() {
+    var bar = document.createElement("div");
+    bar.id = "vigil-ios-install";
+    bar.setAttribute("role", "note");
+    var msg = document.createElement("span");
+    msg.textContent = "Install VIGIL: tap Share, then Add to Home Screen.";
+    var close = document.createElement("button");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", function () {
+      try { localStorage.setItem(IOS_DISMISSED, "1"); } catch (e) { /* storage off: hidden for this load only */ }
+      bar.remove();
+    });
+    bar.appendChild(msg);
+    bar.appendChild(close);
+    document.body.appendChild(bar);
+  }
+  if (ds.iosInstall === "1" && location.pathname === "/" && isIOS() && !standalone() && !iosDismissed()) {
+    showIosBanner();
+  }
+
   checkVersion(true);
   registerWorker();
 

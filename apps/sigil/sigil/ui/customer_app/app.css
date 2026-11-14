@@ -132,3 +132,18 @@ body[data-plane="customer"] #app { display: block; }
   font: inherit; font-weight: 600; cursor: pointer; padding: 4px 12px; border-radius: 999px; border: 0;
   background: var(--primary-bg); color: var(--primary-fg);
 }
+
+/* "Install app" (pwa.js, Chromium's beforeinstallprompt) and the iOS "Share -> Add to Home Screen" banner */
+#vigil-install {
+  position: fixed; right: 16px; bottom: 16px; z-index: 55; cursor: pointer;
+  font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border-strong);
+  background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-1);
+}
+#vigil-ios-install {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 55;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border-strong);
+  background: var(--bg-2); color: var(--text-0); box-shadow: var(--shadow-1); font-size: 0.92rem;
+}
+#vigil-ios-install button { font: inherit; font-size: 1.2rem; line-height: 1; cursor: pointer; border: 0;
+  background: none; color: var(--text-1); padding: 2px 6px; }
