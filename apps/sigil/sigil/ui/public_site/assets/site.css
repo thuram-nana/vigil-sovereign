@@ -32,7 +32,7 @@ code, kbd, pre { font-family: var(--font-mono); }
   backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
 .nav__row { display: flex; align-items: center; gap: var(--sp-5); height: var(--topbar-h); }
 .brand { display: flex; align-items: center; gap: var(--sp-2); font-weight: 650; letter-spacing: .02em; }
-.brand__mark { width: 26px; height: 26px; }
+.brand__logo { display: block; height: 22px; width: auto; }   /* the owner's wordmark, white on the dark site */
 .nav__links { display: flex; gap: var(--sp-5); margin-left: var(--sp-4); }
 .nav__links a { color: var(--text-1); font-size: var(--fs-sm); }
 .nav__links a:hover { color: var(--text-0); }
