@@ -10,6 +10,11 @@
  * API paths always resolve against the mount and no deep server route is needed (the proxy has no SPA history
  * fallback). The SERVER is the authority on identity + tenant scope; this UI never sends an org id the server
  * would trust — reads/launches are scoped to the session org by the edge + admit_customer.
+ *
+ * GOOGLE. When the edge has customer Google sign-in on, it writes data-google-signin="1" into the page at startup and
+ * the sign-in and sign-up screens show "Continue with Google": a top-level GET of api/customer/oidc/login (relative),
+ * which the edge answers with the redirect to Google. A Google sign-in that does not complete lands back on the app
+ * as #oidc=err, shown as one generic message (the edge never says why).
  */
 (function () {
   "use strict";
@@ -40,6 +45,11 @@
   function h() { return VUI.h.apply(null, arguments); }
   function nav(hash) { if (location.hash === hash) render(); else location.hash = hash; }
   function authed() { var w = state.get().who; return !!(w && w.authenticated); }
+
+  function pageFlag(name) {
+    var ds = (document.body && document.body.dataset) || {};
+    return ds[name] === "1";
+  }
 
   function field(id, label, type) {
     return [h("label", { for: id, text: label }),
@@ -75,6 +85,7 @@
   function viewLogin() {
     var form = h("div.card.cust-auth", {}, [
       h("h2", { text: "Sign in" }),
+      googleBlock(),
       field("login-email", "Email", "email"),
       field("login-password", "Password", "password"),
       h("div.row", {}, [
@@ -83,6 +94,42 @@
       ]),
     ]);
     return shell(form, "#/login");
+  }
+
+  // ---- Continue with Google -------------------------------------------------------------------------
+  // Shown only while the edge has customer Google sign-in on (data-google-signin="1", written at startup). The
+  // button is a top-level navigation to the edge's login route, which redirects to Google; the session cookie is
+  // set by the edge when Google sends the person back. This page never sees a Google token.
+  function googleOn() { return pageFlag("googleSignin"); }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function googleMark() {
+    // Google's four-colour "G" (the mark Google's sign-in button guidelines ask for), built as DOM: no inline markup
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 48 48");
+    svg.setAttribute("width", "18");
+    svg.setAttribute("height", "18");
+    svg.setAttribute("aria-hidden", "true");
+    [["#EA4335", "M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"],
+     ["#4285F4", "M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"],
+     ["#FBBC05", "M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"],
+     ["#34A853", "M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"]
+    ].forEach(function (p) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("fill", p[0]);
+      path.setAttribute("d", p[1]);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+  function googleBlock() {
+    if (!googleOn()) return null;
+    var btn = h("button.btn.cust-google", { type: "button", onClick: startGoogle },
+      [googleMark(), h("span", { text: "Continue with Google" })]);
+    return h("div.cust-google-block", {}, [btn, h("div.cust-or", {}, h("span", { text: "or use your email" }))]);
+  }
+  function startGoogle() {
+    clearErr();
+    location.assign(API + "/oidc/login");          // relative: the edge answers with the redirect to Google
   }
 
   async function doLogin() {
@@ -99,7 +146,8 @@
   function viewSignup() {
     var form = h("div.card.cust-auth", {}, [
       h("h2", { text: "Create your account" }),
-      h("p.muted", { text: "We email you a single-use verification link. Your account and workspace are "
+      googleBlock(),
+      h("p.muted", { text: "We email you a single-use verification token. Your account and workspace are "
         + "owner-signed on confirmation — this page never grants access by itself." }),
       field("su-email", "Work email", "email"),
       h("div.row", {}, [
@@ -121,7 +169,7 @@
       // testing; if present we prefill, otherwise we ask the customer to paste the link's token.
       var devToken = (r && (r.token || r.dev_token)) || "";
       VUI.mount(VUI.$("#su-confirm"), confirmBlock(devToken));
-      VUI.toast("Check your email for the verification link.");
+      VUI.toast("Check your email for the verification token.");
     } catch (e) { err(authMsg(e, "Could not start signup.")); }
   }
 
@@ -771,8 +819,19 @@
     return "#/";
   }
 
+  // The edge sends a Google sign-in that did not complete back to the app root as #oidc=err (never why): say so
+  // once and show the sign-in screen. The fragment is replaced, so a reload does not repeat the message.
+  function googleError() {
+    if (location.hash !== "#oidc=err") return false;
+    try { history.replaceState(null, "", location.pathname + location.search + "#/login"); }
+    catch (e) { location.hash = "#/login"; }
+    err("Google sign-in did not complete. Try again, or sign in with your email and password.");
+    return true;
+  }
+
   function render() {
     if (!state.get().booted) { VUI.mount(root, h("div.cust-shell", {}, h("p.cust-muted", { text: "Loading…" }))); return; }
+    googleError();
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
     var view = ROUTES[routeFor(key)];
