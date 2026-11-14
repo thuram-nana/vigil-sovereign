@@ -552,8 +552,44 @@ class LaunchGate:
 
         decision = SettlementDecision.prepaid(reserved, consumed, plan_refund, wallet_refund,
                                               plan_pe if plan_pe is not None else 0.0, basis)
-        return self._settle_once(oid, s, non, reserved, consumed, now_ts, decision, _move_prepaid, refuse_if,
-                                 finish_only)
+        return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
+                                                               _move_prepaid, refuse_if, finish_only))
+
+    @staticmethod
+    def _track_hold(oid: str, s: str, non: str, out: dict) -> dict:
+        """A settle HELD for the owner (refused ``PLAN_DEBIT_PRUNED``: nothing moved) names launch ``(s, non)`` in the
+        durable held-settle alarm `vigil doctor` reports as a hard issue (``governor.settle_hold``), whichever path
+        asked — the customer's cancel, the settle drain, the reservations sweep or the superseded release. A later
+        settle of that launch that completes or finds it already settled drops the name. Returns ``out`` unchanged;
+        an alarm write failure is logged CRITICAL and never changes the settle's result."""
+        from ..governor import settle_hold
+        if out.get("refused") == PLAN_DEBIT_PRUNED:
+            settle_hold.record_held(oid, s, non, PLAN_DEBIT_PRUNED)
+        elif out.get("ok") and out.get("action") in ("launch_settled", "launch_already_settled"):
+            settle_hold.release_held(s, non)
+        return out
+
+    def release_settled_holds(self) -> "list[tuple[str, str, str]]":
+        """Drop from the held-settle alarm every launch that is settled now — its settlement evidence on the spine (a
+        decision record or a settle entry, the owner's included) or its seam settlement marker, exactly what a settle
+        reads as settled — and return those ``(org_id, slug, nonce)``. Reads the spine once. Never raises: an
+        unreadable alarm record or spine releases nothing, so the alarm stays."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+
+        from ..governor import settle_hold
+        from ..governor.launch_settlement import scan_settlements
+        kp = self.owner_key
+        held = settle_hold.read_held()
+        if kp is None or not held:
+            return []
+        try:
+            keys = {(str(h.get("org_id", "")), str(h.get("slug", "")), str(h.get("nonce", ""))) for h in held}
+            ev = scan_settlements(self.store, kp.public_key_b64, keys=keys)
+            base = self._seam_base()
+            done = sorted(k for k in keys if all(k) and (ev[k].settled or is_lease_settled(base, k[1], k[2])))
+        except Exception:  # noqa: BLE001 — a read failure keeps every name (fail-loud)
+            return []
+        return [k for k in done if settle_hold.release_held(k[1], k[2])]
 
     def _pruned_plan_debit_check(self, oid: str, plan_deb_eid: str,
                                  refuse_if: Optional[Callable[[], Optional[str]]]) -> Callable[[], Optional[str]]:

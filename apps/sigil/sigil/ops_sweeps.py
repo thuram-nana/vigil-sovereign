@@ -239,7 +239,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     ``pause_unknown`` (nothing written; the next pass decides); a busy settle lock or meter is ``deferred``; a
     settle that finished a recorded decision a crash interrupted is ``settle_completed`` with the amounts it moved.
     A lease that does not record its plan/wallet split, whose reserve plan debit record a hard prune removed from
-    the live spine, is held as ``plan_debit_pruned`` (nothing moved; an owner action, never retried into the wallet).
+    the live spine, is held as ``plan_debit_pruned`` (nothing moved; an owner action, never retried into the wallet)
+    and named in the held-settle alarm `vigil doctor` reports; under ``apply`` the sweep also drops from that alarm
+    every launch now settled (``LaunchGate.release_settled_holds``, e.g. once the owner has settled it).
     With ``VIGIL_SETTLE_SPINE_RECORD`` on, a listed lease whose settlement marker is present (its tombstone pending:
     possibly a settle interrupted after the marker) is FINISHED under ``apply`` (``settle_launch(finish_only=True)``:
     only a recorded decision, never a fresh refund; no TTL or spool check) and reported ``settle_interrupted`` with
@@ -353,6 +355,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         else:
             rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
                          **_metered_spend(gate, slug_, nonce_)})
+    if apply:
+        gate.release_settled_holds()                       # a held launch settled since (by anyone) leaves the alarm
     return {"applied": bool(apply), "items": rows}
 
 

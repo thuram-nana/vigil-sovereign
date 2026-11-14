@@ -2149,6 +2149,47 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
         report.setdefault("launch_settlements", {})["drain_record"] = f"{type(exc).__name__}: {exc}"
         _note(f"the settle drain's record of unfinished settles could not be read: {exc}")
+    # A customer launch settle HELD for the owner: the settle could not tell how much of the reservation to return to
+    # each credit bucket, so it moved nothing. Whichever path refused it (the customer's cancel, the settle drain, the
+    # reservations sweep, the superseded release), the sovereign gate names the launch in this durable alarm
+    # ($SIGIL_HOME/alarms/launch-settle-held.json). A HARD issue until each named launch settles
+    # (`launch_settlements["held"]`, slugs only); an unreadable record is a HARD issue too. Absent alarm => nothing
+    # is added. Best-effort: never raises.
+    try:
+        _held_alarm = home / "alarms" / "launch-settle-held.json"
+        if _held_alarm.exists() or _held_alarm.is_symlink():
+            _held_slugs: "list[str]" = []
+            _unreadable = False
+            try:
+                import json as _json
+                if _held_alarm.is_symlink():
+                    raise ValueError("a symlink")
+                _rec = _json.loads(_held_alarm.read_text(encoding="utf-8"))
+                _entries = _rec.get("held") if isinstance(_rec, dict) else None
+                if not isinstance(_entries, list) or not all(
+                        isinstance(e, dict) and isinstance(e.get("slug"), str) and e["slug"] for e in _entries):
+                    raise ValueError("malformed")
+                _held_slugs = sorted({e["slug"][:96] for e in _entries})
+            except (OSError, ValueError, AttributeError, TypeError):
+                _unreadable = True
+            if _unreadable:
+                report.setdefault("launch_settlements", {})["held"] = ["(unreadable)"]
+                _issue(f"the record of customer launch settles held for the owner ({_display_path(_held_alarm)}) "
+                       f"cannot be read: one or more launches may be holding a customer's reserved credits. Check "
+                       f"the file (it is JSON, written by the cockpit, the settle drain and `sigil ops-sweep`), then "
+                       f"see the runbook hosting-and-persistence (held settles).")
+            elif _held_slugs:
+                report.setdefault("launch_settlements", {})["held"] = _held_slugs
+                _more = f" and {len(_held_slugs) - 10} more" if len(_held_slugs) > 10 else ""
+                _issue(f"{len(_held_slugs)} customer launch settle(s) are held for the owner "
+                       f"({', '.join(_held_slugs[:10])}{_more}): each settle could not tell how much of the "
+                       f"reservation to return to the plan bucket and how much to the wallet, so nothing moved and "
+                       f"the customer's reserved credits stay reserved. Settle each one as the runbook "
+                       f"hosting-and-persistence describes (held settles); `sigil ops-sweep reservations --apply` "
+                       f"then clears this, as does the launch's next settle.")
+    except Exception as exc:  # noqa: BLE001 — the held-settle probe must never crash the report
+        report.setdefault("launch_settlements", {})["held_record"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the record of held customer launch settles could not be read: {exc}")
 
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.

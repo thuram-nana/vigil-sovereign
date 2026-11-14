@@ -126,10 +126,21 @@ the spine** — never the source of truth.
   lease that carries the split) the owner‑signed lease records that split, so the settle takes it from the lease
   and a hard prune of the reserve records changes nothing. A lease minted without it settles from the reserve's
   plan debit record on the live spine; if a hard prune has removed that record before the launch settled, the
-  settle moves nothing and is held: `ops-sweep reservations` reports it as `plan_debit_pruned` and the settle
-  drain quarantines its completion (and alarms). The pruned record is kept in the prune archive; settling such a
-  launch is an owner action from that record. Only launches minted before the flag was turned on and still open
-  when a prune runs can be held this way.
+  settle moves nothing and is held. A superseded reservation (no lease: it is released from its live reserve
+  records) is held the same way. Only a launch minted without the split, or a superseded reservation, still
+  unsettled when a prune runs can be held this way.
+
+  **Held settles.** Whichever path meets a held settle — the customer's cancel (the customer is told the credits
+  stay reserved until the operator returns them; the audit row is `refund_held`), `ops-sweep reservations`
+  (row status `plan_debit_pruned`), the settle drain (it quarantines the completion and alarms) or the
+  superseded release — the launch is named in `$SIGIL_HOME/alarms/launch-settle-held.json`, and `vigil doctor`
+  reports every named launch (by slug) as a hard issue (`launch_settlements.held`). The pruned record is kept in
+  the prune archive; settling such a launch is an owner action from that record, under the launch's own settle
+  entry ids (`settle-plan:<slug>:<nonce>` to the plan tranche, `settle-wallet:<slug>:<nonce>` to the wallet), so
+  any later settle of the launch finds it already settled and never refunds it twice. A launch leaves the alarm
+  when its next settle finds it settled, or at the next `ops-sweep reservations --apply` once the spine (or its
+  seam settlement marker) shows it settled; the file goes when it names none. Never edit the file by hand while
+  a launch it names is unsettled.
 
   **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
   after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace

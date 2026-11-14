@@ -18,6 +18,9 @@ Pinned here (each guard has a named test that a mutant turns red):
   * the settle drain quarantines a held settle                                 -> test_the_settle_drain_quarantines_...
   * the caller's own precondition is evaluated before the hold               -> test_a_held_settle_reports_the_...
   * E7: a pruned plan debit holds the release / a pruned wallet debit refuses -> test_a_superseded_reservation_...
+  * every held settle names the launch in the held-settle alarm (`vigil doctor` HARD), the customer's cancel
+    included (its own refusal + a critical audit), until the launch settles      -> test_a_customer_cancel_of_a_held_...,
+    test_a_held_launch_leaves_the_alarm_..., test_the_reservations_sweep_drops_..., test_vigil_doctor_reports_...
 
 Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:integration:packages/core/vigil_core \
      python -m pytest apps/sigil/tests/test_lease_plan_split_prune.py
@@ -43,6 +46,7 @@ from sigil.governor.asset_ownership import METHOD_DNS_TXT, AssetOwnershipRegistr
 from sigil.governor.metering import PlanCreditLedger, refill_active_subscription
 from sigil.governor.orgs import OrgRegistry
 from sigil.governor.postpaid import PostpaidRegistry
+from sigil.governor.settle_hold import held_alarm_path, read_held
 from sigil.governor.subscription import SubscriptionRegistry
 from sigil.governor.wallet import WalletRegistry
 from sigil.spine import fold_cache, prune
@@ -73,6 +77,7 @@ def world(request, tmp_path, monkeypatch):
     monkeypatch.setattr(_fl, "FLOOR_PATH", tmp_path / "floor.json")
     monkeypatch.setenv("SIGIL_SPINE_ARCHIVE_DIR", str(tmp_path / "archive"))
     monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "seam"))
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "home"))       # the held-settle alarm lives under it
     monkeypatch.setattr(cfg, "MODEL_METER_DIR", tmp_path / "model_meter")
     for k in ("VIGIL_LEASE_PLAN_SPLIT", "VIGIL_SETTLE_SPINE_RECORD", "VIGIL_METERED_BILLING",
               "VIGIL_ONE_LAUNCH_PER_HOST", "VIGIL_COST_LEDGER_WRITE"):
@@ -170,6 +175,22 @@ def _doc(r):
     return SignedCreditLaunchLease.model_validate(r["lease"]).document
 
 
+def _held():
+    """The launches the held-settle alarm (`vigil doctor`) names, as (slug, nonce)."""
+    return sorted((h["slug"], h["nonce"]) for h in (read_held() or []))
+
+
+def _owner_settles(path, r, *, plan, wallet):
+    """The owner returns a held reservation's credits under the launch's own settle entry ids (what a settle writes)."""
+    s = _store(path)
+    if plan:
+        PlanCreditLedger(s).grant(ORG, plan, period_end=PERIOD_END, entry_id=f"settle-plan:{r['slug']}:{r['nonce']}",
+                                  issued_at=LATE)
+    if wallet:
+        WalletRegistry(s).grant(ORG, wallet, "refund", source_ref=r["slug"],
+                                entry_id=f"settle-wallet:{r['slug']}:{r['nonce']}", issued_at=LATE)
+
+
 # =====================================================================================================================
 # the lease records the split it was minted with
 # =====================================================================================================================
@@ -236,8 +257,10 @@ def test_legacy_lease_after_a_prune_of_its_plan_debit_is_held_and_moves_nothing(
     r = _reserve(s, units=10)                                          # flag off: a lease without the split
     _hard_prune_past_the_reserve(world)
     _assert_debit_pruned(world, r)
+    assert _held() == []
     rows = _sweep(_store(world))
     assert [x["status"] for x in rows] == [PLAN_DEBIT_PRUNED], rows
+    assert _held() == [(r["slug"], r["nonce"])], "a held settle names the launch in the alarm doctor reports"
     s2 = _store(world)
     assert _buckets(s2) == (0, 15), "nothing refunded: the plan share must never land in the wallet"
     assert _entries(s2, "settle-") == 0
@@ -259,6 +282,7 @@ def test_a_held_settle_reports_the_callers_own_refusal_first(world):
                                                   basis="sweep:refund", refuse_if=lambda: "completion_pending")
     assert out["ok"] is False and out["refused"] == "completion_pending", out
     assert _buckets(_store(world)) == (0, 15)
+    assert _held() == [], "a refusal that is not a hold raises no held-settle alarm"
 
 
 def test_legacy_wallet_only_lease_after_a_prune_still_refunds_the_wallet(world):
@@ -311,6 +335,7 @@ def test_the_settle_drain_quarantines_a_held_settle(world):
     assert (out["settled"], out["rejected"]) == (0, 1), out
     reasons = [p.read_text() for p in Path(spool, "rejected").glob("*.reason")]
     assert reasons and PLAN_DEBIT_PRUNED in reasons[0], reasons
+    assert _held() == [(r["slug"], r["nonce"])]
     assert _buckets(_store(world)) == (0, 15)
     rows = ops_sweeps.sweep_abandoned_reservations(LaunchGate(_store(world)), now=LATE, ttl_s=50, apply=True,
                                                    completion_spool=spool)["items"]
@@ -437,6 +462,7 @@ def test_a_superseded_reservation_whose_plan_debit_a_prune_removed_is_held_not_r
     before = _buckets(_store(world))
     out = _release(world, r)
     assert out["ok"] is False and out["refused"] == PLAN_DEBIT_PRUNED, out
+    assert _held() == [(r["slug"], r["nonce"])]
     s2 = _store(world)
     assert _buckets(s2) == before, "nothing moves: the wallet share alone is never released as the whole"
     assert _entries(s2, f"settle-wallet:{r['slug']}:{r['nonce']}") == 0
@@ -468,3 +494,148 @@ def test_a_superseded_reservation_with_its_records_live_is_still_released_in_ful
     assert later["ok"] and g.publish_lease(signed_lease=later["lease"], expect_org_id=ORG)["ok"]
     out = _release(world, r)
     assert out["ok"] and (out["refunded_plan"], out["refunded_wallet"]) == (5, 5), out
+
+
+# =====================================================================================================================
+# a held settle alarms on every path, the customer's cancel included, until the launch settles
+# =====================================================================================================================
+def _audits(store, outcome):
+    return [x.payload for x in store.iter_records()
+            if (x.payload or {}).get("signal") == "provision.audit" and x.payload.get("outcome") == outcome]
+
+
+def test_a_customer_cancel_of_a_held_launch_says_it_is_held_alarms_and_moves_nothing(world):
+    from sigil.ui.provision import LAUNCH_REFUND_HELD_DETAIL, ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)                           # reserved, never started
+    _hard_prune_past_the_reserve(world)
+    _assert_debit_pruned(world, r)
+    with pytest.raises(ProvisionDenied) as ei:
+        build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    assert str(ei.value) == LAUNCH_REFUND_HELD_DETAIL, "never told it was started: it was not"
+    s2 = _store(world)
+    held = _audits(s2, "refund_held")
+    assert len(held) == 1 and held[0]["reason"] == PLAN_DEBIT_PRUNED and held[0]["target"] == r["slug"], held
+    assert _audits(s2, "refused_started") == []
+    assert _held() == [(r["slug"], r["nonce"])]
+    assert _buckets(s2) == (0, 15) and _entries(s2, "settle-") == 0
+
+
+def test_a_customer_cancel_of_a_started_launch_is_still_refused_as_started(world):
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10)                                          # published: started
+    _hard_prune_past_the_reserve(world)
+    with pytest.raises(ProvisionDenied) as ei:
+        build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    assert "has been started" in str(ei.value)
+    assert _held() == [] and _audits(_store(world), "refund_held") == []
+
+
+def test_a_held_launch_leaves_the_alarm_once_it_is_settled(world):
+    """The owner settles the held launch (its settle entries); the launch's next settle finds it already settled and
+    drops it from the alarm — a re-cancel here — and nothing moves twice."""
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)
+    _hard_prune_past_the_reserve(world)
+    with pytest.raises(ProvisionDenied):
+        build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    assert _held() == [(r["slug"], r["nonce"])]
+    _owner_settles(world, r, plan=5, wallet=5)
+    assert _buckets(_store(world)) == (5, 20)
+    out = build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 120)
+    assert out.get("already_settled") is True and out["refunded"] == 0, out
+    assert _held() == [] and not held_alarm_path().exists()
+    assert _buckets(_store(world)) == (5, 20)
+
+
+def test_the_reservations_sweep_drops_a_held_launch_the_spine_shows_settled(world):
+    """A held launch nothing re-settles (an unpublished reservation) leaves the alarm at the next
+    `ops-sweep reservations --apply` once the spine shows it settled — and only then."""
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=30, plan=8)
+    r = _reserve(s, units=4, publish=False)                            # plan 4
+    other = _reserve(_store(world), units=3, publish=False)            # plan 3
+    _hard_prune_past_the_reserve(world)
+    for lease in (r, other):
+        with pytest.raises(ProvisionDenied):
+            build_provisioner(_store(world)).launch_cancel("u", ORG, lease["lease"], now=NOW + 60)
+    assert _held() == sorted([(r["slug"], r["nonce"]), (other["slug"], other["nonce"])])
+    _sweep(_store(world))
+    assert len(_held()) == 2, "nothing is settled yet: the alarm stays"
+    _owner_settles(world, r, plan=4, wallet=0)
+    _sweep(_store(world), apply=False)
+    assert len(_held()) == 2, "a report-only sweep writes nothing"
+    _sweep(_store(world))
+    assert _held() == [(other["slug"], other["nonce"])]
+
+
+def test_vigil_doctor_reports_a_held_settle_as_a_hard_issue_by_slug(world, monkeypatch):
+    from vigil_integration import doctor as _doc
+    repo = Path(_doc.__file__).resolve().parents[2]
+    monkeypatch.setenv("VIGIL_SETTLE_SPOOL", str(Path(os.environ["SIGIL_HOME"]) / "no-spool"))
+    clean = _doc.collect(repo)
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10)
+    _hard_prune_past_the_reserve(world)
+    _sweep(_store(world))
+    report = _doc.collect(repo)
+    new = [i for i in report["issues"] if i not in clean["issues"]]
+    assert len(new) == 1 and "held for the owner" in new[0] and r["slug"] in new[0], new
+    assert r["nonce"] not in new[0], "doctor names slugs only"
+    assert report["launch_settlements"]["held"] == [r["slug"]]
+    assert held_alarm_path().name == "launch-settle-held.json" and str(held_alarm_path()).startswith(
+        os.environ["SIGIL_HOME"])
+
+
+def test_a_finish_only_pass_over_a_held_launch_keeps_it_in_the_alarm(world):
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10)
+    _hard_prune_past_the_reserve(world)
+    _sweep(_store(world))
+    out = LaunchGate(_store(world)).settle_launch(signed_lease=r["lease"], consumed_units=0, now=LATE,
+                                                  basis="sweep:refund", finish_only=True)
+    assert out["ok"] and out["action"] == "launch_not_settled", out
+    assert _held() == [(r["slug"], r["nonce"])], "only a settled launch leaves the alarm"
+
+
+def test_the_reservations_sweep_drops_a_held_launch_its_seam_marker_shows_settled(world):
+    from vigil_integration.live.credit_lease_broker import record_lease_settlement
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)
+    _hard_prune_past_the_reserve(world)
+    with pytest.raises(ProvisionDenied):
+        build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    record_lease_settlement(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])   # what a settle reads as settled
+    _sweep(_store(world))
+    assert _held() == []
+
+
+def test_a_held_cancels_audit_write_is_never_dropped(world, monkeypatch):
+    """The audit of a held cancel is critical: when it cannot be written the cancel fails loudly (the caller sees the
+    write error), never with the audit silently missing."""
+    from sigil.ui.provision import build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)
+    _hard_prune_past_the_reserve(world)
+    prov = build_provisioner(_store(world))
+    real_append = prov.store.append
+
+    def append(*a, **k):
+        if (k.get("payload") or {}).get("outcome") == "refund_held":
+            raise OSError("disk full")
+        return real_append(*a, **k)
+    monkeypatch.setattr(prov.store, "append", append)
+    with pytest.raises(OSError):                       # not swallowed into the ProvisionDenied it would have raised
+        prov.launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    assert _buckets(_store(world)) == (0, 15)
