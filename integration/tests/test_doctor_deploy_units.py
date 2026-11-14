@@ -27,6 +27,8 @@ _UNIT_SRC = {
     "vigil-settle-drain.service": _REPO / "infra" / "systemd" / "vigil-settle-drain.service",
 }
 _DROPIN = _REPO / "infra" / "systemd" / "vigil-command.service.d" / "production.conf"
+# A stand-in for a setting's value: the check compares values as opaque strings and never prints them.
+_VALUE = "owner-set-value"
 
 
 def _never_active(_unit):
@@ -237,8 +239,8 @@ def test_ops_sweep_alone_disagreeing_is_a_hard_issue(tmp_path):
 
 def test_one_value_in_sigil_env_reaches_every_unit(tmp_path):
     # the remedy the issue names: set it once in $SIGIL_HOME/sigil.env, which every sigil process reads
-    _money_host(tmp_path, sigil_env="VIGIL_SETTLE_SPINE_RECORD=1\nVIGIL_BILLING_TARGET_MARGIN=0.37\n")
-    ops = {"VIGIL_SETTLE_SPINE_RECORD": "1", "VIGIL_BILLING_TARGET_MARGIN": "0.37"}
+    _money_host(tmp_path, sigil_env=f"VIGIL_SETTLE_SPINE_RECORD=1\nVIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
+    ops = {"VIGIL_SETTLE_SPINE_RECORD": "1", "VIGIL_BILLING_TARGET_MARGIN": _VALUE}
     sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, ops)
     assert issues == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
 
@@ -260,12 +262,12 @@ def test_sigil_env_is_read_at_each_processs_own_sigil_home(tmp_path):
 
 
 def test_a_pricing_setting_set_in_the_cockpit_only_is_a_hard_issue_and_its_value_is_never_printed(tmp_path):
-    _money_host(tmp_path, cockpit="VIGIL_BILLING_TARGET_MARGIN=0.37\n")
+    _money_host(tmp_path, cockpit=f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
     sec, issues, _notes = dc.must_match_report(tmp_path, _REPO, {})
     assert len(issues) == 1
     assert issues[0].startswith("VIGIL_BILLING_TARGET_MARGIN must be the same")
     assert "set in cockpit; unset in settle-drain, ops-sweep" in issues[0]
-    assert "0.37" not in issues[0] and "0.37" not in repr(sec)
+    assert _VALUE not in issues[0] and _VALUE not in repr(sec)
     assert "customer" not in sec["flags"]["VIGIL_BILLING_TARGET_MARGIN"]   # the customer edge does not settle
 
 
