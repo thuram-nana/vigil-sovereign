@@ -891,8 +891,8 @@ jobs:
           # need them importorskip-SKIPPED — so a sovereign pin bump could break SIGIL with this job green.
           # No apps/sigil test imports a package only the offense lock has (pytest-httpserver, requests,
           # jinja2, structlog, bs4, werkzeug: none), so there is NO second runtime install to mask a
-          # sovereign pin. The ci-tooling lock's overlap with this one (packaging, typing-extensions) is
-          # asserted identical by test_supply_chain.py::test_ci_tooling_lock_agrees_with_runtime_locks_on_
+          # sovereign pin. Every package the ci-tooling lock shares with this one is asserted to be pinned
+          # identically by test_supply_chain.py::test_ci_tooling_lock_agrees_with_runtime_locks_on_
           # shared_packages. apps/sigil/tests/test_ci_suite_legs.py fails if this reverts to the offense lock.
           pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
@@ -904,6 +904,13 @@ jobs:
           # test_bridge_webapp). The runner image ships node; with this set a missing node FAILS those tests
           # instead of skipping them green (apps/sigil/tests/test_ci_suite_legs.py pins it).
           VIGIL_REQUIRE_NODE: "1"
+          # This job installs the sovereign lock, so the sovereign closure is PRESENT here: a test that would
+          # skip because numpy / onnxruntime / tokenizers / huggingface_hub / mcp / qdrant_client "is missing"
+          # FAILS instead (the pytest_require_planes plugin, loaded with -p below), and the tests' own
+          # closure guards fail rather than skip (VIGIL_REQUIRE_SOVEREIGN_CLOSURE). test_ci_suite_legs.py pins
+          # both on every whole-suite run.
+          VIGIL_REQUIRE_SOVEREIGN_CLOSURE: "1"
+          VIGIL_REQUIRE_PLANES: numpy,onnxruntime,tokenizers,huggingface_hub,mcp,qdrant_client
         run: |
           mkdir -p /tmp/sigil-ci
           if [ -f apps/sigil/tests/test_offense_gate.py ]; then
@@ -931,7 +938,7 @@ jobs:
             # --ignore list is now genuinely EMPTY (audit F-05): test_graph is host-independent
             # (normalize_project collapses any host slug by the stable repo basename) and
             # test_robustness's vector tests are importorskip-guarded on qdrant_client, so both run here.
-            PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/ -q
+            PYTHONPATH=apps/sigil:integration:.github/scripts python -m pytest -p pytest_require_planes apps/sigil/tests/ -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
@@ -1011,11 +1018,14 @@ jobs:
           SIGIL_HOME: /tmp/sigil-ci
           VIGIL_FOLD_CACHE_ENABLED: "1"
           VIGIL_REQUIRE_NODE: "1"
+          # the same closure requirement as the governor job's whole-suite step (see there)
+          VIGIL_REQUIRE_SOVEREIGN_CLOSURE: "1"
+          VIGIL_REQUIRE_PLANES: numpy,onnxruntime,tokenizers,huggingface_hub,mcp,qdrant_client
         run: |
           mkdir -p /tmp/sigil-ci
           # No extra -q: apps/sigil/pyproject.toml already adds one, and a second hides the pass/skip tally.
           # -rs names every skip, so a test that skipped under the flag is visible, not a silent green.
-          PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/ -rs
+          PYTHONPATH=apps/sigil:integration:.github/scripts python -m pytest -p pytest_require_planes apps/sigil/tests/ -rs
 
   sigil-lint:
     name: SIGIL lint (ruff blocking + mypy can-complete)

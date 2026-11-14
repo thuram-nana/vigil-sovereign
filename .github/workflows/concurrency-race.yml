@@ -91,7 +91,7 @@ jobs:
           python-version: "3.13"
       - name: install vigil_core + SIGIL deps (hash-locked) — same closure as sigil-governor
         run: |
-          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: high-iteration repeat stress + full flake ledger

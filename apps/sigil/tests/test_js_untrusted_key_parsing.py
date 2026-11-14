@@ -145,7 +145,8 @@ def test_cvss_page_never_writes_a_url_chosen_key_that_the_prototype_chain_resolv
     and assigns the crafted key, which reaches an inherited setter with a value from the URL. The write must be
     keyed by the calculator's own ORDER list, so a crafted id is never assigned, whatever the chain carries."""
     href = "https://vigil.example/tools/cvss-calculator/?vector=CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L/ZZ:N"
-    r = subprocess.run(["node", "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True,
+                       timeout=30)
     assert r.returncode == 0, r.stderr
     got = json.loads(r.stdout)
     assert got["vector"] == "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L"   # the URL's real metrics were applied
