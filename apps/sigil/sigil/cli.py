@@ -2923,20 +2923,55 @@ def cmd_backup(a) -> None:
 def cmd_restore(a) -> None:
     """Restore a `sigil backup` onto a fresh SIGIL_HOME. VERIFIES the manifest owner-signature + every file
     hash BEFORE writing, and re-verifies the restored spine's chain/binding after; fail-closed on a wrong
-    passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.)"""
+    passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.) A backup of a
+    HARD-PRUNED home (SIGIL_PRUNED_RESTORE=1) is verified as one unit before anything is swapped in, and its swap is
+    journaled: `--resume HOME` completes an interrupted one, `--abort HOME` discards one before any unit is in.
+    `--verify-only` runs every check and writes nothing."""
     from pathlib import Path
 
     from vigil_core.vault import Vault
 
-    from .backup import BackupError, restore_backup
-    home = Path(a.home)
+    from .backup import BackupError, restore_abort, restore_backup, restore_resume
+    resume, abort = getattr(a, "resume", None), getattr(a, "abort", None)
+    verify_only = bool(getattr(a, "verify_only", False))
+    if resume or abort:
+        if resume and abort or a.src or a.home or verify_only:
+            print("restore: --resume / --abort take only the home (sigil restore --resume HOME)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            res = restore_resume(resume) if resume else restore_abort(str(abort))
+        except BackupError as e:
+            print(f"!! restore {'resume' if resume else 'abort'} failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        if resume:
+            print(f"restore into {res['home']} completed ({', '.join(res['units'])} swapped in).")
+            print(f"next:  SIGIL_HOME={res['home']} sigil spine verify-unit --deep")
+        else:
+            print(f"the interrupted restore into {res['home']} was discarded (nothing of it was swapped in).")
+        return
+    if not a.src or (not a.home and not verify_only):
+        print("restore: needs the backup file and the home to restore into (sigil restore SRC HOME)", file=sys.stderr)
+        sys.exit(2)
+    home = Path(a.home) if a.home else None
+    archive_dir = getattr(a, "archive_dir", None)
     try:
-        res = restore_backup(a.src, home, _backup_passphrase(), vault=Vault(home / "vault"),
-                             force=getattr(a, "force", False))
+        res = restore_backup(a.src, home, _backup_passphrase(),
+                             vault=None if verify_only else Vault(Path(a.home) / "vault"),
+                             force=getattr(a, "force", False), archive_dir=archive_dir, verify_only=verify_only)
     except BackupError as e:
         print(f"!! restore failed (nothing trusted): {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}).")
+    if verify_only:
+        what = ("its hard-pruned spine verifies as one unit" if res.get("pruned")
+                else "its spine chain verifies")
+        print(f"verify-only: the backup decrypts, its signed manifest and every file verify, and {what}; nothing was "
+              f"written.")
+        return
+    print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}"
+          + ("; hard-pruned unit verified" if res.get("pruned") else "") + ").")
+    if res.get("pruned") and res.get("archive_dir") and home is not None \
+            and Path(res["archive_dir"]).resolve() != (home / "spine" / "archive").resolve():
+        print(f"set:   SIGIL_SPINE_ARCHIVE_DIR={res['archive_dir']} for the restored home (e.g. in {home}/sigil.env)")
     print(f"next:  SIGIL_HOME={res['home']} sigil verify   # confirms the owner-signed head against the restored key")
     print(f"then:  SIGIL_HOME={res['home']} sigil vault provision   # re-seals the keys to THIS box's TPM")
 
@@ -3144,8 +3179,18 @@ def main(argv=None) -> None:
     pbak.add_argument("dest", help="destination file for the encrypted backup")
     pbak.set_defaults(fn=cmd_backup)
     pres = sub.add_parser("restore", help="restore a `sigil backup` onto a fresh SIGIL_HOME (verifies before writing)")
-    pres.add_argument("src", help="the encrypted backup file")
-    pres.add_argument("home", help="a FRESH SIGIL_HOME dir to restore into")
+    pres.add_argument("src", nargs="?", default=None, help="the encrypted backup file")
+    pres.add_argument("home", nargs="?", default=None, help="a FRESH SIGIL_HOME dir to restore into")
+    pres.add_argument("--archive-dir", dest="archive_dir", default=None,
+                      help="a hard-pruned home: where its cold archive goes (default: inside the restored spine, "
+                           "<home>/spine/archive — never this process's SIGIL_SPINE_ARCHIVE_DIR); a backup that "
+                           "carries no archive adopts the one already here if it verifies")
+    pres.add_argument("--verify-only", dest="verify_only", action="store_true",
+                      help="decrypt and verify the backup (for a hard-pruned home: as one unit) and write nothing")
+    pres.add_argument("--resume", default=None, metavar="HOME",
+                      help="complete a restore into HOME that was interrupted between its swaps")
+    pres.add_argument("--abort", default=None, metavar="HOME",
+                      help="discard an interrupted restore into HOME (only while none of its units is swapped in)")
     pres.add_argument("--force", action="store_true",
                       help="REPLACE a non-empty SIGIL_HOME. Without it, restore refuses a non-empty target "
                            "rather than overlay stale state. The replacement is staged + verified first and "
@@ -3606,6 +3651,7 @@ def main(argv=None) -> None:
     psc.add_argument("--subdomains", action="store_true", help="include subdomains of allowed domains")
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
+    _assert_no_restore_journal_or_exit(a.cmd)
     _assert_store_operable_or_exit(a.cmd)
     try:
         a.fn(a)
@@ -3618,6 +3664,24 @@ def main(argv=None) -> None:
 # gate would lock the operator out of the very tools that clear it. Everything else refuses to operate on an
 # un-migrated (legacy, pre-segment) store and names `sigil upgrade`.
 _MIGRATION_GATE_EXEMPT = frozenset({"upgrade", "spine", "doctor", "restore", "backup", "vault", "kernel"})
+
+
+# While a restore into this home is interrupted between its swaps (its journal stands), only the commands that
+# finish or inspect it run: everything else would read or write a home whose units may come from two points in time.
+_RESTORE_JOURNAL_GATE_EXEMPT = frozenset({"restore", "doctor"})
+
+
+def _assert_no_restore_journal_or_exit(cmd: str) -> None:
+    """Fail-closed startup gate: refuse every command but `sigil restore` and `sigil doctor` while a restore journal
+    stands in this SIGIL_HOME, naming `sigil restore --resume` (exit 3)."""
+    if cmd in _RESTORE_JOURNAL_GATE_EXEMPT:
+        return
+    from .config import RESTORE_JOURNAL_PATH, SIGIL_HOME
+    if RESTORE_JOURNAL_PATH.exists():
+        print(f"sigil: refusing to run `{cmd}` — a restore into {SIGIL_HOME} was interrupted; finish it with "
+              f"`sigil restore --resume {SIGIL_HOME}` (or `sigil restore --abort {SIGIL_HOME}` if none of its units "
+              f"was swapped in yet)", file=sys.stderr)
+        sys.exit(3)
 
 
 def _assert_store_operable_or_exit(cmd: str) -> None:

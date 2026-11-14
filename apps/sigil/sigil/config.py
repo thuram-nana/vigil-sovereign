@@ -99,6 +99,10 @@ CACHE_DIR = SIGIL_HOME / "cache"
 # `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower
 # it — a routine reset cannot roll the durable floor back. See spine/floor.py.
 FLOOR_PATH = SIGIL_HOME / "floor.json"
+# The roll-forward journal of a restore into this home that swaps a hard-pruned unit in (`sigil restore`). It exists
+# only while such a restore is between its first and its last swap: while it does, signed-head verification and
+# signing fail closed and the CLI refuses everything but `sigil restore --resume / --abort` and `sigil doctor`.
+RESTORE_JOURNAL_PATH = SIGIL_HOME / "restore-journal.json"
 # PRICING M1c: the model gateway's per-launch meters (hash-chained JSONL, one per (engagement, nonce)). MONEY data:
 # a run's charge is computed from its meter at settle, so the directory is in every backup.
 MODEL_METER_DIR = SIGIL_HOME / "model_meter"

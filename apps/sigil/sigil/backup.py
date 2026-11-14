@@ -101,6 +101,19 @@ _STAGED_ROTATION_MARKER = "spine/keys/owner.next.pub"
 # `sigil sign` writes the head and the floor outside the writer lock), backing off this long times the attempt.
 _CAPTURE_ATTEMPTS = 5
 _CAPTURE_BACKOFF_S = 0.2
+# The roll-forward journal of a restore that swaps a hard-pruned unit in: written (atomically, durably) BEFORE the
+# first swap and removed after the last, so a restore interrupted between its swaps is resumed (or, before any swap,
+# aborted) instead of leaving a home whose units come from two different points in time.
+_JOURNAL_NAME = "restore-journal.json"
+_JOURNAL_SCHEMA = 1
+# Test-only fault-injection hook at the journaled swap's barriers (mirrors ``spine.store._crash_hook``). Production
+# ships it as None; it cannot be armed from the environment.
+_crash_hook: Any = None
+
+
+def _maybe_crash(name: str) -> None:
+    if _crash_hook is not None:
+        _crash_hook(name)
 # Top-level CONFIG files (not key material) packaged verbatim into the sealed body. floor.json /
 # security.manifest.json were already covered; W7-2 adds the HA witness roster (the failover guard depends on
 # it), the governor budget caps, and the persisted env file. ``sigil.env`` can hold a signing secret (e.g.
@@ -146,6 +159,8 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "vault": "machine-bound TPM-sealed KEK — useless off-box; re-provisioned on the new host (the secrets it "
              "wraps are re-wrapped into the sealed backup body instead)",
     "backups": "the backup OUTPUT directory itself — packaging it would recurse prior backups into new ones",
+    "restore-journal.json": "the roll-forward journal of a restore into this home that was interrupted between its "
+                            "swaps (`sigil restore --resume`) — in-progress restore state, never recovery state",
     "alarms": "point-in-time operator alarms about the CURRENT seam (e.g. an eval-capability grant revoke that could "
               "not be confirmed). Not restored: an offense restore leaves the eval publications out (ungranted), "
               "and the next offense close re-checks every published grant from the spine whether or not the alarm "
@@ -747,6 +762,141 @@ def _target_writers_quiet(new_home: Path) -> Iterator[None]:
             os.close(fd)
 
 
+def _write_journal(path: Path, journal: dict) -> None:
+    from .spine.atomicio import atomic_write_text
+    atomic_write_text(path, json.dumps(journal, indent=1, sort_keys=True), prefix=".restore-journal-")
+
+
+def _read_journal(home: Path) -> dict:
+    jp = home / _JOURNAL_NAME
+    if not jp.exists():
+        raise BackupError(f"no interrupted restore at {home} (no {_JOURNAL_NAME})")
+    try:
+        j = json.loads(jp.read_text(encoding="utf-8"))
+        units = j["units"]
+        ok = (j.get("schema") == _JOURNAL_SCHEMA and isinstance(units, list)
+              and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "done"} <= set(u) for u in units))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise BackupError(f"the restore journal at {jp} cannot be read ({e}) — re-run the restore with --force "
+                          f"from the backup") from e
+    if not ok:
+        raise BackupError(f"the restore journal at {jp} is not one this build wrote — re-run the restore with "
+                          f"--force from the backup")
+    staging = [Path(d) for d in (j.get("staging"), j.get("archive_staging")) if d]
+    for u in units:                       # every rename the journal names stays inside the restore's own dirs
+        src, dst = Path(u["src"]), Path(u["dst"])
+        if not any(src.is_relative_to(d) for d in staging) or not all(
+                d.name.startswith(".restore-staging-") for d in staging):
+            raise BackupError(f"the restore journal at {jp} names a staged unit outside its staging dirs — refusing")
+        if u["name"] != "archive" and dst.resolve() != (home / u["name"]).resolve():
+            raise BackupError(f"the restore journal at {jp} names a destination outside {home} — refusing")
+    return j
+
+
+def _drop_staging(journal: dict) -> None:
+    for d in (journal.get("staging"), journal.get("archive_staging")):
+        if d and Path(d).name.startswith(".restore-staging-"):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def _complete_journaled_swap(home: Path, journal: dict) -> None:
+    """Swap every not-yet-done unit of ``journal`` into place, in order, marking each done (atomic journal rewrite)
+    after it lands; then prove every destination is the unit the restore verified, drop the journal and the
+    staging. Idempotent: a unit whose staged copy is gone but whose destination already IS the verified unit (a
+    crash after its swap, before it was marked) is marked done; a staged copy that changed since it was verified,
+    or a unit that is neither staged nor in place, is refused."""
+    from .spine.atomicio import fsync_dir
+    from .spine.consistent_copy import unit_digest
+    jp = home / _JOURNAL_NAME
+    for u in journal["units"]:
+        if u["done"]:
+            continue
+        src, dst = Path(u["src"]), Path(u["dst"])
+        if src.exists() or src.is_symlink():
+            if unit_digest(src) != u["digest"]:
+                raise BackupError(f"the staged copy of {u['name']!r} changed since the restore verified it — refusing "
+                                  f"to swap it in; re-run the restore with --force from the backup")
+            _atomic_swap_unit(src, dst)
+        elif unit_digest(dst) != u["digest"]:
+            raise BackupError(f"cannot complete the interrupted restore: the staged copy of {u['name']!r} is gone and "
+                              f"{dst} is not the unit it verified — re-run the restore with --force from the backup")
+        _drop_path(dst.parent / (".restore-old-" + dst.name))
+        fsync_dir(dst.parent)
+        u["done"] = True
+        _write_journal(jp, journal)
+        _maybe_crash(f"restore_after_unit:{u['name']}")
+    changed = [u["name"] for u in journal["units"] if unit_digest(Path(u["dst"])) != u["digest"]]
+    if changed:
+        raise BackupError(f"restored unit(s) {changed} changed after they were swapped in (is a sigil service running "
+                          f"against {home}?) — the restore journal is kept; stop the services and re-run the restore "
+                          f"with --force")
+    _maybe_crash("restore_before_journal_delete")
+    jp.unlink()
+    fsync_dir(home)
+    _drop_staging(journal)
+
+
+def _new_journal(src: Path, staged: Path, placed: dict, units: "list[tuple[Path, Path]]", shape: dict) -> dict:
+    """The journal of a pruned-unit swap: every unit in swap order (a relocated archive first, then the spine, the
+    floor and the rest), each with the digest of the staged unit the restore verified and re-sealed."""
+    from datetime import datetime, timezone
+
+    from .spine.consistent_copy import unit_digest
+    rows = []
+    if placed["unit"] is not None:
+        a_src, a_dst = placed["unit"]
+        rows.append({"name": "archive", "src": str(a_src.resolve()), "dst": str(a_dst.resolve()),
+                     "digest": unit_digest(a_src), "done": False})
+    for u_src, u_dst in units:
+        rows.append({"name": u_dst.name, "src": str(u_src.resolve()), "dst": str(u_dst.resolve()),
+                     "digest": unit_digest(u_src), "done": False})
+    h = hashlib.sha256()
+    with open(src, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return {"schema": _JOURNAL_SCHEMA, "restore_id": os.urandom(8).hex(),
+            "created": datetime.now(timezone.utc).isoformat(), "backup_sha256": h.hexdigest(),
+            "staging": str(staged.resolve()),
+            "archive_staging": str(placed["cleanup"].resolve()) if placed["cleanup"] is not None else None,
+            "pruned": True, "head_sig_hash": shape.get("head_sig_hash"), "base_seq": shape.get("base_seq"),
+            "units": rows}
+
+
+def _read_journal_or_empty(home: Path) -> dict:
+    try:
+        return _read_journal(home)
+    except BackupError:
+        return {}
+
+
+def restore_resume(home: "str | Path") -> dict:
+    """``sigil restore --resume <home>``: complete a restore into ``home`` that was interrupted between its swaps,
+    from its journal (no passphrase needed: every unit was verified, and its secrets re-sealed, before the journal
+    was written). Each pending unit's staged copy must still be the one the restore verified."""
+    home = Path(home)
+    journal = _read_journal(home)
+    with _target_writers_quiet(home):
+        _complete_journaled_swap(home, journal)
+    return {"home": str(home), "units": [u["name"] for u in journal["units"]], "resumed": True}
+
+
+def restore_abort(home: "str | Path") -> dict:
+    """``sigil restore --abort <home>``: discard an interrupted restore into ``home`` — only while none of its units
+    has been swapped in (the home is then still entirely its old self). Once a unit is in, only ``--resume`` (or a
+    fresh ``--force`` restore from the backup) leaves the home consistent."""
+    home = Path(home)
+    journal = _read_journal(home)
+    done = [u["name"] for u in journal["units"] if u["done"]]
+    if done:
+        raise BackupError(f"cannot abort: unit(s) {done} are already swapped into {home} — finish the restore with "
+                          f"`sigil restore --resume {home}`")
+    _drop_staging(journal)
+    (home / _JOURNAL_NAME).unlink()
+    from .spine.atomicio import fsync_dir
+    fsync_dir(home)
+    return {"home": str(home), "aborted": True}
+
+
 def _reseal_secrets(staged: Path, body: dict, vault: Any) -> None:
     """Re-seal the machine-bound secrets through the NEW vault (sealed under the new TPM if provisioned) into the
     staged home, swapped into place with the rest of the tree: the owner private key, the DEK, and the KV secret store
@@ -889,6 +1039,11 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     captured_units = set(rel.split("/", 1)[0] for rel in files)
     if body.get("secrets_kv_b64") is not None:      # re-wrapped (not a file entry) but lands as a top-level unit
         captured_units.add(_SECRETS_KV_FILE)
+    stale_journal = (new_home is not None and not verify_only and (new_home / _JOURNAL_NAME).exists())
+    if stale_journal and not force:
+        raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore --resume "
+                          f"{new_home}`, discard it with `sigil restore --abort {new_home}` if none of its units was "
+                          f"swapped in yet, or replace it with a fresh restore (--force)")
     present_units = (sorted(u for u in captured_units if (new_home / u).exists())
                      if new_home is not None and not verify_only else [])
     if not force and present_units:
@@ -902,6 +1057,7 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     staged: Path | None = staged_dir            # cleanup handle for the finally; None once ownership transfers
     placed: "dict | None" = None
     held_env: "bytes | None" = None
+    sh: dict = {}
     try:
         # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
         # is resolved to ONE validated target INSIDE the STAGED home, and that SAME target is what we write — so
@@ -934,7 +1090,7 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # the HARD-PRUNED unit: placed, then verified as ONE unit before any secret is re-sealed or swapped in
             placed = _place_staged_archive(staged_dir, new_home, archive_dir, force=force, verify_only=verify_only,
                                            captured_units=captured_units)
-            _verify_staged_pruned_unit(staged_dir, placed, manifest, body)
+            sh = _verify_staged_pruned_unit(staged_dir, placed, manifest, body)
         else:
             if not verify_only:
                 _reseal_secrets(staged_dir, body, vault)
@@ -959,16 +1115,25 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
         new_home.mkdir(parents=True, exist_ok=True)
         if pruned:
             assert placed is not None
-            if placed["unit"] is not None:
-                units = [placed["unit"]] + units            # a relocated archive is its own unit, swapped first
+            journal = _new_journal(src, staged_dir, placed, units, sh)
             with _target_writers_quiet(new_home):
-                _swap_units(units)
+                if stale_journal:
+                    _drop_staging(_read_journal_or_empty(new_home))
+                # the journal is durable BEFORE the first swap: from here on a crash is resumed, never left mixed
+                _write_journal(new_home / _JOURNAL_NAME, journal)
+                staged = None                                # the journal owns the staging dirs now
+                placed = None
+                _maybe_crash("restore_after_journal")
+                _complete_journaled_swap(new_home, journal)
         else:
             # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured
             # home content intact), then drop the drained staging shell (its units were moved out).
             _swap_units(units)
-        shutil.rmtree(staged_dir, ignore_errors=True)
-        staged = None
+            if stale_journal:                                # a --force restore replaced an interrupted one
+                _drop_staging(_read_journal_or_empty(new_home))
+                (new_home / _JOURNAL_NAME).unlink(missing_ok=True)
+            shutil.rmtree(staged_dir, ignore_errors=True)
+            staged = None
         return result
     finally:
         if staged is not None:
