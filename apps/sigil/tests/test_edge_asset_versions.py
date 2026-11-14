@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import socket
 import threading
 from pathlib import Path
 
@@ -139,6 +140,21 @@ def test_the_page_is_revalidated_and_a_matching_etag_is_304(edge):
     assert status2 == 304 and body2 == b"" and h2["etag"] == h["etag"]
     status3, _h3, body3 = edge.get("/", headers={"If-None-Match": '"something-else"'})
     assert status3 == 200 and body3
+
+
+@pytest.mark.parametrize("path", ["/", "/app.js", "/manifest.webmanifest"])
+def test_a_304_sends_no_body_on_the_wire(edge, path):
+    # http.client never reads a body after a 304, so read the raw bytes: the edge closes the connection after each
+    # response, and nothing may follow the 304's header block
+    _s, h, _b = edge.get(path)
+    s = socket.create_connection(("127.0.0.1", edge.port), timeout=5)
+    s.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{edge.port}\r\nIf-None-Match: {h['etag']}\r\n\r\n".encode())
+    raw = b""
+    while chunk := s.recv(65536):
+        raw += chunk
+    s.close()
+    head, sep, rest = raw.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.0 304 ") and sep and rest == b"", raw[:120]
 
 
 def test_version_json_is_unauthenticated_no_store_and_names_the_build(edge):
