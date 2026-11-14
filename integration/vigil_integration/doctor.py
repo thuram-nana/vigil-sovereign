@@ -2360,12 +2360,15 @@ def render(report: dict) -> str:
         lines.append("\nDeployment units (systemd user units installed on this host):")
         for k, d in dep:
             if k == "cockpit_port":
-                lines.append(f"  {_mark(bool(d.get('ok')))}console: {d.get('console_mode')}; cockpit unit on "
-                             f"{d.get('cockpit_addr')}" + (f"; console federates to {d['sovereign_addr']}"
-                                                          if d.get("sovereign_addr") else ""))
+                ck = (f"cockpit unit on {d.get('cockpit_addr')}" if d.get("cockpit_installed", True)
+                      else "no cockpit unit installed")
+                lines.append(f"  {_mark(bool(d.get('ok')))}console: {d.get('console_mode')}; {ck}"
+                             + (f"; console federates to {d['sovereign_addr']}" if d.get("sovereign_addr") else "")
+                             + ("; --domain is EMPTY" if d.get("domain") == "empty" else ""))
             elif k == "sovereign_venv":
                 lines.append(f"  {_mark(bool(d.get('ok')))}{d.get('path')}: "
-                             + (f"symlink to {d.get('target')}" if d.get("symlink") else "NOT a symlink"))
+                             + ("MISSING" if d.get("exists") is False else
+                                f"symlink to {d.get('target')}" if d.get("symlink") else "NOT a symlink"))
             else:
                 procs = ", ".join(p for p in d.get("processes", {}) if p != "ops-sweep")
                 lines.append(f"  {_mark(bool(d.get('ok')))}settle/money settings "

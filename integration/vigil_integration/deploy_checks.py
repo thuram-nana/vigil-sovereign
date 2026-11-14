@@ -1,7 +1,7 @@
 """Deployment-layout checks `vigil doctor` runs against the systemd USER units the host actually has installed.
 
-Three checks, each silent (``{"configured": False}``, no issue, no note) until the units or files it reads exist,
-so a development checkout's `vigil doctor` output is unchanged:
+Three checks, each silent (``{"configured": False}``, no issue, no note) until the units or files it reads exist;
+on a development checkout with no sovereign unit installed they add at most a note, never a hard issue:
 
 * :func:`cockpit_port_report` — the operator console (``vigil-command.service``) and the sovereign cockpit
   (``sigil-cockpit.service``) must not both start a cockpit. A plain ``vigil up`` starts its own cockpit on
@@ -9,9 +9,9 @@ so a development checkout's `vigil doctor` output is unchanged:
   bind and restart-loops. Production runs the console ``--proxy-only`` against the cockpit unit
   (``infra/systemd/vigil-command.service.d/production.conf``); the console must then federate ``/sovereign/*``
   to the address the cockpit unit binds.
-* :func:`sovereign_venv_report` — ``~/.sigil/venv`` (the path every sovereign unit executes) must be the
-  symlink to a hash-locked ``.venv-sovereign`` that ``./bootstrap.sh`` builds, not a separately installed
-  virtualenv.
+* :func:`sovereign_venv_report` — ``~/.sigil/venv`` (the path every sovereign unit executes) must exist and be
+  the symlink to a hash-locked ``.venv-sovereign`` that ``./bootstrap.sh`` builds, not a separately installed
+  virtualenv: a HARD issue while an installed unit runs it, a note on a development install with no such unit.
 * :func:`must_match_report` — the settle and money settings that must hold the SAME value in every process that
   settles a customer launch (``config.settle_spine_record_enabled``, OWNER DECISION OD-4, and the metered
   settle's pricing) agree across the cockpit, the customer edge and the settle drain (a HARD issue when they do
@@ -27,6 +27,7 @@ as absent.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import shlex
 import subprocess
@@ -164,6 +165,15 @@ class UnitView:
                        for p in d.iterdir())
         except OSError:
             return False
+
+    def exec_commands(self) -> "list[str]":
+        """Every effective ``Exec*=`` command line (ExecStartPre, ExecStart, ExecStop, ...): an empty assignment
+        resets that directive's list, as systemd does."""
+        cur: dict = {}
+        for k, v in self.directives:
+            if k.startswith("Exec"):
+                cur[k] = [] if not v else cur.get(k, []) + [v]
+        return [c for cmds in cur.values() for c in cmds]
 
     def exec_start(self) -> str:
         """The effective ExecStart: the last one after the most recent empty reset (``ExecStart=``)."""
@@ -303,9 +313,28 @@ def _hostport(raw: str, default: "tuple[str, int]") -> "tuple[str, int] | None":
         return None
 
 
-def _same_host(a: str, b: str) -> bool:
-    loop = {"127.0.0.1", "localhost", "::1"}
-    return a == b or (a in loop and b in loop)
+def _canon_host(h: str) -> str:
+    h = (h or "").strip().strip("[]").lower()
+    try:
+        return str(ipaddress.ip_address(h))
+    except ValueError:
+        return h
+
+
+def _same_host(client: str, server: str) -> bool:
+    """True iff a connection to ``client`` reaches a listener bound to ``server``: the same address (IP literals
+    compared canonically), or ``localhost`` against 127.0.0.1 / ::1 (a client tries each address ``localhost``
+    resolves to). 127.0.0.1 and ::1 are different addresses: a listener on one refuses a connection to the other."""
+    a, b = _canon_host(client), _canon_host(server)
+    if a == b:
+        return True
+    loop = {"127.0.0.1", "::1"}
+    return (a == "localhost" and b in loop) or (b == "localhost" and a in loop)
+
+
+def _fmt_addr(host: str, port: int) -> str:
+    h = _canon_host(host)
+    return f"[{h}]:{port}" if ":" in h else f"{h}:{port}"
 
 
 # ── 0.3: one cockpit on 127.0.0.1:8733 ──────────────────────────────────────────────────────────────────────
@@ -320,16 +349,37 @@ def _systemctl_active(unit: str) -> "bool | None":
     return state in ("active", "activating", "reloading")
 
 
+def _empty_domain_issue(cmd: UnitView, argv: "list[str]", home: Path) -> "str | None":
+    """A console unit that passes ``--domain`` with no value (``${VIGIL_CONSOLE_DOMAIN}`` unset): `vigil up` refuses
+    it, so the console does not start."""
+    dom = _opt(argv, "--domain")
+    if dom is None or dom.strip():
+        return None
+    files = ", ".join(_display(p, home) for p, _o in cmd.env_files()) or "its EnvironmentFile"
+    return (f"{COMMAND_UNIT} passes an empty --domain: VIGIL_CONSOLE_DOMAIN is not set in its environment "
+            f"({files}), and `vigil up` refuses an empty --domain, so the console does not start. Set "
+            f"VIGIL_CONSOLE_DOMAIN=<the console's hostname> there (GO-LIVE §6), then `systemctl --user restart "
+            f"{COMMAND_UNIT}`.")
+
+
 def cockpit_port_report(home: Path, repo: Path, *,
                         is_active: Callable[[str], "bool | None"] = _systemctl_active) -> "tuple[dict, list, list]":
-    """(section, issues, notes). Configured only when BOTH units are installed for this user."""
+    """(section, issues, notes). Configured when BOTH units are installed for this user, or when the console unit
+    alone passes an empty ``--domain``."""
     cmd = UnitView(COMMAND_UNIT, home=home)
     cockpit = UnitView(COCKPIT_UNIT, home=home)
-    if not (cmd.installed and cockpit.installed):
+    if not cmd.installed:
         return {"configured": False}, [], []
     cmd_env = cmd.environment()
     argv = _argv(cmd, cmd_env)
     proxy_only = "--proxy-only" in argv
+    domain_issue = _empty_domain_issue(cmd, argv, Path(home))
+    if not cockpit.installed:
+        if domain_issue is None:
+            return {"configured": False}, [], []
+        return ({"configured": True, "console_mode": "proxy-only" if proxy_only else "starts its own cockpit",
+                 "cockpit_addr": None, "cockpit_installed": False, "domain": "empty", "ok": False},
+                [domain_issue], [])
     ck_env = cockpit.environment()
     ck_argv = _argv(cockpit, ck_env)
     ck_addr = (_opt(ck_argv, "--host") or ck_env.get("SIGIL_UI_BIND") or _DEFAULT_SOVEREIGN[0],
@@ -344,15 +394,17 @@ def cockpit_port_report(home: Path, repo: Path, *,
 
     both = _running(cmd) and _running(cockpit)
     section: dict = {"configured": True, "console_mode": "proxy-only" if proxy_only else "starts its own cockpit",
-                     "cockpit_addr": f"{cockpit_addr[0]}:{cockpit_addr[1]}" if cockpit_addr else None,
-                     "both_enabled": both}
-    issues: list = []
+                     "cockpit_addr": _fmt_addr(*cockpit_addr) if cockpit_addr else None,
+                     "cockpit_installed": True, "both_enabled": both}
+    issues: list = [domain_issue] if domain_issue else []
     notes: list = []
+    if domain_issue:
+        section["domain"] = "empty"
     fix = (f"install the production drop-in: mkdir -p {_display(user_unit_dir(home) / (COMMAND_UNIT + '.d'), home)} "
            f"&& cp {PRODUCTION_DROPIN} {_display(user_unit_dir(home) / (COMMAND_UNIT + '.d'), home)}/ && "
            f"systemctl --user daemon-reload && systemctl --user restart {COMMAND_UNIT} (GO-LIVE §6)")
     if not proxy_only:
-        section["ok"] = not both
+        section["ok"] = not (both or issues)
         if both:
             same_port = cockpit_addr is not None and cockpit_addr[1] == _DEFAULT_SOVEREIGN[1]
             what = ("the second to start cannot bind 127.0.0.1:8733 and restart-loops" if same_port else
@@ -366,7 +418,7 @@ def cockpit_port_report(home: Path, repo: Path, *,
     if sov_raw is None:
         sov_raw = cmd_env.get("VIGIL_SOVEREIGN_ADDR", "")
     sov = _hostport(sov_raw, _DEFAULT_SOVEREIGN)
-    section["sovereign_addr"] = f"{sov[0]}:{sov[1]}" if sov else sov_raw
+    section["sovereign_addr"] = _fmt_addr(*sov) if sov else sov_raw
     if both and cockpit_addr is not None and (sov is None or not (_same_host(sov[0], cockpit_addr[0])
                                                                  and sov[1] == cockpit_addr[1])):
         issues.append(f"{COMMAND_UNIT} federates /sovereign/* to {section['sovereign_addr']} but {COCKPIT_UNIT} "
@@ -381,34 +433,69 @@ def cockpit_port_report(home: Path, repo: Path, *,
 
 
 # ── 0.4: ~/.sigil/venv is the hash-locked sovereign venv ─────────────────────────────────────────────────────
+def units_running_the_sovereign_venv(home: Path) -> "list[str]":
+    """The installed (not masked) user units whose ``Exec*=`` commands run ``~/.sigil/venv`` — every sigil-* unit
+    and money drain, read from the unit and its drop-ins."""
+    udir = user_unit_dir(home)
+    venv = str(Path(home) / ".sigil" / "venv") + "/"
+    try:
+        names = sorted(p.name for p in udir.glob("*.service"))
+    except OSError:
+        return []
+    out: list[str] = []
+    for name in names:
+        u = UnitView(name, home=home)
+        if u.installed and any(venv in u.expand(c) for c in u.exec_commands()):
+            out.append(name)
+    return out
+
+
 def sovereign_venv_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
     """(section, issues, notes) for ``~/.sigil/venv`` — the path every sovereign unit executes
-    (``%h/.sigil/venv/bin/sigil``). Absent ⇒ not configured (silent)."""
+    (``%h/.sigil/venv/bin/sigil``). A finding is a HARD issue when an installed unit runs it, and a note when none
+    does (a development install). Absent with no such unit ⇒ not configured (silent)."""
     venv = Path(home) / ".sigil" / "venv"
     shown = _display(venv, Path(home))
     locked = Path(repo) / ".venv-sovereign"
-    relink = f"mv {shown} {shown}.unlocked; ln -s {locked} {shown} (or re-run ./bootstrap.sh)"
+    runners = units_running_the_sovereign_venv(Path(home))
+    relink = f"mv {shown} {shown}.unlocked; ln -s {locked} {shown} (or re-run ./bootstrap.sh with SIGIL_HOME unset)"
+
+    def _finding(section: dict, msg: str) -> "tuple[dict, list, list]":
+        section["units"] = runners
+        if runners:
+            section["ok"] = False
+            return section, [msg + f" It is run by {', '.join(runners)}."], []
+        section["ok"] = True
+        return section, [], [msg + " No installed unit runs it yet; fix it before installing the sovereign units."]
+
     if not venv.is_symlink():
         if not venv.exists():
-            return {"configured": False}, [], []
-        return ({"configured": True, "path": shown, "symlink": False, "ok": False},
-                [f"{shown} is a separately installed virtualenv, not the symlink to the hash-locked "
-                 f".venv-sovereign that ./bootstrap.sh builds (envs/build_envs.sh installs it from hash-pinned "
-                 f"requirements). Every sigil-* unit and money drain runs {shown}/bin/sigil, so they run whatever was "
-                 f"installed into it. Replace it: {relink}."], [])
+            if not runners:
+                return {"configured": False}, [], []
+            return ({"configured": True, "path": shown, "symlink": False, "exists": False, "units": runners,
+                     "ok": False},
+                    [f"{shown} does not exist, so no installed unit that runs {shown}/bin/sigil can start "
+                     f"({', '.join(runners)}). Run ./bootstrap.sh with SIGIL_HOME unset (it links {shown} to the "
+                     f"hash-locked .venv-sovereign), or ln -s {locked} {shown}."], [])
+        return _finding({"configured": True, "path": shown, "symlink": False},
+                        f"{shown} is a separately installed virtualenv, not the symlink to the hash-locked "
+                        f".venv-sovereign that ./bootstrap.sh builds (envs/build_envs.sh installs it from "
+                        f"hash-pinned requirements); a unit that runs {shown}/bin/sigil runs whatever was installed "
+                        f"into it. Replace it: {relink}.")
     try:
         target = venv.resolve(strict=True)
     except (OSError, RuntimeError):
-        return ({"configured": True, "path": shown, "symlink": True, "target": None, "ok": False},
-                [f"{shown} is a symlink to a directory that does not exist, so no sigil-* unit or money drain can "
-                 f"start. Relink it: ln -sfn {locked} {shown} (or re-run ./bootstrap.sh)."], [])
+        return _finding({"configured": True, "path": shown, "symlink": True, "target": None},
+                        f"{shown} is a symlink to a directory that does not exist, so nothing can run "
+                        f"{shown}/bin/sigil. Relink it: ln -sfn {locked} {shown} (or re-run ./bootstrap.sh with "
+                        f"SIGIL_HOME unset).")
     section = {"configured": True, "path": shown, "symlink": True, "target": _display(target, Path(home)),
                "ok": True}
     if target.name != ".venv-sovereign" or not (target / "bin" / "sigil").exists():
-        section["ok"] = False
-        return section, [f"{shown} links to {_display(target, Path(home))}, which is not a built .venv-sovereign "
-                         f"(the hash-locked sovereign venv ./bootstrap.sh builds, with bin/sigil). Relink it: "
-                         f"ln -sfn {locked} {shown}."], []
+        return _finding(section, f"{shown} links to {_display(target, Path(home))}, which is not a built "
+                                 f".venv-sovereign (the hash-locked sovereign venv ./bootstrap.sh builds, with "
+                                 f"bin/sigil). Relink it: ln -sfn {locked} {shown}.")
+    section["units"] = runners
     try:
         same = target == locked.resolve()
     except (OSError, RuntimeError):

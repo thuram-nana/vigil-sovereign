@@ -3485,7 +3485,7 @@ def _cmd_up(args: argparse.Namespace) -> int:
         except Exception as _e:  # noqa: BLE001
             print(f"vigil up: root services preflight skipped — {_e}", file=sys.stderr)
     from .uiproxy import run_up
-    return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
+    return run_up(host=args.host, port=args.port, domain=args.domain or "", base_dir=args.base_dir,
                   no_browser=args.no_browser,
                   insecure_no_api_key=getattr(args, "insecure_no_api_key", False),
                   with_feed=getattr(args, "with_feed", False),
@@ -4885,6 +4885,18 @@ def _cmd_posture(args: argparse.Namespace) -> int:
     return int(posture_main(list(args.posture_args or [])))
 
 
+def _console_domain(value: str) -> str:
+    """``vigil up --domain``: a named domain, never an empty one. A unit that passes ``--domain
+    ${VIGIL_CONSOLE_DOMAIN}`` with the variable unset hands over an empty argument; starting would then serve the
+    console as a loopback origin that the reverse proxy's Host can never reach, so it is refused at once."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError(
+            "is empty: name the domain the browser reaches the console by (a unit passing --domain "
+            "${VIGIL_CONSOLE_DOMAIN} needs VIGIL_CONSOLE_DOMAIN set in its EnvironmentFile), or leave --domain out "
+            "for a local console")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -5678,10 +5690,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="bind address for the proxy — loopback (default) or a PRIVATE/tunnel IP only; "
                          "a public/0.0.0.0 bind is refused (never-public). The three backends always "
                          "bind loopback; the proxy is the only human-facing listener.")
-    pu.add_argument("--domain", default="",
+    pu.add_argument("--domain", default=None, type=_console_domain,
                     help="the domain the browser reaches you by (hosted; TLS terminated by your edge "
                          "reverse proxy). An allowlist STRING, not a bind — front it with "
-                         "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https.")
+                         "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https. An empty value is "
+                         "refused (a unit passing --domain ${VIGIL_CONSOLE_DOMAIN} with the variable unset).")
     pu.add_argument("--no-browser", action="store_true",
                     help="do not auto-open a browser (a browser is opened only for a loopback bind)")
     pu.add_argument("--insecure-no-api-key", action="store_true",

@@ -62,3 +62,15 @@ def test_both_ways_to_share_the_settle_settings_reach_the_ops_sweep_shell():
     assert "settle-drain.env" in opt2
     assert "export it" in opt2 and "sigil ops-sweep" in opt2 and "export VIGIL_SETTLE_SPINE_RECORD=1" in opt2
     assert "never its own environment" in para and "vigil-ready.service" in para
+
+
+def test_no_install_guide_builds_the_unit_venv_by_hand():
+    # every sigil unit runs ~/.sigil/venv: the guides build it only through ./bootstrap.sh (the hash-locked link)
+    sigil = REPO / "apps" / "sigil"
+    guides = [RUNBOOK, sigil / "RUNBOOK.md", sigil / "README.md", *sorted((sigil / "deploy" / "systemd").iterdir())]
+    by_hand = re.compile(r"-m venv ~/\.sigil/venv|\.sigil/venv/bin/pip3? install")
+    offenders = [g.relative_to(REPO).as_posix() for g in guides if g.is_file()
+                 and by_hand.search(g.read_text(encoding="utf-8"))]
+    assert offenders == [], offenders
+    for g in (sigil / "RUNBOOK.md", sigil / "README.md"):
+        assert "./bootstrap.sh" in g.read_text(encoding="utf-8"), g

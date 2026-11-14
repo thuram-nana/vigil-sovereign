@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from vigil_integration import cli as _cli
 from vigil_integration import deploy_checks as dc
 from vigil_integration import doctor as _doc
 
@@ -49,10 +50,14 @@ def _install(home: Path, unit: str, *, enable: bool = True) -> Path:
     return dst
 
 
-def _install_dropin(home: Path) -> None:
+def _install_dropin(home: Path, *, domain: "str | None" = "console.example.test") -> None:
+    """The shipped production drop-in, with the console's service.env (GO-LIVE §6) naming ``domain`` (None: no
+    service.env at all)."""
     d = home / ".config" / "systemd" / "user" / "vigil-command.service.d"
     d.mkdir(parents=True, exist_ok=True)
     shutil.copy(_DROPIN, d / "production.conf")
+    if domain is not None:
+        _write(home / "vigil" / ".vigil-live" / "service.env", f"VIGIL_CONSOLE_DOMAIN={domain}\n")
 
 
 def _write(p: Path, text: str) -> Path:
@@ -142,17 +147,147 @@ def test_dropin_execstart_reset_and_variable_expansion():
     assert dc._expand_vars(["--domain", "${VIGIL_CONSOLE_DOMAIN}"], {}) == ["--domain", ""]
 
 
+@pytest.mark.parametrize("bind", ["::1", "0:0:0:0:0:0:0:1"])
+def test_a_console_on_ipv4_loopback_and_a_cockpit_on_ipv6_loopback_is_a_hard_issue(tmp_path, bind):
+    # the drop-in federates to 127.0.0.1:8733; a cockpit bound to [::1]:8733 refuses that connection
+    _install(tmp_path, "vigil-command.service")
+    _install(tmp_path, "sigil-cockpit.service")
+    _install_dropin(tmp_path)
+    _write(tmp_path / ".sigil" / "cockpit.env", f"SIGIL_UI_BIND={bind}\nSIGIL_UI_PORT=8733\n")
+    sec, issues, _notes = dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active)
+    assert sec["ok"] is False and sec["cockpit_addr"] == "[::1]:8733"
+    assert len(issues) == 1 and "federates /sovereign/* to 127.0.0.1:8733" in issues[0] and "[::1]:8733" in issues[0]
+
+
+@pytest.mark.parametrize("client,server,same", [
+    ("127.0.0.1", "127.0.0.1", True), ("::1", "0:0:0:0:0:0:0:1", True), ("[::1]", "::1", True),
+    ("localhost", "127.0.0.1", True), ("localhost", "::1", True), ("LOCALHOST", "127.0.0.1", True),
+    ("127.0.0.1", "::1", False), ("::1", "127.0.0.1", False), ("127.0.0.1", "127.0.0.2", False),
+    ("localhost", "127.0.0.2", False), ("10.0.0.5", "127.0.0.1", False),
+])
+def test_same_host_is_only_an_address_a_connection_reaches(client, server, same):
+    assert dc._same_host(client, server) is same
+
+
+def test_an_env_file_value_wins_over_an_environment_directive(tmp_path):
+    # systemd: EnvironmentFile= overrides Environment= for the same variable; the cockpit binds cockpit.env's port
+    _install(tmp_path, "vigil-command.service")
+    _install(tmp_path, "sigil-cockpit.service")
+    _install_dropin(tmp_path)
+    _write(tmp_path / ".config" / "systemd" / "user" / "sigil-cockpit.service.d" / "port.conf",
+           "[Service]\nEnvironment=SIGIL_UI_PORT=8743\n")
+    _write(tmp_path / ".sigil" / "cockpit.env", "SIGIL_UI_BIND=127.0.0.1\nSIGIL_UI_PORT=8733\n")
+    sec, issues, _notes = dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active)
+    assert sec["cockpit_addr"] == "127.0.0.1:8733" and issues == []
+
+
+def test_a_masked_console_unit_is_not_an_installed_one(tmp_path):
+    # `vigil panic` masks vigil-command (a link to /dev/null): there is no console to clash with
+    _install(tmp_path, "sigil-cockpit.service")
+    udir = tmp_path / ".config" / "systemd" / "user"
+    (udir / "vigil-command.service").symlink_to("/dev/null")
+    assert dc.UnitView("vigil-command.service", home=tmp_path).masked is True
+    assert dc.cockpit_port_report(tmp_path, _REPO, is_active=lambda _u: True) == ({"configured": False}, [], [])
+
+
+def _install_console_dropin(home: Path, exec_args: str) -> None:
+    d = home / ".config" / "systemd" / "user" / "vigil-command.service.d"
+    _write(d / "production.conf", "[Service]\nExecStart=\n"
+           f"ExecStart=%h/vigil/.venv-offense/bin/vigil up --proxy-only --port 8770 --no-browser {exec_args}\n")
+
+
+@pytest.mark.parametrize("addr,clash", [("127.0.0.1:8743", False), ("127.0.0.1:8733", True)])
+def test_the_console_federation_address_falls_back_to_vigil_sovereign_addr(tmp_path, addr, clash):
+    # no --sovereign-addr on the command line: `vigil up` takes VIGIL_SOVEREIGN_ADDR from its environment
+    _install(tmp_path, "vigil-command.service")
+    _install(tmp_path, "sigil-cockpit.service")
+    _install_console_dropin(tmp_path, "--domain console.example.test")
+    _write(tmp_path / "vigil" / ".vigil-live" / "service.env", f"VIGIL_SOVEREIGN_ADDR={addr}\n")
+    _write(tmp_path / ".sigil" / "cockpit.env", "SIGIL_UI_BIND=127.0.0.1\nSIGIL_UI_PORT=8743\n")
+    sec, issues, _notes = dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active)
+    assert sec["sovereign_addr"] == addr
+    assert (len(issues) == 1) is clash
+
+
+def test_an_empty_console_domain_is_a_hard_issue(tmp_path):
+    # the drop-in passes --domain ${VIGIL_CONSOLE_DOMAIN}; service.env without it hands `vigil up` an empty domain
+    _install(tmp_path, "vigil-command.service")
+    _install(tmp_path, "sigil-cockpit.service")
+    _install_dropin(tmp_path, domain=None)
+    _write(tmp_path / "vigil" / ".vigil-live" / "service.env", "CRUCIBLE_API_KEY=x\n")
+    _write(tmp_path / ".sigil" / "cockpit.env", "SIGIL_UI_BIND=127.0.0.1\nSIGIL_UI_PORT=8733\n")
+    sec, issues, _notes = dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active)
+    assert sec["ok"] is False and sec["domain"] == "empty"
+    assert len(issues) == 1 and "empty --domain" in issues[0] and "VIGIL_CONSOLE_DOMAIN" in issues[0]
+    assert "~/vigil/.vigil-live/service.env" in issues[0]
+
+
+def test_an_empty_console_domain_is_reported_without_a_cockpit_unit(tmp_path):
+    _install(tmp_path, "vigil-command.service")
+    _install_dropin(tmp_path, domain="")
+    sec, issues, _notes = dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active)
+    assert sec["configured"] is True and sec["cockpit_installed"] is False and len(issues) == 1
+    _install_dropin(tmp_path)                                 # the hostname set: nothing to report
+    assert dc.cockpit_port_report(tmp_path, _REPO, is_active=_never_active) == ({"configured": False}, [], [])
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_vigil_up_refuses_an_empty_domain(value, capsys):
+    with pytest.raises(SystemExit) as e:
+        _cli.build_parser().parse_args(["up", "--proxy-only", "--domain", value])
+    assert e.value.code == 2 and "--domain" in capsys.readouterr().err
+
+
+def test_vigil_up_keeps_a_named_domain_and_no_domain():
+    assert _cli.build_parser().parse_args(["up", "--domain", "console.example.test"]).domain == "console.example.test"
+    assert not _cli.build_parser().parse_args(["up"]).domain
+
+
 # ── 0.4: ~/.sigil/venv is the hash-locked sovereign venv ─────────────────────────────────────────────────────
 def test_absent_sovereign_venv_is_silent(tmp_path):
     assert dc.sovereign_venv_report(tmp_path, _REPO) == ({"configured": False}, [], [])
 
 
-def test_a_separately_installed_venv_is_a_hard_issue(tmp_path):
-    (tmp_path / ".sigil" / "venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".sigil" / "venv" / "bin" / "sigil").write_text("#!/bin/sh\n")
+def test_an_absent_venv_that_installed_units_run_is_a_hard_issue(tmp_path):
+    # ./bootstrap.sh run with SIGIL_HOME exported links $SIGIL_HOME/venv, not ~/.sigil/venv: every unit fails to exec
+    _install(tmp_path, "sigil-cockpit.service")
+    _install(tmp_path, "vigil-settle-drain.service")
+    _install(tmp_path, "vigil-command.service")                 # runs the offense venv: not counted
+    (tmp_path / ".sigil").mkdir()
     sec, issues, _notes = dc.sovereign_venv_report(tmp_path, _REPO)
-    assert sec["ok"] is False and sec["symlink"] is False
+    assert sec["ok"] is False and sec["exists"] is False
+    assert sec["units"] == ["sigil-cockpit.service", "vigil-settle-drain.service"]
+    assert len(issues) == 1 and "does not exist" in issues[0] and "SIGIL_HOME unset" in issues[0]
+
+
+def test_a_unit_whose_dropin_runs_another_venv_does_not_count(tmp_path):
+    _install(tmp_path, "sigil-cockpit.service")
+    _write(tmp_path / ".config" / "systemd" / "user" / "sigil-cockpit.service.d" / "venv.conf",
+           "[Service]\nExecStart=\nExecStart=/opt/sigil/bin/sigil serve\n")
+    assert dc.units_running_the_sovereign_venv(tmp_path) == []
+    assert dc.sovereign_venv_report(tmp_path, _REPO) == ({"configured": False}, [], [])
+
+
+def _separate_venv(home: Path) -> None:
+    (home / ".sigil" / "venv" / "bin").mkdir(parents=True)
+    (home / ".sigil" / "venv" / "bin" / "sigil").write_text("#!/bin/sh\n")
+
+
+def test_a_separately_installed_venv_that_units_run_is_a_hard_issue(tmp_path):
+    _install(tmp_path, "sigil-cockpit.service")
+    _separate_venv(tmp_path)
+    sec, issues, notes = dc.sovereign_venv_report(tmp_path, _REPO)
+    assert sec["ok"] is False and sec["symlink"] is False and notes == []
     assert len(issues) == 1 and "not the symlink to the hash-locked" in issues[0] and "bootstrap.sh" in issues[0]
+    assert "sigil-cockpit.service" in issues[0]
+
+
+def test_a_separately_installed_venv_on_a_development_install_is_a_note(tmp_path):
+    # no installed unit runs it (a developer's venv): reported, never blocking bring-up
+    _separate_venv(tmp_path)
+    sec, issues, notes = dc.sovereign_venv_report(tmp_path, _REPO)
+    assert issues == [] and sec["ok"] is True and sec["symlink"] is False
+    assert len(notes) == 1 and "not the symlink to the hash-locked" in notes[0] and "before installing" in notes[0]
 
 
 def test_the_bootstrap_symlink_is_ok(tmp_path):
@@ -161,6 +296,7 @@ def test_the_bootstrap_symlink_is_ok(tmp_path):
     (repo / ".venv-sovereign" / "bin" / "sigil").write_text("#!/bin/sh\n")
     (tmp_path / ".sigil").mkdir()
     (tmp_path / ".sigil" / "venv").symlink_to(repo / ".venv-sovereign")
+    _install(tmp_path, "sigil-cockpit.service")
     sec, issues, notes = dc.sovereign_venv_report(tmp_path, repo)
     assert sec["ok"] is True and issues == [] and notes == []
 
@@ -175,16 +311,20 @@ def test_a_symlink_to_another_checkouts_locked_venv_is_a_note(tmp_path):
     assert sec["ok"] is True and issues == [] and len(notes) == 1 and "other checkout" in notes[0]
 
 
+@pytest.mark.parametrize("units", [True, False], ids=["units-installed", "development"])
 @pytest.mark.parametrize("target", ["venv-unlocked", "missing/.venv-sovereign"])
-def test_a_symlink_to_anything_but_a_built_venv_sovereign_is_a_hard_issue(tmp_path, target):
+def test_a_symlink_to_anything_but_a_built_venv_sovereign(tmp_path, target, units):
     t = tmp_path / target
     if target == "venv-unlocked":
         (t / "bin").mkdir(parents=True)
         (t / "bin" / "sigil").write_text("#!/bin/sh\n")
     (tmp_path / ".sigil").mkdir()
     (tmp_path / ".sigil" / "venv").symlink_to(t)
-    sec, issues, _notes = dc.sovereign_venv_report(tmp_path, _REPO)
-    assert sec["ok"] is False and len(issues) == 1
+    if units:
+        _install(tmp_path, "sigil-customer.service")
+    sec, issues, notes = dc.sovereign_venv_report(tmp_path, _REPO)
+    assert sec["ok"] is (not units)
+    assert (len(issues), len(notes)) == ((1, 0) if units else (0, 1))
 
 
 # ── 0.5: settle / money settings that must match ─────────────────────────────────────────────────────────────
@@ -376,6 +516,17 @@ def test_doctor_reports_each_finding_as_a_hard_issue(tmp_path, monkeypatch):
     assert any(i.startswith("VIGIL_SETTLE_SPINE_RECORD must be the same") for i in new)
     text = _doc.render(report)
     assert "Deployment units" in text and "DISAGREE" in text
+
+
+def test_a_development_venv_never_blocks_bring_up(tmp_path, monkeypatch):
+    # apps/sigil's developer layout with no sovereign unit installed: a note, no new hard issue
+    home = _isolated(monkeypatch, tmp_path)
+    baseline = _doc.collect(_REPO)
+    _separate_venv(home)
+    report = _doc.collect(_REPO)
+    assert [i for i in report["issues"] if i not in baseline["issues"]] == []
+    assert any("not the symlink to the hash-locked" in n for n in report["notes"])
+    assert "~/.sigil/venv: NOT a symlink" in _doc.render(report)
 
 
 def _settle_findings(report):
