@@ -698,6 +698,89 @@ def test_every_restore_that_replaces_existing_units_is_journaled(world, tmp_path
     _assert_is_the_plain_backup(world, target)
 
 
+# A restore whose renames of the spine unit fail with an OSError: the old spine cannot be moved aside ("aside"), the
+# staged spine cannot be renamed in and the old one is renamed back ("in"), or neither the new one in nor the old one
+# back ("in, not back").
+RENAME_FAILS = """
+import errno, json, os, sys
+from pathlib import Path
+from sigil import backup
+from vigil_core.vault import Vault
+a = json.loads(sys.argv[1])
+real = os.replace
+def replace(s, d, *k, **kw):
+    s, d = Path(s), Path(d)
+    if a["fail"] == "aside" and s.name == "spine" and d.name == ".restore-old-spine":
+        raise OSError(errno.EBUSY, "injected", str(s))
+    if a["fail"] != "aside" and d.name == "spine" and ".restore-staging-" in str(s):
+        raise OSError(errno.EXDEV, "injected", str(s))
+    if a["fail"] == "in, not back" and s.name == ".restore-old-spine":
+        raise OSError(errno.EIO, "injected", str(s))
+    return real(s, d, *k, **kw)
+os.replace = replace
+home = Path(a["home"])
+try:
+    backup.restore_backup(a["src"], home, "pw-test-only", vault=Vault(home / "vault"), force=True)
+    print(json.dumps({"ok": True}))
+except backup.BackupError as e:
+    print(json.dumps({"error": str(e)}))
+"""
+
+
+@pytest.mark.parametrize("fail", ["aside", "in"])
+@pytest.mark.parametrize("which", ["bk", "bk_plain"])
+def test_a_swap_whose_rename_fails_with_nothing_moved_leaves_the_old_home_and_aborts(world, tmp_path, fail, which):
+    """A unit's rename fails (an OSError) and nothing of it moved — its old copy was never moved aside, or was renamed
+    back: the restore fails, the home is entirely its old self, and the journal no longer marks that unit started, so
+    `--abort` discards the restore and the home verifies and signs again."""
+    target = _target(world, tmp_path)
+    before = _tree(target)
+    host = tmp_path / "restoring-host"
+    host.mkdir()
+    r = run_in_home(host, RENAME_FAILS, json.dumps({"src": str(world[which]), "home": str(target), "fail": fail}),
+                    check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    err = json.loads(r.stdout.splitlines()[-1]).get("error", "")
+    assert "could not swap 'spine'" in err and "still entirely its old self" in err, (err, r.stderr)
+    assert "--abort" in err, (err, r.stderr)
+    j = json.loads((target / "restore-journal.json").read_text())
+    assert not any(u["started"] or u["done"] for u in j["units"]), j["units"]
+    assert {k: v for k, v in _tree(target).items() if k != "restore-journal.json"} == before
+    assert _cli(target, "sign").returncode == 3                           # the journal stands until it is discarded
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 0 and "discarded" in r.stdout, r.stderr
+    assert _tree(target) == before
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".restore-")]
+    assert read_home(target)["verify_checkpoint"][0] is True
+    r = _cli(target, "sign")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+
+
+def test_a_swap_that_fails_with_its_old_copy_aside_keeps_it_marked_and_resumes(world, tmp_path):
+    """The staged spine cannot be renamed in and the old spine cannot be renamed back: the old copy stays aside and
+    the unit stays marked started, so `--abort` refuses (the home is no longer its old self) and `--resume` — the cause
+    gone — makes the home entirely the backup's."""
+    target = _target(world, tmp_path)
+    old_head = (target / "spine" / "head.json").read_bytes()
+    host = tmp_path / "restoring-host"
+    host.mkdir()
+    r = run_in_home(host, RENAME_FAILS, json.dumps({"src": str(world["bk"]), "home": str(target),
+                                                    "fail": "in, not back"}),
+                    check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    err = json.loads(r.stdout.splitlines()[-1]).get("error", "")
+    assert "could not swap 'spine'" in err and "its old copy is at" in err, (err, r.stderr)
+    assert "no longer entirely its old self" in err and "--resume" in err, (err, r.stderr)
+    j = json.loads((target / "restore-journal.json").read_text())
+    assert next(u for u in j["units"] if u["name"] == "spine")["started"] is True, j["units"]
+    assert not (target / "spine").exists()
+    assert (target / ".restore-old-spine" / "head.json").read_bytes() == old_head
+    _assert_fails_closed(target)
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "had begun swapping ['spine']" in r.stderr, r.stderr
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    _assert_restored(target)
+
+
 def test_cli_verify_only_and_usage(world, tmp_path):
     caller = tmp_path / "caller"
     caller.mkdir()

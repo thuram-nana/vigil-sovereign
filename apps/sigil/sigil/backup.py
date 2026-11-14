@@ -56,7 +56,7 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterator
+from typing import Any, Iterator, NoReturn
 
 from vigil_core.sealing import SealError, seal, unseal
 
@@ -942,7 +942,10 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
                     u["started"] = True
                     _write_journal(jp, journal)
                     _maybe_crash(f"restore_unit_started:{u['name']}")
-                _swap_in(src, dst)
+                try:
+                    _swap_in(src, dst)
+                except OSError as e:
+                    _swap_failed(home, journal, u, e)
                 _maybe_crash(f"restore_swapped_in:{u['name']}")
             elif unit_digest(dst) != u["digest"]:
                 raise BackupError(f"cannot complete the interrupted restore: the staged copy of {u['name']!r} is gone "
@@ -963,6 +966,25 @@ def _complete_journaled_swap(home: Path, journal: dict) -> None:
     jp.unlink()
     fsync_dir(home)
     _drop_staging(journal)
+
+
+def _swap_failed(home: Path, journal: dict, u: dict, err: OSError) -> NoReturn:
+    """A unit's swap failed with an OSError. When nothing of it moved — the staged copy is still staged and no old
+    copy is aside (the first rename failed, or the second did and its old copy was renamed back) — its ``started``
+    mark goes back durably: the home then reads as what it is, untouched by this unit. Raises a BackupError that says
+    what the home now is and how to leave the state the journal keeps it in."""
+    began = _swap_began_on_disk(u)
+    if not began:
+        u["started"] = False
+        _write_journal(home / _JOURNAL_NAME, journal)
+    where = (f"its old copy is at {_aside_of(Path(u['dst']))}" if began else f"{u['dst']} was left as it was")
+    if not _touched_units(journal) and _replaced_touched(journal) == []:
+        nxt = (f"the home is still entirely its old self — `sigil restore --abort {home}` discards this restore, or "
+               f"`sigil restore --resume {home}` finishes it once the cause is fixed")
+    else:
+        nxt = (f"the home is no longer entirely its old self — fix the cause and finish it with `sigil restore "
+               f"--resume {home}`, or replace it with a fresh `sigil restore --force` from the backup")
+    raise BackupError(f"could not swap {u['name']!r} into place ({err}): {where}; {nxt}") from err
 
 
 def _new_journal(src: Path, staged: Path, placed: "dict | None", units: "list[tuple[Path, Path]]", shape: dict, *,
@@ -1014,14 +1036,15 @@ def _touched_units(journal: dict) -> "list[str]":
     destination has an old copy moved aside beside it. Once an abort has marked the journal ``aborting`` (after it
     found nothing touched, before it drops a staged copy), a staged copy that is gone is that abort's doing."""
     staged_evidence = not journal.get("aborting")
-    out = []
-    for u in journal["units"]:
-        src, dst = Path(u["src"]), Path(u["dst"])
-        aside = _aside_of(dst)
-        if (u["started"] or u["done"] or (staged_evidence and not (src.exists() or src.is_symlink()))
-                or aside.exists() or aside.is_symlink()):
-            out.append(u["name"])
-    return out
+    return [u["name"] for u in journal["units"]
+            if u["started"] or u["done"] or _swap_began_on_disk(u, staged_evidence=staged_evidence)]
+
+
+def _swap_began_on_disk(u: dict, *, staged_evidence: bool = True) -> bool:
+    """Whether the disk shows that a journal unit's swap began, whatever its marks say: its staged copy has left the
+    staging (when ``staged_evidence``), or an old copy is moved aside beside its destination."""
+    src, aside = Path(u["src"]), _aside_of(Path(u["dst"]))
+    return (staged_evidence and not (src.exists() or src.is_symlink())) or aside.exists() or aside.is_symlink()
 
 
 def _replaced_touched(journal: dict) -> "list[str] | None":
