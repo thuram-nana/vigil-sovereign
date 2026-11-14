@@ -42,10 +42,15 @@ LATE = NOW + 3600.0 + 100.0          # past a 1h lease's window
 
 @pytest.fixture
 def trees(monkeypatch, tmp_path):
+    return make_trees(monkeypatch, tmp_path)
+
+
+def make_trees(monkeypatch, tmp_path):
     """``(legacy, seam, spool)``; the processes run on the LEGACY tree until :func:`_move` switches them."""
     from sigil import config
     legacy, seam, spool = tmp_path / "home" / ".vigil-live", tmp_path / "credit-lease", tmp_path / "spool"
     legacy.mkdir(parents=True)
+    seam.mkdir()
     monkeypatch.setenv("VIGIL_BASE_DIR", str(legacy))
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     monkeypatch.setattr(config, "MODEL_METER_DIR", tmp_path / "model_meter")
@@ -134,7 +139,7 @@ def test_report_only_writes_nothing(trees, monkeypatch):
     assert src["leases"] == [{"slug": started["slug"], "nonce": started["nonce"], "state": "expired_unsettled",
                               "action": "copy"}]
     assert src["held"] == [{"slug": started["slug"], "nonce": started["nonce"], "why": "no archived completion"}]
-    assert not seam.exists()                                              # nothing written to the seam
+    assert _tree_bytes(seam) == {} and list(seam.iterdir()) == []          # nothing written to the seam
     assert _tree_bytes(legacy) == before_legacy and _tree_bytes(spool) == before_spool
     assert not sm.journal_path(seam).exists() and s.next_seq == tip       # no journal, no spine record
     assert "_ops" not in src and "report only" in seam_migrate.format_report(report)
@@ -226,7 +231,7 @@ def test_the_cli_reports_and_exits_by_status(trees, monkeypatch, capsys):
     assert ex.value.code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["applied"] is False and out["sources"][0]["status"] == "planned"
-    assert not seam.exists()
+    assert list(seam.iterdir()) == []
     with pytest.raises(SystemExit) as ex:
         cli.main(["seam", "migrate", "--from", str(legacy), "--to", str(legacy)])
     assert ex.value.code == 2 and "overlap" in capsys.readouterr().err

@@ -1476,7 +1476,8 @@ def cmd_seam(a) -> None:
         sources = legacy_candidates(seam, units=unit_details())
     spool = a.completion_spool or _settle_spool_default()
     try:
-        code, report = seam_migrate.run(SpineStore(), owner_keypair(), seam=seam, sources=sources, spool=spool)
+        code, report = seam_migrate.run(SpineStore(), owner_keypair(), seam=seam, sources=sources, spool=spool,
+                                        apply=a.apply)
     except seam_migrate.MigrateRefused as e:
         print(f"seam migrate: refused — {e}", file=sys.stderr)
         sys.exit(2)
@@ -3396,6 +3397,9 @@ def main(argv=None) -> None:
     psmm.add_argument("--completion-spool", default="",
                       help="the settle drain's completion spool (default: VIGIL_SETTLE_SPOOL, else the drain's env "
                            "file, else ~/.sigil/spool/settle)")
+    psmm.add_argument("--apply", action="store_true",
+                      help="carry the records (run as the service user, with the cockpit, the customer server and "
+                           "the settle drain stopped); without it nothing is written")
     psmm.add_argument("--json", action="store_true", help="print the report as JSON")
     psmm.set_defaults(fn=cmd_seam)
     pos = sub.add_parser("ops-sweep",

@@ -97,7 +97,7 @@ def _owner_root(owner_pub: str) -> Any:
 def _empty_plan(src: str, inv: dict) -> dict:
     return {"from": src, "status": "planned", "digest": inv["digest"], "files": inv["files"],
             "classes": {}, "leases": [], "conflicts": [], "left_in_place": [], "requeue": [], "held": [],
-            "_ops": []}
+            "_ops": [], "_carried": []}
 
 
 def _conflict(plan: dict, cls: str, rel: str, why: str) -> None:
@@ -174,6 +174,7 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
                 except HighWaterError:
                     _conflict(plan, cls.name, rel, "a single-use floor cannot be read cleanly")
                     continue
+                plan.setdefault("_floors", []).append(rel)
                 if lf is not None and (df is None or lf[0] > df[0] or lf[1] > df[1]):
                     c["raised"] = c.get("raised", 0) + 1
                     plan["_ops"].append((cls.name, "floor", rel, None))
@@ -216,8 +217,10 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
         if have is None:
             x["action"] = "copy"
             plan["_ops"].append(("leases", "copy", x["rel"], None))
+            plan["_carried"].append(x["rel"])
         elif have == data:
             x["action"] = "identical"
+            plan["_carried"].append(x["rel"])
         else:
             other = _read_lease_file(dst)
             other_nonce = str(other.signed_lease.document.nonce) if other is not None else None
@@ -230,6 +233,7 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
                 x["action"] = "conflict"
                 _conflict(plan, "leases", x["rel"], "the seam holds a different lease for an unsettled legacy launch")
         plan["leases"].append({k: x[k] for k in ("slug", "nonce", "state", "action")})
+    plan["_leases"] = leases
     live = {x["slug"]: x["nonce"] for x in leases if x["state"] == "live"}
     for cls, rel, path in deferred:
         c = counts[cls.name]
@@ -246,15 +250,17 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
         if have is None:
             c["copied"] = c.get("copied", 0) + 1
             plan["_ops"].append((cls.name, "copy", rel, None))
+            plan["_carried"].append(rel)
         elif have == data or cls.rule == "union_files":
             c["identical"] = c.get("identical", 0) + 1  # a spent-token file: present is present
+            if have == data:
+                plan["_carried"].append(rel)
         else:
             _conflict(plan, cls.name, rel, "the seam holds a different copy of this owner-signed file"
                       if cls.rule != "key" else "the seam holds a different offense-governance key")
+    plan["_rules"] = {c.name: c.rule for c in active_classes(env)}
     plan["classes"] = counts
-    if spool is not None:
-        plan["requeue"], plan["held"] = _completion_plan(spool, [x for x in leases if x["state"] ==
-                                                                 "expired_unsettled"])
+    plan["requeue"], plan["held"] = _completion_plan(spool, [x for x in leases if x["state"] == "expired_unsettled"])
     plan["status"] = "conflict" if plan["conflicts"] else "planned"
     return plan
 
@@ -275,14 +281,15 @@ def _envelope_target(p: Path) -> "Optional[tuple[str, str]]":
 
 def _completion_plan(spool: Any, expired: "list[dict]") -> "tuple[list, list]":
     """For each expired, unsettled legacy launch: the archived completions in ``<spool>/processed`` that name it
-    (to requeue), or — when no completion names it anywhere in the spool — a hold for the owner."""
-    sp = Path(spool)
+    (to requeue), or — when no completion names it anywhere in the spool (or there is no spool) — a hold for the
+    owner."""
     want = {(x["slug"], x["nonce"]) for x in expired}
     if not want:
         return [], []
     found: "dict[tuple[str, str], list[str]]" = {}
     pending: "set[tuple[str, str]]" = set()
-    for sub in ("processed", "incoming", "working", "rejected"):
+    sp = Path(spool) if spool is not None else None
+    for sub in ("processed", "incoming", "working", "rejected") if sp is not None else ():
         try:
             names = sorted(f.name for f in (sp / sub).glob("*.json"))
         except OSError:
@@ -298,6 +305,179 @@ def _completion_plan(spool: Any, expired: "list[dict]") -> "tuple[list, list]":
     held = [{"slug": s, "nonce": n, "why": "no archived completion"} for s, n in sorted(want)
             if (s, n) not in found and (s, n) not in pending]
     return requeue, held
+
+
+# ── APPLY / VERIFY / COMMIT ───────────────────────────────────────────────────────────────────────────────────
+
+class MigrateAborted(Exception):
+    """APPLY stopped before COMMIT (the source's journal entry stays ``applying``; a re-run finishes it)."""
+
+
+def _fault(label: str) -> None:
+    """Called before every write the migration makes (``label`` names it). A no-op; the crash-safety test makes it
+    raise at each write in turn."""
+    return None
+
+
+def _fsync_dir(d: Path) -> None:
+    try:
+        fd = os.open(str(d), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _copy_if_absent(src: Path, dst: Path) -> str:
+    """Create ``dst`` with ``src``'s bytes only if it does not exist (tmp + fsync + ``os.link``, so a reader never sees
+    a partial file and an existing one is never replaced). Returns ``copied`` / ``identical`` / ``differs``."""
+    import secrets
+    data = _read_bounded(src, 1 << 24)
+    dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    have = _bytes_or_none(dst)
+    if have is not None:
+        return "identical" if have == data else "differs"
+    tmp = dst.parent / (dst.name + ".tmp-" + secrets.token_hex(8))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(str(tmp), str(dst))
+        except FileExistsError:
+            have = _bytes_or_none(dst)
+            return "identical" if have == data else "differs"
+    finally:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+    _fsync_dir(dst.parent)
+    return "copied"
+
+
+def _raise_floor(src: Path, dst: Path) -> None:
+    """Raise the floor at ``dst`` to at least the one at ``src`` (each field the max of both; never lowered)."""
+    from types import SimpleNamespace
+
+    from vigil_core.highwater import advance_highwater, highwater_lock
+    with highwater_lock(dst):
+        lf, df = _floor(src), _floor(dst)
+        if lf is None:
+            return
+        head = (max(lf[0], df[0]), max(lf[1], df[1])) if df is not None else lf
+        if df is None or head != df:
+            advance_highwater(dst, SimpleNamespace(entry_count=head[0], last_seq=head[1]), _locked=True)
+
+
+def _sha(p: Path) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(_read_bounded(p, 1 << 24)).hexdigest()
+
+
+def _apply(store: Any, owner_key: Any, seam_s: str, plan: dict, journal: dict, *,
+           env: "Optional[Mapping[str, str]]" = None) -> dict:
+    """APPLY then VERIFY then COMMIT one planned source (the caller holds the journal lock and the settle lock). Every
+    step is idempotent and atomic; a crash or an error leaves the source ``applying`` and a re-run finishes it."""
+    from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease, record_lease_settlement
+    from vigil_integration.live.credit_lease_pause import (
+        paused_past_expiry, record_lease_pause, record_paused_past_expiry,
+    )
+    from vigil_integration.seam_migration import inventory, write_journal
+
+    src, seam = Path(plan["from"]), Path(seam_s)
+    srcj = journal["sources"].setdefault(plan["from"], {})
+    srcj.update(state="applying", started_at=time.time(),
+                inventory={"digest": plan["digest"], "files": plan["files"]})
+    srcj.setdefault("migrated_pauses", [])
+    srcj.setdefault("copied", {})
+    _fault("journal:applying")
+    seam.mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_journal(seam_s, journal)
+    ops, rules = plan["_ops"], plan["_rules"]
+    # a. floors (never lowered)
+    for cls, kind, rel, _ in ops:
+        if kind == "floor":
+            _fault(f"floor:{rel}")
+            _raise_floor(src / rel, seam / rel)
+    # b./c. settlement and paused-past-expiry markers (the nonce-set union)
+    for cls, kind, slug, nonce in ops:
+        if kind == "marker":
+            _fault(f"marker:{cls}:{slug}:{nonce}")
+            (record_lease_settlement if cls == "settlements" else record_paused_past_expiry)(seam_s, slug, nonce)
+    # d. pauses: each legacy (slug, nonce) carried ONCE, then journaled — a pause lifted on the seam afterwards is
+    # never re-applied by a re-run
+    added = []
+    for cls, kind, slug, nonce in ops:
+        if kind == "pause":
+            _fault(f"pause:{slug}:{nonce}")
+            record_lease_pause(seam_s, slug, nonce)
+            added.append(f"{slug}:{nonce}")
+    if added:
+        srcj["migrated_pauses"] = sorted(set(srcj["migrated_pauses"]) | set(added))
+        _fault("journal:pauses")
+        write_journal(seam_s, journal)
+    # e./f. lease bundles, then the copy-if-absent classes (create-if-absent; never replace)
+    for want_leases in (True, False):
+        for cls, kind, rel, _ in ops:
+            if kind != "copy" or (cls == "leases") != want_leases:
+                continue
+            _fault(f"copy:{rel}")
+            got = _copy_if_absent(src / rel, seam / rel)
+            if got == "differs" and rules.get(cls) != "union_files":
+                raise MigrateAborted(f"{rel} appeared on the seam with different content during the migration")
+    # VERIFY
+    for cls, kind, slug, nonce in ops:
+        if kind == "marker" and not (is_lease_settled(seam_s, slug, nonce) if cls == "settlements"
+                                     else paused_past_expiry(seam_s, slug, nonce)):
+            raise MigrateAborted(f"verify: the {cls} record of {slug} is not on the seam")
+    for x in plan.get("_leases", []):
+        if x["state"] == "settled" and not is_lease_settled(seam_s, x["slug"], x["nonce"]):
+            raise MigrateAborted(f"verify: the settled launch {x['slug']} is not marked settled on the seam")
+        if x.get("action") in ("copy", "identical"):
+            b = read_credit_lease(seam_s, x["slug"])
+            if b is None or str(b.signed_lease.document.nonce) != x["nonce"]:
+                raise MigrateAborted(f"verify: the lease of {x['slug']} is not on the seam")
+    for rel in plan.get("_floors", []):
+        lf, df = _floor(src / rel), _floor(seam / rel)
+        if lf is not None and (df is None or df[0] < lf[0] or df[1] < lf[1]):
+            raise MigrateAborted(f"verify: the floor {rel} on the seam is below the former directory's")
+    if inventory(str(src), env=env)["digest"] != plan["digest"]:
+        raise MigrateAborted("the former directory changed during the migration; stop every process that writes it "
+                             "and run the migration again")
+    for rel in plan["_carried"]:                       # every class file the seam now holds with the source's bytes
+        if _bytes_or_none(seam / rel) != _bytes_or_none(src / rel):
+            raise MigrateAborted(f"verify: {rel} is not on the seam with the former directory's content")
+        srcj["copied"][rel] = _sha(seam / rel)
+    # COMMIT: one owner-signed audit record (no nonce, no amount), then the journal entry
+    counts = {k: v.get("files", 0) for k, v in plan["classes"].items()}
+    _fault("audit")
+    _audit_once(store, owner_key, src=plan["from"], seam=seam_s, digest=plan["digest"], counts=counts,
+                requeued=0, held=len(plan["held"]))
+    srcj.update(state="complete", completed_at=time.time(), classes=counts, held=plan["held"],
+                left_in_place=[x["path"] for x in plan["left_in_place"]])
+    _fault("journal:complete")
+    write_journal(seam_s, journal)
+    return {"status": "migrated", "held": plan["held"]}
+
+
+def _audit_once(store: Any, owner_key: Any, *, src: str, seam: str, digest: str, counts: dict, requeued: int,
+                held: int) -> None:
+    """Append the ``seam.migrated`` audit event unless this exact commit (source, seam, digest) already has one (a
+    re-run after a crash between the record and the journal adds nothing)."""
+    from .governor.authn import signed_payload
+    for r in store.iter_records():
+        p = r.payload if isinstance(r.payload, dict) else {}
+        if (p.get("signal") == AUDIT_SIGNAL and p.get("from") == src and p.get("to") == seam
+                and p.get("digest") == digest):
+            return
+    core = {"signal": AUDIT_SIGNAL, "v": 1, "from": src, "to": seam, "digest": digest, "counts": counts,
+            "requeued": int(requeued), "held": int(held)}
+    store.append(kind="event", source="governor", actor="OWNER", payload=signed_payload(core, owner_key))
 
 
 def public_report(plan: dict) -> dict:
@@ -323,19 +503,75 @@ def run(store: Any, owner_key: Any, *, seam: Any, sources: "list[str]", spool: A
         journal = read_journal(seam_s)
     except ValueError as e:
         raise MigrateRefused(f"{e}; restore it from a backup or move it aside after checking it") from e
-    out = {"to": seam_s, "applied": False, "sources": []}
+    out = {"to": seam_s, "applied": bool(apply), "sources": []}
+    if not apply:
+        code = 0
+        for s in sources:
+            plan = plan_source(store, owner_key.public_key_b64, seam_s, s, now=now, journal=journal, env=env,
+                               spool=spool)
+            out["sources"].append(public_report(plan))
+            if plan["status"] in ("conflict", "unsafe", "too_large"):
+                code = 1
+        return code, out
+    return _run_apply(store, owner_key, seam_s, sources, spool=spool, now=now, env=env, out=out)
+
+
+def _run_apply(store: Any, owner_key: Any, seam_s: str, sources: "list[str]", *, spool: Any, now: float,
+               env: "Optional[Mapping[str, str]]", out: dict) -> "tuple[int, dict]":
+    """``--apply``: under the journal lock then the settle lock (so no settle, cancel, sweep or publish interleaves),
+    re-plan each source and carry it. A source with conflicts commits nothing."""
+    from vigil_integration.live.seam_lock import LockBusy
+    from vigil_integration.seam_migration import journal_lock, new_journal, read_journal
+
+    from .governor.launch_settlement import settle_lock
+    from .ops_sweeps import root_apply_refusal
+    why = root_apply_refusal(
+        [("seam directory", seam_s), ("spine directory", Path(store.path).parent),
+         *[("former seam directory", s) for s in sources]],
+        [("completion spool", spool)] if spool is not None else [])
+    if why:
+        raise MigrateRefused(f"running as root, but {why}; run it as the service user that owns those directories")
     code = 0
-    for s in sources:
-        plan = plan_source(store, owner_key.public_key_b64, seam_s, s, now=now, journal=journal, env=env,
-                           spool=spool)
-        out["sources"].append(public_report(plan))
-        if plan["status"] in ("conflict", "unsafe", "too_large"):
-            code = 1
+    try:
+        jl = journal_lock(seam_s)
+        jl.__enter__()
+    except (LockBusy, OSError) as e:
+        raise MigrateRefused(f"the seam migration journal is locked or unusable ({type(e).__name__}); is another "
+                             f"migration running?") from e
+    try:
+        try:
+            journal = read_journal(seam_s) or new_journal(seam_s)
+        except ValueError as e:
+            raise MigrateRefused(str(e)) from e
+        try:
+            sl = settle_lock(store)
+            sl.__enter__()
+        except (LockBusy, OSError, ValueError) as e:
+            raise MigrateRefused(f"the settle lock is busy or unusable ({type(e).__name__}); stop the cockpit, the "
+                                 f"customer server and the settle drain, then retry") from e
+        try:
+            for s in sources:
+                plan = plan_source(store, owner_key.public_key_b64, seam_s, s, now=now, journal=journal, env=env,
+                                   spool=spool)
+                rep = public_report(plan)
+                if plan["status"] == "planned":
+                    try:
+                        rep.update(_apply(store, owner_key, seam_s, plan, journal, env=env))
+                    except MigrateAborted as e:
+                        rep.update(status="aborted", error=str(e))
+                if rep["status"] in ("conflict", "unsafe", "too_large", "aborted") or rep.get("held"):
+                    code = 1
+                out["sources"].append(rep)
+        finally:
+            sl.__exit__(None, None, None)
+    finally:
+        jl.__exit__(None, None, None)
     return code, out
 
 
 def format_report(report: dict) -> str:
-    lines = [f"seam: {report['to']}" + ("" if report.get("applied") else "  (report only; nothing written)")]
+    lines = [f"seam: {report['to']}" + ("" if report.get("applied") else "  (report only; nothing written — "
+                                                                          "--apply carries it)")]
     if not report["sources"]:
         lines.append("  no former seam directory holds launch-seam records")
     for s in report["sources"]:
@@ -352,4 +588,6 @@ def format_report(report: dict) -> str:
             lines.append(f"    left in place: {x['path']} ({x['why']})")
         for x in s.get("conflicts", []):
             lines.append(f"    CONFLICT {x['class']}: {x['path']} — {x['why']}")
+        if s.get("error"):
+            lines.append(f"    ABORTED: {s['error']}")
     return "\n".join(lines)
