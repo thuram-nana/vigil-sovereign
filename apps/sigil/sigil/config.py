@@ -281,11 +281,12 @@ def customer_checkout_enabled() -> bool:
 
 
 def customer_ios_install_banner_enabled() -> bool:
-    """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner
-    (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays off until the owner has signed in
-    with Google inside the installed app on a real iPhone: the sign-in binding cookie is SameSite=Lax, path-scoped
-    and lasts 600 s, and an app installed from Safari may keep a cookie jar of its own. Read when the customer edge
-    starts (it is written into the page), so a change takes effect at the edge's next start."""
+    """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
+    carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
+    off until the owner has signed in with Google inside the installed app on a real iPhone: the sign-in binding
+    cookie is SameSite=Lax, path-scoped and lasts 600 s, and an app installed from Safari may keep a cookie jar of
+    its own. Read when the customer edge starts (it is written into the page), so a change takes effect at the
+    edge's next start."""
     return (os.environ.get("VIGIL_CUSTOMER_IOS_INSTALL_BANNER") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 

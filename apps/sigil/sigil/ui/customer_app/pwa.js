@@ -13,7 +13,9 @@
  * worker is switched quietly.
  *
  * INSTALL. Chromium offers installation through beforeinstallprompt: the event is kept and an "Install app" button
- * shown (root mount only); the browser's own dialog does the rest. Safari on iOS has no such event: when the edge
+ * shown (root mount only); the browser's own dialog does the rest. Away from the origin's root (under /customer/ on
+ * the console origin) the page drops its manifest link, so the browser's own install entry offers nothing there
+ * either — no standalone "VIGIL" app scoped to the console origin. Safari on iOS has no such event: when the edge
  * enables it (VIGIL_CUSTOMER_IOS_INSTALL_BANNER, off by default — pending the owner's sign-in test in the installed
  * app on a real iPhone) a dismissible "Share -> Add to Home Screen" banner is shown instead.
  *
@@ -35,6 +37,13 @@
   var reloading = false;
   function noop() {}
   function reload() { if (!reloading) { reloading = true; location.reload(); } }
+
+  // Not at the customer origin's root (under /customer/ on the console origin): not installable. Without its
+  // manifest the browser has nothing to install; preventDefault on beforeinstallprompt alone would leave the
+  // browser's own install icon and menu entry offering a "VIGIL" app.
+  if (location.pathname !== "/" && typeof document.querySelectorAll === "function") {
+    Array.prototype.forEach.call(document.querySelectorAll('link[rel="manifest"]'), function (l) { l.remove(); });
+  }
 
   function serverBuild(force) {
     var now = Date.now();

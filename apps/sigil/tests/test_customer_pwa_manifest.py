@@ -7,7 +7,8 @@ Checks (stdlib only; the PNG sizes are read from the files' own headers):
   2. its icons: 192 and 512 "any" plus a 512 "maskable", every file present, a PNG of exactly the declared size,
      the maskable one opaque (the owner's dark avatar keeps the mark inside the maskable safe circle);
   3. the page: the manifest link, theme-color for dark and light (tokens.css --bg-0), an opaque 180 px
-     apple-touch-icon and the iOS tags — and still nothing inline, nothing external;
+     apple-touch-icon, and a slot for the iOS tags (the edge fills it only with its iOS install flag on —
+     test_customer_pwa_install.py) — and still nothing inline, nothing external;
   4. the edge serves the manifest as application/manifest+json at a stable (never ?v=) URL with revalidation.
 """
 from __future__ import annotations
@@ -68,9 +69,8 @@ def test_the_page_carries_the_install_tags():
     assert f'<meta name="theme-color" content="{light}" media="(prefers-color-scheme: light)" />' in INDEX
     assert '<link rel="apple-touch-icon" href="brand/apple-touch-icon.png" />' in INDEX
     assert _png(APP / "brand" / "apple-touch-icon.png") == (180, 180, 2)        # opaque, 180 px
-    for tag in ('name="apple-mobile-web-app-capable" content="yes"', 'name="mobile-web-app-capable" content="yes"',
-                'name="apple-mobile-web-app-title" content="VIGIL"', 'name="apple-mobile-web-app-status-bar-style"'):
-        assert tag in INDEX, tag
+    assert '<meta name="mobile-web-app-capable" content="yes" />' in INDEX
+    assert INDEX.count("<!--__VIGIL_IOS_TAGS__-->") == 1 and "apple-mobile-web-app" not in INDEX
     for ref in re.findall(r'(?:href|src)="([^"]+)"', INDEX):
         assert (APP / ref).is_file(), f"index.html names a missing file {ref}"
 

@@ -126,15 +126,26 @@ def _render_worker(text: str, snap: SiteSnapshot) -> str:
                 .replace(shell_line, f"var SHELL = {json.dumps(shell)};"))
 
 
+# The iOS home-screen tags, written into the page's slot only while VIGIL_CUSTOMER_IOS_INSTALL_BANNER is on: until
+# the owner's Google sign-in test in an installed app on a real iPhone passes, the page asks iOS for nothing about
+# installing. (iOS still applies the manifest's display: standalone to an app a person adds to the Home Screen by
+# hand, and iOS 26 opens every Home Screen site as a web app — so that device test stays the real gate.)
+_IOS_TAGS_SLOT = "<!--__VIGIL_IOS_TAGS__-->"
+_IOS_TAGS = ('<meta name="apple-mobile-web-app-capable" content="yes" />\n'
+             '  <meta name="apple-mobile-web-app-status-bar-style" content="black" />\n'
+             '  <meta name="apple-mobile-web-app-title" content="VIGIL" />')
+
+
 def build_app_snapshot(root=None) -> SiteSnapshot:
     """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
     asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
-    iOS install-banner flag (read now, at startup) written into the page."""
+    iOS install flag (read now, at startup) written into the page — the banner switch and the iOS tags."""
     from .. import config as _config
-    ios = "1" if _config.customer_ios_install_banner_enabled() else "0"
+    ios = _config.customer_ios_install_banner_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
-                        html_values={"__VIGIL_IOS_INSTALL__": ios})
+                        html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
+                                     _IOS_TAGS_SLOT: _IOS_TAGS if ios else ""})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign

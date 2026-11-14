@@ -2,11 +2,13 @@
 
 * Chromium: beforeinstallprompt is always kept from the browser's own banner; at the customer origin's root an
   "Install app" button appears, a tap opens the browser's dialog once and removes the button, and appinstalled
-  removes it too. Under /customer/ on the console origin nothing is offered.
+  removes it too. Under /customer/ on the console origin nothing is offered, and the page drops its manifest link
+  so the browser's own install entry offers nothing either.
 * iOS: the "Share -> Add to Home Screen" banner appears only when the edge's flag is on (VIGIL_CUSTOMER_IOS_
   INSTALL_BANNER, OFF by default pending the owner's sign-in test in the installed app on a real iPhone), on an
   iPhone/iPad, not already installed, not dismissed before, at the root; dismissing it is remembered.
-* The edge writes the flag into the page at startup (default "0"), and the deploy example ships it off.
+* The edge writes the flag into the page at startup (default "0"), and the deploy example ships it off. The iOS
+  home-screen tags (apple-mobile-web-app-*) are in the page only with the flag on.
 """
 from __future__ import annotations
 
@@ -41,10 +43,15 @@ function El(tag) { const e = { tagName: tag.toUpperCase(), children: [], attrs: 
   remove() { if (this.parentEl) this.parentEl.children = this.parentEl.children.filter(x => x !== this); } };
   return e; }
 const body = El("body"); body.dataset = { build: "", iosInstall: cfg.flag };
+const head = El("head");
+const manifest = head.appendChild(Object.assign(El("link"), { rel: "manifest", href: "manifest.webmanifest" }));
+head.appendChild(Object.assign(El("link"), { rel: "icon", href: "brand/favicon.svg" }));
 const winL = {};
 const store = Object.assign({}, cfg.storage || {});
 const ctx = { console, Promise, JSON, String, RegExp, Date: { now: () => 1 },
-  document: { body, hidden: false, createElement: El, addEventListener() {} },
+  document: { body, hidden: false, createElement: El, addEventListener() {},
+              querySelectorAll: (sel) => sel === 'link[rel="manifest"]' ? head.children.filter(c => c.rel === "manifest")
+                                                                         : [] },
   window: { addEventListener: (t, f) => { (winL[t] = winL[t] || []).push(f); },
             matchMedia: (q) => ({ matches: q === "(display-mode: standalone)" && !!cfg.standaloneMedia }) },
   navigator: { userAgent: cfg.ua, platform: cfg.platform || "", maxTouchPoints: cfg.touch || 0,
@@ -71,6 +78,8 @@ const find = (id) => body.children.find(c => c.id === id);
   out.ios = ios ? ios.children[0].textContent : null;
   out.iosRole = ios ? ios.attrs.role : null;
   out.stored = store;
+  out.manifest = head.children.includes(manifest);
+  out.headLinks = head.children.length;
   console.log(JSON.stringify(out));
 })();
 """
@@ -99,6 +108,14 @@ def test_chromium_gets_an_install_button_that_opens_the_dialog_once():
 def test_nothing_is_offered_under_the_console_mount():
     out = _run(path="/customer/", actions=["bip"])
     assert out["prevented"] == 1 and out["button"] is None
+    # and the page drops its manifest there, so the browser's own install entry has nothing to install either
+    assert out["manifest"] is False and out["headLinks"] == 1      # the icon link stays
+
+
+@_node
+def test_the_root_mount_keeps_its_manifest():
+    out = _run(path="/")
+    assert out["manifest"] is True and out["headLinks"] == 2
 
 
 @_node
@@ -149,9 +166,16 @@ def test_the_edge_writes_the_flag_into_the_page_at_startup(tmp_path, monkeypatch
     monkeypatch.delenv("VIGIL_CUSTOMER_IOS_INSTALL_BANNER", raising=False)
     off, build_off = _page_and_build(tmp_path / "a")
     assert 'data-ios-install="0"' in off and "__VIGIL_IOS_INSTALL__" not in off
+    assert "apple-mobile-web-app" not in off and "__VIGIL_IOS_TAGS__" not in off      # nothing iOS-specific
+    assert '<link rel="apple-touch-icon"' in off                  # the icon is only an icon
     monkeypatch.setenv("VIGIL_CUSTOMER_IOS_INSTALL_BANNER", "1")
     on, build_on = _page_and_build(tmp_path / "b")
     assert 'data-ios-install="1"' in on
+    for tag in ('<meta name="apple-mobile-web-app-capable" content="yes" />',
+                '<meta name="apple-mobile-web-app-status-bar-style" content="black" />',
+                '<meta name="apple-mobile-web-app-title" content="VIGIL" />'):
+        assert on.count(tag) == 1, tag
+    assert "__VIGIL_IOS_TAGS__" not in on
     assert build_on != build_off                                  # a different page is a different build
 
 

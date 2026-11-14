@@ -8,15 +8,14 @@
   <meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f5f7fb" media="(prefers-color-scheme: light)" />
   <title>VIGIL</title>
-  <!-- installable app (PWA): the manifest, the owner's icons, and the iOS home-screen tags -->
+  <!-- installable app (PWA): the manifest and the owner's icons. The iOS home-screen tags go in the slot below
+       only when the edge's iOS install flag is on (off until the owner's sign-in test on a real iPhone). -->
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="brand/favicon.ico" sizes="any" />
   <link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="brand/apple-touch-icon.png" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
-  <meta name="apple-mobile-web-app-title" content="VIGIL" />
+  <!--__VIGIL_IOS_TAGS__-->
   <!-- Self-contained + strict-CSP. The CSP / nosniff / no-referrer headers are set by the edge as RESPONSE
        HEADERS (never a <meta>). Asset refs are RELATIVE (no leading slash) so they resolve against the mount
        in dev (served under /customer/) and in prod (served at / on the separate customer origin). No CDN, no
