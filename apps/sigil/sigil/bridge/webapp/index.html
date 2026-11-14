@@ -38,6 +38,20 @@
     <div id="panic-msg" class="mono"></div>
   </section>
 
+  <section class="panel" id="switches">
+    <h2>Customer switches <span class="hint">OFF takes effect at once (new launches, sign-ups, purchases, trials only &mdash; existing launches keep running); turning one back ON stays owner-only at the desktop</span></h2>
+    <div class="kv" id="latch-state"><span class="empty">loading&hellip;</span></div>
+    <div class="latchbox">
+      <button class="panic" data-act="latch-off" data-latch="all" id="latch-off-all">&#9632; ALL customer switches OFF</button>
+      <button data-act="latch-off" data-latch="customer_launch">New launches OFF</button>
+      <button data-act="latch-off" data-latch="customer_signup">Sign-ups OFF</button>
+      <button data-act="latch-off" data-latch="checkout">Purchases OFF</button>
+      <button data-act="latch-off" data-latch="trial">Trials OFF</button>
+      <button data-act="latch-off" data-latch="founder_tester">Founder testers OFF</button>
+    </div>
+    <div id="latch-msg" class="mono mt"></div>
+  </section>
+
   <section class="panel">
     <h2>Relay a command <span class="hint">signed inside the envelope &middot; same WARDEN gate as voice/UI</span></h2>
     <div class="relaybox">

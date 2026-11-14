@@ -420,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm"):
+        if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm", "/api/latch-off"):
             return self._deny(404, "not found")
         try:                                                     # a missing/non-numeric/negative CL is a
             length = int(self.headers.get("Content-Length", "0") or "0")   # clean 400 — never an unhandled
@@ -437,6 +437,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._device_action(body_bytes)
         if path == "/api/gesture/arm":
             return self._device_arm(body_bytes)
+        if path == "/api/latch-off":
+            return self._latch_off()
         # panic / relay — effectful, envelope-authenticated with the strict nonce replay gate
         action = "panic" if path == "/api/panic" else "relay"
         core = self._authed_effectful(action)
@@ -452,6 +454,25 @@ class Handler(BaseHTTPRequestHandler):
         reply = self.server.daemon().relay(text)                # NB: never log the relayed text (may hold a subject)
         _log.info("bridge action ok: POST %s device=%s outcome=relayed", path, dev)
         return self._json({"ok": True, "reply": reply})
+
+    def _latch_off(self):
+        """The phone's OFF-button for the owner's customer latches: an effectful device envelope (signature,
+        freshness, endpoint binding, strict nonce replay gate + receipt — exactly as panic) whose SIGNED ``args``
+        name the latch (``{"latch": "<name>"|"all"}``). Only ever the safe direction; ON stays at the desktop."""
+        core = self._authed_effectful("latch_off")
+        if core is None:
+            return
+        a = core.get("args")                                     # signed args may be ANY JSON type — guard
+        name = a.get("latch") if isinstance(a, dict) else None
+        try:
+            seqs = self.server.daemon().latch_off(name, by="phone")
+        except ValueError as e:
+            return self._deny(400, f"refused: {str(e)[:160]}")
+        except Exception as e:  # noqa: BLE001 — never leak internals as a 500
+            return self._deny(400, f"refused: {type(e).__name__}")
+        _log.info("bridge action ok: POST /api/latch-off device=%s outcome=latch-off latches=%s",
+                  _pk_prefix(core.get("device")), ",".join(sorted(seqs)))
+        return self._json({"ok": True, "off": sorted(seqs), "seqs": seqs})
 
     def _device_action(self, body_bytes):
         """The phone posts its OWN device-signed `governor.approval` payload. The SERVER only VERIFIES
