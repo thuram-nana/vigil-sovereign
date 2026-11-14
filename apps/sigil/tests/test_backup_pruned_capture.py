@@ -35,10 +35,9 @@ print(json.dumps({"head_sig_hash": head_sig_hash(h), "floor": load_floor().head_
                   "pub": (config.KEYS_DIR / "owner.pub").read_text().strip()}))
 """
 
-# a capture that races a `sigil sign`: the check is wrapped so a checkpoint lands between the digests
+# a capture that races a `sigil sign`: the in-lock listing is wrapped so a checkpoint lands between the digests
 TORN = """
 import json, sys
-import sigil.spine.home_unit as hu
 from sigil import backup, config
 from sigil.backup import BackupError, create_backup
 from sigil.governor.identity import ensure_owner_keypair
@@ -46,14 +45,14 @@ from sigil.platform.vault import owner_vault
 from sigil.spine import checkpoint as cp
 from sigil.spine.store import SpineStore
 backup._CAPTURE_BACKOFF_S = 0
-real, calls = hu.check_live_unit, []
+real, calls = backup._spine_files, []
 def racing(*a, **k):
     res = real(*a, **k)
     calls.append(1)
     if sys.argv[2] == "always" or len(calls) == 1:
         cp.checkpoint(SpineStore())
     return res
-hu.check_live_unit = racing
+backup._spine_files = racing
 try:
     res = create_backup(sys.argv[1], "pw-test-only", home=config.SIGIL_HOME, vault=owner_vault(),
                         owner_key=ensure_owner_keypair())
@@ -323,3 +322,39 @@ def test_the_capture_holds_a_shared_lock_on_the_writer_lockfile(pruned_home, tmp
     seen = json.loads(run_in_home(home, LOCK_SPY, str(tmp_path / "bk.sglbk"), SIGIL_PRUNED_RESTORE="1",
                                   SIGIL_SPINE_ARCHIVE_DIR=None).stdout.strip().splitlines()[-1])
     assert [str(lock), True] in seen, seen
+
+
+LOCK_ORDER = """
+import fcntl, json, os, sys
+import sigil.spine.home_unit as hu
+from sigil import config
+from sigil.backup import create_backup
+from sigil.governor.identity import ensure_owner_keypair
+from sigil.platform.vault import owner_vault
+events, real_flock, real_verify = [], fcntl.flock, hu.verify_unit_isolated
+def flock(fd, op):
+    if os.readlink(f"/proc/self/fd/{fd}") == str(config.SIGIL_HOME / "spine" / "spine.lock"):
+        events.append({fcntl.LOCK_SH: "shared", fcntl.LOCK_UN: "released"}.get(op, str(op)))
+    return real_flock(fd, op)
+def verify(unit, **kw):
+    events.append("verify")
+    events.append(str(unit.home))
+    return real_verify(unit, **kw)
+fcntl.flock, hu.verify_unit_isolated = flock, verify
+create_backup(sys.argv[1], "pw-test-only", home=config.SIGIL_HOME, vault=owner_vault(), owner_key=ensure_owner_keypair())
+print(json.dumps(events))
+"""
+
+
+def test_the_captured_unit_is_verified_after_the_writer_lock_is_released(pruned_home, tmp_path):
+    """Appenders wait only for the capture's read of the unit (digest, read, digest): the verification of the
+    captured bytes runs after the shared lock is released, in a child scoped to a scratch copy of them beside the
+    backup (removed afterwards)."""
+    home = _copy(pruned_home, tmp_path)
+    out = tmp_path / "out"
+    events = json.loads(run_in_home(home, LOCK_ORDER, str(out / "bk.sglbk"), SIGIL_PRUNED_RESTORE="1",
+                                    SIGIL_SPINE_ARCHIVE_DIR=None).stdout.strip().splitlines()[-1])
+    assert events[:3] == ["shared", "released", "verify"] and len(events) == 4, events
+    scratch = Path(events[3])
+    assert scratch.parent.parent == out and scratch.parent.name.startswith(".sigil-backup-verify-"), events
+    assert not scratch.parent.exists() and sorted(p.name for p in out.iterdir()) == ["bk.sglbk"]

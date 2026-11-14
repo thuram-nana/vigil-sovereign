@@ -336,20 +336,47 @@ def _pruned_unit_digest(home: Path, archive: Path) -> str:
     return "|".join(unit_digest(p) for p in (home / "spine", home / "floor.json", archive.resolve()))
 
 
-def _capture_pruned_unit(home: Path) -> "tuple[list[tuple[Path, str]], dict[str, bytes], dict]":
+def _in_pruned_unit(rel: str) -> bool:
+    """Whether a captured rel belongs to the pruned unit itself: the spine dir (its archive is captured under the
+    normalized ``spine/archive`` rel) or the floor."""
+    return rel.startswith("spine/") or rel == "floor.json"
+
+
+def _verify_captured_unit(raw: "dict[str, bytes]", work_parent: Path) -> dict:
+    """Verify the CAPTURED bytes of a pruned unit with the real readers: written to a private scratch home (public
+    keys only — the private ones are never captured as files) under ``work_parent`` and verified in a child scoped
+    to it (:func:`~sigil.spine.home_unit.verify_unit_isolated`, the archive re-derived in full). Returns its report."""
+    from .spine.home_unit import HomeUnit, verify_unit_isolated
+    root = Path(tempfile.mkdtemp(prefix=".sigil-backup-verify-", dir=str(work_parent)))
+    try:
+        unit_home = root / "unit"
+        for rel, data in raw.items():
+            if _in_pruned_unit(rel):
+                p = unit_home / PurePosixPath(rel)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+        return verify_unit_isolated(HomeUnit.for_home(unit_home), work_dir=root / "work", require_archive=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _capture_pruned_unit(home: Path, work_parent: Path) -> "tuple[list[tuple[Path, str]], dict[str, bytes], dict]":
     """Capture a HARD-PRUNED home as one consistent, verified unit: ``(files, bytes by rel, prune_unit)``.
 
-    The home must be this process's own SIGIL_HOME (its readers resolve the head, floor, keys and archive paths from
-    it). Under a SHARED flock on the spine's writer lockfile, the unit (spine dir, floor, effective archive dir) is
-    digested, VERIFIED with the real readers in-process (chain, signed head, succession tip, snapshot seed, a seeded
-    read, the whole archive re-derived) and read, then digested again: a capture whose digests differ raced a writer
-    outside that lock and is retried; one that never settles is refused. A unit that does not verify is refused —
-    a backup that cannot be restored is no safety net."""
+    The home must be this process's own SIGIL_HOME (the archive it uses is this process's effective one). Under a
+    SHARED flock on the spine's writer lockfile the unit (spine dir, floor, effective archive dir) is digested, read
+    and digested again — nothing else is done under that lock, so appenders wait only for the read: a capture whose
+    digests differ raced a writer outside that lock and is retried; one that never settles is refused. The rest of
+    the home is read after the lock is released, and the captured unit bytes are then VERIFIED with the real readers
+    (chain, signed head, succession tip, snapshot seed, a seeded read, the whole archive re-derived) in a child scoped
+    to a scratch copy of them under ``work_parent`` (:func:`_verify_captured_unit`). A unit that does not verify is
+    refused — a backup that cannot be restored is no safety net."""
+    import time
+
     from . import config
     from .spine.consistent_copy import shared_writer_lock
-    from .spine.home_unit import check_live_unit, failure_reason
+    from .spine.home_unit import failure_reason
     from .spine.prune import archive_dir as effective_archive_dir
-    from .spine.store import SpineStore
     if home.resolve() != config.SIGIL_HOME.resolve():
         raise BackupError(f"{home} holds a hard-pruned spine and is not this process's home — its head, floor and "
                           f"archive are read with this process's paths; run the backup with SIGIL_HOME={home}")
@@ -358,37 +385,39 @@ def _capture_pruned_unit(home: Path) -> "tuple[list[tuple[Path, str]], dict[str,
     for attempt in range(_CAPTURE_ATTEMPTS):
         with shared_writer_lock(home / "spine", "spine.jsonl"):
             before = _pruned_unit_digest(home, eff)
-            rep = check_live_unit(SpineStore(), require_archive=True, deep=True, archive_dir=eff)
-            if not rep.get("ok"):
-                why = failure_reason(rep)
-                failed = next((c.get("name") for c in rep.get("checks") or [] if not c.get("ok")), "")
-                hint = (f" — the backup must see the same SIGIL_SPINE_ARCHIVE_DIR as the services (it read {eff})"
-                        if "archive" in why else
-                        " — if a `sigil key rotate` was interrupted before it re-signed the head, finish it with "
-                        "`sigil key rotate --finish --yes` first" if failed in ("chain", "signed_head") else "")
-                raise BackupError(f"the hard-pruned spine does not verify as one unit ({why}){hint}; a backup that "
-                                  f"cannot be restored is refused")
             files = _spine_files(home, archive=eff)
-            raw = {rel: f.read_bytes() for f, rel in files}
+            raw = {rel: f.read_bytes() for f, rel in files if _in_pruned_unit(rel)}
             after = _pruned_unit_digest(home, eff)
         if before == after:
-            sh = rep["shape"]
-            stale = relocated and any(p.is_file() for p in (home / "spine" / "archive").rglob("*"))
-            prune_unit = {
-                "schema": 1, "base_seq": sh["base_seq"], "snapshot_seq": sh["snapshot_seq"],
-                "last_seq": sh["last_seq"], "entry_count": sh["entry_count"], "head_sig_hash": sh["head_sig_hash"],
-                "floor_head_sig_hash": sh["floor_head_sig_hash"],
-                "cumulative_merkle_root": sh["cumulative_merkle_root"],
-                "archive": {"rel": "spine/archive", "source": "relocated" if relocated else "default",
-                            "source_dir": str(eff), "segments": sh["archive_segments"],
-                            "stale_default_skipped": stale},
-                "succession_tip": sh["succession_tip"], "verified_at_capture": True,
-            }
-            return files, raw, prune_unit
-        import time
+            break
         time.sleep(_CAPTURE_BACKOFF_S * (attempt + 1))
-    raise BackupError("the spine kept changing during the backup (a concurrent sign or prune) — retry when it is "
-                      "idle")
+    else:
+        raise BackupError("the spine kept changing during the backup (a concurrent sign or prune) — retry when it is "
+                          "idle")
+    raw.update({rel: f.read_bytes() for f, rel in files if rel not in raw})
+    rep = _verify_captured_unit(raw, work_parent)
+    if not rep.get("ok") or not rep.get("pruned"):
+        why = failure_reason(rep)
+        failed = next((c.get("name") for c in rep.get("checks") or [] if not c.get("ok")), "")
+        hint = (f" — the backup must see the same SIGIL_SPINE_ARCHIVE_DIR as the services (it read {eff})"
+                if "archive" in why else
+                " — if a `sigil key rotate` was interrupted before it re-signed the head, finish it with "
+                "`sigil key rotate --finish --yes` first" if failed in ("chain", "signed_head") else "")
+        raise BackupError(f"the hard-pruned spine does not verify as one unit ({why}){hint}; a backup that "
+                          f"cannot be restored is refused")
+    sh = rep["shape"]
+    stale = relocated and any(p.is_file() for p in (home / "spine" / "archive").rglob("*"))
+    prune_unit = {
+        "schema": 1, "base_seq": sh["base_seq"], "snapshot_seq": sh["snapshot_seq"],
+        "last_seq": sh["last_seq"], "entry_count": sh["entry_count"], "head_sig_hash": sh["head_sig_hash"],
+        "floor_head_sig_hash": sh["floor_head_sig_hash"],
+        "cumulative_merkle_root": sh["cumulative_merkle_root"],
+        "archive": {"rel": "spine/archive", "source": "relocated" if relocated else "default",
+                    "source_dir": str(eff), "segments": sh["archive_segments"],
+                    "stale_default_skipped": stale},
+        "succession_tip": sh["succession_tip"], "verified_at_capture": True,
+    }
+    return files, raw, prune_unit
 
 
 def _captures_pruned_unit(home: Path) -> bool:
@@ -409,13 +438,15 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     summary. With SIGIL_PRUNED_RESTORE on, a HARD-PRUNED home is captured as one consistent, verified unit
     (:func:`_capture_pruned_unit`, manifest schema 4 with ``prune_unit``); every other home exactly as before."""
     home = Path(home)
+    dest = Path(dest)
     if (home / _STAGED_ROTATION_MARKER).exists():
         raise BackupError("an owner-key rotation is staged in this home — finish it with `sigil key rotate --finish "
                           "--yes` before taking a backup")
     raw_by_rel: "dict[str, bytes] | None" = None
     prune_unit: "dict | None" = None
     if _captures_pruned_unit(home):
-        files, raw_by_rel, prune_unit = _capture_pruned_unit(home)
+        dest.parent.mkdir(parents=True, exist_ok=True)        # the captured unit is verified in scratch beside it
+        files, raw_by_rel, prune_unit = _capture_pruned_unit(home, dest.parent)
     else:
         files = _spine_files(home)
     if not any(rel == "spine/head.json" for _f, rel in files):
@@ -466,7 +497,6 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     salt = os.urandom(_SALT_LEN)
     sealed = seal(_derive_key(passphrase, salt), canonical_json(body), context=_BODY_CONTEXT)
 
-    dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # 0600 before the secrets land
