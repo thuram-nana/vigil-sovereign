@@ -10,7 +10,7 @@ sidecar units under `infra/systemd/`.
 | Situation | Verb | What it stops |
 |---|---|---|
 | Free the port / restart the UI cleanly | `vigil down` | the `vigil-command` unit **only** — backups/reprove/HA timers keep running |
-| **Incident — stop everything now** | `vigil panic` | every engagement's gate **plus** the command unit **plus every cadence sidecar timer & unit** (with no catch-up replay), then **verifies** it held |
+| **Incident — stop everything now** | `vigil panic` | every engagement's gate **plus** the command unit **plus every cadence sidecar timer & unit** (with no catch-up replay) **plus the sovereign plane and the drains** (edges, phone bridges, cockpit, drain and checkpoint timers), then **verifies** it held |
 
 If in doubt during an incident, run `vigil panic` — it is the whole-surface hard-stop.
 
@@ -108,9 +108,20 @@ Stricter than `down`. `_cmd_panic` runs in order:
       oneshot service** (to interrupt a run already in flight — stopping a *timer* does not stop a
       running oneshot). Then **stop + disable every live `vigil-witness@<port>` instance**
       (`Restart=on-failure`).
-   3. **Kill the tracked pids** (as `down`).
-   4. **Verify containment held** (`_verify_sidecar_containment`): re-query `is-active` / `is-enabled`
-      for every timer, service and witness instance. A clean pass prints
+   3. **The sovereign plane and the drains** (`_contain_sovereign_units`), in this order:
+      - every drain and sovereign **timer** — `vigil-settle-drain`, `vigil-billing-drain`,
+        `vigil-billing-drain-stripe`, `vigil-finding-drain`, `sigil-checkpoint`, `sigil-consolidate` — is stopped,
+        disabled and its `Persistent=` catch-up stamp reset, so no new pass starts;
+      - the **edges** `sigil-customer.service` and `sigil-public.service` (customers then get the nginx
+        maintenance page), every live **phone bridge** `sigil-bridge@<addr>.service`, then
+        `sigil-cockpit.service` **last** (the writer) — each stopped and disabled; a clean stop lets the edges
+        and the cockpit finish the requests they already accepted;
+      - the checkpoint and consolidate oneshots are stopped. A **drain pass already in flight** (settle, billing,
+        Stripe billing, findings) is **never interrupted**: panic waits for it (at most 90 s), disables its
+        service, and reports one still running after that bound — it exits on its own, and no further pass starts.
+   4. **Kill the tracked pids** (as `down`).
+   5. **Verify containment held** (`_verify_sidecar_containment`, `_verify_sovereign_containment`): re-query
+      `is-active` / `is-enabled` for every timer, service, witness instance, sovereign unit, bridge and drain. A clean pass prints
       `containment verified (nothing active or enabled)`; any leak is printed to **stderr** with a
       `do NOT assume the system is contained` warning so a partial containment is never silently
       assumed.
@@ -134,6 +145,12 @@ systemctl --user enable --now vigil-reprove.timer vigil-posture.timer vigil-ha-m
                                vigil-integrity.timer
 # ... and any witness instances:  systemctl --user enable --now vigil-witness@8801
 systemctl --user list-timers 'vigil-*'    # confirm the next-run times look sane (no immediate burst)
+# 4. bring the sovereign plane back: the cockpit (the writer) first, then the drains, then the edges and bridges
+systemctl --user enable --now sigil-cockpit.service
+systemctl --user enable --now vigil-settle-drain.timer vigil-billing-drain.timer vigil-finding-drain.timer \
+                               sigil-checkpoint.timer sigil-consolidate.timer
+#    (and vigil-billing-drain-stripe.timer where Stripe is set up)
+systemctl --user enable --now sigil-customer.service sigil-public.service sigil-bridge@<addr>.service
 ```
 
 ## Drill — exercise the runbook

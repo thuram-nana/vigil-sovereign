@@ -320,7 +320,8 @@ Then bring the code to the matching version (section 3a) and restart with `vigil
 ### 3c. Emergency stop
 
 If an upgrade or rollback goes wrong while engagements are live, hard-stop everything (this trips every
-engagement's kill-switch and masks the cockpit unit — see `docs/runbooks/PANIC-AND-CONTAINMENT.md`):
+engagement's kill-switch, masks the `vigil-command` unit, and stops and disables the sidecars, the sovereign
+units and the drains — see `docs/runbooks/PANIC-AND-CONTAINMENT.md`):
 
 ```
 vigil panic

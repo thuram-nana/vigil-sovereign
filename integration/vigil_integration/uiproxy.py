@@ -3425,6 +3425,122 @@ def _verify_sidecar_containment(*, run: Callable[..., Any] = subprocess.run) -> 
     return leaks
 
 
+# --- containment of the SOVEREIGN plane and the DRAINS (`vigil panic` only) ------------------------------------
+#
+# The sovereign units (`apps/sigil/deploy/systemd/`) and the drain timers (`infra/systemd/`) keep serving customers,
+# the phone bridge and the spine after the command unit and the cadence sidecars are down. `vigil panic` contains
+# them too, in this order:
+#   1. every drain / sovereign TIMER: stop + disable + reset its Persistent= catch-up stamp, so no new pass starts;
+#   2. the long-running SERVICES: the customer and public edges first (customers then get the nginx maintenance
+#      page), every live `sigil-bridge@` instance, then the cockpit (the writer) LAST — each a clean systemctl stop,
+#      under which the edges and the cockpit finish the requests they already accepted;
+#   3. the oneshot behind each timer: the checkpoint and consolidate passes are stopped; a DRAIN pass already in
+#      flight (settle, billing, Stripe billing, findings) is never interrupted — panic waits for it, bounded by
+#      `_DRAIN_WAIT_S`, and a pass still running after that is reported (it exits on its own; no next pass starts).
+# Subprocess `systemctl --user` only — no sovereign or framework import.
+_SOVEREIGN_TIMERS = (
+    "vigil-settle-drain.timer",           # settles finished customer launches (money)
+    "vigil-billing-drain.timer",          # mints credits from verified payment webhooks (money)
+    "vigil-billing-drain-stripe.timer",   # the same for Stripe (money)
+    "vigil-finding-drain.timer",          # crosses inert findings into the sovereign spine
+    "sigil-checkpoint.timer",             # signs the spine head
+    "sigil-consolidate.timer",            # the ARCHIVIST consolidation pass
+)
+# A drain's in-flight pass is waited for (never interrupted); the other oneshots are stopped.
+_DRAIN_SERVICES = tuple(t[: -len(".timer")] + ".service" for t in _SOVEREIGN_TIMERS[:4])
+_SOVEREIGN_ONESHOTS = tuple(t[: -len(".timer")] + ".service" for t in _SOVEREIGN_TIMERS[4:])
+# The long-running sovereign services, in stop order: the edges first, the cockpit (the writer) last.
+_SOVEREIGN_EDGES = ("sigil-customer.service", "sigil-public.service")
+_SOVEREIGN_WRITER = "sigil-cockpit.service"
+_BRIDGE_TEMPLATE = "sigil-bridge@.service"
+_BRIDGE_GLOB = "sigil-bridge@*.service"
+#: How long panic waits for a drain pass that is already running before it reports it and moves on.
+_DRAIN_WAIT_S = 90.0
+
+
+def _bridge_instances(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
+    """The live or enabled ``sigil-bridge@<addr>.service`` instances (never the bare template)."""
+    names: set[str] = set()
+    for verb in ("list-units", "list-unit-files"):
+        args = [verb, "--no-legend", "--plain", _BRIDGE_GLOB]
+        if verb == "list-units":
+            args[1:1] = ["--all", "--type=service"]
+        rc, out, _err = _systemctl(*args, run=run)
+        if rc != 0:
+            continue
+        for line in out.splitlines():
+            tok = line.strip().split()
+            if tok and tok[0].startswith("sigil-bridge@") and tok[0].endswith(".service") \
+                    and tok[0] != _BRIDGE_TEMPLATE:
+                names.add(tok[0])
+    return sorted(names)
+
+
+def _stop_and_disable(unit: str, note: str, *, run: Callable[..., Any]) -> list[str]:
+    out: list[str] = []
+    rc, _o, err = _systemctl("stop", unit, run=run)
+    out.append(f"stopped {unit}{note}" if rc == 0 else f"WARNING: could not stop {unit}: {(err.strip() or rc)}")
+    rc, _o, err = _systemctl("disable", unit, run=run)
+    if rc != 0:
+        out.append(f"WARNING: could not disable {unit}: {(err.strip() or rc)}")
+    return out
+
+
+def _contain_sovereign_units(*, run: Callable[..., Any] = subprocess.run, wait_s: Optional[float] = None,
+                             sleep: Callable[[float], Any] = time.sleep,
+                             clock: Callable[[], float] = time.monotonic) -> list[str]:
+    """Stop AND disable the sovereign plane's units and the drains (see the block comment above), returning
+    human-readable action strings (empty ⇒ no user manager to contain). Best-effort and idempotent: one unit's
+    failure is a WARNING and never aborts the rest, and the drain wait is bounded, so panic is never blocked."""
+    if not _user_manager_reachable(run=run):
+        return []
+    actions: list[str] = []
+    for timer in _SOVEREIGN_TIMERS:
+        actions += _stop_and_disable(timer, "", run=run)
+        actions.append(_neutralize_persistent_catchup(timer))
+    for svc in _SOVEREIGN_EDGES:
+        actions += _stop_and_disable(svc, " (customers see the maintenance page)", run=run)
+    for inst in _bridge_instances(run=run):
+        actions += _stop_and_disable(inst, " (the phone bridge)", run=run)
+    actions += _stop_and_disable(_SOVEREIGN_WRITER, " (the writer, last; it finishes accepted requests)", run=run)
+    for svc in _SOVEREIGN_ONESHOTS:
+        actions += _stop_and_disable(svc, " (interrupts an in-flight run)", run=run)
+    budget = _DRAIN_WAIT_S if wait_s is None else float(wait_s)
+    deadline = clock() + budget
+    while True:
+        busy = [d for d in _DRAIN_SERVICES if _systemctl("is-active", d, run=run)[1].strip()
+                in ("active", "activating", "reloading")]
+        if not busy or clock() >= deadline:
+            break
+        sleep(min(2.0, max(0.0, deadline - clock())))
+    for d in _DRAIN_SERVICES:
+        rc, _o, err = _systemctl("disable", d, run=run)      # disabling never interrupts a running pass
+        if rc != 0:
+            actions.append(f"WARNING: could not disable {d}: {(err.strip() or rc)}")
+        if d in busy:
+            actions.append(f"WARNING: {d} is still finishing a pass after {int(budget)} s — it is not interrupted, "
+                           f"it exits on its own and no further pass starts (its timer is stopped and disabled)")
+    return actions
+
+
+def _verify_sovereign_containment(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
+    """After `_contain_sovereign_units`: every sovereign timer, service, bridge instance and drain is neither
+    active nor enabled. Returns the leaks (empty ⇒ contained); skips cleanly with no user manager."""
+    if not _user_manager_reachable(run=run):
+        return []
+    leaks: list[str] = []
+    units = (list(_SOVEREIGN_TIMERS) + list(_SOVEREIGN_EDGES) + [_SOVEREIGN_WRITER] + _bridge_instances(run=run)
+             + list(_SOVEREIGN_ONESHOTS) + list(_DRAIN_SERVICES))
+    for unit in units:
+        _rc, active, _e = _systemctl("is-active", unit, run=run)
+        if active.strip() in ("active", "activating", "reloading"):
+            leaks.append(f"{unit} is still {active.strip()}")
+        _rc, enabled, _e = _systemctl("is-enabled", unit, run=run)
+        if enabled.strip() in ("enabled", "enabled-runtime"):
+            leaks.append(f"{unit} is still {enabled.strip()}")
+    return leaks
+
+
 def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
                        authority: str, scheme: str, origin: str, want_browser: bool,
                        src_dir: Optional[Path], sovereign_addr: str,
@@ -4021,7 +4137,8 @@ def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
     return 0
 
 
-def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
+def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run, drain_wait_s: Optional[float] = None,
+              sleep: Callable[[float], Any] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
     """The process-and-unit half of `vigil panic` — a real HARD-STOP of the running surface (W10-5,
     completed for the cadence sidecars in W10-5b, #478).
 
@@ -4029,8 +4146,10 @@ def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int
     is refused until a deliberate `unmask`) as well as stopping and disabling it; (2) STOPS + DISABLES
     EVERY cadence sidecar timer AND its oneshot service, resets each timer's `Persistent=` catch-up
     stamp so a re-enable cannot replay the runs missed during the incident, and stops every live
-    `vigil-witness@` instance; (3) kills every tracked pid; (4) VERIFIES nothing is left active or
-    enabled and warns LOUDLY on any leak. The gate-level half — tripping every engagement's
+    `vigil-witness@` instance; (2b) STOPS + DISABLES the sovereign plane and the drains
+    (`_contain_sovereign_units`: drain and checkpoint timers, the customer and public edges, every phone bridge,
+    the cockpit last; a drain pass already in flight finishes, bounded by `drain_wait_s`); (3) kills every tracked
+    pid; (4) VERIFIES nothing is left active or enabled and warns LOUDLY on any leak. The gate-level half — tripping every engagement's
     kill-switch so any surviving or later-launched gated action is DENIED — is applied by the caller
     (`_cmd_panic`) BEFORE this runs, because that half needs the offense engine and this module is
     deliberately framework-free.
@@ -4044,8 +4163,11 @@ def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int
     sidecars = _contain_sidecar_units(run=run)
     for action in sidecars:
         print(f"  {action}")
+    sovereign = _contain_sovereign_units(run=run, wait_s=drain_wait_s, sleep=sleep, clock=clock)
+    for action in sovereign:
+        print(f"  {action}")
     stopped, _rc = _kill_tracked_pids(base_dir, label="vigil panic")
-    leaks = _verify_sidecar_containment(run=run)
+    leaks = _verify_sidecar_containment(run=run) + _verify_sovereign_containment(run=run)
     if leaks:
         print("vigil panic: WARNING — containment did NOT fully hold; still active/enabled:",
               file=sys.stderr)
@@ -4053,8 +4175,8 @@ def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int
             print(f"  ! {leak}", file=sys.stderr)
         print("  Investigate and stop/disable these by hand — do NOT assume the system is contained.",
               file=sys.stderr)
-    if contained or sidecars:
-        tail = ("the command unit is masked + stopped and every cadence sidecar "
+    if contained or sidecars or sovereign:
+        tail = ("the command unit is masked + stopped, and every cadence sidecar, sovereign unit and drain "
                 "is stopped + disabled")
     else:
         tail = "no systemd units to contain"
