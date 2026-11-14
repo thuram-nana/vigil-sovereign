@@ -164,9 +164,9 @@ keyless "replay" runs and *the provable layer never depends on the model*).
 
 ---
 
-## 3. Build / test / CI workflow — the 13 CI jobs
+## 3. Build / test / CI workflow — the 14 CI jobs
 
-CI (`.github/workflows/ci.yml`) runs **13 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
+CI (`.github/workflows/ci.yml`) runs **14 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
 kernel), one per trust seam or gate. Run the matching commands locally before you push. The key discipline:
 **framework (offense) and `sigil.governor` (sovereign) tests run in separate processes** — running them in
 one process trips the `assert_no_offense` boundary check (which is the boundary *working*). Two further jobs
@@ -180,13 +180,14 @@ checks** is enumerated in [`.github/required-status-checks.txt`](.github/require
 | 3 | `crucible-core` | offense engine: evidence, verify, worldmodel, confidence, authority, console/api, knowledge_engine | `cd engine/crucible && PYTHONPATH=. pytest framework/v2/{evidence,entitlement,common,verify,confidence,worldmodel,calibration,authority,console,api,report,knowledge_engine} -q` |
 | 4 | `crucible-eval` | offense accuracy: the eval corpus, the committed recall/precision baselines, the determinism re-run and the soak harness | `cd engine/crucible && CRUCIBLE_EVAL_SUITES=framework/v2/eval PYTHONPATH=. pytest framework/v2/eval -q` |
 | 5 | `gateway` | egress gate: denylist, proxy socket refusals, nft render + netns ruleset load | `PYTHONPATH=gateway python -m pytest gateway/tests -q` |
-| 6 | `integration` | **two-env boundary**, inert receiver, keyless worker, oracle adapter, live engine, scoped executor, proof suite — **run in two processes** (sovereign-path suite ignores the framework-dependent tests; those run with `engine/crucible` on the path) | see `ci.yml` lines ~97 and ~110 for the exact two invocations |
+| 6 | `integration` | **two-env boundary**, inert receiver, keyless worker, oracle adapter, live engine, scoped executor, proof suite — **run in two processes** (sovereign-path suite ignores the framework-dependent tests; those run with `engine/crucible` on the path) | copy the job's two pytest commands from `ci.yml` (`integration:` job) **verbatim** — the sovereign leg with its full `--ignore` list, the offense leg with its explicit file list; a shortened single-process run co-loads the planes and `assert_no_offense` refuses it |
 | 7 | `loopback-engagement` | end-to-end: scan a live loopback target, confirm a real finding, then offline re-verify the signed evidence | `bash tools/loopback-engagement/run_loopback_engagement.sh` (+ `pytest tools/loopback-engagement/tests -q`) |
 | 8 | `strix-vigil` | Strix Claude runtime: Anthropic price table + reasoning + dedup fallback | `PYTHONPATH=vendor/strix python -m pytest vendor/strix/tests_vigil -q` |
 | 9 | `sigil-governor` | SIGIL governor: offense gate, hardening, finding receiver (two-anchor ingest), capabilities, spine seal, UI, voice/gesture/HUD nav, knowledge grants | `PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/<listed> -q` |
 | 10 | `sigil-lint` | lint/type gate: `ruff` (blocking) + `mypy` (can-complete) over the sovereign tree | `ruff check sigil` |
 | 11 | `formal-verification` | TLA+ (TLC) model-check of the four core invariants + their mutants (F1) | `bash formal/check.sh` |
 | 12 | `warden-kernel` | Rust WARDEN kernel durability (A10): chain/head/anti-rollback/tiers/router/registry/crypto | `cd apps/sigil/kernel && cargo test` |
+| 13 | `sigil-fold-cache-on` | the whole SIGIL suite again with Front C's verified fold cache ON (its production configuration), on the sovereign lock, closure required, golden-embedding test offline on a warmed model cache; a REQUIRED check (`.github/required-status-checks.txt`; live protection follows `tools/governance/require-checks.sh --apply`) | `VIGIL_FOLD_CACHE_ENABLED=1 PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/` |
 
 The exact, copy-pasteable per-component command list is also in [`README.md`](README.md) §Setup and is the
 authority; `ci.yml` is the machine source. When you add a test, add it to the job for its trust seam — never

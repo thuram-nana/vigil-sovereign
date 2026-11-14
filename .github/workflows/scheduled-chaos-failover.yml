@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           # Same install the required SIGIL governor (P7) job uses, so the suite imports identically here.
-          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
 

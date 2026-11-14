@@ -32,7 +32,8 @@ from pathlib import Path
 
 import pytest
 
-# W16-9 red-pen fix: numpy is absent in the sigil-governor CI job; importorskip makes this module SKIP
+# W16-9 red-pen fix: numpy is absent from an offense-lock env (as the sigil-governor CI job was until it moved
+# to the sovereign lock, which pins numpy, so this module now RUNS there); importorskip makes this module SKIP
 # (not error) there, and — being module-level — it also guards the sigil.voice.backends import below,
 # which triggers numpy at collection. Matches the suite's numpy-optional convention.
 np = pytest.importorskip("numpy")

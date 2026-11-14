@@ -8,6 +8,7 @@ Covers:
 Run: ~/.sigil/venv/bin/python tests/test_robustness.py
 """
 import importlib.util
+import os
 import subprocess as _sp
 
 import httpx
@@ -112,8 +113,11 @@ def _bare_index(client) -> VectorIndex:
 # ...`. The client LIBRARY (not a running server) must be importable. Per the CI doctrine, guard heavy deps
 # with a REPORTED skip rather than excluding the whole file (audit F-05) — so the kernel-classify tests
 # still run in the minimal governor job and this file is no longer --ignored.
+# Under VIGIL_REQUIRE_SOVEREIGN_CLOSURE=1 (the sovereign-lock CI jobs) the skip never applies: a missing
+# qdrant_client there FAILS these tests instead of skipping them green.
 _needs_qdrant = pytest.mark.skipif(
-    importlib.util.find_spec("qdrant_client") is None,
+    importlib.util.find_spec("qdrant_client") is None
+    and os.environ.get("VIGIL_REQUIRE_SOVEREIGN_CLOSURE") != "1",
     reason="qdrant_client (the client library) is not installed — the vector outage-vs-empty tests need it",
 )
 

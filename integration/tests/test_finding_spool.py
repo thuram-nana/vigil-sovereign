@@ -64,7 +64,7 @@ def test_empty_oversized_and_non_json_refused(tmp_path):
 
 
 def test_producer_imports_no_offense_or_sovereign_engine():
-    import sys
-    import vigil_integration.finding_spool  # noqa: F401
-    leaked = [m for m in sys.modules if m.split(".")[0] in ("framework", "strix", "sigil")]
-    assert leaked == [], f"the offense spool producer must stay vigil_core-safe: {leaked}"
+    # the offense spool producer must stay vigil_core-safe — checked in a FRESH both-planes interpreter, so
+    # the verdict is independent of test order and a lazy framework/strix/sigil import is caught
+    from _fatal2 import assert_import_clean
+    assert_import_clean("import vigil_integration.finding_spool")

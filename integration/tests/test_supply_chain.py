@@ -1735,7 +1735,8 @@ def test_ci_tooling_lock_agrees_with_runtime_locks_on_shared_packages() -> None:
     """Where the CI toolchain lock and a runtime lock pin the SAME package, the versions must match.
 
     The converted CI jobs run two hash-enforced installs in sequence — the runtime lock, then the
-    ci-tooling lock. If a shared transitive (today: packaging, typing-extensions) were pinned to
+    ci-tooling lock. If a package the two share (a transitive such as packaging; the set differs per
+    runtime lock and is computed below, never listed here) were pinned to
     different versions across the two, the second `--require-hashes` install would silently change
     what the first pinned, so the tested tree would no longer equal the runtime lock. Assert the
     overlap agrees, so a future ci-tooling regeneration that bumps a shared dep fails HERE (offline)

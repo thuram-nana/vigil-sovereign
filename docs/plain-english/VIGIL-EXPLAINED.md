@@ -15413,13 +15413,13 @@ are present and intact.
 That last clause is worth noting on its own. The quarantine removes the capability while
 preserving the credit.
 
-#### 13.6 The fourteen automated checks that must pass
+#### 13.6 The fifteen automated checks that must pass
 
-Every proposed change must clear fourteen independent automated jobs before it can be merged.
-All fourteen are registered on the repository as *required status checks* on the main line of
+Every proposed change must clear fifteen independent automated jobs before it can be merged.
+All fifteen are registered on the repository as *required status checks* on the main line of
 development; the branch must also be up to date with the main line before a merge, and
 force-pushing to that line and deleting it are both blocked — so the checks cannot be sidestepped
-by rewriting history. The exact fourteen are written down in one committed file,
+by rewriting history. The exact fifteen are written down in one committed file,
 `.github/required-status-checks.txt`, which the apply-tool, an offline test and a live-settings
 check all read, so this list and the live configuration cannot drift apart.
 
@@ -15428,7 +15428,7 @@ rather than left to discover: administrator enforcement is deliberately left **o
 means the repository's owner retains an explicit override and *can* merge without the checks
 being green. For every other contributor, and for every automated agent working in the
 repository, the gate is unconditional. For the owner it is a deliberate and attributable act
-rather than an impossibility. Both facts — the fourteen required checks and the owner override —
+rather than an impossibility. Both facts — the fifteen required checks and the owner override —
 can be confirmed by anyone with read access by querying the repository's own
 branch-protection settings, rather than taken on this briefing's word.
 
@@ -23524,14 +23524,15 @@ recording them.
 is not required to pass is a report, not a gate, so the position on the shared
 code repository is worth stating exactly, and it was read from the repository's
 own settings rather than from a document. The main line of code is protected:
-**fourteen checks are required to pass before a change can be merged**, and the
-supply-chain gate described above is one of the fourteen. The other thirteen cover the
+**fifteen checks are required to pass before a change can be merged**, and the
+supply-chain gate described above is one of the fifteen. The other fourteen cover the
 shared integrity substrate, the offensive core, the autonomous agent's runtime,
 the assistant half's permission gates, the outbound-traffic gate, the separation
 of the two halves, the machine-checked mathematical model of the core rules,
 the durability of the permission kernel, the accuracy benchmark corpus, the linter
 and type checker, the briefing-completeness census that keeps this document honest,
-a fast live-fire smoke slice, and the end-to-end loopback engagement that re-verifies its evidence offline. The exact fourteen are the committed list in
+a fast live-fire smoke slice, the end-to-end loopback engagement that re-verifies its evidence offline, and the
+assistant half's whole test suite run again with its verified fold cache switched on. The exact fifteen are the committed list in
 `.github/required-status-checks.txt`. Rewriting history on that line and deleting it
 are both disabled, and the branch must be up to date before a merge.
 
@@ -23539,8 +23540,8 @@ Three things are **not** switched on, and a procurement officer should have them
 volunteered rather than discover them:
 
 - **Administrators are exempt.** A repository administrator can merge without the
-  fourteen checks passing. On a single-maintainer project that is a documented
-  posture, not an oversight — but it means "fourteen required checks" is a statement
+  fifteen checks passing. On a single-maintainer project that is a documented
+  posture, not an oversight — but it means "fifteen required checks" is a statement
   about the ordinary path, not about every possible path.
 - **Review by a second person is not required** by the repository's settings.
 - **Signed commits are not required** by the repository's settings.
@@ -24867,7 +24868,7 @@ above enforceable rather than merely present.
   half alike. A security product that lags its own cryptography library is in no position to
   lecture anyone about dependencies.
 - **The gate is a required check, not an advisory one.** The repository's main branch is
-  protected, and fourteen automated checks — including the supply-chain gate — must pass before a
+  protected, and fifteen automated checks — including the supply-chain gate — must pass before a
   change can be merged, on a branch up to date with `main`. Rewriting or deleting the branch's history is disabled. Three honest
   gaps go with that, and an evaluator should be told them rather than left to find them:
   repository administrators are **exempt** from the required checks; independent review of a

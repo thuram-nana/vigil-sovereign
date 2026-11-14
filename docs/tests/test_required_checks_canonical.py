@@ -19,7 +19,7 @@ separate, required `.github/workflows/branch-protection-verify.yml`):
   (b) The nightly-only jobs (`livefire full table (nightly)`) are NOT in the canonical list. They
       never report on a PR, so requiring one would block every PR.
   (c) Every doc that states a required-check COUNT or LIST agrees with the canonical file: the count
-      is 14, the authoritative enumeration in docs/AS-BUILT.md names exactly the 14, and no doc
+      is 15, the authoritative enumeration in docs/AS-BUILT.md names exactly the 15, and no doc
       enumerates a nightly-only check as required. This is the doc-truth pin.
   (d) tools/governance/require-checks.sh reads the canonical file and does NOT carry its own second
       copy of the list. Two lists can drift; one cannot.
@@ -34,7 +34,7 @@ NEGATIVE CONTROL. The pure helpers below take their data as arguments precisely 
 can be exercised in-process, not merely described. `test_negative_control_*` feed the checkers a
 deliberately-wrong canonical list / doc text / workflow set and assert they REPORT the divergence.
 If you want to see the real thing bite by hand:
-  * change any "14" in README.md's branch-protection row to "9" -> test_doc_counts_match_canonical fails;
+  * change any "15" in docs/AS-BUILT.md's protection row to "9" -> test_doc_counts_match_canonical fails;
   * add a line "NOT A REAL CHECK" to required-status-checks.txt -> test_canonical_checks_are_all_pr_jobs fails;
   * add "livefire full table (nightly)" to required-status-checks.txt -> test_nightly_jobs_excluded fails;
   * delete a canonical name from the AS-BUILT table -> test_asbuilt_enumeration_matches_canonical fails.
@@ -493,9 +493,9 @@ def find_required_check_counts(text: str) -> list[tuple[int, str]]:
 # --------------------------------------------------------------------------------------------------
 # The tests.
 # --------------------------------------------------------------------------------------------------
-def test_canonical_parses_to_fourteen():
+def test_canonical_parses_to_fifteen():
     names = canonical()
-    assert len(names) == len(set(names)) == 14, f"expected 14 distinct canonical checks, got {names}"
+    assert len(names) == len(set(names)) == 15, f"expected 15 distinct canonical checks, got {names}"
 
 
 def test_canonical_checks_are_all_pr_jobs():
@@ -518,7 +518,7 @@ def test_nightly_jobs_excluded():
 
 
 def test_doc_counts_match_canonical():
-    """(c, count) Every stated required-check count in ANY shipped doc equals the canonical size (14)."""
+    """(c, count) Every stated required-check count in ANY shipped doc equals the canonical size (15)."""
     n = len(canonical())
     docs = discover_doc_files()
     for must in ("README.md", "docs/AS-BUILT.md", "CONTRIBUTING.md"):
@@ -533,7 +533,7 @@ def test_doc_counts_match_canonical():
 
 
 def test_asbuilt_enumeration_matches_canonical():
-    """(c, list) The authoritative enumeration in AS-BUILT names exactly the 14 and no nightly check."""
+    """(c, list) The authoritative enumeration in AS-BUILT names exactly the 15 and no nightly check."""
     text = (REPO / "docs/AS-BUILT.md").read_text(encoding="utf-8")
     # the protection table's "Required status checks" row
     row = next((ln for ln in text.splitlines() if ln.startswith("| Required status checks")), None)
@@ -561,7 +561,7 @@ def test_tool_reads_canonical_single_source():
 # --------------------------------------------------------------------------------------------------
 def test_negative_control_count_checker_bites():
     n = len(canonical())
-    good = "the main branch has 14 required status checks and force-push is blocked"
+    good = "the main branch has 15 required status checks and force-push is blocked"
     bad = "the main branch has 9 required status checks"
     assert all(num == n for num, _ in find_required_check_counts(good)), "13 must read as consistent"
     bad_counts = find_required_check_counts(bad)

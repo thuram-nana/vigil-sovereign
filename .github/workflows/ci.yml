@@ -104,6 +104,10 @@ jobs:
         working-directory: engine/crucible
         env:
           PYTHONPATH: .
+          # console/tests/test_s10_strix_control.py runs the SPA through `node --check`. The runner image ships
+          # node; this makes a missing node FAIL that test instead of skipping it green
+          # (apps/sigil/tests/test_ci_suite_legs.py fails if a job that runs a node test drops it).
+          VIGIL_REQUIRE_NODE: "1"
         run: |
           # Run the WHOLE framework/v2 tree, NOT a hand-maintained path list. A hand list silently DRIFTED:
           # of the 40 test directories under framework/v2 only a subset were named, so ~13 suites
@@ -148,7 +152,7 @@ jobs:
       # workflow's critical path (~8m, every other job <4m), so eval runs HERE, in
       # parallel — coverage added at ~zero wall-clock cost instead of dropped.
       #
-      # NOTE FOR THE OPERATOR: `main` is branch-protected with 14 required status
+      # NOTE FOR THE OPERATOR: `main` is branch-protected with 15 required status
       # checks (committed in .github/required-status-checks.txt), and this job —
       # `CRUCIBLE eval + benchmark corpus` — is now one of them, so it BLOCKS a merge.
       # crucible-core (also required) still carries the security-critical half —
@@ -872,26 +876,69 @@ jobs:
     name: SIGIL governor gates (P7 — offense gate + authn)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # where sigil/vectors/embed.py caches the pinned model files (outside the throwaway SIGIL_HOME)
+      SIGIL_EMBED_CACHE_DIR: /tmp/sigil-embed-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
-      - name: install vigil_core + SIGIL deps (hash-locked) — W3-2 (governor tests are pure-Python)
+      - name: install vigil_core + SIGIL deps from the SOVEREIGN hash lock (the tree SIGIL ships) — W3-2
         run: |
           # W3-2: runtime third-party deps from the committed HASH LOCK, pytest from the pinned CI
-          # toolchain lock. The offense framework lock is used deliberately: it is the LIGHT runtime
-          # closure (the sovereign lock drags in the kuzu/onnxruntime/qdrant ML stack this pure-Python
-          # job does not need), it holds ONLY third-party packages — no framework/sigil, so FATAL-2 is
-          # untouched — and its shared versions are byte-identical to the sovereign lock (asserted by
-          # integration/tests/test_supply_chain.py::test_shared_runtime_versions_agree_across_locks),
-          # so the governor is tested against the same cryptography/pydantic it ships with.
-          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          # toolchain lock. The SOVEREIGN lock, because apps/sigil/tests is the sovereign plane and this is
+          # what a sovereign deployment installs (envs/build_envs.sh). This job used to install the offense
+          # framework lock as a "light" stand-in; then the sovereign-only pins (mcp, onnxruntime, numpy,
+          # qdrant-client, tokenizers, huggingface-hub, kuzu …) never met this suite in CI — the tests that
+          # need them importorskip-SKIPPED — so a sovereign pin bump could break SIGIL with this job green.
+          # No apps/sigil test imports a package only the offense lock has (pytest-httpserver, requests,
+          # jinja2, structlog, bs4, werkzeug: none), so there is NO second runtime install to mask a
+          # sovereign pin. Every package the ci-tooling lock shares with this one is asserted to be pinned
+          # identically by test_supply_chain.py::test_ci_tooling_lock_agrees_with_runtime_locks_on_
+          # shared_packages. apps/sigil/tests/test_ci_suite_legs.py fails if this reverts to the offense lock.
+          pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      # The golden-embedding test (apps/sigil/tests/test_embed_backend.py) needs the PINNED bge model files.
+      # Keep them across runs: the key is derived from sigil/vectors/embed.py, which carries the revision and
+      # sha256 pins, so a pin change busts the cache, and embed.py re-verifies both hashes on whatever is
+      # restored, so the pins stay authoritative regardless of the cache. The prefetch step fetches on a miss
+      # (bounded retries) and fails the job on a hard miss — never a skip; the suite then runs with
+      # HF_HUB_OFFLINE=1, so pytest itself never touches the network.
+      - name: Cache the pinned embedding model files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/sigil-embed-cache
+          key: bge-onnx-${{ hashFiles('apps/sigil/sigil/vectors/embed.py') }}
+      - name: prefetch + verify the pinned embedding model (bounded retries)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+        run: |
+          mkdir -p /tmp/sigil-ci
+          for attempt in 1 2 3 4; do
+            if PYTHONPATH=apps/sigil python -c "from sigil.vectors.embed import prefetch; print(prefetch())"; then
+              exit 0
+            fi
+            echo "prefetch attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::the pinned embedding model could not be fetched and verified"; exit 1
       - name: offense gate + hardening + finding receiver (P7 governance + P10 two-anchor ingest)
         env:
           SIGIL_HOME: /tmp/sigil-ci
+          HF_HUB_OFFLINE: "1"
+          # The suite executes shipped JS under node (test_js_untrusted_key_parsing, test_customer_checkout_ui,
+          # test_bridge_webapp). The runner image ships node; with this set a missing node FAILS those tests
+          # instead of skipping them green (apps/sigil/tests/test_ci_suite_legs.py pins it).
+          VIGIL_REQUIRE_NODE: "1"
+          # This job installs the sovereign lock, so the sovereign closure is PRESENT here: a test that would
+          # skip because numpy / onnxruntime / tokenizers / huggingface_hub / mcp / qdrant_client "is missing"
+          # FAILS instead (the pytest_require_planes plugin, loaded with -p below), and the tests' own
+          # closure guards fail rather than skip (VIGIL_REQUIRE_SOVEREIGN_CLOSURE). test_ci_suite_legs.py pins
+          # both on every whole-suite run.
+          VIGIL_REQUIRE_SOVEREIGN_CLOSURE: "1"
+          VIGIL_REQUIRE_PLANES: numpy,onnxruntime,tokenizers,huggingface_hub,mcp,qdrant_client
         run: |
           mkdir -p /tmp/sigil-ci
           if [ -f apps/sigil/tests/test_offense_gate.py ]; then
@@ -919,7 +966,7 @@ jobs:
             # --ignore list is now genuinely EMPTY (audit F-05): test_graph is host-independent
             # (normalize_project collapses any host slug by the stable repo basename) and
             # test_robustness's vector tests are importorskip-guarded on qdrant_client, so both run here.
-            PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/ -q
+            PYTHONPATH=apps/sigil:integration:.github/scripts python -m pytest -p pytest_require_planes apps/sigil/tests/ -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
@@ -967,6 +1014,69 @@ jobs:
           name: flake-ledger-sigil-governor
           path: ${{ runner.temp }}/flake-ledger.jsonl
           if-no-files-found: warn
+
+  sigil-fold-cache-on:
+    name: SIGIL suite with the fold cache ON (Front C production configuration)
+    # Front C's verified fold cache (VIGIL_FOLD_CACHE_ENABLED, S0) is default-OFF, so the governor job above
+    # exercises it only inside the tests that switch it on for themselves. Its production configuration — every
+    # request-path fold on the cache, for every test in the suite — ran in NO CI leg. This job runs the SAME
+    # whole apps/sigil/tests/ directory, on the same sovereign lock, with the flag ON.
+    #
+    # A separate job, not a matrix leg of the governor job: a matrix appends "(…)" to the job name, so the
+    # required check "SIGIL governor gates (P7 — offense gate + authn)" would stop reporting under that exact
+    # name and every PR would block. It runs in parallel (the governor's whole-suite step takes ~6 min on the
+    # runner; the critical path is P5), far under the job cap. It IS a required check: it is listed in
+    # .github/required-status-checks.txt, which tools/governance/require-checks.sh --apply makes live and
+    # docs/tests/test_required_checks_canonical.py keeps every doc count in step with.
+    # apps/sigil/tests/test_ci_suite_legs.py fails if no ci.yml step runs the whole suite with the flag ON.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # the same model cache as the governor job
+      SIGIL_EMBED_CACHE_DIR: /tmp/sigil-embed-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: install vigil_core + SIGIL deps from the SOVEREIGN hash lock (the same install as the governor job)
+        run: |
+          pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      # The same pinned-model cache + prefetch as the governor job (see there).
+      - name: Cache the pinned embedding model files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/sigil-embed-cache
+          key: bge-onnx-${{ hashFiles('apps/sigil/sigil/vectors/embed.py') }}
+      - name: prefetch + verify the pinned embedding model (bounded retries)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+        run: |
+          mkdir -p /tmp/sigil-ci
+          for attempt in 1 2 3 4; do
+            if PYTHONPATH=apps/sigil python -c "from sigil.vectors.embed import prefetch; print(prefetch())"; then
+              exit 0
+            fi
+            echo "prefetch attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::the pinned embedding model could not be fetched and verified"; exit 1
+      - name: the whole apps/sigil/tests suite with VIGIL_FOLD_CACHE_ENABLED=1
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+          HF_HUB_OFFLINE: "1"
+          VIGIL_FOLD_CACHE_ENABLED: "1"
+          VIGIL_REQUIRE_NODE: "1"
+          # the same closure requirement as the governor job's whole-suite step (see there)
+          VIGIL_REQUIRE_SOVEREIGN_CLOSURE: "1"
+          VIGIL_REQUIRE_PLANES: numpy,onnxruntime,tokenizers,huggingface_hub,mcp,qdrant_client
+        run: |
+          mkdir -p /tmp/sigil-ci
+          # No extra -q: apps/sigil/pyproject.toml already adds one, and a second hides the pass/skip tally.
+          # -rs names every skip, so a test that skipped under the flag is visible, not a silent green.
+          PYTHONPATH=apps/sigil:integration:.github/scripts python -m pytest -p pytest_require_planes apps/sigil/tests/ -rs
 
   sigil-lint:
     name: SIGIL lint (ruff blocking + mypy can-complete)

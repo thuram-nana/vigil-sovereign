@@ -45,10 +45,11 @@ jobs:
       - name: install vigil_core + SIGIL deps (hash-locked) — same closure as the required P7 job
         run: |
           # Runtime third-party deps from the committed HASH LOCK (== the shipped tree), pytest from the
-          # pinned CI toolchain lock; vigil_core editable, no deps. This is the SAME light runtime closure
+          # pinned CI toolchain lock; vigil_core editable, no deps. This is the SAME sovereign-lock closure
           # the `SIGIL governor gates (P7 ...)` job installs, so the soak runs the exact cryptography/
-          # pydantic the sovereign spine ships with.
-          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          # pydantic the sovereign spine ships with (apps/sigil/tests/test_ci_suite_legs.py pins the lock
+          # for every workflow that runs apps/sigil/tests).
+          pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: full-stack soak — large multi-segment N-1 -> N -> rollback on signed data

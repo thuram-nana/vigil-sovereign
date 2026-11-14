@@ -16,12 +16,14 @@ TRUE datum and never fabricates one:
   * the whole reader is resilient on an empty tree (honest empty state, never a crash).
 
 Plus an end-to-end proof the `/api/strix/control` route is wired through the server, and a `node --check`
-syntax gate on the SPA (skipped where node is unavailable).
+syntax gate on the SPA (skipped where node is unavailable; a FAILURE in CI (GITHUB_ACTIONS) or where
+VIGIL_REQUIRE_NODE is set).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -333,10 +335,22 @@ def test_route_is_served_and_returns_the_control_shape():
 # the SPA parses (node --check) — the surface this slice adds is in app.js
 # ---------------------------------------------------------------------------
 
-def test_app_js_node_check():
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
+
+def test_app_js_node_check():
+    node = _need_node()
     app_js = Path(__file__).resolve().parents[6] / "packages" / "vigil-ui" / "app.js"
     assert app_js.is_file(), f"app.js not found at {app_js}"
     proc = subprocess.run([node, "--check", str(app_js)], capture_output=True, text=True, timeout=30)

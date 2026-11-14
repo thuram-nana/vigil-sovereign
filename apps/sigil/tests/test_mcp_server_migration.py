@@ -22,6 +22,7 @@ update this set deliberately — it is the single source of truth for the count 
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -88,8 +89,10 @@ def test_live_server_registers_eight_tools(tmp_path, monkeypatch) -> None:
     """Construct the real v2 server and confirm it registers exactly the 8 tools, and that a live
     tool call returns a dict (never raises to the client).
 
-    Needs the sovereign closure (``mcp`` + onnxruntime/tokenizers/qdrant for the module's top-level imports);
-    SKIPS where that is absent (e.g. the offense-lock ``sigil-governor`` job).
+    Needs the sovereign closure (``mcp`` + onnxruntime/tokenizers/qdrant for the module's top-level imports).
+    SKIPS only where a module of that closure is not installed, and not even then under
+    ``VIGIL_REQUIRE_SOVEREIGN_CLOSURE=1`` (the sovereign-lock CI jobs): there it FAILS. Any other import error
+    (a broken module, a raising import) propagates as a failure.
     """
     import asyncio
 
@@ -97,8 +100,11 @@ def test_live_server_registers_eight_tools(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
     try:
         from sigil.mcp import server
-    except Exception as exc:  # noqa: BLE001 — sovereign heavy deps absent -> skip, don't error
-        pytest.skip(f"sovereign closure not importable here ({type(exc).__name__}: {exc})")
+    except ImportError as exc:  # a module of the sovereign closure is not installed
+        if os.environ.get("VIGIL_REQUIRE_SOVEREIGN_CLOSURE") == "1":
+            pytest.fail(f"the sovereign closure is required here but did not import: {exc}")
+        # str(ModuleNotFoundError) is the canonical "No module named '<x>'", which pytest_require_planes reads
+        pytest.skip(f"sovereign closure not importable here: {exc}")
 
     assert type(server.mcp).__name__ == "MCPServer", "server.mcp is not a v2 MCPServer instance"
 

@@ -1646,12 +1646,17 @@ cd engine/crucible && PYTHONPATH=. pytest framework/v2/evidence framework/v2/ver
 # the egress gate
 PYTHONPATH=gateway python -m pytest gateway/tests -q
 
-# the fusion body + the LIVE engine validation (two processes — the boundary is real):
-PYTHONPATH=integration:gateway python -m pytest integration/tests \
-  --ignore=integration/tests/test_oracle_adapter.py --ignore=integration/tests/test_engine_live.py -q
-PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
-  integration/tests/test_oracle_adapter.py integration/tests/test_engine_live.py -q
+# the fusion body + the LIVE engine validation: run them EXACTLY as the `integration` job
+# ("integration two-env boundary (P5)") in .github/workflows/ci.yml does — copy its sovereign-leg
+# command (`pytest -rs integration/tests` with its full --ignore list) and its offense-leg command
+# (`PYTHONPATH=integration:engine/crucible:gateway:.github/scripts ... -p pytest_require_planes`
+# with its explicit file list) verbatim. They are two processes because the boundary is real.
 ```
+
+Do not shorten those two commands. The sovereign leg's `--ignore` list is what keeps every
+framework-dependent file out of the framework-free process; with fewer `--ignore`s, an offense test file
+puts `engine/crucible` on `sys.path` and loads `framework`, and every later test that imports the sovereign
+plane is then refused by `assert_no_offense` — the boundary working, not a bug.
 
 The full, per-component command list is in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 

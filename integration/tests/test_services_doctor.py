@@ -235,19 +235,30 @@ def test_llm_backend_probe_reports_backend_and_endpoint_and_refuses_nonloopback(
     assert remote["endpoint"] == "http://10.0.0.5:11434"           # reported, but not dialled
 
 
+def _is_llm_down_note(note: str) -> bool:
+    # The LLM-backend note SPECIFICALLY. Other doctor notes also say "not answering" (the docker-daemon note
+    # does), so a bare "not answering" match is satisfied by an unrelated note on any host whose docker
+    # daemon is stopped — the positive check would pass without the LLM note and the negative control would
+    # fail for a reason that has nothing to do with the LLM backend.
+    return "the LLM backend" in note and "not answering on loopback" in note
+
+
 def test_doctor_notes_unreachable_local_backend_but_does_not_flip_ok(tmp_path, monkeypatch):
     import socket
     _seed_venvs(tmp_path)
     monkeypatch.setattr(dmod, "_writable", lambda p: True)
     monkeypatch.setenv("VIGIL_BIN", str(tmp_path / ".venv-offense" / "bin" / "vigil"))
     monkeypatch.setenv("CRUCIBLE_LLM_BACKEND", "ollama")
+    # A stopped docker daemon on the host adds its OWN "not answering" note; force that state so both halves
+    # below are checked against it wherever docker is installed (the predicate must not be fooled by it).
+    monkeypatch.setattr(dmod, "_docker_daemon_running", lambda *a, **k: False)
     s = socket.socket(); s.bind(("127.0.0.1", 0)); closed = s.getsockname()[1]; s.close()
     monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", f"http://127.0.0.1:{closed}")
 
     report = dmod.collect(tmp_path)
     # an unreachable LOCAL backend is ADVISORY (a cloud pick needs no daemon) — a note, never a hard fail.
     assert report["ok"] is True
-    assert any("not answering" in n for n in report["notes"])
+    assert any(_is_llm_down_note(n) for n in report["notes"])
     assert report["llm_backend"]["reachable"] is False
 
     # NEGATIVE CONTROL: a reachable local backend produces NO such note.
@@ -256,10 +267,19 @@ def test_doctor_notes_unreachable_local_backend_but_does_not_flip_ok(tmp_path, m
     try:
         monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", f"http://127.0.0.1:{up}")
         ok_report = dmod.collect(tmp_path)
-        assert not any("not answering" in n for n in ok_report["notes"])
+        assert not any(_is_llm_down_note(n) for n in ok_report["notes"])
         assert ok_report["llm_backend"]["reachable"] is True
+        if ok_report["binaries"]["docker"]:
+            # the decoy IS present here, and the predicate does not mistake it for the LLM note
+            assert any("docker" in n and "not answering" in n for n in ok_report["notes"])
     finally:
         srv.close()
+
+
+def test_the_llm_note_predicate_rejects_the_docker_daemon_note():
+    # hermetic half of the above, for hosts without docker: the two real note texts, told apart
+    assert not _is_llm_down_note("docker is installed but the daemon is not answering `docker info` — start it")
+    assert _is_llm_down_note("the LLM backend 'ollama' at http://127.0.0.1:1 is not answering on loopback — a")
 
 
 def test_env_example_documents_ollama_host_matching_the_engine():
