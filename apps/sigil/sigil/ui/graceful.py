@@ -41,20 +41,20 @@ class GracefulMixin:
         self._inflight_cv = threading.Condition()
         super().__init__(*args, **kwargs)
 
-    def process_request(self, request, client_address):  # type: ignore[no-untyped-def]
+    def process_request(self, request, client_address):
         # Counted on the ACCEPT thread, before the request thread starts, so a drain that begins right after an
         # accept always sees it.
         with self._inflight_cv:
             self._inflight += 1
         try:
-            super().process_request(request, client_address)  # type: ignore[misc]
+            super().process_request(request, client_address)
         except BaseException:
             self._request_done()
             raise
 
-    def process_request_thread(self, request, client_address):  # type: ignore[no-untyped-def]
+    def process_request_thread(self, request, client_address):
         try:
-            super().process_request_thread(request, client_address)  # type: ignore[misc]
+            super().process_request_thread(request, client_address)
         finally:
             self._request_done()
 
