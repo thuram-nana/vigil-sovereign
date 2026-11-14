@@ -96,19 +96,28 @@ def _close_listener(srv: Any) -> None:
 
 
 def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
-                  abort: Optional[threading.Event] = None, log: Callable[[str], None] = print) -> bool:
-    """Stop a running ``GracefulMixin`` server: signal the streams, stop accepting, drain within the deadline.
-    Returns True when every accepted request finished in time. Call it from a thread other than the one inside
-    ``serve_forever`` (``shutdown`` waits for that loop to return)."""
+                  abort: Optional[threading.Event] = None, log: Callable[[str], None] = print,
+                  serving: bool = True) -> bool:
+    """Stop a ``GracefulMixin`` server: signal the streams, stop accepting, drain within the deadline. Returns
+    True when every accepted request finished in time. Call it from a thread other than the one inside
+    ``serve_forever`` (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has
+    already ended. A log line that cannot be written (a closed stdout) never interrupts the stop."""
+    def _say(msg: str) -> None:
+        try:
+            log(msg)
+        except Exception:  # noqa: BLE001 — the stop must complete whatever happened to the log stream
+            pass
+
     srv.stopping.set()
-    srv.shutdown()                      # serve_forever returns; nothing new is accepted
+    if serving:
+        srv.shutdown()                  # serve_forever returns; nothing new is accepted
     _close_listener(srv)
     n = srv.inflight()
     if n:
-        log(f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
+        _say(f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
     drained = srv.wait_drained(drain_deadline_s, abort=abort)
     if not drained:
-        log(f"  stopping: {srv.inflight()} request(s) still running at the deadline; closing")
+        _say(f"  stopping: {srv.inflight()} request(s) still running at the deadline; closing")
     return drained
 
 
@@ -132,19 +141,27 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
                 previous[sig] = signal.signal(sig, _on_signal)
             except (ValueError, OSError):
                 pass
-    worker = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.25},
-                              name="sigil-http-serve", daemon=True)
+    failure: list = []
+
+    def _serve() -> None:
+        try:
+            srv.serve_forever(poll_interval=0.25)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the calling thread below
+            failure.append(exc)
+
+    worker = threading.Thread(target=_serve, name="sigil-http-serve", daemon=True)
     worker.start()
     drained = True
     try:
         while not stop.wait(0.5):
-            if not worker.is_alive():   # serve_forever ended on its own: nothing left to drain
+            if not worker.is_alive():   # serve_forever ended on its own (it failed): stop and report it
                 break
     except KeyboardInterrupt:           # SIGINT before the handler was installed
         stop.set()
     finally:
         try:
-            drained = graceful_stop(srv, drain_deadline_s=drain_deadline_s, abort=force, log=log)
+            drained = graceful_stop(srv, drain_deadline_s=drain_deadline_s, abort=force, log=log,
+                                    serving=worker.is_alive())
         finally:
             try:
                 srv.server_close()
@@ -155,5 +172,10 @@ def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
                         signal.signal(sig, h)
                     except (ValueError, OSError):
                         pass
-                sys.stdout.flush()
+                try:
+                    sys.stdout.flush()
+                except Exception:  # noqa: BLE001 — a closed stdout must not turn a clean stop into a failure
+                    pass
+    if failure:
+        raise failure[0]                # a serve loop that failed fails the process (systemd restarts it)
     return drained

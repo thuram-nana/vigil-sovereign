@@ -309,3 +309,31 @@ def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit):
     assert m, f"{unit} sets no TimeoutStopSec"
     assert graceful.DRAIN_DEADLINE_S + 5 <= int(m.group(1)), (unit, m.group(1))
     assert re.search(r"^KillSignal=SIGTERM\s*$", text, re.M)
+
+
+class _Crashing(_Srv):
+    def service_actions(self):            # runs inside socketserver's serve loop: the loop itself fails
+        raise OSError("the listening socket failed")
+
+
+def test_a_serve_loop_that_fails_still_fails_the_process():
+    # serve_forever raising must not turn into a clean exit: the caller (and so `Restart=on-failure`) sees it
+    srv = _Crashing(("127.0.0.1", 0), _Hold)
+    with pytest.raises(OSError, match="listening socket failed"):
+        graceful.serve_until_signal(srv, stop=threading.Event(), log=lambda _m: None)
+    assert _refused(srv.server_address[1])
+
+
+def test_a_log_line_that_cannot_be_written_never_breaks_the_stop():
+    srv = _Srv(("127.0.0.1", 0), _Hold)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    t, out = _held_request(srv)
+    threading.Timer(0.3, _Hold.release.set).start()
+
+    def _closed_stdout(_msg):
+        raise BrokenPipeError("stdout is gone")
+
+    assert graceful.graceful_stop(srv, drain_deadline_s=5, log=_closed_stdout) is True
+    t.join(5)
+    assert out == {"status": 204}
+    srv.server_close()
