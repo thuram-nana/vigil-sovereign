@@ -627,6 +627,38 @@ def test_demote_founders_skips_an_org_that_is_no_longer_active(flag_on, monkeypa
     assert [x["org_id"] for x in _audits(s, "owner_demote_founder")] == [b["org_id"]]
 
 
+def test_every_member_verb_decides_inside_the_cross_process_membership_lock(flag_on, monkeypatch):
+    # The cockpit's member verbs and the owner CLI verbs share one cross-process lock around their last-admin check,
+    # audit and write. While another holder has it (an flock conflicts across open files, as across processes),
+    # each verb gives up after its bounded wait with nothing written; once it is free, each proceeds.
+    from vigil_integration.live.seam_lock import LockBusy
+
+    from sigil.ui import provision as prov
+    p, s = _prov()
+    u, org, mate = _founder_and_mate(p)
+    p.grant_member(u, org, mate, "analyst")
+    monkeypatch.setattr(prov, "_MEMBERS_LOCK_WAIT_S", 0.05)
+
+    def rows():
+        return [r.payload for r in s.iter_records() if isinstance(r.payload, dict)
+                and r.payload.get("signal") in ("provision.audit", MEMBERSHIP_SIGNAL)]
+
+    verbs = (lambda: p.grant_member(u, org, mate, "viewer"),
+             lambda: p.revoke_member(u, org, mate),
+             lambda: prov.owner_set_member_role(s, org, mate, "org_admin", reason="support", issued_at=9e9),
+             lambda: prov.owner_demote_founders(s, reason="rollback", issued_at=9e9))
+    before = rows()
+    with prov._members_lock(s):
+        for verb in verbs:
+            with pytest.raises(LockBusy):
+                verb()
+    assert rows() == before
+    assert p.orgs.membership_role(mate, org) == "analyst" and p.orgs.membership_role(u, org) == "founder"
+    for verb in verbs:
+        verb()
+    assert p.orgs.membership_role(mate, org) == "org_admin" and p.orgs.membership_role(u, org) == "org_admin"
+
+
 def test_owner_set_member_role_audits_before_the_grant(flag_on, monkeypatch):
     from sigil.ui.provision import owner_set_member_role
     p, s = _prov()

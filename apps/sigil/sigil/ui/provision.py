@@ -218,6 +218,28 @@ def _member_target(username) -> str:
     return _check_member_username(username)
 
 
+#: How long a member verb waits for the membership critical section before it gives up (nothing written).
+_MEMBERS_LOCK_WAIT_S = 10.0
+
+
+def _members_lock(store):
+    """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
+    ``<spine dir>/<stem>.members.lock`` (a ``*.lock`` transient the backups skip), taken with the same hardened
+    ``locked_file`` as the settle lock. Every member verb that applies the last-admin rule holds it around that
+    check AND its audit and owner-signed write — the customer `grant_member`/`revoke_member` in the cockpit and the
+    owner verbs in the `sigil` CLI — so two processes always decide against the administrator set the other left,
+    never against the same one. Lock order: ``spine_lock`` (in-process) -> this -> the spine's append lock. A
+    bounded wait, then ``LockBusy`` with nothing written; an unusable lock file raises ``OSError`` (fail-closed)."""
+    from pathlib import Path
+    from vigil_integration.live.seam_lock import locked_file
+    raw = getattr(store, "path", None)
+    if not raw:
+        raise ValueError("the membership lock needs a spine store with a path")
+    sp = Path(raw)
+    path = sp.parent / f"{sp.stem or sp.name}.members.lock"
+    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S, create=False, chown_like=path.parent)
+
+
 def _member_admins(orgs, org_id: str) -> "set[str]":
     """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (per-org predicate on the stored
     role) — `org_admin` and `founder` today. The last-admin (anti-orphan) rules count these."""
@@ -256,7 +278,9 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
     management refuses a founder target). Fail-closed: a valid role and username and a non-empty reason are
     required; the org must be active; the target must be an active customer or a current member of the org; a
     change that would leave the org with no member holding `manage_members` is refused. A CRITICAL audit row is
-    written before the owner-signed grant. Returns {org_id, username, role, previous_role, seq}."""
+    written before the owner-signed grant. The checks, the audit and the grant run inside the cross-process
+    membership lock (`_members_lock`) that the cockpit's member verbs also hold, so the last-admin rule holds
+    across processes. Returns {org_id, username, role, previous_role, seq}."""
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry, _check_member_role, _check_org_id
     oid, u, r = _check_org_id(org_id), _member_target(username), _check_member_role(role)
@@ -265,7 +289,7 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
         raise ValueError("a reason is required (it is recorded in the audit)")
     orgs = orgs if orgs is not None else OrgRegistry(store)
     customers = customers if customers is not None else CustomerRegistry(store)
-    with spine_lock(store.path):
+    with spine_lock(store.path), _members_lock(store):
         if orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         prev = orgs.membership_role(u, oid)
@@ -284,15 +308,15 @@ def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Opti
     """OWNER act (`sigil org demote-founders`): re-grant `org_admin` to every ACTIVE `founder` membership — in one
     org, or in every active org. Idempotent: a second run finds none. Run it before rolling back to a build that
     has no `founder` role (such a build gives the role no permission, so a founder-only org would have no
-    administrator there). Each change writes a CRITICAL audit row before its owner-signed grant. Returns counts
-    only: {demoted, orgs}."""
+    administrator there). Each change writes a CRITICAL audit row before its owner-signed grant, inside the
+    cross-process membership lock (`_members_lock`). Returns counts only: {demoted, orgs}."""
     from ..governor.orgs import OrgRegistry, _check_org_id
     why = str(reason or "").strip()
     if not why:
         raise ValueError("a reason is required (it is recorded in the audit)")
     oid = _check_org_id(org_id) if org_id is not None else None
     orgs = orgs if orgs is not None else OrgRegistry(store)
-    with spine_lock(store.path):
+    with spine_lock(store.path), _members_lock(store):
         if oid is not None and orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         founders = [m for m in orgs.memberships(oid)
@@ -995,7 +1019,8 @@ class Provisioner:
         the HTTP edge binds it from the `vigil_customer_session` cookie, NEVER a client-supplied body field —
         so an attacker cannot name another admin's username to borrow authority; (TOCTOU) the authority check
         runs INSIDE the transaction lock, immediately before the owner-signs, so a concurrently-revoked admin
-        cannot sign through a stale check; the target must be a real active customer; a change that would
+        cannot sign through a stale check, and the whole check-then-write also holds the cross-process membership
+        lock (`_members_lock`) the owner verbs take; the target must be a real active customer; a change that would
         orphan the org (leave no member holding `manage_members`) is refused; the op is rate-limited per org.
         A target whose CURRENT role is `founder` is refused (the founder included, on themself): changing a
         founder's role is an owner act (`owner_set_member_role`).
@@ -1007,7 +1032,7 @@ class Provisioner:
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
         member_username = _member_target(member_username)
-        with self._lock:
+        with self._lock, _members_lock(self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
@@ -1043,7 +1068,8 @@ class Provisioner:
 
         Hardening (second security review): `requester` is the server-authenticated session principal (never
         a client field — Finding D); the authority check is INSIDE the lock (no TOCTOU with a concurrent
-        revoke of the requester's own admin membership); the org's SOLE administrator (member holding
+        revoke of the requester's own admin membership), and the check-then-write also holds the cross-process
+        membership lock (`_members_lock`) the owner verbs take; the org's SOLE administrator (member holding
         `manage_members`) cannot be revoked (anti-orphan — the tenant must retain at least one administrator);
         and a `founder` membership is never revoked here (the founder included, on themself): that is an
         owner act.
@@ -1053,7 +1079,7 @@ class Provisioner:
         so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
         member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
-        with self._lock:
+        with self._lock, _members_lock(self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
