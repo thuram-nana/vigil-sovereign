@@ -18,6 +18,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * one failing seam stops the others / reports success          -> test_a_revoke_is_tried_on_every_seam_when_one_fails
   * a seam published from a spine without the revoke            -> test_a_revoke_whose_append_fails_publishes_nothing_and_ungrants_every_seam
   * another seam retracted only after the append                 -> test_every_seam_is_ungranted_before_the_revoke_is_appended
+  * a tree holding a publication left out of the revoke          -> test_a_revoke_reaches_another_tree_that_holds_a_publication
   * the ops-sweep wiring (only without an explicit --base-dir)   -> test_ops_sweep_*
   * the eval publishers' ``_base_dir`` through the shared resolver -> test_the_eval_publishers_write_the_tree_*
 """
@@ -287,6 +288,36 @@ def test_every_seam_is_ungranted_before_the_revoke_is_appended(home, monkeypatch
     cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))
     assert at_append == [(False, False)]
     assert _revoked_on(seam_a, SLUG) and _revoked_on(seam_b, SLUG)
+
+
+@pytest.mark.parametrize("where", ["shell", "vigil_up"])
+def test_a_revoke_reaches_another_tree_that_holds_a_publication(home, monkeypatch, tmp_path, capsys, where):
+    """The grant was published, before the upgrade, in this shell's tree or a running `vigil up`'s base: the revoke
+    reaches that tree too (it only un-grants) — never a REVOKED report while a tree still honours the grant."""
+    import os
+
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    for k in ("VIGIL_EVAL_GRANT_HIGHWATER_DIR", "VIGIL_EVAL_OFFENSE_HIGHWATER_DIR", "VIGIL_SEAM_MIGRATION_GUARD"):
+        monkeypatch.delenv(k, raising=False)
+    old_tree = tmp_path / ".vigil-live" if where == "shell" else tmp_path / "console-base"
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(old_tree))
+    rig = _Rig("grant")                                                  # published in the old tree
+    if where == "shell":
+        monkeypatch.delenv("VIGIL_BASE_DIR")                             # the shell resolves ./.vigil-live
+    else:
+        monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+        state = tmp_path / "state"
+        (state / "vigil").mkdir(parents=True)
+        (state / "vigil" / "vigil-up.json").write_text(json.dumps(
+            {"schema": "vigil-up-pointer-v1", "base": str(old_tree), "pid": os.getpid()}))
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    _install(home, _COCKPIT)                                             # the units: %h/.sigil/credit-lease
+    ok = _granted_on(rig)
+    assert ok(old_tree)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: rig.store)
+    cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))
+    assert str(old_tree) in capsys.readouterr().err
+    assert not ok(old_tree) and _revoked_on(str(old_tree), SLUG) and _revoked_on(_units_seam(home), SLUG)
 
 
 def test_a_backup_units_seam_never_blocks_a_writer(home, monkeypatch, tmp_path, capsys):

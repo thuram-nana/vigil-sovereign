@@ -720,7 +720,7 @@ def cmd_eval_grant(a) -> None:
     # when this shell would write a different tree than the configured units use. A revoke (the safe direction) is
     # never refused for that: it is published to every configured writer unit's seam.
     if a.action == "revoke":
-        _revoke_targets = _revoke_seam_targets("eval-grant revoke")
+        _revoke_targets = _revoke_seam_targets("eval-grant revoke", str(a.engagement))
     else:
         _eval_seam = _writer_seam_base(f"eval-grant {a.action}")
         if a.action == "arm":
@@ -1279,12 +1279,13 @@ def _writer_seam_base(verb: str, *, units: "tuple[str, ...] | None" = None) -> s
     return base
 
 
-def _revoke_seam_targets(verb: str) -> "list[str]":
+def _revoke_seam_targets(verb: str, slug: str) -> "list[str]":
     """Where an eval-grant REVOKE (the safe direction) is published: the seam of every configured seam writer unit,
     each distinct directory once — so the revoke reaches whichever tree an offense plane reads, even while the units
     disagree or this shell resolves another directory (a WARNING names them; `vigil doctor` reports the
-    disagreement). Nothing configured ⇒ this shell's seam, unchanged. Never refuses on a disagreement; contradictory
-    settings in this shell are still refused, as for every writer."""
+    disagreement). Nothing configured ⇒ this shell's seam, unchanged. Also this shell's seam and a running `vigil up`'s
+    base when either is another directory that holds a publication of ``slug`` (a revoke only un-grants). Never
+    refuses on a disagreement; contradictory settings in this shell are still refused, as for every writer."""
     import os
 
     from vigil_core.seam_base import SeamBaseError, require_seam_base
@@ -1295,6 +1296,7 @@ def _revoke_seam_targets(verb: str) -> "list[str]":
         sys.exit(2)
     try:
         from vigil_integration.seam_base_units import WRITER_SEAM_UNITS, seam_base_agreement
+        from vigil_integration.seam_migration import running_up_base
     except ImportError:          # the unit-agreement probe is not installed here: this shell's seam
         return [base]
     units = seam_base_agreement(only=WRITER_SEAM_UNITS)[0]["units"]
@@ -1308,7 +1310,25 @@ def _revoke_seam_targets(verb: str) -> "list[str]":
         print(f"{verb}: WARNING — this shell resolves the seam base to {base}; the configured units use "
               f"{'; '.join(f'{u} -> {s}' for u, s in units.items())}. Publishing the revoke to each unit's seam "
               f"({', '.join(targets)}); `vigil doctor` names the disagreement.", file=sys.stderr)
+    for extra in (base, running_up_base()):
+        if extra and os.path.realpath(extra) not in {os.path.realpath(t) for t in targets} \
+                and _holds_grant_publication(extra, slug):
+            print(f"{verb}: {extra} also holds a publication of this grant; the revoke is published there too.",
+                  file=sys.stderr)
+            targets.append(extra)
     return targets
+
+
+def _holds_grant_publication(base: str, slug: str) -> bool:
+    """Whether ``base`` holds an eval-capability-grant publication of ``slug`` (any file at its path)."""
+    import os
+
+    from vigil_integration.live.eval_capability_grant import eval_capability_grant_path
+    try:
+        p = eval_capability_grant_path(base, slug)
+    except Exception:  # noqa: BLE001 — a path that cannot be formed holds nothing to retract
+        return False
+    return p is not None and os.path.lexists(p)
 
 
 def _unmigrated_seam(seam: str) -> list:
