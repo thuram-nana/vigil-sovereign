@@ -64,11 +64,10 @@ _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is 
                            "closed, it is charged for what it used")
 
 
-#: ``_settle_reservation``'s ``lease_split`` for a signed lease minted without the plan/wallet split.
-_LEGACY_SPLIT = object()
-#: The settle refusal (and ``ops-sweep reservations`` row status) of a launch whose lease does not carry its
-#: plan/wallet split while the reserve's plan debit record has left the live spine window: nothing moves until the
-#: owner restores it.
+#: The settle refusal (and ``ops-sweep reservations`` row status) of a reservation whose plan/wallet split is known
+#: neither from its lease nor from the live spine — its lease does not carry the split (or, for a superseded
+#: reservation, there is no lease) while the reserve's plan debit record has left the live spine window: nothing
+#: moves until the owner restores it.
 PLAN_DEBIT_PRUNED = "plan_debit_pruned"
 
 
@@ -436,15 +435,16 @@ class LaunchGate:
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
         # The plan/wallet split the lease was minted with (VIGIL_LEASE_PLAN_SPLIT), from the VERIFIED document; a
-        # lease without it (minted before the flag, or postpaid) settles from the reserve records (`_LEGACY_SPLIT`).
+        # lease without it (minted with the flag off, or postpaid) settles from the reserve records (None).
         lease_split = ((int(doc.plan_reserved), doc.plan_period_end) if doc.plan_reserved is not None
-                       else _LEGACY_SPLIT)
+                       else None)
         return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only,
                                         lease_split=lease_split)
 
     def _settle_reservation(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float,
                             refuse_if: Optional[Callable[[], Optional[str]]], basis: str,
-                            finish_only: bool = False, lease_split: Any = None) -> dict:
+                            finish_only: bool = False,
+                            lease_split: "Optional[tuple[int, Optional[float]]]" = None) -> dict:
         """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
         used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
         bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
@@ -452,9 +452,8 @@ class LaunchGate:
         records.
 
         ``lease_split`` is where a prepaid decision's plan share comes from: the signed lease's
-        ``(plan_reserved, plan_period_end)``; ``_LEGACY_SPLIT`` for a signed lease that does not carry it (the
-        reserve's plan debit record, plus the pruned-record refusal below); None (E7) for the reserve records
-        alone."""
+        ``(plan_reserved, plan_period_end)``; None — a signed lease that does not carry it, or E7, which has no
+        lease — for the reserve's plan debit record, plus the pruned-record refusal below."""
         from ..governor.launch_settlement import SettlementDecision
         # PRICING M1c: every FRESH settle (completion, customer cancel, abandoned-lease sweep) closes the run's model
         # meter and retires its grant — inside the settle critical section, after the caller's precondition, before
@@ -503,7 +502,9 @@ class LaunchGate:
         # readable it must agree, or the settle refuses (an internal inconsistency moves nothing). A lease without
         # the split settles from the live record as before — and when that record is no longer readable although
         # the plan ledger's prune-durable seen-set holds it, a FRESH settle refuses (``plan_debit_pruned``) rather
-        # than route the plan share to the wallet: the refund then waits for the owner (runbook).
+        # than route the plan share to the wallet: the refund then waits for the owner (runbook). The same holds for
+        # E7, whose amount is the reservation's live reserve records: a plan debit that left the live window while
+        # its wallet debit stayed is never released short.
         plan_deb_eid = f"reserve-plan:{s}:{non}"
         plan_deb = self.meter.plan.debited_entry(oid, plan_deb_eid)   # (from_plan, period_end) | None
         if isinstance(lease_split, tuple):
@@ -515,7 +516,7 @@ class LaunchGate:
         else:
             from_plan = plan_deb[0] if plan_deb else 0
             plan_pe = plan_deb[1] if plan_deb else None
-            if lease_split is _LEGACY_SPLIT and plan_deb is None:
+            if plan_deb is None:
                 refuse_if = self._pruned_plan_debit_check(oid, plan_deb_eid, refuse_if)
         refund = reserved - consumed
         plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
@@ -556,10 +557,10 @@ class LaunchGate:
 
     def _pruned_plan_debit_check(self, oid: str, plan_deb_eid: str,
                                  refuse_if: Optional[Callable[[], Optional[str]]]) -> Callable[[], Optional[str]]:
-        """``refuse_if`` extended for a lease without its plan/wallet split whose reserve plan debit the live spine
-        window no longer holds: the caller's own precondition first, then ``PLAN_DEBIT_PRUNED`` when the plan
-        ledger's prune-durable seen-set shows that debit was recorded (its plan share cannot be told from the wallet
-        share, so nothing is refunded). Runs inside the settle critical section on a FRESH settle only (via
+        """``refuse_if`` extended for a reservation without a lease-recorded plan/wallet split (a lease without it,
+        or E7) whose reserve plan debit the live spine window does not hold: the caller's own precondition first,
+        then ``PLAN_DEBIT_PRUNED`` when the plan ledger's prune-durable seen-set shows that debit was recorded (its
+        plan share cannot be told from the wallet share, so nothing is refunded). Runs inside the settle critical section on a FRESH settle only (via
         ``_refusal``), so an already-settled lease and the roll-forward of a recorded decision are untouched."""
         def _check() -> Optional[str]:
             why = _refusal(refuse_if)
@@ -1263,9 +1264,14 @@ class LaunchGate:
         if res is None:
             return {"ok": False, "error": "no owner-signed reservation for this launch"}
         # The bucket(s) it drew from must be the ones its settle path refunds: the postpaid draw for a postpaid
-        # reservation (detected exactly as settle_launch does), the plan + wallet debits otherwise.
+        # reservation (detected exactly as settle_launch does), the plan + wallet debits otherwise. The amount is
+        # the LIVE reserve records, so a reserve debit the wallet ledger has folded (its prune-durable seen-set)
+        # that the live scan no longer shows would release the reservation short: refused (a reserve appends its
+        # plan debit before its wallet debit, so a pruned plan debit is held by the settle's own check instead).
         postpaid = self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}")
-        if set(res.units) - ({"postpaid"} if postpaid else {"plan", "wallet"}) or res.reserved <= 0:
+        if (set(res.units) - ({"postpaid"} if postpaid else {"plan", "wallet"}) or res.reserved <= 0
+                or (not postpaid and "wallet" not in res.units
+                    and self.wallet.has_debit_entry(oid, f"reserve-wallet:{s}:{non}"))):
             return {"ok": False, "error": "the reservation's records are inconsistent (fail-closed)"}
 
         def _precondition() -> Optional[str]:

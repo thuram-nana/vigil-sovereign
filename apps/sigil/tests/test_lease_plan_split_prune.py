@@ -6,7 +6,8 @@ own share. With ``VIGIL_LEASE_PLAN_SPLIT=1`` the owner-signed lease records the 
 — even when a hard prune has taken the reserve's plan debit record out of the live spine window. A lease minted
 without the split settles from the live record; when that record is gone while the plan ledger's prune-durable
 seen-set still holds it (``PlanCreditLedger.has_debit_entry``), a FRESH settle refuses (``plan_debit_pruned``) and
-moves nothing, so the plan share is never refunded into the wallet.
+moves nothing, so the plan share is never refunded into the wallet. A superseded reservation (E7, released from its
+live reserve records, with no lease) is held the same way, so it is never released short.
 
 Pinned here (each guard has a named test that a mutant turns red):
   * the lease split is used across a prune (sweep refund / metered completion)  -> test_split_lease_settles_...
@@ -15,6 +16,8 @@ Pinned here (each guard has a named test that a mutant turns red):
   * the lease split vs a disagreeing live record                               -> test_a_lease_split_that_disagrees_...
   * _spend reports only the plan debit it appended / the flag gates stamping   -> test_reserve_stamps_...
   * the settle drain quarantines a held settle                                 -> test_the_settle_drain_quarantines_...
+  * the caller's own precondition is evaluated before the hold               -> test_a_held_settle_reports_the_...
+  * E7: a pruned plan debit holds the release / a pruned wallet debit refuses -> test_a_superseded_reservation_...
 
 Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:integration:packages/core/vigil_core \
      python -m pytest apps/sigil/tests/test_lease_plan_split_prune.py
@@ -243,6 +246,21 @@ def test_legacy_lease_after_a_prune_of_its_plan_debit_is_held_and_moves_nothing(
     assert _buckets(_store(world)) == (0, 15)
 
 
+def test_a_held_settle_reports_the_callers_own_refusal_first(world):
+    """The caller's precondition is evaluated before the pruned-record check: a settle its caller refuses (e.g. a
+    completion that landed meanwhile, or a pricing guard the drain re-prices next pass) reports THAT reason, not a
+    hold, and moves nothing."""
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10)
+    _hard_prune_past_the_reserve(world)
+    _assert_debit_pruned(world, r)
+    out = LaunchGate(_store(world)).settle_launch(signed_lease=r["lease"], consumed_units=0, now=LATE,
+                                                  basis="sweep:refund", refuse_if=lambda: "completion_pending")
+    assert out["ok"] is False and out["refused"] == "completion_pending", out
+    assert _buckets(_store(world)) == (0, 15)
+
+
 def test_legacy_wallet_only_lease_after_a_prune_still_refunds_the_wallet(world):
     s = _store(world)
     _seat(s, wallet=20, plan=0)                                        # no plan: a wallet-only reservation
@@ -355,3 +373,98 @@ def test_a_tampered_split_does_not_verify(world, monkeypatch):
     out = LaunchGate(s).settle_launch(signed_lease=stripped, consumed_units=0, now=NOW + 60, basis="cancel")
     assert out["ok"] is False and "does not verify" in out["error"], out
     assert _buckets(s) == (0, 15)
+
+
+# =====================================================================================================================
+# E7 — a superseded reservation (no lease: its amount is its live reserve records) is never released short
+# =====================================================================================================================
+SUPERSEDED_AT = NOW + 400 * 3600.0              # past the longest lease window: the release grace is over
+
+
+def _reserve_across_a_segment_boundary(store, monkeypatch, *, wallet_first=False) -> "tuple[dict, int]":
+    """Reserve plan 5 + wallet 5 with a segment boundary between its two debit records (the plan debit first, as
+    ``_spend`` appends them; ``wallet_first`` swaps them). Returns the reservation and the first seq after the
+    boundary."""
+    g = LaunchGate(store)
+    mark = {}
+
+    def _spend(self, oid, units, slug, nonce, now_ts):
+        sub = self.meter.subscriptions.active_subscription(oid, now_ts)
+        steps = [lambda: self.meter.plan.debit(oid, 5, period_end=sub.period_end, engagement_id=slug,
+                                               entry_id=f"reserve-plan:{slug}:{nonce}", issued_at=now_ts),
+                 lambda: self.wallet.debit(oid, units - 5, engagement_id=slug,
+                                           entry_id=f"reserve-wallet:{slug}:{nonce}", issued_at=now_ts)]
+        first, second = reversed(steps) if wallet_first else steps
+        first()
+        self.store.rotate()                    # the segment boundary between the two debit records
+        mark["k"] = self.store.next_seq
+        second()
+        return (5, float(sub.period_end))
+    with monkeypatch.context() as m:
+        m.setattr(LaunchGate, "_spend", _spend)
+        r = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=10, now=NOW, duration_hours=1)
+    assert r["ok"], r
+    assert _buckets(store) == (0, 15)
+    return r, mark["k"]
+
+
+def _supersede_and_prune_at(path, k) -> None:
+    """A later launch of the same target supersedes the reservation on the seam; then a REAL hard prune at ``k``."""
+    g = LaunchGate(_store(path))
+    later = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=1, now=NOW + 1, duration_hours=1)
+    assert later["ok"], later
+    assert g.publish_lease(signed_lease=later["lease"], expect_org_id=ORG)["ok"]
+    s = _store(path)
+    s.rotate()
+    for i in range(3):
+        s.append(kind="event", source="t", actor="u", payload={"signal": "noise", "tail": i})
+    _cp.checkpoint(s)
+    assert prune.commit_prune(s, k, confirm=True)["base_seq"] == k
+    fold_cache.clear_all()
+
+
+def _release(path, r):
+    return LaunchGate(_store(path)).release_superseded_reservation(org_id=ORG, slug=r["slug"], nonce=r["nonce"],
+                                                                   now=SUPERSEDED_AT, grace_s=0.0)
+
+
+def test_a_superseded_reservation_whose_plan_debit_a_prune_removed_is_held_not_released_short(world, monkeypatch):
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r, k = _reserve_across_a_segment_boundary(s, monkeypatch)
+    _supersede_and_prune_at(world, k)
+    _assert_debit_pruned(world, r)
+    before = _buckets(_store(world))
+    out = _release(world, r)
+    assert out["ok"] is False and out["refused"] == PLAN_DEBIT_PRUNED, out
+    s2 = _store(world)
+    assert _buckets(s2) == before, "nothing moves: the wallet share alone is never released as the whole"
+    assert _entries(s2, f"settle-wallet:{r['slug']}:{r['nonce']}") == 0
+    assert _entries(s2, f"settle-plan:{r['slug']}:{r['nonce']}") == 0
+
+
+def test_a_superseded_reservation_whose_wallet_debit_a_prune_removed_is_refused(world, monkeypatch):
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r, k = _reserve_across_a_segment_boundary(s, monkeypatch, wallet_first=True)
+    _supersede_and_prune_at(world, k)
+    eid = f"reserve-wallet:{r['slug']}:{r['nonce']}"
+    s1 = _store(world)
+    assert all((x.payload or {}).get("entry_id") != eid for x in s1.iter_records())
+    assert WalletRegistry(s1).has_debit_entry(ORG, eid) is True, "the seen-set must survive the prune"
+    before = _buckets(s1)
+    out = _release(world, r)
+    assert out["ok"] is False and "inconsistent" in out["error"], out
+    s2 = _store(world)
+    assert _buckets(s2) == before and _entries(s2, "settle-") == 0
+
+
+def test_a_superseded_reservation_with_its_records_live_is_still_released_in_full(world, monkeypatch):
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r, _k = _reserve_across_a_segment_boundary(s, monkeypatch)
+    g = LaunchGate(_store(world))
+    later = g.reserve_launch(requester="u", org_id=ORG, host=HOST, units=1, now=NOW + 1, duration_hours=1)
+    assert later["ok"] and g.publish_lease(signed_lease=later["lease"], expect_org_id=ORG)["ok"]
+    out = _release(world, r)
+    assert out["ok"] and (out["refunded_plan"], out["refunded_wallet"]) == (5, 5), out
