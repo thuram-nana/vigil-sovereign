@@ -27,6 +27,9 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the console unit taken as a migration destination -> test_the_upgrade_procedure_on_a_console_host
   * a tree carried into the units' seam still guarding the console's own seam
                                                       -> test_the_upgrade_procedure_on_a_console_host
+  * a money verb comparing the console's engine home   -> test_on_a_console_host_the_money_verbs_and_reconcile_run
+  * an arm refusal asking every unit for one seam      -> test_on_a_console_host_eval_grant_arm_names_the_console
+  * a reconcile refused, or one seam's failure cleared -> test_on_a_console_host_an_unconfirmed_revoke_is_cleared_by_reconcile
   * `seam migrate --to` the console's seam accepted    -> test_seam_migrate_never_carries_into_the_consoles_seam
   * the console's journal trusted for the money seam   -> test_a_tree_committed_into_the_consoles_seam_still_guards_the_money_seam
   * upgrade --check skipping a console host            -> test_upgrade_check_on_a_console_host_reports_the_former_tree
@@ -401,6 +404,82 @@ def test_the_upgrade_procedure_on_a_console_host(host, serve_spy, monkeypatch, c
     monkeypatch.setenv("VIGIL_BASE_DIR", str(console))
     cli.main(["serve"])                                                    # the console's cockpit
     assert serve_spy["serve"] == 2
+
+
+def _console_host_after_the_upgrade(h, monkeypatch) -> Path:
+    """The runbook's console host after the upgrade: the cockpit and settle-drain units re-copied, the console unit
+    keeping its engine home, the migration committed into the cockpit's and drain's seam, and the runbook's export in
+    the operator's shell (which does not export the guard: the units carry it). Returns the console's seam."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(h["tmp"] / "home")
+    console = _install_console(h)
+    ensure_owner_keypair()
+    _migrated(h)
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(h["seam"]))
+    return console
+
+
+@pytest.mark.parametrize("verb", ["sweep_report", "sweep_apply", "reconcile"])
+def test_on_a_console_host_the_money_verbs_and_reconcile_run(host, monkeypatch, capsys, verb):
+    """`sigil ops-sweep reservations` compares only the cockpit and the settle drain (as `seam migrate` does) and runs
+    on their seam; `sigil eval-grant reconcile` runs on every writer unit's seam, the console's engine home included —
+    none of them is refused for the console's own seam."""
+    console = _console_host_after_the_upgrade(host, monkeypatch)
+    if verb == "reconcile":
+        cli.main(["eval-grant", "reconcile"])
+        got = json.loads(capsys.readouterr().out)
+        assert got["ok"] is True and got["seams"] == [str(host["seam"]), str(console)]
+        return
+    argv = ["ops-sweep", "reservations"]
+    if verb == "sweep_apply":
+        monkeypatch.setenv("VIGIL_OPS_SWEEP_APPLY_ENABLED", "1")
+        argv += ["--apply", "--completion-spool", str(_spool(host))]
+    cli.main(argv)
+    out = capsys.readouterr()
+    assert json.loads(out.out)["items"] == [] and "refus" not in out.err
+    assert json.loads(out.out).get("applied", False) is (verb == "sweep_apply")
+
+
+def test_on_a_console_host_eval_grant_arm_names_the_console(host, monkeypatch, capsys):
+    """An arm publishes to ONE seam: on the console host it refuses, before anything is appended, and its message names
+    the console's engine home — never an instruction to give every unit (the console included) one VIGIL_BASE_DIR."""
+    console = _console_host_after_the_upgrade(host, monkeypatch)
+    tip = host["store"].next_seq
+    assert _exit(["eval-grant", "arm", "--engagement", "eng-x", "--target", "https://x.example"]) == 2
+    err = capsys.readouterr().err
+    assert host["store"].next_seq == tip and err.startswith("eval-grant arm: refusing")
+    assert "operator console" in err and "engine home" in err and str(console) in err
+    assert "for every unit" not in err and "no VIGIL_BASE_DIR in its service.env" in err
+    assert "eval-grant reconcile` run on every unit's seam" in err
+
+
+def test_on_a_console_host_an_unconfirmed_revoke_is_cleared_by_reconcile(host, monkeypatch, capsys):
+    """A revoke that cannot be confirmed on the console's seam exits 1 and tells the operator to run `sigil eval-grant
+    reconcile`; on that host the reconcile runs (on every unit's seam) and clears the alarm once the console's seam is
+    reachable — the instruction the CLI prints works."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from sigil.governor.seam_publish import read_close_alarm
+    from tests.test_seam_base_writer_guard import _revoked_on  # type: ignore
+    console = _console_host_after_the_upgrade(host, monkeypatch)
+    real_publish = EvalCapabilityGrant._publish
+
+    def _publish(self, slug):
+        if self._seam_override == str(console):
+            raise RuntimeError("the console's seam is not reachable")
+        return real_publish(self, slug)
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _publish)
+    assert _exit(["eval-grant", "revoke", "--engagement", "eng-x"]) == 1
+    err = capsys.readouterr().err
+    assert str(console) in err and "`sigil eval-grant reconcile` once it is reachable" in err
+    assert read_close_alarm()["failed"] == ["grant:eng-x"] and read_close_alarm()["seams"] == [str(console)]
+    assert _exit(["eval-grant", "reconcile"]) == 1                         # still unreachable: the alarm stands
+    assert read_close_alarm()["failed"] == ["grant:eng-x"]
+    capsys.readouterr()
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", real_publish)
+    cli.main(["eval-grant", "reconcile"])
+    got = json.loads(capsys.readouterr().out)
+    assert got["ok"] is True and got["seams"] == [str(host["seam"]), str(console)] and read_close_alarm() is None
+    assert _revoked_on(str(console)) and _revoked_on(str(host["seam"]))
 
 
 @pytest.mark.parametrize("apply", [False, True])

@@ -2,12 +2,13 @@
 
 `sigil eval-grant arm|revoke|reconcile` publish the eval grant / attestation (and raise its rollback floor) under
 the seam base this process resolves; the keyless offense plane reads the one the shipped units set
-(VIGIL_BASE_DIR=%h/.sigil/credit-lease). An arm or a reconcile writes only to the tree the configured seam WRITER
-units agree on (the cockpit, the settle drain, the console; the backup units only capture the seam): run from a
-shell that resolves another tree, or while those units disagree, it refuses — before anything is appended,
-published or cleared — and `sigil ops-sweep reservations` without --base-dir does too. A REVOKE (the safe direction)
-is never refused for that: it is published to every writer unit's seam, so it reaches whichever tree an offense
-plane reads. With nothing configured on the host every verb behaves exactly as before.
+(VIGIL_BASE_DIR=%h/.sigil/credit-lease). An arm publishes to ONE tree, the one the configured seam WRITER units agree
+on (the cockpit, the settle drain, the console; the backup units only capture the seam): run from a shell that
+resolves another tree, or while those units disagree, it refuses — before anything is appended or published — and
+`sigil ops-sweep reservations` without --base-dir does too, against the cockpit's and settle drain's seam. A REVOKE
+or a RECONCILE (the safe directions) is never refused for that: it runs on every writer unit's seam, so it reaches
+whichever tree an offense plane reads, and a reconcile clears the close alarm only once every one is confirmed. With
+nothing configured on the host every verb behaves exactly as before.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * the "not the units' seam" refusal in ``_writer_seam_base``   -> test_*_refuses_*_the_units_seam
@@ -15,6 +16,13 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the backup units compared as writers                         -> test_a_backup_units_seam_never_blocks_a_writer
   * the eval-grant wiring                                        -> test_eval_grant_*_refuses_*
   * a revoke refused, or published to one seam only             -> test_a_revoke_reaches_every_writer_units_seam
+  * a reconcile refused, or run on the shell's tree              -> test_eval_grant_reconcile_never_clears_the_alarm_from_the_wrong_tree
+  * a reconcile settling the alarm per seam                      -> test_a_reconcile_failing_on_one_seam_keeps_the_alarm
+  * a seam the alarm names left out of a reconcile              -> test_a_reconcile_runs_on_a_seam_the_alarm_names
+  * a close over two seams appending a revoke per seam          -> test_a_close_over_two_seams_appends_one_revoke
+  * a seam not floored again after the revoke lands             -> test_a_close_over_two_seams_floors_every_seam_above_a_concurrent_append
+  * a tree holding a publication left out of a reconcile         -> test_a_reconcile_reaches_another_tree_that_holds_a_publication
+  * the close alarm's seams not merged / kept / dropped          -> test_the_alarm_keeps_the_seams_a_reconcile_did_not_confirm
   * one failing seam stops the others / reports success          -> test_a_revoke_is_tried_on_every_seam_when_one_fails
   * a seam published from a spine without the revoke            -> test_a_revoke_whose_append_fails_publishes_nothing_and_ungrants_every_seam
   * another seam retracted only after the append                 -> test_every_seam_is_ungranted_before_the_revoke_is_appended
@@ -25,6 +33,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -115,14 +124,13 @@ def _ns(action, **kw):
     return SimpleNamespace(**base)
 
 
-@pytest.mark.parametrize("action", ["arm", "reconcile"])
-def test_eval_grant_writers_refuse_away_from_the_units_seam(home, monkeypatch, tmp_path, capsys, action):
+def test_eval_grant_arm_refuses_away_from_the_units_seam(home, monkeypatch, tmp_path, capsys):
     _install(home, _COCKPIT)
     store = _store(monkeypatch, tmp_path)
     before = sum(1 for _ in store.iter_records())
     with pytest.raises(SystemExit) as ei:
-        cli.cmd_eval_grant(_ns(action))
-    assert ei.value.code == 2 and f"eval-grant {action}: refusing" in capsys.readouterr().err
+        cli.cmd_eval_grant(_ns("arm"))
+    assert ei.value.code == 2 and "eval-grant arm: refusing" in capsys.readouterr().err
     assert sum(1 for _ in store.iter_records()) == before               # nothing appended (no owner key minted)
     assert not (tmp_path / ".vigil-live").exists()                      # nothing published in the wrong tree
 
@@ -149,8 +157,8 @@ def test_a_revoke_lands_on_the_units_seam_from_any_shell(home, monkeypatch, tmp_
 
 
 def test_a_revoke_reaches_every_writer_units_seam(home, monkeypatch, tmp_path, capsys):
-    """While the cockpit and the settle drain disagree, an arm or a reconcile still refuses, and a revoke is
-    published to both seams (one spine record)."""
+    """While the cockpit and the settle drain disagree, an arm still refuses (it publishes to one seam), a revoke is
+    published to both seams (one spine record), and a reconcile runs on both."""
     _install(home, _COCKPIT, _SETTLE)
     other = home / "elsewhere"
     env = home / ".config" / "vigil" / "settle-drain.env"
@@ -158,15 +166,18 @@ def test_a_revoke_reaches_every_writer_units_seam(home, monkeypatch, tmp_path, c
     env.write_text(f"VIGIL_BASE_DIR={other}\n", encoding="utf-8")
     monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
     store = _store(monkeypatch, tmp_path)
-    for action in ("arm", "reconcile"):
-        with pytest.raises(SystemExit) as ei:
-            cli.cmd_eval_grant(_ns(action))
-        assert ei.value.code == 2 and "disagree on the seam base" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_eval_grant(_ns("arm"))
+    assert ei.value.code == 2 and "disagree on the seam base" in capsys.readouterr().err
     cli.cmd_eval_grant(_ns("revoke"))
     out = capsys.readouterr()
     assert "WARNING" in out.err and "Published to 2 seams" in out.out
     assert sum(1 for r in store.iter_records() if (r.payload or {}).get("state") == "revoked") == 1
     assert _revoked_on(_units_seam(home)) and _revoked_on(str(other))
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    got = json.loads(capsys.readouterr().out)
+    assert got["ok"] is True and got["seams"] == [_units_seam(home), str(other)]
+    assert got["republished"] == ["eng-x"]
 
 
 @pytest.mark.parametrize("fails", ["first", "other"])
@@ -338,14 +349,31 @@ def test_a_backup_units_seam_never_blocks_a_writer(home, monkeypatch, tmp_path, 
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
-def test_eval_grant_reconcile_refuses_to_clear_the_alarm_from_the_wrong_tree(home, monkeypatch, tmp_path):
+def test_eval_grant_reconcile_never_clears_the_alarm_from_the_wrong_tree(home, monkeypatch, tmp_path, capsys):
+    """A shell without the export resolves ./.vigil-live: a reconcile runs on the units' seam (a WARNING names it),
+    never on the shell's tree, and the alarm is cleared only once the units' seam is confirmed."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
     from sigil.governor.seam_publish import raise_close_alarm, read_close_alarm
     _install(home, _COCKPIT)
     _store(monkeypatch, tmp_path)
     assert raise_close_alarm("a revoke was not confirmed", cause="seam_unreconciled", failed=["grant:eng-x"])
-    with pytest.raises(SystemExit):
+    real_publish = EvalCapabilityGrant._publish
+
+    def _unreachable(self, slug):
+        raise RuntimeError("the units' seam cannot be written")
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _unreachable)
+    with pytest.raises(SystemExit) as ei:
         cli.cmd_eval_grant(_ns("reconcile", engagement=None))
-    assert read_close_alarm() is not None                               # the doctor alarm still stands
+    got = capsys.readouterr()
+    assert ei.value.code == 1 and json.loads(got.out)["ok"] is False and "WARNING" in got.err
+    alarm = read_close_alarm()
+    assert alarm is not None and "grant:eng-x" in alarm["failed"]       # the doctor alarm still stands
+    assert alarm.get("seams") == [_units_seam(home)]
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", real_publish)
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    got = json.loads(capsys.readouterr().out)
+    assert got["ok"] is True and got["seams"] == [_units_seam(home)] and read_close_alarm() is None
+    assert not (tmp_path / ".vigil-live").exists()                      # the shell's tree was never written
 
 
 def test_eval_grant_reconcile_runs_on_the_units_seam(home, monkeypatch, tmp_path, capsys):
@@ -354,6 +382,190 @@ def test_eval_grant_reconcile_runs_on_the_units_seam(home, monkeypatch, tmp_path
     monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
     cli.cmd_eval_grant(_ns("reconcile", engagement=None))
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("fails", ["first", "second"])
+def test_a_reconcile_failing_on_one_seam_keeps_the_alarm(home, monkeypatch, tmp_path, capsys, fails):
+    """Two seams (the cockpit's and the settle drain's disagree) and an alarm naming a grant: confirmed on one seam and
+    not on the other, the alarm still names it, with the seam it was not confirmed on, and the command fails —
+    whichever seam comes first. Once that seam is reachable, a reconcile clears it."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from sigil.governor.seam_publish import raise_close_alarm, read_close_alarm
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    _store(monkeypatch, tmp_path)
+    assert raise_close_alarm("a revoke was not confirmed", cause="seam_unreconciled", failed=["grant:eng-x"],
+                             seams=[seam_a, seam_b])
+    bad = seam_a if fails == "first" else seam_b
+    real_publish = EvalCapabilityGrant._publish
+
+    def _publish(self, slug):
+        if self._seam_override == bad:
+            raise RuntimeError("this seam cannot be written")
+        return real_publish(self, slug)
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _publish)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    got = json.loads(capsys.readouterr().out)
+    assert ei.value.code == 1 and got["unconfirmed"] == ["grant:eng-x"] and got["seams"] == [seam_a, seam_b]
+    alarm = read_close_alarm()
+    assert alarm is not None and alarm["failed"] == ["grant:eng-x"] and alarm.get("seams") == [bad]
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", real_publish)
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    assert json.loads(capsys.readouterr().out)["ok"] is True and read_close_alarm() is None
+
+
+def test_a_reconcile_runs_on_a_seam_the_alarm_names(home, monkeypatch, tmp_path, capsys):
+    """A revoke could not be confirmed on a tree a later shell no longer resolves (an earlier shell's, a stopped `vigil
+    up`'s): the alarm names that seam and the reconcile runs there too — it never clears the alarm while a tree it
+    did not confirm still honours the grant."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant
+    from sigil.governor.seam_publish import read_close_alarm
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    for k in ("VIGIL_EVAL_GRANT_HIGHWATER_DIR", "VIGIL_EVAL_OFFENSE_HIGHWATER_DIR", "VIGIL_SEAM_MIGRATION_GUARD"):
+        monkeypatch.delenv(k, raising=False)
+    old_tree = tmp_path / "old-tree"
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(old_tree))
+    rig = _Rig("grant")                                                  # published in the old tree
+    _install(home, _COCKPIT)                                             # the units: %h/.sigil/credit-lease
+    ok = _granted_on(rig)
+    assert ok(old_tree)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: rig.store)
+    real_publish, real_retract = EvalCapabilityGrant._publish, EvalCapabilityGrant._retract
+
+    def _publish(self, slug):
+        if self._seam_override == str(old_tree):
+            raise RuntimeError("unreachable")
+        return real_publish(self, slug)
+
+    def _retract(self, slug, **kw):
+        if self._seam_override == str(old_tree):
+            raise RuntimeError("unreachable")
+        return real_retract(self, slug, **kw)
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _publish)
+    monkeypatch.setattr(EvalCapabilityGrant, "_retract", _retract)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_eval_grant(_ns("revoke", engagement=SLUG))           # this shell resolves the old tree
+    assert ei.value.code == 1 and "eval-grant reconcile" in capsys.readouterr().err
+    assert read_close_alarm().get("seams") == [str(old_tree)] and ok(old_tree)
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", real_publish)
+    monkeypatch.setattr(EvalCapabilityGrant, "_retract", real_retract)
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))              # a later shell, with the runbook's export
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    got = capsys.readouterr()
+    assert json.loads(got.out)["seams"] == [_units_seam(home), str(old_tree)] and "eval seam alarm" in got.err
+    assert not ok(old_tree) and _revoked_on(str(old_tree), SLUG) and read_close_alarm() is None
+
+
+@pytest.mark.parametrize("where", ["shell", "vigil_up", "shell_attestation_only"])
+def test_a_reconcile_reaches_another_tree_that_holds_a_publication(home, monkeypatch, tmp_path, capsys, where):
+    """A grant (or only its covering attestation) published, before the upgrade, in this shell's tree or a running
+    `vigil up`'s base: the reconcile runs there too (the tree an offense plane may read), as a revoke does."""
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    from vigil_integration.live.eval_capability_grant import eval_capability_grants_root
+    for k in ("VIGIL_EVAL_GRANT_HIGHWATER_DIR", "VIGIL_EVAL_OFFENSE_HIGHWATER_DIR", "VIGIL_SEAM_MIGRATION_GUARD"):
+        monkeypatch.delenv(k, raising=False)
+    old_tree = tmp_path / "console-base" if where == "vigil_up" else tmp_path / ".vigil-live"
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(old_tree))
+    rig = _Rig("attestation" if where == "shell_attestation_only" else "grant")   # published in the old tree
+    assert eval_capability_grants_root(old_tree).exists() == (where != "shell_attestation_only")
+    if where != "vigil_up":
+        monkeypatch.delenv("VIGIL_BASE_DIR")                             # the shell resolves ./.vigil-live
+    else:
+        monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+        state = tmp_path / "state"
+        (state / "vigil").mkdir(parents=True)
+        (state / "vigil" / "vigil-up.json").write_text(json.dumps(
+            {"schema": "vigil-up-pointer-v1", "base": str(old_tree), "pid": os.getpid()}))
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    _install(home, _COCKPIT)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: rig.store)
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    got = capsys.readouterr()
+    assert json.loads(got.out)["seams"] == [_units_seam(home), str(old_tree)] and str(old_tree) in got.err
+    assert json.loads(got.out)["republished"] == ([] if where == "shell_attestation_only" else [SLUG])
+
+
+def test_a_reconcile_targets_no_alarm_seam_that_is_relative_or_gone(home, monkeypatch, tmp_path, capsys):
+    """Only an absolute, existing directory the alarm names is reconciled: nothing is created for one that is gone,
+    and a relative entry is never resolved against this shell's directory."""
+    from sigil.governor.seam_publish import raise_close_alarm, read_close_alarm
+    _install(home, _COCKPIT)
+    _store(monkeypatch, tmp_path)
+    monkeypatch.setenv("VIGIL_BASE_DIR", _units_seam(home))
+    (tmp_path / "rel-tree").mkdir()
+    gone = tmp_path / "gone-tree"
+    assert raise_close_alarm("x", cause="seam_unreconciled", failed=["grant:eng-x"], seams=["rel-tree", str(gone)])
+    cli.cmd_eval_grant(_ns("reconcile", engagement=None))
+    assert json.loads(capsys.readouterr().out)["seams"] == [_units_seam(home)] and read_close_alarm() is None
+    assert not gone.exists() and list((tmp_path / "rel-tree").iterdir()) == []
+
+
+def test_a_close_over_two_seams_appends_one_revoke(home, monkeypatch, tmp_path):
+    """``reconcile_eval_seam(revoke_live_grants=True)`` over two seams: the live grant is retracted on both before the
+    one revoke is appended, and both seams then publish the revoke."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant, reconcile_eval_seam
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    rig = _Rig("grant")
+    EvalCapabilityGrant(rig.store, owner_key=rig.owner, base_dir=seam_b)._publish(SLUG)   # B honours it too
+    ok = _granted_on(rig)
+    assert ok(seam_a) and ok(seam_b)
+    store = rig.store
+    real_append, at_append = store.append, []
+
+    def _append(*a, **kw):
+        if (kw.get("payload") or {}).get("state") == "revoked":
+            at_append.append((ok(seam_a), ok(seam_b)))
+        return real_append(*a, **kw)
+    monkeypatch.setattr(store, "append", _append)
+    out = reconcile_eval_seam(store, owner_key=rig.owner, revoke_live_grants=True, seams=[seam_a, seam_b])
+    assert out["revoked"] == [SLUG] and at_append == [(False, False)]
+    assert _revoked_on(seam_a, SLUG) and _revoked_on(seam_b, SLUG)
+
+
+def test_a_close_over_two_seams_floors_every_seam_above_a_concurrent_append(home, monkeypatch, tmp_path):
+    """Another process appends while the close revokes: once the revoke lands, every seam's rollback floor is raised to
+    the spine's next seq again (above a publication sealed from the newer spine), before any publish — a close killed
+    right then leaves every seam floored above the revoke, not only the first."""
+    from sigil.governor.eval_capability_grant import EvalCapabilityGrant, reconcile_eval_seam
+    from tests.test_eval_publish_fail_closed import SLUG, _Rig  # type: ignore
+    from vigil_core.highwater import load_highwater
+    from vigil_integration.live.eval_capability_grant import _shared_floor_path
+    seam_a, seam_b = _two_seams(home, monkeypatch)
+    rig = _Rig("grant")
+    EvalCapabilityGrant(rig.store, owner_key=rig.owner, base_dir=seam_b)._publish(SLUG)
+    store = rig.store
+    real_append = store.append
+
+    def _append(*a, **kw):
+        if (kw.get("payload") or {}).get("state") == "revoked":
+            real_append(**{**kw, "payload": {"signal": "unrelated.concurrent"}})
+        return real_append(*a, **kw)
+    monkeypatch.setattr(store, "append", _append)
+
+    def _killed(self, slug):
+        raise KeyboardInterrupt("the close is stopped right after the revokes landed")
+    monkeypatch.setattr(EvalCapabilityGrant, "_publish", _killed)
+    with pytest.raises(KeyboardInterrupt):
+        reconcile_eval_seam(store, owner_key=rig.owner, revoke_live_grants=True, seams=[seam_a, seam_b])
+    floors = [load_highwater(_shared_floor_path(s, SLUG))["last_seq"] for s in (seam_a, seam_b)]
+    assert floors == [store.next_seq, store.next_seq]
+
+
+def test_the_alarm_keeps_the_seams_a_reconcile_did_not_confirm(home):
+    """The close alarm's seams: merged by every revoke; a reconcile keeps those it did not run on and those it could
+    not confirm, and drops those it confirmed; cleared with the last name."""
+    from sigil.governor.seam_publish import raise_close_alarm, read_close_alarm, settle_close_alarm
+    assert raise_close_alarm("a", cause="seam_unreconciled", failed=["grant:a"], seams=["/s1"])
+    assert raise_close_alarm("b", cause="seam_unreconciled", failed=["grant:b"], seams=["/s2"])
+    assert read_close_alarm().get("seams") == ["/s1", "/s2"]
+    settle_close_alarm({"grant:a": "x"}, checked={"grant:a"}, detail="d", seams_checked=["/s1"], seams_failed=["/s1"])
+    assert read_close_alarm().get("seams") == ["/s1", "/s2"]
+    settle_close_alarm({"grant:b": "x"}, checked={"grant:a", "grant:b"}, detail="d", seams_checked=["/s1", "/s2"],
+                       seams_failed=["/s2"])
+    assert read_close_alarm().get("seams") == ["/s2"] and read_close_alarm()["failed"] == ["grant:b"]
+    settle_close_alarm({}, checked={"grant:b"}, detail="d", seams_checked=["/s2"])
+    assert read_close_alarm() is None
 
 
 def test_eval_grant_status_reads_only_and_is_not_guarded(home, monkeypatch, tmp_path, capsys):

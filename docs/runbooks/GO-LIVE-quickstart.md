@@ -139,9 +139,14 @@ spawns. `vigil up` refuses an explicit `--base-dir` that names a different direc
 operator console unit (`vigil-command.service`) keeps the offense engine's own home — its vault, operator key and
 attestation log — in `<repo>/.vigil-live`: do not add a `VIGIL_BASE_DIR=` line to its `service.env` to move it
 (`sigil seam migrate` carries launch-seam records only, never the engine's own state); `vigil doctor` reports when
-its seam differs from the other units'. `sigil eval-grant arm|reconcile` and `sigil ops-sweep reservations` refuse
-to run when the seam they would write is not the one the configured units use, and print the `export` to run
-first; `sigil eval-grant revoke` is published to every unit's seam instead.
+its seam differs from the other units'. `sigil ops-sweep reservations` (without `--base-dir`) and `sigil seam
+migrate` use the seam the cockpit and the settle drain share — the console's engine home is never compared — and
+when this shell resolves another directory they refuse and print the `export` to run first. `sigil eval-grant
+revoke` and `sigil eval-grant reconcile` run on every unit's seam, the console's included, whatever this shell
+resolves, and a reconcile clears the `vigil doctor` alarm only once every one of them is confirmed. `sigil eval-grant
+arm` publishes a grant to one seam, so it runs only where the cockpit, the settle drain and the console unit name the
+same seam; on a host whose console keeps its engine home in `<repo>/.vigil-live` it refuses and names the console's
+seam (keep that engine home where it is).
 
 To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
 `~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`) or drop-in (`systemctl --user edit <unit>`) —

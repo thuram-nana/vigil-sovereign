@@ -216,12 +216,20 @@ def granted_after_last_revoke(store, *, signal: str, engagement_slug: str) -> bo
 IN_PROGRESS = "(reconcile in progress)"
 
 
-def settle_close_alarm(failed: Iterable[str], *, checked: Iterable[str], detail: str) -> bool:
+def _alarm_seams(rec: "Optional[dict]") -> "set[str]":
+    """The seam directories an alarm record names (``seams``: where a revoke or a reconcile was not confirmed)."""
+    return {s for s in (rec or {}).get("seams") or [] if isinstance(s, str) and s}
+
+
+def settle_close_alarm(failed: Iterable[str], *, checked: Iterable[str], detail: str,
+                       seams_checked: Iterable[str] = (), seams_failed: Iterable[str] = ()) -> bool:
     """Finish a full reconcile's alarm, under the alarm lock: the result is ``failed`` plus any name another revoke
     added while the reconcile ran (it was not in ``checked``, so it was not re-checked). With nothing left the alarm
-    is cleared. Returns True when the alarm now says what the reconcile found."""
+    is cleared. The seams it names are ``seams_failed`` plus those it named before that this reconcile did not run on
+    (``seams_checked``). Returns True when the alarm now says what the reconcile found."""
     done = {str(c)[:96] for c in checked} | {IN_PROGRESS}
     names = {str(f)[:96] for f in failed}
+    ran = {os.path.realpath(str(s)) for s in seams_checked}
     try:
         p = close_alarm_path()
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -232,9 +240,11 @@ def settle_close_alarm(failed: Iterable[str], *, checked: Iterable[str], detail:
                 p.unlink(missing_ok=True)
                 return True
             ordered = sorted(names)
+            seams = {str(s) for s in seams_failed} | {s for s in _alarm_seams(cur) if os.path.realpath(s) not in ran}
             tmp = p.parent / (p.name + ".tmp")
             tmp.write_text(json.dumps({"detail": str(detail)[:500], "cause": "seam_unreconciled",
-                                       "failed": ordered[:200], "failed_total": len(ordered), "at": time.time()}),
+                                       "failed": ordered[:200], "failed_total": len(ordered), "at": time.time(),
+                                       **({"seams": sorted(seams)[:50]} if seams else {})}),
                            encoding="utf-8")
             os.chmod(tmp, 0o600)
             os.replace(tmp, p)
@@ -295,13 +305,15 @@ def close_alarm_path() -> Path:
 
 
 def raise_close_alarm(detail: str, *, cause: str = "spine_unreadable", failed: Iterable[str] = (),
-                      replace: bool = False) -> bool:
+                      replace: bool = False, seams: Iterable[str] = ()) -> bool:
     """Record, durably, that an eval-capability grant or eval-offense attestation revoke could not be confirmed on
     the seam. ``failed`` names the publications (``grant:<slug>`` / ``attestation:<slug>``, or a parenthesised
-    condition) that may still authorize. By default the names are MERGED into any existing alarm (a revoke or a
+    condition) that may still authorize; ``seams`` the seam directories where it was not confirmed (`sigil eval-grant
+    reconcile` runs there too). By default the names and seams are MERGED into any existing alarm (a revoke or a
     cascade never drops what an earlier one named); only a full reconcile, which re-checked every name, passes
     ``replace=True``. Returns True when the alarm was written. Never raises (logged CRITICAL instead)."""
     names = {str(f)[:96] for f in failed}
+    where = {str(s) for s in seams if s}
     try:
         p = close_alarm_path()
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -310,10 +322,12 @@ def raise_close_alarm(detail: str, *, cause: str = "spine_unreadable", failed: I
                 prior = read_close_alarm()
                 if prior:
                     names |= {str(f)[:96] for f in prior.get("failed") or [] if isinstance(f, str)}
+                    where |= _alarm_seams(prior)
             tmp = p.parent / (p.name + ".tmp")
             ordered = sorted(names)
             tmp.write_text(json.dumps({"detail": str(detail)[:500], "cause": str(cause)[:32], "failed": ordered[:200],
-                                       "failed_total": len(ordered), "at": time.time()}), encoding="utf-8")
+                                       "failed_total": len(ordered), "at": time.time(),
+                                       **({"seams": sorted(where)[:50]} if where else {})}), encoding="utf-8")
             os.chmod(tmp, 0o600)
             os.replace(tmp, p)
         return True
