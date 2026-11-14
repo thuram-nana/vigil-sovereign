@@ -502,6 +502,52 @@ def test_a_sign_in_finished_on_another_network_than_it_started_is_refused_before
         sov.shutdown(); edge.shutdown()
 
 
+def test_a_handoff_state_without_a_network_completes_nothing(tmp_path, monkeypatch):
+    # a login state written without the starting network (an edge from before the network rule, still running
+    # while the new one takes over) is refused at the callback, before Google's answer is used
+    from sigil.ui.oidc import OidcStateStore
+    _on(monkeypatch)
+    idp = _CountingIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        v = _verifier()
+        OidcStateStore(tmp_path / "customer-oidc-state").issue("old-edge-state", "old-nonce", verifier="pkce-v" * 8,
+                                                               handoff=challenge_of(v))
+        idp.next_id_token = idp.mint(nonce="old-nonce")
+        st, hdr, page = _callback(ep, "old-edge-state")
+        assert st == 403 and b"cust-handoff-code" not in page and idp.exchanges == 0
+        assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_a_handoff_from_a_client_whose_address_cannot_be_read_does_not_start(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, _MiniIdP())
+    try:
+        for bad in ("unknown", "203.0.113.0/24", "not an address"):
+            st, hdr, body = _handoff_login(ep, challenge_of(_verifier()), ip=bad)
+            assert st == 400 and b"client address" in body and "Location" not in hdr
+        assert list((tmp_path / "customer-oidc-state").glob("*")) == []          # no login state was issued
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_the_authorize_url_takes_only_a_known_prompt():
+    from sigil.ui import oidc as _oidc
+    cfg = _oidc.OidcConfig.from_settings({"issuer": "https://accounts.google.com", "client_id": "c",
+                                          "redirect_uri": "https://app.example/cb",
+                                          "authorize_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+                                          "token_endpoint": "https://oauth2.googleapis.com/token",
+                                          "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+                                          "signing_algs": ["RS256"]})
+    url = _oidc.build_authorize_url(cfg, "s", "n", code_challenge="x" * 43, prompt="select_account")
+    assert parse_qs(urlparse(url).query)["prompt"] == ["select_account"]
+    assert "prompt" not in parse_qs(urlparse(_oidc.build_authorize_url(cfg, "s", "n", code_challenge="x" * 43)).query)
+    with pytest.raises(_oidc.OidcError):
+        _oidc.build_authorize_url(cfg, "s", "n", code_challenge="x" * 43, prompt="select_account consent&x=1")
+
+
 def test_the_handoff_asks_google_for_the_account_chooser_and_the_page_names_the_account(tmp_path, monkeypatch):
     _on(monkeypatch)
     idp = _MiniIdP()
