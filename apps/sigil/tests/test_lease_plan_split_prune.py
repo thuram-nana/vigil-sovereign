@@ -54,7 +54,7 @@ PERIOD_END = 1e12
 LATE = NOW + 3600.0 + 100.0                    # past a 1h lease's not_after + the sweep ttl (50)
 
 
-@pytest.fixture(params=["", "1"], ids=["cache_off", "cache_on"])
+@pytest.fixture(params=[("", ""), ("1", ""), ("", "1")], ids=["cache_off", "cache_on", "settle_record_on"])
 def world(request, tmp_path, monkeypatch):
     """One spine with its own owner key, signed head, floor and prune archive (a prune needs all of them)."""
     keys = tmp_path / "keys"
@@ -74,7 +74,9 @@ def world(request, tmp_path, monkeypatch):
     for k in ("VIGIL_LEASE_PLAN_SPLIT", "VIGIL_SETTLE_SPINE_RECORD", "VIGIL_METERED_BILLING",
               "VIGIL_ONE_LAUNCH_PER_HOST", "VIGIL_COST_LEDGER_WRITE"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", request.param)
+    cache, record = request.param
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", cache)
+    monkeypatch.setenv("VIGIL_SETTLE_SPINE_RECORD", record)
     fold_cache.clear_all()
     path = tmp_path / "spine.jsonl"
     SpineStore(path).migrate()
