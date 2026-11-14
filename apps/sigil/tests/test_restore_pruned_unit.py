@@ -350,20 +350,22 @@ def test_the_archive_lands_in_the_given_dir_and_never_where_the_environment_poin
     assert _tree(sentinel) == sent_before
 
 
-@pytest.mark.parametrize("where", ["home", "inside-home", "captured-unit", "process-home", "process-archive"])
+@pytest.mark.parametrize("where", ["home", "inside-home", "spine-dir", "captured-unit", "process-home",
+                                   "process-archive"])
 def test_an_archive_dir_overlapping_another_unit_or_this_home_is_refused(world, tmp_path, flag, monkeypatch, where):
     import sigil.config as cfg
     live = tmp_path / "live-archive"
     monkeypatch.setenv("SIGIL_SPINE_ARCHIVE_DIR", str(live))
     new = tmp_path / "restored"
-    target = {"home": new, "inside-home": tmp_path, "captured-unit": new / "warden" / "arch",
+    target = {"home": new, "inside-home": tmp_path, "spine-dir": new / "spine", "captured-unit": new / "warden" / "arch",
               "process-home": cfg.SIGIL_HOME / "arch", "process-archive": live}[where]
     if where == "captured-unit":
         bk = _rewrite(world["good"], tmp_path / "w.sglbk", world["priv"], files={"warden/tools.json": b"{}"})
     else:
         bk = world["good"]
-    phrase = {"home": "the restored home", "inside-home": "the restored home", "captured-unit": "restored unit",
-              "process-home": "own SIGIL_HOME", "process-archive": "archive dir this process's own home uses"}[where]
+    phrase = {"home": "the restored home", "inside-home": "the restored home", "spine-dir": "the restored spine dir",
+              "captured-unit": "restored unit", "process-home": "own SIGIL_HOME",
+              "process-archive": "archive dir this process's own home uses"}[where]
     with pytest.raises(BackupError, match="refusing the archive dir") as ei:
         _restore(bk, new, archive_dir=target)
     assert phrase in str(ei.value), str(ei.value)
@@ -394,13 +396,45 @@ def test_adopt_an_existing_archive_for_a_backup_that_carries_none(world, tmp_pat
 
 def test_an_existing_archive_at_the_target_needs_force(world, tmp_path, flag):
     arch = tmp_path / "ebs" / "archive"
-    arch.mkdir(parents=True)
+    shutil.copytree(world["src"] / "spine" / "archive", arch)              # an archive already there
     (arch / "old").write_text("old archive")
     with pytest.raises(BackupError, match="existing archive"):
         _restore(world["good"], tmp_path / "r", archive_dir=arch)
     assert (arch / "old").read_text() == "old archive"
     res = _restore(world["good"], tmp_path / "r2", archive_dir=arch, force=True)
     assert res["verified"] is True and not (arch / "old").exists() and (arch / "archive.manifest.json").is_file()
+
+
+def test_an_archive_dir_holding_something_else_is_never_replaced(world, tmp_path, flag):
+    """``--force`` replaces an archive (or an empty dir) at --archive-dir with the backup's — never a dir that holds
+    something else."""
+    other = tmp_path / "ebs" / "data"
+    other.mkdir(parents=True)
+    (other / "settlement.json").write_text("live state")
+    before = _tree(other)
+    with pytest.raises(BackupError, match="holds no archive"):
+        _restore(world["good"], tmp_path / "r", archive_dir=other, force=True)
+    assert _tree(other) == before and not (tmp_path / "r" / "spine").exists()
+    empty = tmp_path / "ebs" / "empty"
+    empty.mkdir()
+    res = _restore(world["good"], tmp_path / "r2", archive_dir=empty, force=True)
+    assert res["verified"] is True and (empty / "archive.manifest.json").is_file()
+
+
+@pytest.mark.parametrize("entry", ["credit-lease", "vault"])
+def test_an_archive_dir_on_live_home_state_the_backup_does_not_capture_is_refused(world, tmp_path, flag, entry):
+    """An archive dir inside the restored home goes under its spine: one on an entry the backup does not capture
+    (the cross-plane seam, the vault) is refused, even with --force, and that entry is left as it was."""
+    new = tmp_path / "restored"
+    _restore(world["good"], new)
+    live = new / entry
+    live.mkdir()
+    (live / "archive.manifest.json").write_text("{}")                     # even one that looks like an archive
+    (live / "marker").write_text("live")
+    before = _tree(new)
+    with pytest.raises(BackupError, match="does not capture"):
+        _restore(world["good"], new, archive_dir=live, force=True)
+    assert _tree(new) == before
 
 
 # ---- verify-only -------------------------------------------------------------------------------------------------------

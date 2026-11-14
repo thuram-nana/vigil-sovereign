@@ -626,9 +626,9 @@ def _overlaps(a: Path, b: Path) -> bool:
 
 def _check_archive_target(target: Path, new_home: Path, staged: Path, captured_units: "set[str]") -> None:
     """Refuse an explicit archive dir that would land on (or around) another unit: the restored home itself or a dir
-    holding it, another captured unit, the staging dir — and, when restoring into a home that is NOT this process's
-    own, this process's SIGIL_HOME or the archive dir its own environment names (on a drill / DR host that is the
-    LIVE archive)."""
+    holding it, any entry of the restored home outside its spine (a captured unit, or live state the backup does not
+    capture), the staging dir — and, when restoring into a home that is NOT this process's own, this process's
+    SIGIL_HOME or the archive dir its own environment names (on a drill / DR host that is the LIVE archive)."""
     from . import config
     from .spine.prune import archive_dir as live_archive_dir
     t, nh = target.resolve(), new_home.resolve()
@@ -636,9 +636,12 @@ def _check_archive_target(target: Path, new_home: Path, staged: Path, captured_u
         raise BackupError(f"refusing the archive dir {target}: it is (or contains) the restored home {new_home}")
     if t == (nh / "spine"):
         raise BackupError(f"refusing the archive dir {target}: it is the restored spine dir itself")
-    for u in sorted(captured_units - {"spine"}):
-        if _overlaps(t, nh / u):
-            raise BackupError(f"refusing the archive dir {target}: it overlaps the restored unit {u!r}")
+    if t.is_relative_to(nh) and not t.is_relative_to(nh / "spine"):
+        u = t.relative_to(nh).parts[0]
+        what = (f"the restored unit {u!r}" if u in captured_units else
+                f"{u!r}, live state of the restored home that the backup does not capture")
+        raise BackupError(f"refusing the archive dir {target}: it overlaps {what} — an archive inside the home goes "
+                          f"under its spine dir")
     if _overlaps(t, staged):
         raise BackupError(f"refusing the archive dir {target}: it overlaps the restore's staging dir")
     if nh != config.SIGIL_HOME.resolve():
@@ -648,6 +651,15 @@ def _check_archive_target(target: Path, new_home: Path, staged: Path, captured_u
         if _overlaps(t, live_archive_dir()):
             raise BackupError(f"refusing the archive dir {target}: it overlaps the archive dir this process's own "
                               f"home uses ({live_archive_dir()}), which this restore does not target")
+
+
+def _replaceable_archive_dir(target: Path) -> bool:
+    """Whether a restore may replace what is at ``target`` with the backup's archive: an archive (its manifest is
+    there) or an empty dir — never anything else, whatever ``--force`` says."""
+    try:
+        return target.is_dir() and ((target / "archive.manifest.json").is_file() or not any(target.iterdir()))
+    except OSError:
+        return False
 
 
 def _place_staged_archive(staged: Path, new_home: "Path | None", archive_dir: "Path | None", *, force: bool,
@@ -693,6 +705,9 @@ def _place_archive(staged: Path, staged_arch: Path, carried: bool, new_home: "Pa
     if (target.exists() or target.is_symlink()) and not force:
         raise BackupError(f"refusing to overwrite the existing archive at {target} — pass force=True (--force) to "
                           f"replace it with the backup's archive")
+    if (target.exists() or target.is_symlink()) and not _replaceable_archive_dir(target):
+        raise BackupError(f"refusing to replace {target}: it is not empty and holds no archive (no "
+                          f"archive.manifest.json) — --archive-dir names the archive's own dir, or a new or empty one")
     target.parent.mkdir(parents=True, exist_ok=True)
     arch_stage = Path(tempfile.mkdtemp(prefix=".restore-staging-archive-", dir=str(target.parent)))
     shutil.move(str(staged_arch), str(arch_stage / "archive"))
