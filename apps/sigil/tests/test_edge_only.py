@@ -84,9 +84,12 @@ def test_against_a_git_history(tmp_path):
     moved = _commit(repo, {CUST + "app.js": None, "apps/sigil/sigil/ui/app.js": "2"}, "move out of the tree")
     rc, out = _run(repo, code, moved)
     assert rc == 1 and "apps/sigil/sigil/ui/app.js" in out             # the rename's new side counts
-    assert _run(repo, moved, moved)[0] == 3                             # nothing differs
+    into = _commit(repo, {"apps/sigil/sigil/ui/custui.py": None, CUST + "custui.py": "2"}, "move code into the tree")
+    rc, out = _run(repo, moved, into)
+    assert rc == 1 and "apps/sigil/sigil/ui/custui.py" in out          # ... and so does its old side
+    assert _run(repo, into, into)[0] == 3                               # nothing differs
     inert = _commit(repo, {"CHANGELOG.md": "x"}, "inert only")
-    assert _run(repo, moved, inert)[0] == 3                             # nothing to swap
+    assert _run(repo, into, inert)[0] == 3                              # nothing to swap
     assert _run(repo, base, "no-such-ref")[0] == 2                     # a git error
     usage = subprocess.run([sys.executable, str(TOOL), base], cwd=repo, capture_output=True, text=True, timeout=60)
     assert usage.returncode == 2 and "edge_only.py" in usage.stderr
