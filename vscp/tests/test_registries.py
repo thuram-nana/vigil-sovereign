@@ -67,3 +67,33 @@ def test_issue_authorization_signs_chains_and_refuses_reviewer(cfg):
     # reviewer issuance signs nothing
     with pytest.raises(PermissionRefused):
         issue_authorization(role="viewer", subject="x", scope="y", config=cfg)
+
+
+def test_per_org_role_names_carry_no_permission_in_vscp(cfg, monkeypatch):
+    # A VSCP role is a GLOBAL role. A per-org role name (org_admin, or a per-org role that carries the WRITE
+    # permission run_engagement) is refused on every route, registry write and issuance, reads included.
+    from vigil_core import rbac
+
+    from vscp import rbac_routes as routes
+    from vscp.authorization import authorize_action
+
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    kp = generate_keypair()
+    with open_store(cfg) as store:
+        for role in ("org_admin", "tenant_tester"):
+            with pytest.raises(PermissionRefused):
+                DeploymentRegistry(store).register(role=role, id="d9", name="edge", environment="production")
+            with pytest.raises(PermissionRefused):
+                TrustAuthorityRegistry(store).register(role=role, id="t9", name="root",
+                                                       public_key_b64=kp.public_key_b64)
+            with pytest.raises(PermissionRefused):
+                issue_authorization(role=role, subject="unit-9", scope="fleet:edge", config=cfg)
+            assert routes.role_can_route(role, "GET", "/vscp/deployments") is False
+            assert routes.role_can_route(role, "POST", "/vscp/deployments") is False
+            assert authorize_action(role=role, action="list_deployments").allowed is False
+        assert DeploymentRegistry(store).list() == []
+        # negative controls: the global roles are unaffected
+        assert routes.role_can_route("viewer", "GET", "/vscp/deployments") is True
+        assert authorize_action(role="viewer", action="list_deployments").allowed is True
+        assert DeploymentRegistry(store).register(role="operator", id="d9", name="edge",
+                                                  environment="production").id == "d9"

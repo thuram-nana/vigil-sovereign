@@ -59,12 +59,19 @@ from ..reuse.crypto import load_public_key
 assert_no_offense()
 
 # ONE source of truth for the role→permission vocabulary. `viewer < analyst < operator < owner`, the
-# cumulative permission sets, and `role_can` live in `vigil_core.rbac` — a pure, namespace-clean module
-# BOTH trust domains import (the offense console per-action gate calls the SAME `role_can`). We RE-EXPORT
+# cumulative permission sets, and the predicates live in `vigil_core.rbac` — a pure, namespace-clean module
+# BOTH trust domains import (the offense console per-action gate calls the SAME predicate). We RE-EXPORT
 # them here so every existing sovereign caller (`from ..governor.accounts import role_can/ROLES/PERMISSIONS`)
 # keeps working unchanged; `PERMISSION_BY_ACTION` below stays sovereign-local (it maps the sovereign action
 # surface). vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
-from vigil_core.rbac import PERMISSIONS, ROLES, role_can  # noqa: E402,F401  (re-exported)
+#
+# `role_can` HERE is `rbac.role_can_global`: every caller of this name checks an ACCOUNT principal's role (a
+# GLOBAL role), so only the four global roles carry a permission — a per-org role name (`org_admin`, ...)
+# presented as an account role carries none. A PER-ORG membership check must use `vigil_core.rbac.role_can`
+# through the org fold (`OrgRegistry.org_role_can` / `admit_customer`), never this name.
+from vigil_core.rbac import PERMISSIONS, ROLES  # noqa: E402,F401  (re-exported)
+from vigil_core.rbac import role_can_global  # noqa: E402,F401  (re-exported)
+from vigil_core.rbac import role_can_global as role_can  # noqa: E402,F401  (re-exported: global-role check)
 
 from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (W9-1 succession-aware owner-key resolver)

@@ -7,9 +7,15 @@ default-deny, and that exact keys win over the wildcard patterns.
 """
 from __future__ import annotations
 
+import vigil_core
+from vigil_core import rbac
 from vigil_core.rbac import (
-    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
+    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can, role_can_global,
 )
+
+# Every permission string the vocabulary defines, plus the default-deny probes.
+_ALL_PERMS = sorted(frozenset().union(*PERMISSIONS.values()))
+_PROBES = [*_ALL_PERMS, None, "", "no-such-permission"]
 
 
 # --- role_can / cumulative ordering ------------------------------------------------------------
@@ -146,3 +152,35 @@ def test_org_admin_is_tenant_billing_and_member_admin_never_testing():
     assert PERMISSIONS["org_admin"] <= PERMISSIONS["owner"]   # owner remains the ceiling
     # the four cumulative roles are unchanged by the addition
     assert PERMISSIONS["operator"] <= PERMISSIONS["owner"] and PERMISSIONS["viewer"] <= PERMISSIONS["analyst"]
+
+
+# --- role_can_global: the predicate for a GLOBAL account role ------------------------------------
+def test_role_can_global_matches_role_can_for_every_global_role():
+    # For the four global roles the two predicates agree on every permission (and on the default-deny
+    # probes), so switching a global-role call site to role_can_global changes nothing for them.
+    for role in ROLES:
+        for perm in _PROBES:
+            assert role_can_global(role, perm) == role_can(role, perm), (role, perm)
+
+
+def test_role_can_global_refuses_every_per_org_and_unknown_role():
+    per_org = [r for r in PERMISSIONS if r not in ROLES]
+    assert "org_admin" in per_org
+    for role in [*per_org, "root", "Owner", "", None]:
+        for perm in _PROBES:
+            assert role_can_global(role, perm) is False, (role, perm)
+    # the per-org predicate still answers for a membership role (the org fold binds it to one org)
+    assert role_can("org_admin", "read") is True and role_can("org_admin", "manage_billing") is True
+
+
+def test_role_can_global_refuses_a_per_org_role_that_carries_the_permission(monkeypatch):
+    # Even a per-org role whose permission set includes run_engagement carries nothing in a global position.
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    assert role_can("tenant_tester", "run_engagement") is True
+    assert role_can_global("tenant_tester", "run_engagement") is False
+    assert role_can_global("tenant_tester", "read") is False
+
+
+def test_role_can_global_is_exported_by_the_package():
+    assert vigil_core.role_can_global is rbac.role_can_global
+    assert "role_can_global" in vigil_core.__all__

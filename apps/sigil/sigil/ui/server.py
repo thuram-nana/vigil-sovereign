@@ -835,9 +835,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- Claim 6 RBAC surface (whoami / accounts / login) -----------------------------------------
     def _principal_json(self, principal) -> dict:
-        from ..governor.accounts import PERMISSIONS
+        # The permission list is what the `vigil up` proxy's coarse offense floor reads. An account principal
+        # holds a GLOBAL role, so only the four global roles list permissions (mirrors rbac.role_can_global):
+        # a per-org role name on an account record lists none.
+        from ..governor.accounts import PERMISSIONS, ROLES
+        perms = PERMISSIONS.get(principal.role, frozenset()) if principal.role in ROLES else frozenset()
         return {"authenticated": True, "username": principal.username, "role": principal.role,
-                "permissions": sorted(PERMISSIONS.get(principal.role, frozenset()))}
+                "permissions": sorted(perms)}
 
     def _whoami(self):
         """The current principal from the presented token (token-optional). {authenticated:false} for an

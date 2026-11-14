@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from ..authorization import PermissionRefused, action_permission
 from ..store import VscpStore
-from vigil_core.rbac import role_can
+from vigil_core.rbac import role_can_global
 
 __all__ = ["Deployment", "DeploymentRegistry"]
 
@@ -31,7 +31,7 @@ class DeploymentRegistry:
     def register(self, *, role: str | None, id: str, name: str, environment: str) -> Deployment:
         """Register a deployment. Reviewer/insufficient role -> PermissionRefused, no write."""
         perm = action_permission("register_deployment")
-        if not role_can(role, perm):
+        if not role_can_global(role, perm):
             raise PermissionRefused(
                 f"role {role!r} lacks {perm!r}: registering a deployment is a write, refused for a "
                 "read-only reviewer (W13-7)"

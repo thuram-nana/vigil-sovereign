@@ -78,6 +78,39 @@ def test_read_is_the_floor_for_every_role():
         assert role_can(r, "read") is True
 
 
+def test_account_role_can_is_the_global_role_check():
+    # An account principal holds a GLOBAL role, so the name every sovereign caller imports from here is
+    # rbac.role_can_global: a per-org role name on an account record carries no permission at all.
+    from vigil_core import rbac
+
+    from sigil import governor
+    assert role_can is rbac.role_can_global
+    assert acc.role_can_global is rbac.role_can_global
+    assert governor.role_can is rbac.role_can_global
+    per_org = [r for r in PERMISSIONS if r not in acc.ROLES]
+    assert "org_admin" in per_org
+    for r in per_org:
+        for perm in sorted(PERMISSIONS[r]):
+            assert role_can(r, perm) is False, (r, perm)
+            assert rbac.role_can(r, perm) is True       # the per-org predicate (used through the org fold) differs
+
+
+def test_per_org_role_checks_never_import_the_global_name():
+    # The modules that check a PER-ORG membership role must take `role_can` from vigil_core.rbac, never the
+    # global-role name re-exported here (which would deny every per-org role).
+    import ast
+    import pathlib
+    root = pathlib.Path(acc.__file__).resolve().parents[1]
+    for rel in ("governor/orgs.py", "ui/provision.py", "ui/launch_gate.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] in ("accounts", "governor"):
+                names = {a.name for a in node.names}
+                assert "role_can" not in names, f"{rel}:{node.lineno} imports the global-role role_can"
+    orgs_src = (root / "governor/orgs.py").read_text(encoding="utf-8")
+    assert "from vigil_core.rbac import ROLES, role_can," in orgs_src
+
+
 # --- create / resolve roundtrip + secret handling --------------------------------
 
 def test_create_then_resolve_roundtrips_the_principal():

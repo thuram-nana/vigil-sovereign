@@ -156,6 +156,25 @@ def test_owner_stamped_invoke_reaches_handler():
         assert st == 200 and body["actor"]["role"] == "owner"
 
 
+# --- a per-org role name in the stamped (global) position carries nothing ----------------------------
+def test_per_org_role_stamp_is_refused_even_when_it_carries_the_permission(monkeypatch):
+    # The stamped role is a GLOBAL account role. A per-org role name (org_admin, or a per-org role that
+    # carries run_engagement) is refused under a VALID hop signature, and the tool never runs.
+    from vigil_core import rbac
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    reg, spy = _registry_with_spy()
+    with _running(registry=reg) as base:
+        for role in ("org_admin", "tenant_tester"):
+            st, body = _post(base, INVOKE, body={"slug": "x", "tool": "spy_scan", "args": {}},
+                             extra_headers=_hop_headers(role, INVOKE))
+            assert st == 403, f"a per-org role {role!r} must be refused on the gated api, got {st}"
+            assert body["role"] == role and "forbidden" in body["error"]
+        # negative control: an operator stamp under the same key reaches the handler
+        st, body = _post(base, INVOKE, body=_REVERIFY_BODY, extra_headers=_hop_headers("operator", INVOKE))
+        assert st == 200 and "gate" in body
+    assert spy.ran is False
+
+
 # --- forgery / replay: a stamped role that does not verify never lifts -------------------------------
 def test_forged_or_replayed_role_assertion_is_refused():
     with _running() as base:

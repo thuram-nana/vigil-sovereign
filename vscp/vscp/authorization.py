@@ -7,7 +7,7 @@ verdict. The two gates are
 
   1. the findings boundary (:func:`vscp.findings_boundary.finding_boundary_gate`) — a
      control-plane action may never be a covert assessment-finding read; and
-  2. the RBAC-of-record (:func:`vigil_core.rbac.role_can`) — the reviewer (read-only
+  2. the RBAC-of-record (:func:`vigil_core.rbac.role_can_global`) — the reviewer (read-only
      ``viewer``) is refused every write.
 
 :func:`issue_authorization` is the full mint: it authorizes first (fail-closed — a refused
@@ -29,7 +29,7 @@ from vigil_core.canonical import digest_payload
 from vigil_core.chain import append_entry
 from vigil_core.crypto import KeyPair, generate_keypair, sign, verify_one
 from vigil_core.models import ChainEntry
-from vigil_core.rbac import role_can
+from vigil_core.rbac import role_can_global
 
 from .config import VscpConfig
 from .findings_boundary import finding_boundary_gate
@@ -72,7 +72,7 @@ def _rbac_gate(role: str | None, action: str) -> Gate:
     perm = action_permission(action)
 
     def decide(_request: Any) -> GateOutcome:
-        if role_can(role, perm):
+        if role_can_global(role, perm):
             return GateOutcome(allow=True, reason=f"role {role!r} holds {perm!r}", code="RBAC_OK")
         return GateOutcome(
             allow=False,

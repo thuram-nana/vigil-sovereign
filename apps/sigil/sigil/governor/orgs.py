@@ -82,7 +82,7 @@ assert_no_offense()
 # ONE source of truth for the role vocabulary (`viewer < analyst < operator < owner`, cumulative permission
 # sets, `role_can`), shared by both trust domains. We reuse it verbatim and scope it PER-ORG — we do NOT
 # define a new vocabulary. vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
-from vigil_core.rbac import ROLES, role_can  # noqa: E402
+from vigil_core.rbac import ROLES, role_can, role_can_global  # noqa: E402
 
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
@@ -615,8 +615,10 @@ class OrgRegistry:
     def admit(self, *, global_role: Optional[str], username: str, org_id: str,
               permission: Optional[str]) -> bool:
         """The COMPOSED multi-tenant admission gate — the SINGLE enforcement helper a tenant-scoped request
-        boundary calls. True iff the caller's GLOBAL account role carries `permission` (`rbac.role_can`) OR
-        their per-org membership role in `org_id` does (`org_role_can`).
+        boundary calls. True iff the caller's GLOBAL account role carries `permission`
+        (`rbac.role_can_global`: one of the four global roles — a per-org role name in the global position
+        carries nothing, so it can never admit across orgs) OR their per-org membership role in `org_id` does
+        (`org_role_can`).
 
         The global OR is load-bearing: the trust-root OWNER (and any owner-signed global operator) is NOT an
         org member, so WITHOUT it the keyholder would be locked out of every tenant — exactly the composition
@@ -631,7 +633,7 @@ class OrgRegistry:
         tenant-admin may manage their org's billing and members, yet STILL cannot self-authorize a test: that
         remains the separate, owner-signed, infrastructure-bound target authority (`target_add` /
         `offense_authority`). Registering/paying is not authorizing an assessment."""
-        if role_can(global_role, permission):
+        if role_can_global(global_role, permission):    # a GLOBAL role: only the four global roles count
             return True
         return self.org_role_can(username, org_id, permission)
 

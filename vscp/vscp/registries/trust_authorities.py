@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vigil_core.crypto import IntegrityError, load_public_key
-from vigil_core.rbac import role_can
+from vigil_core.rbac import role_can_global
 
 from ..authorization import PermissionRefused, action_permission
 from ..store import VscpStore
@@ -35,7 +35,7 @@ class TrustAuthorityRegistry:
         PermissionRefused. A non-canonical / weak key is rejected by ``vigil_core`` before
         any write (reused crypto, not reimplemented)."""
         perm = action_permission("register_trust_authority")
-        if not role_can(role, perm):
+        if not role_can_global(role, perm):
             raise PermissionRefused(
                 f"role {role!r} lacks {perm!r}: registering a trust authority is a write, refused for a "
                 "read-only reviewer (W13-7)"

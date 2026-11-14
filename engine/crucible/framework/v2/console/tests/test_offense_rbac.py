@@ -190,6 +190,23 @@ def test_viewer_may_trip_the_killswitch_protective_emergency_stop():
         assert st != 403, f"viewer must be allowed to trip the protective kill-switch, got {st}"
 
 
+def test_per_org_role_stamp_is_refused_on_every_tier(monkeypatch):
+    # The stamped role is a GLOBAL account role. A per-org role name carries nothing at any tier — not even
+    # the read-tier emergency stop — although org_admin holds `read` inside its own org, and a per-org role
+    # carrying run_engagement is still refused on the operator routes.
+    from vigil_core import rbac
+    monkeypatch.setitem(rbac.PERMISSIONS, "tenant_tester", frozenset({"read", "run_engagement"}))
+    with _running() as base:
+        for role in ("org_admin", "tenant_tester"):
+            for route in (KILLSWITCH_ROUTE, LAUNCH_PREVIEW_ROUTE, OPERATOR_ROUTE):
+                st = _post(base, route, extra_headers=_hop_headers(role, route))
+                assert st == 403, f"per-org role {role!r} must be refused on {route}, got {st}"
+        # negative controls under the same key: a viewer may halt, an operator may preview
+        assert _post(base, KILLSWITCH_ROUTE, extra_headers=_hop_headers("viewer", KILLSWITCH_ROUTE)) != 403
+        assert _post(base, LAUNCH_PREVIEW_ROUTE,
+                     extra_headers=_hop_headers("operator", LAUNCH_PREVIEW_ROUTE)) != 403
+
+
 def test_forged_owner_role_without_valid_hmac_does_not_lift_the_role():
     with _running() as base:
         # a bare, unsigned X-VIGIL-Role: owner (an attacker who guesses the header name but lacks the key)

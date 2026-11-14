@@ -2,7 +2,8 @@
 
 The permissions are the SAME strings the whole VIGIL monorepo shares
 (:mod:`vigil_core.rbac`): ``viewer < analyst < operator < owner``, cumulative, with
-``role_can`` the one predicate the gate turns on. VSCP does not invent a role vocabulary;
+``role_can_global`` the one predicate the gate turns on (a VSCP role is a global role, so a
+per-org role name such as ``org_admin`` carries no permission here). VSCP does not invent a role vocabulary;
 it maps its own routes onto the shared one, so a "reviewer" is exactly the read-only
 ``viewer`` role, everywhere.
 
@@ -12,14 +13,14 @@ does not hold; every read route (GET) requires only ``read``, which the reviewer
 :func:`reviewer_readonly_report` proves this over the whole table, so a future route that
 mapped a write to ``read`` (or left a mutation reviewer-reachable) fails the check.
 
-DEFAULT-DENY: an unmapped ``(method, path)`` resolves to ``None`` -> ``role_can`` False ->
+DEFAULT-DENY: an unmapped ``(method, path)`` resolves to ``None`` -> ``role_can_global`` False ->
 refused for every role, including owner.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vigil_core.rbac import role_can
+from vigil_core.rbac import role_can_global
 
 __all__ = [
     "REVIEWER_ROLE",
@@ -92,9 +93,9 @@ def route_required_permission(method: str, path: str) -> str | None:
 
 def role_can_route(role: str | None, method: str, path: str) -> bool:
     """True iff ``role`` may call ``(method, path)``. Feeds the required permission straight
-    into the shared :func:`vigil_core.rbac.role_can`, so VSCP adds no policy — an unmapped
-    route (None permission) refuses every role."""
-    return role_can(role, route_required_permission(method, path))
+    into the shared :func:`vigil_core.rbac.role_can_global`, so VSCP adds no policy — an unmapped
+    route (None permission) refuses every role, and only the four global roles carry a permission."""
+    return role_can_global(role, route_required_permission(method, path))
 
 
 def reviewer_can_route(method: str, path: str) -> bool:

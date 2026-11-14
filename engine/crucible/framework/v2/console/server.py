@@ -39,8 +39,9 @@ from urllib.parse import parse_qs, urlsplit
 # S1 — per-action RBAC vocabulary. `vigil_core` is the ONE module both trust domains may import (the
 # offense console already imports it in `console.api`); it is namespace-pure (no framework/strix/sigil), so
 # this crosses no boundary and FATAL-2 holds. `offense_perm_for` maps a POST route to its required
-# permission (None ⇒ unmapped ⇒ default-deny) and `role_can` is the same predicate the sovereign gate uses.
-from vigil_core.rbac import offense_perm_for, role_can
+# permission (None ⇒ unmapped ⇒ default-deny) and `role_can_global` is the same predicate the sovereign
+# gate uses for a global account role (a per-org role name carries no permission there).
+from vigil_core.rbac import offense_perm_for, role_can_global
 # The ONE construction of the proxy→offense role assertion (stamp side = uiproxy, verify side = console
 # AND the offense api). Namespace-pure (pure stdlib), so importing it crosses no trust boundary.
 from vigil_core.hopauth import verify_hop_assertion
@@ -758,8 +759,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             console-token holder. Holding the shared console credential is owner-equivalent, so this keeps
             today's FULL access — no regression for the on-host operator / a test / the legacy direct client.
           * A role assertion that VERIFIES (fresh HMAC under the hop key) → enforce
-            ``role_can(stamped_role, offense_perm_for(path))``. An UNMAPPED route ⇒ ``offense_perm_for`` is
-            None ⇒ ``role_can`` False ⇒ DEFAULT-DENY.
+            ``role_can_global(stamped_role, offense_perm_for(path))``. An UNMAPPED route ⇒ ``offense_perm_for``
+            is None ⇒ DEFAULT-DENY, and a per-org role name (not one of the four global roles) carries nothing.
           * A role assertion that is PRESENT but INVALID (forged/expired/incomplete, or the console has no
             hop key to verify it) → REFUSE. A forged ``X-VIGIL-Role: owner`` with no valid MAC never lifts
             the role.
@@ -774,7 +775,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not self._hop_assertion_valid(principal, role or "", ts, sig or "", path):
             return False, "unverified role assertion (bad/expired hop signature)"
         required = offense_perm_for(path)                     # None ⇒ unmapped route ⇒ default-deny
-        if not role_can(role, required):
+        # a stamped role is a GLOBAL account role: only the four global roles carry a permission here
+        if not role_can_global(role, required):
             need = required or "(unmapped route → default-deny)"
             return False, f"role {role!r} lacks required permission {need}"
         return True, ""
