@@ -72,10 +72,10 @@ whenever the cockpit's environment does not set the variable. Setting it to `1` 
 cockpit restores the founders' testing. While it is OFF a founder cannot prove a host or reserve, start, pause
 or resume a launch.
 
-A reservation can always be released. A reserved launch that has not started can be cancelled by anyone in
-its org who holds `run_engagement` or `manage_billing` (an org admin, a founder, an operator), so a founder can
-still cancel its own reservation while the flag is OFF, after `demote-founders` or after an owner role change.
-The cancel returns the whole reservation to the org's balance. A launch that has already started is never
+A reserved launch that has not started stays releasable: anyone in its org who holds `run_engagement` or
+`manage_billing` (an org admin, a founder, an operator) can cancel it with its lease, so a founder can still
+cancel its own reservation while the flag is OFF, after `demote-founders` or after an owner role change. The
+cancel returns the whole reservation to the org's balance. A launch that has already started is never
 cancelled this way. It settles through its completion, the settle drain or the owner sweeps, just as it would
 with the flag ON.
 
