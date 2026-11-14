@@ -188,9 +188,20 @@
   checkVersion(true);
   registerWorker();
 
+  // Sign-out: delete every CacheStorage cache of this origin (the worker's shell holds no account data, but a
+  // shared device should keep nothing of the session). Clear-Site-Data "cache" would not reach CacheStorage.
+  function clearCaches() {
+    if (typeof caches === "undefined" || !caches || typeof caches.keys !== "function") return Promise.resolve(0);
+    return caches.keys()
+      .then(function (keys) { return Promise.all(keys.map(function (k) { return caches.delete(k); })); })
+      .then(function (done) { return done.length; })
+      .catch(function () { return 0; });
+  }
+
   window.VIGIL_PWA = {
     build: MY_BUILD,
     checkVersion: function () { return checkVersion(true); },
     notFound: function () { return checkVersion(false); },   // app.js: a request answered 404
+    clearCaches: clearCaches,                                // app.js: on sign-out
   };
 })();

@@ -726,6 +726,9 @@
     var posted = true;
     try { await VUI.postJSON(API + "/logout", {}); } catch (e) { posted = false; }
     resetNtf();                                  // drop this account's notifications before reflecting the session
+    // delete this origin's CacheStorage (the worker's shell): nothing of the app stays behind on a shared device
+    var pwa = window.VIGIL_PWA;
+    if (pwa && typeof pwa.clearCaches === "function") { try { await pwa.clearCaches(); } catch (e) { /* best effort */ } }
     await refreshWho();                          // reflect the ACTUAL server session — never assume it severed
     if (authed()) {
       // the logout POST did not take (network error / gate refusal / revoke error) and the cookie is STILL
