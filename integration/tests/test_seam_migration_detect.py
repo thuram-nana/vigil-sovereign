@@ -106,6 +106,16 @@ def test_an_uncommitted_migration_is_incomplete(tmp_path):
     assert sm.unmigrated_legacy(seam, [str(legacy)])[0]["reason"] == "incomplete"
 
 
+def test_an_unreadable_journal_never_hides_a_former_tree(tmp_path):
+    """The journal committed the tree, then cannot be read: the tree is reported again (never treated as migrated)."""
+    seam, legacy = tmp_path / "seam", tmp_path / "legacy"
+    record_lease_settlement(str(legacy), "cust_a", "n1")
+    _committed(seam, legacy)
+    assert sm.unmigrated_legacy(seam, [str(legacy)]) == []
+    sm.journal_path(seam).write_text("{truncated")
+    assert sm.unmigrated_legacy(seam, [str(legacy)]) == [{"path": str(legacy), "reason": "no_journal", "files": 1}]
+
+
 def test_lock_files_and_temporaries_do_not_change_the_digest(tmp_path):
     legacy = tmp_path / "legacy"
     record_lease_settlement(str(legacy), "cust_a", "n1")

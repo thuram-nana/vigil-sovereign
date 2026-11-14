@@ -19,6 +19,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * an explicit value in the shell not honoured        -> test_an_explicit_shell_value_is_deliberate
   * a unit without the guard line turning it on        -> test_units_without_the_guard_leave_it_off
   * a sweep --apply aimed at a former seam directory   -> test_a_sweep_apply_never_targets_a_former_seam_directory
+  * an unreadable guard state lets a verb run          -> test_an_unreadable_migration_state_refuses
+  * an unreadable journal hides a former tree          -> test_an_unreadable_journal_never_hides_a_former_tree
 """
 from __future__ import annotations
 
@@ -115,6 +117,24 @@ def test_owner_state_alone_never_blocks(host, serve_spy):
         f.unlink()
     cli.main(["serve"])
     assert serve_spy["serve"] == 1
+
+
+def test_an_unreadable_migration_state_refuses(host, serve_spy, monkeypatch, capsys):
+    def _boom(seam):
+        raise RuntimeError("the unit model cannot be read")
+    monkeypatch.setattr(cli, "_unmigrated_seam", _boom)
+    assert _exit(["serve"]) == 2 and serve_spy == {"serve": 0, "token": 0}
+    assert "migration state cannot be read" in capsys.readouterr().err
+
+
+def test_an_unreadable_journal_never_hides_a_former_tree(host, serve_spy, capsys):
+    """A journal that committed the former tree, then damaged: the tree counts as not migrated (refused)."""
+    _migrated(host)
+    cli.main(["serve"])
+    assert serve_spy["serve"] == 1
+    sm.journal_path(host["seam"]).write_text("{truncated")
+    assert _exit(["serve"]) == 2 and serve_spy["serve"] == 1
+    assert "no_journal" in capsys.readouterr().err
 
 
 def test_with_the_guard_off_every_verb_is_unchanged(host, serve_spy, monkeypatch):
