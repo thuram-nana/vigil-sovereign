@@ -1382,6 +1382,30 @@ def _refuse_unmigrated_seam(verb: str, seam: str) -> None:
         sys.exit(2)
 
 
+def _refuse_former_seam(verb: str, base: str) -> None:
+    """With the seam-migration guard on (:func:`_seam_guard_on`), exit 2 (before anything is written) when ``base`` is
+    a FORMER seam directory of this host (``seam_migration.legacy_candidates`` of a configured unit's seam): its
+    launches are settled on the seam the units use — `sigil seam migrate` carries its records there — so nothing is
+    settled or refunded against it directly, before or after the migration. Off: nothing."""
+    import os
+    if not _seam_guard_on():
+        return
+    try:
+        from vigil_integration.seam_base_units import unit_details
+        from vigil_integration.seam_migration import legacy_candidates
+        units = unit_details()
+        former = {c for u in units.values() for c in legacy_candidates(u["seam"], units=units)}
+    except Exception as e:  # noqa: BLE001 — the guard is on: an unreadable unit model refuses
+        print(f"{verb}: refused — the configured seam units cannot be read ({type(e).__name__}); run `vigil doctor`",
+              file=sys.stderr)
+        sys.exit(2)
+    if os.path.realpath(base) in former:
+        print(f"{verb}: refused — {base} is a former seam directory of this host; its launches are settled on the "
+              f"seam the configured units use. Carry its records there with `sigil seam migrate --apply` and run the "
+              f"sweep without --base-dir.", file=sys.stderr)
+        sys.exit(2)
+
+
 def _require_expanded_path(value: "str | None", flag: str, *, required: bool) -> None:
     """A path argument that reaches a supervised drain from a systemd unit must already be EXPANDED and absolute.
     Reject one that still carries an un-expanded systemd specifier (``%h``/``%S``/…) or is relative. systemd does
@@ -1638,6 +1662,8 @@ def cmd_ops_sweep(a) -> None:
             sys.exit(2)
         if a.apply:
             _refuse_unmigrated_seam("ops-sweep reservations --apply", gate._seam_base())
+            if a.base_dir:
+                _refuse_former_seam("ops-sweep reservations --apply", gate._seam_base())
         else:
             if _seam_guard_on():
                 try:

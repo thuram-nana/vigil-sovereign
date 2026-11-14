@@ -18,6 +18,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * an operator shell not following the units' guard   -> test_an_operator_shell_follows_the_units_guard
   * an explicit value in the shell not honoured        -> test_an_explicit_shell_value_is_deliberate
   * a unit without the guard line turning it on        -> test_units_without_the_guard_leave_it_off
+  * a sweep --apply aimed at a former seam directory   -> test_a_sweep_apply_never_targets_a_former_seam_directory
 """
 from __future__ import annotations
 
@@ -268,3 +269,24 @@ def test_units_without_the_guard_leave_it_off(host, monkeypatch, capsys):
     ensure_owner_keypair()
     cli.main(["ops-sweep", "reservations"])
     assert "WARNING" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["former", "seam", "former_guard_off"])
+def test_a_sweep_apply_never_targets_a_former_seam_directory(host, monkeypatch, capsys, target):
+    """`ops-sweep reservations --apply --base-dir <former seam directory>` is refused, before and after the migration
+    (its launches settle on the units' seam); the units' own seam named explicitly is the operator's choice. With
+    the guard off (units without it, nothing exported) the explicit tree is used as given, as before."""
+    monkeypatch.delenv("VIGIL_SEAM_MIGRATION_GUARD")
+    _install_units(host["tmp"] / "home", guard=target != "former_guard_off")
+    ensure_owner_keypair()
+    _migrated(host)
+    monkeypatch.setenv("VIGIL_OPS_SWEEP_APPLY_ENABLED", "1")
+    base = host["seam"] if target == "seam" else host["legacy"]
+    before, tip = _listing(host["legacy"]), host["store"].next_seq
+    argv = ["ops-sweep", "reservations", "--apply", "--base-dir", str(base), "--completion-spool", str(_spool(host))]
+    if target == "former":
+        assert _exit(argv) == 2 and "former seam directory" in capsys.readouterr().err
+        assert _listing(host["legacy"]) == before and host["store"].next_seq == tip
+    else:
+        cli.main(argv)
+        assert json.loads(capsys.readouterr().out)["applied"] is True
