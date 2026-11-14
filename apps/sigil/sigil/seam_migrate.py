@@ -160,7 +160,7 @@ def plan_source(store: Any, owner_pub: str, seam: Any, src: Any, *, now: float, 
                 plan["_ops"] += [(cls.name, "marker", slug, n) for n in add]
             elif cls.rule == "pause_delta":
                 want = _marker_nonces(path, _PAUSE_KIND)
-                if want is None:
+                if want is None or _marker_nonces(dst, _PAUSE_KIND) is None:
                     _conflict(plan, cls.name, rel, "a pause marker cannot be read cleanly")
                     continue
                 slug = path.name[:-len(".json")]

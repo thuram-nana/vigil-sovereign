@@ -392,3 +392,14 @@ def test_no_settle_interleaves_with_the_migration(trees, monkeypatch):
     assert _apply(s, seam, legacy)[0] == 1                                 # migrated; the expired launch is held
     assert len(got) == 1 and got[0]["ok"] is False and got[0].get("retry") is True, got
     assert _avail(s) == 70                                                  # nothing moved
+
+
+def test_an_unreadable_pause_marker_on_the_seam_is_a_conflict(trees):
+    """A pause marker the seam cannot read holds every launch of its slug; it is never overwritten by a carry."""
+    legacy, seam, _ = trees
+    record_lease_pause(str(legacy), "cust_a", "n1")
+    (seam / "credit-lease-pauses").mkdir()
+    (seam / "credit-lease-pauses" / "cust_a.json").write_text("{corrupt")
+    code, rep = _apply(_store(), seam, legacy)
+    assert code == 1 and rep["sources"][0]["status"] == "conflict"
+    assert (seam / "credit-lease-pauses" / "cust_a.json").read_text() == "{corrupt"
