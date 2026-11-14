@@ -2947,7 +2947,8 @@ def cmd_restore(a) -> None:
             print(f"restore into {res['home']} completed ({', '.join(res['units'])} swapped in).")
             print(f"next:  SIGIL_HOME={res['home']} sigil spine verify-unit --deep")
         else:
-            print(f"the interrupted restore into {res['home']} was discarded (nothing of it was swapped in).")
+            print(f"the interrupted restore into {res['home']} was discarded (none of its units had been touched; "
+                  f"the home is unchanged).")
         return
     if not a.src or (not a.home and not verify_only):
         print("restore: needs the backup file and the home to restore into (sigil restore SRC HOME)", file=sys.stderr)
@@ -3190,7 +3191,8 @@ def main(argv=None) -> None:
     pres.add_argument("--resume", default=None, metavar="HOME",
                       help="complete a restore into HOME that was interrupted between its swaps")
     pres.add_argument("--abort", default=None, metavar="HOME",
-                      help="discard an interrupted restore into HOME (only while none of its units is swapped in)")
+                      help="discard an interrupted restore into HOME (only while none of its units has been "
+                           "touched; refused otherwise — use --resume)")
     pres.add_argument("--force", action="store_true",
                       help="REPLACE a non-empty SIGIL_HOME. Without it, restore refuses a non-empty target "
                            "rather than overlay stale state. The replacement is staged + verified first and "
@@ -3679,8 +3681,8 @@ def _assert_no_restore_journal_or_exit(cmd: str) -> None:
     from .config import RESTORE_JOURNAL_PATH, SIGIL_HOME
     if RESTORE_JOURNAL_PATH.exists():
         print(f"sigil: refusing to run `{cmd}` — a restore into {SIGIL_HOME} was interrupted; finish it with "
-              f"`sigil restore --resume {SIGIL_HOME}` (or `sigil restore --abort {SIGIL_HOME}` if none of its units "
-              f"was swapped in yet)", file=sys.stderr)
+              f"`sigil restore --resume {SIGIL_HOME}` (`sigil restore --abort {SIGIL_HOME}` discards it only while "
+              f"none of its units has been touched)", file=sys.stderr)
         sys.exit(3)
 
 

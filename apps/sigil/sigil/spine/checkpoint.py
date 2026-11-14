@@ -50,8 +50,8 @@ def _restore_interrupted() -> str:
     if not RESTORE_JOURNAL_PATH.exists():
         return ""
     home = RESTORE_JOURNAL_PATH.parent
-    return (f"a restore into this home was interrupted — finish it with `sigil restore --resume {home}` (or `sigil "
-            f"restore --abort {home}` if none of its units was swapped in yet)")
+    return (f"a restore into this home was interrupted — finish it with `sigil restore --resume {home}` (`sigil "
+            f"restore --abort {home}` discards it only while none of its units has been touched)")
 
 
 def _atomic_write_text(path: Path, data: str) -> None:

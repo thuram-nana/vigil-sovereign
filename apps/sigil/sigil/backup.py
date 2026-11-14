@@ -535,24 +535,39 @@ def _drop_path(p: Path) -> None:
             pass
 
 
-def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
-    """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
-    leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Move-aside → rename-in → drop-old (each rename
-    atomic, same filesystem), so a crash leaves ``dest_unit`` as the complete OLD unit, absent, or the complete
-    NEW unit — never torn."""
+def _aside_of(dest_unit: Path) -> Path:
+    """Where a swap moves the OLD copy of ``dest_unit`` until the new one is in place."""
+    return dest_unit.parent / (".restore-old-" + dest_unit.name)
+
+
+def _swap_in(staged_unit: Path, dest_unit: Path) -> "Path | None":
+    """Move the old ``dest_unit`` aside and rename ``staged_unit`` into its place (each rename atomic, same
+    filesystem). The old copy is NOT dropped: returns the aside that holds it (None for a fresh slot), so a journaled
+    caller can record the new unit as in place before the old one goes."""
     dest_unit.parent.mkdir(parents=True, exist_ok=True)
     if dest_unit.exists() or dest_unit.is_symlink():
-        aside = dest_unit.parent / (".restore-old-" + dest_unit.name)
+        aside = _aside_of(dest_unit)
         _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
         os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
+        _maybe_crash(f"restore_moved_aside:{dest_unit.name}")
         try:
             os.replace(str(staged_unit), str(dest_unit))  # atomic: staged unit → dest_unit
         except OSError:
             os.replace(str(aside), str(dest_unit))        # best-effort rollback
             raise
+        return aside
+    os.replace(str(staged_unit), str(dest_unit))          # atomic into a fresh slot
+    return None
+
+
+def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
+    """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
+    leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Move-aside → rename-in → drop-old (each rename
+    atomic, same filesystem), so a crash leaves ``dest_unit`` as the complete OLD unit, absent, or the complete
+    NEW unit — never torn."""
+    aside = _swap_in(staged_unit, dest_unit)
+    if aside is not None:
         _drop_path(aside)                                 # drop the old unit
-    else:
-        os.replace(str(staged_unit), str(dest_unit))      # atomic into a fresh slot
 
 
 def _swap_units(units: "list[tuple[Path, Path]]") -> None:
@@ -775,7 +790,8 @@ def _read_journal(home: Path) -> dict:
         j = json.loads(jp.read_text(encoding="utf-8"))
         units = j["units"]
         ok = (j.get("schema") == _JOURNAL_SCHEMA and isinstance(units, list)
-              and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "done"} <= set(u) for u in units))
+              and all(isinstance(u, dict) and {"name", "src", "dst", "digest", "started", "done"} <= set(u)
+                      for u in units))
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise BackupError(f"the restore journal at {jp} cannot be read ({e}) — re-run the restore with --force "
                           f"from the backup") from e
@@ -800,31 +816,38 @@ def _drop_staging(journal: dict) -> None:
 
 
 def _complete_journaled_swap(home: Path, journal: dict) -> None:
-    """Swap every not-yet-done unit of ``journal`` into place, in order, marking each done (atomic journal rewrite)
-    after it lands; then prove every destination is the unit the restore verified, drop the journal and the
+    """Swap every not-yet-done unit of ``journal`` into place, in order, write-ahead: a unit is marked ``started``
+    (atomic journal rewrite) before its first rename, and ``done`` as soon as the new unit is in place — before its
+    old copy is dropped. Then prove every destination is the unit the restore verified, drop the journal and the
     staging. Idempotent: a unit whose staged copy is gone but whose destination already IS the verified unit (a
-    crash after its swap, before it was marked) is marked done; a staged copy that changed since it was verified,
-    or a unit that is neither staged nor in place, is refused."""
+    crash after its swap, before it was marked) is marked done, and an old copy left aside is dropped; a staged copy
+    that changed since it was verified, or a unit that is neither staged nor in place, is refused."""
     from .spine.atomicio import fsync_dir
     from .spine.consistent_copy import unit_digest
     jp = home / _JOURNAL_NAME
     for u in journal["units"]:
-        if u["done"]:
-            continue
         src, dst = Path(u["src"]), Path(u["dst"])
-        if src.exists() or src.is_symlink():
-            if unit_digest(src) != u["digest"]:
-                raise BackupError(f"the staged copy of {u['name']!r} changed since the restore verified it — refusing "
-                                  f"to swap it in; re-run the restore with --force from the backup")
-            _atomic_swap_unit(src, dst)
-        elif unit_digest(dst) != u["digest"]:
-            raise BackupError(f"cannot complete the interrupted restore: the staged copy of {u['name']!r} is gone and "
-                              f"{dst} is not the unit it verified — re-run the restore with --force from the backup")
-        _drop_path(dst.parent / (".restore-old-" + dst.name))
+        if not u["done"]:
+            if src.exists() or src.is_symlink():
+                if unit_digest(src) != u["digest"]:
+                    raise BackupError(f"the staged copy of {u['name']!r} changed since the restore verified it — "
+                                      f"refusing to swap it in; re-run the restore with --force from the backup")
+                if not u["started"]:
+                    u["started"] = True
+                    _write_journal(jp, journal)
+                    _maybe_crash(f"restore_unit_started:{u['name']}")
+                _swap_in(src, dst)
+                _maybe_crash(f"restore_swapped_in:{u['name']}")
+            elif unit_digest(dst) != u["digest"]:
+                raise BackupError(f"cannot complete the interrupted restore: the staged copy of {u['name']!r} is gone "
+                                  f"and {dst} is not the unit it verified — re-run the restore with --force from the "
+                                  f"backup")
+            fsync_dir(dst.parent)
+            u["started"] = u["done"] = True
+            _write_journal(jp, journal)
+            _maybe_crash(f"restore_after_unit:{u['name']}")
+        _drop_path(_aside_of(dst))                       # the old copy goes only once the new one is marked in place
         fsync_dir(dst.parent)
-        u["done"] = True
-        _write_journal(jp, journal)
-        _maybe_crash(f"restore_after_unit:{u['name']}")
     changed = [u["name"] for u in journal["units"] if unit_digest(Path(u["dst"])) != u["digest"]]
     if changed:
         raise BackupError(f"restored unit(s) {changed} changed after they were swapped in (is a sigil service running "
@@ -846,10 +869,10 @@ def _new_journal(src: Path, staged: Path, placed: dict, units: "list[tuple[Path,
     if placed["unit"] is not None:
         a_src, a_dst = placed["unit"]
         rows.append({"name": "archive", "src": str(a_src.resolve()), "dst": str(a_dst.resolve()),
-                     "digest": unit_digest(a_src), "done": False})
+                     "digest": unit_digest(a_src), "started": False, "done": False})
     for u_src, u_dst in units:
         rows.append({"name": u_dst.name, "src": str(u_src.resolve()), "dst": str(u_dst.resolve()),
-                     "digest": unit_digest(u_src), "done": False})
+                     "digest": unit_digest(u_src), "started": False, "done": False})
     h = hashlib.sha256()
     with open(src, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -880,16 +903,32 @@ def restore_resume(home: "str | Path") -> dict:
     return {"home": str(home), "units": [u["name"] for u in journal["units"]], "resumed": True}
 
 
+def _touched_units(journal: dict) -> "list[str]":
+    """The units of ``journal`` whose swap has begun, by name: marked started or done in the journal (written ahead
+    of the first rename), or — independently of the marks — whose staged copy has left the staging or whose
+    destination has an old copy moved aside beside it."""
+    out = []
+    for u in journal["units"]:
+        src, dst = Path(u["src"]), Path(u["dst"])
+        aside = _aside_of(dst)
+        if (u["started"] or u["done"] or not (src.exists() or src.is_symlink())
+                or aside.exists() or aside.is_symlink()):
+            out.append(u["name"])
+    return out
+
+
 def restore_abort(home: "str | Path") -> dict:
     """``sigil restore --abort <home>``: discard an interrupted restore into ``home`` — only while none of its units
-    has been swapped in (the home is then still entirely its old self). Once a unit is in, only ``--resume`` (or a
-    fresh ``--force`` restore from the backup) leaves the home consistent."""
+    has been touched (the home is then still entirely its old self). Once a swap has begun, only ``--resume`` (the
+    home is then entirely the backup's) or a fresh ``--force`` restore from the backup leaves the home consistent;
+    abort then refuses and deletes nothing."""
     home = Path(home)
     journal = _read_journal(home)
-    done = [u["name"] for u in journal["units"] if u["done"]]
-    if done:
-        raise BackupError(f"cannot abort: unit(s) {done} are already swapped into {home} — finish the restore with "
-                          f"`sigil restore --resume {home}`")
+    touched = _touched_units(journal)
+    if touched:
+        raise BackupError(f"cannot abort: the restore into {home} had begun swapping {touched} in — finish it with "
+                          f"`sigil restore --resume {home}`, or replace it with a fresh `sigil restore --force` from "
+                          f"the backup; nothing was discarded")
     _drop_staging(journal)
     (home / _JOURNAL_NAME).unlink()
     from .spine.atomicio import fsync_dir
@@ -1042,8 +1081,8 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
     stale_journal = (new_home is not None and not verify_only and (new_home / _JOURNAL_NAME).exists())
     if stale_journal and not force:
         raise BackupError(f"a restore into {new_home} was interrupted — finish it with `sigil restore --resume "
-                          f"{new_home}`, discard it with `sigil restore --abort {new_home}` if none of its units was "
-                          f"swapped in yet, or replace it with a fresh restore (--force)")
+                          f"{new_home}`, or replace it with a fresh restore (--force); `sigil restore --abort "
+                          f"{new_home}` discards it only while none of its units has been touched")
     present_units = (sorted(u for u in captured_units if (new_home / u).exists())
                      if new_home is not None and not verify_only else [])
     if not force and present_units:

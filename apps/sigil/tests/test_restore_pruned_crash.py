@@ -31,16 +31,9 @@ def hook(name):
     if name == a["barrier"]:
         os._exit(77)
 backup._crash_hook = hook
-if a["barrier"] == "mid-swap:spine":
-    real = backup._atomic_swap_unit
-    def swap(staged, dest):
-        if dest.name == "spine" and dest.exists():
-            os.replace(str(dest), str(dest.parent / (".restore-old-" + dest.name)))   # moved aside, then killed
-            os._exit(77)
-        return real(staged, dest)
-    backup._atomic_swap_unit = swap
 home = Path(a["home"])
-res = backup.restore_backup(a["src"], home, "pw-test-only", vault=Vault(home / "vault"), force=True)
+kw = {"archive_dir": a["archive_dir"]} if a.get("archive_dir") else {}
+res = backup.restore_backup(a["src"], home, "pw-test-only", vault=Vault(home / "vault"), force=True, **kw)
 print(json.dumps(res, default=str))
 """
 
@@ -81,11 +74,12 @@ def _target(world, tmp_path) -> Path:
     return t
 
 
-def _kill_at(world, target: Path, barrier: str):
+def _kill_at(world, target: Path, barrier: str, archive_dir: "Path | None" = None):
     host = target.parent / "restoring-host"
     host.mkdir(exist_ok=True)
     r = run_in_home(host, RESTORE_KILLED, json.dumps({"src": str(world["bk"]), "home": str(target),
-                                                      "barrier": barrier}),
+                                                      "barrier": barrier,
+                                                      "archive_dir": str(archive_dir) if archive_dir else None}),
                     check=False, SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
     return r
 
@@ -106,18 +100,27 @@ def _assert_fails_closed(target: Path) -> None:
     assert "refused" in signed and "interrupted" in signed["refused"], signed
 
 
-def _assert_restored(target: Path) -> None:
+def _assert_restored(target: Path, archive_dir: "Path | None" = None) -> None:
     assert not (target / "restore-journal.json").exists()
     assert not [p for p in target.parent.iterdir() if p.name.startswith(".restore-")]
     assert not [p for p in target.iterdir() if p.name.startswith(".restore-old-")]
+    if archive_dir is not None:
+        assert not [p for p in archive_dir.parent.iterdir() if p.name.startswith(".restore-")]
     for fold_cache in (False, True):
-        seen = read_home(target, fold_cache=fold_cache)
+        seen = read_home(target, fold_cache=fold_cache, archive_dir=archive_dir)
         assert seen["verify_checkpoint"][0] and seen["verify_archive"][0], seen
         assert seen["killswitch_engaged"] is True and seen["wallet_acme"] == 100, seen
 
 
-BARRIERS = ["restore_after_journal", "mid-swap:spine", "restore_after_unit:spine", "restore_after_unit:floor.json",
+# Every barrier of the journaled swap, in order: the journal is durable; the spine unit is marked started (nothing
+# moved yet); its old copy is moved aside; the new copy is renamed in (not yet marked); it is marked done (its old
+# copy not yet dropped); the floor is marked done; every unit is certified, the journal not yet deleted.
+BARRIERS = ["restore_after_journal", "restore_unit_started:spine", "restore_moved_aside:spine",
+            "restore_swapped_in:spine", "restore_after_unit:spine", "restore_after_unit:floor.json",
             "restore_before_journal_delete"]
+# The barriers at which the spine unit's swap has begun: abort must refuse there.
+TOUCHED = ["restore_unit_started:spine", "restore_moved_aside:spine", "restore_swapped_in:spine",
+           "restore_after_unit:spine"]
 
 
 @pytest.mark.parametrize("barrier", BARRIERS)
@@ -126,10 +129,10 @@ def test_a_restore_killed_at_any_barrier_fails_closed_and_resumes(world, tmp_pat
     r = _kill_at(world, target, barrier)
     assert r.returncode == KILLED, (r.returncode, r.stderr[-800:])
     assert (target / "restore-journal.json").is_file()
-    if barrier == "mid-swap:spine":
+    if barrier == "restore_moved_aside:spine":
         assert not (target / "spine").exists() and (target / ".restore-old-spine").is_dir()
     _assert_fails_closed(target)
-    assert not (target / "spine" / "keys" / "owner.priv").exists() or barrier != "mid-swap:spine"
+    assert not (target / "spine" / "keys" / "owner.priv").exists() or barrier != "restore_moved_aside:spine"
     r = _cli(target, "doctor")
     assert r.returncode != 3                                          # doctor is never gated by the journal
     r = _cli(target, "restore", "--resume", str(target))
@@ -155,9 +158,67 @@ def test_abort_before_any_unit_is_in_leaves_the_old_home(world, tmp_path):
     assert read_home(target)["verify_checkpoint"][0] is True
 
 
+@pytest.mark.parametrize("barrier", TOUCHED)
+def test_abort_is_refused_once_a_unit_swap_has_begun_and_resume_completes_it(world, tmp_path, barrier):
+    """Killed while the spine unit was being swapped in — marked started, its old copy moved aside, the new copy
+    renamed in before it was marked done, or marked done before its old copy was dropped: `--abort` refuses and
+    deletes nothing (the journal, the staging and the old copy stay), the home stays fail-closed, and `--resume`
+    makes it entirely the backup's."""
+    target = _target(world, tmp_path)
+    old_head = (target / "spine" / "head.json").read_bytes()
+    assert _kill_at(world, target, barrier).returncode == KILLED
+    before = _tree(tmp_path)          # the target, its staging and the old copy aside
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "--resume" in r.stderr and "nothing was discarded" in r.stderr, r.stderr
+    assert _tree(tmp_path) == before
+    if barrier in ("restore_moved_aside:spine", "restore_swapped_in:spine", "restore_after_unit:spine"):
+        assert (target / ".restore-old-spine" / "head.json").read_bytes() == old_head      # the old unit is kept
+    _assert_fails_closed(target)
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    _assert_restored(target)
+
+
+@pytest.mark.parametrize("evidence", ["old copy moved aside", "staged copy gone"])
+def test_abort_reads_the_swap_off_the_disk_even_when_the_journal_marks_nothing(world, tmp_path, evidence):
+    """Abort trusts the journal's marks only to refuse: an old copy moved aside beside a destination, or a staged
+    copy that has left the staging, is a swap that began, whatever the marks say."""
+    target = _target(world, tmp_path)
+    barrier = "restore_moved_aside:spine" if evidence == "old copy moved aside" else "restore_swapped_in:spine"
+    assert _kill_at(world, target, barrier).returncode == KILLED
+    jp = target / "restore-journal.json"
+    j = json.loads(jp.read_text())
+    for u in j["units"]:
+        u["started"] = u["done"] = False
+    jp.write_text(json.dumps(j))
+    if evidence == "staged copy gone":
+        shutil.rmtree(target / ".restore-old-spine")              # only the staging shows the swap now
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "had begun swapping ['spine']" in r.stderr, r.stderr
+    assert jp.is_file()
+
+
+def test_abort_is_refused_while_a_relocated_archive_is_swapped_and_the_old_archive_is_kept(world, tmp_path):
+    """The relocated archive unit is swapped first: killed after the target's existing archive was moved aside,
+    abort refuses and the old archive stays on disk; resume completes the restore."""
+    target = _target(world, tmp_path)
+    arch = tmp_path / "ebs" / "archive"
+    shutil.copytree(world["old"] / "spine" / "archive", arch)              # the archive already at --archive-dir
+    old_manifest = (arch / "archive.manifest.json").read_bytes()
+    assert _kill_at(world, target, "restore_moved_aside:archive", archive_dir=arch).returncode == KILLED
+    assert not arch.exists()
+    r = _cli(target, "restore", "--abort", str(target))
+    assert r.returncode == 1 and "had begun swapping ['archive']" in r.stderr, r.stderr
+    assert (arch.parent / ".restore-old-archive" / "archive.manifest.json").read_bytes() == old_manifest
+    _assert_fails_closed(target)
+    r = _cli(target, "restore", "--resume", str(target))
+    assert r.returncode == 0 and "completed" in r.stdout, (r.returncode, r.stdout, r.stderr)
+    _assert_restored(target, archive_dir=arch)
+
+
 def test_abort_is_refused_once_a_unit_is_in(world, tmp_path):
     target = _target(world, tmp_path)
-    assert _kill_at(world, target, "restore_after_unit:spine").returncode == KILLED
+    assert _kill_at(world, target, "restore_after_unit:floor.json").returncode == KILLED
     r = _cli(target, "restore", "--abort", str(target))
     assert r.returncode == 1 and "--resume" in r.stderr
     assert (target / "restore-journal.json").is_file()
