@@ -366,7 +366,8 @@ def test_resume_refuses_a_swapped_unit_that_changed_before_it_completed(world, t
 FORGED = {"dst": "destination outside", "src": "outside its staging", "unit name": "a backup never captures",
           "staging dir": "not a restore's own", "archive dst": "not beside its staging dir",
           "symlinked unit": "destination outside", "archive dst '..'": "not beside its staging dir",
-          "replaced staging dir": "not a restore's own"}
+          "replaced staging dir": "not a restore's own",
+          "archive inside the spine": "inside the destination of 'spine'"}
 
 
 @pytest.mark.parametrize("forgery", sorted(FORGED))
@@ -398,6 +399,14 @@ def test_resume_and_abort_refuse_a_journal_that_names_paths_outside_the_restore(
         elsewhere.mkdir()
         (elsewhere / "keep").write_text("not the restore's")
         j["replaced"] = {"restore_id": None, "touched": [], "staging": [str(elsewhere.resolve())]}
+    elif forgery == "archive inside the spine":                            # swapped in, then carried off with it
+        ast = target.resolve() / "spine" / ".restore-staging-archive-planted"
+        ast.mkdir()
+        shutil.copytree(target / "spine" / "archive", ast / "archive")
+        j["archive_staging"] = str(ast)
+        j["units"].insert(0, {"name": "archive", "src": str(ast / "archive"),
+                              "dst": str(target.resolve() / "spine" / "archive"),
+                              "digest": unit_digest(ast / "archive"), "started": False, "done": False})
     elif forgery == "archive dst '..'":                                     # beside its staging dir, but not a name
         next(u for u in j["units"] if u["name"] == "archive")["dst"] = str(tmp_path / "ebs" / "..")
     else:

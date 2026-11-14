@@ -372,25 +372,39 @@ def test_the_archive_lands_in_the_given_dir_and_never_where_the_environment_poin
 
 
 @pytest.mark.parametrize("where", ["home", "inside-home", "spine-dir", "captured-unit", "process-home",
-                                   "process-archive"])
+                                   "process-archive", "ends in '..'", "symlink in a captured unit",
+                                   "symlink in live home state", "symlink in this process's archive"])
 def test_an_archive_dir_overlapping_another_unit_or_this_home_is_refused(world, tmp_path, flag, monkeypatch, where):
     import sigil.config as cfg
     live = tmp_path / "live-archive"
     monkeypatch.setenv("SIGIL_SPINE_ARCHIVE_DIR", str(live))
     new = tmp_path / "restored"
     target = {"home": new, "inside-home": tmp_path, "spine-dir": new / "spine", "captured-unit": new / "warden" / "arch",
-              "process-home": cfg.SIGIL_HOME / "arch", "process-archive": live}[where]
-    if where == "captured-unit":
+              "process-home": cfg.SIGIL_HOME / "arch", "process-archive": live,
+              "ends in '..'": tmp_path / "ebs" / "x" / "..",
+              "symlink in a captured unit": new / "warden" / "arch",
+              "symlink in live home state": new / "credit-lease" / "arch",
+              "symlink in this process's archive": live / "arch"}[where]
+    if where in ("captured-unit", "symlink in a captured unit"):
         bk = _rewrite(world["good"], tmp_path / "w.sglbk", world["priv"], files={"warden/tools.json": b"{}"})
     else:
         bk = world["good"]
+    if where.startswith("symlink in"):              # the entry is inside the old home's entry, its target outside it
+        (tmp_path / "ebs" / "archive").mkdir(parents=True)
+        target.parent.mkdir(parents=True)
+        target.symlink_to(tmp_path / "ebs" / "archive")
     phrase = {"home": "the restored home", "inside-home": "the restored home", "spine-dir": "the restored spine dir",
               "captured-unit": "restored unit", "process-home": "own SIGIL_HOME",
-              "process-archive": "archive dir this process's own home uses"}[where]
+              "process-archive": "archive dir this process's own home uses", "ends in '..'": "ends in '..'",
+              "symlink in a captured unit": "restored unit 'warden'",
+              "symlink in live home state": "'credit-lease', live state of the restored home",
+              "symlink in this process's archive": "archive dir this process's own home uses"}[where]
+    before = _tree(tmp_path)
     with pytest.raises(BackupError, match="refusing the archive dir") as ei:
-        _restore(bk, new, archive_dir=target)
+        _restore(bk, new, archive_dir=target, force=True)
     assert phrase in str(ei.value), str(ei.value)
-    assert not (new / "spine").exists()
+    assert not (new / "spine").exists() and not (new / "restore-journal.json").exists()
+    assert _tree(tmp_path) == before
 
 
 def test_a_unit_that_cannot_be_searched_for_mount_points_is_refused(world, tmp_path, flag, monkeypatch):
@@ -413,6 +427,71 @@ def test_a_unit_that_cannot_be_searched_for_mount_points_is_refused(world, tmp_p
                            force=True, verify_only=verify_only)
     monkeypatch.undo()
     assert _tree(tmp_path) == before
+
+
+# How an old home's archive entry inside its spine — or its spine entry itself — can be a symlink to another disk,
+# and the archive dir a restore is given: none (the default), the symlinked entry itself, or a path through another
+# symlink that resolves into the spine dir.
+SYMLINKED = ["default, archive entry symlinked out", "--archive-dir the symlinked archive entry",
+             "--archive-dir through a link into the spine", "default, spine entry symlinked out"]
+
+
+@pytest.mark.parametrize("how", SYMLINKED)
+def test_an_archive_named_through_the_spine_lands_with_it_whatever_a_symlink_there_points_to(world, tmp_path, flag,
+                                                                                             how):
+    """The spine unit's swap replaces the entry <home>/spine: an archive named through it (the default, or an
+    --archive-dir that is or resolves to an entry inside the spine dir) is staged inside the staged spine and lands
+    with it, whatever a symlink at the old entry points to. The symlink leaves with the old spine; the dir it pointed
+    to is left as it was. The restore completes with no journal standing, and the home verifies and signs."""
+    home = tmp_path / "home"
+    _restore(world["good"], home)
+    ext = tmp_path / "bigdisk"
+    ext.mkdir()
+    archive_dir = None
+    if how.endswith("spine entry symlinked out"):
+        shutil.move(str(home / "spine"), str(ext / "spine"))
+        (home / "spine").symlink_to(ext / "spine")
+        kept = ext / "spine"
+    else:
+        shutil.move(str(home / "spine" / "archive"), str(ext / "archive"))
+        (home / "spine" / "archive").symlink_to(ext / "archive")
+        kept = ext / "archive"
+        if how == "--archive-dir the symlinked archive entry":
+            archive_dir = home / "spine" / "archive"
+        elif how == "--archive-dir through a link into the spine":
+            (tmp_path / "link").symlink_to(home / "spine")
+            archive_dir = tmp_path / "link" / "archive"
+    before = _tree(kept)
+    res = _restore(world["good"], home, force=True, archive_dir=archive_dir)
+    assert res["verified"] is True and res["archive_mode"] == "in-spine", res
+    assert not (home / "restore-journal.json").exists()
+    arch = home / "spine" / "archive"
+    assert not (home / "spine").is_symlink() and arch.is_dir() and not arch.is_symlink()
+    assert (arch / "archive.manifest.json").is_file()
+    assert _tree(kept) == before                                       # what the symlink pointed to is as it was
+    assert not list(tmp_path.rglob(".restore-*"))
+    seen = read_home(home)
+    assert seen["verify_checkpoint"][0] is True and seen["verify_archive"][0] is True, seen
+    r = run_in_home(home, "import sys\nfrom sigil.cli import main\nmain(sys.argv[1:])\n", "sign", check=False,
+                    SIGIL_PRUNED_RESTORE="1", SIGIL_SPINE_ARCHIVE_DIR=None)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+
+
+def test_a_swap_whose_units_would_nest_is_refused_before_its_journal_is_written(world, tmp_path, flag, monkeypatch):
+    """Were the archive ever placed as its own unit at an entry inside the spine unit's destination (swapped in, then
+    carried off with the old spine), the restore refuses before its journal is written and touches nothing."""
+    home = tmp_path / "home"
+    _restore(world["good"], home)
+    ext = tmp_path / "bigdisk" / "archive"
+    ext.parent.mkdir()
+    shutil.move(str(home / "spine" / "archive"), str(ext))
+    (home / "spine" / "archive").symlink_to(ext)
+    before, ext_before = _tree(home), _tree(ext)
+    monkeypatch.setattr(backup, "_in_spine_unit", lambda target, new_home: None)   # placed on the symlink's target
+    with pytest.raises(BackupError, match="inside the destination of 'spine'"):
+        _restore(world["good"], home, force=True)
+    assert _tree(home) == before and _tree(ext) == ext_before
+    assert not list(tmp_path.rglob(".restore-*"))
 
 
 def _on_another_filesystem(monkeypatch, path: Path) -> None:

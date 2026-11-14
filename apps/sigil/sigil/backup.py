@@ -704,7 +704,9 @@ def _backup_declares_prune(files: dict, hashes: dict, manifest: dict) -> bool:
 
 
 def _overlaps(a: Path, b: Path) -> bool:
-    a, b = a.resolve(), b.resolve()
+    """Whether ``a`` (as given: an entry is compared as itself, never followed) and the real dir ``b`` names are one
+    and the same, or one holds the other."""
+    b = b.resolve()
     return a == b or a in b.parents or b in a.parents
 
 
@@ -712,29 +714,34 @@ def _check_archive_target(target: Path, new_home: Path, staged: Path, captured_u
     """Refuse an explicit archive dir that would land on (or around) another unit: the restored home itself or a dir
     holding it, any entry of the restored home outside its spine (a captured unit, or live state the backup does not
     capture), the staging dir — and, when restoring into a home that is NOT this process's own, this process's
-    SIGIL_HOME or the archive dir its own environment names (on a drill / DR host that is the LIVE archive)."""
+    SIGIL_HOME or the archive dir its own environment names (on a drill / DR host that is the LIVE archive). Both the
+    entry the restore replaces and the dir a symlink at it points to are held to this."""
     from . import config
     from .spine.prune import archive_dir as live_archive_dir
-    t, nh = target.resolve(), new_home.resolve()
-    if t == nh or t in nh.parents:
-        raise BackupError(f"refusing the archive dir {target}: it is (or contains) the restored home {new_home}")
-    if t == (nh / "spine"):
-        raise BackupError(f"refusing the archive dir {target}: it is the restored spine dir itself")
-    if t.is_relative_to(nh) and not t.is_relative_to(nh / "spine"):
-        u = t.relative_to(nh).parts[0]
-        what = (f"the restored unit {u!r}" if u in captured_units else
-                f"{u!r}, live state of the restored home that the backup does not capture")
-        raise BackupError(f"refusing the archive dir {target}: it overlaps {what} — an archive inside the home goes "
-                          f"under its spine dir")
-    if _overlaps(t, staged):
-        raise BackupError(f"refusing the archive dir {target}: it overlaps the restore's staging dir")
-    if nh != config.SIGIL_HOME.resolve():
-        if _overlaps(t, config.SIGIL_HOME):
-            raise BackupError(f"refusing the archive dir {target}: it overlaps this process's own SIGIL_HOME "
-                              f"({config.SIGIL_HOME}), which this restore does not target")
-        if _overlaps(t, live_archive_dir()):
-            raise BackupError(f"refusing the archive dir {target}: it overlaps the archive dir this process's own "
-                              f"home uses ({live_archive_dir()}), which this restore does not target")
+    if Path(target).absolute().name == "..":                   # the swap replaces an entry: it must name one
+        raise BackupError(f"refusing the archive dir {target}: it ends in '..', which names no entry a restore can "
+                          f"replace — name the archive's dir itself")
+    nh = new_home.resolve()
+    for t in dict.fromkeys((target.resolve(), _entry_path(target.absolute()))):
+        if t == nh or t in nh.parents:
+            raise BackupError(f"refusing the archive dir {target}: it is (or contains) the restored home {new_home}")
+        if t == (nh / "spine"):
+            raise BackupError(f"refusing the archive dir {target}: it is the restored spine dir itself")
+        if t.is_relative_to(nh) and not t.is_relative_to(nh / "spine"):
+            u = t.relative_to(nh).parts[0]
+            what = (f"the restored unit {u!r}" if u in captured_units else
+                    f"{u!r}, live state of the restored home that the backup does not capture")
+            raise BackupError(f"refusing the archive dir {target}: it overlaps {what} — an archive inside the home "
+                              f"goes under its spine dir")
+        if _overlaps(t, staged):
+            raise BackupError(f"refusing the archive dir {target}: it overlaps the restore's staging dir")
+        if nh != config.SIGIL_HOME.resolve():
+            if _overlaps(t, config.SIGIL_HOME):
+                raise BackupError(f"refusing the archive dir {target}: it overlaps this process's own SIGIL_HOME "
+                                  f"({config.SIGIL_HOME}), which this restore does not target")
+            if _overlaps(t, live_archive_dir()):
+                raise BackupError(f"refusing the archive dir {target}: it overlaps the archive dir this process's "
+                                  f"own home uses ({live_archive_dir()}), which this restore does not target")
 
 
 def _replaceable_archive_dir(target: Path) -> bool:
@@ -750,17 +757,34 @@ def _place_staged_archive(staged: Path, new_home: "Path | None", archive_dir: "P
                           verify_only: bool, captured_units: "set[str]") -> dict:
     """Where the restored archive goes, and where the verifier reads it. The backup's archive is staged at
     ``<staging>/spine/archive``. The target is ``archive_dir`` when given, else ``<new_home>/spine/archive`` — NEVER
-    the restoring process's ``SIGIL_SPINE_ARCHIVE_DIR``. A target inside the restored spine travels with the spine
-    unit; one outside it is its own unit, staged in a private dir beside the target (same filesystem, so its swap is
-    an atomic rename). A backup that carries no archive (taken before the archive was captured) adopts the archive
-    already at ``archive_dir`` — only if it verifies against the staged head, and it is never replaced. Returns
-    ``{read, target, unit, cleanup, mode}``."""
+    the restoring process's ``SIGIL_SPINE_ARCHIVE_DIR``. A target inside the restored spine unit
+    (:func:`_in_spine_unit`: decided on the entries the swaps replace, whatever a symlink there points to) travels with
+    the spine unit; one outside it is its own unit, staged in a private dir beside the target (same filesystem, so its
+    swap is an atomic rename). A backup that carries no archive (taken before the archive was captured) adopts the
+    archive already at ``archive_dir`` — only if it verifies against the staged head, and it is never replaced.
+    Returns ``{read, target, unit, cleanup, mode}``."""
     staged_arch = staged / "spine" / "archive"
     carried = staged_arch.is_dir()
     out = _place_archive(staged, staged_arch, carried, new_home, archive_dir, force=force, verify_only=verify_only,
                          captured_units=captured_units)
     out["carried"] = carried
     return out
+
+
+def _in_spine_unit(target: Path, new_home: Path) -> "Path | None":
+    """Where ``target`` lies inside the restored home's spine unit (relative to it), or None when it lies outside.
+    Decided on the ENTRIES the swaps replace, never on where a symlink points: the spine unit's swap replaces the entry
+    ``<home>/spine`` with the staged spine dir, so a path named through that entry (whatever the entry is now: a dir, or
+    a symlink) — or an entry whose real parent lies inside the spine dir — is carried by that swap, and lands inside
+    the restored spine. A symlink at such a path leaves with the old spine; the dir it points to is never touched."""
+    spine_entry = _entry_path(new_home / "spine")
+    t = Path(target).absolute()
+    if ".." not in t.parts:
+        for a in (t, *t.parents):
+            if a.name == "spine" and _entry_path(a) == spine_entry:
+                return t.relative_to(a)
+    e = _entry_path(t)
+    return e.relative_to(spine_entry) if e.is_relative_to(spine_entry) else None
 
 
 def _place_archive(staged: Path, staged_arch: Path, carried: bool, new_home: "Path | None",
@@ -775,9 +799,9 @@ def _place_archive(staged: Path, staged_arch: Path, carried: bool, new_home: "Pa
     target = Path(archive_dir) if archive_dir is not None else spine_new / "archive"
     if archive_dir is not None:
         _check_archive_target(target, new_home, staged, captured_units)
-    t, sp = target.resolve(), spine_new.resolve()
-    if t.is_relative_to(sp):                                 # inside the spine unit: swapped with it
-        in_stage = staged / "spine" / t.relative_to(sp)
+    rel = _in_spine_unit(target, new_home)
+    if rel is not None:                                      # inside the spine unit: swapped with it
+        in_stage = staged / "spine" / rel
         if carried and in_stage != staged_arch:
             in_stage.parent.mkdir(parents=True, exist_ok=True)
             os.replace(str(staged_arch), str(in_stage))
@@ -933,7 +957,20 @@ def _read_journal(home: Path) -> dict:
                                   f"archive — refusing")
         elif dst != _entry_path(home / name):
             raise BackupError(f"the restore journal at {jp} names a destination outside {home} — refusing")
+    nested = _nested_unit(units)
+    if nested is not None:
+        raise BackupError(f"the restore journal at {jp} names {nested} — refusing")
     return j
+
+
+def _nested_unit(rows: "list[dict]") -> "str | None":
+    """Each unit of a swap replaces its own entry: a destination at or inside another unit's destination would be
+    swapped in and then carried off with that unit (or moved aside under it). Names such a pair, else None."""
+    for a in rows:
+        for b in rows:
+            if a is not b and Path(a["dst"]).is_relative_to(Path(b["dst"])):
+                return f"the unit {a['name']!r} at {a['dst']}, inside the destination of {b['name']!r}"
+    return None
 
 
 def _entry_path(p: Path) -> Path:
@@ -1424,6 +1461,9 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # that replaces an interrupted one, whose journal this one's replaces BEFORE the first swap — a crash from
             # here on is resumed into THIS restore, never back into the one it replaced
             journal = _new_journal(src, staged_dir, placed, units, sh, pruned=pruned)
+            nested = _nested_unit(journal["units"])
+            if nested is not None:
+                raise BackupError(f"refusing to swap {nested} — nothing was swapped in")
             with _target_writers_quiet(new_home):
                 # what the interrupted restore had already done to the home is read BEFORE its journal is replaced
                 # and carried in this one: an abort is then refused while the home holds any of its swapped units
