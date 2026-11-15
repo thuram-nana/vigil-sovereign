@@ -140,6 +140,22 @@ def test_an_abandoned_block_is_reaped_after_the_strike_ttl(tmp_path):
     assert led.check("a@acme.com", PURPOSE_VERIFY, c2, now=later + 1.0) == CodeOk({})
 
 
+def test_strikes_never_block_issuing_a_code_for_other_addresses(tmp_path):
+    # ios-review r2 residual #1: strike records are bounded separately from live codes and must NEVER make issue()
+    # refuse a NEW code, so an attacker who racks up strikes across addresses cannot degrade code sign-up/recovery
+    # to link-only for everyone. (Old behaviour: 4 strikes >= max_records=2 would have refused the fresh code.)
+    led = EmailCodeLedger(tmp_path, max_records=2, hard_ceiling=5)
+    for n in range(4):
+        e = f"u{n}@acme.com"
+        c = led.issue(e, PURPOSE_VERIFY, now=100.0)
+        assert c is not None
+        for _ in range(5):
+            led.check(e, PURPOSE_VERIFY, _wrong_for(c), now=101.0)   # 5 wrong -> blocked, a strike record remains
+    fresh = led.issue("fresh@acme.com", PURPOSE_VERIFY, now=102.0)
+    assert fresh is not None                                          # strikes did not consume the code budget
+    assert led.check("fresh@acme.com", PURPOSE_VERIFY, fresh, now=103.0) == CodeOk({})
+
+
 @pytest.mark.parametrize("typed", ["", "12345", "1234567", "abcdef", "١٢٣٤٥٦"])
 def test_a_malformed_code_counts_as_wrong(tmp_path, typed):
     led = EmailCodeLedger(tmp_path)

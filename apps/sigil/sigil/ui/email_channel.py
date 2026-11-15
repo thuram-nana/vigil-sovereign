@@ -275,6 +275,10 @@ _DEFAULT_CODE_ATTEMPTS = 5              # wrong codes per CODE before that code 
 # wrong code so it survives re-sends and a destroyed code but a long-abandoned strike is still reaped.
 _DEFAULT_CODE_HARD_CEILING = 30
 _STRIKE_TTL_S = 30 * 24 * 3600.0
+# Strike records are bounded SEPARATELY from live codes, and never block issuing a code (so an attacker who racks
+# up strikes across many addresses cannot degrade code sign-up/recovery to link-only for everyone else). Beyond the
+# cap the strikes expiring soonest are reaped first.
+_MAX_STRIKES = 8192
 _CODE_LOCK = ".codes.lock"
 # scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
 # directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
@@ -328,6 +332,7 @@ class EmailCodeLedger:
         self.max_attempts = int(max_attempts)
         self.max_records = int(max_records)
         self.hard_ceiling = int(hard_ceiling)
+        self.max_strikes = min(int(max_records), _MAX_STRIKES)
 
     def _name(self, email: str, purpose: str) -> Path:
         return self.dir / hashlib.sha256(("code\x00" + purpose + "\x00" + email).encode("utf-8")).hexdigest()
@@ -410,7 +415,11 @@ class EmailCodeLedger:
                 and (self._live(rec, now) or self._strike_live(rec, now)))
 
     def _sweep(self, now: float) -> int:
-        live = 0
+        """Reap expired/dead records and bound the strike records independently (oldest-expiring first beyond
+        max_strikes). Returns the count of LIVE CODE records only — strikes never count toward max_records, so a
+        pile of strikes can never block issuing a new code (it only degrades code entry for the struck addresses)."""
+        codes = 0
+        strikes: "list[tuple[float, str]]" = []
         try:
             entries = list(os.scandir(self.dir))
         except OSError:
@@ -419,11 +428,17 @@ class EmailCodeLedger:
             if e.name == _CODE_LOCK:
                 continue
             rec = self._read(Path(e.path)) if not e.name.startswith(".") else None
-            if self._live(rec, now) or self._strike_live(rec, now):   # a live code OR a still-blocking strike
-                live += 1
+            if self._live(rec, now):
+                codes += 1
+            elif self._strike_live(rec, now):
+                strikes.append((float(rec.get("strike_exp")), e.path))   # type: ignore[arg-type]
             else:
                 self._unlink(e.path)
-        return live
+        if len(strikes) > self.max_strikes:
+            strikes.sort()                                               # smallest strike_exp (soonest to expire) first
+            for _exp, path in strikes[:len(strikes) - self.max_strikes]:
+                self._unlink(path)
+        return codes
 
     def issue(self, email: str, purpose: str, *, bind: "Optional[dict]" = None,
               now: "Optional[float]" = None) -> "Optional[str]":
@@ -508,7 +523,8 @@ class EmailCodeLedger:
                     try:
                         self._write(p, {"strike_exp": t + _STRIKE_TTL_S, "wrongs": wrongs})
                     except OSError:
-                        self._unlink(p)
+                        pass                        # keep the existing record: never DROP the cumulative count on an
+                        #                             I/O error (that would fail the ceiling OPEN); re-tried next guess
                     return CodeBlocked() if wrongs >= self.hard_ceiling else CodeWrong(0)
                 rec["attempts"] = attempts
                 rec["wrongs"] = wrongs
