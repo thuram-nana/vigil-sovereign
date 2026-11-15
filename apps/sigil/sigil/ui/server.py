@@ -799,13 +799,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._deny(404, "unknown endpoint")
 
     def _serve_static(self, name):
-        if name not in self._STATIC_OK:
+        known = next((n for n in self._STATIC_OK if n == name), None)   # the listed name itself, never the request's
+        if known is None:
             return self._deny(404, "not found")
         try:
-            data = (_STATIC / name).read_bytes()
+            data = (_STATIC / known).read_bytes()
         except OSError:
             return self._deny(404, "not found")
-        ctype = "application/javascript" if name.endswith(".js") else "text/css"
+        ctype = "application/javascript" if known.endswith(".js") else "text/css"
         self._send(200, data, ctype=f"{ctype}; charset=utf-8")
 
     def _serve_index(self):

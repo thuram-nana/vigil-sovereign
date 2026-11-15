@@ -88,7 +88,7 @@ _PUBKEY_LOG_PREFIX = 12                           # chars of a device pubkey we 
 def _pk_prefix(pubkey) -> str:
     """A short, non-reversible tag for a device pubkey (prefix only — NEVER the full key in a log)."""
     s = str(pubkey) if pubkey else ""
-    return (s[:_PUBKEY_LOG_PREFIX] + "…") if s else "?"
+    return (_log_safe(s[:_PUBKEY_LOG_PREFIX]) + "…") if s else "?"   # escaped: the pubkey comes from the request
 
 
 _LOG_FIELD_MAX = 200                              # chars of one peer-influenced value we put in a log line
@@ -112,7 +112,8 @@ def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
             out.append(f"\\x{cp:02x}" if cp <= 0xFF else f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
     if len(s) > limit:
         out.append(f"...[+{len(s) - limit} chars]")
-    return "".join(out)
+    # every CR/LF is already an escape above; stated explicitly so a line break can never reach a log record
+    return "".join(out).replace("\r", "").replace("\n", "")
 _TS_WINDOW = 120.0                               # ± seconds a request timestamp may differ from the server clock
 
 # Each network endpoint declares the ONE envelope action that authorizes it. Binding the

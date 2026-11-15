@@ -99,6 +99,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 from . import actions, api, chat, labels, sessions
+from . import safeinput as _si
 from ..agents.blackboard import current_append_tick, wait_for_append
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
@@ -265,9 +266,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             rel = rel[len("static/"):]
         if rel in ("", "index.html"):
             rel = "index.html"
-        target = (STATIC_DIR / rel).resolve()
         # path-traversal guard: the resolved file must stay under STATIC_DIR
-        if STATIC_DIR not in target.parents and target != STATIC_DIR:
+        try:
+            target = _si.contained(STATIC_DIR, rel)
+        except ValueError:
             self._json({"error": "not found"}, status=404)
             return
         if not target.is_file():
@@ -596,7 +598,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                        status=404)
             return
         data = p.read_bytes()
-        safe = "".join(c if (c.isalnum() or c in "._-") else "-" for c in f"vigil-dossier-{run_id}.zip")[:120]
+        safe = _si.slug_chars("".join(c if (c.isalnum() or c in "._-") else "-"
+                                      for c in f"vigil-dossier-{run_id}.zip"), maxlen=120)
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(len(data)))
@@ -618,8 +621,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                                  "VERIFIED first"}, status=404)
             return
         data = p.read_bytes()
-        safe = "".join(c if (c.isalnum() or c in "._-") else "-"
-                       for c in f"vigil-fix-{run_id}-{finding_ref}.patch")[:160]
+        safe = _si.slug_chars("".join(c if (c.isalnum() or c in "._-") else "-"
+                                      for c in f"vigil-fix-{run_id}-{finding_ref}.patch"), maxlen=160)
         self.send_response(200)
         self.send_header("Content-Type", "text/x-patch")
         self.send_header("Content-Length", str(len(data)))
