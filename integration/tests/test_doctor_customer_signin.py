@@ -131,3 +131,12 @@ def test_doctor_reports_and_renders_it(tmp_path, monkeypatch):
     assert any("VIGIL_CUSTOMER_OIDC_HANDOFF is off" in n for n in report["notes"])
     text = _doc.render(report)
     assert "customer Google sign-in: on in the customer edge; on in the cockpit; inside the installed app: OFF" in text
+
+
+def test_the_founder_flag_without_the_trial_preview_is_a_note(tmp_path):
+    _host(tmp_path, cockpit="VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1\nVIGIL_TRIAL_PREVIEW_ENABLED=0\n")
+    _sec, issues, notes = dc.customer_signin_report(tmp_path, _REPO)
+    assert issues == [] and any(n.startswith("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on but") for n in notes)
+    _host(tmp_path, cockpit="VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1\nVIGIL_TRIAL_PREVIEW_ENABLED=1\n")
+    _sec, _issues, notes = dc.customer_signin_report(tmp_path, _REPO)
+    assert not any("FOUNDER_TESTER" in n for n in notes)

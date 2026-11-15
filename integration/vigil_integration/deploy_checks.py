@@ -17,7 +17,8 @@ on a development checkout with no sovereign unit installed they add at most a no
   settle's pricing) agree across the cockpit, the customer edge and the settle drain (a HARD issue when they do
   not), and a shell running ``sigil ops-sweep`` that reads only ``sigil.env`` under the cockpit's ``SIGIL_HOME``
   agrees with them (a note naming what that shell must export when it does not).
-* :func:`customer_signin_report` — customer Google sign-in agrees between the customer edge and the cockpit.
+* :func:`customer_signin_report` — customer Google sign-in agrees between the customer edge and the cockpit (and a
+  note when the founder flag is on without the trial preview it needs).
 * :func:`edge_stop_timeout_report` — every installed edge unit (``sigil-{customer,public}{,@}.service``) lets
   systemd wait for that edge's drain before it kills a stopping edge; a unit installed by an older release keeps
   its shorter timeout until it is re-installed.
@@ -718,6 +719,12 @@ def customer_signin_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
                      f"{_OIDC_FILES['customer']}: in an app installed to an iPhone Home Screen, Google sign-in finishes "
                      "in another browser and the person is not signed in to the app. Set VIGIL_CUSTOMER_OIDC_HANDOFF=1 "
                      "there and restart the customer edge.")
+    if ("cockpit" in procs and _norm("switch", get("cockpit", "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED")) == "on"
+            and _norm("switch", get("cockpit", "VIGIL_TRIAL_PREVIEW_ENABLED")) != "on"):
+        notes.append("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is on but VIGIL_TRIAL_PREVIEW_ENABLED is off in "
+                     f"{_OIDC_FILES['cockpit']}: a sign-up then grants org_admin, not founder (the founder role needs "
+                     "the preview trial). Set VIGIL_TRIAL_PREVIEW_ENABLED=1 there (run `sigil trial backfill-claims` "
+                     "before and after) and restart the cockpit, or set the founder flag to 0.")
     section = {"configured": True, "google": google, "handoff": handoff, "ok": not issues}
     return section, issues, notes
 

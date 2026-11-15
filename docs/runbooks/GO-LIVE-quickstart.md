@@ -117,7 +117,11 @@ CSRF gates must know the public host/origin).
 `VIGIL_TRIAL_PREVIEW_ENABLED=1`: a sign-up makes its founding customer a `founder`, who can prove a host it
 controls and scan it; every launch gate still applies. The founder role needs both lines: with the preview
 off, a sign-up grants `org_admin`. On an existing install whose `cockpit.env` predates the preview line, add
-both. To switch founder testing off, set the flag to `0` in `cockpit.env` and run
+both — and run `sigil trial backfill-claims` (in a shell that exports the cockpit's `SIGIL_HOME`) before you
+restart the cockpit with the preview on and once more right after, so an account made while the preview was off
+cannot take a second, preview trial through a variant of its mailbox. To switch only new sign-ups to `org_admin`
+at once, with no restart, turn the owner's `founder_tester` latch off (`sigil latch off founder_tester`, or the
+phone). To switch founder testing off for every founder, set the flag to `0` in `cockpit.env` and run
 `systemctl --user restart sigil-cockpit` (the cockpit reads `cockpit.env` only when it starts). Roles, owner
 verbs and the rollback order: `customer-roles-and-seats.md`.
 
