@@ -265,7 +265,16 @@ class EmailTokenLedger:
 
 # --- 6-digit email codes ----------------------------------------------------------------------------------------
 _DEFAULT_CODE_TTL_S = 10 * 60.0         # a code is typed while the email is open: 10 minutes
-_DEFAULT_CODE_ATTEMPTS = 5              # wrong codes per (email, purpose) before the code is destroyed
+_DEFAULT_CODE_ATTEMPTS = 5              # wrong codes per CODE before that code is destroyed
+# A per-(email, purpose) hard ceiling on CUMULATIVE wrong codes across re-sends: destroying a code and re-sending
+# only costs the per-email send limit (a few an hour), so without a cumulative cap the guess budget grows without
+# bound over days (NIST 800-63B caps consecutive failures at 100 per authenticator). Once the ceiling is reached,
+# code entry for that (email, purpose) is DISABLED (`CodeBlocked`) until a token-based success clears it
+# (`revoke_for_email`, called when the sign-up/reset completes by either path) — the person uses the email LINK
+# instead. The block is carried in a strike record under the same name as the code, kept this long since its last
+# wrong code so it survives re-sends and a destroyed code but a long-abandoned strike is still reaped.
+_DEFAULT_CODE_HARD_CEILING = 30
+_STRIKE_TTL_S = 30 * 24 * 3600.0
 _CODE_LOCK = ".codes.lock"
 # scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
 # directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
@@ -303,15 +312,22 @@ class CodeGone(NamedTuple):
     """No live code for this (email, purpose): never issued, expired, used, replaced or destroyed."""
 
 
+class CodeBlocked(NamedTuple):
+    """Code entry for this (email, purpose) is disabled: too many cumulative wrong codes. The person must follow the
+    email LINK (the token) instead; a token-based success clears the block."""
+
+
 class EmailCodeLedger:
     """6-digit, single-use, 10-minute codes bound to (email, purpose); see the module docstring."""
 
     def __init__(self, path: "str | os.PathLike", *, ttl_s: float = _DEFAULT_CODE_TTL_S,
-                 max_attempts: int = _DEFAULT_CODE_ATTEMPTS, max_records: int = _DEFAULT_MAX_TOKENS) -> None:
+                 max_attempts: int = _DEFAULT_CODE_ATTEMPTS, max_records: int = _DEFAULT_MAX_TOKENS,
+                 hard_ceiling: int = _DEFAULT_CODE_HARD_CEILING) -> None:
         self.dir = Path(path)
         self.ttl_s = float(ttl_s)
         self.max_attempts = int(max_attempts)
         self.max_records = int(max_records)
+        self.hard_ceiling = int(hard_ceiling)
 
     def _name(self, email: str, purpose: str) -> Path:
         return self.dir / hashlib.sha256(("code\x00" + purpose + "\x00" + email).encode("utf-8")).hexdigest()
@@ -373,6 +389,26 @@ class EmailCodeLedger:
         return (isinstance(exp, (int, float)) and not isinstance(exp, bool) and now < float(exp)
                 and isinstance(rec.get("salt"), str) and isinstance(rec.get("hash"), str))
 
+    @staticmethod
+    def _wrongs(rec: "Optional[dict]") -> int:
+        """The cumulative count of wrong codes for this (email, purpose), carried across destroyed/re-sent codes."""
+        w = rec.get("wrongs") if rec else 0
+        return w if isinstance(w, int) and not isinstance(w, bool) and w > 0 else 0
+
+    @staticmethod
+    def _strike_live(rec: "Optional[dict]", now: float) -> bool:
+        """A non-expired strike record (the block kept after a code is destroyed, so it outlives re-sends)."""
+        if not rec:
+            return False
+        se = rec.get("strike_exp")
+        return isinstance(se, (int, float)) and not isinstance(se, bool) and now < float(se)
+
+    def _blocking(self, rec: "Optional[dict]", now: float) -> bool:
+        """Code entry is disabled for this (email, purpose): the cumulative wrong count has reached the hard ceiling
+        and the record is still live (a live code, or a non-expired strike). An expired strike no longer blocks."""
+        return (self._wrongs(rec) >= self.hard_ceiling
+                and (self._live(rec, now) or self._strike_live(rec, now)))
+
     def _sweep(self, now: float) -> int:
         live = 0
         try:
@@ -382,7 +418,8 @@ class EmailCodeLedger:
         for e in entries:
             if e.name == _CODE_LOCK:
                 continue
-            if not e.name.startswith(".") and self._live(self._read(Path(e.path)), now):
+            rec = self._read(Path(e.path)) if not e.name.startswith(".") else None
+            if self._live(rec, now) or self._strike_live(rec, now):   # a live code OR a still-blocking strike
                 live += 1
             else:
                 self._unlink(e.path)
@@ -403,13 +440,19 @@ class EmailCodeLedger:
         salt = secrets.token_hex(16)
         try:
             rec = {"exp": t + self.ttl_s, "salt": salt, "hash": self._hash(code, salt, email, purpose),
-                   "attempts": 0, "bind": dict(bind or {})}
+                   "attempts": 0, "wrongs": 0, "bind": dict(bind or {})}
             with self._locked():
                 p = self._name(email, purpose)
                 prev = self._read(p)
+                # The cumulative wrong-code count carries across a re-send AND across a destroyed code's strike, so
+                # re-sending never resets the hard ceiling (a re-sent code over a reached ceiling is born blocked).
+                # It carries ONLY while the record is still live: a strike older than _STRIKE_TTL_S no longer blocks
+                # (an abandoned block is reaped), so a code issued after it starts the count fresh.
+                if self._live(prev, t) or self._strike_live(prev, t):
+                    rec["wrongs"] = self._wrongs(prev)
                 if self._live(prev, t):
-                    rec["attempts"] = self._attempts(prev)
-                elif self._sweep(t) >= self.max_records:
+                    rec["attempts"] = self._attempts(prev)   # a live code also hands on its per-code attempt count
+                elif not self._strike_live(prev, t) and self._sweep(t) >= self.max_records:
                     return None
                 self._write(p, rec)
         except OSError:
@@ -434,6 +477,8 @@ class EmailCodeLedger:
         t = time.time() if now is None else float(now)
         p = self._name(email, purpose)
         first = self._read(p)
+        if self._blocking(first, t):
+            return CodeBlocked()     # too many cumulative wrong codes: entry disabled until a token-based success
         try:
             if first is None or not self._live(first, t):
                 self._hash(typed or "000000", _ABSENT_SALT, email, purpose)    # the same work: no timing tell
@@ -443,6 +488,8 @@ class EmailCodeLedger:
             guess = self._hash(typed or "000000", str(first["salt"]), email, purpose)
             with self._locked():
                 rec = self._read(p)
+                if self._blocking(rec, t):             # crossed the ceiling via a concurrent guess: never compared
+                    return CodeBlocked()
                 if rec is None or not self._live(rec, t):
                     self._unlink(p)
                     return CodeGone()
@@ -454,10 +501,17 @@ class EmailCodeLedger:
                     bind = rec.get("bind")
                     return CodeOk(dict(bind) if isinstance(bind, dict) else {})
                 attempts = self._attempts(rec) + 1
-                if attempts >= self.max_attempts:
-                    self._unlink(p)
-                    return CodeWrong(0)
+                wrongs = self._wrongs(rec) + 1
+                if wrongs >= self.hard_ceiling or attempts >= self.max_attempts:
+                    # destroy the live code but KEEP a strike carrying the cumulative wrong count, so re-sending a
+                    # code never resets the hard ceiling and a long-abandoned block is still reaped (_strike_live).
+                    try:
+                        self._write(p, {"strike_exp": t + _STRIKE_TTL_S, "wrongs": wrongs})
+                    except OSError:
+                        self._unlink(p)
+                    return CodeBlocked() if wrongs >= self.hard_ceiling else CodeWrong(0)
                 rec["attempts"] = attempts
+                rec["wrongs"] = wrongs
                 try:
                     self._write(p, rec)
                 except OSError:

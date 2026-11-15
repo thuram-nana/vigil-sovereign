@@ -2399,14 +2399,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
         # X-VIGIL-* identity header (anti-spoof): identity is set by the proxy, never accepted from a client.
         # ALSO strip the client's Accept-Encoding (see below).
+        # The client's own X-Real-IP / X-Forwarded-For are NEVER forwarded: the customer edge trusts X-Real-IP from
+        # its loopback hop (this proxy), so a forwarded client value would let a client choose the address that
+        # drives the installed-app hand-off's same-network rule and the per-IP legs. This proxy SETS X-Real-IP from
+        # the real peer it accepted — unless that peer is itself a trusted loopback hop (an nginx in front), whose
+        # already-set X-Real-IP we keep. (ios-review r2, R3.)
+        upstream_real_ip = (self.headers.get("X-Real-IP", "") or "").strip()
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
             # Cookie is never copied verbatim — it is partitioned across the plane boundary below.
             if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
-                    or lk == "cookie" or _is_vigil_identity_header(key)):
+                    or lk == "cookie" or lk == "x-real-ip" or lk == "x-forwarded-for"
+                    or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
+        peer = self.client_address[0] if self.client_address else ""
+        if peer and not _is_loopback(peer):
+            out["X-Real-IP"] = peer                        # the real client reached this proxy directly
+        elif peer and _is_loopback(peer) and upstream_real_ip:
+            out["X-Real-IP"] = upstream_real_ip            # a trusted loopback hop (nginx) already set it; keep it
+        # else: no trusted client address — forward none, so the edge falls back to its loopback peer and the
+        # hand-off's client_net treats that as non-global and refuses (fail closed), never a client-chosen value.
         # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
         # credential redactor can scan. A compressed body has no literal token bytes to find, so a forwarded
         # `Accept-Encoding: gzip` would let a token-embedding backend index slip past redaction and reach the

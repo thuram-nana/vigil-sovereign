@@ -45,7 +45,8 @@ from test_custui import _edge_raw, _get, _MiniIdP, _oidc_login, _opener, _stack_
 
 from sigil.ui.custui import CUSTOMER_COOKIE, build_customer_server
 from sigil.ui.oidc_handoff import (Elsewhere, Gone, HandoffBusy, HandoffExists, HandoffStore, HandoffTooMany,
-                                   Redeemed, WrongCode, challenge_of, client_net, format_code, normalize_code)
+                                   Redeemed, WrongCode, challenge_of, client_net, format_code, ip_rate_key,
+                                   normalize_code)
 
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 
@@ -252,14 +253,66 @@ def test_the_store_defaults_bound_one_account_and_one_network():
     ("fe80::1%eth0", "fe80::/56"), ("127.0.0.1", "127.0.0.0/24"),
     ("", ""), (None, ""), ("unknown", ""), ("203.0.113.0/24", ""), ("1.2.3.4, 5.6.7.8", ""),
 ])
-def test_client_net(ip, net):
-    assert client_net(ip) == net
+def test_client_net_bucketing_with_private_allowed(ip, net):
+    # allow_private=True (dev/test posture): the /24 or /56 bucketing, independent of global-reachability.
+    assert client_net(ip, allow_private=True) == net
+
+
+@pytest.mark.parametrize("ip", [
+    "127.0.0.1", "::1", "10.1.2.3", "192.168.1.9", "172.16.0.1",
+    "100.64.0.1",                                                              # carrier-grade NAT (100.64/10)
+    "fe80::1", "fc00::1",                                                      # IPv6 link-local / unique-local
+    "203.0.113.77", "198.51.100.23", "2001:db8:1200:a1::5",                   # RFC 5737 / RFC 3849 documentation
+    "0.0.0.0", "", None, "unknown", "1.2.3.4, 5.6.7.8",
+])
+def test_client_net_production_refuses_non_global(ip):
+    # Production posture (the default): a non-globally-routable address is "no network" so the hand-off fails
+    # closed — a mis-configured tunnel (127.0.0.1 for everyone) or a private/VPN peer can never collapse every
+    # visitor onto one shared network and let a relayed code redeem. (ios-review r2, MED #1.)
+    assert client_net(ip) == ""
+
+
+@pytest.mark.parametrize("ip,net", [
+    ("8.8.8.8", "8.8.8.0/24"), ("1.1.1.1", "1.1.1.0/24"),
+    ("2606:4700:4700:1234:5::1", "2606:4700:4700:1200::/56"),                 # /56 keeps the top 8 bits of hextet 4
+])
+def test_client_net_production_buckets_a_global_address(ip, net):
+    assert client_net(ip) == net                                              # a real public client still buckets
+
+
+@pytest.mark.parametrize("ip,key", [
+    ("203.0.113.77", "203.0.113.77"), ("::ffff:8.8.8.8", "8.8.8.8"),          # v4 (incl. mapped) keys on the full addr
+    ("2001:db8:1200:a1:ffff::9", "2001:db8:1200:a1::/64"),                    # v6 keys on the /64 (one subscriber)
+    ("2001:db8:1200:a2::1", "2001:db8:1200:a2::/64"),                         # a different /64 is a different key
+    ("fe80::1%eth0", "fe80::/64"), ("", "?"), (None, "?"), ("garbage", "garbage"),
+])
+def test_ip_rate_key_buckets_ipv6_by_64(ip, key):
+    # The per-IP rate-limit bucket: full address for IPv4, /64 for IPv6 — so one IPv6 /64 cannot mint unbounded
+    # distinct per-IP keys and defeat the leg. (ios-review r2, MED #3.)
+    assert ip_rate_key(ip) == key
 
 
 def test_normalize_code():
     assert normalize_code(" 123 456 ") == "123456" and normalize_code("123456") == "123456"
     for bad in ("12345", "1234567", "12a456", None, ""):
         assert normalize_code(bad) == ""
+
+
+def test_ip_trusts_x_real_ip_only_from_loopback_never_the_forwarded_first_entry():
+    # MED #1 (ios-review r2): the client-chosen FIRST X-Forwarded-For entry is attacker-controlled, so _ip() never
+    # falls back to it. A trusted loopback hop's X-Real-IP is honored; with no X-Real-IP the edge collapses to its
+    # loopback peer (which client_net then treats as non-global and refuses) — never a header the client picked.
+    from sigil.ui.custui import CustomerHandler
+
+    class _H:
+        def __init__(self, peer, headers):
+            self.client_address, self.headers = (peer, 0), headers
+
+    ip = CustomerHandler._ip
+    assert ip(_H("127.0.0.1", {"X-Real-IP": "8.8.8.8"})) == "8.8.8.8"                  # trusted loopback hop
+    assert ip(_H("127.0.0.1", {"X-Forwarded-For": "8.8.8.8, 10.0.0.1"})) == "127.0.0.1"   # XFF-first NOT trusted
+    assert ip(_H("::1", {"X-Forwarded-For": "8.8.8.8"})) == "::1"
+    assert ip(_H("198.51.100.7", {"X-Real-IP": "8.8.8.8"})) == "198.51.100.7"         # non-loopback peer: no headers
 
 
 # ================================================================================================================
@@ -467,6 +520,30 @@ def test_a_relayed_code_redeemed_from_another_network_mints_nothing(tmp_path, mo
         assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
         st, hdr, body = _redeem(ep, {"verifier": attacker_v, "code": code}, ip="198.51.100.40")
         assert st == 401 and body["retry"] is False and CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_the_redeem_ignores_a_network_supplied_in_the_request_body(tmp_path, monkeypatch):
+    """N13 (ios-review r2): a relay attacker who holds the RIGHT code redeems from their own network but claims the
+    victim's network in the request body. The redeem reads the network from the CLIENT's address, never the body, so
+    it is refused as another network and mints nothing. Pins the mutation `net = body.get('net') or client_net(...)`
+    (which would let the attacker claim the victim's /24 and mint)."""
+    _on(monkeypatch)
+    idp = _MiniIdP()
+    sov, edge, ep, _ = _stack_oidc(tmp_path, monkeypatch, idp)
+    try:
+        v = _verifier()
+        st, hdr, _ = _handoff_login(ep, challenge_of(v), ip="198.51.100.23")        # the victim's network
+        q = parse_qs(urlparse(hdr["Location"]).query)
+        idp.next_id_token = idp.mint(nonce=q["nonce"][0], sub="victim", email="victim@gmail.com")
+        st, _vh, page = _callback(ep, q["state"][0], ip="198.51.100.23")
+        assert st == 200
+        code = _code_from(page)                                                     # the attacker holds the right code
+        st, hdr, body = _redeem(ep, {"verifier": v, "code": code, "net": "198.51.100.0/24",
+                                     "username": "cust_x", "org_id": "org_x"}, ip="203.0.113.250")
+        assert st == 401 and body["retry"] is False and "another network" in body["error"]
+        assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")
     finally:
         sov.shutdown(); edge.shutdown()
 

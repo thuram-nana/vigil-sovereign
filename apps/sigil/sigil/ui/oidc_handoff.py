@@ -107,20 +107,52 @@ def format_code(code: str) -> str:
     return f"{code[:3]} {code[3:]}"
 
 
-def client_net(ip) -> str:
-    """The network a client address belongs to for the hand-off's same-network rule: the /24 of an IPv4 address, the
-    /56 of an IPv6 one (an IPv4-mapped IPv6 address counts as its IPv4 address), e.g. "203.0.113.0/24". "" when the
-    value is not an IP address — every caller then refuses (fail closed)."""
+def _parse_ip(ip):
+    """The ``ipaddress`` of ``ip`` (an IPv4-mapped IPv6 address unwrapped to its IPv4 address), or None when the
+    value is not an IP address. A zone id ("fe80::1%eth0") is stripped first."""
     raw = str(ip or "").strip()
     try:
-        addr = ipaddress.ip_address(raw.split("%", 1)[0])          # a zone id ("fe80::1%eth0") is not the network
+        addr = ipaddress.ip_address(raw.split("%", 1)[0])
     except ValueError:
-        return ""
+        return None
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
+    return addr
+
+
+def client_net(ip, *, allow_private: bool = False) -> str:
+    """The network a client address belongs to for the hand-off's same-network rule: the /24 of an IPv4 address, the
+    /56 of an IPv6 one (an IPv4-mapped IPv6 address counts as its IPv4 address), e.g. "203.0.113.0/24". "" when the
+    value is not an IP address, OR (the default, production posture) is not a GLOBALLY-ROUTABLE address — every
+    caller then refuses (fail closed).
+
+    Why the is_global gate: the rule only means anything when the edge sees each visitor's OWN public address. When
+    the edge instead sees a loopback (127.0.0.1 from a mis-configured tunnel), a private/VPN/WireGuard peer, a
+    link-local or a carrier-grade-NAT (100.64/10) address, every visitor collapses onto ONE "network", so a relayed
+    pairing code redeems and the per-IP caps go global. Treating a non-global address as "no network" refuses the
+    hand-off there instead of trusting it. ``allow_private=True`` (dev/test, OUTSIDE production posture) keeps the
+    old behaviour so a loopback ``vigil up`` still works; production callers pass False."""
+    addr = _parse_ip(ip)
+    if addr is None:
+        return ""
+    if not allow_private and not addr.is_global:
+        return ""                                                  # non-routable: not a usable "network" (fail closed)
     if isinstance(addr, ipaddress.IPv4Address):
         return str(ipaddress.IPv4Network((int(addr), _V4_PREFIX), strict=False))
     return str(ipaddress.IPv6Network((int(addr), _V6_PREFIX), strict=False))
+
+
+def ip_rate_key(ip) -> str:
+    """The bucket a client address keys a per-IP rate-limit leg on: the full address for IPv4, the /64 for IPv6 (one
+    device and one LAN stay inside a /64), so a single IPv6 /64 — which a provider hands one subscriber — cannot
+    mint an unbounded number of distinct per-IP keys and thereby defeat the leg or exhaust the marker directory.
+    Falls back to the raw string for a value that is not an IP address (keyed, never dropped)."""
+    addr = _parse_ip(ip)
+    if addr is None:
+        return str(ip or "").strip() or "?"
+    if isinstance(addr, ipaddress.IPv4Address):
+        return str(addr)
+    return str(ipaddress.IPv6Network((int(addr), 64), strict=False))
 
 
 class HandoffBusy(Exception):

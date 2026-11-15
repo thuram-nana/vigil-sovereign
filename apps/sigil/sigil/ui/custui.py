@@ -82,6 +82,13 @@ _SLOW_HOP_TIMEOUTS_S = {
     # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
     "signup_request": 60.0,
     "recover_request": 60.0,
+    # Confirm a sign-up / reset by its 6-digit CODE: the cockpit's code check waits up to email_channel._HASH_WAIT_S
+    # (30 s) for a hash slot, then scrypt (~tens of ms) + the commit. The edge MUST outlast that: a hop that gives up
+    # first lets the cockpit set the new password (and, on recover, the edge then never severs the old sessions,
+    # because it severs only on the 200 it did not receive). 45 s clears 30 + scrypt + commit with margin. Pinned
+    # against _HASH_WAIT_S by test_custui_hop_budget.py.
+    "signup_confirm": 45.0,
+    "recover_confirm": 45.0,
 }
 
 
@@ -420,24 +427,32 @@ class CustomerHandler(BaseHTTPRequestHandler):
         and sits behind a reverse proxy, so the raw TCP peer is the PROXY — keying on it would collapse every
         customer onto ONE rate-limit key, letting a single attacker lock out the entire customer auth surface
         (the red-pen's CO5). When the immediate peer is loopback (the trusted same-host proxy hop), take the
-        real client IP from `X-Real-IP` / the first `X-Forwarded-For` entry instead. Headers are trusted ONLY from
-        a loopback peer, and the shipped proxies overwrite `X-Real-IP` with the address they accepted the
-        connection from (nginx: `$remote_addr`, restored from CF-Connecting-IP only for Cloudflare's published
-        ranges; Caddy: `{remote_host}`), so a client cannot choose the value. It feeds the per-IP legs (the
-        per-account/email leg is the reliable one) and the installed-app Google hand-off's same-network rule
-        (`oidc_handoff.client_net`), which compares the networks of the hand-off's own steps with each other —
-        never a grant of access by itself."""
+        real client IP from `X-Real-IP` instead. Headers are trusted ONLY from a loopback peer, and the shipped
+        proxies overwrite `X-Real-IP` with the address they accepted the connection from (nginx: `$remote_addr`,
+        restored from CF-Connecting-IP only for Cloudflare's published ranges; Caddy: `{remote_host}`; the `vigil up`
+        proxy: its own peer), so a client cannot choose the value. The client-chosen FIRST `X-Forwarded-For` entry is
+        NOT a fallback — it is attacker-controlled, so trusting it (when the trusted hop sets no `X-Real-IP`) would
+        let a client pick the victim's address and defeat the installed-app hand-off's same-network rule and every
+        per-IP leg. A hop that forwards no `X-Real-IP` therefore collapses to its loopback peer, which
+        `oidc_handoff.client_net` treats as non-global and refuses (fail closed), rather than to a header the client
+        chose. This feeds the per-IP legs (the per-account/email leg is the reliable one) and the hand-off's
+        same-network rule (`oidc_handoff.client_net`), which compares the networks of the hand-off's own steps with
+        each other — never a grant of access by itself."""
         peer = self.client_address[0] if self.client_address else ""
         if peer and _is_loopback(peer):
             xr = (self.headers.get("X-Real-IP", "") or "").strip()
             if xr:
                 return xr
-            xff = self.headers.get("X-Forwarded-For", "")
-            if xff:
-                first = xff.split(",")[0].strip()
-                if first:
-                    return first
         return peer
+
+    def _handoff_net(self) -> str:
+        """The client's network for the installed-app Google hand-off's same-network rule, under this edge's posture:
+        production requires a globally-routable client address (a loopback/private/CGNAT address is 'no network' and
+        the hand-off refuses — see oidc_handoff.client_net); a dev/test edge (not production posture) allows a private
+        address so a loopback `vigil up` still works. Used identically at login-start, callback and redeem so the
+        three steps agree on what 'the same network' means."""
+        from .oidc_handoff import client_net
+        return client_net(self._ip(), allow_private=not is_production_posture())
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -648,7 +663,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._deny(403, "denied (origin / host)")
         from .. import config as _config
         from . import oidc as _oidc
-        from .oidc_handoff import client_net, valid_challenge
+        from .oidc_handoff import valid_challenge
         q = parse_qs(urlparse(self.path).query, keep_blank_values=True)   # an empty handoff= is malformed, not absent
         handoff = None
         handoff_net = ""
@@ -658,8 +673,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             handoff = q["handoff"][0] if len(q["handoff"]) == 1 else ""
             if not valid_challenge(handoff):
                 return self._deny(400, "bad request: malformed hand-off")
-            handoff_net = client_net(self._ip())
-            if not handoff_net:                       # no client address to bind the hand-off to: fail closed
+            handoff_net = self._handoff_net()
+            if not handoff_net:                       # no usable client network to bind the hand-off to: fail closed
                 return self._deny(400, "bad request: the client address could not be read")
         try:
             cfg = _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
@@ -747,10 +762,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
         pairing code, and this page shows the code and the Google account it signs in. The username and org come
         from the provisioner's answer only."""
         from .. import config as _config
-        from .oidc_handoff import HandoffBusy, HandoffExists, HandoffTooMany, client_net
+        from .oidc_handoff import HandoffBusy, HandoffExists, HandoffTooMany
         if not _config.customer_oidc_handoff_enabled():   # switched off since the login started
             return self._handoff_page(None, 404)
-        net = client_net(self._ip())
+        net = self._handoff_net()
         if not net or not rec.handoff_net or not hmac.compare_digest(net.encode("utf-8"),
                                                                      rec.handoff_net.encode("utf-8")):
             return self._handoff_page(None, 403)
@@ -834,18 +849,18 @@ class CustomerHandler(BaseHTTPRequestHandler):
         record, then the record is gone); every failure counts against the caller's IP (10 per 15 minutes)."""
         from .. import config as _config
         from .login_ratelimit import LoginRateLimiter
-        from .oidc_handoff import Elsewhere, Redeemed, WrongCode, client_net
+        from .oidc_handoff import Elsewhere, Redeemed, WrongCode, ip_rate_key
         if not (_config.customer_oidc_enabled() and _config.customer_oidc_handoff_enabled()):
             return self._deny(404, "unknown action")
         limiter = LoginRateLimiter(self.server.oidc_handoff_limit_dir, max_fails=_HANDOFF_IP_FAILS,
                                    window_s=_HANDOFF_IP_WINDOW_S, base_lock_s=60.0, max_lock_s=3600.0)
-        key = f"handoff:ip:{self._ip()}"
+        key = f"handoff:ip:{ip_rate_key(self._ip())}"
         locked = limiter.locked(key)
         if locked is not None:
             self._pending_retry_after = str(int(max(1, locked)))
             return self._deny(429, "too many attempts; wait and try again")
         out = self._oidc_handoff_store().redeem(str(body.get("verifier", "")), str(body.get("code", "")),
-                                                net=client_net(self._ip()))
+                                                net=self._handoff_net())
         if isinstance(out, Redeemed):
             self._mint(out.username, out.org_id)           # the IP's failures are not cleared: they age out
             return self._json({"ok": True, "username": out.username, "active_org": out.org_id})

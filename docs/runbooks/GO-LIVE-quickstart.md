@@ -219,9 +219,16 @@ and says to close the page unless the person just tapped *Continue with Google* 
 most 3 sign-ins per account and 16 per network wait at once. The network rule does not tell apart two clients on the
 same network (one Wi-Fi, one office or carrier address range): there, the code and the page's warning are what
 stand in the way. A person whose phone changes network mid-way (Wi-Fi to mobile data) is asked to start again.
-The rule needs the reverse proxy to pass each visitor's own address: the shipped nginx vhost does, including
-behind Cloudflare (`real_ip_header CF-Connecting-IP` from Cloudflare's ranges only). A proxy that passes its own
-peer instead (for example the Caddy example placed behind Cloudflare) would show every visitor as Cloudflare.
+The rule needs the reverse proxy to pass each visitor's own **globally-routable** address: the shipped nginx vhost
+does, including behind Cloudflare (`real_ip_header CF-Connecting-IP` from Cloudflare's ranges only). If the edge
+instead sees a loopback, private, VPN or carrier-NAT address — because the proxy passes its own peer, or a
+**cloudflared tunnel** runs on the host and forwards to nginx over loopback (then every visitor looks like
+`127.0.0.1`) — VIGIL treats that as *no network* and the installed-app hand-off **refuses** (it never relays a
+pairing code onto a shared address). Fix the proxy so the edge sees the real address: the Caddy example must pass
+the visitor's address (not its own peer); for a cloudflared tunnel, add `set_real_ip_from 127.0.0.1;` (and `::1`)
+to the customer vhost so nginx restores the real IP from `CF-Connecting-IP` (see `vigil-customer.nginx.conf`).
+Password-reset and sign-up 6-digit codes are also capped: after too many wrong codes for one address, code entry
+is disabled and the person uses the email link instead.
 
 Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
 to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to

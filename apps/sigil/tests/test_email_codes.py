@@ -36,8 +36,8 @@ from sigil.governor.orgs import OrgRegistry
 from sigil.governor.wallet import WalletRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
-from sigil.ui.email_channel import (PURPOSE_RECOVER, PURPOSE_VERIFY, CodeGone, CodeOk, CodeWrong, EmailCodeLedger,
-                                    EmailSender, EmailTokenLedger, format_code, normalize_code)
+from sigil.ui.email_channel import (PURPOSE_RECOVER, PURPOSE_VERIFY, CodeBlocked, CodeGone, CodeOk, CodeWrong,
+                                    EmailCodeLedger, EmailSender, EmailTokenLedger, format_code, normalize_code)
 from sigil.ui.login_ratelimit import LoginRateLimiter
 from sigil.ui.provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited, Provisioner,
                                 _signup_org_id, _signup_username)
@@ -75,7 +75,69 @@ def test_the_fifth_wrong_code_destroys_it(tmp_path):
     assert [led.check("a@acme.com", PURPOSE_VERIFY, wrong, now=101.0) for _ in range(5)] == \
         [CodeWrong(4), CodeWrong(3), CodeWrong(2), CodeWrong(1), CodeWrong(0)]
     assert led.check("a@acme.com", PURPOSE_VERIFY, code, now=101.0) == CodeGone()
-    assert [p for p in tmp_path.iterdir() if not p.name.startswith(".")] == []
+    # the live code is destroyed; what remains is only a strike record (the cumulative wrong-count carried across
+    # re-sends for the hard ceiling), which holds NO code material.
+    leftover = [p for p in tmp_path.iterdir() if not p.name.startswith(".")]
+    assert len(leftover) == 1
+    strike = json.loads(leftover[0].read_text())
+    assert set(strike) == {"strike_exp", "wrongs"} and strike["wrongs"] == 5
+
+
+def _wrong_for(code: str) -> str:
+    return f"{(int(code) + 1) % 1_000_000:06d}"
+
+
+def test_the_hard_ceiling_blocks_code_entry_across_re_sends(tmp_path):
+    # Destroying a code and re-sending only costs the per-email SEND limit, so the per-code 5 is not a real cap on
+    # guessing. A cumulative hard ceiling across re-sends disables code entry until a token-based success — the
+    # person uses the email LINK instead. (ios-review r2, MED #3.)
+    led = EmailCodeLedger(tmp_path, hard_ceiling=8)
+    c1 = led.issue("a@acme.com", PURPOSE_VERIFY, now=100.0)
+    outs = [led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c1), now=101.0) for _ in range(5)]
+    assert outs == [CodeWrong(4), CodeWrong(3), CodeWrong(2), CodeWrong(1), CodeWrong(0)]   # wrongs 1..5, c1 gone
+    c2 = led.issue("a@acme.com", PURPOSE_VERIFY, now=102.0)                                  # inherits wrongs=5
+    assert led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c2), now=103.0) == CodeWrong(4)   # wrongs=6
+    assert led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c2), now=103.0) == CodeWrong(3)   # wrongs=7
+    assert led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c2), now=103.0) == CodeBlocked()  # wrongs=8 -> blocked
+    # once blocked, even the RIGHT code is refused: code ENTRY is disabled, not merely wrong codes
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c2, now=104.0) == CodeBlocked()
+    # re-sending cannot reset the ceiling — a fresh code is born blocked
+    c3 = led.issue("a@acme.com", PURPOSE_VERIFY, now=105.0)
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c3, now=106.0) == CodeBlocked()
+
+
+def test_a_token_success_revoke_clears_the_block(tmp_path):
+    led = EmailCodeLedger(tmp_path, hard_ceiling=5)
+    c1 = led.issue("a@acme.com", PURPOSE_VERIFY, now=100.0)
+    for _ in range(5):
+        led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c1), now=101.0)   # 5 wrong -> wrongs=5 -> blocked
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c1, now=101.0) == CodeBlocked()
+    led.revoke_for_email("a@acme.com")                                        # a token-based success clears the strike
+    c2 = led.issue("a@acme.com", PURPOSE_VERIFY, now=102.0)
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c2, now=103.0) == CodeOk({})
+
+
+def test_a_correct_code_lets_a_fresh_code_start_the_count_over(tmp_path):
+    led = EmailCodeLedger(tmp_path, hard_ceiling=8)
+    c1 = led.issue("a@acme.com", PURPOSE_VERIFY, now=100.0)
+    for _ in range(3):
+        led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c1), now=101.0)   # wrongs -> 3
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c1, consume=True, now=101.0) == CodeOk({})   # clears the record
+    c2 = led.issue("a@acme.com", PURPOSE_VERIFY, now=102.0)                   # prev gone -> cumulative count reset
+    outs = [led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c2), now=103.0) for _ in range(4)]
+    assert outs == [CodeWrong(4), CodeWrong(3), CodeWrong(2), CodeWrong(1)]   # a fresh 5, not immediately blocked
+
+
+def test_an_abandoned_block_is_reaped_after_the_strike_ttl(tmp_path):
+    from sigil.ui.email_channel import _STRIKE_TTL_S
+    led = EmailCodeLedger(tmp_path, hard_ceiling=5)
+    c1 = led.issue("a@acme.com", PURPOSE_VERIFY, now=100.0)
+    for _ in range(5):
+        led.check("a@acme.com", PURPOSE_VERIFY, _wrong_for(c1), now=101.0)
+    assert led.check("a@acme.com", PURPOSE_VERIFY, "000000", now=101.0) == CodeBlocked()
+    later = 101.0 + _STRIKE_TTL_S + 1.0                                       # long abandoned: the strike expires
+    c2 = led.issue("a@acme.com", PURPOSE_VERIFY, now=later)                   # a fresh code, count reset
+    assert led.check("a@acme.com", PURPOSE_VERIFY, c2, now=later + 1.0) == CodeOk({})
 
 
 @pytest.mark.parametrize("typed", ["", "12345", "1234567", "abcdef", "١٢٣٤٥٦"])
@@ -103,7 +165,7 @@ def test_the_raw_code_and_the_email_are_never_on_disk(tmp_path):
     blob = files[0].read_text()
     assert code not in blob and format_code(code) not in blob and "alice@acme.com" not in blob
     rec = json.loads(blob)
-    assert set(rec) == {"exp", "salt", "hash", "attempts", "bind"}
+    assert set(rec) == {"exp", "salt", "hash", "attempts", "wrongs", "bind"}
     # the stored hash is the salted scrypt of the code, bound to the purpose and the address
     assert EmailCodeLedger._hash(code, rec["salt"], "alice@acme.com", PURPOSE_VERIFY) == rec["hash"]
     assert EmailCodeLedger._hash(code, rec["salt"], "alice@acme.com", PURPOSE_RECOVER) != rec["hash"]

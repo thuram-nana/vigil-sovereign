@@ -43,7 +43,7 @@ assert_no_offense()
 
 from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
                                 METHOD_GOOGLE_OIDC, METHOD_PASSKEY, PasswordIdentityProvider)
-from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY, CodeOk, format_code  # noqa: E402
+from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY, CodeBlocked, CodeOk, format_code  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
 _LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
@@ -535,8 +535,9 @@ class Provisioner:
         values)."""
         if self.email_codes is None:
             raise ProvisionError("email codes are not enabled on this deployment")
+        from .oidc_handoff import ip_rate_key           # the per-IP leg buckets IPv6 by /64 (one subscriber range)
         email_l = str(email or "").strip().lower()
-        ikey, ekey = f"code:ip:{ip}", f"code:{purpose}:{email_l}"
+        ikey, ekey = f"code:ip:{ip_rate_key(ip)}", f"code:{purpose}:{email_l}"
         wait = self.rate_limiter.admit(ikey, now=t)
         if wait is not None:
             raise ProvisionRateLimited(wait)
@@ -547,6 +548,15 @@ class Provisioner:
         res = self.email_codes.check(email_l, purpose, code, consume=consume, now=t) if email_l else None
         if isinstance(res, CodeOk):
             return email_l, res.bind
+        if isinstance(res, CodeBlocked):
+            # Cumulative hard ceiling reached: code entry for this (email, purpose) is disabled until the email
+            # LINK (the token) is used. A distinct message guides the person there; it reveals only that many wrong
+            # codes were entered for this address (which the attacker who entered them already knows), not whether
+            # an account exists — a sign-up code is issued for any address, and the recover path's existence signal
+            # predates codes.
+            self._audit(f"{purpose}_code", target=email_l, outcome="blocked")
+            raise ProvisionDenied("too many incorrect codes were entered for this email; "
+                                  "use the link in the email instead")
         self._audit(f"{purpose}_code", target=email_l, outcome="denied")
         raise ProvisionDenied("invalid or expired code")
 
