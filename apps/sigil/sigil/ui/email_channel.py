@@ -25,8 +25,10 @@ code per (email, purpose) — a new email replaces the previous code and inherit
 re-sending does not buy more guesses. A guess is compared only with the code it was hashed for: a code replaced
 while a guess was being hashed answers "gone". Stored hash-named only: the record name is sha256 of (purpose,
 email) and the code is kept as a salted scrypt hash, never the raw code. Every check costs one scrypt whether or
-not a code exists (no timing tell), and at most `_HASH_SLOTS` hashes run at once in a process, so a burst of
-checks cannot make it hold many 16 MiB hash buffers at the same time. A code proves the same thing as the token in
+not a code exists (no timing tell), and every hash runs on one small pool of `_HASH_CONCURRENCY` worker threads,
+so a burst of checks cannot make the process hold many 16 MiB hash buffers: at most that many run at once, and only
+those threads ever allocate one (the C allocator keeps a freed buffer in the arena of the thread that used it, so
+hashing on each request's own thread would leave one per thread). A code proves the same thing as the token in
 that email — control of the mailbox — and nothing more.
 
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
@@ -39,8 +41,9 @@ import json
 import os
 import secrets
 import smtplib
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
 from contextlib import contextmanager
 from email.message import EmailMessage
 from pathlib import Path
@@ -267,10 +270,11 @@ _CODE_LOCK = ".codes.lock"
 # scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
 # directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1
-# At most this many code hashes run at once in one process (each holds a ~16 MiB buffer); the others wait their
-# turn, up to _HASH_WAIT_S, and then fail closed (a check answers "gone", an issue returns no code).
+# Every code hash runs on this pool: at most _HASH_CONCURRENCY at once in one process (each holds a ~16 MiB buffer),
+# and only these threads ever allocate one. The others wait their turn, up to _HASH_WAIT_S, and then fail closed (a
+# check answers "gone", an issue returns no code); a hash still queued then is dropped.
 _HASH_CONCURRENCY = 4
-_HASH_SLOTS = threading.BoundedSemaphore(_HASH_CONCURRENCY)
+_HASH_POOL = ThreadPoolExecutor(max_workers=_HASH_CONCURRENCY, thread_name_prefix="email-code-hash")
 _HASH_WAIT_S = 30.0
 # The salt a check hashes with when there is no code to compare with: the same work as a real check, so the answer
 # takes as long for an address with a code as for one without.
@@ -314,16 +318,16 @@ class EmailCodeLedger:
 
     @staticmethod
     def _hash(code: str, salt: str, email: str, purpose: str) -> str:
-        """The salted scrypt of `code` bound to (purpose, email). Runs in one of `_HASH_SLOTS`; raises TimeoutError
-        (an OSError) when no slot frees up within `_HASH_WAIT_S`."""
-        if not _HASH_SLOTS.acquire(timeout=_HASH_WAIT_S):
-            raise TimeoutError("too many email-code checks at once")
+        """The salted scrypt of `code` bound to (purpose, email), computed on `_HASH_POOL`. Raises TimeoutError (an
+        OSError) when it has not run within `_HASH_WAIT_S` (the pool is busy): the caller fails closed."""
+        job = _HASH_POOL.submit(hashlib.scrypt, code.encode("ascii"),
+                                salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
+                                n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
         try:
-            return hashlib.scrypt(code.encode("ascii"),
-                                  salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
-                                  n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32).hex()
-        finally:
-            _HASH_SLOTS.release()
+            return job.result(timeout=_HASH_WAIT_S).hex()
+        except _FutureTimeout:
+            job.cancel()                                   # still queued: dropped; already running: result discarded
+            raise TimeoutError("too many email-code checks at once") from None
 
     @contextmanager
     def _locked(self) -> Iterator[None]:

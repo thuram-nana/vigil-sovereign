@@ -291,14 +291,39 @@ def test_no_free_hash_slot_fails_closed(tmp_path, monkeypatch):
     led = EmailCodeLedger(tmp_path)
     code = led.issue("a@acme.com", PURPOSE_RECOVER)
     monkeypatch.setattr(ec, "_HASH_WAIT_S", 0.05)
-    held = [ec._HASH_SLOTS.acquire() for _ in range(ec._HASH_CONCURRENCY)]
+    release = threading.Event()
+    busy = [ec._HASH_POOL.submit(release.wait, 10) for _ in range(ec._HASH_CONCURRENCY)]   # every worker taken
     try:
         assert led.check("a@acme.com", PURPOSE_RECOVER, code) == CodeGone()     # the right code: refused, not run
         assert led.issue("b@acme.com", PURPOSE_RECOVER) is None
     finally:
-        for _ in held:
-            ec._HASH_SLOTS.release()
+        release.set()
+        for f in busy:
+            f.result(timeout=5)
+    monkeypatch.setattr(ec, "_HASH_WAIT_S", 30.0)
     assert led.check("a@acme.com", PURPOSE_RECOVER, code) == CodeOk({})        # nothing was spent meanwhile
+
+
+def test_only_the_hash_pool_threads_ever_hash(tmp_path, monkeypatch):
+    # the 16 MiB scrypt buffer is allocated only on the pool's own threads: the C allocator keeps a freed buffer in
+    # the arena of the thread that used it, so hashing on request threads left one per thread (a burst of 200
+    # concurrent checks measured 648 MiB this way; on the pool it stays near 4 buffers)
+    import sigil.ui.email_channel as ec
+    names = set()
+    real = ec.hashlib.scrypt
+
+    def tracking(*a, **kw):
+        names.add(threading.current_thread().name)
+        return real(*a, **kw)
+
+    led = EmailCodeLedger(tmp_path)
+    led.issue("victim@acme.com", PURPOSE_RECOVER)
+    monkeypatch.setattr(ec.hashlib, "scrypt", tracking)
+    ts = [threading.Thread(target=EmailCodeLedger(tmp_path).check, args=("victim@acme.com", PURPOSE_RECOVER,
+                                                                        f"{k:06d}")) for k in range(16)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert names and all(n.startswith("email-code-hash") for n in names) and len(names) <= ec._HASH_CONCURRENCY
 
 
 def test_normalize_code():
