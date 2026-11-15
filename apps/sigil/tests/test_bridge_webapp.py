@@ -361,4 +361,3 @@ def test_the_app_offers_the_update_and_switches_only_when_asked():
     assert '"controllerchange", function () { if (UPDATE.asked) { location.reload(); } }' in app
     assert "if (!navigator.serviceWorker.controller) { return; }" in app       # not on the first install
     assert ".then(watchUpdates)" in app
-

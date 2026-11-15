@@ -959,4 +959,3 @@ def test_negative_controls_model_cache():
     elsewhere = _perturb_job(text, gov, f"      {_EMBED_CACHE_ENV}: /tmp/sigil-embed-cache\n",
                              f"      {_EMBED_CACHE_ENV}: /tmp/elsewhere\n")
     assert any(gov in b for b in bad(elsewhere)), "a suite reading a cache the cache step does not persist passed"
-
