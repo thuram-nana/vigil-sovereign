@@ -379,7 +379,7 @@ def _install_console(h) -> Path:
     d = h["tmp"] / "home" / ".config" / "systemd" / "user"
     d.mkdir(parents=True, exist_ok=True)
     (d / "vigil-command.service").write_text(
-        (_REPO / "infra/systemd/vigil-command.service").read_text().replace("/home/kali/vigil", str(repo)))
+        (_REPO / "infra/systemd/vigil-command.service").read_text().replace("%h/vigil", str(repo)))
     return repo / ".vigil-live"
 
 

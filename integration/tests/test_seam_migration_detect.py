@@ -206,7 +206,7 @@ def test_the_shipped_units_report_their_working_directories(tmp_path):
     units = unit_details(_REPO, tmp_path)
     assert units["sigil-cockpit.service"]["workdir"] == str(tmp_path / ".sigil")
     assert units["vigil-settle-drain.service"]["workdir"] == str(tmp_path / ".sigil")
-    assert units["vigil-command.service"]["workdir"] == "/home/kali/vigil"
+    assert units["vigil-command.service"]["workdir"] == str(tmp_path / "vigil")   # %h/vigil
 
 
 def test_the_settle_drains_spool_is_what_systemd_gives_it(tmp_path):
@@ -237,7 +237,7 @@ def test_a_tree_carried_into_another_units_seam_is_not_this_seams_candidate(tmp_
     _install(home, "sigil-cockpit.service", "vigil-settle-drain.service")
     d = home / ".config" / "systemd" / "user"
     d.joinpath("vigil-command.service").write_text(
-        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+        _SHIPPED["vigil-command.service"].read_text().replace("%h/vigil", str(repo)))
     console, seam = repo / ".vigil-live", home / ".sigil" / "credit-lease"
     console.mkdir(parents=True)
     former = home / ".sigil" / ".vigil-live"
@@ -265,7 +265,7 @@ def test_a_tree_committed_into_a_non_money_units_seam_stays_the_money_seams_cand
     _install(home, "sigil-cockpit.service", "vigil-settle-drain.service", "vigil-backup.service")
     d = home / ".config" / "systemd" / "user"
     d.joinpath("vigil-command.service").write_text(
-        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+        _SHIPPED["vigil-command.service"].read_text().replace("%h/vigil", str(repo)))
     console, seam, other = repo / ".vigil-live", home / ".sigil" / "credit-lease", tmp_path / "other-tree"
     console.mkdir(parents=True)
     other.mkdir()
@@ -414,7 +414,7 @@ def test_doctor_reports_an_unmigrated_tree_on_a_console_host(tmp_path, monkeypat
     _install(home, "sigil-cockpit.service", "vigil-settle-drain.service")
     d = home / ".config" / "systemd" / "user"
     d.joinpath("vigil-command.service").write_text(
-        _SHIPPED["vigil-command.service"].read_text().replace("/home/kali/vigil", str(repo)))
+        _SHIPPED["vigil-command.service"].read_text().replace("%h/vigil", str(repo)))
     console, seam = repo / ".vigil-live", home / ".sigil" / "credit-lease"
     console.mkdir(parents=True)
     report = _doc.collect(_REPO)

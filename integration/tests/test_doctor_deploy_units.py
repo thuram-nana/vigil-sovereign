@@ -352,8 +352,19 @@ def test_the_shipped_env_examples_agree(tmp_path):
                 customer=(sigil / "customer.env.example").read_text(),
                 drain=(_REPO / "infra" / "systemd" / "vigil-settle-drain.env.example").read_text())
     sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
-    assert issues == [] and notes == [] and sec["ok"] is True
+    assert issues == [] and sec["ok"] is True
+    assert set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on", "off"}   # OD-4: on in every unit ...
+    assert sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"]["ops-sweep"] == "off"           # ... and a bare shell is told
+    assert len(notes) == 1 and "`export VIGIL_SETTLE_SPINE_RECORD=1`" in notes[0]
     assert set(sec["processes"]) == {"cockpit", "customer", "settle-drain", "ops-sweep"}
+
+
+def test_the_settle_record_off_in_every_unit_is_a_note_naming_the_production_value(tmp_path):
+    _money_host(tmp_path, cockpit="VIGIL_SETTLE_SPINE_RECORD=0\n")
+    sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and sec["ok"] is True
+    assert [n for n in notes if n.startswith("VIGIL_SETTLE_SPINE_RECORD is off in every process")] == notes
+    assert len(notes) == 1 and "VIGIL_SETTLE_SPINE_RECORD=1" in notes[0]
 
 
 def test_the_settle_record_flag_on_everywhere_agrees(tmp_path):
@@ -392,6 +403,7 @@ def test_a_pricing_value_missing_from_the_ops_sweep_shell_is_a_note_that_never_p
     v = f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n"
     _money_host(tmp_path, cockpit=v, drain=v)
     sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    notes = [n for n in notes if not n.startswith("VIGIL_SETTLE_SPINE_RECORD is off in every process")]
     assert issues == [] and len(notes) == 1
     assert "set in cockpit, settle-drain; unset in ops-sweep" in notes[0]
     assert "export the same VIGIL_BILLING_TARGET_MARGIN as ~/.sigil/cockpit.env" in notes[0]
@@ -510,8 +522,10 @@ def test_doctor_reports_each_finding_as_a_hard_issue(tmp_path, monkeypatch):
     (home / ".sigil" / "venv" / "bin").mkdir(parents=True)
     report = _doc.collect(_REPO)
     new = [i for i in report["issues"] if i not in baseline["issues"]]
-    assert report["ok"] is False and len(new) == 3, new
+    assert report["ok"] is False and len(new) == 4, new
     assert any("without --proxy-only" in i for i in new)
+    # a console that is not proxy-only starts its own backends on its own seam: that is a seam disagreement too
+    assert any(i.startswith("seam base: the configured units disagree") and "vigil-command.service" in i for i in new)
     assert any("hash-locked" in i for i in new)
     assert any(i.startswith("VIGIL_SETTLE_SPINE_RECORD must be the same") for i in new)
     text = _doc.render(report)
@@ -583,3 +597,18 @@ def test_the_cockpit_process_environment_is_read_from_the_files_it_loads(tmp_pat
     _write(home / ".sigil" / "sigil.env", "SIGIL_HOME=/nowhere\n")
     env = dc.unit_process_environment(dc.COCKPIT_UNIT, home, _REPO)
     assert env["SIGIL_HOME"] == str(home / ".sigil")       # unset: the default home (sigil.env never moves it)
+
+
+def test_a_proxy_only_console_is_not_compared_for_the_seam_base(tmp_path, monkeypatch):
+    # the GO-LIVE host: the console runs `vigil up --proxy-only` (the production drop-in) and keeps its engine home in
+    # <repo>/.vigil-live; it starts no backend, so it never touches the money seam and is no seam disagreement
+    from vigil_integration.seam_base_units import seam_base_agreement
+    home = _isolated(monkeypatch, tmp_path)
+    for u in ("sigil-cockpit.service", "vigil-settle-drain.service", "vigil-command.service"):
+        _install(home, u)
+    sec, issues = seam_base_agreement(_REPO, home)
+    assert issues and "vigil-command.service" in issues[0]                  # without the drop-in: a disagreement
+    _install_dropin(home)
+    sec, issues = seam_base_agreement(_REPO, home)
+    assert issues == [] and sec["proxy_only"] == ["vigil-command.service"]
+    assert set(sec["units"]) == {"sigil-cockpit.service", "vigil-settle-drain.service"}

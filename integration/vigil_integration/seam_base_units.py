@@ -100,12 +100,15 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
     """The seam base the process of the unit ``text`` would use, or ``None`` when the unit is not configured
     here. Returns ``{"seam": <abs path>, "legacy": <abs VIGIL_SETTLE_BASE_DIR or None>, "workdir": <abs working
     directory>, "guard": <the VIGIL_SEAM_MIGRATION_GUARD value its process gets, "" when unset>, "spool": <the
-    ``--spool`` its ExecStart passes, after ``${VAR}`` substitution, as given; None when it passes none>}``."""
+    ``--spool`` its ExecStart passes, after ``${VAR}`` substitution, as given; None when it passes none>, "proxy_only":
+    <True when its ExecStart runs ``vigil up --proxy-only``: a console that starts no backend and so never reads or
+    writes the seam>}``."""
     env: dict = {}
     files: "list[Path]" = []
     workdir = str(home)
     base_arg: Optional[str] = None
     spool_arg: Optional[str] = None
+    proxy_only = False
     for key, value in _directives(text):
         if key == "Environment":
             if not value:
@@ -125,8 +128,10 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
         elif key == "ExecStart":
             if not value:
                 base_arg = spool_arg = None  # `ExecStart=` clears the command a drop-in then replaces
+                proxy_only = False
                 continue
             words = shlex.split(value)
+            proxy_only = "--proxy-only" in words
             for i, w in enumerate(words):
                 if w == "--base-dir" and i + 1 < len(words):
                     base_arg = words[i + 1]
@@ -150,7 +155,7 @@ def unit_seam_base(text: str, home: Path, parse_env: Callable[[Path], Optional[d
     legacy = env.get(_LEGACY_ALIAS) or ""
     spool = _subst(spool_arg, env).strip() if spool_arg is not None else ""
     return {"seam": _abs(raw), "legacy": _abs(legacy) if legacy else None, "workdir": _abs(workdir),
-            "guard": str(env.get(GUARD_ENV) or "").strip(), "spool": spool or None}
+            "guard": str(env.get(GUARD_ENV) or "").strip(), "spool": spool or None, "proxy_only": proxy_only}
 
 
 def unit_details(repo: "Path | str | None" = None, home: "Path | None" = None, *,
@@ -186,11 +191,17 @@ def seam_base_agreement(repo: "Path | str | None" = None, home: "Path | None" = 
                         only: "Optional[Iterable[str]]" = None) -> "tuple[dict, list]":
     """Return ``(section, hard_issues)``. ``section["units"]`` maps each CONFIGURED seam unit to the seam base it
     resolves; ``hard_issues`` names every unit when two of them disagree (or a unit's own legacy
-    ``VIGIL_SETTLE_BASE_DIR`` contradicts it). ``only`` narrows the units compared (default: every seam unit).
-    Nothing configured ⇒ ``({"units": {}}, [])``."""
+    ``VIGIL_SETTLE_BASE_DIR`` contradicts it). ``only`` narrows the units compared (default: every seam unit). A
+    console unit that runs ``vigil up --proxy-only`` (the production drop-in, GO-LIVE §6) starts no backend, so it
+    never touches the seam: it is listed under ``section["proxy_only"]`` and not compared — its engine home stays
+    in its own working directory by design. Nothing configured ⇒ ``({"units": {}}, [])``."""
     seams: dict = {}
     issues: list = []
+    proxies: "list[str]" = []
     for unit, got in unit_details(repo, home, parse_env=parse_env, only=only).items():
+        if got.get("proxy_only"):
+            proxies.append(unit)
+            continue
         seams[unit] = got["seam"]
         if got["legacy"] is not None and os.path.realpath(got["legacy"]) != os.path.realpath(got["seam"]):
             issues.append(
@@ -198,7 +209,9 @@ def seam_base_agreement(repo: "Path | str | None" = None, home: "Path | None" = 
                 f"is {display(got['seam'])} — the settle drain REFUSES to run on that contradiction (completions "
                 f"stay unsettled). Remove {_LEGACY_ALIAS} from its env file, or set VIGIL_BASE_DIR to that path "
                 f"for every seam unit.")
-    section = {"units": {u: display(s) for u, s in seams.items()}}
+    section: dict = {"units": {u: display(s) for u, s in seams.items()}}
+    if proxies:
+        section["proxy_only"] = proxies
     if len({os.path.realpath(s) for s in seams.values()}) > 1:
         listed = "; ".join(f"{u} -> {display(s)}" for u, s in seams.items())
         issues.append(
