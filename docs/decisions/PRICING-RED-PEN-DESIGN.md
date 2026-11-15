@@ -2,10 +2,11 @@
 
 Status: **a proposed pricing model, not yet a validated profitable rate** (the owner's words, 2026-11-11). The owner
 confirmed the credit rate, the minimum, the packs, the single model, the effort-by-depth rule, the customer-facing
-name, the shared-API-key model and the Red-Pen product (§1). Every OTHER number in this document — the markup, the
-floor, the tier budgets, the purchase limits, the concurrency limits — is the design's researched **proposal, not an
-owner decision** (§1.2 lists what is still open). Each is a code default with an env override behind a default-OFF
-flag, so the owner can change any of them without a release. Nothing here is live until its flag is turned on.
+name, the shared-API-key model and the Red-Pen product (§1). On 2026-11-15 the owner also confirmed the floor, the
+tier budgets (until calibration), the purchase limits and the seat, and chose how the gateway scales and guards spend
+(§1.1b); the margin is decided and recorded privately. Each number is a code default with an env override behind a
+default-OFF flag, so the owner can change any of them without a release. Nothing here is live until its flag is
+turned on.
 
 ## 1. What the owner decided
 
@@ -56,7 +57,7 @@ flag, so the owner can change any of them without a release. Nothing here is liv
   lower. It is the only pricing input: the margin dashboard's target line is drawn from it, and the earlier knobs
   `VIGIL_BILLING_MARKUP_K` / `VIGIL_MARGIN_MULTIPLIER_K` are refused while present (`vigil doctor` reports a hard
   issue; metered launches refuse and metered charges wait).
-- **Seats:** $25 per seat (assumed per month). Whether a seat includes credits is open.
+- **Seats:** $25 per seat (assumed per month). A seat includes no credits (decided 2026-11-15, §1.1b).
 - **Free trial:** a real scan that shows partial results; the full report unlocks once the organisation buys credits
   (any pack, from $5). One trial per verified email AND per verified domain. Ownership proof is still required
   (paying is not authority to test). Designed separately; not built here.
@@ -64,11 +65,30 @@ flag, so the owner can change any of them without a release. Nothing here is liv
 - Unchanged: $1 = 100 credits, packs $5–$100, custom from $5, no volume bonus, credits never expire, an estimate first
   and a customer-set budget.
 
-### 1.2 Open owner decisions (none of these is ratified)
+### 1.1b Owner decisions of 2026-11-15
+
+- **Margin:** the target margin value is decided and recorded privately; it is set at deploy through
+  `VIGIL_BILLING_TARGET_MARGIN` and is never committed. It is revisited once calibration (M5) measures the all-in cost.
+- **Floor and budgets:** the 25-credit floor and the tier budgets of §4.5 (Quick 450, Deep 5,000, Max 20,000, and the
+  Red-Pen, Fix and Retest budgets) are confirmed **until calibration (M5)**, which may revise them from measured runs.
+- **Purchase limits:** the limits of §4.6 are confirmed.
+- **Seat:** the $25 seat is platform access only; it includes no credits. Scans are always bought as credits.
+- **Scale target:** VIGIL is built for thousands to millions of customers, so no fixed, hand-set capacity number may
+  block a paying customer. The gateway's capacity is **sized automatically** from the live rate limits the provider
+  reports, every tenant gets a **fair share** of it, and the gateway spreads load over a **pool of provider accounts**
+  (several Anthropic workspaces, and Amazon Bedrock or Google Vertex AI as overflow) so no single account's limit caps
+  growth (§5.2).
+- **Spend guard:** customers may buy and use as many credits as they like. There is **no fixed daily dollar ceiling**.
+  Instead, total AI spend is **prepaid-backed**: every request is reserved against a run budget a customer has already
+  paid for, so spend can never exceed prepaid, reserved credits. A separate **loss alarm** watches VIGIL's own
+  unbillable cost (the unconfirmed spend of §4.3: crashed or cut-off responses): if it passes **2% of the day's billed
+  AI cost**, new runs pause and the owner is alerted (§5.2).
+
+### 1.2 Open owner decisions
 
 | # | Open item | State in the code |
 |---|---|---|
-| (a) | **The proposed numbers**: the 25-credit floor, the tier budgets 450 / 5,000 / 20,000, the top-up limits (§4.6), gateway concurrency 4 per tenant / 32 global. The owner has not confirmed any of them | env-overridable defaults behind default-OFF flags |
+| (a) | **The proposed numbers.** Decided by the owner (2026-11-15, §1.1b): the floor and the tier budgets are confirmed until calibration, the purchase limits are confirmed, and fixed concurrency numbers are replaced by automatic sizing over a provider pool | env-overridable defaults behind default-OFF flags; the automatic sizing, the pool and the loss alarm are slice G1 (§9) |
 | (b) | **The margin value.** Decided by the owner (§1.1a) and set at deploy from the owner's private record; never committed | `VIGIL_BILLING_TARGET_MARGIN` (required, no default); `vigil doctor` flags metered billing without it (M1c) |
 | (c) | **Cost basis.** The formula in §4.1 meters the **AI cost only**, and the target margin is the margin over that metered AI cost. The owner's profit target is measured **after all costs** (AI, card fees, hosting, workers, storage). Calibration (M5) reports the measured fee and hosting fraction per run, and the owner sets the target margin from it so the all-in margin lands on the target. There is no second pricing knob | not built; M5 |
 | (d) | **Cancellation.** Whether a run the customer cancels is charged for the usage so far (this design's proposal, §4.4) or fully refunded. Decided by the owner (2026-11-13): a cancelled run pays for what it used, and a launch the customer paused and never resumed is charged the same way | `VIGIL_BILLING_CANCEL_SETTLEMENT` = `metered` (the default when unset) or `refund`; an unrecognised value refuses metered launches and defers cancelled-run settles, and `vigil doctor` reports it as a hard issue (M1c) |
@@ -276,9 +296,9 @@ That is VIGIL's cost; the settle clamps the customer's charge to the reservation
 
 | Risk | Control |
 |---|---|
-| One tenant takes all of VIGIL's rate limit | Per-tenant concurrency in the gateway (proposed default 4 in-flight requests; the `VIGIL_GATEWAY_TENANT_CONCURRENCY` knob is wired in M1c); a request over the limit waits briefly, then gets a `rate_limit_error` with `retry-after`, which the runners already back off on. Concurrency does not bound input tokens per minute: one tenant sending very large requests can still crowd the account's token-rate limit |
-| All tenants together exceed the account's rate limit | A global concurrency cap (proposed default 32; `VIGIL_GATEWAY_GLOBAL_CONCURRENCY`, M1c), sized to the account's Anthropic tier; provider 429s are relayed with their `retry-after`. Open connections are bounded and every client socket has a deadline |
-| A bug or an abuse drains the prepaid balance | A global daily spend ceiling in the gateway (`VIGIL_GATEWAY_DAILY_LIMIT_USD`, M1c; **unset means no ceiling** — `vigil doctor` notes it); plus a provider-side backstop: customer traffic runs in its own Anthropic **workspace** with a monthly spend limit set in the Console (owner action) |
+| One tenant takes all of VIGIL's rate limit | A **fair share** per tenant (owner, 2026-11-15): each active tenant may hold at most its share of the pool's current capacity in flight, measured in requests and in tokens per minute, so one tenant sending very large requests cannot crowd the others. A request over the share waits briefly, then gets a `rate_limit_error` with `retry-after`, which the runners already back off on. Until G1 ships, the fixed `VIGIL_GATEWAY_TENANT_CONCURRENCY` knob of M1c stands in |
+| All tenants together exceed the provider's rate limit | **Automatic sizing over a provider pool** (owner, 2026-11-15; slice G1): the gateway reads the rate-limit headers the provider returns on every response and sizes its capacity to them, and it spreads requests over several Anthropic workspaces, with Amazon Bedrock or Google Vertex AI as overflow, so capacity grows with the pool rather than with a hand-set number. Provider 429s are relayed with their `retry-after`. Open connections are bounded and every client socket has a deadline. Until G1 ships, the fixed `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` knob of M1c stands in |
+| A bug or an abuse drains the prepaid balance | **Prepaid-backed spend** (owner, 2026-11-15): no fixed daily dollar ceiling; every request is reserved against a run budget a customer already paid for (§4.3), so total spend cannot exceed prepaid, reserved credits. A **loss alarm** (G1) pauses new runs and alerts the owner when VIGIL's own unbillable cost passes 2% of the day's billed AI cost. Provider-side backstop: customer traffic runs in its own Anthropic **workspaces**, each with a monthly spend limit set in the Console (owner action) |
 | Traffic that bypasses the gateway | A daily reconciliation compares the gateway's totals with Anthropic's Usage and Cost Admin API for that workspace (needs an admin key; owner action) |
 | The key leaks from the offense plane | It is never there: only grants are, each bounded by its run's cap and expiry |
 | The Anthropic balance runs out | Customers prepay, so revenue arrives before cost. The owner enables auto-reload on the Anthropic account with a cap |
@@ -413,6 +433,7 @@ Serial PR queue; each slice is default-OFF, tested both ways, mutation-checked a
 | R3 | Red-Pen · System |
 | R4 | VIGIL Fix (opt-in) and Retest |
 | R5 | Red-Pen, Fix and Retest in the customer UI |
+| G1 | Gateway at scale (§1.1b, §5.2): capacity sized from the provider's rate-limit headers; a per-tenant fair share in requests and tokens per minute; a pool of provider accounts (several Anthropic workspaces, Bedrock or Vertex as overflow) with health-checked failover; the loss alarm on unbillable cost |
 | O1 | Owner money view: per-tenant cost and margin from the gateway; the Admin-API reconciliation |
 | A1 | Auto top-up |
 
