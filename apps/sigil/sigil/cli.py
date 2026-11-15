@@ -2562,6 +2562,43 @@ def cmd_key(a) -> None:
 _SPINE_RATE_FLAGS = {"since": None, "until": None, "window": None, "group_by": "signal", "top": 20,
                      "ceiling": None, "json": False}
 _SPINE_PRUNE_FLAGS = {"boundary": None, "yes": False, "archive": None}
+_SPINE_UNIT_FLAGS = {"unit_home": None, "archive_dir": None, "deep": False}
+
+
+def _spine_verify_unit(a) -> None:
+    """`sigil spine verify-unit`: verify a home's spine as ONE unit — its owner-signed head, the floor, the owner
+    public key(s), the live segments and the cold archive — with the real readers. This process's own home is
+    checked in-process; another home (``--home``) in a child process scoped to it, which reads public keys only.
+    Exit 0 when the unit verifies (or the spine is not pruned), 2 when it is refused."""
+    from pathlib import Path as _P
+
+    from . import config
+    from .spine import home_unit as hu
+    home = _P(a.unit_home) if a.unit_home else config.SIGIL_HOME
+    if not (home / "spine").is_dir():
+        print(f"spine verify-unit: no spine at {home}", file=sys.stderr)
+        sys.exit(2)
+    if home.resolve() == config.SIGIL_HOME.resolve():
+        res = hu.check_live_unit(SpineStore(), require_archive=True, deep=a.deep, archive_dir=a.archive_dir)
+    else:
+        held = hu.HomeUnit.for_home(home).secret_files()
+        if held:
+            print(f"spine verify-unit: {home} holds private key material ({', '.join(held)}) and is not this "
+                  f"process's home — verify it as its own home: SIGIL_HOME={home} sigil spine verify-unit",
+                  file=sys.stderr)
+            sys.exit(2)
+        res = hu.verify_other_home(home, archive_dir=a.archive_dir)
+    for c in res.get("checks") or []:
+        print(f"  {'ok  ' if c.get('ok') else 'FAIL'} {c.get('name')}: {c.get('why')}")
+    if not res.get("ok"):
+        print(f"REFUSED: {hu.failure_reason(res)}", file=sys.stderr)
+        sys.exit(2)
+    if not res.get("pruned"):
+        print(f"OK: {home} is not pruned — nothing to verify as a pruned unit (`sigil verify` checks its chain)")
+        return
+    sh = res.get("shape") or {}
+    print(f"OK: the spine unit at {home} verifies (live window from seq {sh.get('base_seq')}, snapshot at seq "
+          f"{sh.get('snapshot_seq')}, {sh.get('archive_segments')} archived segment(s))")
 
 
 def cmd_spine(a) -> None:
@@ -2571,11 +2608,18 @@ def cmd_spine(a) -> None:
     # the wrong action is refused (exit 2), never silently ignored (`spine status --json` printing a table).
     rate_flags = [f for f, dflt in _SPINE_RATE_FLAGS.items() if getattr(a, f, dflt) != dflt]
     prune_flags = [f for f, dflt in _SPINE_PRUNE_FLAGS.items() if getattr(a, f, dflt) != dflt]
-    wrong = prune_flags if a.action == "append-rate" else rate_flags
+    unit_flags = [f for f, dflt in _SPINE_UNIT_FLAGS.items() if getattr(a, f, dflt) != dflt]
+    if a.action == "verify-unit":
+        wrong = rate_flags + prune_flags
+    else:
+        wrong = (prune_flags if a.action == "append-rate" else rate_flags) + unit_flags
     if wrong:
         print(f"spine {a.action}: does not take " + ", ".join("--" + f.replace("_", "-") for f in wrong),
               file=sys.stderr)
         sys.exit(2)
+    if a.action == "verify-unit":
+        _spine_verify_unit(a)
+        return
     store = SpineStore()
     if a.action == "migrate":
         if store.migrate():
@@ -3278,20 +3322,62 @@ def cmd_backup(a) -> None:
 def cmd_restore(a) -> None:
     """Restore a `sigil backup` onto a fresh SIGIL_HOME. VERIFIES the manifest owner-signature + every file
     hash BEFORE writing, and re-verifies the restored spine's chain/binding after; fail-closed on a wrong
-    passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.)"""
+    passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.) A backup of a
+    HARD-PRUNED home (SIGIL_PRUNED_RESTORE=1) is verified as one unit before anything is swapped in. Its swap is
+    journaled, and so is the swap of any restore that replaces existing units: `--resume HOME` completes an
+    interrupted one, `--abort HOME` discards one while the home is still entirely its old self.
+    `--verify-only` runs every check and writes nothing."""
     from pathlib import Path
 
     from vigil_core.vault import Vault
 
-    from .backup import BackupError, restore_backup
-    home = Path(a.home)
+    from .backup import BackupError, restore_abort, restore_backup, restore_resume
+    resume, abort = getattr(a, "resume", None), getattr(a, "abort", None)
+    verify_only = bool(getattr(a, "verify_only", False))
+    if resume or abort:
+        if resume and abort or a.src or a.home or verify_only:
+            print("restore: --resume / --abort take only the home (sigil restore --resume HOME)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            res = restore_resume(resume) if resume else restore_abort(str(abort))
+        except BackupError as e:
+            print(f"!! restore {'resume' if resume else 'abort'} failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        if resume:
+            print(f"restore into {res['home']} completed ({', '.join(res['units'])} swapped in).")
+            print(f"next:  SIGIL_HOME={res['home']} sigil spine verify-unit --deep")
+        else:
+            print(f"the interrupted restore into {res['home']} was discarded; the home is unchanged (still entirely "
+                  f"its old self).")
+        return
+    if not a.src or (not a.home and not verify_only):
+        print("restore: needs the backup file and the home to restore into (sigil restore SRC HOME)", file=sys.stderr)
+        sys.exit(2)
+    home = Path(a.home) if a.home else None
+    archive_dir = getattr(a, "archive_dir", None)
     try:
-        res = restore_backup(a.src, home, _backup_passphrase(), vault=Vault(home / "vault"),
-                             force=getattr(a, "force", False))
+        res = restore_backup(a.src, home, _backup_passphrase(),
+                             vault=None if verify_only else Vault(Path(a.home) / "vault"),
+                             force=getattr(a, "force", False), archive_dir=archive_dir, verify_only=verify_only)
     except BackupError as e:
         print(f"!! restore failed (nothing trusted): {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}).")
+    if verify_only:
+        what = ("its hard-pruned spine verifies as one unit" if res.get("pruned")
+                else "its spine chain verifies")
+        print(f"verify-only: the backup decrypts, its signed manifest and every file verify, and {what}; nothing was "
+              f"written.")
+        return
+    print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}"
+          + ("; hard-pruned unit verified" if res.get("pruned") else "") + ").")
+    if res.get("pruned") and res.get("archive_env_mismatch"):
+        print(f"fix:   {home}/sigil.env sets SIGIL_SPINE_ARCHIVE_DIR={res['archive_env']}, but this restore placed the "
+              f"archive at {res['archive_dir']} — set SIGIL_SPINE_ARCHIVE_DIR={res['archive_dir']} there before "
+              f"starting the services (or restore again with --archive-dir {res['archive_env']})")
+    elif res.get("pruned") and res.get("archive_dir") and home is not None \
+            and Path(res["archive_dir"]).resolve() != (home / "spine" / "archive").resolve() \
+            and not res.get("archive_env"):
+        print(f"set:   SIGIL_SPINE_ARCHIVE_DIR={res['archive_dir']} for the restored home (e.g. in {home}/sigil.env)")
     print(f"next:  SIGIL_HOME={res['home']} sigil verify   # confirms the owner-signed head against the restored key")
     print(f"then:  SIGIL_HOME={res['home']} sigil vault provision   # re-seals the keys to THIS box's TPM")
 
@@ -3499,8 +3585,20 @@ def main(argv=None) -> None:
     pbak.add_argument("dest", help="destination file for the encrypted backup")
     pbak.set_defaults(fn=cmd_backup)
     pres = sub.add_parser("restore", help="restore a `sigil backup` onto a fresh SIGIL_HOME (verifies before writing)")
-    pres.add_argument("src", help="the encrypted backup file")
-    pres.add_argument("home", help="a FRESH SIGIL_HOME dir to restore into")
+    pres.add_argument("src", nargs="?", default=None, help="the encrypted backup file")
+    pres.add_argument("home", nargs="?", default=None, help="a FRESH SIGIL_HOME dir to restore into")
+    pres.add_argument("--archive-dir", dest="archive_dir", default=None,
+                      help="a hard-pruned home: where its cold archive goes (default: inside the restored spine, "
+                           "<home>/spine/archive — never this process's SIGIL_SPINE_ARCHIVE_DIR); a backup that "
+                           "carries no archive adopts the one already here if it verifies")
+    pres.add_argument("--verify-only", dest="verify_only", action="store_true",
+                      help="decrypt and verify the backup (for a hard-pruned home: as one unit) and write nothing; "
+                           "with HOME, also refuse whatever the restore into HOME (with the same --force) would")
+    pres.add_argument("--resume", default=None, metavar="HOME",
+                      help="complete a restore into HOME that was interrupted between its swaps")
+    pres.add_argument("--abort", default=None, metavar="HOME",
+                      help="discard an interrupted restore into HOME (only while none of its units has been "
+                           "touched; refused otherwise — use --resume)")
     pres.add_argument("--force", action="store_true",
                       help="REPLACE a non-empty SIGIL_HOME. Without it, restore refuses a non-empty target "
                            "rather than overlay stale state. The replacement is staged + verified first and "
@@ -3860,9 +3958,11 @@ def main(argv=None) -> None:
     pup.set_defaults(fn=cmd_upgrade)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; "
                                        "prune-plan; verify-archive; prune; prune-finish; "
-                                       "append-rate (read-only appends/s by signal)")
+                                       "append-rate (read-only appends/s by signal); "
+                                       "verify-unit (a home's spine as one unit: head, floor, keys, archive)")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
-                                        "prune-plan", "verify-archive", "prune", "prune-finish", "append-rate"])
+                                        "prune-plan", "verify-archive", "prune", "prune-finish", "append-rate",
+                                        "verify-unit"])
     psp.add_argument("--since", default=None, help="append-rate: count records with ts >= this ISO-8601 time (no offset = UTC)")
     psp.add_argument("--until", default=None, help="append-rate: count records with ts < this ISO-8601 time")
     psp.add_argument("--window", type=int, action="append", default=None,
@@ -3881,6 +3981,14 @@ def main(argv=None) -> None:
     psp.add_argument("--yes", action="store_true",
                      help="prune: REQUIRED confirmation — the hard prune DELETES the pruned prefix [0..K)")
     psp.add_argument("--archive", default=None, help="verify-archive: the archive dir (default SIGIL_HOME/spine/archive)")
+    psp.add_argument("--home", dest="unit_home", default=None,
+                     help="verify-unit: the home to verify (default: this SIGIL_HOME; another home is verified in a "
+                          "child process scoped to it, with public keys only)")
+    psp.add_argument("--archive-dir", dest="archive_dir", default=None,
+                     help="verify-unit: the unit's archive dir (default: SIGIL_SPINE_ARCHIVE_DIR for this home, "
+                          "<home>/spine/archive for another)")
+    psp.add_argument("--deep", action="store_true",
+                     help="verify-unit: re-derive the whole archive (another home is always verified in full)")
     psp.set_defaults(fn=cmd_spine)
     pck = sub.add_parser("checkpoint",
                          help="witnessed anti-rollback checkpoints (audit G3(b)): emit | verify | cosign | witness")
@@ -3988,6 +4096,7 @@ def main(argv=None) -> None:
     psc.add_argument("--subdomains", action="store_true", help="include subdomains of allowed domains")
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
+    _assert_no_restore_journal_or_exit(a.cmd)
     _assert_store_operable_or_exit(a.cmd)
     try:
         a.fn(a)
@@ -4000,6 +4109,24 @@ def main(argv=None) -> None:
 # gate would lock the operator out of the very tools that clear it. Everything else refuses to operate on an
 # un-migrated (legacy, pre-segment) store and names `sigil upgrade`.
 _MIGRATION_GATE_EXEMPT = frozenset({"upgrade", "spine", "doctor", "restore", "backup", "vault", "kernel"})
+
+
+# While a restore into this home is interrupted between its swaps (its journal stands), only the commands that
+# finish or inspect it run: everything else would read or write a home whose units may come from two points in time.
+_RESTORE_JOURNAL_GATE_EXEMPT = frozenset({"restore", "doctor"})
+
+
+def _assert_no_restore_journal_or_exit(cmd: str) -> None:
+    """Fail-closed startup gate: refuse every command but `sigil restore` and `sigil doctor` while a restore journal
+    stands in this SIGIL_HOME, naming `sigil restore --resume` (exit 3)."""
+    if cmd in _RESTORE_JOURNAL_GATE_EXEMPT:
+        return
+    from .config import RESTORE_JOURNAL_PATH, SIGIL_HOME
+    if RESTORE_JOURNAL_PATH.exists():
+        print(f"sigil: refusing to run `{cmd}` — a restore into {SIGIL_HOME} was interrupted; finish it with "
+              f"`sigil restore --resume {SIGIL_HOME}` (`sigil restore --abort {SIGIL_HOME}` discards it only while "
+              f"the home is still entirely its old self)", file=sys.stderr)
+        sys.exit(3)
 
 
 def _assert_store_operable_or_exit(cmd: str) -> None:

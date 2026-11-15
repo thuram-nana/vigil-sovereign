@@ -4758,6 +4758,21 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
         print("vigil restore: --sovereign-only and --offense-only are mutually exclusive", file=sys.stderr)
         return 2
+    if getattr(args, "resume_sovereign", False):
+        # finish a sovereign restore that was interrupted between its swaps (its journal stands in the home): no
+        # backup, no passphrase — every unit was verified before the journal was written
+        home = getattr(args, "sigil_home", "") or ""
+        if not home:
+            print("vigil restore: --resume-sovereign needs --sigil-home <the home being restored>", file=sys.stderr)
+            return 2
+        rc = _run_sovereign_leg(["restore", "--resume", home], "")
+        if rc != 0:
+            print(f"vigil restore: resuming the sovereign restore failed (exit {rc})", file=sys.stderr)
+            return 1
+        return 0
+    if not getattr(args, "src", None):
+        print("vigil restore: the backup dir is required", file=sys.stderr)
+        return 2
     src = Path(args.src)
     if not src.is_dir():
         print(f"vigil restore: {src} is not a backup dir (expected a timestamped dir with MANIFEST.json)",
@@ -4837,6 +4852,31 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             return None, 2
         return f, 0
 
+    sov_archive_dir = getattr(args, "sigil_archive_dir", "") or ""
+    if not getattr(args, "sovereign_only", False) and not getattr(args, "offense_only", False):
+        # BOTH planes: verify the sovereign part completely (`sigil restore --verify-only` — for a hard-pruned home,
+        # as one unit) BEFORE the offense leg writes anything, so a sovereign part that would be refused leaves BOTH
+        # planes untouched.
+        sov_pre, err = _verified_part("sovereign")
+        if err:
+            return err
+        if sov_pre is not None:
+            pre_home = getattr(args, "sigil_home", "") or ""
+            if not pre_home:
+                print("vigil restore: --sigil-home <fresh dir> is required to restore the sovereign plane",
+                      file=sys.stderr)
+                return 2
+            vargs = ["restore", "--verify-only", str(sov_pre), pre_home]
+            if getattr(args, "force", False):
+                vargs.append("--force")        # verified against the same override the sovereign leg will run with
+            if sov_archive_dir:
+                vargs += ["--archive-dir", sov_archive_dir]
+            rc = _run_sovereign_leg(vargs, pw)
+            if rc != 0:
+                print(f"vigil restore: the sovereign part does not verify (exit {rc}) — nothing was restored on "
+                      f"either plane", file=sys.stderr)
+                return 1
+
     if not getattr(args, "sovereign_only", False):
         off, err = _verified_part("offense")
         if err:
@@ -4876,6 +4916,8 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             sov_args = ["restore", str(sov), home]
             if getattr(args, "force", False):
                 sov_args.append("--force")     # forward the non-empty-target override to the sovereign leg
+            if sov_archive_dir:
+                sov_args += ["--archive-dir", sov_archive_dir]    # where a hard-pruned home's archive goes
             rc = _run_sovereign_leg(sov_args, pw)
             if rc != 0:
                 print(f"vigil restore: sovereign leg failed (exit {rc})", file=sys.stderr)
@@ -6161,13 +6203,20 @@ def build_parser() -> argparse.ArgumentParser:
              "anchor + no pin, production refuses fail-closed, non-production is integrity-only + a warning); "
              "refuses a rollback to an older backup; then verifies each plane part's sha256 before invoking "
              "either leg (fail-closed, two-file boundary; the sovereign leg is a sigil subprocess)")
-    prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
-                                 "encrypted parts)")
+    prs.add_argument("src", nargs="?", default=None,
+                     help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
+                          "encrypted parts)")
     prs.add_argument("--base-dir", default=seam, help="offense base_dir to restore INTO (fresh)")
     prs.add_argument("--crucible-root", dest="crucible_root", default="",
                      help="CRUCIBLE root to restore .blackboard/.console into (default: $CRUCIBLE_ROOT or in-repo)")
     prs.add_argument("--sigil-home", dest="sigil_home", default="",
                      help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
+    prs.add_argument("--sigil-archive-dir", dest="sigil_archive_dir", default="",
+                     help="a hard-pruned sovereign home: where its cold archive goes (forwarded as `sigil restore "
+                          "--archive-dir`; default inside the restored spine)")
+    prs.add_argument("--resume-sovereign", dest="resume_sovereign", action="store_true",
+                     help="finish a sovereign restore into --sigil-home that was interrupted between its swaps "
+                          "(`sigil restore --resume`)")
     prs.add_argument("--expect-governance-pubkey", dest="expect_governance_pubkey", default="",
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
                           "set it ALWAYS overrides the host trust anchor, and BOTH the orchestrator "
