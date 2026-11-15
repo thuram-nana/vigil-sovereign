@@ -203,3 +203,23 @@ def test_cve_api_is_honestly_empty_without_a_catalog(tmp_path):
         assert json.loads(_get(port, "/api/cve/stats")[2])["populated"] is False
     finally:
         srv.shutdown()
+
+
+def test_every_page_carries_the_owner_logo_and_favicons():
+    # The owner's logo replaced the old shield mark: every page links the ICO + SVG favicons and the iOS icon, its
+    # header shows the white wordmark (the site is dark-only), and every /assets/ file a page names exists.
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
+    pages = sorted(root.rglob("*.html"))
+    assert len(pages) >= 15
+    for page in pages:
+        html = page.read_text(encoding="utf-8")
+        rel = page.relative_to(root)
+        assert '<link rel="icon" href="/assets/favicon.ico" sizes="any">' in html, rel
+        assert '<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">' in html, rel
+        assert '<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">' in html, rel
+        assert 'class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL"' in html, rel
+        assert "brand__mark" not in html, rel
+        for ref in re.findall(r'(?:href|src)="(/assets/[^"?#]+)"', html):
+            assert (root / ref.lstrip("/")).is_file(), f"{rel} names a missing asset {ref}"

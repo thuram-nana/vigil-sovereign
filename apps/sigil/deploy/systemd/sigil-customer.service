@@ -57,9 +57,10 @@ ExecStart=%h/.sigil/venv/bin/sigil serve-customer --host ${VIGIL_CUSTOMER_BIND} 
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-# A stop finishes the requests in flight first: up to 65 s, longer than the slowest provisioner action the
-# customer edge waits for (sigil/ui/graceful.py PROVISIONER_DRAIN_DEADLINE_S). An idle stop is immediate.
-TimeoutStopSec=75
+# A stopping edge first finishes every request it accepted, up to 75 s (custui.drain_deadline_s: past its
+# slowest wait on the cockpit, 60 s for a sign-up email), so a stop never cuts an action the cockpit is
+# still completing. systemd must not SIGKILL before that (a test pins the margin).
+TimeoutStopSec=90
 
 # --- hardening (least privilege without cutting off what the edge needs) ----
 NoNewPrivileges=yes

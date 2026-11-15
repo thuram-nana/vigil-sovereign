@@ -570,6 +570,7 @@ document.addEventListener("click", function (e) {
     if (act === "arm-gesture") { return onArm(); }
     if (act === "latch-off") { return onLatchOff(btn.dataset.latch); }
     if (act === "recall") { return doRecall(); }
+    if (act === "apply-update") { return applyUpdate(); }
     if (act === "copy-pub") { return copyText(DEVICE.pubB64).then(function (ok) { btn.textContent = ok ? "Copied" : "Select above to copy"; }); }
     if (act === "copy-cmd") {
       var cmd = "sigil mesh authorize " + DEVICE.deviceId + " " + DEVICE.pubB64;
@@ -587,12 +588,53 @@ document.addEventListener("keydown", function (e) {
   if (e.target && e.target.id === "recall-input") { doRecall(); }
 });
 
+/* ---------------------------------------------------------------------------- app updates */
+// The worker keeps one build of this app (its cache is named after the build). A new build installs and WAITS;
+// the owner is told and the switch happens only when they tap Reload: the waiting worker is sent SKIP_WAITING
+// and the page reloads once it takes control. Never automatic — a reload mid-approval would lose the screen.
+var UPDATE = { worker: null, asked: false };
+function offerUpdate(worker) {
+  if (!navigator.serviceWorker.controller) { return; }       // the first install: nothing to replace
+  UPDATE.worker = worker;
+  var box = $("#update");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "update";
+    box.className = "banner info";
+    var msg = document.createElement("span");
+    msg.textContent = "A new version of the Companion is available. ";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.act = "apply-update";
+    btn.textContent = "Reload";
+    box.appendChild(msg);
+    box.appendChild(btn);
+    var anchor = $("#banner");
+    anchor.parentNode.insertBefore(box, anchor);
+  }
+}
+function applyUpdate() {
+  if (!UPDATE.worker) { location.reload(); return; }
+  UPDATE.asked = true;
+  UPDATE.worker.postMessage({ type: "SKIP_WAITING" });       // the reload follows on controllerchange
+}
+function watchUpdates(reg) {
+  if (reg.waiting) { offerUpdate(reg.waiting); }
+  reg.addEventListener("updatefound", function () {
+    var w = reg.installing;
+    if (!w) { return; }
+    w.addEventListener("statechange", function () { if (w.state === "installed" && reg.waiting === w) { offerUpdate(w); } });
+  });
+}
+
 /* ------------------------------------------------------------------------------------- init */
 async function init() {
   // Register the offline-shell service worker (scope /static/ — the only scope the bridge can serve
   // it from; the app's installed start_url lives under /static/ to match). Best-effort.
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/static/service-worker.js", { scope: "/static/" }).catch(function () { /* noop */ });
+    navigator.serviceWorker.addEventListener("controllerchange", function () { if (UPDATE.asked) { location.reload(); } });
+    navigator.serviceWorker.register("/static/service-worker.js", { scope: "/static/" })
+      .then(watchUpdates).catch(function () { /* noop */ });
   }
   if (!(await ed25519Available())) {
     banner("err", "This browser can't hold a device key: crypto.subtle has no Ed25519. Use Chrome/Edge 137+, "

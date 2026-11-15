@@ -415,7 +415,13 @@ _STATIC_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".webmanifest": "application/manifest+json; charset=utf-8",
+    # the owner's logo (packages/vigil-ui/brand/, copied from packages/vigil-brand): favicon + header mark
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
 }
+# The brand files the serve dir carries (assemble_serve_dir copies brand/<name> for these suffixes only).
+_BRAND_SUFFIXES = (".svg", ".png", ".ico")
 
 # Text assets worth gzipping on the wire: js/css/html/json compress ~5x and dominate time-to-first-
 # paint over a high-latency link. Anything not listed (images, fonts, already-compressed blobs) is
@@ -768,6 +774,20 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     for name in BUNDLE_JS:                       # deterministic order (BUNDLE_JS is a fixed tuple)
         _digest.update(b"\0" + name.encode("utf-8") + b"\0")
         _digest.update(js_blobs[name].encode("utf-8"))
+    # The owner's logo (favicon + header mark), copied byte-for-byte into serve_dir/brand/ and part of the build id,
+    # so a new logo is a new build. Regular files with an image suffix only; a missing brand/ dir is no logo.
+    brand_src = src_dir / "brand"
+    brand_files: list[Path] = []
+    if brand_src.is_dir():
+        brand_files = sorted(p for p in brand_src.iterdir()
+                             if p.is_file() and not p.is_symlink() and p.suffix.lower() in _BRAND_SUFFIXES)
+    if brand_files:
+        (serve_dir / "brand").mkdir(exist_ok=True)
+    for p in brand_files:
+        blob = p.read_bytes()
+        (serve_dir / "brand" / p.name).write_bytes(blob)
+        _digest.update(b"\0brand/" + p.name.encode("utf-8") + b"\0")
+        _digest.update(blob)
     build_id = _digest.hexdigest()[:12]
     try:
         (serve_dir / ".build-id").write_text(build_id, encoding="utf-8")
@@ -1850,6 +1870,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._plane_json({"ok": False, "error": f"plane control refused ({why})"},
                              status=403, drained=True)
             return
+        # 3b) the bundle build id answers BEFORE sign-in: a tab sitting on the login gate must learn of a redeploy
+        #     too, and the answer is a content hash of files every visitor is served anyway (no secret, nothing
+        #     per-user). It stays behind the private-peer and Host/Origin guards above, GET/HEAD only, no-store.
+        if path == PLANE_VERSION_PATH:
+            if self.command not in ("GET", "HEAD"):
+                self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
+                return
+            build = ""
+            try:
+                build = (self.server.serve_dir / ".build-id").read_text(encoding="utf-8").strip()
+            except (OSError, AttributeError):
+                build = ""
+            self._plane_json({"ok": True, "build": build}, drained=True)
+            return
         # 4) per-user authentication (Claim 6) — the SAME sovereign-delegated identity the forwarded routes
         #    use. Fail-closed: an unresolved bearer is 401 before anything is inspected or spawned. Plane
         #    control talks to the SOVEREIGN plane (which is up even when the offense backends are down), so
@@ -1880,20 +1914,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
                 return
             self._plane_json(plane_status(pc, getattr(self.server, "backends", None)), drained=True)
-            return
-        if path == PLANE_VERSION_PATH:
-            # The current bundle build id (a content hash), so a long-open tab can notice a redeploy and
-            # offer to reload. Read-only, non-secret (just a hash); GET only. Guarded like every plane
-            # route (private peer + Host/Origin + token), so it is never a cross-site read.
-            if self.command not in ("GET", "HEAD"):
-                self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
-                return
-            build = ""
-            try:
-                build = (self.server.serve_dir / ".build-id").read_text(encoding="utf-8").strip()
-            except (OSError, AttributeError):
-                build = ""
-            self._plane_json({"ok": True, "build": build}, drained=True)
             return
         if path == PLANE_START_OFFENSE_PATH:
             # POST only: a GET/HEAD must never start anything (no side effect on a safe method).
@@ -2379,14 +2399,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
         # X-VIGIL-* identity header (anti-spoof): identity is set by the proxy, never accepted from a client.
         # ALSO strip the client's Accept-Encoding (see below).
+        # The client's own X-Real-IP / X-Forwarded-For are NEVER forwarded: the customer edge trusts X-Real-IP from
+        # its loopback hop (this proxy), so a forwarded client value would let a client choose the address that
+        # drives the installed-app hand-off's same-network rule and the per-IP legs. This proxy SETS X-Real-IP from
+        # the real peer it accepted — unless that peer is itself a trusted loopback hop (an nginx in front), whose
+        # already-set X-Real-IP we keep. (ios-review r2, R3.)
+        upstream_real_ip = (self.headers.get("X-Real-IP", "") or "").strip()
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
             # Cookie is never copied verbatim — it is partitioned across the plane boundary below.
             if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
-                    or lk == "cookie" or _is_vigil_identity_header(key)):
+                    or lk == "cookie" or lk == "x-real-ip" or lk == "x-forwarded-for"
+                    or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
+        peer = self.client_address[0] if self.client_address else ""
+        if peer and not _is_loopback(peer):
+            out["X-Real-IP"] = peer                        # the real client reached this proxy directly
+        elif peer and _is_loopback(peer) and upstream_real_ip:
+            out["X-Real-IP"] = upstream_real_ip            # a trusted loopback hop (nginx) already set it; keep it
+        # else: no trusted client address — forward none, so the edge falls back to its loopback peer and the
+        # hand-off's client_net treats that as non-global and refuses (fail closed), never a client-chosen value.
         # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
         # credential redactor can scan. A compressed body has no literal token bytes to find, so a forwarded
         # `Accept-Encoding: gzip` would let a token-embedding backend index slip past redaction and reach the

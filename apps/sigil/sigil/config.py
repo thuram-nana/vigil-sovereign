@@ -175,6 +175,8 @@ def sovereign_provision_base() -> str:
     return os.environ.get("VIGIL_PROVISION_BASE", f"http://127.0.0.1:{COCKPIT_UI_PORT}")
 CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
 EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
+EMAIL_CODES_DIR = _customer / "email_codes"             # the 6-digit codes sent beside them (when enabled)
+EMAIL_CODE_RATELIMIT_DIR = _customer / "email_code_ratelimit"   # wrong codes per email+purpose, across re-sends
 LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers
 TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial grant (never on-the-wire)
 # Anti-farming ceilings on the provisioner's owner-signed mints. The signup cap is a GLOBAL per-rolling-day
@@ -295,6 +297,16 @@ def customer_checkout_enabled() -> bool:
     VIGIL_STRIPE_API_VERSION; any other value: not configured) — the amount is always the OWNER CATALOG's, and
     credit is granted ONLY by the verified inbound webhook drain, never here."""
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_ios_install_banner_enabled() -> bool:
+    """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
+    carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
+    off until the owner has signed in with Google inside the installed app on a real iPhone: the sign-in binding
+    cookie is SameSite=Lax, path-scoped and lasts 600 s, and an app installed from Safari may keep a cookie jar of
+    its own. Read when the customer edge starts (it is written into the page), so a change takes effect at the
+    edge's next start."""
+    return (os.environ.get("VIGIL_CUSTOMER_IOS_INSTALL_BANNER") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_plan_checkout_enabled() -> bool:
@@ -618,6 +630,16 @@ def email_enabled() -> bool:
     return bool(os.environ.get("SIGIL_EMAIL_HOST", "").strip())
 
 
+def customer_email_code_enabled() -> bool:
+    """True iff the sign-up and password-reset emails also carry a 6-digit code (`VIGIL_CUSTOMER_EMAIL_CODE`
+    affirmative), so a person in the installed app can type it instead of following the email into a browser. OFF by
+    default: the emails carry only the token, exactly as before, and a code confirmation is refused. Read by the
+    customer provisioner (the cockpit process). A code is bound to the email and the purpose, used once, lives 10
+    minutes, and is gone after 5 wrong codes; wrong codes are also limited per email across re-sent codes and per
+    client IP. The token in the same email keeps working."""
+    return (os.environ.get("VIGIL_CUSTOMER_EMAIL_CODE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def email_sender():
     """The configured EmailSender: a stdlib SmtpEmailSender behind `SIGIL_EMAIL_*`, else the OFF-by-default
     NullEmailSender. Lazily imports the (stdlib-only) channel so `config` stays import-light."""
@@ -814,6 +836,17 @@ def customer_oidc_enabled() -> bool:
     OFF by default and INDEPENDENT of the operator `SIGIL_OIDC_ENABLED`. When OFF the edge's
     /api/customer/oidc/* routes are not served and the provisioner builds no OIDC provider (no egress)."""
     return (os.environ.get("VIGIL_CUSTOMER_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_oidc_handoff_enabled() -> bool:
+    """True iff Google sign-in may complete inside an INSTALLED customer app through the app hand-off
+    (`VIGIL_CUSTOMER_OIDC_HANDOFF` affirmative; ui/oidc_handoff.py). OFF by default. Read by the customer edge only,
+    and only together with `customer_oidc_enabled()`: with it on, an app running standalone (added to a Home Screen)
+    starts Google sign-in with a hand-off challenge, the edge shows a pairing code where the Google sign-in
+    finished, and the app redeems verifier + code for its session. With it off, the edge refuses a hand-off login
+    and the installed app uses the browser flow (which on an iPhone lands the session outside the app). Read when
+    the edge starts (it is written into the page) and on each hand-off request."""
+    return (os.environ.get("VIGIL_CUSTOMER_OIDC_HANDOFF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def _customer_oidc_base() -> dict:

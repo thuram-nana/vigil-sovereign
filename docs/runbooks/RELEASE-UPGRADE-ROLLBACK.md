@@ -181,8 +181,8 @@ done
 # 3. record and stop the long-running services: the edges and the console first, the cockpit (the writer) last
 systemctl --user list-units --type=service --state=running,activating --plain --no-legend 'vigil-*' 'sigil-*' \
   | awk '{print $1}' > "$U/services"
-systemctl --user stop sigil-customer.service sigil-public.service vigil-command.service \
-  'sigil-bridge@*.service' 'vigil-witness@*.service'
+systemctl --user stop sigil-customer.service sigil-public.service 'sigil-customer@*.service' \
+  'sigil-public@*.service' vigil-command.service 'sigil-bridge@*.service' 'vigil-witness@*.service'
 systemctl --user stop sigil-cockpit.service
 
 # 4. confirm nothing is left running
@@ -244,6 +244,13 @@ for f in "$UD"/*.service "$UD"/*.timer "$UD"/*.service.d/*.conf; do
   done
 done
 ```
+
+A release can change a unit in a way the code relies on — the customer edge, for example, finishes an action
+the cockpit is still completing for up to 75 s, and its units allow 90 s before systemd kills it; with a unit
+from an older release (20 s) a stop would cut such an action, the customer told it failed. Keep local changes in
+drop-ins of your own (`systemctl --user edit <unit>` writes `override.conf`), which the loop leaves alone.
+`vigil doctor` (2.9) reports an edge unit whose stop timeout is too short, and `tools/deploy/edge-swap.sh`
+refuses to swap with one.
 
 ### 2.7 Migrate the sovereign data store
 

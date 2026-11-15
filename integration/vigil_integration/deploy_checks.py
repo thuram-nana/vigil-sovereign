@@ -17,6 +17,10 @@ on a development checkout with no sovereign unit installed they add at most a no
   settle's pricing) agree across the cockpit, the customer edge and the settle drain (a HARD issue when they do
   not), and a shell running ``sigil ops-sweep`` that reads only ``sigil.env`` under the cockpit's ``SIGIL_HOME``
   agrees with them (a note naming what that shell must export when it does not).
+* :func:`customer_signin_report` — customer Google sign-in agrees between the customer edge and the cockpit.
+* :func:`edge_stop_timeout_report` — every installed edge unit (``sigil-{customer,public}{,@}.service``) lets
+  systemd wait for that edge's drain before it kills a stopping edge; a unit installed by an older release keeps
+  its shorter timeout until it is re-installed.
 
 :func:`unit_process_environment` gives one unit's process environment the same way (``sigil latch`` reads the
 cockpit's SIGIL_HOME and the ceilings of its customer latches from it).
@@ -32,6 +36,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -642,3 +647,136 @@ def must_match_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
     section = {"configured": True, "processes": where, "flags": flags, "ok": not issues,
                "ops_sweep_agrees": not notes}
     return section, issues, notes
+
+
+# ── customer sign-in: Google, and Google inside the installed app ───────────────────────────────────────────────────
+#: Read by BOTH the customer edge (the button, the redirect to Google) and the cockpit's provisioner (the token
+#: exchange): with different values in the two, the button is shown and every Google sign-in fails, or the reverse.
+_OIDC_SHARED = ("VIGIL_CUSTOMER_OIDC_ENABLED", "VIGIL_CUSTOMER_OIDC_CLIENT_ID", "VIGIL_CUSTOMER_OIDC_REDIRECT_URI")
+_OIDC_FILES = {"customer": "~/.sigil/customer.env", "cockpit": "~/.sigil/cockpit.env"}
+
+
+def customer_signin_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
+    """(section, issues, notes) for customer Google sign-in, from the env files the customer edge and the cockpit
+    units load (values are never printed). Silent until one of the two takes part.
+
+    HARD: the Google switch, client id or redirect URI differ between the edge and the cockpit; Google sign-in is on
+    in one of them without its client id or redirect URI; on in the cockpit without the client secret.
+    NOTE: Google sign-in is on at the edge without VIGIL_CUSTOMER_OIDC_HANDOFF — in an app installed to an iPhone
+    Home Screen, Google sign-in then finishes in another browser and the person is not signed in to the app."""
+    envs, _where = process_environments(home, repo)
+    procs = [p for p in ("customer", "cockpit") if p in envs]
+    if not procs:
+        return {"configured": False}, [], []
+
+    def get(proc: str, name: str) -> "str | None":
+        v = (envs[proc].get(name) or "").strip()
+        return v or None
+
+    google = {p: _norm("switch", get(p, "VIGIL_CUSTOMER_OIDC_ENABLED")) for p in procs}
+    issues: list = []
+    notes: list = []
+    if len(procs) == 2:
+        for name in _OIDC_SHARED:
+            a = _norm("switch", get("customer", name)) if name == _OIDC_SHARED[0] else get("customer", name)
+            b = _norm("switch", get("cockpit", name)) if name == _OIDC_SHARED[0] else get("cockpit", name)
+            if name != _OIDC_SHARED[0] and "on" not in google.values():
+                continue
+            if a != b:
+                state = (f"{a} in the customer edge, {b} in the cockpit" if name == _OIDC_SHARED[0]
+                         else "set differently in the customer edge and the cockpit" if a and b
+                         else f"set in the {'customer edge' if a else 'cockpit'} only")
+                issues.append(f"{name} must be the same for the customer edge and the cockpit, and it is not "
+                              f"({state}). The edge shows the Google button and sends people to Google; the cockpit "
+                              f"finishes the sign-in: with different values every Google sign-in fails or the button "
+                              f"is missing. Set it once in $SIGIL_HOME/sigil.env, or the same value in "
+                              f"{_OIDC_FILES['customer']} and {_OIDC_FILES['cockpit']}; restart both units.")
+    for proc in procs:
+        if google[proc] != "on":
+            continue
+        need = ["VIGIL_CUSTOMER_OIDC_CLIENT_ID", "VIGIL_CUSTOMER_OIDC_REDIRECT_URI"]
+        if proc == "cockpit":
+            need.append("VIGIL_CUSTOMER_OIDC_CLIENT_SECRET")
+        missing = [n for n in need if get(proc, n) is None]
+        if missing:
+            issues.append(f"Customer Google sign-in is on in the {'customer edge' if proc == 'customer' else 'cockpit'} "
+                          f"but {', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not set there "
+                          f"({_OIDC_FILES[proc]}): Google sign-in cannot complete. Set "
+                          f"{'it' if len(missing) == 1 else 'them'} (the client secret in the cockpit only, from your "
+                          f"secret manager) and restart the unit, or turn VIGIL_CUSTOMER_OIDC_ENABLED off.")
+    handoff = "customer" in procs and _norm("switch", get("customer", "VIGIL_CUSTOMER_OIDC_HANDOFF")) == "on"
+    if google.get("customer") == "on" and not handoff:
+        notes.append("Customer Google sign-in is on but VIGIL_CUSTOMER_OIDC_HANDOFF is off in "
+                     f"{_OIDC_FILES['customer']}: in an app installed to an iPhone Home Screen, Google sign-in finishes "
+                     "in another browser and the person is not signed in to the app. Set VIGIL_CUSTOMER_OIDC_HANDOFF=1 "
+                     "there and restart the customer edge.")
+    section = {"configured": True, "google": google, "handoff": handoff, "ok": not issues}
+    return section, issues, notes
+
+
+# ── the edges' stop timeout ───────────────────────────────────────────────────────────────────────────────────────
+#: The stop timeout each edge's units must allow: the edge's drain deadline (custui.drain_deadline_s 75 s for the
+#: customer edge; ui/graceful.DRAIN_DEADLINE_S 10 s for the public site) + the handshake grace + 5 s. The same floor
+#: tools/deploy/edge-swap.sh enforces; a sovereign test pins both to the servers' deadlines.
+EDGE_STOP_FLOOR_S = {"customer": 81, "public": 16}
+_EDGE_UNITS = (("customer", "sigil-customer.service"), ("customer", "sigil-customer@.service"),
+               ("public", "sigil-public.service"), ("public", "sigil-public@.service"))
+#: systemd's default stop timeout (DefaultTimeoutStopSec) when a unit sets none.
+_SYSTEMD_DEFAULT_STOP_S = 90.0
+_SPAN_UNITS = {"": 1.0, "s": 1.0, "sec": 1.0, "second": 1.0, "seconds": 1.0, "us": 1e-6, "usec": 1e-6,
+               "ms": 1e-3, "msec": 1e-3, "m": 60.0, "min": 60.0, "minute": 60.0, "minutes": 60.0,
+               "h": 3600.0, "hr": 3600.0, "hour": 3600.0, "hours": 3600.0, "d": 86400.0, "day": 86400.0,
+               "days": 86400.0}
+_SPAN_PART = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([a-z]*)")
+
+
+def parse_timespan(raw: str) -> "float | None":
+    """A systemd time span as a unit file writes it ("90", "90s", "1min 30s", "1min30s", "infinity") in seconds;
+    None when it cannot be read."""
+    v = (raw or "").strip()
+    if v == "infinity":
+        return float("inf")
+    total, pos = 0.0, 0
+    for m in _SPAN_PART.finditer(v):
+        if m.start() != pos or m.group(2) not in _SPAN_UNITS:
+            return None
+        total += float(m.group(1)) * _SPAN_UNITS[m.group(2)]
+        pos = m.end()
+    return total if v and pos == len(v) else None
+
+
+def edge_stop_timeout_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
+    """(section, issues, notes) for the stop timeout of every INSTALLED edge unit (with its drop-ins; the last
+    ``TimeoutStopSec=``/``TimeoutSec=`` wins, none means systemd's default 90 s). Silent until one is installed.
+
+    HARD: below ``EDGE_STOP_FLOOR_S`` — systemd would kill a stopping edge while it still finishes an action it
+    accepted (the action done, the customer told it failed, a retry doing it twice). NOTE: a value it cannot read."""
+    del repo                                           # only the installed units matter (never the repo's copies)
+    units: dict = {}
+    issues: list = []
+    notes: list = []
+    for edge, name in _EDGE_UNITS:
+        u = UnitView(name, home=home)
+        if not u.installed:
+            continue
+        raw = None
+        for k, v in u.directives:
+            if k in ("TimeoutStopSec", "TimeoutSec"):
+                raw = v
+        secs = _SYSTEMD_DEFAULT_STOP_S if raw is None or raw == "" else parse_timespan(raw)
+        floor = EDGE_STOP_FLOOR_S[edge]
+        if secs is None:
+            units[name] = "unreadable"
+            notes.append(f"{name}: TimeoutStopSec={raw!r} could not be read; a stopping {edge} edge needs systemd to "
+                         f"wait at least {floor} s. Install this release's unit (RELEASE-UPGRADE-ROLLBACK.md §2.6).")
+            continue
+        units[name] = secs
+        if secs < floor:
+            issues.append(f"{name} lets systemd stop the {edge} edge after {secs:g} s (TimeoutStopSec), but a "
+                          f"stopping {edge} edge may need {floor} s to finish the requests it accepted: systemd would "
+                          f"kill it part way through an action (the action done, the customer told it failed). "
+                          f"Install this release's unit: cp apps/sigil/deploy/systemd/{name} ~/.config/systemd/user/ "
+                          f"&& systemctl --user daemon-reload (RELEASE-UPGRADE-ROLLBACK.md §2.6).")
+    if not units:
+        return {"configured": False}, [], []
+    return {"configured": True, "units": units, "ok": not issues}, issues, notes

@@ -1,7 +1,7 @@
 """The cockpit, the customer edge and the public site stop GRACEFULLY on SIGTERM (what `systemctl stop|restart`
-sends): a request already accepted finishes and gets its answer, the cockpit's SSE feeds end, new connections
-are refused at once, and the process exits 0 — all within a drain deadline shorter than the units'
-TimeoutStopSec. A second signal ends the drain at once.
+sends): a request already accepted finishes and gets its answer, a connection still waiting in the listen queue is
+served (never reset), the cockpit's SSE feeds end, new connections are refused, and the process exits 0 — all
+within a drain deadline shorter than the units' TimeoutStopSec. A second signal ends the drain at once.
 
 The subprocess tests run the real `python -m sigil serve*` entry points and send real signals.
 
@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sigil.ui import graceful
+from sigil.ui import custui, graceful, pubui
 from sigil.ui.custui import CustomerServer
 from sigil.ui.pubui import PublicServer
 from sigil.ui.server import UIServer
@@ -145,6 +145,77 @@ def test_customer_edge_finishes_an_in_flight_request_on_sigterm(tmp_path, monkey
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        prov.shutdown()
+
+
+class _SlowerThanTheGenericDeadline(_SlowProvisioner):
+    received = threading.Event()
+
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        type(self).received.set()
+        time.sleep(3.0)                                  # the generic deadline in the child below is 1 s
+        body = json.dumps({"ok": True, "marker": "sent-after-the-generic-deadline"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_customer_edge_outwaits_a_cockpit_action_slower_than_the_generic_deadline(tmp_path):
+    # In production the generic deadline (10 s) is shorter than what custui allows some cockpit calls (45-60 s): a
+    # sign-up email taking 14 s, cut at 10 s by an edge swap, left the customer with nginx's "unavailable" page
+    # while the cockpit sent the email anyway. Here the child's generic deadline is 1 s and the action takes 3 s:
+    # the real `serve-customer` entry point must still wait for it, answer it, and only then exit 0.
+    _SlowerThanTheGenericDeadline.received.clear()
+    prov = ThreadingHTTPServer(("127.0.0.1", 0), _SlowerThanTheGenericDeadline)
+    threading.Thread(target=prov.serve_forever, daemon=True).start()
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("VIGIL_", "SIGIL_"))}
+    env.update({"SIGIL_HOME": str(tmp_path / "home"), "PYTHONPATH": _PYPATH, "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONUNBUFFERED": "1", "VIGIL_PROVISION_HOP_KEY": "graceful-hop-key",
+                "VIGIL_PROVISION_BASE": f"http://127.0.0.1:{prov.server_address[1]}"})
+    (tmp_path / "home").mkdir()
+    code = ("import sys\nfrom sigil.ui import graceful\ngraceful.DRAIN_DEADLINE_S = 1.0\n"
+            "from sigil.cli import main\n"
+            f"main(['serve-customer', '--host', '127.0.0.1', '--port', '{port}'])\n")
+    log = open(tmp_path / "server.log", "w")  # noqa: SIM115 — closed below
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        _wait_listening(port, proc)
+        result: dict = {}
+
+        def _client():
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+            try:
+                c.request("POST", "/api/customer/signup/request", body=json.dumps({"email": "a@example.test"}),
+                          headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}",
+                                   "Origin": f"http://127.0.0.1:{port}"})
+                r = c.getresponse()
+                result["status"], result["body"] = r.status, r.read().decode()
+            except Exception as exc:  # noqa: BLE001 — the pre-fix failure mode: the edge exits mid-action
+                result["error"] = repr(exc)
+
+        t = threading.Thread(target=_client)
+        t.start()
+        assert _SlowerThanTheGenericDeadline.received.wait(10), "the hop never reached the provisioner"
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        t.join(20)
+        assert result.get("status") == 200, result
+        assert json.loads(result["body"])["marker"] == "sent-after-the-generic-deadline"
+        assert proc.wait(20) == 0
+        assert time.monotonic() - t0 > 2.0               # it waited past the generic deadline, for the action
+        log.close()
+        # ... with the customer edge's own deadline (the one the units' TimeoutStopSec is sized for)
+        assert f"waiting up to {custui.drain_deadline_s():g} s for 1 request(s)" in \
+            (tmp_path / "server.log").read_text(encoding="utf-8")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
         prov.shutdown()
 
 
@@ -298,6 +369,48 @@ def test_drain_gives_up_at_the_deadline():
     t.join(5)
 
 
+class _LongDrainSrv(_Srv):
+    def drain_deadline(self) -> float:
+        return 5.0
+
+
+class _ShortDrainSrv(_Srv):
+    def drain_deadline(self) -> float:
+        return 0.4
+
+
+def test_a_stop_without_an_explicit_deadline_uses_the_servers_own():
+    # the deadline is the server's (the customer edge's is longer than the generic one), not one global figure
+    for cls, drained in ((_LongDrainSrv, True), (_ShortDrainSrv, False)):
+        srv = cls(("127.0.0.1", 0), _Hold)
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        t, _out = _held_request(srv)
+        threading.Timer(1.0, _Hold.release.set).start()
+        assert graceful.graceful_stop(srv, log=lambda _m: None) is drained, cls.__name__
+        srv.server_close()
+        _Hold.release.set()
+        t.join(5)
+
+
+def test_a_server_without_its_own_deadline_gets_the_generic_one():
+    assert graceful.drain_deadline_of(object()) == graceful.DRAIN_DEADLINE_S
+    assert graceful.drain_deadline_of(_LongDrainSrv.__new__(_LongDrainSrv)) == 5.0
+    assert graceful.drain_deadline_of(object.__new__(CustomerServer)) == custui.drain_deadline_s()
+
+
+def test_the_customer_edge_waits_past_its_slowest_cockpit_hop():
+    # A stopping edge must outwait every hop it may be in: otherwise it exits while the cockpit still completes
+    # the action (an email sent, a checkout created, a single-use sign-in code spent) and the customer is told
+    # it failed. The public site and the cockpit keep the generic deadline.
+    longest = max([custui._HOP_TIMEOUT_S, *custui._SLOW_HOP_TIMEOUTS_S.values()])
+    customer = object.__new__(CustomerServer).drain_deadline()
+    assert customer >= longest + 15, (customer, longest)
+    assert customer == custui.drain_deadline_s()
+    assert object.__new__(PublicServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
+    assert object.__new__(UIServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
+    assert graceful.DRAIN_DEADLINE_S < longest           # why the customer edge needs its own
+
+
 def test_serve_until_signal_stops_on_its_event_and_closes_the_server():
     srv = _Srv(("127.0.0.1", 0), _Hold)
     stop = threading.Event()
@@ -317,15 +430,175 @@ def test_the_three_servers_are_graceful(cls):
     assert cls.block_on_close is False
 
 
-@pytest.mark.parametrize("unit,deadline", [("sigil-cockpit.service", graceful.PROVISIONER_DRAIN_DEADLINE_S),
-                                           ("sigil-customer.service", graceful.PROVISIONER_DRAIN_DEADLINE_S),
-                                           ("sigil-public.service", graceful.DRAIN_DEADLINE_S)])
-def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit, deadline):
+@pytest.mark.parametrize("unit,cls", [("sigil-cockpit.service", UIServer), ("sigil-customer.service", CustomerServer),
+                                      ("sigil-public.service", PublicServer), ("sigil-customer@.service", CustomerServer),
+                                      ("sigil-public@.service", PublicServer)])
+def test_the_drain_deadline_is_inside_every_units_stop_timeout(unit, cls):
+    # systemd SIGKILLs at TimeoutStopSec: the server's own drain must end well before that
     text = (_SIGIL / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
     m = re.search(r"^TimeoutStopSec=(\d+)\s*$", text, re.M)
     assert m, f"{unit} sets no TimeoutStopSec"
-    assert deadline + 5 <= int(m.group(1)), (unit, m.group(1))
+    deadline = object.__new__(cls).drain_deadline()
+    assert deadline + graceful.HANDSHAKE_GRACE_S + 5 <= int(m.group(1)), (unit, deadline, m.group(1))
     assert re.search(r"^KillSignal=SIGTERM\s*$", text, re.M)
+
+
+class _Quick(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):  # noqa: N802
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.dumps({"got": self.rfile.read(n).decode()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _read_all(s: socket.socket) -> bytes:
+    data = b""
+    try:
+        while chunk := s.recv(65536):
+            data += chunk
+    except OSError as exc:                               # the pre-fix outcome: the queued connection is reset
+        return data + f"<{type(exc).__name__}>".encode()
+    return data
+
+
+def test_connections_waiting_in_the_listen_queue_are_served_not_reset():
+    # The kernel completes a handshake before the server accepts it, so a client (nginx) may already have sent its
+    # POST into the listen queue when the stop begins; closing the listener then would reset it, and nginx never
+    # re-sends a POST. Here no accept loop runs at all: every request below is in the queue when the stop starts.
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    port = srv.server_address[1]
+    clients = []
+    for i in range(4):
+        c = socket.create_connection(("127.0.0.1", port), timeout=10)
+        body = f'{{"n": {i}}}'.encode()
+        c.sendall(b"POST /api/customer/launch/reserve HTTP/1.0\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        clients.append((c, body))
+    assert graceful.graceful_stop(srv, drain_deadline_s=5, log=lambda _m: None, serving=False) is True
+    for c, body in clients:
+        data = _read_all(c)
+        c.close()
+        assert data.startswith(b"HTTP/1.0 200 "), data[:80]
+        assert json.loads(data.split(b"\r\n\r\n", 1)[1]) == {"got": body.decode()}
+    assert _refused(port)
+    srv.server_close()
+
+
+def test_a_client_that_gave_up_in_the_queue_does_not_strand_the_ones_behind_it():
+    # accept() can report a connection its client aborted while queued (ECONNABORTED); the connections queued
+    # behind it are still served
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    c = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=10)
+    c.sendall(b"POST / HTTP/1.0\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+    real, calls = srv.get_request, []
+
+    def _aborted_first():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionAbortedError("the client gave up while queued")
+        return real()
+
+    srv.get_request = _aborted_first
+    assert graceful.graceful_stop(srv, drain_deadline_s=5, log=lambda _m: None, serving=False) is True
+    data = _read_all(c)
+    c.close()
+    assert data.startswith(b"HTTP/1.0 200 "), data[:80]
+    srv.server_close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the SYN filter is Linux-only")
+def test_a_stopping_listener_takes_no_new_connection_but_keeps_the_ones_queued():
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    port = srv.server_address[1]
+    queued = socket.create_connection(("127.0.0.1", port), timeout=5)       # handshake done before the hold
+    assert graceful._hold_new_connections(srv) is True
+    t0 = time.monotonic()
+    with pytest.raises(socket.timeout):                                     # a new attempt is not taken ...
+        socket.create_connection(("127.0.0.1", port), timeout=0.5)
+    assert time.monotonic() - t0 >= 0.45
+    late: dict = {}
+
+    def _late():
+        t = time.monotonic()
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=5).close()
+            late["r"] = "connected"
+        except OSError as exc:
+            late["r"], late["s"] = type(exc).__name__, time.monotonic() - t
+
+    th = threading.Thread(target=_late)
+    th.start()
+    time.sleep(0.2)
+    assert graceful._serve_waiting_connections(srv) == 1                     # ... the queued one still is
+    graceful._close_listener(srv)
+    th.join(5)
+    assert late.get("r") == "ConnectionRefusedError", late                  # ... and the held one is refused
+    queued.close()
+    srv.server_close()
+
+
+def test_the_stop_holds_new_connections_then_serves_the_queue_then_closes(monkeypatch):
+    # the order is what makes the stop lose nothing: once new attempts are held, nothing can join the queue between
+    # the last accept and the close
+    srv = _Srv(("127.0.0.1", 0), _Quick)
+    order: list = []
+    for name in ("_hold_new_connections", "_serve_waiting_connections", "_close_listener"):
+        def _spy(s, _real=getattr(graceful, name), _name=name):
+            order.append(_name)
+            return _real(s)
+        monkeypatch.setattr(graceful, name, _spy)
+    assert graceful.graceful_stop(srv, drain_deadline_s=1, log=lambda _m: None, serving=False) is True
+    assert order == ["_hold_new_connections", "_serve_waiting_connections", "_close_listener"]
+    srv.server_close()
+
+
+# ── a new edge listens only once it can serve ────────────────────────────────────────────────────────────────
+def _build(edge: str, port: int, tmp_path):
+    if edge == "customer":
+        return CustomerServer(("127.0.0.1", port), custui.CustomerHandler, hop_key="k",
+                              provision_base="http://127.0.0.1:1", sessions_dir=str(tmp_path / "s"))
+    return PublicServer(("127.0.0.1", port), pubui.PublicHandler)
+
+
+@pytest.mark.parametrize("edge,module,name", [("customer", "custui", "build_app_snapshot"),
+                                              ("public", "pubui", "SiteSnapshot")])
+def test_a_new_edge_refuses_connections_until_it_can_serve(tmp_path, monkeypatch, edge, module, name):
+    # During an edge swap nginx sends requests to the new edge's port as soon as it accepts connections; a request
+    # handed to an edge whose startup then fails is reset (a POST is never re-sent). So the port refuses until the
+    # app is read, and a startup that fails leaves the port refusing and free.
+    mod = {"custui": custui, "pubui": pubui}[module]
+    real = getattr(mod, name)
+    port = _free_port()
+    seen: dict = {}
+
+    def _spy(*a, **k):
+        seen["refused"] = _refused(port)
+        return real(*a, **k)
+
+    monkeypatch.setattr(mod, name, _spy)
+    srv = _build(edge, port, tmp_path / "ok")
+    try:
+        assert seen == {"refused": True}, "the edge accepted connections before it could serve"
+        assert not _refused(port)                                    # and it listens once it can
+    finally:
+        srv.server_close()
+
+    def _fails(*_a, **_k):
+        raise ValueError("customer_app/sw.js must carry exactly one BUILD and one SHELL placeholder line")
+
+    monkeypatch.setattr(mod, name, _fails)
+    with pytest.raises(ValueError, match="placeholder"):
+        _build(edge, port, tmp_path / "bad")
+    assert _refused(port)
+    s = socket.socket()
+    s.bind(("127.0.0.1", port))                                      # the failed edge released its port
+    s.close()
 
 
 def test_the_provisioner_drain_outwaits_every_action_the_customer_edge_waits_for():
@@ -346,13 +619,17 @@ def _captured_serve(monkeypatch, module) -> dict:
     return seen
 
 
-def test_the_customer_edge_stops_with_the_provisioner_deadline(tmp_path, monkeypatch):
+def test_the_customer_edge_stops_with_its_own_deadline_past_the_cockpits(tmp_path, monkeypatch):
+    # the edge waits for its own deadline (custui.drain_deadline_s), which outlasts the cockpit's drain: an action
+    # the cockpit is still finishing at a joint stop is answered before the edge gives up on it
     from sigil.ui import custui
     seen = _captured_serve(monkeypatch, custui)
     (tmp_path / "s").mkdir()
     custui.serve_customer(host="127.0.0.1", port=0, hop_key="k", provision_base="http://127.0.0.1:9",
                           sessions_dir=str(tmp_path / "s"))
-    assert seen["drain_deadline_s"] == graceful.PROVISIONER_DRAIN_DEADLINE_S
+    assert seen.get("drain_deadline_s") is None
+    assert graceful.drain_deadline_of(seen["srv"]) == custui.drain_deadline_s()
+    assert custui.drain_deadline_s() > graceful.PROVISIONER_DRAIN_DEADLINE_S
 
 
 @pytest.mark.parametrize("gateway_on", [True, False], ids=["gateway", "no-gateway"])

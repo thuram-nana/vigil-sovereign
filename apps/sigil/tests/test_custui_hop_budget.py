@@ -33,6 +33,11 @@ def test_each_slow_action_outwaits_its_own_downstream_worst_case():
     smtp = _default(email_channel.SmtpEmailSender.__init__, "timeout")
     for a in ("signup_request", "recover_request"):
         assert t[a] > 5 * smtp                                                     # connect/EHLO/STARTTLS/AUTH/DATA
+    # Confirm-by-CODE must outlast the cockpit's code check, which waits up to _HASH_WAIT_S for a hash slot before
+    # scrypt + the commit. A shorter edge wait lets the cockpit set the new password (and, on recover, never sever
+    # the old sessions) after the edge gave up. (ios-review r2, MED #2.)
+    for a in ("signup_confirm", "recover_confirm"):
+        assert t[a] > email_channel._HASH_WAIT_S + 10.0                            # _HASH_WAIT_S + scrypt + commit
     assert custui._hop_timeout("login") == custui._HOP_TIMEOUT_S == 10.0           # local actions still fail fast
     assert all(v > custui._HOP_TIMEOUT_S for v in t.values())
 
@@ -74,6 +79,6 @@ def test_a_slow_checkout_is_not_reported_failed_but_a_wedged_local_action_still_
 
 
 @pytest.mark.parametrize("action", ["billing_checkout", "oidc_finish", "target_verify", "signup_request",
-                                    "recover_request"])
+                                    "recover_request", "signup_confirm", "recover_confirm"])
 def test_every_slow_action_name_is_a_real_hop_action(action):
     assert f'"{action}"' in inspect.getsource(custui)

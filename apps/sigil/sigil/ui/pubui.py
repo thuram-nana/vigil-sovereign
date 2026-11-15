@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import posixpath
 import re
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -28,6 +29,7 @@ assert_no_offense()
 
 from ..bridge.daemon import bind_ok  # noqa: E402  (the ONE loopback/private bind invariant — reused, not re-authored)
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402  (stdlib-only graceful stop)
+from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402  (stdlib-only)
 
 # The packaged content tree (ships with the sigil package, so it deploys wherever sigil does).
 _PUBLIC_ROOT = Path(__file__).resolve().parent / "public_site"
@@ -47,6 +49,23 @@ _CTYPES = {
 }
 _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site is a mistake — refuse
 
+# Cache policy (the site is read once at startup into a content-hashed snapshot — ui/static_site.py):
+#   * pages and any asset requested WITHOUT ?v=: a browser revalidates every time (ETag -> 304) and a CDN may
+#     keep a copy for 60 s, so a release reaches every visitor within about a minute;
+#   * an asset requested with ?v=<its current digest>: immutable for a year (the bytes behind that URL never
+#     change); with any other v: 404 + no-store (see static_site.SiteSnapshot.version_state);
+#   * /version.json, the probes, every 404: no-store.
+_PAGE_CACHE = "public, max-age=0, s-maxage=60"
+
+# A number in a query string: ASCII digits only and at most 9 of them. str.isdigit() also accepts '²' and other
+# digits int() refuses, and int() refuses a string of more than 4300 digits; either used to end the request
+# with no answer at all.
+_NUMBER = re.compile(r"[0-9]{1,9}")
+
+
+def _number(raw: str, default: "int | None") -> "int | None":
+    return int(raw) if _NUMBER.fullmatch(raw) else default
+
 
 class PublicServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
@@ -61,11 +80,21 @@ class PublicServer(GracefulMixin, ThreadingHTTPServer):
         ip = ipaddress.ip_address(host)
         if ip.version == 6:
             self.address_family = socket.AF_INET6
-        super().__init__(addr, handler)
-        self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
-        # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
-        # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
-        self.catalog_path = Path(catalog_path) if catalog_path else None
+        # Bind now, LISTEN LAST (server_activate below): until the site is read, a connection to this port is
+        # refused — nginx then sends it to the other port — so a startup that fails never drops a request.
+        super().__init__(addr, handler, bind_and_activate=False)
+        try:
+            self.server_bind()
+            self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
+            # the whole site, read ONCE: what this process serves until it stops (one consistent build)
+            self.site = SiteSnapshot(self.root, _CTYPES, max_file=_MAX_BYTES)
+            # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
+            # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
+            self.catalog_path = Path(catalog_path) if catalog_path else None
+            self.server_activate()
+        except BaseException:
+            self.server_close()
+            raise
 
 
 class PublicHandler(BaseHTTPRequestHandler):
@@ -76,7 +105,8 @@ class PublicHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A003 — never log
         pass
 
-    def _send_headers(self, code: int, ctype: str, length: int, *, cache: "str | None" = "public, max-age=300"):
+    def _send_headers(self, code: int, ctype: str, length: int, *, cache: "str | None" = "public, max-age=300",
+                      etag: "str | None" = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(length))
@@ -84,32 +114,31 @@ class PublicHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Vigil-Build", self.server.site.build)
         if cache:
             self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
         self.end_headers()
 
     def _resolve(self, urlpath: str):
-        """Map a URL path to a safe file under root, or None. Directory / extension-less routes resolve to
-        `<path>.html` then `<path>/index.html`; "/" → index.html. Path-traversal is refused: every candidate
-        must `resolve()` to within the (resolved) root. Returns (abs_path, content_type) or None → 404."""
-        rel = unquote(urlparse(urlpath).path).lstrip("/")
-        root = self.server.root
-        if rel in ("", "/"):
-            cands = [root / "index.html"]
+        """Map a URL path to an asset of the site snapshot, or None. Directory / extension-less routes resolve
+        to `<path>.html` then `<path>/index.html`; "/" → index.html. Only files read into the snapshot at
+        startup can ever be served, and a path is clamped inside the content root before it is looked up."""
+        rel = normalize_rel(urlparse(urlpath).path)
+        site = self.server.site
+        if rel is None:
+            return None
+        if rel == "":
+            cands = ["index.html"]
         else:
-            base = root / rel
-            cands = [base]
-            if not base.suffix:                       # a pretty route: try <path>.html then <path>/index.html
-                cands += [root / (rel + ".html"), base / "index.html"]
+            cands = [rel]
+            if not posixpath.splitext(rel)[1]:            # a pretty route: try <path>.html then <path>/index.html
+                cands += [rel + ".html", rel + "/index.html"]
         for cand in cands:
-            try:
-                rp = cand.resolve()
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if rp != root and not rp.is_relative_to(root):
-                continue                              # traversal guard — must stay within the content root
-            if rp.is_file():
-                return rp, _CTYPES.get(rp.suffix.lower(), "application/octet-stream")
+            a = site.get(cand)
+            if a is not None:
+                return a
         return None
 
     # --- health / readiness (probe surface) ----------------------------------------------------------
@@ -127,20 +156,56 @@ class PublicHandler(BaseHTTPRequestHandler):
             pass
 
     def _readyz(self):
-        root = self.server.root
-        try:
-            ready = root.is_dir() and (root / "index.html").is_file()
-        except OSError:                      # a disk/permission fault reading the root is NOT ready
-            ready = False
+        # ready = the site shell this edge serves at "/" is in the snapshot it read at startup
+        ready = "index.html" in self.server.site
         self._probe_json({"ok": ready, "checks": [{"name": "content_root", "ok": ready}]},
                          200 if ready else 503)
 
+    def _version(self, head: bool = False):
+        """GET /version.json — the build this edge serves (a content hash; no auth, no-store)."""
+        body = json.dumps({"build": self.server.site.build}).encode("utf-8")
+        self._send_headers(200, "application/json; charset=utf-8", len(body), cache="no-store")
+        if not head:
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    def _fault(self, head: bool) -> None:
+        """One clean 500 (no internals, no-store) for a fault no route expected — never a connection closed with no
+        answer, which nginx would count against this edge."""
+        api = urlparse(self.path).path.startswith("/api/")
+        body = b'{"error": "request failed"}' if api else b"VIGIL could not answer this request.\n"
+        try:
+            self._send_headers(500, "application/json; charset=utf-8" if api else "text/plain; charset=utf-8",
+                               len(body), cache="no-store")
+            if not head:
+                self.wfile.write(body)
+        except OSError:
+            pass
+
     def do_GET(self):
+        try:
+            return self._route_get()
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._fault(head=False)
+
+    def do_HEAD(self):
+        try:
+            if urlparse(self.path).path == "/version.json":
+                return self._version(head=True)
+            return self._serve(head=True)
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._fault(head=True)
+
+    def _route_get(self):
         path = urlparse(self.path).path
         if path == "/healthz":
             return self._probe_json({"ok": True})
         if path == "/readyz":
             return self._readyz()
+        if path == "/version.json":
+            return self._version()
         if path == "/api/cve" or path.startswith("/api/cve/"):
             return self._cve_api(path)
         # pretty dynamic CVE routes map to a static shell that client-side JS then fills from /api/cve.
@@ -148,10 +213,7 @@ class PublicHandler(BaseHTTPRequestHandler):
             return self._serve(head=False, override="cve/_detail.html")
         if re.fullmatch(r"/cve/year/\d{4}/?", path):
             return self._serve(head=False, override="cve/_year.html")
-        self._serve(head=False)
-
-    def do_HEAD(self):
-        self._serve(head=True)
+        return self._serve(head=False)
 
     # -- read-only public CVE API (offense-free; reads the local catalog; no egress at request time) ---
     def _json(self, obj, code: int = 200):
@@ -192,10 +254,10 @@ class PublicHandler(BaseHTTPRequestHandler):
             one = lambda k: (q.get(k, [""])[0] or "").strip()  # noqa: E731
             kev = one("kev")
             res = store.query(
-                page=int(one("page") or 1) if one("page").isdigit() else 1,
-                per_page=int(one("per_page") or 50) if one("per_page").isdigit() else 50,
+                page=_number(one("page"), 1) or 1,
+                per_page=_number(one("per_page"), 50) or 50,
                 severity=one("severity") or None, q=one("q") or None,
-                year=int(one("year")) if one("year").isdigit() else None,
+                year=_number(one("year"), None),
                 kev=(True if kev in ("1", "true", "yes") else (False if kev in ("0", "false", "no") else None)),
                 order=one("order") or "published_desc")
             res["populated"] = True
@@ -213,27 +275,31 @@ class PublicHandler(BaseHTTPRequestHandler):
     def _serve(self, head: bool, override: "str | None" = None):
         hit = self._resolve("/" + override) if override else self._resolve(self.path)
         if hit is None:
+            rel = normalize_rel(urlparse(self.path).path)
+            if rel is not None and rel in self.server.site.too_large:
+                self._send_headers(413, "text/plain; charset=utf-8", 0, cache="no-store")
+                return
             return self._not_found(head)
-        rp, ctype = hit
-        try:
-            data = rp.read_bytes()
-        except OSError:
-            return self._not_found(head)
-        if len(data) > _MAX_BYTES:
-            self._send_headers(413, "text/plain; charset=utf-8", 0, cache=None)
+        state = self.server.site.version_state(hit, urlparse(self.path).query)
+        if state == "mismatch":
+            return self._not_found(head)          # another build's URL: never cache today's bytes under it
+        cache = IMMUTABLE if state == "immutable" else _PAGE_CACHE
+        if not_modified(self.headers.get("If-None-Match", ""), hit.etag):
+            self._send_headers(304, hit.ctype, len(hit.body), cache=cache, etag=hit.etag)   # no body follows
             return
-        self._send_headers(200, ctype, len(data))
+        self._send_headers(200, hit.ctype, len(hit.body), cache=cache, etag=hit.etag)
         if not head:
             try:
-                self.wfile.write(data)
+                self.wfile.write(hit.body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
     def _not_found(self, head: bool):
-        custom = self.server.root / "404.html"
-        body = (custom.read_bytes() if custom.is_file()
+        custom = self.server.site.get("404.html")
+        body = (custom.body if custom is not None
                 else b"<!doctype html><meta charset=utf-8><title>404</title><h1>404 Not Found</h1>")
-        self._send_headers(404, "text/html; charset=utf-8", len(body), cache=None)
+        # no-store: a 404 kept by a cache would outlive the release that adds the page (or the build it names)
+        self._send_headers(404, "text/html; charset=utf-8", len(body), cache="no-store")
         if not head:
             try:
                 self.wfile.write(body)

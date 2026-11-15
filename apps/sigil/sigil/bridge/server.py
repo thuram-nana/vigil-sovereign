@@ -31,6 +31,7 @@ preferred. Offense-free."""
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
@@ -50,6 +51,27 @@ from .envelope import consume, verify_envelope
 from .notifier import PushNotifier
 
 _WEBAPP = Path(__file__).parent / "webapp"       # the PWA is a later slice — served if present, else 404
+# Content types of the Companion's static files (anything else is application/octet-stream).
+_STATIC_CTYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
+    ".webmanifest": "application/manifest+json", ".png": "image/png", ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
+# The Companion's worker names its cache after the webapp's build (a content hash written in at serve time), so a
+# changed app is a new worker with a new cache, offered to the owner as an update instead of patched in place.
+_WORKER = "service-worker.js"
+_WORKER_BUILD = "__COMPANION_BUILD__"
+
+
+def _webapp_build() -> str:
+    """sha256[:12] over every webapp file (path + bytes): what the Companion's worker calls its build."""
+    h = hashlib.sha256()
+    base = _WEBAPP.resolve()
+    for p in sorted(base.rglob("*")) if base.is_dir() else []:
+        if p.is_file() and not p.is_symlink():
+            h.update(p.relative_to(base).as_posix().encode("utf-8") + b"\0" + hashlib.sha256(p.read_bytes()).digest())
+    return h.hexdigest()[:12]
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DEFAULT_PORT = 8722
 
@@ -357,13 +379,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(404, "not found")
         if not target.is_file():
             return self._deny(404, "not found")                  # includes: webapp dir absent (later slice)
-        name = target.name
-        ctype = ("application/javascript" if name.endswith(".js")
-                 else "text/css" if name.endswith(".css")
-                 else "text/html" if name.endswith(".html")
-                 else "application/octet-stream")
+        ctype = _STATIC_CTYPES.get(target.suffix.lower(), "application/octet-stream")
         try:
-            self._send(200, target.read_bytes(), ctype=f"{ctype}; charset=utf-8")
+            body = target.read_bytes()
+            if target.name == _WORKER and target.parent == base:
+                body = body.replace(_WORKER_BUILD.encode("ascii"), _webapp_build().encode("ascii"))
+            self._send(200, body, ctype=ctype)
         except OSError:
             self._deny(404, "not found")
 

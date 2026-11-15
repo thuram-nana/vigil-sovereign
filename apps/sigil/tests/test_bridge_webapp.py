@@ -29,7 +29,7 @@ from sigil.reuse import canonical_json
 from sigil.bridge import envelope as _E
 WEBAPP = Path(_E.__file__).parent / "webapp"
 
-FILES = ["index.html", "app.js", "style.css", "manifest.json", "service-worker.js", "canonical.js"]
+FILES = ["index.html", "app.js", "style.css", "manifest.webmanifest", "service-worker.js", "canonical.js"]
 
 
 def _read(name):
@@ -205,3 +205,163 @@ def test_esc_is_safe_in_a_quoted_attribute_executed():
         assert '"' not in g and "'" not in g and "<" not in g
     attr = '<button data-seq="' + got[0] + '">'                  # what refreshPending() builds
     assert attr.count('"') == 2                                  # the attribute cannot be broken out of
+
+
+# ---- 6. installable with the owner's icons, served with the right types (Phase 3.4) ---------------------------
+def _png_size(path):
+    import struct
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR", path
+    w, h, _d, colour = struct.unpack(">IIBB", data[16:26])
+    return w, h, colour
+
+
+def test_manifest_icons_are_the_owners_pngs():
+    m = json.loads(_read("manifest.webmanifest"))
+    assert m["start_url"] == "/static/index.html" and m["scope"] == "/static/" and m["display"] == "standalone"
+    icons = m["icons"]
+    assert {(i["sizes"], i["purpose"]) for i in icons} >= {("192x192", "any"), ("512x512", "any"),
+                                                          ("512x512", "maskable")}
+    for i in icons:
+        assert i["type"] == "image/png" and i["src"].startswith("/static/brand/") and "data:" not in i["src"]
+        w, h, colour = _png_size(WEBAPP / i["src"][len("/static/"):])
+        assert f"{w}x{h}" == i["sizes"] and colour == 2, i          # the opaque dark avatar
+    html = _read("index.html")
+    assert '<link rel="manifest" href="/static/manifest.webmanifest">' in html
+    assert '<link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml">' in html
+    assert '<link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png">' in html
+    assert 'href="data:' not in html
+
+
+def _bridge():
+    import tempfile
+    import threading
+
+    from sigil.bridge.server import build_server
+    from sigil.reuse import generate_keypair
+    spine = tempfile.mktemp(suffix=".jsonl")
+    srv = build_server(addr="127.0.0.1", port=0, spine_path=spine,
+                       trusted_pubkey=generate_keypair().public_key_b64)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def _get(port, path):
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", path)
+    r = c.getresponse()
+    return r.status, r.getheader("Content-Type"), r.read()
+
+
+def test_the_bridge_serves_the_manifest_and_icons_with_their_types():
+    srv, port = _bridge()
+    try:
+        for path, ctype in (("/static/manifest.webmanifest", "application/manifest+json"),
+                            ("/static/brand/icon-192.png", "image/png"), ("/static/brand/icon-512.png", "image/png"),
+                            ("/static/brand/favicon.svg", "image/svg+xml"),
+                            ("/static/app.js", "application/javascript; charset=utf-8"),
+                            ("/static/style.css", "text/css; charset=utf-8")):
+            status, got, body = _get(port, path)
+            assert status == 200 and got == ctype and body, (path, status, got)
+        assert _get(port, "/static/manifest.json")[0] == 404            # the old name is gone
+    finally:
+        srv.shutdown()
+
+
+def test_the_worker_cache_is_named_after_the_apps_build():
+    from sigil.bridge import server as bridge_server
+    srv, port = _bridge()
+    try:
+        status, ctype, body = _get(port, "/static/service-worker.js")
+        assert status == 200 and ctype.startswith("application/javascript")
+        build = bridge_server._webapp_build()
+        assert re.fullmatch(r"[0-9a-f]{12}", build)
+        text = body.decode()
+        assert f'var BUILD = "{build}";' in text and "__COMPANION_BUILD__" not in text
+        assert 'var CACHE = "sigil-companion-" + BUILD;' in text
+    finally:
+        srv.shutdown()
+
+
+def test_a_changed_app_is_a_new_build(tmp_path, monkeypatch):
+    from sigil.bridge import server as bridge_server
+    for name in FILES:
+        (tmp_path / name).write_bytes((WEBAPP / name).read_bytes())
+    monkeypatch.setattr(bridge_server, "_WEBAPP", tmp_path)
+    one = bridge_server._webapp_build()
+    (tmp_path / "app.js").write_text(_read("app.js") + "\n// changed\n", encoding="utf-8")
+    assert bridge_server._webapp_build() != one
+
+
+_SW_HARNESS = r"""
+const vm = require("vm");
+const [SRC, CFG] = process.argv.slice(-2);
+const cfg = JSON.parse(CFG);
+const log = { puts: 0, added: [], deleted: [], skip: 0, claimed: 0, answers: {} };
+const store = { "sigil-companion-v1": {}, "sigil-companion-oldbuild0000": {} };
+const L = {};
+const caches = {
+  open: async (n) => { store[n] = store[n] || {}; const c = store[n];
+    return { addAll: async (urls) => { log.added.push([n, urls]); urls.forEach(u => { c[u] = "cached:" + u; }); },
+             put: async () => { log.puts++; },
+             match: async (u) => (c[u] ? { body: c[u] } : undefined) }; },
+  keys: async () => Object.keys(store),
+  delete: async (k) => { log.deleted.push(k); delete store[k]; return true; } };
+const self = { location: { origin: "https://phone.wg" }, addEventListener: (t, f) => { L[t] = f; },
+  skipWaiting: () => { log.skip++; }, clients: { claim: async () => { log.claimed++; } } };
+const ctx = { self, caches, URL, Promise, console, fetch: async (r) => ({ body: "net:" + (r.url || r) }) };
+vm.createContext(ctx);
+vm.runInContext(SRC, ctx);
+(async () => {
+  let p; L.install({ waitUntil: (x) => { p = x; } }); await p;
+  L.activate({ waitUntil: (x) => { p = x; } }); await p;
+  for (const [m, u] of cfg.requests) {
+    let res = null;
+    L.fetch({ request: { method: m, url: "https://phone.wg" + u }, respondWith: (x) => { res = x; } });
+    log.answers[m + " " + u] = res === null ? null : (await res).body;
+  }
+  L.message({ data: { type: "nope" } });
+  log.skipBeforeAsk = log.skip;
+  L.message({ data: { type: "SKIP_WAITING" } });
+  log.caches = Object.keys(store);
+  console.log(JSON.stringify(log));
+})();
+"""
+
+
+def test_the_worker_stores_only_the_shell_waits_for_the_owner_and_never_touches_api():
+    if not shutil.which("node"):
+        print("  SKIP  node not present")
+        return
+    src = _read("service-worker.js").replace("__COMPANION_BUILD__", "abcdef012345")
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    assert ".put(" not in code, "the worker must store nothing at run time"
+    reqs = [["GET", "/static/app.js"], ["GET", "/static/index.html"], ["GET", "/api/snapshot"],
+            ["GET", "/api/stream"], ["POST", "/api/action"], ["POST", "/static/app.js"],
+            ["GET", "/static/app.js?x=1"], ["GET", "/static/unknown.js"], ["GET", "/"]]
+    out = subprocess.run(["node", "-e", _SW_HARNESS, src, json.dumps({"requests": reqs})], capture_output=True,
+                         text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    log = json.loads(out.stdout)
+    assert log["answers"]["GET /static/app.js"] == "cached:/static/app.js"
+    assert log["answers"]["GET /static/index.html"] == "cached:/static/index.html"
+    for k in ("GET /api/snapshot", "GET /api/stream", "POST /api/action", "POST /static/app.js",
+              "GET /static/app.js?x=1", "GET /static/unknown.js", "GET /"):
+        assert log["answers"][k] is None, k
+    assert log["puts"] == 0
+    assert log["added"][0][0] == "sigil-companion-abcdef012345"
+    assert "/static/manifest.webmanifest" in log["added"][0][1] and "/static/brand/icon-192.png" in log["added"][0][1]
+    assert sorted(log["deleted"]) == ["sigil-companion-oldbuild0000", "sigil-companion-v1"]
+    assert log["caches"] == ["sigil-companion-abcdef012345"]
+    assert log["skipBeforeAsk"] == 0 and log["skip"] == 1        # it waits until the page asks
+
+
+def test_the_app_offers_the_update_and_switches_only_when_asked():
+    app = _read("app.js")
+    assert 'btn.dataset.act = "apply-update";' in app and 'if (act === "apply-update") { return applyUpdate(); }' in app
+    assert 'UPDATE.worker.postMessage({ type: "SKIP_WAITING" });' in app
+    assert '"controllerchange", function () { if (UPDATE.asked) { location.reload(); } }' in app
+    assert "if (!navigator.serviceWorker.controller) { return; }" in app       # not on the first install
+    assert ".then(watchUpdates)" in app
+

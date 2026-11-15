@@ -2297,15 +2297,17 @@ def collect(repo_root) -> dict:
         report["metering"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
 
     # GO-LIVE §1/§6 — the systemd user units this host has installed: one cockpit on 127.0.0.1:8733 (the console
-    # proxy-only in front of sigil-cockpit), ~/.sigil/venv as the hash-locked sovereign venv, and the settle/money
-    # settings every settling process must share. Each is silent until its units or files exist (default output
-    # unchanged). Read only from the files the units load (deploy_checks), never from this process's environment, so
-    # `vigil-ready.service` and an operator's shell reach the same verdict. Best-effort.
+    # proxy-only in front of sigil-cockpit), ~/.sigil/venv as the hash-locked sovereign venv, the settle/money
+    # settings every settling process must share, customer Google sign-in, and edge units whose stop timeout outlasts
+    # the edge's drain (RELEASE §2.6). Each is silent until its units or files exist (default output
+    # unchanged); a finding is a HARD issue. Read from the files the units load (deploy_checks). Best-effort.
     from . import deploy_checks as _dc
     _home = Path.home()
     for _key, _check in (("cockpit_port", lambda: _dc.cockpit_port_report(_home, repo)),
                          ("sovereign_venv", lambda: _dc.sovereign_venv_report(_home, repo)),
-                         ("must_match_flags", lambda: _dc.must_match_report(_home, repo))):
+                         ("must_match_flags", lambda: _dc.must_match_report(_home, repo)),
+                         ("customer_signin", lambda: _dc.customer_signin_report(_home, repo)),
+                         ("edge_stop_timeout", lambda: _dc.edge_stop_timeout_report(_home, repo))):
         try:
             _sec, _iss, _nts = _check()
             report[_key] = _sec
@@ -2511,7 +2513,8 @@ def render(report: dict) -> str:
                      + (f"; cancelled runs: {mt.get('cancel_settlement')}" if mt.get("cancel_settlement") else "")
                      + (f"; daily ceiling ${mt.get('daily_limit_usd')}" if mt.get("daily_limit_usd") else ""))
 
-    dep = [(k, report.get(k)) for k in ("cockpit_port", "sovereign_venv", "must_match_flags")]
+    dep = [(k, report.get(k)) for k in ("cockpit_port", "sovereign_venv", "must_match_flags", "customer_signin",
+                                        "edge_stop_timeout")]
     dep = [(k, d) for k, d in dep if isinstance(d, dict) and d.get("configured") and "error" not in d]
     if dep:
         # GO-LIVE §1/§6: rendered ONLY when the units/files a check reads exist (default output unchanged).
@@ -2527,6 +2530,17 @@ def render(report: dict) -> str:
                 lines.append(f"  {_mark(bool(d.get('ok')))}{d.get('path')}: "
                              + ("MISSING" if d.get("exists") is False else
                                 f"symlink to {d.get('target')}" if d.get("symlink") else "NOT a symlink"))
+            elif k == "customer_signin":
+                g = d.get("google", {})
+                lines.append(f"  {_mark(bool(d.get('ok')))}customer Google sign-in: "
+                             + "; ".join(f"{v} in the {'customer edge' if p == 'customer' else p}"
+                                         for p, v in g.items())
+                             + ("; inside the installed app: " + ("on" if d.get("handoff") else "OFF")
+                                if g.get("customer") == "on" else ""))
+            elif k == "edge_stop_timeout":
+                lines.append(f"  {_mark(bool(d.get('ok')))}edge stop timeouts: "
+                             + "; ".join(f"{u} {v if isinstance(v, str) else format(v, 'g') + ' s'}"
+                                         for u, v in d.get("units", {}).items()))
             else:
                 procs = ", ".join(p for p in d.get("processes", {}) if p != "ops-sweep")
                 lines.append(f"  {_mark(bool(d.get('ok')))}settle/money settings "

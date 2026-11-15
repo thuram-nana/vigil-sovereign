@@ -10,6 +10,23 @@
  * API paths always resolve against the mount and no deep server route is needed (the proxy has no SPA history
  * fallback). The SERVER is the authority on identity + tenant scope; this UI never sends an org id the server
  * would trust — reads/launches are scoped to the session org by the edge + admit_customer.
+ *
+ * GOOGLE. When the edge has customer Google sign-in on, it writes data-google-signin="1" into the page at startup and
+ * the sign-in and sign-up screens show "Continue with Google": a top-level GET of api/customer/oidc/login (relative),
+ * which the edge answers with the redirect to Google. A Google sign-in that does not complete lands back on the app
+ * as #oidc=err, shown as one generic message (the edge never says why).
+ *
+ * GOOGLE IN THE INSTALLED APP. An app added to a Home Screen runs standalone, and iOS finishes Google sign-in in a
+ * separate browser with its own cookies, so a session set there never reaches the app. When the edge has the hand-off
+ * on (data-oidc-handoff="1") and the app runs standalone, the button instead makes a random 32-byte verifier, keeps
+ * it in this app (IndexedDB, else sessionStorage; never a cookie or a URL) and starts the login with
+ * ?handoff=<base64url(sha256(verifier))>. The page where Google sign-in finished shows a 6-digit code; back in the
+ * app, a code box asks for it and POSTs {verifier, code} to api/customer/oidc/handoff, which sets the session
+ * cookie in the app's own cookie jar. Outside a standalone app the normal flow is used, unchanged.
+ *
+ * EMAIL CODES. When the deployment sends them (the request answers code: true), the sign-up and password-reset emails
+ * carry a 6-digit code beside the token, and the screens ask for "the 6-digit code from your email" (with the token
+ * one tap away). The code is sent with the email address it went to; it works once, for 10 minutes.
  */
 (function () {
   "use strict";
@@ -21,6 +38,18 @@
   if (!VUI) { if (root) { root.textContent = "VIGIL could not load its interface. Please reload."; } return; }
   // Cookie-auth plane: no embedded/sessionStorage token. VUI.postJSON still sends X-Requested-With + cookie.
   window.VIGIL_CFG = { token: "", api: {} };
+  // A 404 may mean the edge now runs a newer build than this page (a route or file this build expected): let
+  // pwa.js ask the edge — it shows the "new version" notice only when the build really changed.
+  (function () {
+    var P = window.VIGIL_PWA;
+    if (!P || typeof P.notFound !== "function") return;
+    ["getJSON", "postJSON"].forEach(function (k) {
+      var f = VUI[k];
+      VUI[k] = function () {
+        return f.apply(VUI, arguments).catch(function (e) { if (e && e.status === 404) P.notFound(); throw e; });
+      };
+    });
+  })();
   var API = "api/customer"; // relative to the mount
   var state = VUI.store({ who: null, booted: false });
 
@@ -28,6 +57,11 @@
   function h() { return VUI.h.apply(null, arguments); }
   function nav(hash) { if (location.hash === hash) render(); else location.hash = hash; }
   function authed() { var w = state.get().who; return !!(w && w.authenticated); }
+
+  function pageFlag(name) {
+    var ds = (document.body && document.body.dataset) || {};
+    return ds[name] === "1";
+  }
 
   function field(id, label, type) {
     return [h("label", { for: id, text: label }),
@@ -63,14 +97,179 @@
   function viewLogin() {
     var form = h("div.card.cust-auth", {}, [
       h("h2", { text: "Sign in" }),
+      googleBlock(),
       field("login-email", "Email", "email"),
       field("login-password", "Password", "password"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Sign in", onClick: doLogin }),
         h("button.cust-nav-link", { type: "button", text: "Create an account", onClick: function () { nav("#/signup"); } }),
       ]),
+      h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "Forgot your password?", onClick: function () { nav("#/recover"); } }),
+      ]),
     ]);
     return shell(form, "#/login");
+  }
+
+  // ---- Continue with Google -------------------------------------------------------------------------
+  // Shown only while the edge has customer Google sign-in on (data-google-signin="1", written at startup). The
+  // button is a top-level navigation to the edge's login route, which redirects to Google; the session cookie is
+  // set by the edge when Google sends the person back. This page never sees a Google token.
+  function googleOn() { return pageFlag("googleSignin"); }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function googleMark() {
+    // Google's four-colour "G" (the mark Google's sign-in button guidelines ask for), built as DOM: no inline markup
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 48 48");
+    svg.setAttribute("width", "18");
+    svg.setAttribute("height", "18");
+    svg.setAttribute("aria-hidden", "true");
+    [["#EA4335", "M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"],
+     ["#4285F4", "M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"],
+     ["#FBBC05", "M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"],
+     ["#34A853", "M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"]
+    ].forEach(function (p) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("fill", p[0]);
+      path.setAttribute("d", p[1]);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+  function googleBlock() {
+    if (!googleOn()) return null;
+    var btn = h("button.btn.cust-google", { type: "button", onClick: startGoogle },
+      [googleMark(), h("span", { text: "Continue with Google" })]);
+    return h("div.cust-google-block", {}, [btn, h("div.cust-or", {}, h("span", { text: "or use your email" }))]);
+  }
+  function startGoogle() {
+    clearErr();
+    if (handoffOn()) { startHandoff(); return; }
+    location.assign(API + "/oidc/login");          // relative: the edge answers with the redirect to Google
+  }
+
+  // ---- Google sign-in inside the installed app: the hand-off ----------------------------------------------
+  var HANDOFF_KEY = "vigil.oidc.handoff";
+  var HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;         // the edge keeps a finished sign-in ~2 min; the login ~10 min
+  function standaloneApp() {
+    return navigator.standalone === true
+      || !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  }
+  function handoffOn() { return googleOn() && pageFlag("oidcHandoff") && standaloneApp(); }
+  function b64u(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  // The pending verifier lives in this app only: IndexedDB (survives iOS ending the app in the background), else
+  // sessionStorage. Every access is guarded; nothing here ever goes into a cookie or a URL.
+  function idbRun(mode, fn) {
+    return new Promise(function (resolve, reject) {
+      if (typeof indexedDB === "undefined" || !indexedDB) { reject(new Error("no IndexedDB")); return; }
+      var open = indexedDB.open("vigil-app", 1);
+      open.onupgradeneeded = function () { open.result.createObjectStore("kv"); };
+      open.onerror = function () { reject(open.error || new Error("IndexedDB")); };
+      open.onsuccess = function () {
+        var db = open.result, tx, req;
+        try { tx = db.transaction("kv", mode); req = fn(tx.objectStore("kv")); }
+        catch (e) { db.close(); reject(e); return; }
+        tx.oncomplete = function () { db.close(); resolve(req ? req.result : undefined); };
+        tx.onerror = tx.onabort = function () { db.close(); reject(tx.error || new Error("IndexedDB")); };
+      };
+    });
+  }
+  function ssGet() { try { return JSON.parse(sessionStorage.getItem(HANDOFF_KEY) || "null"); } catch (e) { return null; } }
+  function pendingSave(rec) {
+    return idbRun("readwrite", function (st) { return st.put(rec, HANDOFF_KEY); })
+      .catch(function () { sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(rec)); });   // throws if neither works
+  }
+  function pendingLoad() {
+    return idbRun("readonly", function (st) { return st.get(HANDOFF_KEY); })
+      .catch(function () { return null; })
+      .then(function (rec) {
+        rec = rec || ssGet();
+        var fresh = rec && typeof rec.verifier === "string" && /^[A-Za-z0-9_-]{43}$/.test(rec.verifier)
+          && typeof rec.at === "number" && Date.now() - rec.at < HANDOFF_MAX_AGE_MS;
+        return fresh ? rec : null;
+      });
+  }
+  function pendingClear() {
+    try { sessionStorage.removeItem(HANDOFF_KEY); } catch (e) { /* storage off */ }
+    return idbRun("readwrite", function (st) { return st.delete(HANDOFF_KEY); }).catch(function () {});
+  }
+  async function startHandoff() {
+    try {
+      var raw = new Uint8Array(32);
+      crypto.getRandomValues(raw);
+      var verifier = b64u(raw);
+      var digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      var challenge = b64u(new Uint8Array(digest));
+      await pendingSave({ verifier: verifier, at: Date.now() });
+      nav("#/google-code");                          // the code box is waiting when the person comes back
+      location.assign(API + "/oidc/login?handoff=" + challenge);
+    } catch (e) {
+      err("Google sign-in could not start in this app. Sign in with your email, or try again.");
+    }
+  }
+  // Coming back to the app (from the browser where Google sign-in finished): a sign-in in progress shows the box.
+  async function resumeHandoff() {
+    if (authed() || !pageFlag("oidcHandoff") || here() === "#/google-code") return;
+    if (await pendingLoad()) nav("#/google-code");
+  }
+  function viewGoogleCode() {
+    var holder = h("div#gc-body", {}, h("p.cust-muted", { text: "Checking for a Google sign-in on this device…" }));
+    pendingLoad().then(function (rec) {
+      if (here() !== "#/google-code") return;
+      if (!rec) {
+        VUI.mount(holder, [
+          h("p", { text: "No Google sign-in is waiting in this app. Open VIGIL from your Home Screen and start "
+            + "with Continue with Google there." }),
+          h("div.row", {}, [h("button.btn", { type: "button", text: "Back to sign in",
+            onClick: function () { nav("#/login"); } })]),
+        ]);
+        return;
+      }
+      var input = h("input#gc-code.cust-code-input", { type: "text", inputmode: "numeric", pattern: "[0-9 ]*",
+        autocomplete: "one-time-code", maxlength: "7", "aria-label": "6-digit code", spellcheck: "false" });
+      input.addEventListener("keydown", function (e) { if (e.key === "Enter") doHandoff(); });
+      VUI.mount(holder, [
+        h("p", { text: "Enter the 6-digit code shown after you signed in with Google." }),
+        h("label", { for: "gc-code", text: "Code" }), input,
+        h("div.row", {}, [
+          h("button.btn.btn-primary", { type: "button", text: "Continue", onClick: doHandoff }),
+          h("button.cust-nav-link", { type: "button", text: "Start again", onClick: function () {
+            pendingClear().then(startGoogle); } }),
+        ]),
+        h("p.muted", { text: "Only enter a code that VIGIL showed you after you signed in with Google on this phone. "
+          + "Stay on the same Wi-Fi or mobile network until you are signed in." }),
+      ]);
+      try { input.focus(); } catch (e) { /* no focus outside a gesture */ }
+    });
+    return shell(h("div.card.cust-auth", {}, [h("h2", { text: "Finish signing in with Google" }), holder]),
+      "#/google-code");
+  }
+  async function doHandoff() {
+    clearErr();
+    var code = val("gc-code").replace(/\s+/g, "");
+    if (!/^[0-9]{6}$/.test(code)) { return err("Enter the 6 digits of the code."); }
+    var rec = await pendingLoad();
+    if (!rec) { render(); return err("This sign-in has expired. Start again with Continue with Google."); }
+    try {
+      var r = await VUI.postJSON(API + "/oidc/handoff", { verifier: rec.verifier, code: code });
+      await pendingClear();
+      if (r && r.ok) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); }
+      else { err("Sign-in failed."); }
+    } catch (e) {
+      var d = (e && e.data) || {};
+      if (e && e.status === 401 && d.retry) { return err(d.error || "That code does not match."); }
+      if (e && e.status === 429) { return err("Too many attempts — wait a moment and try again."); }
+      if (e && e.status === 401) {
+        await pendingClear();
+        nav("#/login");
+        return err(d.error || "This sign-in is no longer valid. Start again with Continue with Google.");
+      }
+      err(authMsg(e, "Sign-in could not finish. Try again."));
+    }
   }
 
   async function doLogin() {
@@ -87,16 +286,57 @@
   function viewSignup() {
     var form = h("div.card.cust-auth", {}, [
       h("h2", { text: "Create your account" }),
-      h("p.muted", { text: "We email you a single-use verification link. Your account and workspace are "
-        + "owner-signed on confirmation — this page never grants access by itself." }),
+      googleBlock(),
+      h("p.muted", { text: "We email you a single-use verification token (and, where enabled, a 6-digit code). "
+        + "Your account and workspace are owner-signed on confirmation — this page never grants access by itself." }),
       field("su-email", "Work email", "email"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Send verification", onClick: doSignupRequest }),
+      ]),
+      h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#su-confirm"), confirmBlock(true, true, "", "")); } }),
         h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
       ]),
       h("div#su-confirm"),
     ]);
     return shell(form, "#/signup");
+  }
+
+  // The mailbox proof of a sign-up or reset email: its 6-digit code (with the email address it went to), or its
+  // token. `byCode` = the deployment sends codes; `offer` = show the other way too.
+  function codeField(id) {
+    return [h("label", { for: id, text: "6-digit code" }),
+            h("input#" + id + ".cust-code-input", { type: "text", inputmode: "numeric", pattern: "[0-9 ]*",
+              autocomplete: "one-time-code", maxlength: "7", spellcheck: "false" })];
+  }
+  function proofSwitch(holder, prefix, tokenLabel, byCode, offer) {
+    function draw(useCode) {
+      holder.dataset.mode = useCode ? "code" : "token";
+      VUI.mount(holder, [
+        h("p.muted", { text: useCode ? "Enter the 6-digit code from your email."
+                                     : "Paste the token from the email." }),
+        useCode ? codeField(prefix + "-code") : field(prefix + "-token", tokenLabel, "text"),
+        offer ? h("button.cust-nav-link", { type: "button",
+          text: useCode ? "Use the token from the email instead" : "Use the 6-digit code instead",
+          onClick: function () { draw(!useCode); } }) : null,
+      ]);
+    }
+    draw(byCode);
+    return holder;
+  }
+  // {code, email} or {token} from the proof block; null (with the message shown) when it is not filled in.
+  function proofBody(prefix, emailId) {
+    var holder = VUI.$("#" + prefix + "-proof");
+    if (holder && holder.dataset.mode === "code") {
+      var code = val(prefix + "-code").replace(/\s+/g, ""), email = val(emailId);
+      if (!email) { err("Enter the email address the code was sent to."); return null; }
+      if (!/^[0-9]{6}$/.test(code)) { err("Enter the 6-digit code from your email."); return null; }
+      return { email: email, code: code };
+    }
+    var token = val(prefix + "-token");
+    if (!token) { err("Paste the token from the email."); return null; }
+    return { token: token };
   }
 
   async function doSignupRequest() {
@@ -105,38 +345,112 @@
     if (!email) { return err("Enter your email."); }
     try {
       var r = await VUI.postJSON(API + "/signup/request", { email: email });
-      // The token is delivered by email. A dev edge MAY echo it (explicit, governed flag) to speed local
-      // testing; if present we prefill, otherwise we ask the customer to paste the link's token.
+      // The token (and, where enabled, a 6-digit code) is delivered by email. A dev edge MAY echo them (explicit,
+      // governed flag) to speed local testing; if present we prefill.
+      var byCode = !!(r && r.code);
       var devToken = (r && (r.token || r.dev_token)) || "";
-      VUI.mount(VUI.$("#su-confirm"), confirmBlock(devToken));
-      VUI.toast("Check your email for the verification link.");
+      VUI.mount(VUI.$("#su-confirm"), confirmBlock(byCode, byCode, devToken, (r && r.dev_code) || ""));
+      VUI.toast(byCode ? "Check your email for your 6-digit code." : "Check your email for the verification token.");
     } catch (e) { err(authMsg(e, "Could not start signup.")); }
   }
 
-  function confirmBlock(devToken) {
+  function confirmBlock(byCode, offer, devToken, devCode) {
     var box = h("div", {}, [
       h("hr"),
-      h("p.muted", { text: "Paste the token from the email, pick a password, and name your workspace." }),
-      field("su-token", "Verification token", "text"),
+      proofSwitch(h("div#su-proof"), "su", "Verification token", byCode, offer),
+      h("p.muted", { text: "Pick a password and name your workspace." }),
       field("su-password", "Choose a password", "password"),
       field("su-org", "Workspace name", "text"),
       h("div.row", {}, [
         h("button.btn.btn-primary", { type: "button", text: "Create account", onClick: doSignupConfirm }),
       ]),
     ]);
-    if (devToken) { setTimeout(function () { var t = VUI.$("#su-token"); if (t) t.value = devToken; }, 0); }
+    setTimeout(function () {
+      var t = VUI.$("#su-token"), c = VUI.$("#su-code");
+      if (t && devToken) t.value = devToken;
+      if (c && devCode) c.value = devCode;
+    }, 0);
     return box;
   }
 
   async function doSignupConfirm() {
     clearErr();
-    var token = val("su-token"), password = val("su-password"), org = val("su-org");
-    if (!token || !password || !org) { return err("Fill in the token, password, and workspace name."); }
+    var password = val("su-password"), org = val("su-org");
+    var proof = proofBody("su", "su-email");
+    if (!proof) return;
+    if (!password || !org) { return err("Choose a password and name your workspace."); }
+    proof.password = password;
+    proof.org_name = org;
     try {
-      var r = await VUI.postJSON(API + "/signup/confirm", { token: token, password: password, org_name: org });
+      var r = await VUI.postJSON(API + "/signup/confirm", proof);
       if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Welcome to VIGIL"); }
       else { err("Could not complete signup."); }
     } catch (e) { err(authMsg(e, "Could not complete signup.")); }
+  }
+
+  // ---- password reset ---------------------------------------------------------------------------------
+  function viewRecover() {
+    var form = h("div.card.cust-auth", {}, [
+      h("h2", { text: "Reset your password" }),
+      h("p.muted", { text: "We email a single-use token (and, where enabled, a 6-digit code) to the address of your "
+        + "account. Setting a new password signs you out everywhere." }),
+      field("rc-email", "Email", "email"),
+      h("div.row", {}, [
+        h("button.btn.btn-primary", { type: "button", text: "Send reset email", onClick: doRecoverRequest }),
+      ]),
+      h("div.row", {}, [
+        h("button.cust-nav-link", { type: "button", text: "I already have a code",
+          onClick: function () { VUI.mount(VUI.$("#rc-confirm"), recoverBlock(true, true, "", "")); } }),
+        h("button.cust-nav-link", { type: "button", text: "Back to sign in", onClick: function () { nav("#/login"); } }),
+      ]),
+      h("div#rc-confirm"),
+    ]);
+    return shell(form, "#/recover");
+  }
+
+  async function doRecoverRequest() {
+    clearErr();
+    var email = val("rc-email");
+    if (!email) { return err("Enter your email."); }
+    try {
+      var r = await VUI.postJSON(API + "/recover/request", { email: email });
+      var byCode = !!(r && r.code);
+      VUI.mount(VUI.$("#rc-confirm"), recoverBlock(byCode, byCode, (r && r.dev_token) || "", (r && r.dev_code) || ""));
+      // the same answer whether or not the address has an account
+      VUI.toast(byCode ? "If that address has an account, a 6-digit code is on its way."
+                       : "If that address has an account, a reset token is on its way.");
+    } catch (e) { err(authMsg(e, "Could not send the reset email.")); }
+  }
+
+  function recoverBlock(byCode, offer, devToken, devCode) {
+    var box = h("div", {}, [
+      h("hr"),
+      proofSwitch(h("div#rc-proof"), "rc", "Reset token", byCode, offer),
+      field("rc-password", "New password", "password"),
+      h("div.row", {}, [
+        h("button.btn.btn-primary", { type: "button", text: "Set new password", onClick: doRecoverConfirm }),
+      ]),
+    ]);
+    setTimeout(function () {
+      var t = VUI.$("#rc-token"), c = VUI.$("#rc-code");
+      if (t && devToken) t.value = devToken;
+      if (c && devCode) c.value = devCode;
+    }, 0);
+    return box;
+  }
+
+  async function doRecoverConfirm() {
+    clearErr();
+    var password = val("rc-password");
+    var proof = proofBody("rc", "rc-email");
+    if (!proof) return;
+    if (!password) { return err("Choose a new password."); }
+    proof.new_password = password;
+    try {
+      var r = await VUI.postJSON(API + "/recover/confirm", proof);
+      if (r && r.username) { nav("#/login"); VUI.toast("Password changed. Sign in with your new password."); }
+      else { err("Could not reset the password."); }
+    } catch (e) { err(authMsg(e, "Could not reset the password.")); }
   }
 
   // ---- views: logged in ---------------------------------------------------------------------------
@@ -696,7 +1010,11 @@
       : h("button.cust-nav-link", { type: "button", text: "Sign in", onClick: function () { nav("#/login"); } });
     return h("div.cust-shell", {}, [
       h("div.cust-topbar", {}, [
-        h("span.brand", { text: "VIGIL" }),
+        // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
+        h("span.brand", {}, [
+          h("img.vigil-logo.for-dark", { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" }),
+          h("img.vigil-logo.for-light", { src: "brand/vigil-wordmark.svg", alt: "VIGIL", width: "99", height: "22" }),
+        ]),
         h("nav", {}, links),
         h("span.spacer"),
         authed() ? ntfWidget() : null,
@@ -710,6 +1028,9 @@
     var posted = true;
     try { await VUI.postJSON(API + "/logout", {}); } catch (e) { posted = false; }
     resetNtf();                                  // drop this account's notifications before reflecting the session
+    // delete this origin's CacheStorage (the worker's shell): nothing of the app stays behind on a shared device
+    var pwa = window.VIGIL_PWA;
+    if (pwa && typeof pwa.clearCaches === "function") { try { await pwa.clearCaches(); } catch (e) { /* best effort */ } }
     await refreshWho();                          // reflect the ACTUAL server session — never assume it severed
     if (authed()) {
       // the logout POST did not take (network error / gate refusal / revoke error) and the cookie is STILL
@@ -735,6 +1056,8 @@
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/login": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
+    "#/recover": function () { return authed() ? viewDashboard() : viewRecover(); },
+    "#/google-code": function () { return authed() ? viewDashboard() : viewGoogleCode(); },
     "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
     "#/billing/return": function () { return authed() ? viewBillingReturn() : viewLogin(); },
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
@@ -752,8 +1075,19 @@
     return "#/";
   }
 
+  // The edge sends a Google sign-in that did not complete back to the app root as #oidc=err (never why): say so
+  // once and show the sign-in screen. The fragment is replaced, so a reload does not repeat the message.
+  function googleError() {
+    if (location.hash !== "#oidc=err") return false;
+    try { history.replaceState(null, "", location.pathname + location.search + "#/login"); }
+    catch (e) { location.hash = "#/login"; }
+    err("Google sign-in did not complete. Try again, or sign in with your email and password.");
+    return true;
+  }
+
   function render() {
     if (!state.get().booted) { VUI.mount(root, h("div.cust-shell", {}, h("p.cust-muted", { text: "Loading…" }))); return; }
+    googleError();
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
     var view = ROUTES[routeFor(key)];
@@ -764,6 +1098,9 @@
   }
 
   window.addEventListener("hashchange", render);
+  // back in the installed app after Google sign-in finished in the browser: show the code box
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) resumeHandoff(); });
+  window.addEventListener("pageshow", function () { resumeHandoff(); });
   window.addEventListener("resize", setTopbarVar);   // keep the fixed notification panel pinned below the topbar
   state.sub(render);
 
@@ -771,5 +1108,6 @@
   (async function boot() {
     render();            // "Loading…" shell (VUI is guaranteed present — guarded at module init above)
     await refreshWho();  // flips booted -> render() via the store subscription
+    resumeHandoff();     // a Google sign-in started in this installed app and not yet finished: the code box
   })();
 })();
