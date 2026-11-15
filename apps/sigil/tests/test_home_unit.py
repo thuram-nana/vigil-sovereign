@@ -311,7 +311,8 @@ def test_the_child_refuses_unless_scoped_to_its_unit(homes, tmp_path, scope):
         return
     assert res["ok"] is False and res["checks"] == [] and "not scoped to its unit" in res["refused"], res
     phrase = {"wrong_nonce": "nonce", "wrong_home": "SIGIL_HOME", "tmp_outside": "TMPDIR",
-              "wrong_archive": "SIGIL_SPINE_ARCHIVE_DIR", "private_key": "owner.priv", "data_key": "spine.dek"}[scope]
+              "wrong_archive": "SIGIL_SPINE_ARCHIVE_DIR", "private_key": "private key file(s)",
+              "data_key": "private key file(s)"}[scope]
     assert phrase in res["refused"]
 
 

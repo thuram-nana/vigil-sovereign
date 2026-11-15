@@ -385,8 +385,8 @@ def _child_main(home: str, work_dir: str, archive_dir: str, require_archive: boo
            else f"TMPDIR={tmp} is outside the work dir" if tmp is not None
            else "SIGIL_SPINE_ARCHIVE_DIR is not the unit's archive dir"
            if not env_archive or Path(env_archive).resolve() != Path(archive_dir).resolve()
-           else f"the unit holds private key material ({', '.join(secrets_present)}) — it is verified with public "
-                f"keys only" if secrets_present
+           else f"the unit holds {len(secrets_present)} private key file(s) — it is verified with public keys only"
+           if secrets_present
            else "")
     if why:
         res: "dict[str, Any]" = {"ok": False, "pruned": None, "checks": [], "shape": {},
