@@ -372,11 +372,12 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, sub: str):
         base = _WEBAPP.resolve()
         try:
-            target = (base / sub).resolve()
+            real = os.path.realpath(os.path.join(str(base), sub))
         except (OSError, ValueError):                            # e.g. an embedded NUL: refuse AND audit it,
             return self._deny(404, "not found")                  # never drop the connection unrecorded
-        if base != target and base not in target.parents:        # traversal guard (allowlist by containment)
+        if not real.startswith(str(base) + os.sep):              # traversal guard (allowlist by containment)
             return self._deny(404, "not found")
+        target = Path(real)
         if not target.is_file():
             return self._deny(404, "not found")                  # includes: webapp dir absent (later slice)
         ctype = _STATIC_CTYPES.get(target.suffix.lower(), "application/octet-stream")
