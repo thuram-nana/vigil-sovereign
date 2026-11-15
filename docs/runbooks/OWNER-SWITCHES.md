@@ -37,10 +37,7 @@ are never stranded and nothing half-made is left behind.
 | `customer_signup` | a new sign-up request, a new sign-up confirmation, a first Google sign-in | logging in; finishing a sign-up whose account already exists | — |
 | `checkout` | a new hosted checkout | payments already made (their webhooks still credit) | `VIGIL_CUSTOMER_CHECKOUT_ENABLED` |
 | `trial` | the trial credit of a new sign-up (the sign-up itself still completes), a new trial scan | a trial already granted | `VIGIL_TRIAL_CREDITS` |
-
-`founder_tester` is a known latch name that this deployment does **not offer**: no founder-tester grant consults it,
-so `sigil latch status` lists it as "not offered on this deployment", `sigil latch off|on founder_tester` is
-refused, `off all` leaves it alone and the phone has no button for it.
+| `founder_tester` | the founder tester role for a new sign-up: the sign-up still completes, its founding member an org admin (no self-serve testing) | existing founders keep testing; to withdraw it from them too, set `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=0` and restart the cockpit, or `sigil org demote-founders` | `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` (with `VIGIL_TRIAL_PREVIEW_ENABLED`) |
 
 The environment setting stays the **ceiling**: a latch can only narrow what the environment allows. With the
 checkout setting off, checkout stays off whatever the latch says. `sigil latch status` reads each ceiling from the

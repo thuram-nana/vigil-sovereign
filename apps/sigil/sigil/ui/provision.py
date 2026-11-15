@@ -40,7 +40,7 @@ import hashlib
 import math
 import secrets
 import time
-from typing import NoReturn, Optional
+from typing import Callable, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -126,10 +126,12 @@ def _signup_org_id(token: str) -> str:
     return _ORG_ID_PREFIX + hashlib.sha256(("o:" + str(token)).encode("utf-8")).hexdigest()[:24]
 
 
-def _signup_role() -> str:
+def _signup_role(founder_latch: "Optional[Callable[[], bool]]" = None) -> str:
     """The per-org role a sign-up grants its founding customer, on BOTH sign-up paths (email confirm and Google
     auto-provision): `founder` while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED AND VIGIL_TRIAL_PREVIEW_ENABLED are both
-    on, else `org_admin` (the default, unchanged). Server-decided at the committing attempt — never a client value.
+    on AND the owner's `founder_tester` latch is ON (``founder_latch()``, read only when both flags allow a founder;
+    the environment stays the ceiling), else `org_admin` (the default, unchanged). Server-decided at the committing
+    attempt — never a client value.
 
     The founder role needs the preview trial: with the preview on, the only credits a sign-up grants are the
     preview trial, which keeps the trial rules (the trial product only, one registrable domain, the daily cap)
@@ -137,7 +139,8 @@ def _signup_role() -> str:
     a scan; the owner can still grant `founder` to an existing member (`owner_set_member_role`)."""
     from .. import config
     if config.signup_founder_tester_enabled() and config.trial_preview_enabled():
-        return _FOUNDER_ROLE
+        if founder_latch is None or founder_latch():
+            return _FOUNDER_ROLE
     return "org_admin"
 
 
@@ -531,6 +534,11 @@ class Provisioner:
         from ..governor.customer_latch import refusal
         return refusal(self.store, name, trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None))
 
+    def _founder_latch_open(self) -> bool:
+        """The owner's ``founder_tester`` latch, read fresh (fail-closed: a read that fails answers OFF, so the
+        sign-up grants `org_admin`). Consulted only by `_signup_role` when the environment allows a founder."""
+        return self._latch_refusal("founder_tester") is None
+
     def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str, ip: str = "") -> str:
         """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
         append is idempotent, so a retry re-applies it safely. Returns "granted", "none" (trial size 0) or
@@ -759,7 +767,7 @@ class Provisioner:
                                       issued_at=self._next_issued())
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
-            role = _signup_role()
+            role = _signup_role(self._founder_latch_open)
             self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
             trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
@@ -926,7 +934,7 @@ class Provisioner:
             self.customers.create(email or f"{username}@google-oidc.local", password=None, username=username,
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
-        role = _signup_role()
+        role = _signup_role(self._founder_latch_open)
         self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
         self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a

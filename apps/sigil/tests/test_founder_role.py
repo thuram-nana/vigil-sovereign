@@ -768,3 +768,52 @@ def test_the_env_example_ships_the_production_value_and_leaves_step_up_unset():
     assert "VIGIL_TRIAL_PREVIEW_ENABLED=1" in lines                # the founder role needs the preview on
     assert not any(ln.startswith(("VIGIL_CUSTOMER_STEPUP_REQUIRED=", "VIGIL_CUSTOMER_PROD_EXECUTION=",
                                   "VIGIL_SETTLE_SPINE_RECORD=")) for ln in lines)
+
+
+# --- the owner's founder_tester latch: OFF withholds the founder role from NEW sign-ups only -------------------
+
+def test_the_founder_tester_latch_off_signs_up_org_admins_and_leaves_existing_founders(flag_on):
+    from sigil.governor import customer_latch as cl
+    from sigil.ui.provision import ProvisionDenied
+    p, s = _prov(idp=_StubIdP(), trial=True)
+    before = _signup(p, email="early@early-founder.io", org="Early")
+    assert p.orgs.membership_role(before["username"], before["org_id"]) == "founder"
+    cl.turn_off(s, "founder_tester", owner_key=None)          # the phone's OFF: unsigned, honoured at once
+    a = _signup(p)
+    g = p.oidc_finish(code="c", code_verifier="v", nonce="n", ip="1.2.3.4")
+    for user, org in ((a["username"], a["org_id"]), (g["username"], g["orgs"][0])):
+        assert p.orgs.membership_role(user, org) == "org_admin"      # the sign-up completes, with no testing
+        with pytest.raises(ProvisionDenied):
+            p.target_challenge(user, org, "acme-founder.io")
+    assert p.orgs.membership_role(before["username"], before["org_id"]) == "founder"   # existing: unchanged
+    assert [r.get("role") for r in _audits(s, "signup")] == ["founder", "org_admin", "org_admin"]
+
+
+def test_the_founder_tester_latch_never_widens_the_environment(monkeypatch):
+    # with the founder flag off the latch is not even read, and ON grants nothing beyond org_admin
+    from sigil.ui import provision
+    monkeypatch.setenv(PREVIEW, "1")
+    calls: list = []
+    assert provision._signup_role(lambda: calls.append(1) or True) == "org_admin" and calls == []
+    monkeypatch.setenv(FLAG, "1")
+    assert provision._signup_role(lambda: True) == "founder"
+    assert provision._signup_role(lambda: False) == "org_admin"
+
+
+def test_an_unreadable_founder_tester_latch_signs_up_an_org_admin(flag_on, monkeypatch):
+    from sigil.governor import customer_latch as cl
+    p, _s = _prov(trial=True)
+
+    real = cl.CapabilityGate.reader
+
+    class _Unreadable:                                     # only the founder_tester read fails
+        def __init__(self, inner):
+            self.inner = inner
+
+        def is_enabled(self, name):
+            if name == "founder_tester":
+                raise OSError("spine unreadable")
+            return self.inner.is_enabled(name)
+    monkeypatch.setattr(cl.CapabilityGate, "reader", lambda *a, **k: _Unreadable(real(*a, **k)))
+    a = _signup(p)
+    assert p.orgs.membership_role(a["username"], a["org_id"]) == "org_admin"

@@ -12,7 +12,7 @@ Guarantees pinned here:
   * ``checkout`` refuses a new checkout before any processor work; the environment flag stays the ceiling;
   * ``trial`` withholds a new sign-up trial and refuses a new trial scan; a trial grant already made stands;
   * the latches carry across a hard prune, and ``sigil latch``, ``sigil status``, ``sigil doctor`` and the dashboard
-    snapshot read them; ``founder_tester`` is a known name no surface offers (no grant consults it);
+    snapshot read them; ``founder_tester`` gates the founder role of a new sign-up (test_founder_role.py);
   * ``sigil latch`` acts only on the home the service runs from (a shell whose SIGIL_HOME is not the cockpit's, or a
     home with no owner identity or no spine, is refused with nothing written anywhere), turns latches OFF with no
     private key (unsigned when the owner key is not usable), never creates a key, and names the spine and its head
@@ -63,8 +63,8 @@ def fold_cache(request, monkeypatch):
 # ---------------------------------------------------------------------------------------------------------------
 def test_the_offered_latches_and_no_record_means_on(tmp_path, fold_cache):
     s = _store(tmp_path)
-    assert cl.LATCHES == ("checkout", "customer_launch", "customer_signup", "trial")
-    assert set(cl.NOT_OFFERED) == {"founder_tester"} and "not offered" in cl.NOT_OFFERED["founder_tester"]
+    assert cl.LATCHES == ("checkout", "customer_launch", "customer_signup", "founder_tester", "trial")
+    assert cl.NOT_OFFERED == {}
     assert cl.state_all(s, trusted_pubkey=OP) == {n: "on" for n in cl.LATCHES}
     assert all(cl.refusal(s, n, trusted_pubkey=OP) is None for n in cl.LATCHES)
     assert CapabilityGate(s, owner_key=OWNER, trusted_pubkey=OP).state_all() == {c: "enabled" for c in
@@ -153,7 +153,9 @@ def test_the_ceiling_names_the_setting_and_what_its_value_means():
     assert cl.ceiling_state("trial", {}) == "VIGIL_TRIAL_CREDITS=unset (on: the default 100 credits)"
     assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "0"}) == "VIGIL_TRIAL_CREDITS=0 (off: no trial credits)"
     assert cl.ceiling_state("trial", {"VIGIL_TRIAL_CREDITS": "-1"}).startswith("VIGIL_TRIAL_CREDITS=-1 (invalid")
-    assert cl.ceiling_state("founder_tester", {}) == cl.NOT_OFFERED["founder_tester"]
+    assert cl.ceiling_state("founder_tester", {}) == "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=unset (off)"
+    assert cl.ceiling_state("founder_tester", {"VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED": "1"}) == \
+        "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1 (on)"
 
 
 def test_the_unset_trial_ceiling_is_the_trial_the_code_grants(monkeypatch):
@@ -163,12 +165,12 @@ def test_the_unset_trial_ceiling_is_the_trial_the_code_grants(monkeypatch):
     assert cl.TRIAL_CREDITS_DEFAULT == _DEFAULT_TRIAL_CREDITS == config._int_env("VIGIL_TRIAL_CREDITS", 100)
 
 
-def test_founder_tester_stays_a_known_latch_that_folds(tmp_path, fold_cache):
+def test_founder_tester_is_an_offered_latch_that_folds(tmp_path, fold_cache):
     s = _store(tmp_path)
     assert cl.is_open(s, "founder_tester", trusted_pubkey=OP)
     cl.turn_off(s, "founder_tester", owner_key=None)
     assert cl.is_open(s, "founder_tester", trusted_pubkey=OP) is False
-    assert "founder_tester" not in cl.state_all(s, trusted_pubkey=OP)
+    assert cl.state_all(s, trusted_pubkey=OP)["founder_tester"] == "off"
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -585,19 +587,18 @@ def test_latch_off_is_owner_signed_when_the_key_is_usable(home, capsys):
     assert verify_signed(p, _CORE, owner.public_key_b64)
 
 
-def test_founder_tester_is_not_offered_by_the_cli(home, capsys):
+def test_founder_tester_is_switched_by_the_cli_like_every_latch(home, capsys):
     path, _owner = home
-    for action in ("off", "on"):
-        with pytest.raises(SystemExit) as e:
-            _cli(action, "founder_tester")
-        assert e.value.code == 2 and "not offered on this deployment" in capsys.readouterr().err
-    _cli("off")                                                       # all: every OFFERED latch
+    _cli("off", "founder_tester")
+    assert cl.is_open(SpineStore(path), "founder_tester") is False
+    _cli("on", "founder_tester")
     assert cl.is_open(SpineStore(path), "founder_tester") is True
+    _cli("off")                                                       # all: every offered latch, this one included
+    assert cl.is_open(SpineStore(path), "founder_tester") is False
     capsys.readouterr()
     _cli("status")
     out = capsys.readouterr().out.splitlines()
-    assert any("founder_tester" in ln and "not offered on this deployment" in ln for ln in out)
-    assert not any("founder_tester" in ln and (" ON " in ln or " OFF " in ln) for ln in out)
+    assert any("founder_tester" in ln and "OFF" in ln for ln in out)
 
 
 def test_latch_status_reads_each_ceiling_as_the_cockpit_loads_it(home, capsys, monkeypatch):

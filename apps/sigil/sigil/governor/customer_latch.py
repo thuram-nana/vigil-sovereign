@@ -1,15 +1,17 @@
 """The owner's customer latches — instant switches over NEW customer reservations, sign-ups and checkouts.
 
 The owner-signed latches ride the governed capability latch (``capability.py``: same record shape, fold, snapshot
-carry across a hard prune, and per-latch anti-replay). This deployment offers four (``LATCHES``):
+carry across a hard prune, and per-latch anti-replay). This deployment offers five (``LATCHES``):
 
   ``customer_launch``  a new launch reservation (``LaunchGate.reserve_launch``)
   ``customer_signup``  a new self-serve sign-up (an email sign-up request or confirmation, a first Google sign-in)
   ``checkout``         a new hosted checkout
   ``trial``            a new sign-up trial grant and a new trial scan
+  ``founder_tester``   the founder tester role for a new sign-up (``provision._signup_role``): while it is OFF a new
+                       sign-up still completes, its founding member an ``org_admin``; existing founders are unchanged
+                       (the owner demotes them with ``sigil org demote-founders``)
 
-``founder_tester`` (the founder tester role for a new sign-up) is a known latch name that this deployment does not
-offer (``NOT_OFFERED``): no founder-tester grant consults it, so no owner surface presents it as a control.
+``NOT_OFFERED`` holds a known latch name a deployment does not offer (none today): no owner surface presents it.
 
 Each gates only the NEW act. Cancel, settle, pause, resume and release of an existing launch, a webhook for a payment
 already made, logging in, and finishing a sign-up or a trial grant that already started stay open, so held credits
@@ -32,9 +34,7 @@ from typing import Optional
 from .capability import CUSTOMER_LATCHES, CapabilityGate, append_disable
 
 #: Known latch names this deployment does not offer, with the reason every owner surface shows instead of a state.
-NOT_OFFERED: "dict[str, str]" = {
-    "founder_tester": "not offered on this deployment: no founder-tester grant consults it",
-}
+NOT_OFFERED: "dict[str, str]" = {}
 #: The latches this deployment offers: the ones `sigil latch`, `sigil status`, the doctor, the dashboard snapshot and
 #: the phone show and switch.
 LATCHES = tuple(sorted(CUSTOMER_LATCHES - set(NOT_OFFERED)))
