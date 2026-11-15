@@ -124,13 +124,20 @@ def eval_attestations_root(base_dir: Any) -> Path:
     return Path(base_dir) / _DIRNAME
 
 
+#: The printable ASCII characters an id component may hold (no separator), mapped to themselves: the value handed
+#: on is read from this table, so it holds only checked characters (and static analysis can see that).
+_COMPONENT_TABLE = {chr(i): chr(i) for i in range(0x20, 0x7F) if chr(i) not in "/\\"}
+
+
 def _safe_component(value: Any) -> str:
     s = str(value or "").strip()
     if not s or "/" in s or "\\" in s or ".." in s:
         return ""
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
         return ""
-    return s
+    if any(c not in _COMPONENT_TABLE for c in s):         # non-ASCII: not an id we mint
+        return ""
+    return "".join(_COMPONENT_TABLE[c] for c in s)
 
 
 def _contained_child(root: Path, filename: str) -> Optional[Path]:

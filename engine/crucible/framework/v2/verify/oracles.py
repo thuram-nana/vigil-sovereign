@@ -3441,12 +3441,27 @@ def _sfx_status_set(statuses: Any) -> "frozenset[int]":
 
 
 def _sfx_strip_tags(raw: str) -> str:
-    """``_SFX_TAG_RE.sub(" ", raw)``, byte-identical, in linear time. No tag can start in, or extend past, the
+    """``_SFX_TAG_RE.sub(" ", raw)``, byte-identical, in linear time, without the regex. No tag can start in, or extend past, the
     text after the LAST ``>``, so only the prefix up to and including it is scanned; inside that prefix every
     ``<`` reaches a ``>``. Run over the whole body, a response of ``<`` repeated to the transport cap with no
     ``>`` made every ``<`` rescan to the end of the string (quadratic: ~2 s at 64 KB, ~half an hour at 2 MB)."""
-    cut = raw.rfind(">") + 1
-    return _SFX_TAG_RE.sub(" ", raw[:cut]) + raw[cut:]
+    out, i, n = [], 0, len(raw)
+    while i < n:                              # each "<" is looked at once: find the next ">" after it
+        lt = raw.find("<", i)
+        if lt < 0:
+            break
+        gt = raw.find(">", lt + 1)
+        if gt < 0:
+            break
+        if gt == lt + 1:                      # "<>" is not a tag: keep the "<", look again just after it
+            out.append(raw[i:lt + 1])
+            i = lt + 1
+            continue
+        out.append(raw[i:lt])
+        out.append(" ")
+        i = gt + 1
+    out.append(raw[i:])
+    return "".join(out)
 
 
 def _sfx_substantive_body(status: Any, body: str) -> bool:
@@ -7226,7 +7241,22 @@ _UNTRUSTED_CTX_RES: tuple["re.Pattern[str]", ...] = tuple(re.compile(p, re.I) fo
 ))
 _UNTRUSTED_PR_CHECKOUT_RE = re.compile(
     r"(?i)(github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref|refs/pull/)")
-_INTERP_RE = re.compile(r"\$\{\{(.+?)\}\}", re.S)
+_INTERP_RE = re.compile(r"\$\{\{(.+?)\}\}", re.S)   # the shape _interp_exprs finds (kept as its specification)
+
+
+def _interp_exprs(run: str):
+    r"""[m.group(1) for m in re.finditer(r"\$\{\{(.+?)\}\}", run, re.S)], in linear time."""
+    out, i = [], 0
+    while True:
+        s = run.find("${{", i)
+        if s < 0:
+            return out
+        e = run.find("}}", s + 4)
+        if e < 0:
+            i = s + 1
+            continue
+        out.append(run[s + 3:e])
+        i = e + 2
 
 
 def _cicd_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
@@ -7283,8 +7313,7 @@ def cicd_posture_oracle(observed_control: Any) -> OracleSignal:
 
     if rule == "script_injection":
         run = _coerce_text(ctl.get("run"))[:_CICD_VALUE_CAP]
-        for m in _INTERP_RE.finditer(run):
-            expr = m.group(1)
+        for expr in _interp_exprs(run):
             body = _QUOTED_LIT_RE.sub(" ", expr)   # a quoted literal never dereferences a context
             for rx in _UNTRUSTED_CTX_RES:
                 hit = rx.search(body)
@@ -9871,6 +9900,26 @@ _IMDS_GCP_HOSTS = frozenset({"metadata.google.internal"})
 # The token path must match the ORDERED grammar (round-2) — computeMetadata/v1 BEFORE service-accounts BEFORE
 # a bounded single-segment SA identity BEFORE token — never the three markers in any order.
 _IMDS_GCP_PATH_RE = re.compile(r"(^|/)computemetadata/v1/(?:[^/]+/)*service-accounts/[^/]+/token(/|$)")
+
+
+def _gcp_token_path(path: str) -> bool:
+    """re.search(r"(^|/)computemetadata/v1/(?:[^/]+/)*service-accounts/[^/]+/token(/|$)", path) is not None."""
+    segs = path.split("/")
+    for i in range(len(segs) - 1):
+        if segs[i] != "computemetadata" or segs[i + 1] != "v1":
+            continue
+        rest = segs[i + 2:]
+        for j, seg in enumerate(rest):
+            if seg == "service-accounts" and j + 2 < len(rest) and rest[j + 1] and rest[j + 2] == "token" \
+                    and all(rest[:j]):
+                return True
+            if not seg:
+                break
+    return False
+
+_OPS = (">=", "<=", "==", "=", ">", "<", "~=")      # the regex's alternation order
+
+
 # The confirming call's declared ACTION is REQUIRED and must match the branch's provider (audit B1 +
 # round-2) — a GCP action on an AWS identity body (or vice-versa), OR an ABSENT action, is a mismatched/
 # unverified confirmation and must NOT confirm. Compared case-insensitively.
@@ -10049,7 +10098,7 @@ def _imds_source_is_gcp_metadata(source: str) -> bool:
         return False
     host, path = parsed
     host_ok = host in _IMDS_GCP_HOSTS or _imds_ip_in(_imds_host_to_ip(host), _IMDS_GCP_METADATA_IPS)
-    return host_ok and _IMDS_GCP_PATH_RE.search(path) is not None
+    return host_ok and _gcp_token_path(path)
 
 
 def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, Any, Mapping[str, Any], bool]:

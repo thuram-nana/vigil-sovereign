@@ -74,9 +74,16 @@ def _write(run_id: str, meta: dict) -> None:
     os.replace(tmp, p)
 
 
+_ALNUM = {c: c for c in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+
+
 def _read(run_id: str) -> "dict | None":
+    # a run id is alphanumeric (launch() mints token_hex): anything else names no run (and never a path)
+    if not isinstance(run_id, str) or not 0 < len(run_id) <= 64 or any(c not in _ALNUM for c in run_id):
+        return None
+    rid = "".join(_ALNUM[c] for c in run_id)
     try:
-        return json.loads((_dir() / f"{run_id}.json").read_text(encoding="utf-8"))
+        return json.loads((_dir() / f"{rid}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 

@@ -25,6 +25,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from ..jobs.reconciliation import ChangedPR   # pure stdlib — no framework pulled
 
@@ -60,8 +61,11 @@ def _owner_repo(repo: str) -> str:
     repo with extra segments or a ``..`` segment raises GitHubReadError (never traverses the REST path)."""
     r = str(repo or "").strip()
     if "://" in r:
-        r = r.split("://", 1)[1]
-    if r.lower().startswith("github.com/"):
+        parts = urlsplit(r)
+        if (parts.hostname or "").lower() != "github.com":
+            raise GitHubReadError(f"not a github.com repository URL: {repo!r}")
+        r = parts.path
+    elif r.lower().startswith("github.com/"):
         r = r[len("github.com/"):]
     r = r.strip("/")
     if not _OWNER_REPO_RE.match(r):
