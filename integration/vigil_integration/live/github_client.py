@@ -65,8 +65,10 @@ def _owner_repo(repo: str) -> str:
         if (parts.hostname or "").lower() != "github.com":
             raise GitHubReadError(f"not a github.com repository URL: {repo!r}")
         r = parts.path
-    elif r.lower().startswith("github.com/"):
-        r = r[len("github.com/"):]
+    else:
+        head, sep, rest = r.partition("/")
+        if sep and head.lower() == "github.com":           # a scheme-less ``github.com/org/repo``
+            r = rest
     r = r.strip("/")
     if not _OWNER_REPO_RE.match(r):
         raise GitHubReadError(f"not a safe org/repo identity (refusing REST-path traversal): {repo!r}")
