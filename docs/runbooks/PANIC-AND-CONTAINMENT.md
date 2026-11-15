@@ -98,7 +98,10 @@ Stricter than `down`. `_cmd_panic` runs in order:
    pid is killed.
 2. **Contain the whole surface** (`uiproxy.run_panic`):
    1. **Command unit** — same containment as `down` but the unit is additionally **masked**
-      (`systemctl --user mask`): even a manual `systemctl start` is refused until it is unmasked.
+      (`systemctl --user mask`): even a manual `systemctl start` is refused until it is unmasked. A unit
+      FILE in `~/.config/systemd/user` (how GO-LIVE installs it) cannot be masked in place, so panic first
+      moves it aside to `vigil-command.service.panic-aside` in the same directory and then masks; the panic
+      output says when it did.
    2. **Every cadence sidecar** (`_contain_sidecar_units`), in this documented order — the timers that
       reach the target or push data off-host **first**: `vigil-reprove` → `vigil-posture` →
       `vigil-ha-mirror` → `vigil-backup-push` → `vigil-backup` → `vigil-backup-drill` →
@@ -149,8 +152,11 @@ rest, because a hard-stop must not be blockable.
 ```bash
 # 1. clear each engagement's kill-switch when it is safe (a logged, intentional act)
 #    the kill-switch file lives at <CRUCIBLE_ROOT>/framework/v2/.authority/<slug>.halt
-# 2. allow the command unit to run again
+# 2. allow the command unit to run again (put its unit file back if panic moved it aside)
 systemctl --user unmask vigil-command.service
+UD=~/.config/systemd/user
+[ -f "$UD/vigil-command.service.panic-aside" ] && mv "$UD/vigil-command.service.panic-aside" "$UD/vigil-command.service"
+systemctl --user daemon-reload
 systemctl --user enable --now vigil-command.service
 # 3. re-enable ONLY the cadence timers you still want (they were disabled, not masked). Because panic
 #    reset each timer's Persistent= stamp, re-enabling schedules the NEXT run — it does NOT replay the

@@ -3262,9 +3262,31 @@ def _in_unit_cgroup(unit: str, *, cgroup_text: Optional[str] = None) -> bool:
     return False
 
 
+def _user_unit_dir() -> Path:
+    """``$XDG_CONFIG_HOME/systemd/user`` (default ``~/.config/systemd/user``): where GO-LIVE installs the units."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "systemd" / "user"
+
+
+def _move_unit_file_aside(unit_dir: Optional[Path] = None) -> Optional[Path]:
+    """Rename a REGULAR ``vigil-command.service`` file in the user unit dir to ``<name>.panic-aside`` (same
+    directory; systemd loads no unit from that name) and return the new path; None when there is no such regular
+    file (a symlink or nothing) or the rename fails. Never raises."""
+    try:
+        src = (unit_dir if unit_dir is not None else _user_unit_dir()) / _SERVICE_UNIT
+        if src.is_symlink() or not src.is_file():
+            return None
+        dst = src.with_name(src.name + ".panic-aside")
+        os.replace(src, dst)
+        return dst
+    except OSError:
+        return None
+
+
 def _contain_service_unit(*, mask: bool = False,
                           run: Callable[..., Any] = subprocess.run,
-                          env: Optional[dict] = None, stop: bool = True) -> list[str]:
+                          env: Optional[dict] = None, stop: bool = True,
+                          unit_dir: Optional[Path] = None) -> list[str]:
     """Stop-and-disable the `vigil-command.service` user unit so it cannot restore the stack, returning
     a list of human-readable action strings (empty ⇒ no unit to contain).
 
@@ -3279,7 +3301,8 @@ def _contain_service_unit(*, mask: bool = False,
          containment verb. Panic keeps its full containment in every context.
       3. `disable` — removes the boot-time restore. Idempotent, never recurses; always safe.
       4. `mask` (panic only) — the strongest form: even a manual `systemctl start` is refused until a
-         deliberate `unmask`.
+         deliberate `unmask`. When the unit FILE sits in the user unit dir (GO-LIVE's install) `mask` fails with
+         EEXIST, so the file is moved aside to ``<name>.panic-aside`` first and the mask retried.
       5. `stop` — ONLY when the unit is up AND we are not our own ExecStop. A clean systemctl stop does
          not trigger `Restart=`; skipping it under ExecStop avoids a recursive-stop deadlock (systemd is
          already stopping us there, so `Restart=` will not fire regardless). ``stop=False`` leaves it to the
@@ -3300,9 +3323,22 @@ def _contain_service_unit(*, mask: bool = False,
 
     if mask:
         rc, _out, err = _systemctl("mask", _SERVICE_UNIT, run=run)
-        actions.append(
-            f"masked {_SERVICE_UNIT} (a manual start is refused until `systemctl --user unmask`)"
-            if rc == 0 else f"WARNING: could not mask {_SERVICE_UNIT}: {(err.strip() or rc)}")
+        aside: Optional[Path] = None
+        if rc != 0:
+            # `mask` writes a /dev/null symlink in ~/.config/systemd/user and fails (EEXIST) when the unit FILE is
+            # there — exactly where GO-LIVE installs it. Move the file aside (systemd ignores the suffix) and mask
+            # again, so a manual start is refused as promised; PANIC-AND-CONTAINMENT.md says how to put it back.
+            aside = _move_unit_file_aside(unit_dir)
+            if aside is not None:
+                _systemctl("daemon-reload", run=run)
+                rc, _out, err = _systemctl("mask", _SERVICE_UNIT, run=run)
+        if rc == 0:
+            actions.append(f"masked {_SERVICE_UNIT} (a manual start is refused until `systemctl --user unmask`)"
+                           + (f"; its unit file was moved aside to {aside} so it could be masked: after the "
+                              f"unmask, move it back and `systemctl --user daemon-reload`" if aside else ""))
+        else:
+            actions.append(f"WARNING: could not mask {_SERVICE_UNIT}: {(err.strip() or rc)}"
+                           + (f" (its unit file is aside at {aside}, so it cannot start either)" if aside else ""))
 
     if not stop:
         return actions

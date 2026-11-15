@@ -147,6 +147,44 @@ def test_panic_masks_the_unit(monkeypatch):
     assert any("masked" in a for a in actions)
 
 
+class _MaskFailsOnAFile(FakeSystemctl):
+    """systemd's real behaviour: `mask` fails (EEXIST) while the unit FILE is in the user unit dir."""
+
+    def __init__(self, unit_dir: Path) -> None:
+        super().__init__(known=True, active=True)
+        self.unit_dir = unit_dir
+
+    def __call__(self, argv, capture_output=None, text=None, timeout=None):
+        if argv[2] == "mask" and (self.unit_dir / "vigil-command.service").is_file():
+            self.calls.append(list(argv))
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="Failed to mask unit: File exists")
+        return super().__call__(argv, capture_output=capture_output, text=text, timeout=timeout)
+
+
+def test_panic_masks_a_unit_installed_as_a_file_by_moving_it_aside(tmp_path):
+    # GO-LIVE copies the unit FILE into ~/.config/systemd/user, where `mask` cannot write its /dev/null link
+    (tmp_path / "vigil-command.service").write_text("[Service]\n")
+    ctl = _MaskFailsOnAFile(tmp_path)
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl, env={}, unit_dir=tmp_path)
+    assert ctl.verbs.count("mask") == 2 and ctl.verbs.index("daemon-reload") > ctl.verbs.index("mask")
+    assert not (tmp_path / "vigil-command.service").exists()
+    assert (tmp_path / "vigil-command.service.panic-aside").read_text() == "[Service]\n"
+    assert any(a.startswith("masked ") and "moved aside" in a for a in actions), actions
+    assert not any("WARNING" in a for a in actions)
+
+
+def test_a_mask_that_still_fails_is_reported_and_a_symlinked_unit_is_not_moved(tmp_path):
+    real = tmp_path / "real.service"
+    real.write_text("[Service]\n")
+    (tmp_path / "vigil-command.service").symlink_to(real)               # `systemctl link`: never moved
+    ctl = FakeSystemctl(known=True, active=True)
+    ctl_fail = lambda argv, **kw: (types.SimpleNamespace(returncode=1, stdout="", stderr="nope")  # noqa: E731
+                                   if argv[2] == "mask" else ctl(argv, **kw))
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl_fail, env={}, unit_dir=tmp_path)
+    assert (tmp_path / "vigil-command.service").is_symlink()
+    assert any(a.startswith("WARNING: could not mask") for a in actions)
+
+
 def test_no_user_manager_is_a_clean_noop_not_a_failure():
     # If systemctl is absent entirely, _systemctl returns rc 127 and _unit_is_known is False → no
     # containment attempted, no exception. Containment must never fail the down/panic path.
