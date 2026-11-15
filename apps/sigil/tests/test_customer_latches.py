@@ -477,6 +477,23 @@ def test_status_doctor_and_dashboard_read_the_switches(home, capsys):
     assert snapshot(store)["customer_latches"]["trial"] == "off"
 
 
+def test_status_and_doctor_give_no_switch_verdict_from_another_home(home, capsys, monkeypatch, tmp_path):
+    # a shell whose SIGIL_HOME is not the cockpit's would read another spine's switches: say so, give no verdict
+    from sigil import cli
+    from sigil.cli import sigil_doctor_report
+    live = tmp_path / "data" / ".sigil"
+    _cockpit_env(f"SIGIL_UI_PORT=8733\nSIGIL_HOME={live}\n")
+    check = next(c for c in sigil_doctor_report()["checks"] if c["id"] == "switches")
+    assert check["state"] == "UNKNOWN" and check["ok"] is False and "not the service's home" in check["detail"]
+    assert "all on" not in check["detail"] and "released" not in check["detail"]
+    monkeypatch.setattr(cli, "verify_checkpoint", lambda: (True, "ok"))
+    monkeypatch.setattr(cli, "VectorIndex", lambda: type("V", (), {"count": lambda self: 0,
+                                                                  "last_indexed_seq": lambda self: -1})())
+    cli.cmd_status(None)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("switches:"))
+    assert "not the service's home" in line and "all on" not in line
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # `sigil latch` acts only on the service's home, needs no key to turn OFF, and names the spine it acted on
 # ---------------------------------------------------------------------------------------------------------------

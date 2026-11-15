@@ -429,6 +429,10 @@ def _latch_home_refusal() -> "str | None":
     return None
 
 
+class _NotTheServiceHome(Exception):
+    """This process's SIGIL_HOME is not the one the service runs from (``_latch_home_refusal``)."""
+
+
 def _latch_home_or_exit() -> None:
     refusal = _latch_home_refusal()
     if refusal is not None:
@@ -1356,6 +1360,10 @@ def cmd_status(a) -> None:
     print(f"vectors:   {vi.count()} points | last_indexed_seq {vi.last_indexed_seq()}")
     print(f"chain:     {'OK' if ok else 'FAIL'} — {msg}")
     print(f"head:      {'OK' if hok else '(' + hmsg + ')'}")
+    elsewhere = _latch_home_refusal()
+    if elsewhere is not None:            # another home's switches would be a confident, wrong verdict
+        print(f"switches:  not read — not the service's home: {elsewhere}")
+        return
     sw = _switches_read(store)
     off = [n for n, v in sw["customer_latches"].items() if v["latch"] != "on"]
     print(f"switches:  kill switch {sw['kill_switch']} | customer latches "
@@ -3159,7 +3167,10 @@ def sigil_doctor_report() -> dict:
     checks.append(Check(id="kernel_pin", ok=(_mark != "!!"), required=True,
                         state=("TAMPER" if _mark == "!!" else ("UNPINNED" if _mark == "**" else "OK")),
                         detail=_detail))
+    _elsewhere = _latch_home_refusal()
     try:                                   # the owner's instant switches: advisory (an off-switch is a choice)
+        if _elsewhere is not None:         # another home's switches would be a confident, wrong verdict
+            raise _NotTheServiceHome(_elsewhere)
         _sw = _switches_read(SpineStore())
         _off = [n for n, v in _sw["customer_latches"].items() if v["latch"] != "on"]
         _swok = _sw["kill_switch"] == "released" and not _off
@@ -3167,9 +3178,12 @@ def sigil_doctor_report() -> dict:
                      + (f" ({_KILL_ENGAGED_NOTE})" if _sw["kill_switch"] == "engaged" else "")
                      + f"; customer latches {'all on' if not _off else 'OFF: ' + ', '.join(_off)} "
                        f"(`sigil latch status`)")
+    except _NotTheServiceHome as e:
+        _swok, _swdetail = False, f"not read — not the service's home: {e}"
     except Exception as e:  # noqa: BLE001 — the doctor reports, never crashes
         _swok, _swdetail = False, f"could not read the switches ({type(e).__name__})"
-    checks.append(Check(id="switches", ok=_swok, required=False, state=("ON" if _swok else "OFF"),
+    checks.append(Check(id="switches", ok=_swok, required=False,
+                        state=("UNKNOWN" if _elsewhere is not None else "ON" if _swok else "OFF"),
                         detail=_swdetail))
     _shok, _shdetail = _signed_head_doctor()
     checks.append(Check(id="signed_head", ok=_shok, required=True,
