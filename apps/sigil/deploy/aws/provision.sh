@@ -5,7 +5,8 @@
 #   1. a KMS CMK (alias/<project>-owner-kek) that envelope-encrypts VIGIL's KEK   -> VIGIL_KMS_KEY_ID
 #   2. an S3 backup bucket (versioned, default SSE-KMS, public access blocked)    -> VIGIL_PUSH_DEST
 #   3. an IAM role + instance profile the EC2 host assumes (NO static keys): KMS Encrypt/Decrypt/GenerateDataKey
-#      on that CMK + S3 Get/Put on that bucket, and nothing else
+#      on that CMK + S3 Get/Put on that bucket + ssm:GetParameter on the ONE provider-key parameter (the owner
+#      creates that SecureString in the console; this script never creates or reads it), and nothing else
 #   4. a security group: 443 + 80 ONLY from Cloudflare's current ranges, 22 ONLY from your admin IP
 #   5. an Elastic IP (the stable public IPv4 you point the DNS A record at)
 #
@@ -21,6 +22,12 @@ set -euo pipefail
 REGION="${REGION:?set REGION, e.g. eu-west-1}"
 PROJECT="${PROJECT:-vigil}"
 ADMIN_SSH_CIDR="${ADMIN_SSH_CIDR:?set ADMIN_SSH_CIDR to your admin IP /32 for SSH, e.g. 203.0.113.4/32}"
+# The SSM SecureString the model gateway reads its provider key from (VIGIL_ANTHROPIC_KEY_SSM_PARAMETER).
+PROVIDER_KEY_PARAMETER="${PROVIDER_KEY_PARAMETER:-/vigil/anthropic-api-key}"
+case "$PROVIDER_KEY_PARAMETER" in
+  /*) ;;
+  *) echo "PROVIDER_KEY_PARAMETER must be a full parameter path such as /vigil/anthropic-api-key" >&2; exit 1 ;;
+esac
 
 aws() { command aws --region "$REGION" "$@"; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }; }
@@ -67,14 +74,16 @@ ROLE="${PROJECT}-host"
 aws iam get-role --role-name "$ROLE" >/dev/null 2>&1 || aws iam create-role --role-name "$ROLE" \
   --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
 aws iam put-role-policy --role-name "$ROLE" --policy-name "${PROJECT}-host-policy" --policy-document "$(jq -cn \
-  --arg key "$KEY_ARN" --arg bkt "arn:aws:s3:::${BUCKET}" '{Version:"2012-10-17",Statement:[
+  --arg key "$KEY_ARN" --arg bkt "arn:aws:s3:::${BUCKET}" \
+  --arg param "arn:aws:ssm:${REGION}:${ACCT}:parameter${PROVIDER_KEY_PARAMETER}" '{Version:"2012-10-17",Statement:[
     {Sid:"OwnerKekEnvelope",Effect:"Allow",Action:["kms:Encrypt","kms:Decrypt","kms:GenerateDataKey","kms:DescribeKey"],Resource:$key},
     {Sid:"BackupObjects",Effect:"Allow",Action:["s3:PutObject","s3:GetObject"],Resource:($bkt+"/*")},
-    {Sid:"BackupList",Effect:"Allow",Action:["s3:ListBucket"],Resource:$bkt}]}')"
+    {Sid:"BackupList",Effect:"Allow",Action:["s3:ListBucket"],Resource:$bkt},
+    {Sid:"ProviderKeyParameter",Effect:"Allow",Action:["ssm:GetParameter"],Resource:$param}]}')"
 aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1 \
   || aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
 aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" 2>/dev/null || true
-echo "  = IAM role/instance-profile ${ROLE} ready (KMS Encrypt/Decrypt/GenerateDataKey on the CMK + S3 Get/Put on the bucket only)"
+echo "  = IAM role/instance-profile ${ROLE} ready (KMS Encrypt/Decrypt/GenerateDataKey on the CMK + S3 Get/Put on the bucket + ssm:GetParameter on ${PROVIDER_KEY_PARAMETER} only)"
 
 # 4) Security group — 443/80 from Cloudflare only, 22 from the admin IP -------------------------------------
 VPC="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)"
@@ -137,6 +146,7 @@ cat <<SUMMARY
   VIGIL_AWS_REGION=${REGION}
   VIGIL_PUSH_DEST=s3://${BUCKET}/vigil
   VIGIL_BACKUP_S3_SSE_KMS_KEY_ID=${ALIAS}          # optional 2nd at-rest layer
+  VIGIL_ANTHROPIC_KEY_SSM_PARAMETER=${PROVIDER_KEY_PARAMETER}   # the gateway's key source (create it as a SecureString)
 
   SECURITY_GROUP_ID=${SGID}                        # launch the instance in this SG
   INSTANCE_PROFILE=${ROLE}                         # attach this instance profile (no static keys)

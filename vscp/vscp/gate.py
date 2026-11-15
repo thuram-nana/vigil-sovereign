@@ -3,7 +3,7 @@
 This mirrors the ``sovereign_bridge`` invariant (W13-2): a facade SEQUENCES existing
 deciders and returns the composed verdict; it holds NO authorization policy of its own.
 Every ALLOW/DENY VSCP returns comes from a gate — the RBAC-of-record
-(:func:`vigil_core.rbac.role_can`) and the findings boundary — not from anything this
+(:func:`vigil_core.rbac.role_can_global`) and the findings boundary — not from anything this
 sequencer decides by inspecting the request.
 
 VSCP cannot import the product's ``sovereign_bridge`` module directly: it lives in the

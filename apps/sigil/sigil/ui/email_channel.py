@@ -18,19 +18,41 @@ TTL — each a path to account takeover / trial-credit farming):
   * The raw token is NEVER written to disk — only `sha256(token)` names the marker (mirrors
     `sessions.SessionLedger`), so a read of the ledger directory cannot recover a live token.
 
+EMAIL CODES (`EmailCodeLedger`, OFF unless the provisioner is given one): a 6-digit code sent in the same email as
+the token, so a person in the installed app can type it instead of following the email into a browser. A code is
+bound to the email address and the purpose, used once, lives 10 minutes, and is gone after 5 wrong codes; one live
+code per (email, purpose) — a new email replaces the previous code and inherits its count of wrong codes, so
+re-sending does not buy more guesses. A guess is compared only with the code it was hashed for: a code replaced
+while a guess was being hashed answers "gone". Stored hash-named only: the record name is sha256 of (purpose,
+email) and the code is kept as a salted scrypt hash, never the raw code. Every check costs one scrypt whether or
+not a code exists (no timing tell), and every hash runs on one small pool of `_HASH_CONCURRENCY` worker threads,
+so a burst of checks cannot make the process hold many 16 MiB hash buffers: at most that many run at once, and only
+those threads ever allocate one (the C allocator keeps a freed buffer in the arena of the thread that used it, so
+hashing on each request's own thread would leave one per thread). A code proves the same thing as the token in
+that email — control of the mailbox — and nothing more.
+
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
 import smtplib
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
+from contextlib import contextmanager
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, NamedTuple, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX: code checks then refuse (fail closed)
+    fcntl = None  # type: ignore[assignment]
 
 # Purposes a token may be minted/consumed for. A token minted for one is refused for the other.
 PURPOSE_VERIFY = "verify"
@@ -237,5 +259,297 @@ class EmailTokenLedger:
             rec = self._read(Path(entry.path))
             if isinstance(rec, dict) and rec.get("email") == email:
                 self._unlink(entry.path)
+                n += 1
+        return n
+
+
+# --- 6-digit email codes ----------------------------------------------------------------------------------------
+_DEFAULT_CODE_TTL_S = 10 * 60.0         # a code is typed while the email is open: 10 minutes
+_DEFAULT_CODE_ATTEMPTS = 5              # wrong codes per CODE before that code is destroyed
+# A per-(email, purpose) hard ceiling on CUMULATIVE wrong codes across re-sends: destroying a code and re-sending
+# only costs the per-email send limit (a few an hour), so without a cumulative cap the guess budget grows without
+# bound over days (NIST 800-63B caps consecutive failures at 100 per authenticator). Once the ceiling is reached,
+# code entry for that (email, purpose) is DISABLED (`CodeBlocked`) until a token-based success clears it
+# (`revoke_for_email`, called when the sign-up/reset completes by either path) — the person uses the email LINK
+# instead. The block is carried in a strike record under the same name as the code, kept this long since its last
+# wrong code so it survives re-sends and a destroyed code but a long-abandoned strike is still reaped.
+_DEFAULT_CODE_HARD_CEILING = 30
+_STRIKE_TTL_S = 30 * 24 * 3600.0
+# Strike records are bounded SEPARATELY from live codes, and never block issuing a code (so an attacker who racks
+# up strikes across many addresses cannot degrade code sign-up/recovery to link-only for everyone else). Beyond the
+# cap the strikes expiring soonest are reaped first.
+_MAX_STRIKES = 8192
+_CODE_LOCK = ".codes.lock"
+# scrypt for the stored code: a 6-digit code has 1,000,000 values, so a fast hash of it would hand a reader of the
+# directory the code at once; this costs ~16 MiB and tens of milliseconds per try.
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1
+# Every code hash runs on this pool: at most _HASH_CONCURRENCY at once in one process (each holds a ~16 MiB buffer),
+# and only these threads ever allocate one. The others wait their turn, up to _HASH_WAIT_S, and then fail closed (a
+# check answers "gone", an issue returns no code); a hash still queued then is dropped.
+_HASH_CONCURRENCY = 4
+_HASH_POOL = ThreadPoolExecutor(max_workers=_HASH_CONCURRENCY, thread_name_prefix="email-code-hash")
+_HASH_WAIT_S = 30.0
+# The salt a check hashes with when there is no code to compare with: the same work as a real check, so the answer
+# takes as long for an address with a code as for one without.
+_ABSENT_SALT = "0" * 32
+
+
+def normalize_code(value) -> str:
+    """The code as typed, without spaces ("123 456" -> "123456"); "" unless it is exactly 6 digits."""
+    raw = "".join(str(value or "").split())
+    return raw if len(raw) == 6 and raw.isascii() and raw.isdigit() else ""
+
+
+def format_code(code: str) -> str:
+    return f"{code[:3]} {code[3:]}"
+
+
+class CodeOk(NamedTuple):
+    bind: dict              # what the issuer bound to the code (e.g. the sign-up's derived username/org id)
+
+
+class CodeWrong(NamedTuple):
+    remaining: int          # wrong codes left; 0 means the code has just been destroyed
+
+
+class CodeGone(NamedTuple):
+    """No live code for this (email, purpose): never issued, expired, used, replaced or destroyed."""
+
+
+class CodeBlocked(NamedTuple):
+    """Code entry for this (email, purpose) is disabled: too many cumulative wrong codes. The person must follow the
+    email LINK (the token) instead; a token-based success clears the block."""
+
+
+class EmailCodeLedger:
+    """6-digit, single-use, 10-minute codes bound to (email, purpose); see the module docstring."""
+
+    def __init__(self, path: "str | os.PathLike", *, ttl_s: float = _DEFAULT_CODE_TTL_S,
+                 max_attempts: int = _DEFAULT_CODE_ATTEMPTS, max_records: int = _DEFAULT_MAX_TOKENS,
+                 hard_ceiling: int = _DEFAULT_CODE_HARD_CEILING) -> None:
+        self.dir = Path(path)
+        self.ttl_s = float(ttl_s)
+        self.max_attempts = int(max_attempts)
+        self.max_records = int(max_records)
+        self.hard_ceiling = int(hard_ceiling)
+        self.max_strikes = min(int(max_records), _MAX_STRIKES)
+
+    def _name(self, email: str, purpose: str) -> Path:
+        return self.dir / hashlib.sha256(("code\x00" + purpose + "\x00" + email).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _hash(code: str, salt: str, email: str, purpose: str) -> str:
+        """The salted scrypt of `code` bound to (purpose, email), computed on `_HASH_POOL`. Raises TimeoutError (an
+        OSError) when it has not run within `_HASH_WAIT_S` (the pool is busy): the caller fails closed."""
+        job = _HASH_POOL.submit(hashlib.scrypt, code.encode("ascii"),
+                                salt=(salt + "\x00" + purpose + "\x00" + email).encode("utf-8"),
+                                n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+        try:
+            return job.result(timeout=_HASH_WAIT_S).hex()
+        except _FutureTimeout:
+            job.cancel()                                   # still queued: dropped; already running: result discarded
+            raise TimeoutError("too many email-code checks at once") from None
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        if fcntl is None:
+            raise OSError("no flock on this platform")
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(self.dir / _CODE_LOCK), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _read(p: Path) -> "Optional[dict]":
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    def _write(self, p: Path, rec: dict) -> None:
+        tmp = p.with_name(f".{p.name}.{secrets.token_hex(8)}.tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, json.dumps(rec).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)
+
+    @staticmethod
+    def _unlink(p) -> None:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _live(rec: "Optional[dict]", now: float) -> bool:
+        if not rec:
+            return False
+        exp = rec.get("exp")
+        return (isinstance(exp, (int, float)) and not isinstance(exp, bool) and now < float(exp)
+                and isinstance(rec.get("salt"), str) and isinstance(rec.get("hash"), str))
+
+    @staticmethod
+    def _wrongs(rec: "Optional[dict]") -> int:
+        """The cumulative count of wrong codes for this (email, purpose), carried across destroyed/re-sent codes."""
+        w = rec.get("wrongs") if rec else 0
+        return w if isinstance(w, int) and not isinstance(w, bool) and w > 0 else 0
+
+    @staticmethod
+    def _strike_live(rec: "Optional[dict]", now: float) -> bool:
+        """A non-expired strike record (the block kept after a code is destroyed, so it outlives re-sends)."""
+        if not rec:
+            return False
+        se = rec.get("strike_exp")
+        return isinstance(se, (int, float)) and not isinstance(se, bool) and now < float(se)
+
+    def _blocking(self, rec: "Optional[dict]", now: float) -> bool:
+        """Code entry is disabled for this (email, purpose): the cumulative wrong count has reached the hard ceiling
+        and the record is still live (a live code, or a non-expired strike). An expired strike no longer blocks."""
+        return (self._wrongs(rec) >= self.hard_ceiling
+                and (self._live(rec, now) or self._strike_live(rec, now)))
+
+    def _sweep(self, now: float) -> int:
+        """Reap expired/dead records and bound the strike records independently (oldest-expiring first beyond
+        max_strikes). Returns the count of LIVE CODE records only — strikes never count toward max_records, so a
+        pile of strikes can never block issuing a new code (it only degrades code entry for the struck addresses)."""
+        codes = 0
+        strikes: "list[tuple[float, str]]" = []
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for e in entries:
+            if e.name == _CODE_LOCK:
+                continue
+            rec = self._read(Path(e.path)) if not e.name.startswith(".") else None
+            if self._live(rec, now):
+                codes += 1
+            elif rec is not None and self._strike_live(rec, now):
+                strikes.append((float(rec.get("strike_exp") or 0.0), e.path))
+            else:
+                self._unlink(e.path)
+        if len(strikes) > self.max_strikes:
+            strikes.sort()                                               # smallest strike_exp (soonest to expire) first
+            for _exp, path in strikes[:len(strikes) - self.max_strikes]:
+                self._unlink(path)
+        return codes
+
+    def issue(self, email: str, purpose: str, *, bind: "Optional[dict]" = None,
+              now: "Optional[float]" = None) -> "Optional[str]":
+        """A fresh code for (`email`, `purpose`), replacing any earlier one, with `bind` stored beside it (returned by
+        a right `check`). A live earlier code hands its count of wrong codes on to the new one (re-sending the email
+        does not reset the 5). Returns the raw code (never stored), or None when the ledger is full or cannot be
+        written."""
+        if purpose not in _PURPOSES:
+            raise ValueError(f"purpose must be one of {sorted(_PURPOSES)}")
+        if not isinstance(email, str) or not email:
+            raise ValueError("email must be a non-empty string")
+        t = time.time() if now is None else float(now)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        salt = secrets.token_hex(16)
+        try:
+            rec = {"exp": t + self.ttl_s, "salt": salt, "hash": self._hash(code, salt, email, purpose),
+                   "attempts": 0, "wrongs": 0, "bind": dict(bind or {})}
+            with self._locked():
+                p = self._name(email, purpose)
+                prev = self._read(p)
+                # The cumulative wrong-code count carries across a re-send AND across a destroyed code's strike, so
+                # re-sending never resets the hard ceiling (a re-sent code over a reached ceiling is born blocked).
+                # It carries ONLY while the record is still live: a strike older than _STRIKE_TTL_S no longer blocks
+                # (an abandoned block is reaped), so a code issued after it starts the count fresh.
+                if self._live(prev, t) or self._strike_live(prev, t):
+                    rec["wrongs"] = self._wrongs(prev)
+                if self._live(prev, t):
+                    rec["attempts"] = self._attempts(prev)   # a live code also hands on its per-code attempt count
+                elif not self._strike_live(prev, t) and self._sweep(t) >= self.max_records:
+                    return None
+                self._write(p, rec)
+        except OSError:
+            return None
+        return code
+
+    @staticmethod
+    def _attempts(rec: "Optional[dict]") -> int:
+        a = rec.get("attempts") if rec else 0
+        return a if isinstance(a, int) and not isinstance(a, bool) and a > 0 else 0
+
+    def check(self, email: str, purpose: str, code, *, consume: bool = False,
+              now: "Optional[float]" = None):
+        """Check a typed code for (`email`, `purpose`). Right: CodeOk(bind), and the code is removed when `consume`
+        (a caller that commits later removes it with `consume_code`). Wrong: the attempt is counted and the
+        `max_attempts`-th wrong code removes the code (CodeWrong(0)). No live code, or a code replaced while the guess
+        was hashed: CodeGone — after the same scrypt a real check costs. A malformed code counts as wrong. Never
+        raises; an I/O error, or no free hash slot, is CodeGone (fail closed)."""
+        if purpose not in _PURPOSES or not isinstance(email, str) or not email:
+            return CodeGone()
+        typed = normalize_code(code)
+        t = time.time() if now is None else float(now)
+        p = self._name(email, purpose)
+        first = self._read(p)
+        if self._blocking(first, t):
+            return CodeBlocked()     # too many cumulative wrong codes: entry disabled until a token-based success
+        try:
+            if first is None or not self._live(first, t):
+                self._hash(typed or "000000", _ABSENT_SALT, email, purpose)    # the same work: no timing tell
+                return CodeGone()
+            # the slow hash outside the lock (so one check does not hold up every other), compared under it; a
+            # malformed code is hashed too (as "000000", never a match), so it costs what a real check costs
+            guess = self._hash(typed or "000000", str(first["salt"]), email, purpose)
+            with self._locked():
+                rec = self._read(p)
+                if self._blocking(rec, t):             # crossed the ceiling via a concurrent guess: never compared
+                    return CodeBlocked()
+                if rec is None or not self._live(rec, t):
+                    self._unlink(p)
+                    return CodeGone()
+                if rec["salt"] != first["salt"]:
+                    return CodeGone()          # replaced meanwhile: the guess was hashed for a code that is gone
+                if typed and hmac.compare_digest(guess, str(rec["hash"])):
+                    if consume:
+                        self._unlink(p)
+                    bind = rec.get("bind")
+                    return CodeOk(dict(bind) if isinstance(bind, dict) else {})
+                attempts = self._attempts(rec) + 1
+                wrongs = self._wrongs(rec) + 1
+                if wrongs >= self.hard_ceiling or attempts >= self.max_attempts:
+                    # destroy the live code but KEEP a strike carrying the cumulative wrong count, so re-sending a
+                    # code never resets the hard ceiling and a long-abandoned block is still reaped (_strike_live).
+                    try:
+                        self._write(p, {"strike_exp": t + _STRIKE_TTL_S, "wrongs": wrongs})
+                    except OSError:
+                        pass                        # keep the existing record: never DROP the cumulative count on an
+                        #                             I/O error (that would fail the ceiling OPEN); re-tried next guess
+                    return CodeBlocked() if wrongs >= self.hard_ceiling else CodeWrong(0)
+                rec["attempts"] = attempts
+                rec["wrongs"] = wrongs
+                try:
+                    self._write(p, rec)
+                except OSError:
+                    self._unlink(p)                     # a wrong code that cannot be counted ends the code
+                    return CodeGone()
+                return CodeWrong(self.max_attempts - attempts)
+        except OSError:
+            return CodeGone()
+
+    def consume_code(self, email: str, purpose: str) -> None:
+        """Remove the code for (`email`, `purpose`) — the commit marker of a caller that checked without consuming."""
+        if purpose in _PURPOSES and isinstance(email, str) and email:
+            self._unlink(self._name(email, purpose))
+
+    def revoke_for_email(self, email: str) -> int:
+        """Remove the codes of every purpose for `email` (a sign-up or reset completed by either path)."""
+        n = 0
+        if not isinstance(email, str) or not email:
+            return 0
+        for purpose in sorted(_PURPOSES):
+            p = self._name(email, purpose)
+            if p.exists():
+                self._unlink(p)
                 n += 1
         return n

@@ -1029,13 +1029,13 @@ def test_resolve_offense_llm_env_result_signals_ok_vs_error(tmp_path):
 
 
 def test_new_plane_routes_are_guarded_like_start(proxy):
-    """/offense/stop (POST) and /offense/version (GET) run the SAME guard chain as /offense/start: this
-    fixture's proxy has no session token, so every plane route fails closed with a 4xx BEFORE the route
-    body runs — proving the guard is not bypassed for the routes this slice added."""
+    """/offense/stop (POST) and /auth/purge (POST) run the SAME guard chain as /offense/start: this fixture's
+    proxy has no session token, so every such plane route fails closed with a 4xx BEFORE the route body runs —
+    proving the guard is not bypassed for the routes this slice added. (/version answers before sign-in by
+    design, behind the peer + Host/Origin guards: test_uiproxy_version_prelogin.py.)"""
     base, _serve = proxy
     for method, path in [("POST", "/__vigil/plane/offense/stop"),
-                         ("POST", "/__vigil/plane/auth/purge"),   # W9-3 admin force-purge / edge-revoke
-                         ("GET", "/__vigil/plane/version")]:
+                         ("POST", "/__vigil/plane/auth/purge")]:   # W9-3 admin force-purge / edge-revoke
         req = urllib.request.Request(base + path, method=method,
                                      data=(b"{}" if method == "POST" else None))
         try:

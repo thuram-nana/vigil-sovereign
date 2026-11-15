@@ -34,13 +34,18 @@ two deliberate owner switches at the very end (§10–§11). Work top to bottom;
 ## 1. Install & build the planes
 
 ```bash
-git clone <your-fork> vigil && cd vigil
-# Sovereign venv (apps/sigil + vigil_core):
-python3.13 -m venv ~/.sigil/venv && ~/.sigil/venv/bin/pip install -e apps/sigil
+git clone <your-fork> ~/vigil && cd ~/vigil    # the units run the checkout at ~/vigil (%h/vigil)
+./bootstrap.sh          # the hash-locked venvs (.venv-sovereign, .venv-offense) + the WARDEN kernel,
+                        # and the link ~/.sigil/venv -> .venv-sovereign that every sigil unit runs
 # Confirm the CLIs resolve:
 ~/.sigil/venv/bin/sigil --help >/dev/null && echo "sigil ok"
 vigil doctor            # operator readiness: binaries, both venvs, writable dirs, UI ports, docker
 ```
+
+Run `./bootstrap.sh` before §2 and with `SIGIL_HOME` unset, so the link lands at `~/.sigil/venv`, the path
+the units execute. Install nothing into `~/.sigil/venv` by hand: `envs/build_envs.sh` (which bootstrap runs)
+installs every dependency from hash-pinned requirements, and `vigil doctor` reports a `~/.sigil/venv` that is
+not the symlink to a built `.venv-sovereign` as a hard issue.
 
 `vigil doctor` exits non-zero on a hard prerequisite gap — clear those first.
 
@@ -108,6 +113,18 @@ fails signup/login **closed**. In `customer.env` also set `VIGIL_CUSTOMER_ALLOWE
 `VIGIL_CUSTOMER_ALLOWED_ORIGINS` to your customer domain (the edge sets a cookie, so its anti-rebind +
 CSRF gates must know the public host/origin).
 
+`cockpit.env.example` ships `VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1` together with
+`VIGIL_TRIAL_PREVIEW_ENABLED=1`: a sign-up makes its founding customer a `founder`, who can prove a host it
+controls and scan it; every launch gate still applies. The founder role needs both lines: with the preview
+off, a sign-up grants `org_admin`. On an existing install whose `cockpit.env` predates the preview line, add
+both — and run `sigil trial backfill-claims` (in a shell that exports the cockpit's `SIGIL_HOME`) before you
+restart the cockpit with the preview on and once more right after, so an account made while the preview was off
+cannot take a second, preview trial through a variant of its mailbox. To switch only new sign-ups to `org_admin`
+at once, with no restart, turn the owner's `founder_tester` latch off (`sigil latch off founder_tester`, or the
+phone). To switch founder testing off for every founder, set the flag to `0` in `cockpit.env` and run
+`systemctl --user restart sigil-cockpit` (the cockpit reads `cockpit.env` only when it starts). Roles, owner
+verbs and the rollback order: `customer-roles-and-seats.md`.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now sigil-cockpit sigil-customer sigil-public sigil-checkpoint.timer
@@ -115,8 +132,111 @@ loginctl enable-linger "$USER"        # keep units up after logout
 systemctl --user status sigil-cockpit sigil-customer sigil-public
 ```
 
-The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — start it
-on this host and keep it **private** (SSO/VPN), never a public face.
+The operator console (`vigil up`, :8770) is the control surface for ceremonies/engage/panic — keep it
+**private** (SSO/VPN), never a public face. On this host the cockpit already runs as `sigil-cockpit` on
+127.0.0.1:8733, so the console runs **proxy-only** in front of it: it starts no cockpit of its own and federates
+`/sovereign/*` to the cockpit unit (a plain `vigil up` would start a second cockpit on the same port). Install
+the console unit with its production drop-in:
+
+```bash
+cp infra/systemd/vigil-command.service ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/vigil-command.service.d
+cp infra/systemd/vigil-command.service.d/production.conf ~/.config/systemd/user/vigil-command.service.d/
+# ~/vigil/.vigil-live/service.env (plain KEY=VALUE, mode 0600): the console's hostname from §7 and the api key
+# `vigil up --domain` requires. Add the same hostname to SIGIL_UI_ALLOWED_HOSTS / SIGIL_UI_ALLOWED_ORIGINS
+# in ~/.sigil/cockpit.env.
+#   VIGIL_CONSOLE_DOMAIN=console.vigil.example.com
+#   CRUCIBLE_API_KEY=<a long random secret>
+systemctl --user daemon-reload
+systemctl --user enable --now vigil-command
+vigil doctor            # reports a console that is not proxy-only beside the cockpit unit, as a hard issue
+```
+
+The drop-in runs `vigil up --proxy-only --sovereign-addr 127.0.0.1:8733`; if `cockpit.env` binds the cockpit
+elsewhere, change `--sovereign-addr` to match (`vigil doctor` reports a mismatch). The console's `/offense/*`
+screens federate to an offense console and API on this host (127.0.0.1:8787 / :8799) when you run them
+(`docs/architecture/HA-PROFILE.md` §1.1). Do not also run a plain `vigil up` on this host.
+
+**Settings every settling process must share.** `VIGIL_SETTLE_SPINE_RECORD` and the metered-settle pricing
+(`VIGIL_BILLING_TARGET_MARGIN`, `VIGIL_RUN_FLOOR_CREDITS`, `VIGIL_BILLING_CANCEL_SETTLEMENT`) must hold the same
+value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. Either:
+
+1. set each once in `$SIGIL_HOME/sigil.env` — every sigil process reads it beneath its own env file, and so does
+   a shell that exports the cockpit's `SIGIL_HOME` — or
+2. set the same value in `cockpit.env`, `customer.env` and `~/.config/vigil/settle-drain.env`, **and** export it
+   in the shell before every `sigil ops-sweep` (e.g. `export VIGIL_SETTLE_SPINE_RECORD=1`).
+
+`vigil doctor` reads only the files the installed units load, never its own environment, so it gives the same
+answer from your shell and from `vigil-ready.service`: a disagreement between the units is a hard issue, and a
+value that a shell reading only `sigil.env` would not see (option 2) is a note naming what to export.
+
+**One money-seam directory (`VIGIL_BASE_DIR`).** Every process that touches a customer launch — the
+cockpit (`sigil serve`, which publishes the credit lease and writes pause/settlement markers), the settle
+drain, the offense engine (`vigil up`, `vigil launch-drain`) and the offense backup — must use the SAME
+seam directory, or a lease published in one tree is never seen by the drain reading another (every
+completion settles nothing and the credits stay held). The shipped `sigil-*` / `vigil-settle-drain` /
+`vigil-backup*` units all set `VIGIL_BASE_DIR=%h/.sigil/credit-lease`; in any shell that runs a `vigil` command,
+or a `sigil` command that writes the seam (`sigil eval-grant arm|revoke|reconcile`, `sigil ops-sweep
+reservations`), export the same value:
+
+```bash
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"   # the value the shipped units set — keep ONE value
+mkdir -p "$VIGIL_BASE_DIR" && chmod 700 "$VIGIL_BASE_DIR"
+vigil doctor                                        # HARD issue if the installed units disagree on it
+```
+
+Every `vigil` verb's `--base-dir` defaults to `$VIGIL_BASE_DIR` (else `./.vigil-live`), and `vigil up` hands its
+base to every backend it starts, so one export covers the console, the engines and the cockpit `vigil up`
+spawns. `vigil up` refuses an explicit `--base-dir` that names a different directory than `$VIGIL_BASE_DIR`. The
+operator console unit (`vigil-command.service`) keeps the offense engine's own home — its vault, operator key and
+attestation log — in `<repo>/.vigil-live`: do not add a `VIGIL_BASE_DIR=` line to its `service.env` to move it
+(`sigil seam migrate` carries launch-seam records only, never the engine's own state); `vigil doctor` reports when
+its seam differs from the other units'. `sigil ops-sweep reservations` (without `--base-dir`) and `sigil seam
+migrate` use the seam the cockpit and the settle drain share — the console's engine home is never compared — and
+when this shell resolves another directory they refuse and print the `export` to run first. `sigil eval-grant
+revoke` and `sigil eval-grant reconcile` run on every unit's seam, the console's included, whatever this shell
+resolves, and a reconcile clears the `vigil doctor` alarm only once every one of them is confirmed. `sigil eval-grant
+arm` publishes a grant to one seam, so it runs only where the cockpit, the settle drain and the console unit name the
+same seam; on a host whose console keeps its engine home in `<repo>/.vigil-live` it refuses and names the console's
+seam (keep that engine home where it is).
+
+To move the seam, set the same **absolute** path in every unit's env file (`~/.sigil/cockpit.env`,
+`~/.config/vigil/settle-drain.env`, `backup.env`, `backup-push.env`) or drop-in (`systemctl --user edit <unit>`) —
+never in only some of them. The settle drain refuses to start when a leftover `VIGIL_SETTLE_BASE_DIR` names a
+different directory.
+
+**Upgrading a host whose cockpit used another seam directory.** An earlier install's cockpit kept its launch
+records (published leases, settlement and pause markers, single-use floors) in its working-directory default
+`~/.sigil/.vigil-live`. Carry them into the seam before anything serves or settles on it — as the service user:
+
+```bash
+systemctl --user stop sigil-cockpit sigil-customer vigil-settle-drain.timer vigil-settle-drain
+# re-copy the shipped units (they bring VIGIL_BASE_DIR and VIGIL_SEAM_MIGRATION_GUARD=1), then:
+systemctl --user daemon-reload
+export VIGIL_BASE_DIR="$HOME/.sigil/credit-lease"
+sigil seam migrate             # report only: what it carries, requeues to the settle drain, or holds for the owner
+sigil seam migrate --apply     # exit 1 lists any conflict, or a launch held for the owner (`legacy_hold`)
+vigil doctor                   # no `seam migration` issue left
+systemctl --user start sigil-cockpit sigil-customer vigil-settle-drain.timer
+```
+
+On a host where the operator console unit (`vigil-command.service`) is installed, the procedure is the same:
+`sigil seam migrate` carries the former tree into the seam the cockpit and the settle drain use, never into the
+console's engine home (a `--to` naming the console's seam is refused), and the cockpit `vigil up` starts on the
+console's own seam serves again once the migration commits. `vigil doctor` and `sigil upgrade --check` check the
+seam the cockpit and the settle drain use and report the former tree until it is committed there; `vigil doctor`
+also keeps reporting that the console's seam differs from the other units' (above), which is not a seam migration
+issue.
+
+Until the migration commits, the cockpit, the settle drain, `sigil ops-sweep reservations --apply`, `sigil
+eval-grant arm` and `sigil monitoring-secret` refuse to run. The migration hands each archived completion of an
+unsettled launch back to the settle drain, which settles it at its outcome, and holds for the owner a launch it
+cannot settle (no money moves for it). It reads the completion spool the configured settle drain drains (its unit,
+drop-ins and env file); a `--completion-spool` naming any other directory is refused. **Never run `sigil ops-sweep
+reservations --apply` against the former directory** (`--base-dir ~/.sigil/.vigil-live`); with the units' guard on
+it is refused, before and after the migration. Run the migration before you remove a leftover
+`VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and
+it holds the cockpit's own passkey store and bootstrap token.
 
 ## 7. Reverse proxy + TLS (three separate origins)
 
@@ -134,6 +254,73 @@ Edit each vhost's `server_name` + cert paths, obtain certs (`certbot certonly --
 vhost (done in the template) or its gates fail closed. Confirm every listener is loopback/private
 (`ss -ltnp` shows nothing on the public interface except the proxy).
 
+## 7b. Customer sign-in: email, Google, and the installed iPhone app
+
+Everything below goes in the env files from §6; restart both units after a change
+(`systemctl --user restart sigil-cockpit sigil-customer`). `vigil doctor` reads those files and reports a Google
+setting that differs between the cockpit and the customer edge, a missing Google setting, or Google sign-in without
+the installed-app hand-off (values are never printed).
+
+**Email (sign-up confirmation and password reset).** In `cockpit.env` set `SIGIL_EMAIL_HOST`, `SIGIL_EMAIL_PORT`
+(587, STARTTLS), `SIGIL_EMAIL_FROM`, `SIGIL_EMAIL_USER` and `SIGIL_EMAIL_PASSWORD` (the password from your secret
+manager; never in `customer.env`, never in git). With `SIGIL_EMAIL_HOST` unset no email is sent at all, so nobody
+can confirm a sign-up or reset a password. Amazon SES works well: verify the sending domain, add its DKIM CNAME
+records in Cloudflare DNS with SPF and DMARC, and request production access before launch.
+
+With `VIGIL_CUSTOMER_EMAIL_CODE=1` (the production example) each sign-up and reset email carries a **6-digit code**
+beside the single-use token, so a person in the installed app types the code instead of following the email into
+a browser. A code works once, for 10 minutes, for that address and that purpose only (a sign-up code is not a reset
+code); its 5th wrong entry ends it, and a re-sent email's code inherits the wrong entries of the one it replaces.
+Every entry is counted before it is checked, however many arrive at once: 5 per address and purpose, then that
+address's code entry is locked for an hour (each later lock doubles, up to a day); 5 per client IP, then that IP
+is locked for a minute (doubling, up to an hour). The lock counts every entry for the address, so it never tells
+whether the address has an account; a person whose code entry is locked uses the token from the same email (valid
+1 hour), which the lock does not touch. A new password that is too short is refused before the code or token is
+used, so the person can correct it and use the same email. A code is stored only as a salted hash.
+
+**Google ("Continue with Google").** In Google Cloud console create an OAuth client of type *Web application* and
+add the authorized redirect URI exactly `https://app.<your-domain>/api/customer/oidc/callback`. Set
+`VIGIL_CUSTOMER_OIDC_ENABLED=1`, `VIGIL_CUSTOMER_OIDC_CLIENT_ID` and `VIGIL_CUSTOMER_OIDC_REDIRECT_URI` to the
+**same** values in `cockpit.env` and `customer.env` (or once in `$SIGIL_HOME/sigil.env`), and
+`VIGIL_CUSTOMER_OIDC_CLIENT_SECRET` in `cockpit.env` only — the customer edge never holds it. The sign-in and
+sign-up screens show the button only while the switch is on and the client id and redirect URI are set (read when
+the edge starts). A first Google sign-in creates a passwordless account for that Google identity; an address that
+already has a password account is refused, never linked by email.
+
+**Google inside the installed iPhone app.** `VIGIL_CUSTOMER_IOS_INSTALL_BANNER=1` (in `customer.env`) shows iPhone
+and iPad visitors in the browser a guide to *Share → Add to Home Screen*; it disappears once the app runs from the
+Home Screen and remembers a dismissal. An installed app runs standalone, and iOS finishes Google sign-in in a
+separate browser with its own cookies, so with `VIGIL_CUSTOMER_OIDC_HANDOFF=1` (in `customer.env`) the app starts
+the sign-in with a one-time challenge, the page where Google sign-in finished shows a 6-digit pairing code ("Only
+enter it in the VIGIL app on this phone"), and the app exchanges its secret verifier plus that code for its own
+session. The pairing code works once, for about 2 minutes; its 5th wrong entry ends it, and failed exchanges are
+limited per client IP. Outside an installed app the normal browser sign-in is used.
+
+What protects that code: the whole hand-off happens on **one network** as the edge sees the client address (the
+same IPv4 /24, or IPv6 /56). The sign-in must finish on the network where the app started it, or it is refused
+before Google's answer is used (no account is created); and the code is redeemed only from the network where the
+sign-in finished — a code typed into anything else and sent from another network ends the sign-in and signs in
+nobody. Google shows its account chooser for every installed-app sign-in, and the code page names the Google account
+and says to close the page unless the person just tapped *Continue with Google* in the VIGIL app on this phone. At
+most 3 sign-ins per account and 16 per network wait at once. The network rule does not tell apart two clients on the
+same network (one Wi-Fi, one office or carrier address range): there, the code and the page's warning are what
+stand in the way. A person whose phone changes network mid-way (Wi-Fi to mobile data) is asked to start again.
+The rule needs the reverse proxy to pass each visitor's own **globally-routable** address: the shipped nginx vhost
+does, including behind Cloudflare (`real_ip_header CF-Connecting-IP` from Cloudflare's ranges only). If the edge
+instead sees a loopback, private, VPN or carrier-NAT address — because the proxy passes its own peer, or a
+**cloudflared tunnel** runs on the host and forwards to nginx over loopback (then every visitor looks like
+`127.0.0.1`) — VIGIL treats that as *no network* and the installed-app hand-off **refuses** (it never relays a
+pairing code onto a shared address). Fix the proxy so the edge sees the real address: the Caddy example must pass
+the visitor's address (not its own peer); for a cloudflared tunnel, add `set_real_ip_from 127.0.0.1;` (and `::1`)
+to the customer vhost so nginx restores the real IP from `CF-Connecting-IP` (see `vigil-customer.nginx.conf`).
+Password-reset and sign-up 6-digit codes are also capped: after too many wrong codes for one address, code entry
+is disabled and the person uses the email link instead.
+
+Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
+to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to
+VIGIL and type the code — you are signed in inside the app. Then sign up a second address with the emailed 6-digit
+code, and reset its password with the code from the reset email.
+
 ## 8. Pricing ↔ real Flutterwave plan-id binding (owner confirms)
 
 The owner catalog (`apps/sigil/sigil/governor/catalog.py`) is the **sole money anchor** — no on-the-wire
@@ -145,7 +332,16 @@ amount decides money. Before go-live, confirm the three owner inputs (hosting ru
    payment_plan id** you create in your Flutterwave dashboard; each top-up `price_id` must be set as the
    checkout `meta.price_id`. VIGIL cannot mint these; `amount_minor` is the cross-check, not the charge.
 
-A price change is an owner-reviewed commit + deploy (catalog validated fail-closed at import).
+A price change is an owner-reviewed commit + deploy (catalog validated fail-closed at import). **Never edit a
+sold entry's amount, currency or credits in place**: mark it `retired=True` and add a new `price_id`, so a
+checkout opened before the deploy still credits at its own price (retired entries stay mintable).
+
+**A paid top-up the drain cannot credit.** With `VIGIL_BILLING_TOPUP_ALARM=1` in the billing drain's env (the
+Stripe drain always does this), a verified top-up whose price is not in the catalog, that carries no verified
+currency, or that paid less than (or another currency than) the catalog price is quarantined in `rejected/`
+with a `.reason`, nothing is minted, and the drain unit stays FAILED until `rejected/` is empty. Refund the
+payment in the processor dashboard, then move the envelope and its `.reason` out of `rejected/` into a record
+folder outside the spool (it minted nothing).
 
 ## 9. Flutterwave webhook drain + transaction verifier (payments; default-OFF)
 
@@ -209,7 +405,11 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    with no credit.
 
 `sigil ops-sweep tx-refs --provider stripe --spool <stripe spool> --checkouts <file>` reports Stripe checkouts
-that never reached a drained webhook. Webhook-driven cancellation is not acted on: a cancelled plan expires at
+nothing has credited. The drain records what each webhook it archives did (`<spool>/outcomes/`, beside
+`processed/`), and a checkout is left out only when a webhook for it minted; the others are reported as `noop`
+(archived without crediting anything — the row names why, e.g. `underpaid_or_currency`, `unknown_price`),
+`processed_unrecorded` (archived before outcomes were recorded), `quarantined`, `retrying` or `no_webhook`. The
+same applies to the Flutterwave spool (without `--provider`). Webhook-driven cancellation is not acted on: a cancelled plan expires at
 the end of its paid period, as with Flutterwave.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

@@ -42,10 +42,11 @@ Deliberate refusals (fail-closed, honest):
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+from vigil_core.seam_base import resolve_seam_base
 
 # A conservative default validity window and action budget for a UI-issued authorization. The operator
 # widens deliberately; a short window bounds a forgotten authorization.
@@ -67,9 +68,9 @@ _HOSTNAME_RE = re.compile(
 
 
 def _base_dir() -> str:
-    """The shared engagement base dir both planes agree on (``vigil up`` sets VIGIL_BASE_DIR for both);
-    matches the offense console's own resolution and the offense-approvals ceremony."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    """The shared engagement base dir both planes agree on — the ONE seam-base resolver every plane uses
+    (``vigil_core.seam_base``: explicit > ``VIGIL_BASE_DIR`` > ``.vigil-live``, absolutised)."""
+    return resolve_seam_base()
 
 
 def _owner_keypair():

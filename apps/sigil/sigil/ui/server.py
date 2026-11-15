@@ -31,6 +31,7 @@ import hmac
 import http.cookies
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import threading
@@ -52,6 +53,7 @@ from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
 from ..spine.verify import verify_record
 from . import actions as _actions
+from .graceful import PROVISIONER_DRAIN_DEADLINE_S, GracefulMixin, serve_until_signal
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -111,6 +113,8 @@ class FailedTokenCache:
 # serves the last projected value. Not a scale target: it bounds how often an anonymous caller triggers work.
 METRICS_PROJECTION_TTL_S = 10.0
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+#: The content types of the cockpit's two static assets (`_serve_static`); every other response is no-store.
+_STATIC_CTYPES = ("application/javascript", "text/css")
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
 # bytes. The tag (a versioned, NUL-terminated label) namespaces the signature so a login proof can never be
@@ -139,8 +143,12 @@ BOOTSTRAP_PATHS = frozenset({
 })
 
 
-class UIServer(ThreadingHTTPServer):
+class UIServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
+
+    def drain_deadline(self) -> float:
+        # outwaits every action the customer edge relays here (ui/graceful.PROVISIONER_DRAIN_DEADLINE_S)
+        return PROVISIONER_DRAIN_DEADLINE_S
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
                  extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None,
@@ -383,6 +391,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Every answer but the two token-free static assets (app.js, style.css) is no-store: the JSON plane, the
+        # probes and the token-bearing page are never kept by a browser or an intermediary.
+        if not ctype.startswith(_STATIC_CTYPES):
+            self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)   # Slice 1c-ii: a queued session Set-Cookie, if any
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -398,6 +410,11 @@ class Handler(BaseHTTPRequestHandler):
     def _download(self, path, filename):
         """Stream a file as an attachment (Wave 3 backup download). `filename` is already regex-validated by
         `durability.resolve_backup` (only `backup-…enc`), so it is safe in the Content-Disposition header."""
+        # Rebuilt from its parsed parts (never the request's text) so the header can only ever hold this shape.
+        m = re.fullmatch(r"backup-(\d{8})-(\d{6})-([0-9a-f]{6})\.enc", str(filename))
+        if m is None:
+            return self._deny(404, "no such backup")
+        safe = f"backup-{int(m.group(1)):08d}-{int(m.group(2)):06d}-{int(m.group(3), 16):06x}.enc"
         try:
             size = path.stat().st_size
         except OSError:
@@ -405,7 +422,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -781,13 +799,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._deny(404, "unknown endpoint")
 
     def _serve_static(self, name):
-        if name not in self._STATIC_OK:
+        known = next((n for n in self._STATIC_OK if n == name), None)   # the listed name itself, never the request's
+        if known is None:
             return self._deny(404, "not found")
         try:
-            data = (_STATIC / name).read_bytes()
+            data = (_STATIC / known).read_bytes()
         except OSError:
             return self._deny(404, "not found")
-        ctype = "application/javascript" if name.endswith(".js") else "text/css"
+        ctype = "application/javascript" if known.endswith(".js") else "text/css"
         self._send(200, data, ctype=f"{ctype}; charset=utf-8")
 
     def _serve_index(self):
@@ -835,9 +854,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- Claim 6 RBAC surface (whoami / accounts / login) -----------------------------------------
     def _principal_json(self, principal) -> dict:
-        from ..governor.accounts import PERMISSIONS
+        # The permission list is what the `vigil up` proxy's coarse offense floor reads. An account principal
+        # holds a GLOBAL role, so only the four global roles list permissions (mirrors rbac.role_can_global):
+        # a per-org role name on an account record lists none.
+        from ..governor.accounts import PERMISSIONS, ROLES
+        perms = PERMISSIONS.get(principal.role, frozenset()) if principal.role in ROLES else frozenset()
         return {"authenticated": True, "username": principal.username, "role": principal.role,
-                "permissions": sorted(PERMISSIONS.get(principal.role, frozenset()))}
+                "permissions": sorted(perms)}
 
     def _whoami(self):
         """The current principal from the presented token (token-optional). {authenticated:false} for an
@@ -1189,6 +1212,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         # Bind `state` to THIS browser: an HttpOnly, SameSite=Lax cookie set here and re-checked at the
         # callback. SameSite=Lax still rides the IdP's top-level GET redirect back to us, but a cross-site
         # POST/subresource cannot carry it; HttpOnly keeps script from reading it; Path scopes it to /api/oidc.
@@ -1351,7 +1375,7 @@ class Handler(BaseHTTPRequestHandler):
             since = -1                                          # any malformed cursor → from genesis
         tailer = SpineTailer(self.server.store(), since_seq=since)
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 for ev in tailer.poll():
                     self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
@@ -1359,7 +1383,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")                    # heartbeat / flush
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return                                               # client closed — end the stream
 
@@ -1389,7 +1413,7 @@ class Handler(BaseHTTPRequestHandler):
         from ..voice.hud_status import read_status
         last_state = None
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 # S4: fan out the voice FSM state (idle/listening/thinking/speaking) from the EPHEMERAL 0600
                 # status file — deduped (emit only on change). It is read-only telemetry, never the spine.
@@ -1417,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -1553,6 +1577,10 @@ class Handler(BaseHTTPRequestHandler):
         if action == "signup_request":
             return p.request_signup(str(body.get("email", "")), ip=ip)
         if action == "signup_confirm":
+            if not str(body.get("token", "") or "") and str(body.get("code", "") or ""):   # the 6-digit email code
+                return p.confirm_signup_code(str(body.get("email", "")), str(body.get("code", "")),
+                                             password=str(body.get("password", "")),
+                                             org_name=str(body.get("org_name", "")), ip=ip)
             return p.confirm_signup(str(body.get("token", "")), password=str(body.get("password", "")),
                                     org_name=str(body.get("org_name", "")), ip=ip)
         if action == "login":
@@ -1560,6 +1588,9 @@ class Handler(BaseHTTPRequestHandler):
         if action == "recover_request":
             return p.request_recover(str(body.get("email", "")), ip=ip)
         if action == "recover_confirm":
+            if not str(body.get("token", "") or "") and str(body.get("code", "") or ""):   # the 6-digit email code
+                return p.confirm_recover_code(str(body.get("email", "")), str(body.get("code", "")),
+                                              new_password=str(body.get("new_password", "")), ip=ip)
             return p.confirm_recover(str(body.get("token", "")), new_password=str(body.get("new_password", "")))
         # E2b — Google-OIDC login finish: the secret-bearing token exchange + verify + auto-provision /
         # anti-takeover, then {username, orgs}. A public bootstrap (no requester — the hop key alone gates it,
@@ -1928,9 +1959,9 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     gw = model_gateway.start_from_env()
     if gw is not None:
         print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        srv.shutdown()
-    finally:
-        srv.server_close()                        # writes any pending failed-login counts (FailedAuthnCoalescer)
+    # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted — here or at the model gateway — and the requests
+    # in flight finish within graceful.PROVISIONER_DRAIN_DEADLINE_S (longer than any action the customer edge waits
+    # for), the gateway's metered as they finish; then server_close writes any pending failed-login counts
+    # (FailedAuthnCoalescer).
+    serve_until_signal(srv, drain_deadline_s=PROVISIONER_DRAIN_DEADLINE_S,
+                       on_stop=None if gw is None else (lambda d: model_gateway.stop(gw, drain_s=d)))

@@ -19,7 +19,7 @@ Every item below merged only after adversarial red-pen + all required CI jobs gr
 
 | Protection | State today |
 |---|---|
-| Required status checks | **14**, all of them: `A14 supply-chain gate` · `CRUCIBLE core on vigil_core` · `CRUCIBLE eval + benchmark corpus` · `formal (TLA+ core-invariant model check, F1)` · `gateway egress gate (P6)` · `integration two-env boundary (P5)` · `livefire smoke (per-PR subset)` · `loopback engagement (end-to-end + offline re-verify)` · `SIGIL governor gates (P7 — offense gate + authn)` · `SIGIL lint (ruff blocking + mypy can-complete)` · `strix Claude-runtime (P8)` · `the briefing explains every agent and capability` · `vigil_core — shared integrity substrate` · `WARDEN Rust kernel (A10 durability)`. The committed source of truth is [`.github/required-status-checks.txt`](../.github/required-status-checks.txt); the offline test `docs/tests/test_required_checks_canonical.py` and the live-reality workflow `.github/workflows/branch-protection-verify.yml` both key on it, so this table cannot drift from the settings again. |
+| Required status checks | **15**, all of them: `A14 supply-chain gate` · `CRUCIBLE core on vigil_core` · `CRUCIBLE eval + benchmark corpus` · `formal (TLA+ core-invariant model check, F1)` · `gateway egress gate (P6)` · `integration two-env boundary (P5)` · `livefire smoke (per-PR subset)` · `loopback engagement (end-to-end + offline re-verify)` · `SIGIL governor gates (P7 — offense gate + authn)` · `SIGIL lint (ruff blocking + mypy can-complete)` · `SIGIL suite with the fold cache ON (Front C production configuration)` · `strix Claude-runtime (P8)` · `the briefing explains every agent and capability` · `vigil_core — shared integrity substrate` · `WARDEN Rust kernel (A10 durability)`. The committed source of truth is [`.github/required-status-checks.txt`](../.github/required-status-checks.txt); the offline test `docs/tests/test_required_checks_canonical.py` and the live-reality workflow `.github/workflows/branch-protection-verify.yml` both key on it, so this table cannot drift from the settings again. |
 | Branch must be up to date before merge | **required** (`strict: true`) — a PR must be rebased on the current `main`, so a check cannot pass against stale code |
 | Force-push to `main` | blocked |
 | Branch deletion | blocked |
@@ -28,11 +28,11 @@ Every item below merged only after adversarial red-pen + all required CI jobs gr
 | Required reviews | **none** — `required_pull_request_reviews` is not set. A code-owner/approving-review gate is a deliberate, scheduled handoff, **not** a shipped control; do not read this table as claiming review is enforced |
 | Signed commits | **not required** by the settings — also a planned handoff, not live |
 
-So the honest form of the claim is: **a pull request cannot merge without those 14 checks green, on a branch up to date with `main` — unless the
+So the honest form of the claim is: **a pull request cannot merge without those 15 checks green, on a branch up to date with `main` — unless the
 repository owner uses their admin override.** For every ordinary contributor, and for every automated agent
 in this repo, the gate is unconditional. For the owner it is a deliberate, attributable act rather than an
 impossibility. Anyone with read access can re-derive this in one command — it now succeeds (the API returned 404 until protection was enabled):
-`gh api repos/thuram-nana/vigil-sovereign/branches/main/protection`. Expect `required_status_checks.contexts` to hold the 14 names above (compare it against `.github/required-status-checks.txt`), `required_status_checks.strict = true`, `enforce_admins.enabled = false`, `allow_force_pushes.enabled = false` and `allow_deletions.enabled = false`.
+`gh api repos/thuram-nana/vigil-sovereign/branches/main/protection`. Expect `required_status_checks.contexts` to hold the 15 names above (compare it against `.github/required-status-checks.txt`), `required_status_checks.strict = true`, `enforce_admins.enabled = false`, `allow_force_pushes.enabled = false` and `allow_deletions.enabled = false`.
 
 - **Per-action owner approval is the default offense authority** (#178). A queued offense action, and the
   vendored agent's arbitrary shell (`exec_command`/`write_stdin`, gated by default — and **fail-closed since
@@ -273,9 +273,9 @@ fix → **adversarial re-check on the fixed branch** → PR → all CI green →
 fixed branch is load-bearing — it repeatedly surfaced the *next* defect one level deeper (e.g. the
 I2 chain: conditional-majority → distinct-key → base64-malleable → **low-order keyless forgery**;
 the emitter chain: no-progress false-fork → non-atomic brick → **honest-prune false is_split**).
-CI = 13 jobs in `ci.yml` (`vigil-core`, `briefing-completeness`, `crucible-core`, `crucible-eval`,
+CI = 14 jobs in `ci.yml` (`vigil-core`, `briefing-completeness`, `crucible-core`, `crucible-eval`,
 `loopback-engagement`, `gateway`, `integration` — two runs: sovereign, then the framework-dependent
-oracle-adapter in its own process — `strix-vigil`, `sigil-governor`, `sigil-lint`, `formal-verification`,
+oracle-adapter in its own process — `strix-vigil`, `sigil-governor`, `sigil-fold-cache-on`, `sigil-lint`, `formal-verification`,
 `warden-kernel`, `python-compat`), plus the `supply-chain` and `livefire` jobs in their own workflows. The full set of
 required status checks is enumerated in the protection table at the top of this file and in the committed
 source of truth [`.github/required-status-checks.txt`](../.github/required-status-checks.txt).

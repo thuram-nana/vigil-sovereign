@@ -16,6 +16,12 @@ without dragging a dependency across the trust boundary.
 
 DEFAULT-DENY is the whole posture: `role_can(role, None)` is False, an unknown role has no permissions,
 and `offense_perm_for()` returns None (⇒ deny) for any route not explicitly mapped.
+
+TWO PREDICATES, by where the role came from:
+  * `role_can_global(role, perm)` — a GLOBAL account role (the hop-stamped offense role, a vscp role, a
+    sovereign account principal, the global leg of `orgs.admit`). It admits only the four roles in `ROLES`,
+    so a per-org role name presented in a global position carries nothing.
+  * `role_can(role, perm)` — a PER-ORG membership role, already bound to one org by the org fold.
 """
 from __future__ import annotations
 
@@ -54,33 +60,54 @@ _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offen
                       # hosts. Disjoint from run_engagement/offense_authority (observe != offense-test).
                       "manage_monitoring"}
 
-# A PER-ORG tenant-admin role (Slice E0) — NOT part of the global linear chain
-# (viewer<analyst<operator<owner) and NEVER a grantable global account role; it exists ONLY as an
-# owner-signed per-org membership (governor/orgs.py). It carries tenant-scoped BILLING + MEMBERSHIP
-# administration — the "own org" scoping comes from the `org_id` the composed `admit` gate binds, not from
-# the permission name, so a customer tenant-admin manages ONLY their own org. It DELIBERATELY omits
-# `run_engagement` and `offense_authority`, so a paying tenant-admin can manage their org's money + members
-# yet can NEVER authorize a security assessment (billing-authz != testing-authz, STRUCTURALLY — not merely
-# by policy). It is a non-cumulative addition to PERMISSIONS: `org_admin ⊆ owner` (owner stays the ceiling)
-# and the four cumulative roles above are unchanged, so `role_can` (a pure membership test) is unaffected.
+# PER-ORG roles — NOT part of the global linear chain (viewer<analyst<operator<owner) and NEVER a grantable
+# global account role; each exists ONLY as an owner-signed per-org membership (governor/orgs.py), and the
+# "own org" scoping comes from the `org_id` the composed admission gate binds, not from the permission name.
+# Both are non-cumulative additions to PERMISSIONS (each ⊆ owner, so owner stays the ceiling); the four
+# global roles above are unchanged, and `role_can_global` refuses both in any global position.
+#
+# `org_admin` (Slice E0) — the customer tenant-admin: tenant-scoped BILLING + MEMBERSHIP administration. It
+# carries NO testing permission (`run_engagement`, `view_assessments`, `offense_authority`), so a paying
+# tenant-admin manages their org's money + members yet never runs or reads a security assessment
+# (billing-authz != testing-authz, structurally).
 _ORG_ADMIN = frozenset({"read", "view_billing", "view_usage", "view_invoices",
                         "manage_billing", "manage_members",
                         # AE-1: a tenant-admin may request DEFENSIVE monitoring of the org's proven hosts
                         # (never offense — own != offense-test != observe != block).
                         "manage_monitoring"})
+# `founder` — the customer who signed the org up (owner-approved). Exactly `org_admin` plus the two
+# testing permissions a self-serve scan needs: `run_engagement` (register/prove a host, launch on it) and
+# `view_assessments` (read its own results). It is the ONE per-org role that carries `run_engagement`, and the
+# testing it allows still passes every launch gate: exact-host ownership proof, the recorded authorization
+# affirmation, the owner-pinned engagement authority and the credit reservation. It NEVER carries
+# `offense_authority`, `approve_a2`/`approve_a3`, `toggle_guard`, `config_nonsecret`, `queue_proposal`,
+# `manage_org`, `manage_users`, `secrets`, `promote` or `kill_release`, and it is never a global role. Only
+# the service owner grants it or changes a founder's membership (customer member management refuses both).
+_FOUNDER = _ORG_ADMIN | {"run_engagement", "view_assessments"}
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
-    "org_admin": _ORG_ADMIN,
+    "org_admin": _ORG_ADMIN, "founder": _FOUNDER,
 }
 
 
 def role_can(role: Optional[str], perm: Optional[str]) -> bool:
     """True iff `role` carries `perm`. DEFAULT-DENY: an unmapped permission (None/"") refuses, and an
-    unknown role has no permissions. This is the one predicate the whole gate turns on — the sovereign
-    admission gate and the offense console per-action gate both call THIS."""
+    unknown role has no permissions. This is the predicate for a PER-ORG membership role (the org fold
+    resolves the role, then asks this); a GLOBAL account role is checked with `role_can_global` below."""
     if not perm:
         return False
     return perm in PERMISSIONS.get(role or "", frozenset())
+
+
+def role_can_global(role: Optional[str], perm: Optional[str]) -> bool:
+    """True iff `role` is one of the four GLOBAL roles (`ROLES`) AND carries `perm`. Every check of a GLOBAL
+    role calls this: the offense console and gated API (a hop-stamped role), the vscp route and registry
+    gates, the sovereign account principal (`accounts.role_can` is this function) and the global leg of
+    `orgs.admit`. A per-org role in `PERMISSIONS` (e.g. `org_admin`) is valid only inside one org, where the
+    org fold binds it; presented as a global role it carries NO permission here, so it can never reach an
+    org-independent gate. DEFAULT-DENY as `role_can`: an unmapped permission, None and an unknown role all
+    refuse."""
+    return role in ROLES and role_can(role, perm)
 
 
 # ==================================================================================================

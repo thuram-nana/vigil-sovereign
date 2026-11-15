@@ -426,10 +426,10 @@ def test_concurrent_last_two_admin_revokes_keep_at_least_one_admin():
 
     def worker(name, requester, target):
         p = _prov_req(spine_path, tokens_dir)
-        real = p._org_admin_usernames
+        real = p._member_admins
         def slow(o):
             r = real(o); time.sleep(0.3); return r
-        p._org_admin_usernames = slow
+        p._member_admins = slow
         try:
             p.revoke_member(requester, oid, target); results[name] = "ok"
         except ProvisionError:

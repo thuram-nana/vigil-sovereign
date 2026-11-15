@@ -82,3 +82,54 @@ def test_cmd_billing_drain_refuses_percent_h_spool(capsys, monkeypatch):
         cmd_billing_drain(a)
     assert ei.value.code == 2
     assert "--spool must be an ABSOLUTE" in capsys.readouterr().err
+
+
+# --- E3a: the settle drain derives its seam from the ONE resolver and REFUSES contradictory settings -----------
+# Each asserts the seam-base message, isolating THIS guard from the (also exit-2) owner/delegation checks after it.
+
+def _settle_args(tmp_path, base_dir=""):
+    return types.SimpleNamespace(spool=str(tmp_path / "spool"), base_dir=base_dir,
+                                 delegation=str(tmp_path / "absent-delegation.json"), scope="*",
+                                 settle_cmd="drain", interval=2.0)
+
+
+def test_cmd_settle_drain_refuses_a_legacy_settle_base_naming_another_tree(tmp_path, capsys, monkeypatch):
+    """The pre-E3a drain unit read VIGIL_SETTLE_BASE_DIR (%h/.sigil/credit-lease) while the cockpit published
+    under a different tree; a settle-drain.env still carrying it must not silently win or lose — it refuses."""
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "seam"))
+    monkeypatch.setenv("VIGIL_SETTLE_BASE_DIR", str(tmp_path / "credit-lease"))
+    with pytest.raises(SystemExit) as ei:
+        cmd_settle_drain(_settle_args(tmp_path))
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "contradictory seam base settings" in err and "VIGIL_SETTLE_BASE_DIR" in err
+
+
+def test_cmd_settle_drain_refuses_base_dir_contradicting_vigil_base_dir(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "seam"))
+    monkeypatch.delenv("VIGIL_SETTLE_BASE_DIR", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        cmd_settle_drain(_settle_args(tmp_path, base_dir=str(tmp_path / "other")))
+    assert ei.value.code == 2
+    assert "contradictory seam base settings" in capsys.readouterr().err
+
+
+def test_cmd_settle_drain_refuses_a_percent_h_vigil_base_dir(tmp_path, capsys, monkeypatch):
+    """The seam now comes from VIGIL_BASE_DIR, so the literal-%h guard must cover the ENV source too (an env file
+    value is never expanded): a literal %h seam would read an empty tree and archive completions unsettled."""
+    monkeypatch.setenv("VIGIL_BASE_DIR", "%h/.sigil/credit-lease")
+    monkeypatch.delenv("VIGIL_SETTLE_BASE_DIR", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        cmd_settle_drain(_settle_args(tmp_path))
+    assert ei.value.code == 2
+    assert "unexpanded systemd specifier" in capsys.readouterr().err
+
+
+def test_cmd_settle_drain_accepts_an_agreeing_legacy_settle_base(tmp_path, capsys, monkeypatch):
+    """A legacy VIGIL_SETTLE_BASE_DIR naming the SAME directory is reconciled, not refused: the drain proceeds
+    past the seam check (and then stops at the absent delegation / owner identity, never the seam)."""
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "seam"))
+    monkeypatch.setenv("VIGIL_SETTLE_BASE_DIR", str(tmp_path / "seam") + "/")
+    with pytest.raises(SystemExit):
+        cmd_settle_drain(_settle_args(tmp_path))
+    assert "seam base" not in capsys.readouterr().err

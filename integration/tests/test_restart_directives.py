@@ -30,6 +30,8 @@ _EXPECTED_LONG_RUNNING = {
     "apps/sigil/deploy/systemd/sigil-cockpit.service",
     "apps/sigil/deploy/systemd/sigil-customer.service",
     "apps/sigil/deploy/systemd/sigil-public.service",
+    "apps/sigil/deploy/systemd/sigil-customer@.service",     # the edge-swap instances (one per loopback port)
+    "apps/sigil/deploy/systemd/sigil-public@.service",
 }
 # The restart policies that actually pick a CRASH back up. Deliberately EXCLUDES "on-success": it restarts
 # ONLY on a clean exit (code 0 / SIGHUP/SIGINT/SIGTERM/SIGPIPE) and NOT on a crash (non-zero exit, SIGSEGV/

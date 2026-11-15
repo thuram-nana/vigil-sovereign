@@ -74,13 +74,45 @@ def test_manual_down_disables_and_stops_a_managed_active_unit(monkeypatch):
 def test_execstop_skips_the_stop_to_avoid_a_recursive_deadlock():
     # NEGATIVE CONTROL: a naive "always stop" implementation would deadlock when run as the unit's own
     # ExecStop (systemd is already stopping us, TimeoutStopSec would elapse). When $SERVICE_RESULT is
-    # present we must DISABLE but NOT issue `stop` (and not even probe is-active).
+    # present we must NOT issue `stop` (and not even probe is-active).
     ctl = FakeSystemctl(known=True, active=True)
     actions = uiproxy._contain_service_unit(mask=False, run=ctl, env={"SERVICE_RESULT": "success"})
-    assert "disable" in ctl.verbs
     assert "stop" not in ctl.verbs
     assert "is-active" not in ctl.verbs
     assert any("ExecStop" in a for a in actions)
+
+
+@pytest.mark.parametrize("result", ["success", "exit-code", "signal"])
+def test_execstop_keeps_the_boot_start_on_restart_stop_and_crash(result):
+    # systemd runs ExecStop (`vigil down`) for `systemctl stop`, for `systemctl restart`, and after the main
+    # process exits on its own — a crash that Restart=always picks up ($SERVICE_RESULT=exit-code/signal). None
+    # of those may change the unit's boot start: under ExecStop `vigil down` issues no disable and no mask.
+    ctl = FakeSystemctl(known=True, active=True)
+    actions = uiproxy._contain_service_unit(mask=False, run=ctl, env={"SERVICE_RESULT": result})
+    assert ctl.verbs == ["cat"], ctl.verbs            # only the existence probe ran
+    assert not any(a.startswith(("disabled", "masked", "stopped")) for a in actions)
+    assert any("boot start is unchanged" in a for a in actions)
+
+
+def test_panic_under_execstop_still_disables_and_masks():
+    # Panic keeps its full containment in every context: even with $SERVICE_RESULT in the environment it
+    # disables and masks the unit (it only skips the recursive stop).
+    ctl = FakeSystemctl(known=True, active=True)
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl, env={"SERVICE_RESULT": "success"})
+    assert "disable" in ctl.verbs and "mask" in ctl.verbs
+    assert "stop" not in ctl.verbs
+    assert any("masked" in a for a in actions)
+
+
+def test_run_down_under_execstop_reports_the_boot_start_unchanged(tmp_path, monkeypatch, capsys):
+    # `systemctl --user restart vigil-command` runs `vigil down` as ExecStop: it must neither disable the unit
+    # nor claim it did.
+    monkeypatch.setenv("SERVICE_RESULT", "success")
+    ctl = FakeSystemctl(known=True, active=True)
+    assert uiproxy.run_down(base_dir=str(tmp_path), run=ctl) == 0
+    out = capsys.readouterr().out
+    assert "disable" not in ctl.verbs
+    assert "boot start is unchanged" in out and "disabled + stopped" not in out
 
 
 def test_unknown_unit_issues_no_disable_or_stop(monkeypatch):
@@ -115,6 +147,44 @@ def test_panic_masks_the_unit(monkeypatch):
     assert any("masked" in a for a in actions)
 
 
+class _MaskFailsOnAFile(FakeSystemctl):
+    """systemd's real behaviour: `mask` fails (EEXIST) while the unit FILE is in the user unit dir."""
+
+    def __init__(self, unit_dir: Path) -> None:
+        super().__init__(known=True, active=True)
+        self.unit_dir = unit_dir
+
+    def __call__(self, argv, capture_output=None, text=None, timeout=None):
+        if argv[2] == "mask" and (self.unit_dir / "vigil-command.service").is_file():
+            self.calls.append(list(argv))
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="Failed to mask unit: File exists")
+        return super().__call__(argv, capture_output=capture_output, text=text, timeout=timeout)
+
+
+def test_panic_masks_a_unit_installed_as_a_file_by_moving_it_aside(tmp_path):
+    # GO-LIVE copies the unit FILE into ~/.config/systemd/user, where `mask` cannot write its /dev/null link
+    (tmp_path / "vigil-command.service").write_text("[Service]\n")
+    ctl = _MaskFailsOnAFile(tmp_path)
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl, env={}, unit_dir=tmp_path)
+    assert ctl.verbs.count("mask") == 2 and ctl.verbs.index("daemon-reload") > ctl.verbs.index("mask")
+    assert not (tmp_path / "vigil-command.service").exists()
+    assert (tmp_path / "vigil-command.service.panic-aside").read_text() == "[Service]\n"
+    assert any(a.startswith("masked ") and "moved aside" in a for a in actions), actions
+    assert not any("WARNING" in a for a in actions)
+
+
+def test_a_mask_that_still_fails_is_reported_and_a_symlinked_unit_is_not_moved(tmp_path):
+    real = tmp_path / "real.service"
+    real.write_text("[Service]\n")
+    (tmp_path / "vigil-command.service").symlink_to(real)               # `systemctl link`: never moved
+    ctl = FakeSystemctl(known=True, active=True)
+    ctl_fail = lambda argv, **kw: (types.SimpleNamespace(returncode=1, stdout="", stderr="nope")  # noqa: E731
+                                   if argv[2] == "mask" else ctl(argv, **kw))
+    actions = uiproxy._contain_service_unit(mask=True, run=ctl_fail, env={}, unit_dir=tmp_path)
+    assert (tmp_path / "vigil-command.service").is_symlink()
+    assert any(a.startswith("WARNING: could not mask") for a in actions)
+
+
 def test_no_user_manager_is_a_clean_noop_not_a_failure():
     # If systemctl is absent entirely, _systemctl returns rc 127 and _unit_is_known is False → no
     # containment attempted, no exception. Containment must never fail the down/panic path.
@@ -144,7 +214,9 @@ def test_run_panic_masks_and_stops_the_unit(tmp_path, monkeypatch):
     # XDG_DATA_HOME so the stamp writes land in tmp, never the real ~/.local/share/systemd/timers.
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     ctl = FakeSystemctl(known=True, active=True)
-    rc = uiproxy.run_panic(base_dir=str(tmp_path), run=ctl)
+    now = [0.0]                                   # every unit reads active, drains included: a fake clock keeps the
+    rc = uiproxy.run_panic(base_dir=str(tmp_path), run=ctl,   # bounded drain wait from sleeping for real
+                           sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
     assert rc == 0
     assert {"disable", "mask", "stop"} <= set(ctl.verbs)
 

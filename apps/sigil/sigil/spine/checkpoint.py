@@ -16,7 +16,7 @@ from pathlib import Path
 
 _MAX_HEAD_SCHEMA = 2   # head schema versions this build understands; a higher one -> "upgrade sigil"
 
-from ..config import HEAD_PATH, KEYS_DIR, OWNER_KEY_ID, SCOPE
+from ..config import HEAD_PATH, KEYS_DIR, OWNER_KEY_ID, RESTORE_JOURNAL_PATH, SCOPE
 from ..reuse import (
     AuthorizerKey,
     KeyPair,
@@ -42,6 +42,16 @@ from vigil_core.models import _GENESIS_PREV  # noqa: E402  (the genesis prev_has
 
 _PRIV = KEYS_DIR / "owner.priv"
 _PUB = KEYS_DIR / "owner.pub"
+
+
+def _restore_interrupted() -> str:
+    """Why this home must not be read or signed: a restore into it was interrupted between its swaps (its journal
+    stands), so its units may come from two different points in time. '' when no restore journal stands."""
+    if not RESTORE_JOURNAL_PATH.exists():
+        return ""
+    home = RESTORE_JOURNAL_PATH.parent
+    return (f"a restore into this home was interrupted — finish it with `sigil restore --resume {home}` (`sigil "
+            f"restore --abort {home}` discards it only while the home is still entirely its old self)")
 
 
 def _atomic_write_text(path: Path, data: str) -> None:
@@ -167,6 +177,9 @@ def checkpoint(store: SpineStore | None = None, *, force: bool = False,
     floor is rolled BACKWARDS by a stale concurrent signer. `force=True` (the `sigil floor reset` path)
     re-anchors a deliberately SHORTER spine — it skips the monotonic head guard; the caller then
     force-lowers the floor. `carry` / `admit_incumbent`: see `standing_pruned_head` (an owner-key rotation)."""
+    interrupted = _restore_interrupted()
+    if interrupted:
+        raise CheckpointRefused(f"refusing to sign a head: {interrupted}")
     store = store or SpineStore()
     priv, pub = _owner_keys()
     owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)   # G2: sign the durable floor too
@@ -499,6 +512,9 @@ def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
 
 
 def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
+    interrupted = _restore_interrupted()
+    if interrupted:
+        return False, interrupted
     store = store or SpineStore()
     if not HEAD_PATH.exists():
         from .snapshot import live_window_start

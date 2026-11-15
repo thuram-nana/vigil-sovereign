@@ -112,3 +112,26 @@ def test_force_replaces_captured_units_but_preserves_uncaptured(tmp_path):
     assert (new / "vectors" / "embeddings.db").read_text() == "expensive cache"
     assert (new / "config.json").read_text() == '{"live":"config"}'
     assert _staging_litter(tmp_path) == [], "a successful restore must clean up its staging/aside dirs"
+    assert not (new / "restore-journal.json").exists(), "a completed (journaled) swap leaves no journal behind"
+
+
+def test_a_stray_entry_at_the_staging_root_is_never_swapped_into_the_target(tmp_path, monkeypatch):
+    """Only the units the backup CAPTURED are swapped in: anything else that turns up at the staging root while the
+    restore runs (a reader's lockfile, a stray directory) never reaches the target home."""
+    from pathlib import Path
+
+    import sigil.spine.store as store_mod
+    dest = _make_backup(tmp_path)
+    new = tmp_path / "restored"
+    real = store_mod.SpineStore.verify
+
+    def verify(self):
+        staged = Path(self.path).parent.parent
+        (staged / "stray.lock").write_text("x")
+        (staged / "stray-dir").mkdir()
+        return real(self)
+    monkeypatch.setattr(store_mod.SpineStore, "verify", verify)
+    out = restore_backup(dest, new, PW, vault=Vault(tmp_path / "rv", make_fake_tpm()))
+    assert out["verified"] is True and (new / "spine" / "head.json").is_file()
+    assert not (new / "stray.lock").exists() and not (new / "stray-dir").exists()
+    assert not _staging_litter(tmp_path)

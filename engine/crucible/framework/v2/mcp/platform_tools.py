@@ -13,8 +13,8 @@ machine-readable tables are:
 This module is a PURE transform of those tables into MCP ``Tool`` descriptors. **It mints no authority.**
 The descriptor's ``readOnly``/``destructive``/``idempotent`` hints are DISCLOSURE derived from the route's
 own method and tier (advisory only — the gate, not the hint, enforces). The actual call (a later slice)
-routes every invocation through the EXISTING console gate (``role_can(role, offense_perm_for(path))``) over
-the authenticated ``vigil up`` proxy hop, so the MCP layer can never widen a role or bypass a gate.
+routes every invocation through the EXISTING console gate (``role_can_global(role, offense_perm_for(path))``)
+over the authenticated ``vigil up`` proxy hop, so the MCP layer can never widen a role or bypass a gate.
 
 Two invariants this module is built to keep, both asserted in ``tests/test_platform_tools.py`` (mirroring
 the W17-14 orphan-route guard):
@@ -200,7 +200,8 @@ def build_platform_tools(
     GET read routes (from the three console registries) are ``read``-tier, read-only tools. POST action
     routes (from ``OFFENSE_ACTION_PERM``) carry their mapped tier. A tool is ADVERTISED only if its tier is
     in the profile's permitted set — ``core`` never advertises an owner-tier (``offense_authority``)
-    operation. Visibility only: every call is still gated at ``role_can(role, offense_perm_for(route))``.
+    operation. Visibility only: every call is still gated at
+    ``role_can_global(role, offense_perm_for(route))``.
 
     ``read_routes``/``action_perms`` are injectable for tests; the defaults read the live registries.
     """

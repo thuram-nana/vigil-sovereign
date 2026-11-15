@@ -15,6 +15,11 @@ the owner key reserve the credits and mint a ``CreditLaunchLease``:
      seam-writer could forge with the owner's public key). The G0 mint is the only legitimate producer.
   4. CREDIT BALANCE (spend): ``CreditMeter.available(org_id, now) >= units`` (units in [1, 1e6], fail-closed).
 
+Before all four, the OWNER'S SWITCHES: the governor kill switch and the owner's ``customer_launch`` latch
+(``governor.customer_latch``), read fresh from the spine on every check (an off-switch is honoured at once, no
+restart) and fail-closed. They refuse only a NEW reservation (and the kill switch a start); cancel, settle, pause,
+resume and release of an existing launch never consult them, so held credits are never stranded.
+
 Only then, under the spine lock (all four conjuncts RE-CHECKED inside it — TOCTOU): RESERVE the credits and
 MINT the owner-signed lease. The reservation is bound to OWNER-SIGNED LEDGER RECORDS, never to a wire amount:
   * reserve SPENDS plan-credits-first then the wallet (``_spend``) and then ENFORCES an availability-delta
@@ -62,6 +67,22 @@ _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is 
                            "progress continues and settles normally, but a launch that has not started, or a run "
                            "that stopped for the pause, will not start again. Because it was paused when its window "
                            "closed, it is charged for what it used")
+
+
+#: The settle refusal (and ``ops-sweep reservations`` row status) of a reservation whose plan/wallet split is known
+#: neither from its lease nor from the live spine — its lease does not carry the split (or, for a superseded
+#: reservation, there is no lease) while the reserve's plan debit record has left the live spine window: nothing
+#: moves until the owner restores it.
+PLAN_DEBIT_PRUNED = "plan_debit_pruned"
+#: What a customer is told when they start a reservation whose cancel was held for the owner
+#: (``launch_settlement.LAUNCH_CANCEL_HELD_SIGNAL``): it was cancelled, so it never runs.
+CANCEL_HELD_START_DETAIL = ("this reservation was cancelled and cannot be started; its credits stay reserved, not "
+                            "spent, until the operator returns them")
+
+#: What a customer is told while the owner's kill switch refuses a new reservation or a start — engaged, or (fail-
+#: closed) unreadable. It names no mechanism and no state of the service: the reason stays in the server log.
+_HALTED = ("new assessment launches are paused right now; your existing launches can still be cancelled, paused and "
+           "resumed — please try again later")
 
 
 def _refusal(refuse_if: Optional[Callable[[], Optional[str]]]) -> Optional[str]:
@@ -119,11 +140,35 @@ class LaunchGate:
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
 
+    def _owner_pub(self) -> Optional[str]:
+        return self.owner_key.public_key_b64 if self.owner_key is not None else None
+
+    def _halt_refusal(self) -> Optional[str]:
+        """The governor kill switch, read fresh (an engage is honoured at once, no restart): the customer-facing
+        refusal while it is engaged, else None. A kill switch that cannot be read refuses (fail-closed) with the same
+        customer-facing text; why it could not be read goes to the server log only."""
+        from ..governor.killswitch import KillSwitch
+        try:
+            engaged = KillSwitch.reader(self.store, trusted_pubkey=self._owner_pub()).is_engaged()
+        except Exception as e:  # noqa: BLE001 — an unreadable kill switch never green-lights a new launch
+            import logging
+            logging.getLogger(__name__).warning("a new launch was refused: the kill switch could not be read (%s)",
+                                                type(e).__name__)
+            return _HALTED
+        return _HALTED if engaged else None
+
+    def _new_launch_refusal(self) -> Optional[str]:
+        """The two owner switches over a NEW reservation: the kill switch, then the owner's ``customer_launch``
+        latch (``governor.customer_latch``). Both are read fresh each call and fail closed. Cancel, settle, pause,
+        resume and release of an existing reservation never consult them."""
+        from ..governor.customer_latch import refusal
+        return self._halt_refusal() or refusal(self.store, "customer_launch", trusted_pubkey=self._owner_pub())
+
     def _seam_base(self) -> str:
-        if self._base_dir:
-            return self._base_dir
-        from .target_authorization import _base_dir
-        return _base_dir()
+        """This gate's explicit ``base_dir``, else the shared default — through the ONE seam-base resolver every
+        plane uses (``vigil_core.seam_base``), so the cockpit, the offense engine and the drains meet in one tree."""
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base(self._base_dir)
 
     @staticmethod
     def _as_dt(now: Any) -> datetime:
@@ -165,23 +210,29 @@ class LaunchGate:
         except Exception:  # noqa: BLE001 — a missing/corrupt/foreign bundle is simply "not authorized"
             return False
 
-    def _spend(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> None:
+    def _spend(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> "tuple[int, Optional[float]]":
         """Debit ``units`` across PLAN-credits-first then the WALLET, so ``CreditMeter.available`` drops by
         ``units``. Each bucket debit is idempotent per (slug, nonce), so a reused nonce re-appends the SAME
         entry_ids and no-ops — the caller's availability-delta invariant then sees no drop and refuses. Never
         over-debits: ``from_plan`` is clamped to the live plan remainder and the caller already checked
-        ``available >= units``."""
+        ``available >= units``.
+
+        Returns the plan debit it appended — ``(credits, period_end)`` — or ``(0, None)`` when it appended none
+        (no live plan remainder, or no active subscription), so the lease can record the split it was minted with."""
         pos = self.meter.position(oid, now_ts)
         from_plan = min(units, max(0, pos.plan_live))
+        plan_part: "tuple[int, Optional[float]]" = (0, None)
         if from_plan > 0:
             sub = self.meter.subscriptions.active_subscription(oid, now_ts)
             if sub is not None:
                 self.meter.plan.debit(oid, from_plan, period_end=sub.period_end, engagement_id=slug,
                                       entry_id=f"reserve-plan:{slug}:{nonce}", issued_at=now_ts)
+                plan_part = (from_plan, float(sub.period_end))
         from_wallet = units - from_plan
         if from_wallet > 0:
             self.wallet.debit(oid, from_wallet, engagement_id=slug,
                               entry_id=f"reserve-wallet:{slug}:{nonce}", issued_at=now_ts)
+        return plan_part
 
     def _write_cost_reserve(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> None:
         """EC-5: owner-sign the cost-ledger RESERVE for this launch — the token envelope ``units * E`` it may
@@ -267,6 +318,9 @@ class LaunchGate:
 
         def _gated() -> Optional[str]:
             """Return None if all four conjuncts hold, else the refusal reason. Resolved LIVE each call."""
+            switched = self._new_launch_refusal()     # the owner's kill switch and customer_launch latch first
+            if switched is not None:
+                return switched
             if not self.orgs.admit_customer(username=requester, org_id=oid, permission="run_engagement"):
                 return "requester may not launch assessments for this org (membership is not testing authority)"
             if not self.ownership.has_current_proof(oid, h, now=now_ts):
@@ -319,6 +373,7 @@ class LaunchGate:
             if re is not None:
                 return {"ok": False, "error": re}
             acct = self.postpaid.account(oid)
+            split: "dict[str, Any]" = {}
             if acct is not None and acct.is_enabled():
                 # POSTPAID (PP-1): ACCRUE `u` against the credit line. The accrual-delta invariant mirrors the
                 # prepaid availability-delta — a reused nonce's idempotent accrue no-ops ⇒ no delta ⇒ refuse and
@@ -331,18 +386,24 @@ class LaunchGate:
                     return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
             else:
                 before = self.meter.available(oid, now_ts)
-                self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent per slug/nonce)
+                plan_part = self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent)
                 if before - self.meter.available(oid, now_ts) < u:
                     # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
                     # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
                     return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
+                if config.lease_plan_split_enabled():
+                    # The lease records the plan/wallet split this reserve actually debited, under the owner
+                    # signature, so the settle restores each bucket from the lease itself — whatever the live
+                    # spine window still holds of the reserve records. Postpaid leases never carry it (their settle
+                    # is routed by the prune-durable arrears seen-set).
+                    split = {"plan_reserved": plan_part[0], "plan_period_end": plan_part[1]}
             # EC-5: after the real (incremental) reserve succeeds, write the cost-ledger RESERVE for the pool
             # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
             # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
             self._write_cost_reserve(oid, u, slug, non, now_ts)
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
-                not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts)
+                not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts, **split)
             signed = sign_credit_launch_lease(doc, {"owner": kp.private_key_b64})
             trust_root = TrustRoot(threshold=1, authorizers=[
                 AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
@@ -414,16 +475,26 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
-        return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only)
+        # The plan/wallet split the lease was minted with (VIGIL_LEASE_PLAN_SPLIT), from the VERIFIED document; a
+        # lease without it (minted with the flag off, or postpaid) settles from the reserve records (None).
+        lease_split = ((int(doc.plan_reserved), doc.plan_period_end) if doc.plan_reserved is not None
+                       else None)
+        return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only,
+                                        lease_split=lease_split)
 
     def _settle_reservation(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float,
                             refuse_if: Optional[Callable[[], Optional[str]]], basis: str,
-                            finish_only: bool = False) -> dict:
+                            finish_only: bool = False,
+                            lease_split: "Optional[tuple[int, Optional[float]]]" = None) -> dict:
         """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
         used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
         bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
         fields; ``release_superseded_reservation`` (E7) with ``reserved`` taken from the owner-signed reserve
-        records."""
+        records.
+
+        ``lease_split`` is where a prepaid decision's plan share comes from: the signed lease's
+        ``(plan_reserved, plan_period_end)``; None — a signed lease that does not carry it, or E7, which has no
+        lease — for the reserve's plan debit record, plus the pruned-record refusal below."""
         from ..governor.launch_settlement import SettlementDecision
         # PRICING M1c: every FRESH settle (completion, customer cancel, abandoned-lease sweep) closes the run's model
         # meter and retires its grant — inside the settle critical section, after the caller's precondition, before
@@ -465,9 +536,29 @@ class LaunchGate:
         # to that SAME tranche, and only the remainder to the wallet. consumed == 0 (cancel) therefore restores
         # the reservation exactly — a no-op, with nothing moved plan->wallet. This split builds the FRESH decision
         # only: finishing a recorded decision moves the RECORDED split and never re-reads the (prune-sensitive) debit.
-        plan_deb = self.meter.plan.debited_entry(oid, f"reserve-plan:{s}:{non}")   # (from_plan, period_end) | None
-        from_plan = plan_deb[0] if plan_deb else 0
-        plan_pe = plan_deb[1] if plan_deb else None
+        #
+        # PRUNE-DURABLE SPLIT. The debit record is read from the live spine window, which a hard prune can shorten
+        # under a reservation that is still open. A lease minted with the split (VIGIL_LEASE_PLAN_SPLIT) carries
+        # it under the owner signature, so its settle takes the split from the lease; when the live debit is still
+        # readable it must agree, or the settle refuses (an internal inconsistency moves nothing). A lease without
+        # the split settles from the live record as before — and when that record is no longer readable although
+        # the plan ledger's prune-durable seen-set holds it, a FRESH settle refuses (``plan_debit_pruned``) rather
+        # than route the plan share to the wallet: the refund then waits for the owner (runbook). The same holds for
+        # E7, whose amount is the reservation's live reserve records: a plan debit that left the live window while
+        # its wallet debit stayed is never released short.
+        plan_deb_eid = f"reserve-plan:{s}:{non}"
+        plan_deb = self.meter.plan.debited_entry(oid, plan_deb_eid)   # (from_plan, period_end) | None
+        if isinstance(lease_split, tuple):
+            from_plan, plan_pe = int(lease_split[0]), lease_split[1]
+            if plan_deb is not None and (int(plan_deb[0]), float(plan_deb[1])) != (
+                    from_plan, float(plan_pe) if plan_pe is not None else None):
+                return {"ok": False, "error": "internal: refund invariant violated (the lease's plan split "
+                        "disagrees with the reserve record)"}
+        else:
+            from_plan = plan_deb[0] if plan_deb else 0
+            plan_pe = plan_deb[1] if plan_deb else None
+            if plan_deb is None:
+                refuse_if = self._pruned_plan_debit_check(oid, plan_deb_eid, refuse_if)
         refund = reserved - consumed
         plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
         wallet_refund = refund - plan_refund               # the rest (wallet portion + any plan over-consumption)
@@ -502,8 +593,58 @@ class LaunchGate:
 
         decision = SettlementDecision.prepaid(reserved, consumed, plan_refund, wallet_refund,
                                               plan_pe if plan_pe is not None else 0.0, basis)
-        return self._settle_once(oid, s, non, reserved, consumed, now_ts, decision, _move_prepaid, refuse_if,
-                                 finish_only)
+        return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
+                                                               _move_prepaid, refuse_if, finish_only))
+
+    @staticmethod
+    def _track_hold(oid: str, s: str, non: str, out: dict) -> dict:
+        """A settle HELD for the owner (refused ``PLAN_DEBIT_PRUNED``: nothing moved) names launch ``(s, non)`` in the
+        durable held-settle alarm `vigil doctor` reports as a hard issue (``governor.settle_hold``), whichever path
+        asked — the customer's cancel, the settle drain, the reservations sweep or the superseded release. A later
+        settle of that launch that completes or finds it already settled drops the name. Returns ``out`` unchanged;
+        an alarm write failure is logged CRITICAL and never changes the settle's result."""
+        from ..governor import settle_hold
+        if out.get("refused") == PLAN_DEBIT_PRUNED:
+            settle_hold.record_held(oid, s, non, PLAN_DEBIT_PRUNED)
+        elif out.get("ok") and out.get("action") in ("launch_settled", "launch_already_settled"):
+            settle_hold.release_held(s, non)
+        return out
+
+    def release_settled_holds(self) -> "list[tuple[str, str, str]]":
+        """Drop from the held-settle alarm every launch that is settled now — its settlement evidence on the spine (a
+        decision record or a settle entry, the owner's included) or its seam settlement marker, exactly what a settle
+        reads as settled — and return those ``(org_id, slug, nonce)``. Reads the spine once. Never raises: an
+        unreadable alarm record or spine releases nothing, so the alarm stays."""
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+
+        from ..governor import settle_hold
+        from ..governor.launch_settlement import scan_settlements
+        kp = self.owner_key
+        held = settle_hold.read_held()
+        if kp is None or not held:
+            return []
+        try:
+            keys = {(str(h.get("org_id", "")), str(h.get("slug", "")), str(h.get("nonce", ""))) for h in held}
+            ev = scan_settlements(self.store, kp.public_key_b64, keys=keys)
+            base = self._seam_base()
+            done = sorted(k for k in keys if all(k) and (ev[k].settled or is_lease_settled(base, k[1], k[2])))
+        except Exception:  # noqa: BLE001 — a read failure keeps every name (fail-loud)
+            return []
+        return [k for k in done if settle_hold.release_held(k[1], k[2])]
+
+    def _pruned_plan_debit_check(self, oid: str, plan_deb_eid: str,
+                                 refuse_if: Optional[Callable[[], Optional[str]]]) -> Callable[[], Optional[str]]:
+        """``refuse_if`` extended for a reservation without a lease-recorded plan/wallet split (a lease without it,
+        or E7) whose reserve plan debit the live spine window does not hold: the caller's own precondition first,
+        then ``PLAN_DEBIT_PRUNED`` when the plan ledger's prune-durable seen-set shows that debit was recorded (its
+        plan share cannot be told from the wallet share, so nothing is refunded). Runs inside the settle critical section on a FRESH settle only (via
+        ``_refusal``), so an already-settled lease and the roll-forward of a recorded decision are untouched."""
+        def _check() -> Optional[str]:
+            why = _refusal(refuse_if)
+            if why:
+                return why
+            return PLAN_DEBIT_PRUNED if self.meter.plan.has_debit_entry(oid, plan_deb_eid) else None
+        return _check
 
     def _settle_once(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float, decision: Any,
                      move: "Callable[[Any, set[str], bool], dict]",
@@ -866,6 +1007,13 @@ class LaunchGate:
             if ev.settled or is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
                 return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
                         "re-published"}
+            if ev.cancel_held:
+                return {"ok": False, "error": CANCEL_HELD_START_DETAIL}
+            # the owner's kill switch, read under the locks: an engaged kill switch starts nothing new (a reserved,
+            # unstarted launch stays cancellable; nothing is minted or written here)
+            halted = self._halt_refusal()
+            if halted is not None:
+                return {"ok": False, "error": halted}
             # the billing mode as it is NOW, under the locks (another process may have marked it since the unlocked read)
             was_metered = self._launch_was_metered(doc.engagement_slug, doc.nonce)
             cur = read_credit_lease(self._seam_base(), doc.engagement_slug)
@@ -1200,9 +1348,14 @@ class LaunchGate:
         if res is None:
             return {"ok": False, "error": "no owner-signed reservation for this launch"}
         # The bucket(s) it drew from must be the ones its settle path refunds: the postpaid draw for a postpaid
-        # reservation (detected exactly as settle_launch does), the plan + wallet debits otherwise.
+        # reservation (detected exactly as settle_launch does), the plan + wallet debits otherwise. The amount is
+        # the LIVE reserve records, so a reserve debit the wallet ledger has folded (its prune-durable seen-set)
+        # that the live scan no longer shows would release the reservation short: refused (a reserve appends its
+        # plan debit before its wallet debit, so a pruned plan debit is held by the settle's own check instead).
         postpaid = self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}")
-        if set(res.units) - ({"postpaid"} if postpaid else {"plan", "wallet"}) or res.reserved <= 0:
+        if (set(res.units) - ({"postpaid"} if postpaid else {"plan", "wallet"}) or res.reserved <= 0
+                or (not postpaid and "wallet" not in res.units
+                    and self.wallet.has_debit_entry(oid, f"reserve-wallet:{s}:{non}"))):
             return {"ok": False, "error": "the reservation's records are inconsistent (fail-closed)"}
 
         def _precondition() -> Optional[str]:

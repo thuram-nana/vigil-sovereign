@@ -84,6 +84,33 @@ def test_cmd_fleet_kill_passes_a_loaded_signed_revocation(tmp_path, monkeypatch)
     assert seen["n"] == 1
 
 
+
+def test_cmd_fleet_kill_prints_every_drain_still_running(tmp_path, monkeypatch, capsys):
+    """The one bounded drain wait after every revocation: each pass still finishing is printed, never dropped."""
+    from framework.v2.entitlement import provision
+    from framework.v2.entitlement.models import RevocationDocument
+    from datetime import datetime, timezone
+
+    _, priv = provision.new_authorizer("k1", "Owner One")
+    doc = RevocationDocument(serial=1, issued_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                             revoked_entitlement_ids=["ent-123"])
+    rev_path = tmp_path / "revocation.json"
+    rev_path.write_text(json.dumps(provision.sign_revocation(doc, {"k1": priv}).model_dump(mode="json")),
+                        encoding="utf-8")
+    roster = tmp_path / "roster.json"
+    roster.write_text(json.dumps({"instances": [{"instance_id": "vm-a", "base_dir": "/home/a"}]}), encoding="utf-8")
+    warnings = ["WARNING: vigil-settle-drain.service is still finishing a pass after 90 s",
+                "could not check the drains: OSError: no bus"]
+    monkeypatch.setattr(fm, "fan_out_kill", lambda *a, **k: {
+        "totals": {"instances": 1, "panic_ok": 1, "revoke_ok": 1, "revoke_refused": 0, "revoke_error": 0},
+        "reason": "drill", "revocation_supplied": True, "instances": [],
+        "drains": {"waited": True, "still_running": warnings}})
+    assert cli._cmd_fleet_kill(SimpleNamespace(roster=str(roster), revocation=str(rev_path), reason="drill",
+                                               yes=True)) == 0
+    out = capsys.readouterr().out
+    assert all(f"  {w}" in out for w in warnings)
+
+
 # --------------------------------------------------------------------------------------------------
 # sign-revocation CLI verb wires the real sign_revocation library (owner ceremony, m-of-n unchanged)
 # --------------------------------------------------------------------------------------------------

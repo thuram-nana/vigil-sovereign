@@ -362,10 +362,10 @@ def test_require_destruction_authorization_atomic_ledger(tmp_path):
 
 
 def test_import_clean_no_offense_modules():
-    import sys
-    import vigil_integration.destruction_gate  # noqa: F401
-    assert not any(m == "framework" or m.startswith("framework.")
-                   or m == "strix" or m.startswith("strix.") for m in sys.modules)
+    # In a FRESH interpreter where every plane IS importable, so the verdict does not depend on what earlier
+    # tests in this process loaded, and a lazy framework/strix/sigil import would be loaded and caught.
+    from _fatal2 import assert_import_clean
+    assert_import_clean("import vigil_integration.destruction_gate")
 
 
 # ---------------------------------------------------------------------------------------------------

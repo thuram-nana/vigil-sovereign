@@ -41,6 +41,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..common import paths
+from . import safeinput as _si
 from ..common.redact import MASK, scrub_log_event
 
 # M4.1 — the ONE egress chokepoint every model call routes through (``vigil_core.ai_gateway``). vigil_core
@@ -95,6 +96,14 @@ _CLOUD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,127}\Z")
 
 def _valid_slug(slug: str) -> bool:
     return bool(slug) and ".." not in slug and _SLUG_RE.match(slug) is not None
+
+
+def _clean_slug(slug: str) -> str:
+    """A slug that passed :func:`_valid_slug`, rebuilt from the identifier allowlist (``safeinput.token``) so the
+    command or path it reaches holds only that checked content; ``ValueError`` for one that does not pass."""
+    if not _valid_slug(slug):
+        raise ValueError(f"unsafe slug: {slug!r}")
+    return _si.token(slug)
 
 
 # D1 — the per-slug engagement lease.
@@ -245,6 +254,7 @@ def launch_cloud(slug: str, mode: str, target: str, *, provider: str = "") -> di
     if not _valid_slug(slug):
         return {"error": "invalid engagement slug (expected [A-Za-z0-9._-], a single path-safe "
                          "component — no separators, no '..')"}
+    slug = _clean_slug(slug)
     target = (target or "").strip()
     ok, why = _valid_cloud_label(target)
     if not ok:
@@ -376,7 +386,7 @@ def _safe_run_id(run_id: str) -> str:
     rid = str(run_id or "")
     if ".." in rid or not _SAFE_RUN_ID.match(rid):
         raise ValueError(f"unsafe run id: {run_id!r}")
-    return rid
+    return _si.token(rid)
 
 
 def run_dir(run_id: str, *, ephemeral: bool = False) -> Path:
@@ -641,7 +651,8 @@ def _has_verified_authority(slug: str, host: str = "") -> bool:
                 owner_pubkeys_of,
                 verify_live_offense_attested,
             )
-            _base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            from vigil_core.seam_base import resolve_seam_base
+            _base = resolve_seam_base()
             _ok_att, _att_reason = verify_live_offense_attested(
                 _base, engagement_slug=slug, trusted_owner_pubkeys=owner_pubkeys_of(trust_root),
                 now=_now.timestamp())
@@ -699,7 +710,8 @@ def _install_target_authorization(slug: str) -> "tuple[str, str]":
     except Exception as e:  # noqa: BLE001 — install machinery unavailable ⇒ nothing installed (gate refuses)
         return "", f"install unavailable ({type(e).__name__})"
 
-    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base = resolve_seam_base()
     try:
         ta = read_authorization(base, slug)
     except Exception:  # noqa: BLE001
@@ -1890,7 +1902,8 @@ def _strix_runtime_base_dir() -> str:
         from vigil_integration.strix_runtime import resolve_base_dir
         return resolve_base_dir()
     except Exception:  # noqa: BLE001 — integration package absent ⇒ prior (relative) convention
-        return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base()
 
 
 def _strix_sandbox_gate() -> "tuple[dict, str, str]":
@@ -2132,7 +2145,7 @@ def _repo_name(repo: str) -> str:
     if tail.endswith(".git"):
         tail = tail[:-4]
     tail = re.sub(r"[^A-Za-z0-9._-]", "-", tail).strip("-.")
-    return (tail or "repo")[:64]
+    return _si.slug_chars(tail, maxlen=64) or "repo"
 
 
 def _repo_host(repo: str) -> str:
@@ -2222,13 +2235,16 @@ def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -
     if not (outcome == "auto" or (outcome == "queue" and operator_present)):
         return {"ok": False, "error": "clone refused by the gate: " + getattr(d, "reason", "") +
                 (" (needs an operator-present request)" if outcome == "queue" else "")}
-    base = Path(_live_base()) / "clones" / (cid or "adhoc")
+    base = Path(_live_base()) / "clones" / _si.slug_chars(cid or "adhoc", maxlen=128)
     name = _repo_name(repo)
     try:
         base_abs = base.resolve()
-        dest_abs = (base_abs / name).resolve()
         # confinement: dest must sit STRICTLY under the per-chat clone base
-        if os.path.commonpath([str(base_abs), str(dest_abs)]) != str(base_abs) or dest_abs == base_abs:
+        try:
+            dest_abs = _si.contained(base_abs, name)
+        except ValueError:
+            return {"ok": False, "error": "refused: the clone destination escaped the confined area"}
+        if dest_abs == base_abs:
             return {"ok": False, "error": "refused: the clone destination escaped the confined area"}
         if dest_abs.exists():
             shutil.rmtree(dest_abs, ignore_errors=True)   # dest_abs is confirmed under base_abs
@@ -2261,8 +2277,8 @@ def _confined_clone_path(chat_id: str, path: str) -> str:
     if not cid or not path:
         return ""
     try:
-        base = (Path(_live_base()) / "clones" / cid).resolve()
-        p = Path(str(path)).resolve()
+        base = (Path(_live_base()) / "clones" / _si.slug_chars(cid, maxlen=128)).resolve()
+        p = _si.resolved_under(base, str(path))
         if p.parent == base and p != base and p.is_dir():
             return str(p)
     except (ValueError, OSError):
@@ -3316,7 +3332,9 @@ def _verify_run_cert(basename: str, run_id: str, *, oob_pin: str = "") -> dict:
     raw = str(basename or "")
     if "/" in raw and not run_id:
         run_id, _, raw = raw.partition("/")
-    bn = Path(raw).name                       # strip any path component (defence-in-depth)
+    asked = Path(raw).name                    # strip any path component (defence-in-depth)
+    # the file name used below is the known certificate name itself, never the request's string
+    bn = next((k for k in _RUN_CERT_KINDS if k == asked), "")
     kind = _RUN_CERT_KINDS.get(bn)
     if kind is None:
         return {"verified": False, "error": f"unknown certificate: {basename!r}"}
@@ -3410,7 +3428,7 @@ def run_evolve_tick(slug: str) -> dict:
     ``studied_enough`` reflects the now-open predictions. Kill-switch gated. It only DRAFTS proposals +
     records predictions — it NEVER merges/applies a proposal, fires no oracle, and mints NO fact (the OUTCOME
     of each prediction is recorded later by a real engagement)."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "select an engagement (slug required)"}
     try:
@@ -3636,7 +3654,10 @@ def _resolve_posture_name(name: str) -> "Path | None":
     if not isinstance(name, str) or not _POSTURE_NAME.match(name):
         return None
     base = (console_dir() / "posture").resolve()
-    p = (base / name).resolve()
+    try:
+        p = _si.contained(base, _si.token(name, maxlen=64))
+    except ValueError:
+        return None
     if p.parent != base:
         return None
     return p
@@ -3866,13 +3887,14 @@ def run_deep_learn(slug: str, vuln_id: str) -> dict:
     deterministic oracle kinds or drafts a GATED ``ImprovementProposal`` (authorise≠apply). Kill-switch gated
     — pre-checked HERE (an honest early refusal, no subprocess) AND re-checked by the CLI (exit 3). Fail-closed
     on a bad slug / vuln id / unresolvable interpreter; never a traceback."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "select an engagement (slug required)"}
     vuln_id = str(vuln_id or "").strip()
     if not _VULN_ID_RE.match(vuln_id):
         return {"ok": False, "error": "a vulnerability id is required "
                                       "(e.g. CVE-2024-1234 — letters, digits, '.', '-', '_' only)"}
+    vuln_id = _si.slug_chars(vuln_id, maxlen=81)          # the checked id, rebuilt from its allowlist
     try:
         from ..authority.killswitch import KillSwitch
         if KillSwitch(slug).is_tripped():                 # honest early refusal — nothing spawned under STOP
@@ -3913,7 +3935,7 @@ def run_feed_pull(slug: str) -> dict:
     (exit 3). Fail-closed on an unresolvable interpreter / non-JSON output; never a traceback. In an offline
     environment the per-source single-host allowlist simply refuses egress (applied 0, hosts_refused N) — honest,
     not a crash."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "select an engagement (slug required)"}
     try:
@@ -4038,7 +4060,7 @@ def run_feed_start(slug: str, interval: int = 3600) -> dict:
     daemon re-checks every ``--poll`` (a trip halts it within one poll). Everything minted is an intel-tier
     LEAD. Idempotent — a live sidecar for the slug is reported, never double-spawned. Fail-closed on a bad slug
     / unspawnable child; never a traceback."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "select an engagement (slug required)"}
     try:
@@ -4082,7 +4104,7 @@ def run_feed_start(slug: str, interval: int = 3600) -> dict:
 def run_feed_stop(slug: str) -> dict:
     """Stop the tracked recurring feed sidecar for ``slug`` (SIGTERM→SIGKILL, then reap + untrack). Idempotent:
     an untracked slug is a clean no-op. Fail-closed on a bad slug; never a traceback."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "select an engagement (slug required)"}
     with _FEED_LOCK:                                       # serialise with start → no tmp-write race
@@ -4113,7 +4135,7 @@ def proof_export(run_id: str) -> dict:
         slug = json.loads((rd / "meta.json").read_text(encoding="utf-8")).get("slug") or ""
     except (OSError, ValueError, AttributeError):
         slug = ""
-    slug = "".join(c for c in str(slug).strip() if c.isalnum() or c in "-_.")[:120] or "engagement"
+    slug = _si.slug_chars(slug) or "engagement"
     vigil = _vigil_bin()
     if not vigil:
         return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
@@ -4153,13 +4175,27 @@ def _valid_finding_ref(finding_ref: str) -> bool:
         and not any(c in ref for c in "/\\ \t\r\n")
 
 
+#: Every printable ASCII character a finding reference may hold: no separator, no whitespace (the
+#: :func:`_valid_finding_ref` policy; ``..`` and a leading ``-`` are refused there).
+_REF_CHARS = "".join(chr(i) for i in range(0x21, 0x7F) if chr(i) not in "/\\")
+
+
+def _clean_ref(finding_ref: str) -> str:
+    """A finding reference that passed :func:`_valid_finding_ref`, rebuilt from its allowlist
+    (``safeinput.token``) so the argv or file name it reaches holds only that checked content."""
+    ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(ref):
+        raise ValueError("invalid finding reference")
+    return _si.token(ref, maxlen=200, extra=_REF_CHARS)
+
+
 def _safe_fix_ref(finding_ref: str) -> str:
     """A finding ref reduced to ONE filesystem-safe path component (never a traversal / separator), for the
     persisted ``<ref>.patch`` / ``<ref>.verify.json`` names. Mirrors the CLI's ``_remediate_safe_ref``; the
     caller has ALREADY passed ``_valid_finding_ref`` (so this only normalises for the filename)."""
     s = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(finding_ref or "finding"))
     s = s.strip("._") or "finding"
-    return s[:80]
+    return _si.token(s[:80])
 
 
 def fix_diff_path(run_id: str, finding_ref: str) -> Path:
@@ -4171,6 +4207,7 @@ def fix_diff_path(run_id: str, finding_ref: str) -> Path:
     rd = run_dir(run_id)                                   # traversal-guarded; raises ValueError on a bad id
     if not _valid_finding_ref(finding_ref):
         raise ValueError("invalid finding reference")
+    finding_ref = _clean_ref(finding_ref)
     return rd / "fixes" / f"{_safe_fix_ref(finding_ref)}.patch"
 
 
@@ -4244,25 +4281,42 @@ def _safe_apply_dest(dest_path: str, source_root: str) -> "tuple[str, str]":
         return "", "a destination path is required for a copy apply"
     if ".." in raw.replace("\\", "/").split("/"):
         return "", "destination must not contain a '..' component"
-    p = Path(raw).expanduser()
-    if not p.is_absolute():
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
         return "", "destination must be an absolute path"
     try:
-        dest = os.path.realpath(str(p))                    # resolves symlinks in the whole chain
         src = os.path.realpath(str(source_root or ""))
     except (OSError, ValueError) as exc:
         return "", f"cannot resolve the destination path: {type(exc).__name__}"
     if not src or not os.path.isdir(src):
         return "", "the source tree is not a readable local directory"
+    # POSITIVE allowlist FIRST: the resolved dest MUST sit strictly under the source's parent dir, or the VIGIL
+    # workspace — decided on the resolved path before anything on disk is looked at.
+    allow_roots = [os.path.dirname(src)]
+    ws = _apply_workspace()
+    if ws:
+        allow_roots.append(os.path.realpath(ws))
+    dest = ""
+    for root in allow_roots:
+        if not root:
+            continue
+        try:
+            dest = str(_si.contained(root, os.path.relpath(os.path.realpath(expanded), root)))
+        except ValueError:
+            dest = ""
+            continue
+        if dest != root:
+            break
+        dest = ""
+    if not dest:
+        return "", ("destination is not under an allowlisted root (the source's parent dir, or the VIGIL "
+                    "apply workspace under the live base)")
     if dest == src:
         return "", "destination equals the source tree"
-    try:
-        if os.path.commonpath([dest, src]) == src:
-            return "", "destination is inside the source tree"
-        if os.path.commonpath([dest, src]) == dest:
-            return "", "destination is an ancestor of the source tree"
-    except ValueError:
-        pass                                               # no common path (different roots) — fine
+    if dest.startswith(src + os.sep):
+        return "", "destination is inside the source tree"
+    if src.startswith(dest + os.sep):
+        return "", "destination is an ancestor of the source tree"
     if dest in _APPLY_SYSTEM_EXACT:
         return "", "destination is a system directory"
     for sysd in _APPLY_SYSTEM_DIRS:
@@ -4272,21 +4326,7 @@ def _safe_apply_dest(dest_path: str, source_root: str) -> "tuple[str, str]":
         return "", "destination directory exists and is not empty"
     if os.path.exists(dest) and not os.path.isdir(dest):
         return "", "destination exists and is not a directory"
-    # POSITIVE allowlist: the dest MUST sit strictly under the source's parent dir, or the VIGIL workspace.
-    allow_roots = [os.path.dirname(src)]
-    ws = _apply_workspace()
-    if ws:
-        allow_roots.append(ws)
-    for root in allow_roots:
-        if not root:
-            continue
-        try:
-            if os.path.commonpath([dest, root]) == root and dest != root:
-                return dest, ""
-        except ValueError:
-            continue
-    return "", ("destination is not under an allowlisted root (the source's parent dir, or the VIGIL "
-                "apply workspace under the live base)")
+    return dest, ""
 
 
 def fix_precondition(run_id: str) -> dict:
@@ -4313,7 +4353,8 @@ def fix_precondition(run_id: str) -> dict:
     exception. ``why_not`` is "" iff runnable; ``command`` is the equivalent CLI invocation (shown to the
     operator when the console cannot run it here), and ``vigil`` is "" when no entrypoint resolved.
     """
-    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    base_dir = resolve_seam_base()
     out = {"runnable": False, "why_not": "", "slug": "", "repo": "", "base_dir": base_dir,
            "spine": "", "vigil": "", "command": "",
            # Fixes-screen local-apply affordance predicate (defaults for every early return).
@@ -4330,6 +4371,7 @@ def fix_precondition(run_id: str) -> dict:
         return {**out, "why_not": "this run has no valid engagement slug to ground the fix in — the gated "
                                   "auto-patch applies to a codebase (Strix) assessment launched under an "
                                   "engagement slug."}
+    slug = _clean_slug(slug)
     out["slug"] = slug
     repo = str(meta.get("target") or "").strip()
     # only a codebase run (Strix `codebase`, or the deterministic DAA `sast` codescan) has a source tree to
@@ -4397,6 +4439,7 @@ def verify_fix(run_id: str, finding_ref: str, *, root: str = "") -> dict:
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "cleared": False, "error": "invalid finding reference"}
+    finding_ref = _clean_ref(finding_ref)
     pre = fix_precondition(run_id)
     scan_root = str(root or "").strip() or pre["repo"]
     if not scan_root:
@@ -4445,6 +4488,7 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "runnable": False, "error": "invalid finding reference"}
+    finding_ref = _clean_ref(finding_ref)
     pre = fix_precondition(run_id)
     if not pre["runnable"]:
         out = {"ok": False, "runnable": False, "error": pre["why_not"]}
@@ -4543,6 +4587,7 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "runnable": False, "error": "invalid finding reference"}
+    finding_ref = _clean_ref(finding_ref)
     pre = fix_precondition(run_id)
     if not pre["runnable"]:
         out = {"ok": False, "runnable": False, "error": pre["why_not"]}
@@ -4598,6 +4643,7 @@ def apply_fix_local(run_id: str, finding_ref: str, dest_path: str = "",
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "error": "invalid finding reference"}
+    finding_ref = _clean_ref(finding_ref)
     mode = str(mode or "copy").strip().lower()
     if mode not in ("copy", "in_place"):
         return {"ok": False, "error": "mode must be 'copy' (a confined fixed copy) or 'in_place'"}
@@ -4760,7 +4806,8 @@ def _terminal_parse(command) -> "tuple[list | None, str]":
 
 def _terminal_base_dir() -> str:
     """The engine home the `vigil terminal` verb + the terminal history share (mirrors `apply_fix`)."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
 
 
 def terminal_dryrun(command) -> dict:
@@ -5591,7 +5638,7 @@ def build_dossier(run_id: str) -> dict:
         slug = json.loads((rd / "meta.json").read_text(encoding="utf-8")).get("slug") or ""
     except (OSError, ValueError, AttributeError):
         slug = ""
-    slug = "".join(c for c in str(slug).strip() if c.isalnum() or c in "-_.")[:120] or "engagement"
+    slug = _si.slug_chars(slug) or "engagement"
     # Include the operator's signed terminal transcript (a session-global log) when one exists, so the
     # dossier records every governed terminal command too. Already redacted at source + re-scrubbed by the
     # compiler; covered by the dossier manifest+signature.
@@ -5637,7 +5684,7 @@ def provision_loopback_authority(slug: str) -> dict:
     HARD-FIXED to ``127.0.0.1``. The UI can provision a *loopback* charter, but — per the constitution — a
     REMOTE target needs a signed charter the UI CANNOT mint (that is a deliberate out-of-band ceremony).
     Shells the exec-only ``vigil provision``; fail-closed. Scope is never taken from the caller."""
-    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(slug or "")
     if not slug:
         return {"ok": False, "error": "slug required (a path-safe token)"}
     vigil = _vigil_bin()
@@ -5737,7 +5784,7 @@ def oob_arm_loopback(body: dict) -> dict:
     a slug with no running, listening collaborator is refused. CSRF/rebind/role (_OWN) gated by do_POST."""
     body = body if isinstance(body, dict) else {}
     # Same path-safe sanitisation provision_loopback_authority uses — the slug reaches an argv.
-    slug = "".join(c for c in str(body.get("slug", "")).strip() if c.isalnum() or c in "-_.")[:120]
+    slug = _si.slug_chars(body.get("slug", ""))
     if not slug:
         return {"ok": False, "error": "slug required (a path-safe token)"}
     # loopback-vs-remote is decided by the SERVER from the target host, never a body flag (which could lie).
@@ -6262,6 +6309,7 @@ def planner_compute(body: dict) -> dict:
     slug = str(body.get("slug", "")).strip()
     if not _valid_slug(slug):
         return {"ok": False, "error": "a valid engagement slug is required"}
+    slug = _clean_slug(slug)
     cmd = [sys.executable, "-m", "framework.v2", "plan", slug]
     try:
         proc = subprocess.run(cmd, cwd=str(_framework_root()), capture_output=True, text=True,  # noqa: S603
@@ -6287,8 +6335,10 @@ def intel_ingest_offline(body: dict) -> dict:
     seed = str(body.get("seed", "")).strip().lower()
     if not _valid_slug(slug):
         return {"ok": False, "error": "a valid engagement slug is required"}
+    slug = _clean_slug(slug)
     if "://" in seed or "/" in seed or not _SEED_DOMAIN_RE.match(seed):
         return {"ok": False, "error": "seed must be an apex domain (e.g. example.com) — not a URL, CIDR, or path"}
+    seed = _si.slug_chars(seed, maxlen=253)                  # the checked domain, rebuilt from its allowlist
     # OFFLINE ONLY — no --live, ever. The passive collectors read bundled fixtures; no egress.
     cmd = [sys.executable, "-m", "framework.v2", "intel", "ingest", "--seed", seed, "--slug", slug]
     try:

@@ -44,6 +44,8 @@ from typing import Any, Callable, Optional
 from sigil.spine.store import SpineStore
 from sigil.ui.launch_gate import LaunchGate
 
+from vigil_core.seam_base import resolve_seam_base
+
 from ..reuse import assert_no_offense
 
 assert_no_offense()  # SOVEREIGN plane: this settle-drain must never pull the offense engine (FATAL-2)
@@ -100,8 +102,7 @@ class CompletionSpoolWatcher:
         # WRITE, so they can never diverge. Previously the gate was built with no base_dir, so its revoke wrote
         # to $VIGIL_BASE_DIR while the read used this base_dir — with the two differing, the lease was never
         # tombstoned in the read tree and a second differently-outcomed completion re-settled (double refund).
-        self._base_dir = str(base_dir) if base_dir is not None else (
-            os.environ.get("VIGIL_BASE_DIR") or ".vigil-live")
+        self._base_dir = str(base_dir) if base_dir is not None else resolve_seam_base()
         self._gate = LaunchGate(store, base_dir=self._base_dir)
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
@@ -203,6 +204,15 @@ class CompletionSpoolWatcher:
         if not result.get("ok"):
             if result.get("retry"):                    # a request still in flight, a meter / lock busy right now
                 raise CompletionSpoolDeferred(f"settle_launch deferred: {result.get('error')}")
+            from ..ui.launch_gate import PLAN_DEBIT_PRUNED
+            if result.get("refused") == PLAN_DEBIT_PRUNED:
+                # no retry can settle it: the lease does not carry its plan/wallet split and the reserve's plan
+                # debit record has left the live spine window. Quarantined (the drain alarms; the sweep treats a
+                # quarantined completion as pending, so it never refunds the run) until the owner restores it.
+                raise CompletionSpoolError(
+                    f"settle refused: {PLAN_DEBIT_PRUNED} — the reservation's plan debit record is no longer on the "
+                    f"live spine and the lease does not record its plan/wallet split; nothing was moved. This needs "
+                    f"the owner (runbook: hosting-and-persistence, held settles)")
             if result.get("refused"):                  # the in-lock pricing guard changed: re-priced next drain
                 raise CompletionSpoolDeferred(f"settle refused: {result.get('refused')}")
             raise CompletionSpoolError(f"settle_launch refused: {result.get('error')}")

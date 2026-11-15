@@ -76,7 +76,7 @@ from .signed_build_manifest import (
     parse_signed_manifest, read_signed_manifest, sign_manifest, verify_build_integrity,
 )
 from .rbac import (
-    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
+    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can, role_can_global,
 )
 from .rotation import RotationError, rewrap, rewrap_or_seal, verify_opens_to
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
@@ -125,7 +125,8 @@ __all__ = [
     "build_signed_manifest", "digest_file", "digest_tree", "evaluate_build_integrity",
     "load_build_trust_root", "parse_signed_manifest", "read_signed_manifest", "sign_manifest",
     "verify_build_integrity",
-    "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
+    "ROLES", "PERMISSIONS", "role_can", "role_can_global", "OFFENSE_ACTION_PERM", "offense_perm_for",
+    "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "RotationError", "rewrap", "rewrap_or_seal", "verify_opens_to",
     "TargetClass", "DeploymentMode", "AUTHORIZED_CLASSES", "RegisteredAsset", "RegisteredAssetStore",

@@ -39,8 +39,9 @@ from urllib.parse import parse_qs, urlsplit
 # S1 — per-action RBAC vocabulary. `vigil_core` is the ONE module both trust domains may import (the
 # offense console already imports it in `console.api`); it is namespace-pure (no framework/strix/sigil), so
 # this crosses no boundary and FATAL-2 holds. `offense_perm_for` maps a POST route to its required
-# permission (None ⇒ unmapped ⇒ default-deny) and `role_can` is the same predicate the sovereign gate uses.
-from vigil_core.rbac import offense_perm_for, role_can
+# permission (None ⇒ unmapped ⇒ default-deny) and `role_can_global` is the same predicate the sovereign
+# gate uses for a global account role (a per-org role name carries no permission there).
+from vigil_core.rbac import offense_perm_for, role_can_global
 # The ONE construction of the proxy→offense role assertion (stamp side = uiproxy, verify side = console
 # AND the offense api). Namespace-pure (pure stdlib), so importing it crosses no trust boundary.
 from vigil_core.hopauth import verify_hop_assertion
@@ -98,6 +99,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 from . import actions, api, chat, labels, sessions
+from . import safeinput as _si
 from ..agents.blackboard import current_append_tick, wait_for_append
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
@@ -264,9 +266,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             rel = rel[len("static/"):]
         if rel in ("", "index.html"):
             rel = "index.html"
-        target = (STATIC_DIR / rel).resolve()
         # path-traversal guard: the resolved file must stay under STATIC_DIR
-        if STATIC_DIR not in target.parents and target != STATIC_DIR:
+        try:
+            target = _si.contained(STATIC_DIR, rel)
+        except ValueError:
             self._json({"error": "not found"}, status=404)
             return
         if not target.is_file():
@@ -595,7 +598,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                        status=404)
             return
         data = p.read_bytes()
-        safe = "".join(c if (c.isalnum() or c in "._-") else "-" for c in f"vigil-dossier-{run_id}.zip")[:120]
+        safe = _si.slug_chars("".join(c if (c.isalnum() or c in "._-") else "-"
+                                      for c in f"vigil-dossier-{run_id}.zip"), maxlen=120)
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(len(data)))
@@ -617,8 +621,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                                  "VERIFIED first"}, status=404)
             return
         data = p.read_bytes()
-        safe = "".join(c if (c.isalnum() or c in "._-") else "-"
-                       for c in f"vigil-fix-{run_id}-{finding_ref}.patch")[:160]
+        safe = _si.slug_chars("".join(c if (c.isalnum() or c in "._-") else "-"
+                                      for c in f"vigil-fix-{run_id}-{finding_ref}.patch"), maxlen=160)
         self.send_response(200)
         self.send_header("Content-Type", "text/x-patch")
         self.send_header("Content-Length", str(len(data)))
@@ -758,8 +762,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             console-token holder. Holding the shared console credential is owner-equivalent, so this keeps
             today's FULL access — no regression for the on-host operator / a test / the legacy direct client.
           * A role assertion that VERIFIES (fresh HMAC under the hop key) → enforce
-            ``role_can(stamped_role, offense_perm_for(path))``. An UNMAPPED route ⇒ ``offense_perm_for`` is
-            None ⇒ ``role_can`` False ⇒ DEFAULT-DENY.
+            ``role_can_global(stamped_role, offense_perm_for(path))``. An UNMAPPED route ⇒ ``offense_perm_for``
+            is None ⇒ DEFAULT-DENY, and a per-org role name (not one of the four global roles) carries nothing.
           * A role assertion that is PRESENT but INVALID (forged/expired/incomplete, or the console has no
             hop key to verify it) → REFUSE. A forged ``X-VIGIL-Role: owner`` with no valid MAC never lifts
             the role.
@@ -774,7 +778,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not self._hop_assertion_valid(principal, role or "", ts, sig or "", path):
             return False, "unverified role assertion (bad/expired hop signature)"
         required = offense_perm_for(path)                     # None ⇒ unmapped route ⇒ default-deny
-        if not role_can(role, required):
+        # a stamped role is a GLOBAL account role: only the four global roles carry a permission here
+        if not role_can_global(role, required):
             need = required or "(unmapped route → default-deny)"
             return False, f"role {role!r} lacks required permission {need}"
         return True, ""

@@ -1682,12 +1682,13 @@ class _Server(ThreadingHTTPServer):
             return
         self._drain_and_close()
 
-    def _drain_and_close(self) -> None:
-        """Stop serving, wait (up to ``shutdown_drain_s``) for the requests in flight to be metered and for every
-        record a failed write still owes to be written, and only then give up the meter directory. A connection that
-        has not started its request is cut, and one that starts after this point is refused. If a request is still
-        running, or a record still owed, at the deadline, the meter lock is KEPT (and the record retried) until the
-        process exits, so a settle step can never mistake a live request for a crash's leftover."""
+    def _drain_and_close(self, drain_s: Optional[float] = None) -> None:
+        """Stop serving, wait (up to ``drain_s``, default ``shutdown_drain_s``) for the requests in flight to be
+        metered and for every record a failed write still owes to be written, and only then give up the meter
+        directory. A connection that has not started its request is cut, and one that starts after this point is
+        refused. If a request is still running, or a record still owed, at the deadline, the meter lock is KEPT (and
+        the record retried) until the process exits, so a settle step can never mistake a live request for a
+        crash's leftover."""
         super().server_close()
         with self._in_flight_cond:
             self._stopping = True
@@ -1696,7 +1697,7 @@ class _Server(ThreadingHTTPServer):
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
-        deadline = time.monotonic() + self.gateway.config.shutdown_drain_s
+        deadline = time.monotonic() + (self.gateway.config.shutdown_drain_s if drain_s is None else drain_s)
         with self._in_flight_cond:
             while self._in_flight > 0:
                 left = deadline - time.monotonic()
@@ -1744,6 +1745,18 @@ def start(config: GatewayConfig, *, host: str = "127.0.0.1", port: int = 0) -> "
     return server, t
 
 
+def stop(server: _Server, *, drain_s: Optional[float] = None) -> None:
+    """Stop a running gateway: it refuses new requests at once, the requests in flight are metered as they finish
+    (waited for up to ``drain_s``, default the configured ``shutdown_drain_s``), and the meter directory is given up
+    — or kept until the process exits while a request is still running (:meth:`_Server._drain_and_close`). The
+    cockpit calls this when it stops, so the gateway stops accepting at the same moment as the cockpit does."""
+    server.shutdown()
+    server._drain_and_close(drain_s)
+    with _RUNNING_LOCK:
+        for k in [k for k, v in _RUNNING.items() if v is server]:
+            del _RUNNING[k]
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Starting it in the cockpit (PRICING M1c)
 # ---------------------------------------------------------------------------------------------------------------
@@ -1779,16 +1792,16 @@ def _daily_limit_nano() -> Optional[int]:
 
 def config_from_env() -> GatewayConfig:
     """The gateway's configuration from the sovereign environment: the ONE provider key
-    (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``), the owner public key, the meter directory, the
+    (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``, or — with ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set —
+    only that AWS SSM SecureString: ``sigil.provider_key``), the owner public key, the meter directory, the
     sovereignty tier as the egress check, and the account protections (design §5.2):
     ``VIGIL_GATEWAY_TENANT_CONCURRENCY`` (default 4), ``VIGIL_GATEWAY_GLOBAL_CONCURRENCY`` (default 32) and
     ``VIGIL_GATEWAY_DAILY_LIMIT_USD`` (unset = no ceiling). Raises ``ValueError`` on a missing key, no owner key or
     a bad value."""
     from . import config, sovereignty
     from .governor.identity import owner_pubkey
-    key = (os.environ.get("SIGIL_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if not key:
-        raise ValueError("the model gateway needs the provider key (SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY)")
+    from .provider_key import provider_key
+    key = provider_key()                      # ProviderKeyError (a ValueError) when it cannot be obtained
 
     owner = owner_pubkey()
     if not owner:

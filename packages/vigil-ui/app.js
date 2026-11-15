@@ -805,7 +805,11 @@
 
   function shell() {
     document.body.appendChild(h("div#app", null, [
-      h("div#brand", null, [h("span.logo", null, "V"), h("span.name", null, "VIGIL COMMAND")]),
+      // the owner's mark: the white artwork on the dark theme, the dark artwork on the light one (components.css)
+      h("div#brand", null, [h("span.logo", null, [
+        h("img.vigil-logo.for-dark", { src: "brand/vigil-mark-white.svg", alt: "", width: "30", height: "30" }),
+        h("img.vigil-logo.for-light", { src: "brand/vigil-mark.svg", alt: "", width: "30", height: "30" }),
+      ]), h("span.name", null, "VIGIL COMMAND")]),
       topbar(),
       h("div#nav", { role: "navigation", "aria-label": "Primary" }),
       h("div#main", null, h("div.wrap#screen")),

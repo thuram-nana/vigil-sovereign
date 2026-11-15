@@ -10,6 +10,7 @@ serves ONLY a file that both matches the exact minted name shape AND resolves di
 """
 from __future__ import annotations
 
+import os
 import re
 import secrets as _secrets
 import time
@@ -18,6 +19,7 @@ from pathlib import Path
 # The ONLY filename shape we mint and will serve: backup-YYYYMMDD-HHMMSS-<hex6>.enc. Anchored, no separators
 # other than the literal dashes — so a traversal / absolute-path `id` can never match.
 _BACKUP_NAME = re.compile(r"^backup-\d{8}-\d{6}-[0-9a-f]{6}\.enc$")
+_BACKUP_PARTS = re.compile(r"backup-(\d{8})-(\d{6})-([0-9a-f]{6})\.enc")
 
 _MIN_PASSPHRASE = 8
 
@@ -77,11 +79,17 @@ def list_backups(home: Path) -> list[dict]:
 def resolve_backup(home: Path, backup_id: str) -> "Path | None":
     """Path-traversal-safe: return the archive Path ONLY when `backup_id` matches the exact minted shape AND
     resolves to a regular file directly inside the backups dir. Anything else → None (never serve it)."""
-    if not isinstance(backup_id, str) or not _BACKUP_NAME.match(backup_id):
+    m = _BACKUP_PARTS.fullmatch(backup_id) if isinstance(backup_id, str) else None
+    if m is None or not _BACKUP_NAME.match(backup_id):
         return None
-    d = backups_dir(home).resolve()
-    p = (d / backup_id).resolve()
-    if p.parent != d or not p.is_file():        # strict containment + must exist
+    # the file name is rebuilt from its parsed parts — never the request's string — then strictly contained
+    name = f"backup-{int(m.group(1)):08d}-{int(m.group(2)):06d}-{int(m.group(3), 16):06x}.enc"
+    d = os.path.realpath(str(backups_dir(home)))
+    real = os.path.realpath(os.path.join(d, name))
+    if not real.startswith(d + os.sep):
+        return None
+    p = Path(real)
+    if p.parent != Path(d) or not p.is_file():   # strict containment + must exist
         return None
     return p
 

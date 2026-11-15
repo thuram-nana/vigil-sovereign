@@ -80,3 +80,4 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .empty{color:var(--dim);font-style:italic}
 .mt{margin-top:14px}
 .outbox{color:var(--amber);font:11px var(--mono);margin-top:8px}
+.latchbox{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}

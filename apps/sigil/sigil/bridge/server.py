@@ -31,6 +31,7 @@ preferred. Offense-free."""
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
@@ -50,6 +51,27 @@ from .envelope import consume, verify_envelope
 from .notifier import PushNotifier
 
 _WEBAPP = Path(__file__).parent / "webapp"       # the PWA is a later slice — served if present, else 404
+# Content types of the Companion's static files (anything else is application/octet-stream).
+_STATIC_CTYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
+    ".webmanifest": "application/manifest+json", ".png": "image/png", ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
+# The Companion's worker names its cache after the webapp's build (a content hash written in at serve time), so a
+# changed app is a new worker with a new cache, offered to the owner as an update instead of patched in place.
+_WORKER = "service-worker.js"
+_WORKER_BUILD = "__COMPANION_BUILD__"
+
+
+def _webapp_build() -> str:
+    """sha256[:12] over every webapp file (path + bytes): what the Companion's worker calls its build."""
+    h = hashlib.sha256()
+    base = _WEBAPP.resolve()
+    for p in sorted(base.rglob("*")) if base.is_dir() else []:
+        if p.is_file() and not p.is_symlink():
+            h.update(p.relative_to(base).as_posix().encode("utf-8") + b"\0" + hashlib.sha256(p.read_bytes()).digest())
+    return h.hexdigest()[:12]
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DEFAULT_PORT = 8722
 
@@ -66,7 +88,7 @@ _PUBKEY_LOG_PREFIX = 12                           # chars of a device pubkey we 
 def _pk_prefix(pubkey) -> str:
     """A short, non-reversible tag for a device pubkey (prefix only — NEVER the full key in a log)."""
     s = str(pubkey) if pubkey else ""
-    return (s[:_PUBKEY_LOG_PREFIX] + "…") if s else "?"
+    return (_log_safe(s[:_PUBKEY_LOG_PREFIX]) + "…") if s else "?"   # escaped: the pubkey comes from the request
 
 
 _LOG_FIELD_MAX = 200                              # chars of one peer-influenced value we put in a log line
@@ -90,7 +112,8 @@ def _log_safe(value, limit: int = _LOG_FIELD_MAX) -> str:
             out.append(f"\\x{cp:02x}" if cp <= 0xFF else f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
     if len(s) > limit:
         out.append(f"...[+{len(s) - limit} chars]")
-    return "".join(out)
+    # every CR/LF is already an escape above; stated explicitly so a line break can never reach a log record
+    return "".join(out).replace("\r", "").replace("\n", "")
 _TS_WINDOW = 120.0                               # ± seconds a request timestamp may differ from the server clock
 
 # Each network endpoint declares the ONE envelope action that authorizes it. Binding the
@@ -350,20 +373,20 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, sub: str):
         base = _WEBAPP.resolve()
         try:
-            target = (base / sub).resolve()
+            real = os.path.realpath(os.path.join(str(base), sub))
         except (OSError, ValueError):                            # e.g. an embedded NUL: refuse AND audit it,
             return self._deny(404, "not found")                  # never drop the connection unrecorded
-        if base != target and base not in target.parents:        # traversal guard (allowlist by containment)
+        if not real.startswith(str(base) + os.sep):              # traversal guard (allowlist by containment)
             return self._deny(404, "not found")
+        target = Path(real)
         if not target.is_file():
             return self._deny(404, "not found")                  # includes: webapp dir absent (later slice)
-        name = target.name
-        ctype = ("application/javascript" if name.endswith(".js")
-                 else "text/css" if name.endswith(".css")
-                 else "text/html" if name.endswith(".html")
-                 else "application/octet-stream")
+        ctype = _STATIC_CTYPES.get(target.suffix.lower(), "application/octet-stream")
         try:
-            self._send(200, target.read_bytes(), ctype=f"{ctype}; charset=utf-8")
+            body = target.read_bytes()
+            if target.name == _WORKER and target.parent == base:
+                body = body.replace(_WORKER_BUILD.encode("ascii"), _webapp_build().encode("ascii"))
+            self._send(200, body, ctype=ctype)
         except OSError:
             self._deny(404, "not found")
 
@@ -420,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm"):
+        if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm", "/api/latch-off"):
             return self._deny(404, "not found")
         try:                                                     # a missing/non-numeric/negative CL is a
             length = int(self.headers.get("Content-Length", "0") or "0")   # clean 400 — never an unhandled
@@ -437,6 +460,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._device_action(body_bytes)
         if path == "/api/gesture/arm":
             return self._device_arm(body_bytes)
+        if path == "/api/latch-off":
+            return self._latch_off()
         # panic / relay — effectful, envelope-authenticated with the strict nonce replay gate
         action = "panic" if path == "/api/panic" else "relay"
         core = self._authed_effectful(action)
@@ -452,6 +477,25 @@ class Handler(BaseHTTPRequestHandler):
         reply = self.server.daemon().relay(text)                # NB: never log the relayed text (may hold a subject)
         _log.info("bridge action ok: POST %s device=%s outcome=relayed", path, dev)
         return self._json({"ok": True, "reply": reply})
+
+    def _latch_off(self):
+        """The phone's OFF-button for the owner's customer latches: an effectful device envelope (signature,
+        freshness, endpoint binding, strict nonce replay gate + receipt — exactly as panic) whose SIGNED ``args``
+        name the latch (``{"latch": "<name>"|"all"}``). Only ever the safe direction; ON stays at the desktop."""
+        core = self._authed_effectful("latch_off")
+        if core is None:
+            return
+        a = core.get("args")                                     # signed args may be ANY JSON type — guard
+        name = a.get("latch") if isinstance(a, dict) else None
+        try:
+            seqs = self.server.daemon().latch_off(name, by="phone")
+        except ValueError as e:
+            return self._deny(400, f"refused: {str(e)[:160]}")
+        except Exception as e:  # noqa: BLE001 — never leak internals as a 500
+            return self._deny(400, f"refused: {type(e).__name__}")
+        _log.info("bridge action ok: POST /api/latch-off device=%s outcome=latch-off latches=%s",
+                  _pk_prefix(core.get("device")), ",".join(sorted(seqs)))
+        return self._json({"ok": True, "off": sorted(seqs), "seqs": seqs})
 
     def _device_action(self, body_bytes):
         """The phone posts its OWN device-signed `governor.approval` payload. The SERVER only VERIFIES

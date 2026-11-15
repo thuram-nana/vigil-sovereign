@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -44,9 +44,14 @@ from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
+from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
+from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
+#: Seconds a customer is told to wait (`Retry-After`) when the provisioner is not listening — the cockpit restarts
+#: in about this long (sigil-cockpit.service RestartSec=5).
+UPDATING_RETRY_AFTER_S = 5
 # E2b — the SHORT-LIVED Google-OIDC browser-binding cookie: HttpOnly, SameSite=Lax (must ride the IdP's
 # top-level GET redirect back to us), Path-scoped to /api/customer/oidc, Max-Age 600s. Its sha256 is bound to
 # the single-use `state` at login and re-checked at the callback (anti login-CSRF). DISTINCT from the session
@@ -77,12 +82,36 @@ _SLOW_HOP_TIMEOUTS_S = {
     # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
     "signup_request": 60.0,
     "recover_request": 60.0,
+    # Confirm a sign-up / reset by its 6-digit CODE: the cockpit's code check waits up to email_channel._HASH_WAIT_S
+    # (30 s) for a hash slot, then scrypt (~tens of ms) + the commit. The edge MUST outlast that: a hop that gives up
+    # first lets the cockpit set the new password (and, on recover, the edge then never severs the old sessions,
+    # because it severs only on the 200 it did not receive). 45 s clears 30 + scrypt + commit with margin. Pinned
+    # against _HASH_WAIT_S by test_custui_hop_budget.py.
+    "signup_confirm": 45.0,
+    "recover_confirm": 45.0,
 }
 
 
 def _hop_timeout(action: str) -> float:
     """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
     return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
+
+
+# The installed-app Google hand-off: failed redemptions (wrong code, unknown or expired record) per client IP.
+_HANDOFF_IP_FAILS = 10
+_HANDOFF_IP_WINDOW_S = 15 * 60.0
+
+# How much longer than its slowest hop a stopping edge waits for the requests it accepted (ui/graceful.py).
+_DRAIN_MARGIN_S = 15.0
+
+
+def drain_deadline_s() -> float:
+    """How long a stopping customer edge (an edge swap, a restart, a release stop) waits for the requests it accepted:
+    past the slowest hop above, so it never exits while the cockpit is still completing an action this edge relayed
+    — the customer gets the cockpit's answer, not the proxy's "unavailable" page for an action that went through.
+    nginx hands the edge each request whole (request buffering), so a request's time here is its hop. The customer
+    units' TimeoutStopSec sits above this (test_graceful_stop.py pins both)."""
+    return max([_HOP_TIMEOUT_S, *_SLOW_HOP_TIMEOUTS_S.values()]) + _DRAIN_MARGIN_S
 # The packaged customer SPA tree this keyless edge serves itself (Slice I). The app is HASH-routed, so only
 # the mount root ("/" -> index.html) and its static assets are ever requested — there are no deep server
 # routes and no SPA history fallback (an unknown path 404s). A per-asset size cap guards against a mistake.
@@ -94,7 +123,72 @@ _APP_CTYPES = {
     ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
     ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
     ".wav": "audio/wav",   # the notification chime (same-origin media; strict CSP's default-src 'self' covers it)
+    ".webmanifest": "application/manifest+json",   # the install manifest (served under default-src 'self')
 }
+# Cache policy for the app (read ONCE at startup into a content-hashed snapshot — ui/static_site.py):
+#   * index.html and any asset requested WITHOUT ?v=: `no-cache` + ETag — revalidated on every load, so a release
+#     is picked up at the next load (a 304 costs no body);
+#   * an asset requested with ?v=<its current digest>: immutable for a year; with any other v: 404 + no-store;
+#   * /version.json, /api/*, the probes and every JSON answer: no-store (see _no_store).
+_APP_PAGE_CACHE = "no-cache"
+
+
+# The service worker (customer_app/sw.js) keeps ONE stable URL (never ?v=) so the browser can find its update;
+# the edge writes the build id and the shell list into it, so every build is a new worker script.
+_WORKER = "sw.js"
+
+
+def _render_worker(text: str, snap: SiteSnapshot) -> str:
+    """sw.js with its BUILD (the cache name) and SHELL: the root page, then exactly the ?v= files the page names.
+    Built from the edge's own file list, so it can only ever name this build's static files."""
+    build_line, shell_line = 'var BUILD = "__VIGIL_BUILD__";', 'var SHELL = ["__VIGIL_SHELL__"];'
+    if text.count(build_line) != 1 or text.count(shell_line) != 1:
+        # fail at startup: a worker without its build would keep one cache name across every release
+        raise ValueError("customer_app/sw.js must carry exactly one BUILD and one SHELL placeholder line")
+    shell = ["./"] + snap.versioned_refs("index.html")
+    return (text.replace(build_line, f"var BUILD = {json.dumps(snap.build)};")
+                .replace(shell_line, f"var SHELL = {json.dumps(shell)};"))
+
+
+# The iOS home-screen tags, written into the page's slot only while VIGIL_CUSTOMER_IOS_INSTALL_BANNER is on: until
+# the owner's Google sign-in test in an installed app on a real iPhone passes, the page asks iOS for nothing about
+# installing. (iOS still applies the manifest's display: standalone to an app a person adds to the Home Screen by
+# hand, and iOS 26 opens every Home Screen site as a web app — so that device test stays the real gate.)
+_IOS_TAGS_SLOT = "<!--__VIGIL_IOS_TAGS__-->"
+_IOS_TAGS = ('<meta name="apple-mobile-web-app-capable" content="yes" />\n'
+             '  <meta name="apple-mobile-web-app-status-bar-style" content="black" />\n'
+             '  <meta name="apple-mobile-web-app-title" content="VIGIL" />')
+
+
+def _google_redirect_ready(_config) -> bool:
+    """Whether this edge can send a person to Google: the non-secret settings it builds the redirect from are complete
+    (client id, redirect URI, endpoints). While they are not, the page shows no Google button (the login route still
+    answers that sign-in is misconfigured, and `vigil doctor` names the missing setting)."""
+    from . import oidc as _oidc
+    try:
+        _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
+    except _oidc.OidcError:
+        return False
+    return True
+
+
+def build_app_snapshot(root=None) -> SiteSnapshot:
+    """The customer app as this edge serves it: every file under ``root`` (default: the packaged app) read once,
+    asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
+    switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
+    the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
+    "Continue with Google" button) and whether an installed app finishes it through the app hand-off. Each is a
+    non-secret on/off value and each counts in the build id."""
+    from .. import config as _config
+    ios = _config.customer_ios_install_banner_enabled()
+    google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
+    handoff = google and _config.customer_oidc_handoff_enabled()
+    return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
+                        stable=(_WORKER,), templates={_WORKER: _render_worker},
+                        html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
+                                     _IOS_TAGS_SLOT: _IOS_TAGS if ios else "",
+                                     "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
+                                     "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -171,8 +265,11 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
           "/api/customer/assets": "assets_overview",
           "/api/customer/notifications": "notifications"}
 
-class CustomerServer(ThreadingHTTPServer):
+class CustomerServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
+
+    def drain_deadline(self) -> float:
+        return drain_deadline_s()     # outwaits the slowest cockpit hop (ui/graceful.py reads it at stop time)
 
     def __init__(self, addr, handler, *, hop_key: str, provision_base: str, sessions_dir,
                  extra_hosts=(), extra_origins=()):
@@ -185,7 +282,20 @@ class CustomerServer(ThreadingHTTPServer):
         ip = ipaddress.ip_address(host)
         if ip.version == 6:
             self.address_family = socket.AF_INET6
-        super().__init__(addr, handler)
+        # Bind now, LISTEN LAST (server_activate below). Until this edge can serve, a connection to its port is
+        # refused — nginx then sends it to the other port — so a startup step that fails (the app snapshot, a ledger
+        # directory) never drops a request that had already been handed to a half-started edge.
+        super().__init__(addr, handler, bind_and_activate=False)
+        try:
+            self.server_bind()
+            self._setup(host, ip, hop_key=hop_key, provision_base=provision_base, sessions_dir=sessions_dir,
+                        extra_hosts=extra_hosts, extra_origins=extra_origins)
+            self.server_activate()
+        except BaseException:
+            self.server_close()
+            raise
+
+    def _setup(self, host, ip, *, hop_key, provision_base, sessions_dir, extra_hosts, extra_origins) -> None:
         self.hop_key = str(hop_key or "")
         self.provision_base = str(provision_base).rstrip("/")
         self.sessions = SessionLedger(sessions_dir)
@@ -196,6 +306,12 @@ class CustomerServer(ThreadingHTTPServer):
         self.oidc_state_dir = Path(str(sessions_dir)).parent / "customer-oidc-state"
         # E3b-2 — the edge's single-use WebAuthn challenge ledger (passkey enroll + login), a SIBLING dir.
         self.passkey_challenge_dir = Path(str(sessions_dir)).parent / "customer-passkey-challenges"
+        # The installed-app Google hand-off (ui/oidc_handoff.py): completed sign-ins waiting for the app, and the
+        # per-IP limit on redeeming them — SIBLING dirs, like the two above.
+        self.oidc_handoff_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff"
+        self.oidc_handoff_limit_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff-limit"
+        # the app, read ONCE: what this process serves until it stops (one consistent build; see static_site)
+        self.app = build_app_snapshot()
         port = self.server_address[1]
 
         def _hp(h: str) -> str:
@@ -222,17 +338,38 @@ class CustomerHandler(BaseHTTPRequestHandler):
         pass
 
     # --- response + session helpers ----------------------------------------------------------------
-    def _send(self, code: int, body: bytes, ctype="application/json"):
+    def _no_store(self, ctype: str = "") -> bool:
+        """True for every `/api/*` response and every JSON answer (the probes and the error bodies): tenant data,
+        session state and refusals are never kept by a browser or an intermediary, whatever the CDN in front is
+        set to do. The static SPA assets keep their own caching."""
+        return urlparse(self.path).path.startswith("/api/") or ctype.startswith("application/json")
+
+    def _send(self, code: int, body: bytes, ctype="application/json", *, cache: "str | None" = None,
+              etag: "str | None" = None):
+        """One response. ``cache``/``etag`` are the static app's (ignored where `_no_store` applies); a 304 carries
+        the full representation's length and no body."""
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Vigil-Build", self.server.app.build)
+        if self._no_store(ctype):
+            self.send_header("Cache-Control", "no-store")
+        elif cache:
+            self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
+        ra = getattr(self, "_pending_retry_after", None)
+        if ra:
+            self.send_header("Retry-After", ra)
         sc = getattr(self, "_pending_set_cookie", None)
         if sc:
             self.send_header("Set-Cookie", sc)
         self.end_headers()
+        if code == 304:
+            return
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -290,20 +427,32 @@ class CustomerHandler(BaseHTTPRequestHandler):
         and sits behind a reverse proxy, so the raw TCP peer is the PROXY — keying on it would collapse every
         customer onto ONE rate-limit key, letting a single attacker lock out the entire customer auth surface
         (the red-pen's CO5). When the immediate peer is loopback (the trusted same-host proxy hop), take the
-        real client IP from `X-Real-IP` / the first `X-Forwarded-For` entry instead. This value feeds ONLY the
-        best-effort per-IP leg (the per-account/email leg is the reliable one), NEVER authz — so a spoofed
-        header lets an attacker evade only their OWN throttle, never impersonate or lock out another."""
+        real client IP from `X-Real-IP` instead. Headers are trusted ONLY from a loopback peer, and the shipped
+        proxies overwrite `X-Real-IP` with the address they accepted the connection from (nginx: `$remote_addr`,
+        restored from CF-Connecting-IP only for Cloudflare's published ranges; Caddy: `{remote_host}`; the `vigil up`
+        proxy: its own peer), so a client cannot choose the value. The client-chosen FIRST `X-Forwarded-For` entry is
+        NOT a fallback — it is attacker-controlled, so trusting it (when the trusted hop sets no `X-Real-IP`) would
+        let a client pick the victim's address and defeat the installed-app hand-off's same-network rule and every
+        per-IP leg. A hop that forwards no `X-Real-IP` therefore collapses to its loopback peer, which
+        `oidc_handoff.client_net` treats as non-global and refuses (fail closed), rather than to a header the client
+        chose. This feeds the per-IP legs (the per-account/email leg is the reliable one) and the hand-off's
+        same-network rule (`oidc_handoff.client_net`), which compares the networks of the hand-off's own steps with
+        each other — never a grant of access by itself."""
         peer = self.client_address[0] if self.client_address else ""
         if peer and _is_loopback(peer):
             xr = (self.headers.get("X-Real-IP", "") or "").strip()
             if xr:
                 return xr
-            xff = self.headers.get("X-Forwarded-For", "")
-            if xff:
-                first = xff.split(",")[0].strip()
-                if first:
-                    return first
         return peer
+
+    def _handoff_net(self) -> str:
+        """The client's network for the installed-app Google hand-off's same-network rule, under this edge's posture:
+        production requires a globally-routable client address (a loopback/private/CGNAT address is 'no network' and
+        the hand-off refuses — see oidc_handoff.client_net); a dev/test edge (not production posture) allows a private
+        address so a loopback `vigil up` still works. Used identically at login-start, callback and redeem so the
+        three steps agree on what 'the same network' means."""
+        from .oidc_handoff import client_net
+        return client_net(self._ip(), allow_private=not is_production_posture())
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -317,8 +466,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
     def _provision(self, action: str, principal: str, body: dict):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
         sovereign verifies it (role == action; principal + method + path + ts inside the HMAC). The hop key
-        is this edge's ONLY credential — it holds no owner key. A dead provisioner, or a reply that cannot be read
-        (truncated, not JSON), is a 502, never a crash."""
+        is this edge's ONLY credential — it holds no owner key. A provisioner that is not listening (the cockpit is
+        restarting) is a 503 `{"error": "updating"}` with Retry-After: the request reached nothing. Any other
+        failure — one after the request may have arrived, or a reply that cannot be read (truncated, not JSON) — is
+        a 502, never a crash. The edge sends each request to the provisioner once."""
         if not self.server.hop_key:
             # No hop key: nothing this edge could stamp would verify (and `body_binding` raises on a blank key —
             # a POST surfaced that as a 400, a GET dropped the connection). Refuse before any hop, with the same
@@ -345,7 +496,15 @@ class CustomerHandler(BaseHTTPRequestHandler):
                 return e.code, json.loads(e.read().decode())
             except (ValueError, http.client.HTTPException, OSError):   # an unreadable error body keeps its status
                 return e.code, {"error": "provision error"}
-        except (urllib.error.URLError, OSError):
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ConnectionRefusedError):
+                # Nothing listens on the provisioner port (the cockpit is restarting): the connection was refused
+                # before a byte of the request was sent, so it reached nothing and changed nothing. Say so, and
+                # when to come back; the caller decides whether to send it again (the edge never does).
+                self._pending_retry_after = str(UPDATING_RETRY_AFTER_S)
+                return 503, {"error": "updating"}
+            return 502, {"error": "provisioner unreachable"}
+        except OSError:
             return 502, {"error": "provisioner unreachable"}
         except (ValueError, http.client.HTTPException):
             # a 2xx whose body is truncated (IncompleteRead) or not JSON — e.g. the cockpit restarted mid-reply, or
@@ -396,6 +555,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path == "/readyz":
             return self._readyz()
+        if path == "/version.json":
+            # the build this edge serves (a content hash of the app): no auth, no cookie read, no-store (JSON)
+            return self._json({"build": self.server.app.build})
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:
@@ -428,37 +590,31 @@ class CustomerHandler(BaseHTTPRequestHandler):
         return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
 
     def _resolve_app(self, urlpath: str):
-        """Map a URL path to a safe file under `_APP_ROOT`, or None. "/" -> index.html; any other path is an
+        """Map a URL path to an asset of the app snapshot, or None. "/" -> index.html; any other path is an
         EXACT static asset (the SPA is hash-routed, so there are no deep routes and NO index.html fallback —
-        an unknown path returns None -> 404, never a masked shell). Path-traversal is refused: the candidate
-        must `resolve()` to within the resolved root. Returns (abs_path, content_type) or None."""
-        rel = unquote(urlparse(urlpath).path).lstrip("/")
-        root = _APP_ROOT
-        cand = (root / "index.html") if rel in ("", "/") else (root / rel)
-        try:
-            rp = cand.resolve()
-        except (OSError, RuntimeError, ValueError):
+        an unknown path returns None -> 404, never a masked shell). Only files read into the snapshot at
+        startup can be served, and a path is clamped inside the app root before it is looked up."""
+        rel = normalize_rel(urlparse(urlpath).path)
+        if rel is None:
             return None
-        if rp != root and not rp.is_relative_to(root):
-            return None                        # traversal guard — must stay within the content root
-        if rp.is_file():
-            return rp, _APP_CTYPES.get(rp.suffix.lower(), "application/octet-stream")
-        return None
+        return self.server.app.get(rel or "index.html")
 
     def _serve_app(self, path: str):
-        """Serve the self-contained customer SPA (static, traversal-safe, strict-CSP, size-capped). The edge
+        """Serve the self-contained customer SPA (static, strict-CSP, size-capped, content-hashed). The edge
         holds no key and the SPA carries no token — it authenticates by the `vigil_customer_session` cookie."""
+        app = self.server.app
         hit = self._resolve_app(path)
         if hit is None:
+            rel = normalize_rel(urlparse(path).path)
+            if rel is not None and rel in app.too_large:
+                return self._deny(413, "asset too large")
             return self._deny(404, "not found")
-        rp, ctype = hit
-        try:
-            data = rp.read_bytes()
-        except OSError:
-            return self._deny(404, "not found")
-        if len(data) > _MAX_APP_BYTES:
-            return self._deny(413, "asset too large")
-        self._send(200, data, ctype)           # same strict CSP / nosniff / no-referrer headers as every response
+        state = app.version_state(hit, urlparse(self.path).query)
+        if state == "mismatch":
+            return self._deny(404, "not found")    # another build's URL: 404 + no-store, never today's bytes
+        cache = IMMUTABLE if state == "immutable" else _APP_PAGE_CACHE
+        code = 304 if not_modified(self.headers.get("If-None-Match", ""), hit.etag) else 200
+        self._send(code, hit.body, hit.ctype, cache=cache, etag=hit.etag)   # + strict CSP / nosniff / no-referrer
 
     def _customer_read_relay(self, action: str):
         """Relay a customer-plane READ to the provisioner over the hop, carrying the SESSION org (never a
@@ -495,11 +651,31 @@ class CustomerHandler(BaseHTTPRequestHandler):
         """GET /api/customer/oidc/login — 302 to Google's authorize endpoint with a fresh single-use
         state+nonce+PKCE-S256 challenge, setting the HttpOnly SameSite=Lax sid cookie whose hash binds the
         state to THIS browser. Built from the NON-SECRET public config only (the client secret never reaches
-        this keyless edge). Same-origin/Host gated like every edge route; a misconfigured OIDC fails LOUD (500)."""
+        this keyless edge). Same-origin/Host gated like every edge route; a misconfigured OIDC fails LOUD (500).
+
+        `?handoff=<challenge>` (an installed app, ui/oidc_handoff.py; only while VIGIL_CUSTOMER_OIDC_HANDOFF is on,
+        else 404): the state is bound to that challenge INSTEAD of a sid cookie, and no cookie is set — the
+        browser that finishes the Google sign-in is not the app, so a cookie set here could never prove anything.
+        The state also keeps the network of the client starting the login (the callback must come from the same
+        one), and Google is asked to show its account chooser (`prompt=select_account`), so the person picks the
+        account the app signs in with on a Google page, never silently."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         from .. import config as _config
         from . import oidc as _oidc
+        from .oidc_handoff import valid_challenge
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)   # an empty handoff= is malformed, not absent
+        handoff = None
+        handoff_net = ""
+        if "handoff" in q:
+            if not _config.customer_oidc_handoff_enabled():
+                return self._deny(404, "not found")
+            handoff = q["handoff"][0] if len(q["handoff"]) == 1 else ""
+            if not valid_challenge(handoff):
+                return self._deny(400, "bad request: malformed hand-off")
+            handoff_net = self._handoff_net()
+            if not handoff_net:                       # no usable client network to bind the hand-off to: fail closed
+                return self._deny(400, "bad request: the client address could not be read")
         try:
             cfg = _oidc.OidcConfig.from_settings(_config.customer_oidc_public_settings())
         except _oidc.OidcError:
@@ -511,18 +687,26 @@ class CustomerHandler(BaseHTTPRequestHandler):
         sid = secrets.token_urlsafe(32)
         sid_hash = hashlib.sha256(sid.encode("utf-8")).hexdigest()
         try:
-            self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
+            if handoff:
+                self._oidc_state_store().issue(state, nonce, verifier=verifier, handoff=handoff,
+                                               handoff_net=handoff_net)
+            else:
+                self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
         except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
             return self._deny(500, "could not mint an oidc login state")
-        location = _oidc.build_authorize_url(cfg, state, nonce, code_challenge=challenge)
+        location = _oidc.build_authorize_url(cfg, state, nonce, code_challenge=challenge,
+                                             prompt="select_account" if handoff else "")
         cookie = (f"{_OIDC_SID_COOKIE}={sid}; Path=/api/customer/oidc; Max-Age=600; HttpOnly; SameSite=Lax"
                   + ("; Secure" if is_production_posture() else ""))
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        self.send_header("Set-Cookie", cookie)
+        if not handoff:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")       # the state/nonce never leak via Referer
+        self.send_header("X-Vigil-Build", self.server.app.build)
         self.end_headers()
 
     def _oidc_callback(self):
@@ -546,6 +730,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if rec is None:
             return self._json({"authenticated": False,
                                "error": "unknown, expired, or already-used oidc state"}, 401)
+        if rec.handoff:
+            return self._oidc_handoff_callback(code, rec)    # an installed app started it: no cookie here
         presented = self._oidc_sid_cookie()
         if not rec.sid_hash or not presented or not hmac.compare_digest(
                 hashlib.sha256(presented.encode("utf-8")).hexdigest(), rec.sid_hash):
@@ -562,6 +748,133 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._redirect_to_app()                   # 302 into the hash-routed SPA, carrying the session
         return self._redirect_to_app(ok=False)               # a refusal lands the browser back on the app
 
+    # --- the installed-app hand-off (ui/oidc_handoff.py) ---------------------------------------------------
+    def _oidc_handoff_store(self):
+        from .oidc_handoff import HandoffStore
+        return HandoffStore(self.server.oidc_handoff_dir)
+
+    def _oidc_handoff_callback(self, code: str, rec):
+        """The callback of a login an installed app started (the state is bound to its hand-off challenge, not to a
+        cookie of this browser). The client finishing the sign-in must be on the network that started it — checked
+        BEFORE Google's answer is used, so a sign-in finished anywhere else exchanges no code and creates no account.
+        After the provisioner's oidc_finish verifies the Google sign-in, NO session cookie is set here: the verified
+        sign-in is stored for the app (single use, about 2 minutes, redeemable only from this network) with a 6-digit
+        pairing code, and this page shows the code and the Google account it signs in. The username and org come
+        from the provisioner's answer only."""
+        from .. import config as _config
+        from .oidc_handoff import HandoffBusy, HandoffExists, HandoffTooMany
+        if not _config.customer_oidc_handoff_enabled():   # switched off since the login started
+            return self._handoff_page(None, 404)
+        net = self._handoff_net()
+        if not net or not rec.handoff_net or not hmac.compare_digest(net.encode("utf-8"),
+                                                                     rec.handoff_net.encode("utf-8")):
+            return self._handoff_page(None, 403)
+        c, r = self._provision("oidc_finish", "", {"code": code, "code_verifier": rec.verifier,
+                                                   "nonce": rec.nonce, "ip": self._ip()})
+        if not (c == 200 and isinstance(r, dict) and r.get("username")):
+            return self._handoff_page(None, 401)
+        orgs = r.get("orgs") or []
+        try:
+            pairing = self._oidc_handoff_store().complete(rec.handoff, str(r["username"]), orgs[0] if orgs else None,
+                                                          net=net)
+        except HandoffExists:
+            return self._handoff_page(None, 409)
+        except HandoffTooMany:
+            return self._handoff_page(None, 429)
+        except (HandoffBusy, ValueError):
+            return self._handoff_page(None, 503)
+        email = r.get("email")
+        return self._handoff_page(pairing, 200, email=email if isinstance(email, str) else "")
+
+    def _handoff_page(self, pairing: "str | None", status: int, *, email: str = ""):
+        """The static page shown where the Google sign-in finished: the pairing code and the Google account it signs
+        in, or why there is none. Strict CSP: the app's own stylesheets and one same-origin script (handoff.js),
+        referenced relative to this route so it works at the origin's root and under a mount; no inline script or
+        style. The account (from the provisioner's verified answer) is HTML-escaped."""
+        import html as _html
+        from .oidc_handoff import format_code
+        app = self.server.app
+
+        def ref(rel: str) -> str:
+            a = app.get(rel)
+            return f"../../../{rel}" + (f"?v={a.digest}" if a is not None and a.versioned else "")
+
+        if pairing:
+            shown = format_code(pairing)
+            title = "Signed in"
+            who = (f'<p>You signed in to Google as <strong class="cust-handoff-account">{_html.escape(email)}'
+                   f'</strong>.</p>\n' if email else "")
+            body = (f'<h1>Signed in.</h1>\n{who}'
+                    f'<p>Go back to the VIGIL app and enter this code:</p>\n'
+                    f'<p class="cust-handoff-code" aria-label="{" ".join(pairing)}">{shown}</p>\n'
+                    f'<p class="cust-handoff-warn">Only enter it in the VIGIL app on this phone — VIGIL will never '
+                    f'ask you for it anywhere else.</p>\n'
+                    f'<p class="cust-handoff-warn">If you did not just tap Continue with Google in the VIGIL app '
+                    f'installed on this phone, close this page and do not enter the code anywhere.</p>\n'
+                    f'<p class="cust-muted">The code works once, for about 2 minutes, on the network you are on now. '
+                    f'If it runs out, start again with Continue with Google in the app.</p>\n'
+                    f'<p id="handoff-continue" hidden><a class="btn primary" href="../../../#/google-code">'
+                    f'Continue in VIGIL</a></p>')
+        else:
+            title = "Sign-in did not complete"
+            why = {409: "This Google sign-in was already finished once.",
+                   503: "VIGIL is busy right now.",
+                   429: "Too many Google sign-ins are waiting for this account or this network. Use a code you "
+                        "were already shown, or wait two minutes.",
+                   403: "This Google sign-in was started on another network. If you did not just tap Continue "
+                        "with Google in the VIGIL app installed on this phone, close this page. Otherwise stay on "
+                        "the same Wi-Fi or mobile network until you are signed in.",
+                   404: "Google sign-in for the installed app is turned off."}.get(
+                       status, "Google could not confirm the sign-in for VIGIL.")
+            body = (f'<h1>Sign-in did not complete.</h1>\n<p>{why}</p>\n'
+                    f'<p>Go back to the VIGIL app and start again with Continue with Google.</p>')
+        page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n'
+                '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n'
+                '<meta name="color-scheme" content="dark light" />\n<meta name="robots" content="noindex" />\n'
+                f'<title>VIGIL — {title}</title>\n'
+                f'<link rel="stylesheet" href="{ref("tokens.css")}" />\n'
+                f'<link rel="stylesheet" href="{ref("components.css")}" />\n'
+                f'<link rel="stylesheet" href="{ref("app.css")}" />\n</head>\n'
+                '<body data-plane="customer" class="cust-handoff-page">\n'
+                f'<main class="card cust-handoff">\n{body}\n</main>\n'
+                f'<script src="{ref("handoff.js")}"></script>\n</body>\n</html>\n')
+        return self._send(status, page.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _oidc_handoff(self, body: dict):
+        """POST /api/customer/oidc/handoff {verifier, code} — the installed app redeems a completed Google sign-in
+        (CSRF/Origin-gated like every POST). The record is found by sha256(verifier); a redeem from another network
+        than the one the sign-in was finished on removes it unchecked; otherwise the code is checked in constant
+        time, and a right code consumes it and mints the session in THIS (the app's) cookie jar from the
+        username/org the provisioner returned at the callback — never from the request. A wrong code counts (5 per
+        record, then the record is gone); every failure counts against the caller's IP (10 per 15 minutes)."""
+        from .. import config as _config
+        from .login_ratelimit import LoginRateLimiter
+        from .oidc_handoff import Elsewhere, Redeemed, WrongCode, ip_rate_key
+        if not (_config.customer_oidc_enabled() and _config.customer_oidc_handoff_enabled()):
+            return self._deny(404, "unknown action")
+        limiter = LoginRateLimiter(self.server.oidc_handoff_limit_dir, max_fails=_HANDOFF_IP_FAILS,
+                                   window_s=_HANDOFF_IP_WINDOW_S, base_lock_s=60.0, max_lock_s=3600.0)
+        key = f"handoff:ip:{ip_rate_key(self._ip())}"
+        locked = limiter.locked(key)
+        if locked is not None:
+            self._pending_retry_after = str(int(max(1, locked)))
+            return self._deny(429, "too many attempts; wait and try again")
+        out = self._oidc_handoff_store().redeem(str(body.get("verifier", "")), str(body.get("code", "")),
+                                                net=self._handoff_net())
+        if isinstance(out, Redeemed):
+            self._mint(out.username, out.org_id)           # the IP's failures are not cleared: they age out
+            return self._json({"ok": True, "username": out.username, "active_org": out.org_id})
+        limiter.record_failure(key)
+        if isinstance(out, WrongCode) and out.remaining > 0:
+            return self._json({"error": "That code does not match. Check the code on the page where you signed in "
+                                        "with Google.", "retry": True}, 401)
+        if isinstance(out, Elsewhere):
+            return self._json({"error": "This Google sign-in was finished on another network, so it cannot sign in "
+                                        "here. Start again with Continue with Google, and stay on the same Wi-Fi or "
+                                        "mobile network until you are signed in.", "retry": False}, 401)
+        return self._json({"error": "This sign-in is no longer valid. Start again with Continue with Google.",
+                           "retry": False}, 401)
+
     def _redirect_to_app(self, *, ok: bool = True):
         """End the top-level OIDC flow with a 302 into the SPA root. On success the `_mint`-set session cookie
         rides along (so the SPA is immediately authenticated); on failure no cookie is set and the SPA shows
@@ -570,14 +883,24 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/" if ok else "/#oidc=err")
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)
         if ok and sc:
             self.send_header("Set-Cookie", sc)
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Vigil-Build", self.server.app.build)
         self.end_headers()
 
     def do_POST(self):
+        # As do_GET: an unexpected fault answers one clean JSON 500 (no internals). A connection closed with no
+        # answer is the worst outcome here — nginx never re-sends a POST, so the customer sees "unavailable".
+        try:
+            return self._route_post()
+        except Exception:  # noqa: BLE001 — never 500-leak internals
+            return self._deny(500, "request failed")
+
+    def _route_post(self):
         path = urlparse(self.path).path
         if not path.startswith("/api/customer/"):
             return self._deny(404, "not found")
@@ -588,6 +911,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             body = self._read_body()
         except (ValueError, OSError) as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception:  # noqa: BLE001 — e.g. RecursionError: JSON nested deeper than the parser follows
+            return self._deny(400, "bad request: the body could not be read")
         try:
             return self._dispatch(action, body)
         except Exception as e:  # noqa: BLE001 — never 500-leak internals
@@ -598,7 +923,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("signup_request", "", {"email": body.get("email", ""), "ip": self._ip()})
             return self._json(r, c)
         if action == "signup/confirm":
+            # the email's token, or its 6-digit code with the email it was sent to (the provisioner decides which)
             c, r = self._provision("signup_confirm", "", {"token": body.get("token", ""),
+                    "email": body.get("email", ""), "code": body.get("code", ""),
                     "password": body.get("password", ""), "org_name": body.get("org_name", ""),
                     "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
@@ -618,7 +945,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json(r, c)
         if action == "recover/confirm":
             c, r = self._provision("recover_confirm", "", {"token": body.get("token", ""),
-                    "new_password": body.get("new_password", "")})
+                    "email": body.get("email", ""), "code": body.get("code", ""),
+                    "new_password": body.get("new_password", ""), "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
                 # SEVER every existing session for the account (the edge half of the session-reset seam).
                 self.server.sessions.revoke_all_for_user(str(r["username"]))
@@ -646,6 +974,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
                       "passkey/login/challenge", "passkey/login/verify"):
             return self._passkey(action, body)
+        if action == "oidc/handoff":                  # 404 unless Google sign-in AND the hand-off are on
+            return self._oidc_handoff(body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
@@ -878,7 +1208,6 @@ def serve_customer(*, host: str = "127.0.0.1", port=None, hop_key=None, provisio
              else "hop key UNSET → provisioning FAILS CLOSED (set VIGIL_PROVISION_HOP_KEY)")
     print(f"  vigil customer edge on http://{host}:{bound_port}  (keyless; cookie=vigil_customer_session; "
           f"provisioner={srv.provision_base}; {keyed})")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    # SIGTERM/SIGINT: finish the requests in flight — a slow provisioner action included — within this edge's own
+    # drain deadline (drain_deadline_s), then exit (ui/graceful)
+    serve_until_signal(srv)

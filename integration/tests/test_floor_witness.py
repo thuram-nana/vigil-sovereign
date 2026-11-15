@@ -14,8 +14,6 @@ Mirrors ``apps/sigil/tests/test_floor_witness.py`` for the offense high-water fl
 """
 from __future__ import annotations
 
-import sys
-
 import pytest
 
 from vigil_core import (
@@ -200,8 +198,29 @@ def test_strict_majority_independent_set_labelled_conditional_prevention():
 
 def test_fatal2_no_cross_plane_import():
     """Exercising the offense floor-witness path must never load a sovereign/framework module — the two
-    trust domains never co-load (the witnessed checkpoint is inert bytes, read out-of-band)."""
-    bad = [m for m in sys.modules
-           if m == "sigil" or m.startswith("sigil.") or m.startswith("apps.sigil")
-           or m.startswith("framework") or m.startswith("strix")]
-    assert not bad, f"offense path co-loaded a cross-plane module: {bad}"
+    trust domains never co-load (the witnessed checkpoint is inert bytes, read out-of-band). Run in a FRESH
+    interpreter where every plane IS importable, so the verdict does not depend on what earlier tests in this
+    process loaded and a lazy cross-plane import is loaded and caught: emit a witness, then verify a forward
+    advance and a rollback against it."""
+    from _fatal2 import assert_import_clean
+    assert_import_clean(
+        "import tempfile, pathlib\n"
+        "from vigil_core import build_chain, generate_keypair, sha256_hex, sign_head\n"
+        "from vigil_integration import floor_witness as FW\n"
+        "gov = generate_keypair()\n"
+        "def head(n):\n"
+        "    e = build_chain([sha256_hex(f'{i}:'.encode()) for i in range(n)])\n"
+        "    return sign_head(e, engagement_slug='loopback', signers=[('spine', gov.private_key_b64)])\n"
+        "def hw(h):\n"
+        "    return {'entry_count': h.entry_count, 'last_seq': h.last_seq}\n"
+        "retain = pathlib.Path(tempfile.mkdtemp()) / 'hw-witnessed.json'\n"
+        "h3, h5 = head(3), head(5)\n"
+        "FW.emit_highwater_witness(h5, hw(h5), [FW.offense_governance_witness(gov)], retain_path=retain,\n"
+        "                          scope='loopback')\n"
+        "tr = FW.offense_witness_trust_root(gov.public_key_b64)\n"
+        "assert FW.verify_highwater_against_witnessed(h5, hw(h5), [retain.read_text()], scope='loopback',\n"
+        "                                             trust_root=tr)[0]\n"
+        "assert not FW.verify_highwater_against_witnessed(h3, hw(h3), [retain.read_text()], scope='loopback',\n"
+        "                                                 trust_root=tr)[0]\n",
+        forbidden=("framework", "strix", "sigil", "apps"),
+    )

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import actions
+from . import safeinput as _si
 
 _MAX_ID = 128
 _MAX_NAME = 200
@@ -99,7 +100,7 @@ def _safe_session_id(raw: str) -> str:
     rid = actions._safe_run_id(raw)        # reuse the console's one traversal guard
     if len(rid) > _MAX_ID:
         raise ValueError(f"session id too long (> {_MAX_ID})")
-    return rid
+    return _si.token(rid, maxlen=_MAX_ID)
 
 
 def _safe_name(raw: str) -> str:

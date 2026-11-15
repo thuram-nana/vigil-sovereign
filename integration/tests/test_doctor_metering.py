@@ -15,6 +15,8 @@ Integration leg (doctor only — framework-free).
 """
 from __future__ import annotations
 
+import pytest
+
 from vigil_core import model_metering as mm
 
 from vigil_integration import doctor as d
@@ -260,3 +262,91 @@ def test_collect_reports_a_retired_setting_on_a_flat_deploy(monkeypatch, tmp_pat
     assert report["metering"] == {"configured": False, "ok": False}
     out = d.render(report)
     assert "Action needed" in out and says in out.split("Action needed", 1)[1]
+
+
+# --- the provider key from an AWS SSM SecureString (VIGIL_ANTHROPIC_KEY_SSM_PARAMETER) ---------------------------
+# Doctor proves the parameter is readable and a SecureString by asking AWS for its TYPE only (no decryption): it
+# never handles the key. SSM is the gateway's only key source then, so an environment key is ignored (a note).
+_SSM = {"VIGIL_MODEL_GATEWAY_ENABLED": "1", "VIGIL_ANTHROPIC_KEY_SSM_PARAMETER": "/vigil/anthropic-api-key",
+        "VIGIL_AWS_REGION": "eu-west-1", "VIGIL_GATEWAY_DAILY_LIMIT_USD": "500"}
+
+
+def _ssm_type(t):
+    calls = []
+
+    def probe(region, name):
+        calls.append((region, name))
+        return t
+    probe.calls = calls
+    return probe
+
+
+def test_a_readable_secure_string_needs_no_env_key():
+    probe = _ssm_type("SecureString")
+    section, issues, notes = d._metering_report(dict(_SSM), probe=_alive, ssm_probe=probe)
+    assert issues == [] and section["key_source"] == "ssm" and section["ok"]
+    assert probe.calls == [("eu-west-1", "/vigil/anthropic-api-key")]
+
+
+def test_an_env_key_beside_ssm_is_a_note_not_the_key():
+    section, issues, notes = d._metering_report({**_SSM, "ANTHROPIC_API_KEY": "fake-env-" + "k9"}, probe=_alive,
+                                                ssm_probe=_ssm_type("SecureString"))
+    assert issues == [] and any("is ignored" in n for n in notes)
+    assert "fake-env-k9" not in repr((section, issues, notes))
+
+
+@pytest.mark.parametrize("env,expect", [
+    ({"VIGIL_AWS_REGION": ""}, "region"),
+    ({"VIGIL_AWS_REGION": "--endpoint-url=x"}, "region"),
+    ({"VIGIL_ANTHROPIC_KEY_SSM_PARAMETER": "vigil key"}, "parameter name"),
+])
+def test_a_missing_region_or_bad_name_is_hard_and_never_probes(env, expect):
+    probe = _ssm_type("SecureString")
+    issues = d._metering_report({**_SSM, **env}, probe=_alive, ssm_probe=probe)[1]
+    assert any(expect in m and "will not start" in m for m in issues), issues
+    assert probe.calls == []
+
+
+def test_a_plain_string_parameter_is_hard():
+    issues = d._metering_report(dict(_SSM), probe=_alive, ssm_probe=_ssm_type("String"))[1]
+    assert any("not a SecureString" in m for m in issues), issues
+
+
+def test_an_unreadable_parameter_is_hard():
+    from vigil_core.aws_ssm import SsmParameterError
+
+    def denied(region, name):
+        raise SsmParameterError(f"SSM parameter {name} could not be read (aws exit 254: ...)")
+    issues = d._metering_report(dict(_SSM), probe=_alive, ssm_probe=denied)[1]
+    assert any("could not be read" in m and "ssm:GetParameter" in m for m in issues), issues
+
+    def broken(region, name):
+        raise RuntimeError("fake-secret-" + "z1")                      # an unexpected error: its text is not echoed
+    issues = d._metering_report(dict(_SSM), probe=_alive, ssm_probe=broken)[1]
+    assert any("RuntimeError" in m for m in issues) and not any("fake-secret-z1" in m for m in issues)
+
+
+def test_the_default_probe_reports_a_missing_aws_cli(monkeypatch):
+    monkeypatch.setattr(d.shutil, "which", lambda name: None)
+    issues = d._metering_report(dict(_SSM), probe=_alive)[1]
+    assert any("aws CLI is not installed" in m for m in issues), issues
+
+
+def test_the_default_probe_asks_only_for_the_type(monkeypatch):
+    from vigil_core import aws_ssm
+    from vigil_core.kek import TpmResult
+    seen = []
+
+    def runner(argv, stdin):
+        seen.append(list(argv))
+        return TpmResult(0, b"SecureString\n")
+    monkeypatch.setattr(d.shutil, "which", lambda name: "/usr/bin/aws")
+    monkeypatch.setattr(aws_ssm, "_default_aws_runner", runner)
+    assert d._metering_report(dict(_SSM), probe=_alive)[1] == []
+    assert seen and all("--with-decryption" not in argv for argv in seen)
+
+
+def test_without_ssm_a_missing_env_key_is_still_hard():
+    env = {k: v for k, v in _SSM.items() if k != "VIGIL_ANTHROPIC_KEY_SSM_PARAMETER"}
+    issues = d._metering_report(env, probe=_alive, ssm_probe=_ssm_type("SecureString"))[1]
+    assert any("no provider key" in m for m in issues)

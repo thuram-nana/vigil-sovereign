@@ -11,9 +11,12 @@
 
 2. DANGLING FLUTTERWAVE tx_refs. Nothing on the spine durably records a started checkout, so the operator supplies
    the started set (JSONL of ``{"tx_ref", "created"}``, e.g. the checkout log / a provider export). Each tx_ref
-   older than ``ttl_s`` is classified against the billing spool: ``handled`` (a webhook carrying it was drained to
-   ``processed/``), ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), ``retrying`` (parked in
-   ``retry/`` for a bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``. REPORT
+   older than ``ttl_s`` is classified against the billing spool, by what the drain recorded for each archived
+   envelope (``outcomes/<sha256>.outcome`` beside ``processed/<sha256>.json``): handled (an envelope carrying it MINTED — not reported),
+   ``noop`` (every envelope carrying it was archived without crediting anything; the row names the reasons),
+   ``processed_unrecorded`` (archived with no outcome recorded — e.g. drained before outcomes were recorded),
+   ``quarantined`` (only in ``rejected/`` — recoverable, re-drain it), ``retrying`` (parked in ``retry/`` for a
+   bounded NET-2b transient-verify retry — the drain will re-try it), or ``no_webhook``, in that precedence. REPORT
    ONLY: this sweep never mints, never calls the provider, and never moves a file.
 
 3. INTERRUPTED RECORDED SETTLES (``finish_interrupted_settles``, run by the settle drain on every pass while
@@ -161,14 +164,56 @@ def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now:
         raise _SweepDefer("deferred_config", f"the charge waits on its pricing configuration: {e}") from e
 
 
+def _held_snapshot(base: Any) -> "tuple[set, bool]":
+    """``(held, unknown)``: the launches the seam migration held for the owner (``legacy_hold``), and whether the
+    seam's migration journal exists but cannot be read — then no launch may be settled or released by a sweep
+    (``journal_unreadable``), since a held one cannot be ruled out."""
+    from vigil_integration.seam_migration import held_launches
+    try:
+        return held_launches(base), False
+    except ValueError:
+        return set(), True
+
+
+def _legacy_hold(base: Any, pair: tuple) -> Optional[str]:
+    """``legacy_hold`` / ``journal_unreadable`` for ``pair`` (:func:`_held_snapshot`), re-read when called — inside
+    the settle critical section, where the seam migration commits its holds — else None."""
+    held, unknown = _held_snapshot(base)
+    if unknown:
+        return "journal_unreadable"
+    return "legacy_hold" if (str(pair[0]), str(pair[1])) in held else None
+
+
+def _hold_block(base: Any, pair: tuple) -> "Callable[[], Optional[str]]":
+    """:func:`_legacy_hold` for ``pair`` as a ``refuse_if`` check (read when called, inside the critical section)."""
+    def _check() -> Optional[str]:
+        return _legacy_hold(base, pair)
+    return _check
+
+
+def _first_refusal(*checks: "Callable[[], Optional[str]]") -> "Callable[[], Optional[str]]":
+    """One ``refuse_if``: the first of ``checks`` that refuses, else None."""
+    def _check() -> Optional[str]:
+        for c in checks:
+            why = c()
+            if why:
+                return why
+        return None
+    return _check
+
+
 def _settle_precondition(spool: Path, pair: tuple, base: Any, *, metered: bool,
                          paused: bool) -> "Callable[[], Optional[str]]":
     """The sweep's settle precondition, evaluated INSIDE the settle's critical section (``refuse_if``), right
-    before it decides: ``completion_pending`` if a completion for ``pair`` is waiting / quarantined,
+    before it decides: ``legacy_hold`` if the seam migration held ``pair`` for the owner (``journal_unreadable`` if
+    its journal cannot be read); ``completion_pending`` if a completion for ``pair`` is waiting / quarantined,
     ``completion_unknown`` if the spool cannot be fully read; for a metered launch, ``pause_unknown`` if its pause
     state cannot be read and ``pause_changed`` if it differs from what this sweep priced the settle on (a pause
     that landed after the up-front read — the next pass applies D4). None: the settle may proceed."""
     def _check() -> Optional[str]:
+        why = _legacy_hold(base, pair)
+        if why:
+            return why
         pending, unreadable = _pending_completions(spool)
         if pair in pending:
             return "completion_pending"
@@ -235,10 +280,18 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     late completion / pause refuses it as ``completion_pending`` / ``completion_unknown`` / ``pause_changed`` /
     ``pause_unknown`` (nothing written; the next pass decides); a busy settle lock or meter is ``deferred``; a
     settle that finished a recorded decision a crash interrupted is ``settle_completed`` with the amounts it moved.
+    A lease that does not record its plan/wallet split, whose reserve plan debit record a hard prune removed from
+    the live spine, is held as ``plan_debit_pruned`` (nothing moved; an owner action, never retried into the wallet)
+    and named in the held-settle alarm `vigil doctor` reports; under ``apply`` the sweep also drops from that alarm
+    every launch now settled (``LaunchGate.release_settled_holds``, e.g. once the owner has settled it).
     With ``VIGIL_SETTLE_SPINE_RECORD`` on, a listed lease whose settlement marker is present (its tombstone pending:
     possibly a settle interrupted after the marker) is FINISHED under ``apply`` (``settle_launch(finish_only=True)``:
     only a recorded decision, never a fresh refund; no TTL or spool check) and reported ``settle_interrupted`` with
-    its pending amounts without it. With the flag off such a lease is skipped, as before."""
+    its pending amounts without it. With the flag off such a lease is skipped, as before.
+
+    A launch the seam migration held for the owner (listed in ``<seam>/.seam-migration/journal.json``) is reported
+    ``legacy_hold`` and never settled, with or without ``apply`` (re-checked inside the settle's critical section);
+    while that journal exists but cannot be read, no launch is settled (``journal_unreadable``)."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
     from . import config
@@ -255,6 +308,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     root = TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
     base = gate._seam_base()
+    held, held_unknown = _held_snapshot(base)
     rows: list[dict] = []
     leases = list_credit_leases(base)
     record = config.settle_spine_record_enabled()
@@ -302,6 +356,12 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "completion_unknown"})
             continue
         slug_, nonce_ = str(doc.engagement_slug), str(doc.nonce)
+        if (slug_, nonce_) in held:
+            rows.append({**row, "status": "legacy_hold"})  # held for the owner by the seam migration: never settled
+            continue
+        if held_unknown:
+            rows.append({**row, "status": "journal_unreadable"})  # a held launch cannot be ruled out: never settled
+            continue
         try:
             metered = bool(gate._launch_was_metered(slug_, nonce_))
         except OSError as e:
@@ -348,6 +408,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         else:
             rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
                          **_metered_spend(gate, slug_, nonce_)})
+    if apply:
+        gate.release_settled_holds()                       # a held launch settled since (by anyone) leaves the alarm
     return {"applied": bool(apply), "items": rows}
 
 
@@ -424,7 +486,7 @@ def finish_interrupted_settles(gate: Any, *, now: float, scope: str = "*",
     def _scan(keys: Any) -> Any:
         return settle_checkpoint.scan(gate.store, kp.public_key_b64, keys=keys,
                                       path=Path(checkpoint) if checkpoint is not None else None, scope=scope,
-                                      listed_from=listed_from, listing_clean=clean, now=float(now))
+                                      listed_from=listed_from, listing_clean=clean, now=float(now), seam=base)
 
     pending = gate.interrupted_settlements([b.signed_lease for b in leases], strict=True, scan=_scan)
     retire_path = Path(retire) if retire is not None else None
@@ -565,7 +627,9 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     the amounts it moved. With ``VIGIL_SETTLE_SPINE_RECORD`` on, a SETTLED reservation the seam holds no lease for
     whose recorded decision has an entry that has not landed is finished under ``apply`` (``settle_completed``) and
     reported ``settle_interrupted`` with its pending amounts without it (as ``sweep_abandoned_reservations`` does
-    for a lease on the seam)."""
+    for a lease on the seam). A launch the seam migration held for the owner is reported ``legacy_hold`` and never
+    released (re-checked inside the settle's critical section); while the migration journal exists but cannot be
+    read, nothing is released (``journal_unreadable``)."""
     from vigil_integration.live.credit_lease_broker import is_lease_settled
 
     from . import config
@@ -581,6 +645,7 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     spool = Path(completion_spool) if completion_spool is not None else None
     charging, spool_unreadable = _charging_completions(spool) if spool is not None else (set(), False)
     base = gate._seam_base()
+    held, held_unknown = _held_snapshot(base)
     record = config.settle_spine_record_enabled()
     # ONE pass over the spine: the reservations and, with the settle record on, every settled launch's settlement
     # evidence (its recorded decision and the entries that landed), so no launch is ever re-scanned on its own here
@@ -624,11 +689,18 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
         if spool_unreadable:
             rows.append({**row, "status": "completion_unknown"})
             continue
+        if (slug, nonce) in held:
+            rows.append({**row, "status": "legacy_hold"})  # held for the owner by the seam migration: never released
+            continue
+        if held_unknown:
+            rows.append({**row, "status": "journal_unreadable"})  # a held launch cannot be ruled out: never released
+            continue
         if not apply:
             rows.append({**row, "status": "superseded"})
             continue
-        r = gate.release_superseded_reservation(org_id=oid, slug=slug, nonce=nonce, now=now, grace_s=ttl_s,
-                                                refuse_if=_release_block(cast(Path, spool), (slug, nonce)))
+        r = gate.release_superseded_reservation(
+            org_id=oid, slug=slug, nonce=nonce, now=now, grace_s=ttl_s,
+            refuse_if=_first_refusal(_hold_block(base, (slug, nonce)), _release_block(cast(Path, spool), (slug, nonce))))
         if r.get("refused"):
             rows.append({**row, "status": str(r["refused"])})
         elif not r.get("ok") and r.get("retry"):
@@ -714,9 +786,9 @@ def sweep_postpaid_reconciliation(postpaid: Any, arrears: Any, invoices: Any, *,
     return {"applied": False, "items": rows}
 
 
-def _iter_spool_bodies(d: Path) -> Iterable[dict]:
-    """Yield every decodable webhook body (JSON object) in a billing-spool subdir. Never follows symlinks,
-    never raises on a hostile/malformed file (it is simply skipped)."""
+def _iter_spool_envelopes(d: Path) -> "Iterable[tuple[Path, object, dict]]":
+    """Yield ``(path, envelope schema, body)`` for every decodable webhook body (JSON object) in a billing-spool
+    subdir. Never follows symlinks, never raises on a hostile/malformed file (it is simply skipped)."""
     if not d.is_dir():
         return
     for fp in sorted(d.glob("*.json")):
@@ -728,7 +800,35 @@ def _iter_spool_bodies(d: Path) -> Iterable[dict]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
         if isinstance(body, dict):
-            yield body
+            yield fp, env.get("schema"), body
+
+
+def _iter_spool_bodies(d: Path) -> Iterable[dict]:
+    """Yield every decodable webhook body (JSON object) in a billing-spool subdir (``_iter_spool_envelopes``)."""
+    for _fp, _schema, body in _iter_spool_envelopes(d):
+        yield body
+
+
+#: The envelope schema each provider's drain archives (a recorded outcome counts only for its own provider).
+_PROVIDER_SCHEMA = {"flutterwave": "vigil.webhook.billing.v1", "stripe": "vigil.webhook.stripe.v1"}
+_MAX_OUTCOME = 4096
+
+
+def _recorded_outcome(fp: Path) -> Optional[dict]:
+    """The outcome the billing drain recorded for archived envelope ``processed/<sha256>.json``
+    (``outcomes/<sha256>.outcome``), or None when there is none or it is unreadable / malformed (reported as
+    unrecorded: noisy, never silently handled)."""
+    from .inbound.billing_spool import OUTCOME_SUFFIX, OUTCOMES_DIRNAME
+    p = fp.parent.parent / OUTCOMES_DIRNAME / (fp.stem + OUTCOME_SUFFIX)
+    try:
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > _MAX_OUTCOME:
+            return None
+        o = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(o, dict) or o.get("outcome") not in ("minted", "noop"):
+        return None
+    return o
 
 
 def _body_tx_ref(body: dict, provider: str = "flutterwave") -> Optional[str]:
@@ -769,7 +869,25 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
     if provider not in ("flutterwave", "stripe"):
         raise ValueError(f"unknown billing provider {provider!r}")
     spool = Path(spool_dir)
-    handled = {r for b in _iter_spool_bodies(spool / "processed") if (r := _body_tx_ref(b, provider))}
+    # processed/: what the drain recorded beside each archived envelope decides. An envelope counts for the refs it
+    # carries — its body's reference and, for this provider's envelopes, the reference its outcome names (a Stripe
+    # plan's invoice names its checkout only through the subscription the drain fetched).
+    minted: set[str] = set()
+    noop: "dict[str, set[str]]" = {}
+    unrecorded: set[str] = set()
+    for fp, schema, body in _iter_spool_envelopes(spool / "processed"):
+        side = _recorded_outcome(fp)
+        refs = {r} if (r := _body_tx_ref(body, provider)) else set()
+        side_ref = side.get("tx_ref") if side is not None and schema == _PROVIDER_SCHEMA[provider] else None
+        if isinstance(side_ref, str) and side_ref:
+            refs.add(side_ref)
+        if side is None:
+            unrecorded |= refs
+        elif side["outcome"] == "minted":
+            minted |= refs
+        else:
+            for ref in refs:
+                noop.setdefault(ref, set()).add(str(side.get("reason") or ""))
     quarantined = {r for b in _iter_spool_bodies(spool / "rejected") if (r := _body_tx_ref(b, provider))}
     # NET-2b: a webhook parked for a bounded transient-verify retry is PENDING, not missing (no retry/ ⇒ unchanged)
     retrying = {r for b in _iter_spool_bodies(spool / "retry") if (r := _body_tx_ref(b, provider))}
@@ -780,9 +898,13 @@ def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLi
         if ref in seen or c["created"] + ttl_s > now:
             continue
         seen.add(ref)
-        if ref in handled:
+        if ref in minted:
+            continue                                     # credited: only a MINTED outcome counts as handled
+        if ref in noop:
+            rows.append({"tx_ref": ref, "created": c["created"], "status": "noop", "reasons": sorted(noop[ref])})
             continue
         rows.append({"tx_ref": ref, "created": c["created"],
-                     "status": ("quarantined" if ref in quarantined else
+                     "status": ("processed_unrecorded" if ref in unrecorded else
+                                "quarantined" if ref in quarantined else
                                 "retrying" if ref in retrying else "no_webhook")})
     return {"applied": False, "items": rows}

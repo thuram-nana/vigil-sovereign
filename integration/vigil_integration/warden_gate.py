@@ -326,8 +326,9 @@ def _strix_gate_on() -> bool:
 
 def _strix_base_dir() -> str:
     """The engagement base dir the approvals root + persisted authority live under (matches the console/CLI
-    ``VIGIL_BASE_DIR`` convention; defaults to ``.vigil-live``)."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    ``VIGIL_BASE_DIR`` convention; defaults to ``.vigil-live``) — the ONE seam-base resolver."""
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
 
 
 # The external egress endpoint the vendored ``web_search`` tool posts to — a FIXED host

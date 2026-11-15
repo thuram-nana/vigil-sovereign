@@ -445,3 +445,37 @@ def test_the_cockpit_env_check_never_blocks_or_crashes_on_a_file_that_is_not_reg
     cockpit_env.mkdir()                                      # "replaced by something unreadable after the check"
     monkeypatch.setattr(Path, "is_file", lambda self: True)
     assert cli._cockpit_env_sigil_home() is None
+
+
+# ---- ST-11.0a: a paid top-up the drain cannot credit at the catalog price ---------------------------------------
+def _underpaid_verifier(price_id):
+    amt, ccy = catalog.expected_amounts()[price_id]
+
+    def v(txid):
+        return {"id": int(txid), "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+                "amount": (amt - 1) / 100, "currency": ccy, "meta": {"price_id": price_id}}
+    return v
+
+
+@pytest.mark.parametrize("flag", ["", "1"], ids=["alarm_off", "alarm_on"])
+def test_an_underpaid_top_up_is_a_no_op_or_quarantined_by_the_topup_alarm(home, capsys, monkeypatch, flag):
+    pid, _credits = _topup()
+    monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.setenv("VIGIL_BILLING_TOPUP_ALARM", flag)
+    monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: _underpaid_verifier(pid))
+    spool = Path(tempfile.mkdtemp())
+    _spool_charge(spool, 7311)
+    ns = SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1)
+    before = WalletRegistry(SpineStore()).available("acme")      # the default store is shared by this module
+    if not flag:
+        cli.cmd_billing_drain(ns)                                   # exit 0: archived as a no-op (unchanged)
+        assert "0 minted, 1 noop, 0 rejected" in capsys.readouterr().out
+        assert list((spool / "rejected").glob("*.json")) == []
+    else:
+        with pytest.raises(SystemExit) as ei:
+            cli.cmd_billing_drain(ns)
+        assert ei.value.code == 1
+        reasons = "".join(p.read_text() for p in (spool / "rejected").glob("*.reason"))
+        assert "UN-MINTED" in reasons and "top-up" in reasons
+    assert WalletRegistry(SpineStore()).available("acme") == before        # nothing credited either way

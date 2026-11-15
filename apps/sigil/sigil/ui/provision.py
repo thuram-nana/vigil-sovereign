@@ -13,15 +13,23 @@ assessment scope — registering/paying authorizes NO assessment.
 
 Workflows:
   * request_signup / confirm_signup — public self-serve: a verify token proves mailbox control, THEN the
-    service owner-signs {customer account, org, `org_admin` membership, trial credit} atomically. The trial
-    (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant.
+    service owner-signs {customer account, org, founding membership, trial credit} atomically. The trial
+    (real money) is granted ONLY after email verification (anti-Sybil), amount a server constant. The founding
+    membership is `org_admin`, or `founder` (org_admin plus self-serve testing on hosts the org proves) while
+    VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED and VIGIL_TRIAL_PREVIEW_ENABLED are both on — server-set, never a client
+    value (`_signup_role`).
   * login — email+password (constant-time via the decoy), rate-limited + locked out on abuse.
   * request_recover / confirm_recover — single-use recovery token → owner-signed password reset.
-  * grant_member / revoke_member — an `org_admin` manages THEIR org's team: the service checks
+  * confirm_signup_code / confirm_recover_code — the same two confirmations with the 6-digit code from the same
+    email instead of its token (when the provisioner has an EmailCodeLedger; off by default): bound to the email
+    and the purpose, single use, 10 minutes, 5 wrong codes per email+purpose, plus a per-IP limit.
+  * grant_member / revoke_member — an `org_admin` (or the founder) manages THEIR org's team: the service checks
     `admit_customer(requester, org_id, manage_members)` THEN owner-signs the (capped) membership grant /
     revoke. This is R1's AUTHENTICATED ordinary revocation (never an anonymous unsigned record) and the
     milestone primitive: an org admin invites/manages users without ever touching the owner key, another
-    tenant's resources, or any assessment target (the grantable set excludes `operator`/`owner`).
+    tenant's resources, or any assessment target (the grantable set excludes `operator`/`founder`/`owner`).
+    A founder's own membership is never changed or revoked here: that is an owner act
+    (`owner_set_member_role` / `owner_demote_founders`, the `sigil org` verbs).
 
 FATAL-2: sovereign-side (`assert_no_offense` at import); no framework/strix.
 """
@@ -32,7 +40,7 @@ import hashlib
 import math
 import secrets
 import time
-from typing import NoReturn, Optional
+from typing import Callable, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -40,19 +48,41 @@ assert_no_offense()
 
 from .customer_identity import (CustomerIdentity, IdentityRefused,  # noqa: E402
                                 METHOD_GOOGLE_OIDC, METHOD_PASSKEY, PasswordIdentityProvider)
-from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
+from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY, CodeBlocked, CodeOk, format_code  # noqa: E402
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
+# The PER-ORG predicate (a membership role the org fold resolved) — never the global-role `accounts.role_can`.
+from vigil_core.rbac import role_can  # noqa: E402
 
 _LOCKED_FINDING_BODY = ("Confirmed by the oracle. The proof and the fix are part of the full report: buy credits "
                         "in Billing to unlock it.")
 _LOCKED_COMPLETED_BODY = ("An assessment run completed. Every finding is listed in your assessments; buy credits in "
                           "Billing to unlock the full proof and fix.")
+# A customer cancel whose settle is HELD for the owner (launch_gate.PLAN_DEBIT_PRUNED): nothing moved, and the owner is
+# alarmed (`vigil doctor`); the customer is told exactly that.
+LAUNCH_REFUND_HELD_DETAIL = ("this reservation cannot be released automatically right now: its credits stay "
+                             "reserved, not spent, until the operator returns them (the operator has been alerted)")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
-# The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` (which carries
-# run_engagement) and `owner` — a customer can never hand a teammate any offense‑adjacent or global
-# authority (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
+# The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` and `founder` (which
+# carry run_engagement) and `owner` — a customer can never hand a teammate any testing or global authority
+# (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
+# The per-org role only the service owner grants or changes (vigil_core.rbac `founder`).
+_FOUNDER_ROLE = "founder"
+# The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
+# one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
+_SIGNUP_CODE_EMAIL = (
+    "Your VIGIL verification code is:\n\n    {code}\n\n"
+    "Type it into VIGIL within 10 minutes. It works once.\n\n"
+    "Or paste this single-use token on the sign-up page (valid for 1 hour):\n\n    {token}\n\n"
+    "If you did not ask to create a VIGIL account, ignore this email. VIGIL will never ask you for this code or "
+    "token by phone, chat or another email.\n")
+_RECOVER_CODE_EMAIL = (
+    "Your VIGIL password reset code is:\n\n    {code}\n\n"
+    "Type it into VIGIL within 10 minutes to choose a new password. It works once.\n\n"
+    "Or paste this single-use token on the password reset page (valid for 1 hour):\n\n    {token}\n\n"
+    "If you did not ask to reset your VIGIL password, ignore this email: your password stays as it is. VIGIL will "
+    "never ask you for this code or token by phone, chat or another email.\n")
 # The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
 # so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
 _NOTIF_MAX = 100
@@ -94,6 +124,24 @@ def _signup_org_id(token: str) -> str:
     so `create_org`/`grant_membership`/`wallet.grant` all re-target the same keys and are idempotent (the
     commit-marker recovery, Finding A). Not guessable without the token; a valid `_TENANT_RE` tenant id."""
     return _ORG_ID_PREFIX + hashlib.sha256(("o:" + str(token)).encode("utf-8")).hexdigest()[:24]
+
+
+def _signup_role(founder_latch: "Optional[Callable[[], bool]]" = None) -> str:
+    """The per-org role a sign-up grants its founding customer, on BOTH sign-up paths (email confirm and Google
+    auto-provision): `founder` while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED AND VIGIL_TRIAL_PREVIEW_ENABLED are both
+    on AND the owner's `founder_tester` latch is ON (``founder_latch()``, read only when both flags allow a founder;
+    the environment stays the ceiling), else `org_admin` (the default, unchanged). Server-decided at the committing
+    attempt — never a client value.
+
+    The founder role needs the preview trial: with the preview on, the only credits a sign-up grants are the
+    preview trial, which keeps the trial rules (the trial product only, one registrable domain, the daily cap)
+    until the org buys credits. With the preview off a sign-up grants `org_admin`, whose trial credits cannot fund
+    a scan; the owner can still grant `founder` to an existing member (`owner_set_member_role`)."""
+    from .. import config
+    if config.signup_founder_tester_enabled() and config.trial_preview_enabled():
+        if founder_latch is None or founder_latch():
+            return _FOUNDER_ROLE
+    return "org_admin"
 
 
 def _signup_username(token: str) -> str:
@@ -185,6 +233,126 @@ def _publish_monitoring(base, org_id: str, host: str, data: bytes):
     return final
 
 
+def _member_target(username) -> str:
+    """The CANONICAL member username every member verb uses for all of its checks, its audit row and its
+    owner-signed write. It is the value the org registry itself stores and looks up (`_check_member_username`:
+    surrounding whitespace removed, then the username charset enforced), so a check can never read a different
+    membership than the write changes. Raises ValueError for a value that is no member username."""
+    from ..governor.orgs import _check_member_username
+    return _check_member_username(username)
+
+
+#: How long a member verb waits for the membership critical section before it gives up (nothing written).
+_MEMBERS_LOCK_WAIT_S = 10.0
+
+
+def _members_lock(store):
+    """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
+    ``<spine dir>/<stem>.members.lock`` (a ``*.lock`` transient the backups skip), taken with the same hardened
+    ``locked_file`` as the settle lock. Every member verb that applies the last-admin rule holds it around that
+    check AND its audit and owner-signed write — the customer `grant_member`/`revoke_member` in the cockpit and the
+    owner verbs in the `sigil` CLI — so two processes always decide against the administrator set the other left,
+    never against the same one. Lock order: ``spine_lock`` (in-process) -> this -> the spine's append lock. A
+    bounded wait, then ``LockBusy`` with nothing written; an unusable lock file raises ``OSError`` (fail-closed)."""
+    from pathlib import Path
+    from vigil_integration.live.seam_lock import locked_file
+    raw = getattr(store, "path", None)
+    if not raw:
+        raise ValueError("the membership lock needs a spine store with a path")
+    sp = Path(raw)
+    path = sp.parent / f"{sp.stem or sp.name}.members.lock"
+    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S, create=False, chown_like=path.parent)
+
+
+def _member_admins(orgs, org_id: str) -> "set[str]":
+    """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (per-org predicate on the stored
+    role) — `org_admin` and `founder` today. The last-admin (anti-orphan) rules count these."""
+    return {m.username for m in orgs.memberships(org_id) if role_can(m.role, "manage_members")}
+
+
+def _audit_payload(action: str, *, requester: str, org_id: str, target: str, outcome: str,
+                   reason: str) -> "dict[str, object]":
+    """The secret-free, field-capped core of one `provision.audit` row (shared by the provisioner and the owner
+    membership verbs, so both write the same shape)."""
+    return {"signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
+            "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
+            "reason": str(reason)[:160]}
+
+
+def _owner_membership_audit(store, action: str, *, org_id: str, target: str, role: str, reason: str) -> None:
+    """A CRITICAL audit row for an owner membership change, written BEFORE the owner-signed grant: a write failure
+    propagates, so the change fails closed (committed implies audited)."""
+    payload = _audit_payload(action, requester="owner", org_id=org_id, target=target, outcome=f"role={role}",
+                             reason=reason)
+    payload["role"] = str(role)[:32]
+    store.append(kind="event", source="provision", actor="WARDEN", payload=payload)
+
+
+def _fresh_issued_at(orgs, org_id: str, username: str, issued_at: float) -> float:
+    """An issued_at strictly above the member's current grant, so an owner change is never ignored as stale."""
+    cur = next((m.issued_at for m in orgs.memberships(org_id) if m.username == username), None)
+    at = float(issued_at)
+    return at if cur is None or at > cur else math.nextafter(float(cur), math.inf)
+
+
+def owner_set_member_role(store, org_id: str, username: str, role: str, *, reason: str, issued_at: float,
+                          orgs=None, customers=None) -> dict:
+    """OWNER act (`sigil org set-member-role`): owner-sign `username`'s per-org role in `org_id` — any assignable
+    per-org role, `founder` included. This is how a founder's role is granted or changed (customer member
+    management refuses a founder target). Fail-closed: a valid role and username and a non-empty reason are
+    required; the org must be active; the target must be an active customer or a current member of the org; a
+    change that would leave the org with no member holding `manage_members` is refused. A CRITICAL audit row is
+    written before the owner-signed grant. The checks, the audit and the grant run inside the cross-process
+    membership lock (`_members_lock`) that the cockpit's member verbs also hold, so the last-admin rule holds
+    across processes. Returns {org_id, username, role, previous_role, seq}."""
+    from ..governor.customers import CustomerRegistry
+    from ..governor.orgs import OrgRegistry, _check_member_role, _check_org_id
+    oid, u, r = _check_org_id(org_id), _member_target(username), _check_member_role(role)
+    why = str(reason or "").strip()
+    if not why:
+        raise ValueError("a reason is required (it is recorded in the audit)")
+    orgs = orgs if orgs is not None else OrgRegistry(store)
+    customers = customers if customers is not None else CustomerRegistry(store)
+    with spine_lock(store.path), _members_lock(store):
+        if orgs.org(oid) is None:
+            raise ValueError(f"no active org {oid!r}")
+        prev = orgs.membership_role(u, oid)
+        if prev is None and customers.customer(u) is None:
+            raise ValueError("the target is neither an active customer nor a member of this org")
+        if not role_can(r, "manage_members") and _member_admins(orgs, oid) == {u}:
+            raise ValueError("refused: the org would have no administrator left (grant another admin first)")
+        at = _fresh_issued_at(orgs, oid, u, issued_at)
+        _owner_membership_audit(store, "owner_set_member_role", org_id=oid, target=u, role=r, reason=why)
+        seq = orgs.grant_membership(oid, u, r, issued_at=at)
+    return {"org_id": oid, "username": u, "role": r, "previous_role": prev, "seq": seq}
+
+
+def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Optional[str]" = None,
+                          orgs=None) -> dict:
+    """OWNER act (`sigil org demote-founders`): re-grant `org_admin` to every ACTIVE `founder` membership — in one
+    org, or in every active org. Idempotent: a second run finds none. Run it before rolling back to a build that
+    has no `founder` role (such a build gives the role no permission, so a founder-only org would have no
+    administrator there). Each change writes a CRITICAL audit row before its owner-signed grant, inside the
+    cross-process membership lock (`_members_lock`). Returns counts only: {demoted, orgs}."""
+    from ..governor.orgs import OrgRegistry, _check_org_id
+    why = str(reason or "").strip()
+    if not why:
+        raise ValueError("a reason is required (it is recorded in the audit)")
+    oid = _check_org_id(org_id) if org_id is not None else None
+    orgs = orgs if orgs is not None else OrgRegistry(store)
+    with spine_lock(store.path), _members_lock(store):
+        if oid is not None and orgs.org(oid) is None:
+            raise ValueError(f"no active org {oid!r}")
+        founders = [m for m in orgs.memberships(oid)
+                    if m.role == _FOUNDER_ROLE and orgs.org(m.org_id) is not None]
+        for m in founders:
+            at = _fresh_issued_at(orgs, m.org_id, m.username, issued_at)
+            _owner_membership_audit(store, "owner_demote_founder", org_id=m.org_id, target=m.username,
+                                    role="org_admin", reason=why)
+            orgs.grant_membership(m.org_id, m.username, "org_admin", issued_at=at)
+    return {"demoted": len(founders), "orgs": len({m.org_id for m in founders})}
+
+
 class Provisioner:
     """The owner-signed signing service. Registries + ledgers are INJECTED (the registries carry the owner
     key; the edge never constructs this). `expose_dev_tokens` is a DEV-ONLY escape hatch that returns the
@@ -195,13 +363,19 @@ class Provisioner:
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
-                 trial_ip_limiter=None,
+                 trial_ip_limiter=None, email_codes=None, email_code_limiter=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
         self.orgs = orgs
         self.wallet = wallet
         self.email_tokens = email_tokens
+        # The 6-digit email codes (an EmailCodeLedger) sent beside the token. None ⇒ off: the emails carry only the
+        # token, exactly as before, and the code confirmations refuse. `email_code_limiter` (a LoginRateLimiter) bounds
+        # wrong codes per email+purpose ACROSS re-sent codes (each code also dies at its own 5th wrong code); the
+        # per-IP leg uses `rate_limiter`.
+        self.email_codes = email_codes
+        self.email_code_limiter = email_code_limiter
         self.rate_limiter = rate_limiter
         # Slice E2a/E2b — the owner-signed customer-credential registry (the (iss,sub) / passkey substrate)
         # and the Google-OIDC identity provider. `customer_credentials` is wired whenever the provisioner is
@@ -281,7 +455,7 @@ class Provisioner:
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
-               tx_ref: str = "", expires_at: float = 0.0) -> None:
+               tx_ref: str = "", expires_at: float = 0.0, role: str = "") -> None:
         """Append one secret-free, field-capped `provision.audit` spine event linking an edge request to the
         owner-signed mint it triggered (the principal's tamper-evident edge→mint audit).
 
@@ -291,10 +465,10 @@ class Provisioner:
         the transaction lock, before the signup commit marker, so a committed signup is always audited.
         Only NON-critical telemetry (`critical=False`, e.g. a login outcome) swallows a write failure,
         following a separate availability policy."""
-        payload: "dict[str, object]" = {
-            "signal": "provision.audit", "action": str(action)[:48], "requester": str(requester)[:64],
-            "org_id": str(org_id)[:64], "target": str(target)[:64], "outcome": str(outcome)[:32],
-            "reason": str(reason)[:160]}
+        payload = _audit_payload(action, requester=requester, org_id=org_id, target=target, outcome=outcome,
+                                 reason=reason)
+        if role:
+            payload["role"] = str(role)[:32]        # the per-org role a sign-up or owner membership change granted
         if tx_ref:
             payload["tx_ref"] = str(tx_ref)[:128]   # the processor reference this audit row is about (checkout)
         if expires_at:
@@ -346,11 +520,24 @@ class Provisioner:
             raise ProvisionRateLimited(locked)
         self.member_limiter.record_failure(f"member:org:{org_id}", now=now)
 
-    def _org_admin_usernames(self, org_id: str) -> "set[str]":
-        """The usernames holding an ACTIVE `org_admin` membership in `org_id` (resolved LIVE from the
-        membership fold). The basis for last-admin protection: an org must never be left with zero admins, or
-        nobody could ever manage its members/billing again (an un-governable, orphaned tenant)."""
-        return {m.username for m in self.orgs.memberships(org_id) if m.role == "org_admin"}
+    def _member_admins(self, org_id: str) -> "set[str]":
+        """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (resolved LIVE from the
+        membership fold) — `org_admin` and `founder` today. The basis for last-admin protection: an org must never
+        be left with zero admins, or nobody could ever manage its members/billing again (an un-governable,
+        orphaned tenant)."""
+        return _member_admins(self.orgs, org_id)
+
+    def _latch_refusal(self, name: str) -> "Optional[str]":
+        """The owner's customer latch ``name`` (``governor.customer_latch``), read fresh from the spine (an off-switch
+        is honoured at once, no restart; a read that fails refuses): None when it is on, else the customer-facing
+        reason. Consulted only before a NEW sign-up, checkout, trial grant or trial scan."""
+        from ..governor.customer_latch import refusal
+        return refusal(self.store, name, trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None))
+
+    def _founder_latch_open(self) -> bool:
+        """The owner's ``founder_tester`` latch, read fresh (fail-closed: a read that fails answers OFF, so the
+        sign-up grants `org_admin`). Consulted only by `_signup_role` when the environment allows a founder."""
+        return self._latch_refusal("founder_tester") is None
 
     def _grant_signup_trial(self, org_id: str, email: str, *, source_ref: str, ip: str = "") -> str:
         """The sign-up trial grant. Caller holds the lock; runs BEFORE the audit and the commit marker, and every
@@ -369,6 +556,9 @@ class Provisioner:
         if not config.trial_preview_enabled():
             if self.wallet.has_grant_entry(org_id, preview):
                 return "granted"
+            # the owner's `trial` latch withholds a NEW trial; a grant this sign-up already made stands
+            if not self.wallet.has_grant_entry(org_id, legacy) and self._latch_refusal("trial") is not None:
+                return self._trial_withheld(org_id, "paused")
             self.wallet.grant(org_id, self.trial_credits, "trial", entry_id=legacy, source_ref=source_ref,
                               issued_at=self._next_issued())
             return "granted"
@@ -389,6 +579,8 @@ class Provisioner:
             return self._trial_withheld(org_id, "mailbox_claimed")
         ip_key = None
         if holder is None:
+            if self._latch_refusal("trial") is not None:        # the owner's `trial` latch: no NEW trial claim
+                return self._trial_withheld(org_id, "paused")
             # S3c gates run only for a NEW claim. A mailbox this org already claimed is a retry of a sign-up that
             # stopped between its claim and its grant: it resumes to the grant, whatever the list or the per-IP
             # count says now (re-running them could strand the claim with no trial).
@@ -422,6 +614,9 @@ class Provisioner:
         """Phase 1: rate-limit, then issue a single-use verify token and send it. Mints NOTHING yet (no
         account/org/trial), so a flood of requests cannot farm trial credits — only a VERIFIED email in
         phase 2 does. Never reveals whether the email already exists."""
+        paused = self._latch_refusal("customer_signup")    # the owner's latch: no NEW sign-up is started
+        if paused is not None:
+            raise ProvisionDenied(paused)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
@@ -436,11 +631,22 @@ class Provisioner:
                     raise ProvisionRateLimited(locked)
                 self.signup_email_limiter.record_failure(mkey, now=t)
         token = self.email_tokens.issue(email_l, PURPOSE_VERIFY, now=t) if email_l else None
-        sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email",
-                                                      f"Confirm: token {token}") if token else False
-        out = {"status": "verification_sent"}          # same response whether or not the email exists
+        code = None
+        if token and self.email_codes is not None:
+            # the code is bound to the ids THIS token derives, so the code and the token complete the same sign-up
+            # (a crash half-way through one is finished by either); the derived ids are not secrets
+            code = self.email_codes.issue(email_l, PURPOSE_VERIFY, now=t,
+                                          bind={"u": _signup_username(token), "o": _signup_org_id(token)})
+        body = (_SIGNUP_CODE_EMAIL.format(code=format_code(code), token=token) if code
+                else f"Confirm: token {token}")
+        sent = bool(token) and self.email_sender.send(email_l, "Verify your VIGIL email", body) if token else False
+        out: "dict[str, object]" = {"status": "verification_sent"}   # same response whether or not the email exists
+        if self.email_codes is not None:
+            out["code"] = True                         # the deployment sends codes (the same answer for every request)
         if token and self.expose_dev_tokens and not sent:
             out["dev_token"] = token                   # DEV ONLY (no real sender) — never populated in prod
+            if code:
+                out["dev_code"] = code
         return out
 
     def confirm_signup(self, token: str, *, password: str, org_name: str, ip: str = "",
@@ -463,7 +669,8 @@ class Provisioner:
             any point before the consume leaves the token valid; the next attempt re-derives the same ids,
             re-applies every (idempotent) mutation, re-audits, and consumes. A crash AFTER the consume leaves
             a fully-committed, audited signup.
-        The role is SERVER-set to `org_admin`; the org_id/username are SERVER-derived (never client values);
+        The role is SERVER-set (`_signup_role`: `org_admin`, or `founder` while the founder flag is on, read at
+        the committing attempt); the org_id/username are SERVER-derived (never client values);
         the trial amount is a server constant granted ONLY now (post-verification, anti-Sybil) and bounded by
         the optional GLOBAL signup cap (anti-farming). A DIFFERENT token for an already-registered email
         derives a different username, so the by-email collision check refuses it (no second account)."""
@@ -472,7 +679,65 @@ class Provisioner:
         email = self.email_tokens.peek(tok, PURPOSE_VERIFY, now=t)   # validate WITHOUT consuming (commit-marker)
         if not email:
             raise ProvisionDenied("invalid or expired verification token")
-        username, org_id = _signup_username(tok), _signup_org_id(tok)
+        return self._signup_commit(email, _signup_username(tok), _signup_org_id(tok), password=password,
+                                   org_name=org_name, ip=ip, t=t,
+                                   commit=lambda: self.email_tokens.consume(tok, PURPOSE_VERIFY, now=t))
+
+    def confirm_signup_code(self, email: str, code: str, *, password: str, org_name: str, ip: str = "",
+                            now: "Optional[float]" = None) -> dict:
+        """Phase 2 with the 6-digit code from the verification email instead of its token (the installed app types
+        the code). The code is checked WITHOUT being consumed (wrong codes count: 5 per email, then it is gone; plus
+        the per-IP limit), then the SAME commit-marker transaction runs over the ids bound to the code at issue —
+        the ids the email's token derives — and consuming the code is the commit marker."""
+        t = self._now() if now is None else float(now)
+        email_l, bind = self._code_check(email, PURPOSE_VERIFY, code, ip=ip, t=t, consume=False)
+        username, org_id = str(bind.get("u") or ""), str(bind.get("o") or "")
+        if not username or not org_id:
+            raise ProvisionDenied("invalid or expired code")
+        codes = self.email_codes
+        return self._signup_commit(email_l, username, org_id, password=password, org_name=org_name, ip=ip, t=t,
+                                   commit=lambda: codes.consume_code(email_l, PURPOSE_VERIFY))
+
+    def _code_check(self, email: str, purpose: str, code, *, ip: str, t: float, consume: bool) -> "tuple[str, dict]":
+        """Check a typed email code. EVERY attempt is counted BEFORE the code is hashed, in one atomic step per leg
+        (`LoginRateLimiter.admit`, under the limiter's flock, across threads and processes): per caller IP
+        (`rate_limiter`) and per email+purpose (`email_code_limiter`, 5 an hour across re-sent codes) — so no burst
+        of concurrent guesses gets more evaluations than the limit, and a locked leg refuses before any hash. Both
+        legs count whether or not the address has a live code: the answer (and the lock) never hint whether it has
+        an account. A wrong, malformed, expired or unknown code is one generic refusal. Returns (email, bound
+        values)."""
+        if self.email_codes is None:
+            raise ProvisionError("email codes are not enabled on this deployment")
+        from .oidc_handoff import ip_rate_key           # the per-IP leg buckets IPv6 by /64 (one subscriber range)
+        email_l = str(email or "").strip().lower()
+        ikey, ekey = f"code:ip:{ip_rate_key(ip)}", f"code:{purpose}:{email_l}"
+        wait = self.rate_limiter.admit(ikey, now=t)
+        if wait is not None:
+            raise ProvisionRateLimited(wait)
+        if self.email_code_limiter is not None:
+            wait = self.email_code_limiter.admit(ekey, now=t)
+            if wait is not None:
+                raise ProvisionRateLimited(wait)
+        res = self.email_codes.check(email_l, purpose, code, consume=consume, now=t) if email_l else None
+        if isinstance(res, CodeOk):
+            return email_l, res.bind
+        if isinstance(res, CodeBlocked):
+            # Cumulative hard ceiling reached: code entry for this (email, purpose) is disabled until the email
+            # LINK (the token) is used. A distinct message guides the person there; it reveals only that many wrong
+            # codes were entered for this address (which the attacker who entered them already knows), not whether
+            # an account exists — a sign-up code is issued for any address, and the recover path's existence signal
+            # predates codes.
+            self._audit(f"{purpose}_code", target=email_l, outcome="blocked")
+            raise ProvisionDenied("too many incorrect codes were entered for this email; "
+                                  "use the link in the email instead")
+        self._audit(f"{purpose}_code", target=email_l, outcome="denied")
+        raise ProvisionDenied("invalid or expired code")
+
+    def _signup_commit(self, email: str, username: str, org_id: str, *, password: str, org_name: str, ip: str,
+                       t: float, commit) -> dict:
+        """The owner-signed sign-up transaction for a verified mailbox (see confirm_signup): idempotent mints over
+        the deterministic `username`/`org_id`, the critical audit, then `commit()` (consume the token or the code —
+        the commit marker), then every other token and code for the email is dropped."""
         # NH-2: validate EVERY client-supplied input BEFORE the first owner-signed append. Otherwise an
         # invalid org_name (too long / control chars) would raise inside create_org AFTER customers.create
         # has already minted the account+email binding — a deterministic partial commit that squats the
@@ -493,21 +758,29 @@ class Provisioner:
                 # a DIFFERENT signup already owns this email (not an idempotent retry of THIS one) → refuse
                 raise ProvisionDenied("an account already exists for this email")
             if existing is None:                            # first attempt — mint the account at the fixed id
+                # the owner's `customer_signup` latch refuses a NEW sign-up (the token stays valid for later); a
+                # retry finishing a sign-up whose account already exists is never refused
+                paused = self._latch_refusal("customer_signup")
+                if paused is not None:
+                    raise ProvisionDenied(paused)
                 self.customers.create(email, password=password, username=username,
                                       issued_at=self._next_issued())
             # idempotent re-targets: LWW on the deterministic org_id; wallet dedups on the deterministic entry_id
             self.orgs.create_org(org_id, str(org_name or email), owner=username, issued_at=self._next_issued())
-            self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
+            role = _signup_role(self._founder_latch_open)
+            self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
             trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
-                        critical=True)
-            # COMMIT MARKER — consume the token LAST (single-use); a replay now finds it already consumed.
-            self.email_tokens.consume(tok, PURPOSE_VERIFY, now=t)
+                        role=role, critical=True)
+            # COMMIT MARKER — consume the token (or the code) LAST (single-use); a replay now finds it consumed.
+            commit()
             if self.signup_cap_limiter is not None:         # count this signup toward the cap (post-commit)
                 self.signup_cap_limiter.record_failure("signup:global", now=t)
         self.email_tokens.revoke_for_email(email)      # drop any other outstanding tokens for this email
+        if self.email_codes is not None:
+            self.email_codes.revoke_for_email(email)   # ... and its codes: one sign-up, by the token or the code
         out = {"username": username, "org_id": org_id}
         if trial == "unavailable":
             out["trial"] = "unavailable"                # generic: never says which limit applied
@@ -591,7 +864,9 @@ class Provisioner:
             explicit in-session verified link, a later slice). The binding is `(iss, sub)`, never the email.
 
         Then the SHARED `finish_login` tail → {username, orgs} the keyless edge mints a CUSTOMER cookie from
-        (never an operator bearer; `CustomerPrincipal` carries no global role). Fail-closed when customer
+        (never an operator bearer; `CustomerPrincipal` carries no global role), plus `email`, the verified Google
+        address, which the installed-app hand-off page shows in the browser that just signed in with it (never
+        used to resolve or mint anything). Fail-closed when customer
         Google sign-in is not enabled/configured (`oidc_provider is None`). The check-then-provision is atomic
         under the spine lock, so two concurrent first-sign-ins of the same Google account mint exactly one
         customer + trial."""
@@ -616,6 +891,7 @@ class Provisioner:
                 self._link_or_provision_federated(identity, now=t, ip=ip)
         result = self.finish_login(identity)                # re-resolves by (iss,sub) live; role-free tail
         self._audit("oidc_login", requester=result["username"], target=result["username"], outcome="ok")
+        result["email"] = str(identity.email or "")          # display only (the hand-off page names the account)
         return result
 
     def _link_or_provision_federated(self, identity: CustomerIdentity, *, now: float, ip: str = "") -> str:
@@ -640,6 +916,12 @@ class Provisioner:
                 self._audit("oidc_login", target=email, outcome="email_collision")
                 raise ProvisionDenied(
                     "an account already exists for this email; sign in with your password, then link Google")
+        # the owner's `customer_signup` latch refuses a NEW federated customer; a retry finishing this identity's own
+        # deterministic account (a crash between its mints) is never refused
+        if self.customers.customer(username) is None:
+            paused = self._latch_refusal("customer_signup")
+            if paused is not None:
+                raise ProvisionDenied(paused)
         # GLOBAL signup cap (anti-trial-farming) — the SAME ceiling email signup uses, checked under the lock.
         if self.signup_cap_limiter is not None:
             capped = self.signup_cap_limiter.locked("signup:global", now=now)
@@ -652,13 +934,14 @@ class Provisioner:
             self.customers.create(email or f"{username}@google-oidc.local", password=None, username=username,
                                   issued_at=self._next_issued())
         self.orgs.create_org(org_id, email or username, owner=username, issued_at=self._next_issued())
-        self.orgs.grant_membership(org_id, username, "org_admin", issued_at=self._next_issued())
+        role = _signup_role(self._founder_latch_open)
+        self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
         self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
         self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created-google",
-                    critical=True)
+                    role=role, critical=True)
         if self.signup_cap_limiter is not None:             # count this signup toward the cap (post-commit)
             self.signup_cap_limiter.record_failure("signup:global", now=now)
         return username
@@ -825,13 +1108,20 @@ class Provisioner:
         email_l = str(email or "").strip().lower()
         self._rate_guard(f"recover:ip:{ip}", f"recover:email:{email_l}", now=t)
         self.rate_limiter.record_failure(f"recover:ip:{ip}", now=t)
-        out = {"status": "recovery_sent"}
+        out: "dict[str, object]" = {"status": "recovery_sent"}
+        if self.email_codes is not None:
+            out["code"] = True                         # the deployment sends codes (the same answer for every email)
         if email_l and self.customers.by_email(email_l) is not None:
             token = self.email_tokens.issue(email_l, PURPOSE_RECOVER, now=t)
-            sent = bool(token) and self.email_sender.send(email_l, "Reset your VIGIL password",
-                                                          f"Reset: token {token}")
+            code = (self.email_codes.issue(email_l, PURPOSE_RECOVER, now=t)
+                    if token and self.email_codes is not None else None)
+            body = (_RECOVER_CODE_EMAIL.format(code=format_code(code), token=token) if code
+                    else f"Reset: token {token}")
+            sent = bool(token) and self.email_sender.send(email_l, "Reset your VIGIL password", body)
             if token and self.expose_dev_tokens and not sent:
                 out["dev_token"] = token               # DEV ONLY
+                if code:
+                    out["dev_code"] = code
         return out
 
     def confirm_recover(self, token: str, *, new_password: str, now: "Optional[float]" = None) -> dict:
@@ -846,9 +1136,30 @@ class Provisioner:
         on that return before completing the response (wired in the E1 HTTP transport). We also drop every
         outstanding verify/recover token for the email here, so no sibling token survives the reset."""
         t = self._now() if now is None else float(now)
+        from ..governor.accounts import check_password_policy
+        check_password_policy(new_password)            # a refused password must not spend the token
         email = self.email_tokens.consume(str(token or ""), PURPOSE_RECOVER, now=t)
         if not email:
             raise ProvisionDenied("invalid or expired recovery token")
+        return self._recover_commit(email, new_password)
+
+    def confirm_recover_code(self, email: str, code: str, *, new_password: str, ip: str = "",
+                             now: "Optional[float]" = None) -> dict:
+        """The password reset with the 6-digit code from the reset email instead of its token. The new password is
+        checked first (a refused one does not spend the code), then the code is checked and consumed in one step
+        (single use; wrong codes count: 5 per email, then it is gone; plus the per-IP limit), then the same
+        owner-signed reset and session-revocation contract as confirm_recover."""
+        t = self._now() if now is None else float(now)
+        if self.email_codes is None:
+            raise ProvisionError("email codes are not enabled on this deployment")
+        from ..governor.accounts import check_password_policy
+        check_password_policy(new_password)
+        email_l, _bind = self._code_check(email, PURPOSE_RECOVER, code, ip=ip, t=t, consume=True)
+        return self._recover_commit(email_l, new_password)
+
+    def _recover_commit(self, email: str, new_password: str) -> dict:
+        """The owner-signed reset for a mailbox already proven (token or code consumed), then every other token and
+        code for the email is dropped; the edge revokes the account's sessions on the answer."""
         with self._lock:
             acct = self.customers.by_email(email)
             if acct is None:
@@ -857,6 +1168,8 @@ class Provisioner:
             self._audit("recover", requester=acct.username, target=acct.username, outcome="password_reset",
                         critical=True)
         self.email_tokens.revoke_for_email(email)      # no sibling verify/recover token survives the reset
+        if self.email_codes is not None:
+            self.email_codes.revoke_for_email(email)   # ... nor any code
         return {"username": acct.username, "sessions_must_revoke": True}
 
     # -- member management (the milestone: an org_admin manages THEIR org) --------------------------
@@ -871,12 +1184,20 @@ class Provisioner:
         the HTTP edge binds it from the `vigil_customer_session` cookie, NEVER a client-supplied body field —
         so an attacker cannot name another admin's username to borrow authority; (TOCTOU) the authority check
         runs INSIDE the transaction lock, immediately before the owner-signs, so a concurrently-revoked admin
-        cannot sign through a stale check; the target must be a real active customer; a change that would
-        orphan the org (strip its last `org_admin`) is refused; the op is rate-limited per org."""
+        cannot sign through a stale check, and the whole check-then-write also holds the cross-process membership
+        lock (`_members_lock`) the owner verbs take; the target must be a real active customer; a change that would
+        orphan the org (leave no member holding `manage_members`) is refused; the op is rate-limited per org.
+        A target whose CURRENT role is `founder` is refused (the founder included, on themself): changing a
+        founder's role is an owner act (`owner_set_member_role`).
+
+        The target is canonicalised ONCE, before anything else (`_member_target`), and only that canonical
+        username is used afterwards — by the founder check, the customer lookup, the last-admin rule, the audit
+        and the owner-signed grant — so every check reads the exact membership the grant writes."""
         t = self._now() if now is None else float(now)
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
-        with self._lock:
+        member_username = _member_target(member_username)
+        with self._lock, _members_lock(self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
@@ -886,9 +1207,14 @@ class Provisioner:
             # P6: meter AUTHORIZED churn only — the rate guard records AFTER admit_customer, so a non-admin
             # cannot burn the per-org member budget and lock the real admin out (the limiter's finding).
             self._member_rate_guard(requester_org_id, now=t)
+            if self.orgs.membership_role(member_username, requester_org_id) == _FOUNDER_ROLE:
+                self._audit("grant_member", requester=requester, org_id=requester_org_id,
+                            target=member_username, outcome="denied", reason="founder_owner_only")
+                raise ProvisionDenied("the founder's role can only be changed by the service owner")
             if self.customers.customer(member_username) is None:        # never seat an unknown / foreign id
                 raise ProvisionDenied("target is not an active customer account")
-            if role != "org_admin" and self._org_admin_usernames(requester_org_id) == {member_username}:
+            if (not role_can(role, "manage_members")
+                    and self._member_admins(requester_org_id) == {member_username}):
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
             # NH-3: durable audit BEFORE the owner-signed mutation — a critical-audit store failure then fails
             # CLOSED with no membership change (committed⟹audited), mirroring the signup audit-before-commit.
@@ -907,12 +1233,18 @@ class Provisioner:
 
         Hardening (second security review): `requester` is the server-authenticated session principal (never
         a client field — Finding D); the authority check is INSIDE the lock (no TOCTOU with a concurrent
-        revoke of the requester's own admin membership); and the org's SOLE `org_admin` cannot be revoked
-        (anti-orphan — the tenant must retain at least one administrator)."""
+        revoke of the requester's own admin membership), and the check-then-write also holds the cross-process
+        membership lock (`_members_lock`) the owner verbs take; the org's SOLE administrator (member holding
+        `manage_members`) cannot be revoked (anti-orphan — the tenant must retain at least one administrator);
+        and a `founder` membership is never revoked here (the founder included, on themself): that is an
+        owner act.
+
+        The target is canonicalised ONCE, before any audit (`_member_target`), and only that canonical username
+        is used afterwards — by the founder check, the last-admin rule, the audit and the owner-signed revoke —
+        so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
-        from ..governor.orgs import _check_member_username
-        _check_member_username(member_username)          # NH-3 prep: validate target shape before any audit
-        with self._lock:
+        member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
+        with self._lock, _members_lock(self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
@@ -920,7 +1252,11 @@ class Provisioner:
                 raise ProvisionDenied("requester is not an administrator of this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
             self._member_rate_guard(requester_org_id, now=t)   # P6: meter AUTHORIZED churn only (after admit)
-            admins = self._org_admin_usernames(requester_org_id)
+            if self.orgs.membership_role(member_username, requester_org_id) == _FOUNDER_ROLE:
+                self._audit("revoke_member", requester=requester, org_id=requester_org_id,
+                            target=member_username, outcome="denied", reason="founder_owner_only")
+                raise ProvisionDenied("the founder can only be removed by the service owner")
+            admins = self._member_admins(requester_org_id)
             if member_username in admins and len(admins) <= 1:
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
             # NH-3: durable critical audit BEFORE the owner-signed revoke (fail-closed; committed⟹audited).
@@ -1041,6 +1377,9 @@ class Provisioner:
         from ..governor.asset_ownership import AssetOwnershipRegistry
         from ..governor.registrable_domain import TrialDomainRefused, load_rules, same_domain, trial_domain
         from ..governor.trial_claim import key_digest
+        paused = self._latch_refusal("trial")              # the owner's `trial` latch: no NEW trial scan
+        if paused is not None:
+            self._trial_launch_refuse(requester, org_id, host, "trial_paused", paused)
         product = config.trial_product_id()
         if not product or self.trial_claims is None or self.trial_launch_limiter is None:
             self._trial_launch_refuse(requester, org_id, host, "trial_not_configured",
@@ -1239,6 +1578,9 @@ class Provisioner:
         from .. import config
         if not config.customer_checkout_enabled():
             raise ProvisionDenied("customer checkout is not enabled")
+        paused = self._latch_refusal("checkout")          # the owner's latch narrows the flag: no NEW checkout
+        if paused is not None:
+            raise ProvisionDenied(paused)
         t = self._now() if now is None else float(now)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
@@ -1354,15 +1696,20 @@ class Provisioner:
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
         """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
-        admit_customer(run_engagement) AND the lease's org MUST match the requester's session org
-        (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The refund is bound to the
-        owner-signed lease, not a wire amount. The METERED settle (consumed > 0) is driven by offense
-        completion, not this customer path."""
+        admit_customer(run_engagement) OR admit_customer(manage_billing), AND the lease's org MUST match the
+        requester's session org (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The
+        refund is bound to the owner-signed lease, not a wire amount. The METERED settle (consumed > 0) is driven
+        by offense completion, not this customer path.
+
+        Why billing authority suffices: a cancel only ever releases a reserved, NOT started launch back to the
+        org's own balance (a started launch is refused below), so it authorises no traffic. An org admin — and a
+        founder while founder testing is switched off, or after the owner changed its role — can therefore always
+        release a reservation: credits never stay held because nobody left in the org may run tests."""
         t = self._now() if now is None else float(now)
-        from .launch_gate import LaunchGate
+        from .launch_gate import PLAN_DEBIT_PRUNED, LaunchGate
         with self._lock:
-            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
-                                            permission="run_engagement"):
+            if not any(self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission=perm)
+                       for perm in ("run_engagement", "manage_billing")):
                 self._audit("launch_cancel", requester=requester, org_id=requester_org_id, outcome="denied")
                 raise ProvisionDenied("requester may not manage launches for this org")
             self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
@@ -1401,6 +1748,23 @@ class Provisioner:
                 "this launch has been started and must settle through its completion; it cannot be cancelled")
         r = gate.settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
                                expect_org_id=requester_org_id, refuse_if=_started, basis="cancel")
+        if r.get("refused") == PLAN_DEBIT_PRUNED:
+            # HELD for the owner (nothing moved): the settle cannot tell this reservation's plan share from its wallet
+            # share. The gate has named it in the held-settle alarm `vigil doctor` reports; the customer is told the
+            # truth (not "started"), and the audit is critical. The cancel marker goes on the spine first: the
+            # customer was told this reservation is cancelled, so it must never start afterwards (publish_lease reads
+            # the marker under the settle lock). A marker that cannot be written fails the cancel, to be retried.
+            from ..governor.launch_settlement import LAUNCH_CANCEL_HELD_SIGNAL
+            try:
+                self.store.append(kind="event", source="provision", actor="WARDEN",
+                                  payload={"signal": LAUNCH_CANCEL_HELD_SIGNAL, "org_id": str(_cdoc.org_id),
+                                           "slug": str(_cdoc.engagement_slug), "nonce": str(_cdoc.nonce)})
+            except Exception as e:  # noqa: BLE001 — no marker, no "cancelled" answer: the customer retries
+                raise ProvisionDenied("launch cancel could not be recorded (retry)") from e
+            self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                        target=str(_cdoc.engagement_slug), outcome="refund_held", reason=PLAN_DEBIT_PRUNED,
+                        critical=True)
+            raise ProvisionDenied(LAUNCH_REFUND_HELD_DETAIL)
         if r.get("refused"):
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refused_started")
@@ -1976,7 +2340,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
     from ..governor.wallet import WalletRegistry
-    from .email_channel import EmailTokenLedger
+    from .email_channel import EmailCodeLedger, EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
     from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs, stripe_billing_spool_dirs
     from .signcount import SignCountLedger
@@ -2009,6 +2373,12 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         wallet=WalletRegistry(store),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
+        # the 6-digit email codes, OFF unless VIGIL_CUSTOMER_EMAIL_CODE: 5 wrong codes per email+purpose per hour
+        # across re-sent codes, the lock doubling up to a day (each code also dies at its own 5th wrong code)
+        email_codes=EmailCodeLedger(config.EMAIL_CODES_DIR) if config.customer_email_code_enabled() else None,
+        email_code_limiter=(LoginRateLimiter(config.EMAIL_CODE_RATELIMIT_DIR, max_fails=5, window_s=3600.0,
+                                             base_lock_s=3600.0, max_lock_s=86400.0)
+                            if config.customer_email_code_enabled() else None),
         # the GLOBAL per-day signup ceiling (anti-trial-farming) and the per-org member-management ceiling —
         # separate limiters under disjoint marker dirs (never couple to the login limiter). The signup cap's
         # base_lock_s EQUALS its window (86400s): on the CAP-th committed signup the limiter trips and stays

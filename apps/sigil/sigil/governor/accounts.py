@@ -59,12 +59,19 @@ from ..reuse.crypto import load_public_key
 assert_no_offense()
 
 # ONE source of truth for the role→permission vocabulary. `viewer < analyst < operator < owner`, the
-# cumulative permission sets, and `role_can` live in `vigil_core.rbac` — a pure, namespace-clean module
-# BOTH trust domains import (the offense console per-action gate calls the SAME `role_can`). We RE-EXPORT
+# cumulative permission sets, and the predicates live in `vigil_core.rbac` — a pure, namespace-clean module
+# BOTH trust domains import (the offense console per-action gate calls the SAME predicate). We RE-EXPORT
 # them here so every existing sovereign caller (`from ..governor.accounts import role_can/ROLES/PERMISSIONS`)
 # keeps working unchanged; `PERMISSION_BY_ACTION` below stays sovereign-local (it maps the sovereign action
 # surface). vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
-from vigil_core.rbac import PERMISSIONS, ROLES, role_can  # noqa: E402,F401  (re-exported)
+#
+# `role_can` HERE is `rbac.role_can_global`: every caller of this name checks an ACCOUNT principal's role (a
+# GLOBAL role), so only the four global roles carry a permission — a per-org role name (`org_admin`, ...)
+# presented as an account role carries none. A PER-ORG membership check must use `vigil_core.rbac.role_can`
+# through the org fold (`OrgRegistry.org_role_can` / `admit_customer`), never this name.
+from vigil_core.rbac import PERMISSIONS, ROLES  # noqa: E402,F401  (re-exported)
+from vigil_core.rbac import role_can_global  # noqa: E402,F401  (re-exported)
+from vigil_core.rbac import role_can_global as role_can  # noqa: E402,F401  (re-exported: global-role check)
 
 from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (W9-1 succession-aware owner-key resolver)
@@ -147,13 +154,20 @@ DECOY_PASSWORD_HASH = "scrypt${}${}${}${}${}".format(
     base64.b64encode(b"\x00" * 32).decode("ascii"))
 
 
+def check_password_policy(password: str) -> None:
+    """Raise ValueError unless `password` is acceptable to :func:`hash_password` (a string of at least 8
+    characters). A caller that spends something single-use before setting a password (a reset token or code)
+    checks this FIRST, so a refused password never costs the person their token or code."""
+    if not isinstance(password, str) or len(password) < 8:
+        raise ValueError("password must be a string of at least 8 characters")
+
+
 def hash_password(password: str) -> str:
     """Salted-scrypt hash of a password, as a self-describing ``scrypt$n$r$p$salt_b64$dk_b64`` string. The
     plaintext password is never stored — only this one-way hash reaches the spine. Refuses a password
-    shorter than 8 chars. NOTE: a password is the WEAKER, optional convenience login; the per-user KEYPAIR
-    (S3 ``enroll_pubkey`` + PoP) is the stronger path."""
-    if not isinstance(password, str) or len(password) < 8:
-        raise ValueError("password must be a string of at least 8 characters")
+    shorter than 8 chars (:func:`check_password_policy`). NOTE: a password is the WEAKER, optional convenience
+    login; the per-user KEYPAIR (S3 ``enroll_pubkey`` + PoP) is the stronger path."""
+    check_password_policy(password)
     salt = secrets.token_bytes(16)
     dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P,
                         maxmem=_SCRYPT_MAXMEM, dklen=32)

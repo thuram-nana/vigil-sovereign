@@ -36,12 +36,13 @@ from .authn import check_api_key, load_api_key
 from .guard import LOOPBACK_BIND_HOSTS, check_same_origin
 
 # W16-12 — wire the gated api to the SAME multi-user model as the offense console instead of a second
-# one. `vigil_core.rbac` is the ONE role→permission vocabulary (`role_can`) and offense route→permission
-# map (`offense_perm_for`); `vigil_core.hopauth` is the ONE construction of the proxy→offense role
-# assertion the console verifies. Both are namespace-pure `vigil_core` modules the console already
-# reuses, so importing them here crosses no trust boundary (FATAL-2 holds).
+# one. `vigil_core.rbac` is the ONE role→permission vocabulary (`role_can_global` for a stamped, global
+# role) and offense route→permission map (`offense_perm_for`); `vigil_core.hopauth` is the ONE
+# construction of the proxy→offense role assertion the console verifies. Both are namespace-pure
+# `vigil_core` modules the console already reuses, so importing them here crosses no trust boundary
+# (FATAL-2 holds).
 from vigil_core.hopauth import verify_hop_assertion
-from vigil_core.rbac import offense_perm_for, role_can
+from vigil_core.rbac import offense_perm_for, role_can_global
 
 # Attribution/authorization audit log. INFO by default (quiet — Python's last-resort handler only emits
 # WARNING+), so it stays silent on the operator's terminal unless they configure logging, while every
@@ -153,8 +154,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             a legacy client). Attributed as the on-host operator (``authenticated: False`` — it is not a
             named human, the honest residual).
           * A role assertion that VERIFIES (fresh HMAC under the hop key) → the proxy-resolved per-user
-            principal from the owner-signed accounts spine. Enforce ``role_can(role, offense_perm_for(path))``;
-            an UNMAPPED route ⇒ ``offense_perm_for`` is None ⇒ ``role_can`` False ⇒ DEFAULT-DENY.
+            principal from the owner-signed accounts spine. Enforce
+            ``role_can_global(role, offense_perm_for(path))``; an UNMAPPED route ⇒ ``offense_perm_for`` is
+            None ⇒ DEFAULT-DENY, and a per-org role name (not one of the four global roles) carries nothing.
           * A role assertion PRESENT but INVALID (forged/expired/incomplete, or no hop key to verify it) →
             REFUSE. A forged ``X-VIGIL-Role: owner`` with no valid MAC never lifts the role; the refusal is
             still attributed to the CLAIMED (unverified) principal so it is logged against a name.
@@ -176,7 +178,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         actor = {"principal": principal or "(unnamed)", "role": role,
                  "authenticated": True, "via": "hop"}
         required = offense_perm_for(path)                     # None ⇒ unmapped route ⇒ default-deny
-        if not role_can(role, required):
+        # a stamped role is a GLOBAL account role: only the four global roles carry a permission here
+        if not role_can_global(role, required):
             need = required or "(unmapped route → default-deny)"
             return (False, actor,
                     f"principal {actor['principal']!r} (role {role!r}) lacks required permission {need}")

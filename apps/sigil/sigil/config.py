@@ -99,6 +99,11 @@ CACHE_DIR = SIGIL_HOME / "cache"
 # `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower
 # it — a routine reset cannot roll the durable floor back. See spine/floor.py.
 FLOOR_PATH = SIGIL_HOME / "floor.json"
+# The roll-forward journal of a restore into this home that swaps a hard-pruned unit in, or replaces an interrupted
+# restore (`sigil restore`). It exists only while such a restore is between its first and its last swap: while it
+# does, signed-head verification and signing fail closed and the CLI refuses everything but `sigil restore --resume /
+# --abort` and `sigil doctor`.
+RESTORE_JOURNAL_PATH = SIGIL_HOME / "restore-journal.json"
 # PRICING M1c: the model gateway's per-launch meters (hash-chained JSONL, one per (engagement, nonce)). MONEY data:
 # a run's charge is computed from its meter at settle, so the directory is in every backup.
 MODEL_METER_DIR = SIGIL_HOME / "model_meter"
@@ -170,6 +175,8 @@ def sovereign_provision_base() -> str:
     return os.environ.get("VIGIL_PROVISION_BASE", f"http://127.0.0.1:{COCKPIT_UI_PORT}")
 CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
 EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
+EMAIL_CODES_DIR = _customer / "email_codes"             # the 6-digit codes sent beside them (when enabled)
+EMAIL_CODE_RATELIMIT_DIR = _customer / "email_code_ratelimit"   # wrong codes per email+purpose, across re-sends
 LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers
 TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial grant (never on-the-wire)
 # Anti-farming ceilings on the provisioner's owner-signed mints. The signup cap is a GLOBAL per-rolling-day
@@ -257,6 +264,18 @@ def trial_preview_enabled() -> bool:
     return (os.environ.get("VIGIL_TRIAL_PREVIEW_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def signup_founder_tester_enabled() -> bool:
+    """True iff the founder role is switched on (`VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED` affirmative). OFF by
+    default: both sign-up paths grant `org_admin` exactly as before (billing and members, no testing). ON, together
+    with `trial_preview_enabled()`: they grant `founder` (org_admin plus run_engagement and view_assessments), so
+    the founder can prove a host it controls and scan it; every launch gate still applies. ON with the preview OFF:
+    sign-ups still grant `org_admin` (the founder role needs the rule-bound preview trial). Also the kill switch:
+    while it is OFF, an existing founder membership is admitted as `org_admin` (no testing, billing kept), with no
+    spine write. Read on each request by the provisioner process (the cockpit) from its own environment, which
+    systemd loads from cockpit.env when the service starts: a change applies once the cockpit restarts."""
+    return (os.environ.get("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def trial_ip_limit_enabled() -> bool:
     """True iff the opt-in per-IP soft limit on preview trial grants is ON (`VIGIL_TRIAL_IP_LIMIT_ENABLED`
     affirmative; default OFF)."""
@@ -280,6 +299,16 @@ def customer_checkout_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_ios_install_banner_enabled() -> bool:
+    """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
+    carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
+    off until the owner has signed in with Google inside the installed app on a real iPhone: the sign-in binding
+    cookie is SameSite=Lax, path-scoped and lasts 600 s, and an app installed from Safari may keep a cookie jar of
+    its own. Read when the customer edge starts (it is written into the page), so a change takes effect at the
+    edge's next start."""
+    return (os.environ.get("VIGIL_CUSTOMER_IOS_INSTALL_BANNER") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_plan_checkout_enabled() -> bool:
     """True iff customers may also check out SUBSCRIPTION plans (`VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED`
     affirmative). Effective only together with the base checkout flag (the edge route is absent without it).
@@ -298,6 +327,14 @@ def billing_plan_alarm_enabled() -> bool:
     that are still being billed (CHK-1b red-pen)."""
     return customer_plan_checkout_enabled() or (
         (os.environ.get("VIGIL_BILLING_PLAN_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE)
+
+
+def billing_topup_alarm_enabled() -> bool:
+    """Whether the Flutterwave billing drain QUARANTINES (alarms on) a verified paid TOP-UP it cannot credit at the
+    catalog price — a price not in the catalog, no verified currency, or less than / another currency than the
+    catalog price — instead of archiving it as a no-op (``VIGIL_BILLING_TOPUP_ALARM`` affirmative; default OFF:
+    unchanged). The Stripe drain always alarms. Read by the billing drain process."""
+    return (os.environ.get("VIGIL_BILLING_TOPUP_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_billing_return_url() -> "str | None":
@@ -364,6 +401,20 @@ def tiered_products_enabled() -> bool:
     return (os.environ.get("VIGIL_TIERED_PRODUCTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def _seam_base() -> str:
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
+
+
+def seam_migration_guard_enabled() -> bool:
+    """``VIGIL_SEAM_MIGRATION_GUARD`` — refuse to serve, settle, sweep with ``--apply``, arm an eval grant or provision
+    a monitoring secret while a former seam directory of this host holds launch-seam records the seam lacks (until
+    ``sigil seam migrate --apply`` commits them). DEFAULT OFF in code; the shipped ``sigil-cockpit.service`` and
+    ``vigil-settle-drain.service`` set it to 1, so the seam move and the guard always arrive together. When this
+    environment does not set it, a guarded verb follows the configured seam units' value (``cli._seam_guard_on``)."""
+    return (os.environ.get("VIGIL_SEAM_MIGRATION_GUARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
@@ -371,7 +422,7 @@ def monitoring_publish_dir() -> Path:
     override = (os.environ.get("VIGIL_MONITORING_PUBLISH_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "monitoring_authority"
+    return Path(_seam_base()) / "aegis" / "monitoring_authority"
 
 
 def monitoring_secrets_dir() -> Path:
@@ -381,7 +432,7 @@ def monitoring_secrets_dir() -> Path:
     override = (os.environ.get("VIGIL_MONITORING_SECRETS_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(os.environ.get("VIGIL_BASE_DIR") or ".vigil-live") / "aegis" / "report_secrets"
+    return Path(_seam_base()) / "aegis" / "report_secrets"
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -481,6 +532,17 @@ def settle_spine_record_enabled() -> bool:
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def lease_plan_split_enabled() -> bool:
+    """True iff a prepaid launch lease records, under the owner signature, the plan/wallet split its reserve
+    debited (``plan_reserved`` and ``plan_period_end``), so its settle restores each bucket from the lease itself,
+    whatever the live spine window still holds of the reserve records. OFF by default (``VIGIL_LEASE_PLAN_SPLIT``
+    unset / non-affirmative): leases are minted exactly as before, byte-identical. Read by the process that reserves
+    (the cockpit's provisioner). Turn it on only once the offense plane runs a build that accepts these optional
+    lease fields: an older verifier refuses a lease that carries them (the launch does not run, and its reservation
+    is refunded like any launch that never started). Resolved at call time."""
+    return (os.environ.get("VIGIL_LEASE_PLAN_SPLIT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 #: The default and the bounds of :func:`settle_lock_wait_s` (OWNER DECISION OD-7).
 SETTLE_LOCK_WAIT_DEFAULT_S = 10.0
 _SETTLE_LOCK_WAIT_BOUNDS = (0.1, 120.0)
@@ -526,6 +588,16 @@ def paused_expiry_settle_enabled() -> bool:
     return (os.environ.get("VIGIL_PAUSED_EXPIRY_SETTLE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def pruned_restore_enabled() -> bool:
+    """True iff a backup / restore handles a HARD-PRUNED spine as one verified unit (``SIGIL_PRUNED_RESTORE``
+    affirmative): the backup captures the spine, its head, the floor and the archive as one consistent set and
+    verifies it before writing (manifest schema 4, ``prune_unit``); a restore stages that set, verifies it in a child
+    process scoped to the staged home and only then swaps it in. OFF by default (unset / non-affirmative): a backup
+    is written exactly as before, and a restore of a backup holding a hard-pruned spine is refused before anything
+    is written. Read at call time."""
+    return (os.environ.get("SIGIL_PRUNED_RESTORE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def provision_hop_key() -> str:
     """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
     handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail
@@ -556,6 +628,16 @@ def email_enabled() -> bool:
     default: a dev/sovereign install uses NullEmailSender and surfaces a verify/recover token only on an
     explicit dev flag, NEVER in production."""
     return bool(os.environ.get("SIGIL_EMAIL_HOST", "").strip())
+
+
+def customer_email_code_enabled() -> bool:
+    """True iff the sign-up and password-reset emails also carry a 6-digit code (`VIGIL_CUSTOMER_EMAIL_CODE`
+    affirmative), so a person in the installed app can type it instead of following the email into a browser. OFF by
+    default: the emails carry only the token, exactly as before, and a code confirmation is refused. Read by the
+    customer provisioner (the cockpit process). A code is bound to the email and the purpose, used once, lives 10
+    minutes, and is gone after 5 wrong codes; wrong codes are also limited per email across re-sent codes and per
+    client IP. The token in the same email keeps working."""
+    return (os.environ.get("VIGIL_CUSTOMER_EMAIL_CODE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def email_sender():
@@ -756,6 +838,17 @@ def customer_oidc_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_oidc_handoff_enabled() -> bool:
+    """True iff Google sign-in may complete inside an INSTALLED customer app through the app hand-off
+    (`VIGIL_CUSTOMER_OIDC_HANDOFF` affirmative; ui/oidc_handoff.py). OFF by default. Read by the customer edge only,
+    and only together with `customer_oidc_enabled()`: with it on, an app running standalone (added to a Home Screen)
+    starts Google sign-in with a hand-off challenge, the edge shows a pairing code where the Google sign-in
+    finished, and the app redeems verifier + code for its session. With it off, the edge refuses a hand-off login
+    and the installed app uses the browser flow (which on an iPhone lands the session outside the app). Read when
+    the edge starts (it is written into the page) and on each hand-off request."""
+    return (os.environ.get("VIGIL_CUSTOMER_OIDC_HANDOFF") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def _customer_oidc_base() -> dict:
     """The NON-SECRET customer-OIDC settings (Google-pinned by default, overridable via `VIGIL_CUSTOMER_OIDC_*`).
     NEVER reads the client secret. `username_claim` is fixed to the immutable `sub` — the customer binding is
@@ -929,6 +1022,11 @@ def _redact(name: str, value):
     return _strip_url_credentials(value)
 
 
+def _provider_key_source() -> str:
+    from .provider_key import key_source
+    return key_source()
+
+
 def effective_config() -> dict:
     """The fully-resolved runtime configuration (env → sigil.env → default), secrets REDACTED.
     Re-reads the environment at call time, so it reflects overrides applied after import — this is
@@ -960,6 +1058,10 @@ def effective_config() -> dict:
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
         "ANTHROPIC_API_KEY": "***redacted***" if api_key_set else "",
+        # Where the model gateway's provider key comes from ("ssm" | "env" | ""), and the SSM parameter NAME when
+        # it is SSM (sigil.provider_key: SSM is then the only source). Never the key itself.
+        "MODEL_PROVIDER_SOURCE": _provider_key_source(),
+        "MODEL_PROVIDER_SSM_PARAMETER": (os.environ.get("VIGIL_ANTHROPIC_KEY_SSM_PARAMETER") or "").strip(),
         # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
         # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
         # SECRET name-hint below (and is not placed here at all).

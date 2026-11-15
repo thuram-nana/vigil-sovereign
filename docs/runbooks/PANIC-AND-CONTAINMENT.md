@@ -10,7 +10,7 @@ sidecar units under `infra/systemd/`.
 | Situation | Verb | What it stops |
 |---|---|---|
 | Free the port / restart the UI cleanly | `vigil down` | the `vigil-command` unit **only** — backups/reprove/HA timers keep running |
-| **Incident — stop everything now** | `vigil panic` | every engagement's gate **plus** the command unit **plus every cadence sidecar timer & unit** (with no catch-up replay), then **verifies** it held |
+| **Incident — stop everything now** | `vigil panic` | every engagement's gate **plus** the command unit **plus every cadence sidecar timer & unit** (with no catch-up replay) **plus the sovereign plane and the drains** (edges, phone bridges, cockpit, drain and checkpoint timers), then **verifies** it held |
 
 If in doubt during an incident, run `vigil panic` — it is the whole-surface hard-stop.
 
@@ -56,7 +56,10 @@ What it does, in order (`uiproxy.run_down` → `_contain_service_unit` then `_ki
    - a **clean** `systemctl --user stop` → unlike a raw kill, a clean stop does **not** trigger
      `Restart=`, so the stack stays down.
    - Recursion-safe: when `vigil down` runs as the unit's own `ExecStop` (systemd sets
-     `$SERVICE_RESULT` there), it skips the stop — systemd is already stopping it.
+     `$SERVICE_RESULT` there), it skips the stop — systemd is already stopping it — and it leaves the
+     unit's boot start unchanged: systemd runs `ExecStop` for `systemctl --user stop`, for
+     `systemctl --user restart` and after a crash, so a restart or a crash never removes the boot start.
+     Run `vigil down` from a shell to contain the unit.
    - No-op when `vigil up` was started **by hand** (no unit) or there is no user manager.
 2. **Kill the tracked pids** in `.vigil-live/ui/pids` (SIGTERM → 5 s grace → SIGKILL). Under a managed
    unit this is mop-up (the stop already took them via `KillMode=control-group`); started-by-hand it is
@@ -95,7 +98,10 @@ Stricter than `down`. `_cmd_panic` runs in order:
    pid is killed.
 2. **Contain the whole surface** (`uiproxy.run_panic`):
    1. **Command unit** — same containment as `down` but the unit is additionally **masked**
-      (`systemctl --user mask`): even a manual `systemctl start` is refused until it is unmasked.
+      (`systemctl --user mask`): even a manual `systemctl start` is refused until it is unmasked. A unit
+      FILE in `~/.config/systemd/user` (how GO-LIVE installs it) cannot be masked in place, so panic first
+      moves it aside to `vigil-command.service.panic-aside` in the same directory and then masks; the panic
+      output says when it did.
    2. **Every cadence sidecar** (`_contain_sidecar_units`), in this documented order — the timers that
       reach the target or push data off-host **first**: `vigil-reprove` → `vigil-posture` →
       `vigil-ha-mirror` → `vigil-backup-push` → `vigil-backup` → `vigil-backup-drill` →
@@ -106,11 +112,37 @@ Stricter than `down`. `_cmd_panic` runs in order:
       running oneshot). Then **stop + disable every live `vigil-witness@<port>` instance**
       (`Restart=on-failure`).
    3. **Kill the tracked pids** (as `down`).
-   4. **Verify containment held** (`_verify_sidecar_containment`): re-query `is-active` / `is-enabled`
-      for every timer, service and witness instance. A clean pass prints
-      `containment verified (nothing active or enabled)`; any leak is printed to **stderr** with a
+   4. **The sovereign plane and the drains** (`_contain_sovereign_units`), in this order:
+      - every drain and sovereign **timer** — `vigil-settle-drain`, `vigil-billing-drain`,
+        `vigil-billing-drain-stripe`, `vigil-finding-drain`, `sigil-checkpoint`, `sigil-consolidate` — is stopped,
+        disabled and its `Persistent=` catch-up stamp reset, so no new pass starts;
+      - the **edges** `sigil-customer.service` and `sigil-public.service` (customers then get the nginx
+        maintenance page), every live **phone bridge** `sigil-bridge@<addr>.service`, then
+        `sigil-cockpit.service` **last** (the writer) — each stopped and disabled. A clean stop lets the edges
+        and the cockpit finish the requests they already accepted: each `systemctl stop` waits up to 100 s, longer
+        than any of these units' `TimeoutStopSec` (75 s for the cockpit and the customer edge), so the next unit is
+        stopped only once the previous one is down. A stop still draining after that is reported as **still
+        stopping**, never as a failure;
+      - the checkpoint and consolidate oneshots are stopped. A **drain pass already in flight** (settle, billing,
+        Stripe billing, findings) is **never interrupted**: its service is disabled, and no further pass starts.
+   5. **Wait once for a drain pass in flight** (`await_drains`): after everything else is contained, panic waits
+      for it (at most 90 s) and reports one still running after that bound — it exits on its own.
+   6. **Verify containment held** (`_verify_sidecar_containment`, `_verify_sovereign_containment`): re-query
+      `is-active` / `is-enabled` for every timer, service, witness instance, sovereign unit, bridge and drain. A
+      unit still running (`active`, `activating`, `deactivating` or `reloading`) or still enabled is a leak. A clean
+      pass prints `containment verified (nothing active or enabled)`; any leak is printed to **stderr** with a
       `do NOT assume the system is contained` warning so a partial containment is never silently
       assumed.
+
+   **From the console's PANIC button.** The console starts `vigil panic` in its own session but inside
+   `vigil-command.service`'s cgroup, so stopping that unit (`KillMode=control-group`) ends the panic too. Panic
+   recognises this (`/proc/self/cgroup`): it masks and disables the command unit first, contains the sidecars and
+   the sovereign plane with no drain wait, verifies and reports, and only then stops the command unit (which ends
+   the console, its tracked processes and the panic itself).
+
+   **`vigil fleet kill`** runs this containment for every roster instance with no per-instance drain wait, applies
+   each owner-signed revocation straight after its instance's containment, and waits for the drains once, after
+   the last revocation.
 
 Every step is best-effort and idempotent — one stubborn unit's failure is reported and never aborts the
 rest, because a hard-stop must not be blockable.
@@ -120,8 +152,11 @@ rest, because a hard-stop must not be blockable.
 ```bash
 # 1. clear each engagement's kill-switch when it is safe (a logged, intentional act)
 #    the kill-switch file lives at <CRUCIBLE_ROOT>/framework/v2/.authority/<slug>.halt
-# 2. allow the command unit to run again
+# 2. allow the command unit to run again (put its unit file back if panic moved it aside)
 systemctl --user unmask vigil-command.service
+UD=~/.config/systemd/user
+[ -f "$UD/vigil-command.service.panic-aside" ] && mv "$UD/vigil-command.service.panic-aside" "$UD/vigil-command.service"
+systemctl --user daemon-reload
 systemctl --user enable --now vigil-command.service
 # 3. re-enable ONLY the cadence timers you still want (they were disabled, not masked). Because panic
 #    reset each timer's Persistent= stamp, re-enabling schedules the NEXT run — it does NOT replay the
@@ -131,6 +166,12 @@ systemctl --user enable --now vigil-reprove.timer vigil-posture.timer vigil-ha-m
                                vigil-integrity.timer
 # ... and any witness instances:  systemctl --user enable --now vigil-witness@8801
 systemctl --user list-timers 'vigil-*'    # confirm the next-run times look sane (no immediate burst)
+# 4. bring the sovereign plane back: the cockpit (the writer) first, then the drains, then the edges and bridges
+systemctl --user enable --now sigil-cockpit.service
+systemctl --user enable --now vigil-settle-drain.timer vigil-billing-drain.timer vigil-finding-drain.timer \
+                               sigil-checkpoint.timer sigil-consolidate.timer
+#    (and vigil-billing-drain-stripe.timer where Stripe is set up)
+systemctl --user enable --now sigil-customer.service sigil-public.service sigil-bridge@<addr>.service
 ```
 
 ## Drill — exercise the runbook

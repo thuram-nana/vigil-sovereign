@@ -45,8 +45,9 @@ def _safe_slug(slug: Any) -> str:
 
 def _base_dir() -> str:
     """The cross-plane seam base — the SAME ``VIGIL_BASE_DIR`` the authority seam uses (defaults to the live
-    base), so the lease co-locates with its G0 EngagementAuthority."""
-    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    base), so the lease co-locates with its G0 EngagementAuthority — the ONE seam-base resolver."""
+    from vigil_core.seam_base import resolve_seam_base
+    return resolve_seam_base()
 
 
 def is_customer_slug(slug: Any) -> bool:

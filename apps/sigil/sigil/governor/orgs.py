@@ -82,7 +82,7 @@ assert_no_offense()
 # ONE source of truth for the role vocabulary (`viewer < analyst < operator < owner`, cumulative permission
 # sets, `role_can`), shared by both trust domains. We reuse it verbatim and scope it PER-ORG — we do NOT
 # define a new vocabulary. vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
-from vigil_core.rbac import ROLES, role_can  # noqa: E402
+from vigil_core.rbac import ROLES, role_can, role_can_global  # noqa: E402
 
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
@@ -97,13 +97,19 @@ ORG_SIGNAL = "governor.org"
 MEMBERSHIP_SIGNAL = "governor.org_membership"
 
 # The assignable PER-ORG membership roles. "owner" is the trust-root key-holder, never grantable
-# (single-owner doctrine). The three global-chain roles below owner (viewer / analyst / operator) PLUS the
-# per-org tenant-admin role `org_admin` (Slice E0: billing + member admin for THIS org, never
-# run_engagement/offense_authority — billing-authz != testing-authz). This DELIBERATELY diverges from
-# accounts._ASSIGNABLE_ROLES (the operator plane: viewer/analyst/operator only): `org_admin` is a PER-ORG
-# role, never a global account role, so a customer tenant-admin is an org_admin membership and nothing more.
-# A lockstep test asserts every entry here is a real vigil_core.rbac role (no typo/drift).
-_ASSIGNABLE_ROLES = frozenset(ROLES[:-1]) | {"org_admin"}   # viewer / analyst / operator / org_admin — never "owner"
+# (single-owner doctrine). The three global-chain roles below owner (viewer / analyst / operator) PLUS the two
+# per-org roles: `org_admin` (Slice E0: billing + member admin for THIS org, never run_engagement /
+# offense_authority — billing-authz != testing-authz) and `founder` (org_admin plus run_engagement and
+# view_assessments: the signing-up customer's self-serve scans on hosts it proves; owner-granted only, see
+# vigil_core.rbac). This DELIBERATELY diverges from accounts._ASSIGNABLE_ROLES (the operator plane:
+# viewer/analyst/operator only): both are PER-ORG roles, never global account roles. A lockstep test asserts
+# every entry here is a real vigil_core.rbac role (no typo/drift).
+_ASSIGNABLE_ROLES = frozenset(ROLES[:-1]) | {"org_admin", "founder"}   # never "owner"
+
+# The founder kill switch: while VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED is OFF, a founder membership is ADMITTED as
+# this role (billing and members kept, no testing). Read-time only — no spine record changes.
+_FOUNDER_ROLE = "founder"
+_FOUNDER_FLAG_OFF_ROLE = "org_admin"
 
 # A username charset IDENTICAL to accounts._USERNAME_RE (1-64 chars of [A-Za-z0-9._-], alphanumeric start).
 # Replicated here (not imported) so this module stays independently importable; a lockstep test asserts the
@@ -201,7 +207,7 @@ class Org:
 class Membership:
     org_id: str
     username: str
-    role: str            # one of _ASSIGNABLE_ROLES (viewer/analyst/operator) — never "owner"
+    role: str            # one of _ASSIGNABLE_ROLES (viewer/analyst/operator/org_admin/founder) — never "owner"
     issued_at: float     # owner-set anti-replay high-water for this (org_id, username)
     state: str           # "active" | "revoked"
 
@@ -608,15 +614,25 @@ class OrgRegistry:
         the proxy must OR this with the existing GLOBAL account check (`accounts.role_can(principal.role, ...)`)
         so the keyholder is never locked out of their own tenant. Keeping this primitive purely
         membership-scoped is deliberate (single responsibility, soundly default-deny). `admit` below is that
-        composition."""
+        composition.
+
+        FOUNDER KILL SWITCH: while `config.signup_founder_tester_enabled()` is False, a `founder` membership is
+        admitted as `org_admin` — testing off, admin and billing kept — with no spine write; turning the flag
+        back on restores it. The stored membership (`membership_role`) is unchanged either way."""
         role = self.membership_role(username, org_id)
+        if role == _FOUNDER_ROLE:
+            from .. import config
+            if not config.signup_founder_tester_enabled():
+                role = _FOUNDER_FLAG_OFF_ROLE
         return role_can(role, permission)
 
     def admit(self, *, global_role: Optional[str], username: str, org_id: str,
               permission: Optional[str]) -> bool:
         """The COMPOSED multi-tenant admission gate — the SINGLE enforcement helper a tenant-scoped request
-        boundary calls. True iff the caller's GLOBAL account role carries `permission` (`rbac.role_can`) OR
-        their per-org membership role in `org_id` does (`org_role_can`).
+        boundary calls. True iff the caller's GLOBAL account role carries `permission`
+        (`rbac.role_can_global`: one of the four global roles — a per-org role name in the global position
+        carries nothing, so it can never admit across orgs) OR their per-org membership role in `org_id` does
+        (`org_role_can`).
 
         The global OR is load-bearing: the trust-root OWNER (and any owner-signed global operator) is NOT an
         org member, so WITHOUT it the keyholder would be locked out of every tenant — exactly the composition
@@ -631,7 +647,7 @@ class OrgRegistry:
         tenant-admin may manage their org's billing and members, yet STILL cannot self-authorize a test: that
         remains the separate, owner-signed, infrastructure-bound target authority (`target_add` /
         `offense_authority`). Registering/paying is not authorizing an assessment."""
-        if role_can(global_role, permission):
+        if role_can_global(global_role, permission):    # a GLOBAL role: only the four global roles count
             return True
         return self.org_role_can(username, org_id, permission)
 

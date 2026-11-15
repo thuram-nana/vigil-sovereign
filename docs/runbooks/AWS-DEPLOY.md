@@ -44,7 +44,9 @@ It creates, each least-privilege:
 3. **IAM role + instance profile** `vigil-host` — the EC2 host assumes it (NO static keys on disk). Policy:
    `kms:Encrypt`/`Decrypt`/`GenerateDataKey`/`DescribeKey` on **that CMK only** (S3 SSE-KMS uploads call
    `GenerateDataKey` under the host's own identity — without it every backup PUT is denied),
-   `s3:PutObject`/`GetObject` on **that bucket only**, `s3:ListBucket` on the bucket. Nothing else.
+   `s3:PutObject`/`GetObject` on **that bucket only**, `s3:ListBucket` on the bucket, and `ssm:GetParameter` on
+   **the one provider-key parameter** (`/vigil/anthropic-api-key`, or `PROVIDER_KEY_PARAMETER`; §2b′ creates
+   it). Nothing else.
 4. **Security group** `vigil-edge` — inbound **443 + 80 only from Cloudflare's current IP ranges** (fetched
    live from `cloudflare.com/ips`), **22 only from `ADMIN_SSH_CIDR`**. So the origin is unreachable except
    through Cloudflare (and your admin IP for SSH). Everything else is denied.
@@ -112,6 +114,29 @@ engagement + its evidence) at the root, and the proof db, runs, MLS learning mem
 entitlement trust root, DestructionAuthority (kill-switches) and authority root under `framework/v2/`. The
 crypto-shred evidence keystore (`framework/v2/.evidence-keys`) is never in a backup (W16-8).
 
+### 2b′. The model provider key in AWS SSM (from a phone browser)
+
+The model gateway's provider key lives in AWS SSM Parameter Store as a **SecureString**, never in a file on the
+host. The owner creates it once from the AWS console (a phone browser is enough):
+
+1. **Systems Manager → Parameter Store → Create parameter.**
+2. Name `/vigil/anthropic-api-key`, tier **Standard**, type **SecureString**, KMS key `alias/aws/ssm` (the
+   default) or `alias/vigil-owner-kek`; paste the key as the value; **Create parameter**. Never paste the key
+   into a chat, a ticket, an email or any file on the host.
+
+`provision.sh` already lets the host's instance role read that one parameter (`ssm:GetParameter`, statement
+`ProviderKeyParameter`; re-run it on an existing setup to add the statement). Someone with server access then
+puts `VIGIL_ANTHROPIC_KEY_SSM_PARAMETER=/vigil/anthropic-api-key` and `VIGIL_AWS_REGION` in the environment file
+of the process that runs the gateway (`infra/systemd/vigil-calibration.env.example`) and restarts it. With the
+parameter set, SSM is the gateway's only key source: a key in the environment or `sigil.env` is ignored, and a
+missing region or `aws` CLI, a parameter that is not a SecureString, or one the role cannot read stops the gateway
+from starting (metered runs then fail closed), so for the process that runs the gateway its start is the check.
+`vigil doctor` reads only its own environment and `$SIGIL_HOME/sigil.env`: it checks the parameter's type and
+access, without reading the key, when the gateway is enabled there with the parameter set — not for a gateway
+configured in another environment file (such as the calibration one). **Rotate** by editing the parameter's value, then restart that
+process (the key is read at start). The cockpit's own gateway stays off in production; this parameter does not go
+in `cockpit.env`.
+
 ### 2c. nginx for the public origin
 
 Install `apps/sigil/deploy/reverse-proxy/vigil-public.nginx.conf` (it already carries the Cloudflare
@@ -134,7 +159,8 @@ for d in finding-drain settle-drain; do
   cp infra/systemd/vigil-$d.{service,timer} ~/.config/systemd/user/
   cp infra/systemd/vigil-$d.env.example     ~/.config/vigil/$d.env
   # Set ONLY the owner-signed delegation path, as an ABSOLUTE path. The spool, scope and (for settle) the
-  # credit-lease base-dir ship as working %h-expanded defaults in the .service — override them in the env
+  # credit-lease seam VIGIL_BASE_DIR (the SAME value every seam unit sets — GO-LIVE §6) ship as working
+  # %h-expanded defaults in the .service — override them in the env
   # file ONLY with an absolute path. Do NOT put the ENABLE flag here (it is read by the monitor, below).
   # A %h or relative path in an env file does NOT expand and the drain refuses it (fails loud), so keep paths absolute.
   $EDITOR ~/.config/vigil/$d.env
@@ -206,9 +232,63 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      inbound 443/80.
 
    Cloudflare's *shared* AOP cert alone is **not** a sufficient origin lock.
-5. **Cloudflare → caching / rules:** the public plane is static + read-only JSON, so a cache rule on
-   `vigilguard.net/*` is safe and desirable; **do not** cache `app.vigilguard.net` (authenticated, cookies) —
-   add a bypass rule. Turn on the WAF managed ruleset.
+5. **Cloudflare → Caching → Cache Rules — exactly these two, each matching exact host names.** Never write a
+   rule whose expression could match `app.vigilguard.net`: no `*.vigilguard.net`, no
+   `ends_with(http.host, "vigilguard.net")`, no `contains`, no URL pattern without the host. The two host sets
+   below do not overlap, so their order does not matter.
+
+   Cloudflare's labels (EXTERNAL) may be worded slightly differently; the settings are what matter.
+
+   | Rule name | When incoming requests match (expression editor) | Then |
+   |---|---|---|
+   | `VIGIL app — bypass` | `(http.host eq "app.vigilguard.net")` | Cache eligibility: **Bypass cache** |
+   | `VIGIL public site — cache` | `(http.host in {"vigilguard.net" "www.vigilguard.net"})` | Cache eligibility: **Eligible for cache**; Edge TTL: **Use cache-control header if present, bypass cache if not**; Browser TTL: **Respect origin TTL** |
+
+   - Never set "Ignore cache-control header and use this TTL" (an override TTL) on anything that matches `app`.
+   - **Caching → Configuration → Browser Cache TTL: Respect Existing Headers.** EXTERNAL (Cloudflare
+     behaviour): with any other value Cloudflare may raise a response's browser `max-age` to that value, which
+     would keep the public pages (`max-age=0`) in browsers for hours.
+   - What the origins send, which these rules respect: the public site's pages `public, max-age=0,
+     s-maxage=60` + ETag (a page is at most 60 s old at the edge), its `?v=<hash>` assets
+     `public, max-age=31536000, immutable` (any other `v` is a 404 + `no-store`), its `/version.json` and 404s
+     `no-store`; the customer origin's `/api/*`, `/version.json` and probes `no-store`, its page and bare
+     assets `no-cache` + ETag. EXTERNAL: Cloudflare caches `.js`/`.css` by default even without origin headers —
+     the bypass rule is what keeps `app` out of the edge cache, and the origin's `no-store` on every tenant
+     response is the backstop if that rule is ever missing (the customer vhost has no Authenticated Origin Pulls
+     block, so the origin's headers, not Cloudflare, are the real control).
+   - Turn on the WAF managed ruleset.
+6. **Recommended — purge the public pages after every release and every public-site swap.** Without it a page can
+   be up to 60 s old at the edge (`s-maxage=60`), and that page names the previous build's `?v=<hash>` assets,
+   which the new origin answers with 404 + `no-store`: at a Cloudflare location that holds the old page but not
+   its assets, visitors get the page without its styles and scripts until it expires. The purge, run right after
+   the new public edge serves (`EDGE-SWAP.md`), closes that window for every public page. The customer app is
+   never cached, so there is nothing of it to purge. To purge from the host:
+   - In Cloudflare → My Profile → API Tokens, create a **custom token** with one permission,
+     **Zone → Cache Purge → Purge**, and **Zone Resources: Include → Specific zone → vigilguard.net**. Nothing
+     else: it cannot read or change DNS, rules or settings.
+   - Keep it **on the host only** (never in this repository, never in GitHub secrets or Actions), as a curl
+     header file readable by the deploy user alone, so the token is never typed into the shell history or seen
+     in a process list (paste it at the silent prompt):
+     ```
+     install -m 600 /dev/null ~/.sigil/cloudflare-purge.header
+     read -rs CF_TOKEN && printf 'Authorization: Bearer %s\n' "$CF_TOKEN" > ~/.sigil/cloudflare-purge.header
+     unset CF_TOKEN
+     ```
+   - After a release (or an edge swap of the public site, `EDGE-SWAP.md`), purge everything the zone holds
+     (`<zone-id>` is on the zone's Overview page; it is not a secret):
+     ```
+     curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/<zone-id>/purge_cache" \
+       -H @"$HOME/.sigil/cloudflare-purge.header" -H "Content-Type: application/json" \
+       --data '{"purge_everything":true}'
+     ```
+     This purges exactly the public site: the rules in item 5 make the public site the only host this zone
+     caches (`app` is Bypass, `console` has no public record, and the `www` redirect carries no Cache-Control),
+     so nothing else is in the cache. It reaches every page, which a list of URLs cannot: `/privacy`, `/careers`,
+     every `/vs/…`, `/tools/…`, `/blog/…` and `/cve/…` page, and each query-string variant (`?utm_…`), which
+     Cloudflare keeps under its own cache key. A purged object is fetched from the origin again on its next
+     request. If a later rule ever makes another host cacheable on this zone, purge by host name instead where
+     the plan offers it (`--data '{"hosts":["vigilguard.net"]}'`; EXTERNAL: Cloudflare plan feature).
+     Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare

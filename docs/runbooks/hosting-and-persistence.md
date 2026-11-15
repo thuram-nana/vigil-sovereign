@@ -39,18 +39,24 @@ the spine** — never the source of truth.
 - `SIGIL_HOME` (default `~/.sigil`) — private state: spine, owner keys, the sealed DEK, embedded
   Qdrant/graph/CVE, the customer session/token ledgers. **This is the one directory that must be on
   durable, backed‑up storage.**
-- `VIGIL_BASE_DIR` (default `.vigil-live`) — published owner‑signed artifacts + the cross‑plane seam
+- `VIGIL_BASE_DIR` (default `.vigil-live`, relative to the process's working directory; the shipped
+  units all set `%h/.sigil/credit-lease`) — published owner‑signed artifacts + the cross‑plane seam
   (credit leases and their settlement + pause markers, monitoring authorities, the offense engine's own
   keys and state). Durable, and **not** rebuildable from the spine: the sovereign `sigil backup`
   deliberately excludes it, and the offense `vigil backup` captures it only when its `--base-dir` is this
-  directory (`vigil doctor` notes a mismatch). Launch settlement does not rely on it alone: a settle is
+  directory (`vigil doctor` notes a mismatch). Every plane resolves it through one resolver
+  (`vigil_core.seam_base`), and every process on the launch path must see the SAME value — `vigil doctor`
+  refuses when the installed units disagree. Every `vigil` verb's `--base-dir` defaults to it, and
+  `vigil up` passes its base to every backend it starts. Launch settlement does not rely on it alone: a settle is
   decided under a cross‑process lock beside the spine (`<stem>.settle.lock`), and a settle that moved
   money (a refund, or any postpaid settle) is on the spine. With `VIGIL_SETTLE_SPINE_RECORD=1` (default
   off) every fresh settle — a completed run's zero‑refund settle included — first writes an
   owner‑signed `governor.launch_settled` record carrying its whole decision (mode, reservation,
   consumption and the exact plan / wallet / postpaid refund split), and a later settle that finds it
   finishes it at the recorded amounts. **Set the flag identically for the cockpit, the customer
-  server, the settle drain and `ops-sweep`.** A lost or stale settlement marker then cannot re‑open the
+  server, the settle drain and `ops-sweep`** (once in `$SIGIL_HOME/sigil.env` covers all four) — `vigil doctor`
+  reads the env files the installed units load, reports a disagreement between the units as a hard issue, and
+  notes a value a shell reading only that `sigil.env` would not see. A lost or stale settlement marker then cannot re‑open the
   refund of a settled launch — but only while BOTH hold: the launch was settled by a process with the
   flag on (or a refund of it landed), and its owner‑signed evidence is still in the LIVE spine. A hard
   prune past the settle removes that evidence (the scan is live, not snapshot‑seeded), after which a lost
@@ -118,6 +124,36 @@ the spine** — never the source of truth.
   metered (`metered` / `metered_unknown`: it is charged for what it used, through its completion or a
   cancel). With the settle record on, a release a crash interrupted is finished by `--apply`
   (`settle_completed`) and reported `settle_interrupted` without it.
+
+  **Plan/wallet split across a hard prune.** A prepaid reserve takes credits from the tenant's current plan
+  tranche first, then from the wallet, and its settle refunds each bucket its own share (the plan share to the
+  same tranche, which still expires at its period end). With `VIGIL_LEASE_PLAN_SPLIT=1` (default off; set it
+  for the cockpit, which reserves, once both planes run the same release — an older offense build refuses a
+  lease that carries the split) the owner‑signed lease records that split, so the settle takes it from the lease
+  and a hard prune of the reserve records changes nothing. A lease minted without it settles from the reserve's
+  plan debit record on the live spine; if a hard prune has removed that record before the launch settled, the
+  settle moves nothing and is held. A superseded reservation (no lease: it is released from its live reserve
+  records) is held the same way. Only a launch minted without the split, or a superseded reservation, still
+  unsettled when a prune runs can be held this way.
+
+  **Held settles.** Whichever path meets a held settle — the customer's cancel (the customer is told the credits
+  stay reserved until the operator returns them; the audit row is `refund_held`), `ops-sweep reservations`
+  (row status `plan_debit_pruned`), the settle drain (it quarantines the completion and alarms) or the
+  superseded release — the launch is named in `$SIGIL_HOME/alarms/launch-settle-held.json`, and `vigil doctor`
+  reports every named launch (by slug) as a hard issue (`launch_settlements.held`). The pruned record is kept in
+  the prune archive; settling such a launch is an owner action from that record, under the launch's own settle
+  entry ids (`settle-plan:<slug>:<nonce>` to the plan tranche, `settle-wallet:<slug>:<nonce>` to the wallet), so
+  any later settle of the launch finds it already settled and never refunds it twice. A launch leaves the alarm
+  when its next settle finds it settled, or at the next `ops-sweep reservations --apply` once the spine (or its
+  seam settlement marker) shows it settled; the file goes when it names none. Never edit the file by hand while
+  a launch it names is unsettled. A held customer cancel also writes a `launch.cancel_held` record on the spine:
+  that reservation can never be started afterwards, even without the alarm file.
+
+  The alarm file is not in the backups (`alarms` is a documented exclusion): after a restore, the next
+  `ops-sweep reservations --apply` (or the next settle attempt of the launch) names a still-held launch again,
+  and the spine's cancel records keep a cancelled one from starting. Settle the launch by its settle entries —
+  the owner grants to the entry ids above, never a sweep run over it while it is held — and only then let the
+  sweep drop it from the alarm.
 
   **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
   after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace

@@ -287,6 +287,18 @@ class WalletRegistry:
             return bool(hit)
         return key in self._fold()[2]
 
+    def has_debit_entry(self, org_id: str, entry_id: str) -> bool:
+        """True iff an owner-signed DEBIT with this (org_id, entry_id) has been folded — membership of the fold's
+        own seen-set, so it survives a hard prune (the seen-set is part of the snapshot seed), unlike a live scan of
+        the debit record. Fail-closed (False) on an empty id."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return False
+        key = (CREDIT_DEBIT_SIGNAL, org_id, entry_id)
+        hit = self._cached(lambda v: key in v.seen)
+        if hit is not _UNCACHED:
+            return bool(hit)
+        return key in self._fold()[2]
+
     def balances(self) -> list[Balance]:
         """Every tenant with ledger activity, in org_id order (the per-tenant billing view)."""
         hit = self._cached(lambda v: _balances(v.granted, v.debited))

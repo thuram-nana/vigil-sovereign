@@ -81,6 +81,9 @@ Release for the tag carrying those artifacts and the changelog section as its no
    git push origin vX.Y.Z
    ```
 
+   **The tag is the release.** A host is upgraded to exactly the commit a release tag names, and only when
+   that commit is on `origin/main` (section 2.1); a branch head or an untagged commit is never deployed.
+
    The tag push runs `release.yml`. It never runs on pull requests (a release must not sign every PR
    head); its shape is asserted on every PR by `integration/tests/test_release_provenance.py` and
    `integration/tests/test_release_github_release.py`.
@@ -93,52 +96,218 @@ Release for the tag carrying those artifacts and the changelog section as its no
 
 ## 2. Upgrade — move an existing install to a new version
 
-VIGIL is deployed from a git checkout with two editable venvs (`.venv-offense` / `.venv-sovereign`), so
-an upgrade is: get the new code, rebuild the venvs, then run the crash-safe **data** migration.
+A production host runs VIGIL as systemd **user** units (GO-LIVE §6): the cockpit (the one spine writer), the
+customer and public edges, the console, the bridge and witnesses, and the timers that fire the money drains,
+backups, checkpoints and the HA mirror. The install is editable, so an upgrade replaces the code under every
+one of them: stop **all** of them, back up with the old build, build and migrate, then start exactly the units
+that were running. Run every step in one shell, from the checkout (`~/vigil`); `$U` keeps this upgrade's record.
 
-1. **Contain the running cockpit** so nothing writes mid-upgrade:
+### 2.1 Pick the release by its tag
 
-   ```
-   vigil down
-   ```
+```
+cd ~/vigil
+git fetch origin --tags
+TAG=vX.Y.Z
+git merge-base --is-ancestor "$TAG^{commit}" origin/main && echo "$TAG is on main"
+SHA="$(git rev-parse "$TAG^{commit}")"
+U=~/vigil-upgrade-"$TAG"-"$(date +%Y%m%dT%H%M%S)"; mkdir -p "$U"
+vigil --version > "$U/from-version"
+```
 
-2. **Get the new code.** Check out the release tag (or pull `main`):
+Stop here unless the tag's commit is on `origin/main`. When your clone holds the release signer's key,
+`git verify-tag "$TAG"` checks the tag's signature as well.
 
-   ```
-   git fetch origin
-   git checkout vX.Y.Z
-   ```
+### 2.2 Preflight (nothing is stopped yet)
 
-3. **Rebuild the two venvs + the WARDEN kernel** (idempotent; re-runnable):
+```
+vigil doctor
+sigil latch status        # in a shell that exports the units' SIGIL_HOME (the one in ~/.sigil/cockpit.env)
+systemctl --user is-enabled vigil-command.service
+systemctl --user list-units --state=activating,failed --plain --no-legend 'vigil-*' 'sigil-*'
+```
 
-   ```
-   ./bootstrap.sh
-   ```
+The last line lists units that are not running cleanly. One shown as `activating auto-restart` is restarting
+after a failure; the upgrade stops it with the rest (2.4), installs this release's units (2.6) and starts it
+again (2.8) — check it in 2.9.
 
-   `bootstrap.sh` re-runs `envs/build_envs.sh`, which reinstalls the editable members, so `--version`
-   immediately reports the new sha.
+`vigil doctor` must exit 0: clear every hard issue first — in particular settle and money settings that
+differ between the cockpit, the customer edge and the settle drain (a note names what the shell running
+`sigil ops-sweep` must export). Do not upgrade a host that `vigil panic` contained (`vigil-command.service`
+reads `masked`); close the incident first.
 
-4. **Migrate the sovereign data store.** Check first (touches nothing; exit 3 means a migration is
-   needed), then run it. `vigil upgrade` forwards to `sigil upgrade` in the sovereign venv and performs
-   `backup → verify → migrate → verify → report`, **rolling back to the verified backup on any
-   failure** — it never leaves a half-migrated store:
+`sigil latch status` shows the owner's switches. The governor kill switch also refuses every new customer launch
+and the start of a reserved one: if it reads `engaged` (a phone PANIC or a `sigil warden kill` drill that was never
+released), new customer launches are refused until you release it (`sigil warden release`, owner-signed). Release
+it before the upgrade if the incident is over, or keep it engaged on purpose. A customer latch that is OFF stays
+OFF across the upgrade; no latch record means ON.
 
-   ```
-   vigil upgrade --check
-   vigil upgrade
-   ```
+### 2.3 Quiesce: let money in flight finish
 
-   (`sigil upgrade --check` / `sigil upgrade` are the same verb run directly in the sovereign venv;
-   `vigil upgrade --no-backup` skips the pre-migration backup only if you have taken your own.)
+Wait until no customer engagement is running and the drains have taken every pending signal (the paths are
+the defaults; use the ones your env files set):
 
-5. **Verify and restart.**
+```
+ls "${VIGIL_BASE_DIR:-$HOME/vigil/.vigil-live}"/jobs/running/
+ls ~/.sigil/spool/settle/incoming/ ~/.sigil/spool/findings/incoming/
+ls "${SIGIL_HOME:-$HOME/.sigil}"/billing-spool/incoming/ "${SIGIL_HOME:-$HOME/.sigil}"/stripe-billing-spool/incoming/
+sigil ops-sweep reservations
+```
 
-   ```
-   vigil --version
-   sigil doctor
-   vigil verify
-   vigil up
-   ```
+Each `incoming/` empties within a drain cycle (60 s). With `VIGIL_SETTLE_SPINE_RECORD` off, never stop while
+a settle may be in progress: wait until the settle spool's `incoming/` is empty and no settle drain is
+running (2.4 waits for the drain). With it on in every settling process (`vigil doctor` reports them in
+agreement), a settle a stop interrupts is finished from its spine record on the settle drain's first pass
+after the upgrade.
+
+### 2.4 Stop every unit: timers first, then running oneshots, then services
+
+```
+# 1. record and stop every vigil/sigil TIMER, so no drain, backup, checkpoint or HA-mirror run starts
+systemctl --user list-units --type=timer --state=active --plain --no-legend 'vigil-*' 'sigil-*' \
+  | awk '{print $1}' > "$U/timers"
+cat "$U/timers"                       # vigil-ha-mirror.timer (the off-host rsync of ~/.sigil) is one of them
+xargs -r systemctl --user stop < "$U/timers"
+
+# 2. wait, at most 30 minutes, for a oneshot that was already running (a drain pass, a backup push, a mirror
+#    rsync) to finish. A unit restarting after a failure (SUB auto-restart) is not waited for: step 3 stops it.
+for i in $(seq 360); do
+  busy="$(systemctl --user list-units --type=service --state=activating --plain --no-legend 'vigil-*' 'sigil-*' \
+          | awk '$4 != "auto-restart" {print $1}')"
+  [ -z "$busy" ] && break
+  echo "waiting for: $busy"; sleep 5
+done
+[ -z "$busy" ] && echo "no oneshot running" || echo "STOP: still running after 30 minutes: $busy"
+
+# 3. record and stop the long-running services: the edges and the console first, the cockpit (the writer) last
+systemctl --user list-units --type=service --state=running,activating --plain --no-legend 'vigil-*' 'sigil-*' \
+  | awk '{print $1}' > "$U/services"
+systemctl --user stop sigil-customer.service sigil-public.service 'sigil-customer@*.service' \
+  'sigil-public@*.service' vigil-command.service 'sigil-bridge@*.service' 'vigil-witness@*.service'
+systemctl --user stop sigil-cockpit.service
+
+# 4. confirm nothing is left running
+systemctl --user list-units --state=active,activating --plain --no-legend 'vigil-*' 'sigil-*'
+```
+
+Do not go on past a `STOP:` line from step 2: find out why that oneshot is still running first. Step 4 lists
+nothing but finished oneshots (`active exited`, e.g. `vigil-bringup.service`). Stopping
+`vigil-command` this way keeps its boot start. The cockpit and the customer edge finish every request they
+already accepted before they exit — waiting up to 65 s, longer than the slowest provisioner action (an email
+sent inline) — and the cockpit's model gateway refuses new requests from the moment the cockpit stops; the
+public site drains within 10 s. While they are down the nginx vhosts answer customers with a 503 "briefly
+unavailable" page. A system-level `aegis-saas-gateway@` instance, where one runs, is stopped and recorded the same way
+with `sudo systemctl`.
+
+### 2.5 Back up with the old build, after the writers stopped
+
+```
+ls -laR ~/.sigil/spool/ "${SIGIL_HOME:-$HOME/.sigil}"/billing-spool/ \
+  "${SIGIL_HOME:-$HOME/.sigil}"/stripe-billing-spool/ > "$U/spools" 2>&1
+systemctl --user start vigil-backup-push.service      # or vigil-backup.service when no off-host push is set up
+systemctl --user status vigil-backup-push.service --no-pager
+```
+
+The backup unit runs `vigil backup` with your configured passphrase, base dir and destination (`--push`
+verifies the copy at the destination); by hand it is
+`vigil backup --out ~/vigil-backups --base-dir "$VIGIL_BASE_DIR" --push "$VIGIL_PUSH_DEST"`. It must succeed
+before anything changes. The sovereign leg leaves the pending-signal spools out by design; `$U/spools`
+records what was in them.
+
+### 2.6 Get the release, build it and install its units
+
+```
+git checkout --detach "$SHA"
+./bootstrap.sh
+vigil --version
+```
+
+`bootstrap.sh` rebuilds the two hash-locked venvs, the WARDEN kernel and the egress guard
+(`envs/build_envs.sh`) and links `~/.sigil/venv` to `.venv-sovereign`; `vigil doctor` reports that link if
+it is anything else. Run it with `SIGIL_HOME` unset, so the link lands at `~/.sigil/venv`.
+
+Then install this release's copy of every unit file and drop-in this host already has, so the units started
+in 2.8 are the release's (a release may change them). The old set is kept in `$U/units-before`, the changes
+in `$U/units.diff`; a masked or linked unit and one the release does not ship are left as they are, and
+nothing new is installed:
+
+```
+UD=~/.config/systemd/user
+cp -a "$UD" "$U/units-before"
+: > "$U/units.diff"
+for f in "$UD"/*.service "$UD"/*.timer "$UD"/*.service.d/*.conf; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  rel="${f#"$UD"/}"
+  for d in infra/systemd apps/sigil/deploy/systemd; do
+    if [ -f "$d/$rel" ] && ! cmp -s "$d/$rel" "$f"; then
+      diff -u "$f" "$d/$rel" >> "$U/units.diff"; cp "$d/$rel" "$f"; echo "updated $rel"
+    fi
+  done
+done
+```
+
+A release can change a unit in a way the code relies on — the customer edge, for example, finishes an action
+the cockpit is still completing for up to 75 s, and its units allow 90 s before systemd kills it; with a unit
+from an older release (20 s) a stop would cut such an action, the customer told it failed. Keep local changes in
+drop-ins of your own (`systemctl --user edit <unit>` writes `override.conf`), which the loop leaves alone.
+`vigil doctor` (2.9) reports an edge unit whose stop timeout is too short, and `tools/deploy/edge-swap.sh`
+refuses to swap with one.
+
+### 2.7 Migrate the sovereign data store
+
+Check first (touches nothing; exit 3 means a migration is needed), then run it. `vigil upgrade` forwards to
+`sigil upgrade` in the sovereign venv and performs `backup → verify → migrate → verify → report`,
+**rolling back to the verified backup on any failure** — it never leaves a half-migrated store:
+
+```
+vigil upgrade --check
+vigil upgrade
+```
+
+(`sigil upgrade --check` / `sigil upgrade` are the same verb run directly in the sovereign venv;
+`vigil upgrade --no-backup` skips the pre-migration backup only if you have taken your own — 2.5 is not a
+substitute for it.)
+
+### 2.8 Start exactly the recorded units, the cockpit first
+
+```
+systemctl --user daemon-reload                                       # loads the units installed in 2.6
+systemctl --user start sigil-cockpit.service
+until curl -fsS http://127.0.0.1:8733/readyz; do sleep 2; done      # the spine opens
+xargs -r systemctl --user start < "$U/timers"
+xargs -r systemctl --user start < "$U/services"
+```
+
+The drains' timers start after the cockpit (they settle through its spine), then every service that was
+running — nothing that was not.
+
+### 2.9 Verify
+
+```
+vigil --version
+vigil doctor
+sigil verify
+vigil verify
+vigil verify-integrity
+```
+
+Watch one drain cycle pass (`vigil alerts --status`, or `systemctl --user list-timers 'vigil-*'`) before you
+call the upgrade done. If anything fails, roll back (section 3).
+
+### 2.10 Launch leases with optional fields
+
+A launch lease can carry optional owner‑signed fields (with
+`VIGIL_LEASE_PLAN_SPLIT=1`, its plan/wallet split). A build older than the release that defines them cannot
+read such a lease — neither the offense plane (the launch never runs) nor the sovereign plane (its settle,
+cancel and reservations sweep refuse or skip it) — so upgrade both planes from the same checkout before turning
+the flag on. To roll back below that release (section 3a rolls back both planes): first turn the flag off and
+restart the cockpit, then wait until no unsettled lease carries the split — past the longest lease window (one
+week) plus the sweep `--ttl` from the moment the flag went off, with `sigil ops-sweep reservations --apply` run
+after that, and no file under the seam's `credit-launch-leases/` directory still containing `plan_reserved` —
+and only then roll the code back. A lease carrying the split that is still unsettled at the rollback (one
+reserved and never started or cancelled, say) stays unsettled, its credits reserved and nothing lost, until
+the release is re‑applied; it then settles normally. Independently of the flag, a settle whose lease does not
+record the split and whose reserve plan debit record a hard prune has removed is held as `plan_debit_pruned`
+(nothing moves; `vigil doctor` reports it; see hosting-and-persistence, held settles) rather than refunded.
 
 ---
 
@@ -149,15 +318,16 @@ There are two independent things to roll back: the **code** and the **data**.
 ### 3a. Automatic data rollback (the common case)
 
 If `vigil upgrade` fails, it has already rolled the store back to the verified pre-migration backup and
-says so in its report — no action is needed for the data. Roll the **code** back to the previous version:
+says so in its report — no action is needed for the data. Roll the **code** back to the previous version
+with the same stop and restore as the upgrade: stop every unit (2.4, recording into a new `$U` if they were
+started again), check out the previous release's commit, rebuild, install its units (2.6) and start the
+recorded units (2.8):
 
 ```
-vigil down
-git checkout vPREV
+git checkout --detach "$(git rev-parse "vPREV^{commit}")"
 ./bootstrap.sh
 vigil --version
 vigil verify
-vigil up
 ```
 
 ### 3b. Manual data restore (if the store is damaged)
@@ -182,7 +352,8 @@ Then bring the code to the matching version (section 3a) and restart with `vigil
 ### 3c. Emergency stop
 
 If an upgrade or rollback goes wrong while engagements are live, hard-stop everything (this trips every
-engagement's kill-switch and masks the cockpit unit — see `docs/runbooks/PANIC-AND-CONTAINMENT.md`):
+engagement's kill-switch, masks the `vigil-command` unit, and stops and disables the sidecars, the sovereign
+units and the drains — see `docs/runbooks/PANIC-AND-CONTAINMENT.md`):
 
 ```
 vigil panic

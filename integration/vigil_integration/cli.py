@@ -3408,6 +3408,17 @@ def _cmd_up(args: argparse.Namespace) -> int:
     _gate = _enforce_production_gate("up")
     if _gate is not None:
         return _gate
+    # One seam for the whole process tree: `--base-dir` (default: the shared resolver, $VIGIL_BASE_DIR else
+    # ./.vigil-live) is pinned into every child's VIGIL_BASE_DIR by run_up, so the cockpit publishes where the
+    # console and the engines it launches read. An explicit --base-dir that names another directory than
+    # $VIGIL_BASE_DIR, or a value still carrying a literal systemd specifier, is refused here, before anything
+    # is brought up, instead of splitting the planes across two trees.
+    from vigil_core.seam_base import SeamBaseError, require_seam_base
+    try:
+        args.base_dir = require_seam_base(args.base_dir, aliases=())
+    except SeamBaseError as _e:
+        print(f"vigil up: REFUSED (fail-closed) — {_e}", file=sys.stderr)
+        return 2
     if getattr(args, "services", False):
         # Optional docker preflight: create the egress-gateway + root services (qdrant) if none exist
         # (idempotent). Both helpers are pure-stdlib, so this stays on the boundary-safe path. The two legs
@@ -3485,7 +3496,7 @@ def _cmd_up(args: argparse.Namespace) -> int:
         except Exception as _e:  # noqa: BLE001
             print(f"vigil up: root services preflight skipped — {_e}", file=sys.stderr)
     from .uiproxy import run_up
-    return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
+    return run_up(host=args.host, port=args.port, domain=args.domain or "", base_dir=args.base_dir,
                   no_browser=args.no_browser,
                   insecure_no_api_key=getattr(args, "insecure_no_api_key", False),
                   with_feed=getattr(args, "with_feed", False),
@@ -3902,6 +3913,8 @@ def _cmd_fleet_kill(args: argparse.Namespace) -> int:
         p, rv = r["panic"], r["revoke"]
         print(f"  {r['instance_id']:<20} panic={p.get('status', '?')} (ok={p.get('ok')})  "
               f"revoke={rv.get('status', '?')} (ok={rv.get('ok')})")
+    for warning in report.get("drains", {}).get("still_running", []):
+        print(f"  {warning}")
     print(f"--- contained {t['panic_ok']}/{t['instances']}; revoked {t['revoke_ok']}/{t['instances']} "
           f"(refused={t['revoke_refused']}, error={t['revoke_error']}) ---")
     # Non-zero exit if any leg did not fully complete, so a script notices a partial fan-out.
@@ -4747,6 +4760,21 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
         print("vigil restore: --sovereign-only and --offense-only are mutually exclusive", file=sys.stderr)
         return 2
+    if getattr(args, "resume_sovereign", False):
+        # finish a sovereign restore that was interrupted between its swaps (its journal stands in the home): no
+        # backup, no passphrase — every unit was verified before the journal was written
+        home = getattr(args, "sigil_home", "") or ""
+        if not home:
+            print("vigil restore: --resume-sovereign needs --sigil-home <the home being restored>", file=sys.stderr)
+            return 2
+        rc = _run_sovereign_leg(["restore", "--resume", home], "")
+        if rc != 0:
+            print(f"vigil restore: resuming the sovereign restore failed (exit {rc})", file=sys.stderr)
+            return 1
+        return 0
+    if not getattr(args, "src", None):
+        print("vigil restore: the backup dir is required", file=sys.stderr)
+        return 2
     src = Path(args.src)
     if not src.is_dir():
         print(f"vigil restore: {src} is not a backup dir (expected a timestamped dir with MANIFEST.json)",
@@ -4826,6 +4854,31 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             return None, 2
         return f, 0
 
+    sov_archive_dir = getattr(args, "sigil_archive_dir", "") or ""
+    if not getattr(args, "sovereign_only", False) and not getattr(args, "offense_only", False):
+        # BOTH planes: verify the sovereign part completely (`sigil restore --verify-only` — for a hard-pruned home,
+        # as one unit) BEFORE the offense leg writes anything, so a sovereign part that would be refused leaves BOTH
+        # planes untouched.
+        sov_pre, err = _verified_part("sovereign")
+        if err:
+            return err
+        if sov_pre is not None:
+            pre_home = getattr(args, "sigil_home", "") or ""
+            if not pre_home:
+                print("vigil restore: --sigil-home <fresh dir> is required to restore the sovereign plane",
+                      file=sys.stderr)
+                return 2
+            vargs = ["restore", "--verify-only", str(sov_pre), pre_home]
+            if getattr(args, "force", False):
+                vargs.append("--force")        # verified against the same override the sovereign leg will run with
+            if sov_archive_dir:
+                vargs += ["--archive-dir", sov_archive_dir]
+            rc = _run_sovereign_leg(vargs, pw)
+            if rc != 0:
+                print(f"vigil restore: the sovereign part does not verify (exit {rc}) — nothing was restored on "
+                      f"either plane", file=sys.stderr)
+                return 1
+
     if not getattr(args, "sovereign_only", False):
         off, err = _verified_part("offense")
         if err:
@@ -4865,6 +4918,8 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             sov_args = ["restore", str(sov), home]
             if getattr(args, "force", False):
                 sov_args.append("--force")     # forward the non-empty-target override to the sovereign leg
+            if sov_archive_dir:
+                sov_args += ["--archive-dir", sov_archive_dir]    # where a hard-pruned home's archive goes
             rc = _run_sovereign_leg(sov_args, pw)
             if rc != 0:
                 print(f"vigil restore: sovereign leg failed (exit {rc})", file=sys.stderr)
@@ -4885,7 +4940,25 @@ def _cmd_posture(args: argparse.Namespace) -> int:
     return int(posture_main(list(args.posture_args or [])))
 
 
+def _console_domain(value: str) -> str:
+    """``vigil up --domain``: a named domain, never an empty one. A unit that passes ``--domain
+    ${VIGIL_CONSOLE_DOMAIN}`` with the variable unset hands over an empty argument; starting would then serve the
+    console as a loopback origin that the reverse proxy's Host can never reach, so it is refused at once."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError(
+            "is empty: name the domain the browser reaches the console by (a unit passing --domain "
+            "${VIGIL_CONSOLE_DOMAIN} needs VIGIL_CONSOLE_DOMAIN set in its EnvironmentFile), or leave --domain out "
+            "for a local console")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # Every `--base-dir` defaults to THE seam base (vigil_core.seam_base: $VIGIL_BASE_DIR, else ./.vigil-live,
+    # made absolute): the same directory the sovereign plane publishes leases, authorizations and eval grants
+    # to, so an offense verb run without --base-dir reads and writes the tree the sovereign side uses. With
+    # VIGIL_BASE_DIR unset it names the same directory the former relative default did.
+    from vigil_core.seam_base import resolve_seam_base
+    seam = resolve_seam_base()
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
         epilog="subsystem verbs (forwarded to their own venv): sigil · crucible · aegis · strix · gateway  "
@@ -4917,7 +4990,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "hosts — a *.wildcard is a deliberate BROAD grant: it authorizes reaching whatever "
                          "public IP any matching subdomain currently resolves to (the metadata/LAN floor still "
                          "holds). Default 127.0.0.1")
-    pe.add_argument("--base-dir", default=".vigil-live")
+    pe.add_argument("--base-dir", default=seam)
     pe.add_argument("--session", default="",
                     help="the SESSION this run belongs to (F3): the per-session knowledge-graph partition "
                          "key. Runs sharing a session accumulate + reuse each other's prior context; empty "
@@ -4995,22 +5068,22 @@ def build_parser() -> argparse.ArgumentParser:
                               "prompts still waits for your approval)")
     pei.add_argument("slug", help="the engagement slug to steer (same --slug you gave `vigil engage`)")
     pei.add_argument("text", help="the instruction, e.g. \"also check the admin API for BOLA\"")
-    pei.add_argument("--base-dir", default=".vigil-live")
+    pei.add_argument("--base-dir", default=seam)
     pei.set_defaults(func=_cmd_engage_instruct)
 
     pl = sub.add_parser("ledger", help="query the usage-attestation ledger (who/when)")
     pl.add_argument("which", choices=("who", "when"))
-    pl.add_argument("--path", default=".vigil-live/usage-ledger.jsonl")
-    pl.add_argument("--base-dir", default=".vigil-live")
+    pl.add_argument("--path", default=os.path.join(seam, "usage-ledger.jsonl"))
+    pl.add_argument("--base-dir", default=seam)
     pl.set_defaults(func=_cmd_ledger)
 
     pv = sub.add_parser("verify-ledger", help="verify the usage-attestation ledger integrity")
-    pv.add_argument("--path", default=".vigil-live/usage-ledger.jsonl")
-    pv.add_argument("--base-dir", default=".vigil-live")
+    pv.add_argument("--path", default=os.path.join(seam, "usage-ledger.jsonl"))
+    pv.add_argument("--base-dir", default=seam)
     pv.set_defaults(func=_cmd_verify_ledger)
 
     pver = sub.add_parser("verify", help="verify the offense spine segments (per-segment, owner-tie-aware)")
-    pver.add_argument("--base-dir", default=".vigil-live")
+    pver.add_argument("--base-dir", default=seam)
     pver.add_argument("--slug", default="", help="verify only {slug}.spine (default: every *.spine)")
     pver.add_argument("--owner-pubkey", default="",
                       help="the pinned owner PUBLIC key (base64) — the trust anchor for the delegation")
@@ -5030,7 +5103,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--environment", default="twin")
     pp.add_argument("--hours", type=float, default=8.0)
     pp.add_argument("--max-actions", type=int, default=1000)
-    pp.add_argument("--base-dir", default=".vigil-live",
+    pp.add_argument("--base-dir", default=seam,
                     help="engagement home for the STABLE governance key (shared with `vigil engage`)")
     pp.add_argument("--oob-collector-pubkey", default="",
                     help="Base64 Ed25519 PUBLIC key of the OOB relay's independent collector to PIN into the "
@@ -5044,7 +5117,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pid = sub.add_parser("identity",
                          help="export the offense stable identity PUBLIC keys (spine+governance) for owner delegation")
-    pid.add_argument("--base-dir", default=".vigil-live")
+    pid.add_argument("--base-dir", default=seam)
     pid.set_defaults(func=_cmd_identity)
 
     ppatch = sub.add_parser(
@@ -5069,7 +5142,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "drives fix-verification (that is selected by the TRUSTED finding's OWN ref), "
                              "and a value that disagrees with the trusted finding's own ref is REFUSED "
                              "(fail-closed).")
-    ppatch.add_argument("--base-dir", default=".vigil-live",
+    ppatch.add_argument("--base-dir", default=seam,
                         help="engagement home holding {slug}.spine + vault (--from-spine)")
     # target + workdir + coder
     ppatch.add_argument("--target-repo", default="",
@@ -5229,7 +5302,7 @@ def build_parser() -> argparse.ArgumentParser:
                            "drives the proof — that entry is selected by the TRUSTED finding's OWN ref — and "
                            "a value that disagrees with the trusted finding's own ref is REFUSED "
                            "(fail-closed), never honoured.")
-    prem.add_argument("--base-dir", default=".vigil-live",
+    prem.add_argument("--base-dir", default=seam,
                       help="engagement home: holds {slug}.spine + vault + the STABLE governance key, and where "
                            "the prove-certificate is written (proofs/remediation-prove-<ref>.json)")
     prem.add_argument("--run-dir", default="",
@@ -5273,7 +5346,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "can NEVER redirect which retained re-verifiable entry drives the proof (that is "
                           "selected by the TRUSTED finding's OWN ref), and a value that disagrees with the "
                           "trusted finding's own ref is REFUSED (fail-closed).")
-    prr.add_argument("--base-dir", default=".vigil-live",
+    prr.add_argument("--base-dir", default=seam,
                      help="engagement home: holds {slug}.spine + vault + the STABLE governance key + the "
                           "self-witness key, and (by default) the attestation-log/ directory")
     prr.add_argument("--run-dir", default="",
@@ -5303,7 +5376,7 @@ def build_parser() -> argparse.ArgumentParser:
     pfw.add_argument("action", choices=["witness", "verify-witnessed"])
     pfw.add_argument("--log-dir", required=True,
                      help="offense attestation-log dir holding head.json + highwater.json")
-    pfw.add_argument("--base-dir", default=".vigil-live",
+    pfw.add_argument("--base-dir", default=seam,
                      help="offense engine home (holds the sealed offense GOVERNANCE key that co-signs)")
     pfw.add_argument("--scope", required=True, help="engagement slug the witnessed checkpoint is bound to")
     pfw.add_argument("--retain", default="",
@@ -5328,7 +5401,7 @@ def build_parser() -> argparse.ArgumentParser:
     pprov = sub.add_parser(
         "provision-destruction",
         help="mint the m-of-n destruction quorum keys for `vigil patch --open-pr` (prints keys ONCE)")
-    pprov.add_argument("--base-dir", default=".vigil-live",
+    pprov.add_argument("--base-dir", default=seam,
                        help="where the PUBLIC trust root + nonce ledger live (shared with `vigil patch`)")
     pprov.add_argument("--threshold", type=int, default=1,
                        help="m in m-of-n — how many signers must sign (default 1 = solo owner)")
@@ -5344,7 +5417,7 @@ def build_parser() -> argparse.ArgumentParser:
     pauth.add_argument("--action-id", required=True, help="the pr-<remediation_id> printed by the dry run")
     pauth.add_argument("--slug", required=True, help="the engagement_slug printed by the dry run")
     pauth.add_argument("--target", required=True, help="the target repo printed by the dry run (must match)")
-    pauth.add_argument("--base-dir", default=".vigil-live", help="where to write signed-authorization.json")
+    pauth.add_argument("--base-dir", default=seam, help="where to write signed-authorization.json")
     pauth.add_argument("--out", default="", help="output path (default: <base-dir>/signed-authorization.json)")
     pauth.add_argument("--owner-id", default="owner", help="the owner signer's key id (matches provisioning)")
     pauth.add_argument("--window-s", type=float, default=600.0,
@@ -5373,7 +5446,7 @@ def build_parser() -> argparse.ArgumentParser:
         "assemble-destruction",
         help="(W9-5) PHASE 2 on the MINTING box: assemble the m-of-n trust root from PUBLIC enrolment requests "
              "(verifies every proof-of-possession; no private key on this box)")
-    pasm.add_argument("--base-dir", default=".vigil-live",
+    pasm.add_argument("--base-dir", default=seam,
                       help="where the PUBLIC trust root is written (shared with `vigil patch`)")
     pasm.add_argument("--enrollment", action="append", default=[],
                       help="a signer as key_id=/path/to/enrollment.json (repeatable; PUBLIC material only). "
@@ -5417,7 +5490,7 @@ def build_parser() -> argparse.ArgumentParser:
     preq.add_argument("--action-id", required=True, help="the pr-<remediation_id> printed by the dry run")
     preq.add_argument("--slug", required=True, help="the engagement_slug printed by the dry run")
     preq.add_argument("--target", required=True, help="the target repo printed by the dry run (must match)")
-    preq.add_argument("--base-dir", default=".vigil-live", help="where authorization-request.json is written")
+    preq.add_argument("--base-dir", default=seam, help="where authorization-request.json is written")
     preq.add_argument("--out", default="", help="output path (default: <base-dir>/authorization-request.json)")
     preq.add_argument("--window-s", type=float, default=600.0,
                       help="validity window in seconds (single-use; total window must stay <=900s)")
@@ -5441,7 +5514,7 @@ def build_parser() -> argparse.ArgumentParser:
     pcmb.add_argument("--request", required=True, help="the same authorization-request.json the signers signed")
     pcmb.add_argument("--signature", action="append", default=[],
                       help="a detached signature file (repeatable; key_id=/path or just /path)")
-    pcmb.add_argument("--base-dir", default=".vigil-live", help="where signed-authorization.json is written")
+    pcmb.add_argument("--base-dir", default=seam, help="where signed-authorization.json is written")
     pcmb.add_argument("--out", default="", help="output path (default: <base-dir>/signed-authorization.json)")
     pcmb.add_argument("--target", default="", help="(display only) the target repo, for the printed next-step")
     pcmb.set_defaults(func=_cmd_combine_destruction)
@@ -5455,17 +5528,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     papp = pap_sub.add_parser("provision-authority",
                               help="mint + persist the owner approval authority (public key under --base-dir)")
-    papp.add_argument("--base-dir", default=".vigil-live")
+    papp.add_argument("--base-dir", default=seam)
     papp.add_argument("--key-id", default="owner", help="the owner signer's key id")
     papp.add_argument("--force", action="store_true", help="re-provision (ROTATES the key; invalidates old tokens)")
     papp.set_defaults(func=_cmd_approve_provision)
 
     papl = pap_sub.add_parser("list", help="list pending per-action approval requests")
-    papl.add_argument("--base-dir", default=".vigil-live")
+    papl.add_argument("--base-dir", default=seam)
     papl.set_defaults(func=_cmd_approve_list)
 
     paps = pap_sub.add_parser("sign", help="sign ONE pending action with the owner key (VIGIL_APPROVAL_OWNER_KEY)")
-    paps.add_argument("--base-dir", default=".vigil-live")
+    paps.add_argument("--base-dir", default=seam)
     paps.add_argument("--request-id", required=True, help="the request_id from `vigil approve list`")
     paps.add_argument("--ttl", type=float, default=300.0,
                       help="validity window in seconds (single-use; capped at the 900s dead-man's-switch)")
@@ -5481,7 +5554,7 @@ def build_parser() -> argparse.ArgumentParser:
     pft_sub = pft.add_subparsers(dest="fireteam_cmd", required=True)
 
     pftl = pft_sub.add_parser("list", help="list PENDING over-cap escalations awaiting a signed operator decision")
-    pftl.add_argument("--base-dir", default=".vigil-live")
+    pftl.add_argument("--base-dir", default=seam)
     pftl.add_argument("--slug", required=True, help="the engagement slug (names its durable escalation ledger)")
     pftl.add_argument("--now-seq", type=int, default=None,
                       help="current injected-sequence tick; shows ticks_remaining before the fail-closed auto-reject")
@@ -5489,7 +5562,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pfta = pft_sub.add_parser("approve",
                               help="SOVEREIGN: sign an owner approval for ONE escalation (VIGIL_APPROVAL_OWNER_KEY)")
-    pfta.add_argument("--base-dir", default=".vigil-live")
+    pfta.add_argument("--base-dir", default=seam)
     pfta.add_argument("--slug", required=True, help="the engagement slug (bound INTO the signed approval bytes)")
     pfta.add_argument("--wave-id", required=True, help="the escalation's wave_id (from `vigil fireteam list`)")
     pfta.add_argument("--member-id", required=True, help="the escalation's member_id")
@@ -5499,7 +5572,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pftr = pft_sub.add_parser("resolve",
                               help="OFFENSE: drive the resolve loop — apply signed approvals, sweep deadline expiries")
-    pftr.add_argument("--base-dir", default=".vigil-live")
+    pftr.add_argument("--base-dir", default=seam)
     pftr.add_argument("--slug", required=True, help="the engagement slug (names its durable escalation ledger)")
     pftr.add_argument("--now-seq", type=int, default=None,
                       help="current injected-sequence tick; a pending escalation past its deadline auto-REJECTS "
@@ -5549,7 +5622,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="deterministic local-codebase scan (DAA) that grounds a gated fix in the signed spine")
     pcs.add_argument("--root", required=True, help="the codebase path to scan (or re-scan for --verify)")
     pcs.add_argument("--slug", default="codebase", help="engagement slug (the signed <slug>.spine key)")
-    pcs.add_argument("--base-dir", default=".vigil-live", help="engagement base dir holding <slug>.spine")
+    pcs.add_argument("--base-dir", default=seam, help="engagement base dir holding <slug>.spine")
     pcs.add_argument("--max-files", type=int, default=5000)
     pcs.add_argument("--verify", action="store_true",
                      help="fix-verification oracle: re-run DAA and report whether --ref still fires (exit 0 iff cleared)")
@@ -5560,7 +5633,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="W4: the GitHub-Action runner — enqueue a CI SecurityJob and drain it through the "
                               "authorized runner, emitting FACT/LEAD-typed PR annotations (diff-scoped, local)")
     pci.add_argument("--queue-root", default="", help="the durable SecurityJob queue root (required)")
-    pci.add_argument("--base-dir", default=".vigil-live", help="engagement base dir holding <slug>.spine")
+    pci.add_argument("--base-dir", default=seam, help="engagement base dir holding <slug>.spine")
     pci.add_argument("--workspace", default="", help="the checked-out repo tree (default $GITHUB_WORKSPACE or .)")
     pci.add_argument("--base-ref", default="", help="diff base rev (default $GITHUB_BASE_REF)")
     pci.add_argument("--head-ref", default="", help="diff head rev (default the job commit / $GITHUB_SHA)")
@@ -5607,7 +5680,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "+ dedupe, run the gated deep-fix per finding (own clone, never a PR), optionally "
                               "mint an attestation per verified fix, and emit a SIGNED hash-chained ledger")
     prc.add_argument("--from-spine", required=True, help="the engagement slug whose <slug>.spine holds the facts")
-    prc.add_argument("--base-dir", dest="repo_base_dir", default=".vigil-live", help="dir holding <slug>.spine")
+    prc.add_argument("--base-dir", dest="repo_base_dir", default=seam, help="dir holding <slug>.spine")
     prc.add_argument("--target-repo", required=True, help="the codebase to remediate (fixes land in a disposable clone)")
     prc.add_argument("--target-branch", default="", help="clone branch (default: repo default)")
     prc.add_argument("--apply-edits", action="store_true", help="approve the proposed edits into the clone (deep fix)")
@@ -5649,7 +5722,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="emit a typed verdict with NO certificate (skip signer provisioning)")
     pce.add_argument("--out", default="", help="where to write the signed certificate on a FACT (default: "
                                                "<capture>.cert.json)")
-    pce.add_argument("--base-dir", default=".vigil-live")
+    pce.add_argument("--base-dir", default=seam)
     pce.set_defaults(func=_cmd_cloud_exploit)
 
     pg = sub.add_parser(
@@ -5678,17 +5751,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="bind address for the proxy — loopback (default) or a PRIVATE/tunnel IP only; "
                          "a public/0.0.0.0 bind is refused (never-public). The three backends always "
                          "bind loopback; the proxy is the only human-facing listener.")
-    pu.add_argument("--domain", default="",
+    pu.add_argument("--domain", default=None, type=_console_domain,
                     help="the domain the browser reaches you by (hosted; TLS terminated by your edge "
                          "reverse proxy). An allowlist STRING, not a bind — front it with "
-                         "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https.")
+                         "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https. An empty value is "
+                         "refused (a unit passing --domain ${VIGIL_CONSOLE_DOMAIN} with the variable unset).")
     pu.add_argument("--no-browser", action="store_true",
                     help="do not auto-open a browser (a browser is opened only for a loopback bind)")
     pu.add_argument("--insecure-no-api-key", action="store_true",
                     help="with --domain, proceed even if CRUCIBLE_API_KEY is unset — ONLY if your edge "
                          "proxy adds authentication (otherwise the gated offense api is internet-exposed)")
-    pu.add_argument("--base-dir", default=".vigil-live",
-                    help="engagement home for the runtime serve dir (.vigil-live/ui/) + pids file")
+    pu.add_argument("--base-dir", default=seam,
+                    help="engagement home + cross-plane seam (default: $VIGIL_BASE_DIR, else ./.vigil-live): the "
+                         "runtime serve dir (<base>/ui/) + pids file, and the VIGIL_BASE_DIR every spawned "
+                         "backend is given; must agree with $VIGIL_BASE_DIR when both are set")
     pu.add_argument("--with-feed", action="store_true",
                     help="also run the recurring vuln-intel feed (NVD/OSV/CISA-KEV) as a gated sidecar. "
                          "OFF by default (recurring LIVE egress); needs --feed-slug. Honors that slug's "
@@ -5862,7 +5938,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pdn = sub.add_parser("down", help="CONTAIN a running `vigil up`: stop+disable the systemd unit so it "
                                       "does not restore, then kill the backends + proxy")
-    pdn.add_argument("--base-dir", default=".vigil-live",
+    pdn.add_argument("--base-dir", default=seam,
                      help="engagement home holding the ui/pids file written by `vigil up`")
     pdn.set_defaults(func=_cmd_down)
 
@@ -5881,7 +5957,7 @@ def build_parser() -> argparse.ArgumentParser:
                                         "stop+disable EVERY cadence sidecar timer/unit (no catch-up "
                                         "replay), kill the offense processes, and verify containment "
                                         "held. Clearing is a deliberate operator act.")
-    ppan.add_argument("--base-dir", default=".vigil-live",
+    ppan.add_argument("--base-dir", default=seam,
                       help="engagement home holding the ui/pids file written by `vigil up`")
     ppan.add_argument("--reason", default="",
                       help="reason recorded in every kill-switch (default: 'vigil panic')")
@@ -5893,7 +5969,7 @@ def build_parser() -> argparse.ArgumentParser:
                                                "target-touching/mutating action) but leaves the process "
                                                "UP so diagnosis + evidence export still work. Recorded on "
                                                "the chain; survives restart.")
-    pes.add_argument("--base-dir", default=".vigil-live",
+    pes.add_argument("--base-dir", default=seam,
                      help="engagement home holding the restricted-mode transitions ledger")
     pes.add_argument("--reason", default="", help="reason recorded on the chain and in each kill-switch")
     pes.add_argument("--leave", action="store_true",
@@ -6015,7 +6091,7 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--queue-root", default="",
                     help="the SecurityJob queue root (shared with `reconcile` / `webhook-drain`); required to "
                          "DRAIN (omit only for --print-fix-authorization)")
-    pb.add_argument("--base-dir", default=".vigil-live",
+    pb.add_argument("--base-dir", default=seam,
                     help="engagement base dir (authority root, governance key, approvals, git-write grant)")
     pb.add_argument("--github-token", default="",
                     help="GitHub token for clone + read + comment (else $GITHUB_TOKEN). Off-spine (child env only).")
@@ -6067,7 +6143,7 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--approve", action="store_true",
                     help="operator approval — upgrade the A2 queue to allow (the SAME wiring approval path the "
                          "engine uses). Without it the command QUEUES and does not run.")
-    pt.add_argument("--base-dir", default=".vigil-live",
+    pt.add_argument("--base-dir", default=seam,
                     help="engine home (holds the signed-authority gate + the sealed spine signer)")
     pt.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
     pt.set_defaults(func=_cmd_terminal)
@@ -6084,7 +6160,7 @@ def build_parser() -> argparse.ArgumentParser:
     psb.add_argument("--approve", action="store_true",
                      help="operator approval — upgrade the A3 queue to allow (the SAME wiring approval path). "
                           "Without it the command QUEUES and does not run.")
-    psb.add_argument("--base-dir", default=".vigil-live",
+    psb.add_argument("--base-dir", default=seam,
                      help="engine home (holds the signed-authority gate + the sealed spine signer + the "
                           "sandbox-workspace)")
     psb.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
@@ -6100,7 +6176,7 @@ def build_parser() -> argparse.ArgumentParser:
              "sigil subprocess; NEVER a merged archive — that would be a FATAL-2 boundary breach) + a MANIFEST")
     pbk.add_argument("--out", default="",
                      help="destination root for the timestamped backup dir (default: ~/vigil-backups)")
-    pbk.add_argument("--base-dir", default=".vigil-live", help="offense engine home to back up")
+    pbk.add_argument("--base-dir", default=seam, help="offense engine home to back up")
     pbk.add_argument("--crucible-root", dest="crucible_root", default="",
                      help="CRUCIBLE root holding .blackboard/.console (default: $CRUCIBLE_ROOT or the in-repo v2)")
     grp = pbk.add_mutually_exclusive_group()
@@ -6142,13 +6218,20 @@ def build_parser() -> argparse.ArgumentParser:
              "anchor + no pin, production refuses fail-closed, non-production is integrity-only + a warning); "
              "refuses a rollback to an older backup; then verifies each plane part's sha256 before invoking "
              "either leg (fail-closed, two-file boundary; the sovereign leg is a sigil subprocess)")
-    prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
-                                 "encrypted parts)")
-    prs.add_argument("--base-dir", default=".vigil-live", help="offense base_dir to restore INTO (fresh)")
+    prs.add_argument("src", nargs="?", default=None,
+                     help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
+                          "encrypted parts)")
+    prs.add_argument("--base-dir", default=seam, help="offense base_dir to restore INTO (fresh)")
     prs.add_argument("--crucible-root", dest="crucible_root", default="",
                      help="CRUCIBLE root to restore .blackboard/.console into (default: $CRUCIBLE_ROOT or in-repo)")
     prs.add_argument("--sigil-home", dest="sigil_home", default="",
                      help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
+    prs.add_argument("--sigil-archive-dir", dest="sigil_archive_dir", default="",
+                     help="a hard-pruned sovereign home: where its cold archive goes (forwarded as `sigil restore "
+                          "--archive-dir`; default inside the restored spine)")
+    prs.add_argument("--resume-sovereign", dest="resume_sovereign", action="store_true",
+                     help="finish a sovereign restore into --sigil-home that was interrupted between its swaps "
+                          "(`sigil restore --resume`)")
     prs.add_argument("--expect-governance-pubkey", dest="expect_governance_pubkey", default="",
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
                           "set it ALWAYS overrides the host trust anchor, and BOTH the orchestrator "

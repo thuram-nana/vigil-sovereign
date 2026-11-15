@@ -879,8 +879,9 @@ def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeyp
         def drain(self):
             return next(results)
     monkeypatch.setattr(cs, "CompletionSpoolWatcher", _Watcher)
-    a = types.SimpleNamespace(spool=str(tmp_path), base_dir=str(tmp_path), delegation=str(dfile), scope="*",
-                              settle_cmd="drain", interval=2.0)
+    # the seam the module's fixture set (a --base-dir naming another tree than VIGIL_BASE_DIR is refused)
+    a = types.SimpleNamespace(spool=str(tmp_path), base_dir=os.environ["VIGIL_BASE_DIR"], delegation=str(dfile),
+                              scope="*", settle_cmd="drain", interval=2.0)
     with pytest.raises(SystemExit) as ei:
         cli.cmd_settle_drain(a)
     assert ei.value.code == 1 and "wait on the pricing configuration" in capsys.readouterr().err

@@ -46,10 +46,9 @@ Type=simple
 EnvironmentFile=-%h/.sigil/bridge.env
 Environment=SIGIL_LOG_LEVEL=INFO
 
-# ExecStart uses the `sigil` console command installed into the project venv
-# (README canonical layout: python3 -m venv ~/.sigil/venv && ~/.sigil/venv/bin/pip
-# install -e .). If you did NOT `pip install -e .` (only requirements.txt), the
-# console script is absent — swap the line below for the `python -m sigil` form.
+# ExecStart uses the `sigil` console command of the hash-locked sovereign venv:
+# ./bootstrap.sh (repository root, SIGIL_HOME unset) builds .venv-sovereign and
+# links ~/.sigil/venv to it. The `python -m sigil` form below runs the same code.
 WorkingDirectory=%h/.sigil
 ExecStart=%h/.sigil/venv/bin/sigil bridge serve --addr %i --port ${SIGIL_BRIDGE_PORT}
 # Alternative if the `sigil` console script is not installed:

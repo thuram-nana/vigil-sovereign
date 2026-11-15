@@ -461,49 +461,16 @@ def test_main_exit_code_for_inconclusive(tmp_path, monkeypatch, capsys):
 
 # --- audit E4: the drill never holds the owner key and never writes outside its work dir -----------------
 
-_MAKE_HOME = """
-import sys
-from sigil import config
-from sigil.spine import checkpoint as cp, prune
-from sigil.spine.store import SpineStore
-s = SpineStore(config.SPINE_PATH)
-s.migrate()
-seq = 0
-for _seg in range(4):
-    for _i in range(5):
-        s.append(kind="event", source="t", actor="u", payload={"i": seq}); seq += 1
-    s.rotate()
-for _i in range(3):
-    s.append(kind="event", source="t", actor="u", payload={"i": seq}); seq += 1
-cp.checkpoint(s)
-if sys.argv[1] == "prune":
-    prune.commit_prune(s, 10, confirm=True)
-"""
-
-
-def _env(home):
-    import os
-    import sys
-    from pathlib import Path
-
-    import sigil
-    env = dict(os.environ)
-    env["SIGIL_HOME"] = str(home)
-    root = str(Path(sigil.__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = os.pathsep.join([root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    return env, sys.executable
+# the real-home builders are shared with the home-unit / backup / restore tests (tests/_real_home.py)
+from tests._real_home import MAKE_HOME as _MAKE_HOME  # type: ignore  # noqa: E402
+from tests._real_home import env as _env  # type: ignore  # noqa: E402
+from tests._real_home import signed_home as _real_signed_home  # type: ignore  # noqa: E402
 
 
 def _signed_home(tmp_path, *, pruned: bool):
     """A REAL sovereign home (its own SIGIL_HOME, built in a child process): a segmented spine with an
     owner-signed head + floor + owner keypair under ``home/spine/keys`` — optionally cold-archive PRUNED."""
-    import subprocess
-    home = tmp_path / "realhome"
-    home.mkdir()
-    env, py = _env(home)
-    subprocess.run([py, "-c", _MAKE_HOME, "prune" if pruned else "keep"], env=env, check=True)
-    assert (home / "spine" / "keys" / "owner.priv").is_file() and (home / "spine" / "head.json").is_file()
-    return home
+    return _real_signed_home(tmp_path, pruned=pruned)
 
 
 def _whole_tree(root):

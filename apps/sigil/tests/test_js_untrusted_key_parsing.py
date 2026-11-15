@@ -21,14 +21,16 @@ _VUI = _ROOT / "packages" / "vigil-ui" / "app.js"
 _CVSS = _ROOT / "apps" / "sigil" / "sigil" / "ui" / "public_site" / "tools" / "cvss-calculator" / "cvss.js"
 
 
-
-def _need_node() -> None:
-    """These guards execute shipped JavaScript, so they need node. Without it they SKIP on a developer machine,
-    but FAIL in CI (GITHUB_ACTIONS, where every runner that runs this file has node) or wherever
-    VIGIL_REQUIRE_NODE=1 — a guard must never go green by not running."""
-    if shutil.which("node") is not None:
-        return
-    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("VIGIL_REQUIRE_NODE") == "1":
+def _need_node() -> str:
+    """The node binary these guards execute shipped JavaScript with. Without node they SKIP on a developer
+    machine, but FAIL in CI (GITHUB_ACTIONS, where every runner that runs this file has node) or wherever
+    VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it) — a guard must never go green by
+    not running. Callers use the returned path as argv[0]."""
+    node = shutil.which("node")
+    if node is not None:
+        return node
+    if (os.environ.get("GITHUB_ACTIONS") == "true"
+            or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
         pytest.fail("node is required to run the JS key-parsing guards here, and it is not on PATH")
     pytest.skip("node not installed")
 
@@ -55,8 +57,16 @@ def test_a_missing_node_fails_in_ci_and_skips_only_locally(monkeypatch):
     assert _outcome_of_need_node() == "fail"
     monkeypatch.delenv("GITHUB_ACTIONS")
     assert _outcome_of_need_node() == "skip"
-    monkeypatch.setenv("VIGIL_REQUIRE_NODE", "1")
-    assert _outcome_of_need_node() == "fail"
+    for truthy in ("1", "true", "YES", " on "):
+        monkeypatch.setenv("VIGIL_REQUIRE_NODE", truthy)
+        assert _outcome_of_need_node() == "fail"
+    monkeypatch.setenv("VIGIL_REQUIRE_NODE", "0")
+    assert _outcome_of_need_node() == "skip"
+
+
+def test_a_present_node_is_returned_for_argv0(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/opt/node/bin/node" if name == "node" else None)
+    assert _need_node() == "/opt/node/bin/node"
 
 
 def _slice(src: str, start: str, end_after: str) -> str:
@@ -65,7 +75,7 @@ def _slice(src: str, start: str, end_after: str) -> str:
 
 
 def _node(prog: str):
-    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -135,7 +145,8 @@ def test_cvss_page_never_writes_a_url_chosen_key_that_the_prototype_chain_resolv
     and assigns the crafted key, which reaches an inherited setter with a value from the URL. The write must be
     keyed by the calculator's own ORDER list, so a crafted id is never assigned, whatever the chain carries."""
     href = "https://vigil.example/tools/cvss-calculator/?vector=CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L/ZZ:N"
-    r = subprocess.run(["node", "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", _CVSS_PAGE, str(_CVSS), href], capture_output=True, text=True,
+                       timeout=30)
     assert r.returncode == 0, r.stderr
     got = json.loads(r.stdout)
     assert got["vector"] == "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:L/I:L/A:L"   # the URL's real metrics were applied

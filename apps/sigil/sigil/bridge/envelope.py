@@ -26,9 +26,10 @@ from ..reuse import canonical_json, sign, verify_one
 from ..spine.snapshot import SnapshotState
 from ..spine.store import SpineStore
 
-# The request vocabulary the bridge accepts — a fail-closed allow-list. `panic`/`relay` are effectful;
-# the `read:*` family is side-effect-free. An action outside this set is refused even if validly signed.
-ACTIONS = frozenset({"panic", "relay", "read:snapshot", "read:pending", "read:record",
+# The request vocabulary the bridge accepts — a fail-closed allow-list. `panic`/`relay`/`latch_off` are
+# effectful; the `read:*` family is side-effect-free. An action outside this set is refused even if validly signed.
+# `latch_off` turns one of the owner's customer latches (or all of them) OFF — only ever the safe direction.
+ACTIONS = frozenset({"panic", "relay", "latch_off", "read:snapshot", "read:pending", "read:record",
                      "read:stream", "read:recall"})
 
 # The spine signal marking a consumed request. Its records form the per-device nonce highwater.

@@ -19,8 +19,9 @@ _UI_PORTS = (("proxy", 8770), ("cockpit", 8733), ("console", 8787), ("api", 8799
 def find_repo_root() -> Path:
     """Best-effort repo root — the dir holding `.venv-offense` / `.vigil-live` / `docker-compose.yml`.
     Anchors on the offense venv (a console/CLI runs IN `repo/.venv-offense`, so `sys.prefix`'s parent is
-    the repo), then the cwd. Never raises; falls back to the venv parent. Shared by the readiness report
-    and the services bring-up so both agree on which tree to inspect/act on."""
+    the repo), then the cwd, then the checkout this module was loaded from. Never raises; falls back to the venv
+    parent. Shared by the readiness report and the services bring-up so both agree on which tree to inspect/act
+    on."""
     import sys
     for start in (Path(sys.prefix).parent, Path.cwd()):
         try:
@@ -30,6 +31,11 @@ def find_repo_root() -> Path:
         for cand in [start, *start.parents]:
             if (cand / ".venv-offense").exists():
                 return cand
+    # no offense venv (a sovereign-only host, a CI job on a system Python): the checkout this module was loaded
+    # from, when it is one — its shipped unit files are what the deployment checks compare against
+    here = Path(__file__).resolve().parents[2]
+    if (here / "apps" / "sigil" / "deploy" / "systemd").is_dir() and (here / "infra" / "systemd").is_dir():
+        return here
     return Path(sys.prefix).parent
 
 
@@ -1296,10 +1302,10 @@ def _network_recovery_report(env: "dict | None" = None, *, probe=None, clock=Non
 
 # ── #70: is the cross-plane MONEY SEAM inside what the offense backup captures? (ADVISORY) ─────────────────
 # The credit-lease seam (leases, settlement + pause markers) is the shared VIGIL_BASE_DIR both planes agree on;
-# `vigil-settle-drain` reads/writes it at VIGIL_SETTLE_BASE_DIR (unit default %h/.sigil/credit-lease). It is
+# `vigil-settle-drain` reads/writes it at VIGIL_BASE_DIR (unit default %h/.sigil/credit-lease). It is
 # deliberately NOT in the sovereign `sigil backup` (cross-plane: it also holds offense keys — FATAL-2), so it is
-# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR} from
-# ~/.config/vigil/backup.env, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
+# covered ONLY if the OFFENSE backup's base dir (`vigil-backup.service`: --base-dir ${VIGIL_BASE_DIR}, unit
+# default %h/.sigil/credit-lease, run from WorkingDirectory=%h/vigil) is that seam or contains it. A mismatch means
 # a dead disk loses every lease + settlement marker. ADVISORY: a note, never an _issue / `ok` flip. DEFAULT-OFF:
 # evaluated only once the money drain is configured (settle-drain.env present) — otherwise nothing changes.
 def _parse_env_file(path: Path) -> "dict | None":
@@ -1325,14 +1331,14 @@ def _money_seam_backup_coverage(home: "Path | None" = None) -> "tuple[dict, list
     settle = _parse_env_file(cfg / "settle-drain.env")
     if settle is None:
         return {"configured": False}, []
-    seam = Path(settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
+    seam = Path(settle.get("VIGIL_BASE_DIR") or settle.get("VIGIL_SETTLE_BASE_DIR") or (h / ".sigil" / "credit-lease"))
     backup = _parse_env_file(cfg / "backup.env")
     section: dict = {"configured": True, "seam": _display_path(seam), "backup_base_dir": None, "covered": False}
     if backup is None:
         return section, [f"money seam {_display_path(seam)} (leases + settlement markers) is backed up by NOTHING: "
                          f"there is no ~/.config/vigil/backup.env (vigil-backup.service). Point the offense "
                          f"backup's VIGIL_BASE_DIR at the seam."]
-    base = Path(backup.get("VIGIL_BASE_DIR") or ".vigil-live").expanduser()
+    base = Path(backup.get("VIGIL_BASE_DIR") or (h / ".sigil" / "credit-lease")).expanduser()   # E3a unit default
     if not base.is_absolute():
         base = h / "vigil" / base                         # the unit's WorkingDirectory=%h/vigil
     section["backup_base_dir"] = _display_path(base)
@@ -1413,7 +1419,7 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
 _AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.config's affirmative set (a test pins it)
 
 
-def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list, list]":
+def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "tuple[dict, list, list]":
     """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
     (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
 
@@ -1426,7 +1432,13 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
     AI cost only (payment fees and hosting are outside it); its value is never printed. A retired pricing setting
     (``VIGIL_BILLING_MARKUP_K`` / ``VIGIL_MARGIN_MULTIPLIER_K``) is a HARD issue whether or not either flag is on:
     the margin is the only pricing input. ``probe(url) -> bool | None`` checks the gateway answers (tests inject
-    one); the default sends one unauthenticated request and expects the gateway's own 401."""
+    one); the default sends one unauthenticated request and expects the gateway's own 401.
+
+    With ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set (the gateway's key comes ONLY from that AWS SSM SecureString,
+    ``sigil.provider_key``) and the gateway enabled, the key check is the parameter instead: HARD when the region is
+    missing or invalid, the ``aws`` CLI is missing, or the parameter cannot be read or is not a SecureString;
+    ``ssm_probe(region, name) -> type`` (tests inject one; the default asks AWS for the parameter's TYPE only,
+    without decryption, so doctor never handles the key). A key also in the environment is a note (SSM wins)."""
     e = _runtime_env() if env is None else env
     metered = (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE
     gateway_on = (e.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _AFFIRMATIVE
@@ -1450,7 +1462,14 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
         issues.append("VIGIL_METERED_BILLING is on but VIGIL_MODEL_GATEWAY_ENABLED is not: no customer run can reach "
                       "a model gateway, so every metered launch fails. Enable the gateway in the cockpit's "
                       "environment.")
-    if gateway_on and not ((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip()):
+    env_key = bool((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip())
+    ssm_name = (e.get(_SSM_KEY_PARAMETER_ENV) or "").strip()
+    if gateway_on and ssm_name:
+        section["key_source"] = "ssm"
+        _ssm_issues, _ssm_notes = _ssm_provider_key_report(e, ssm_name, ssm_probe, env_key)
+        issues += _ssm_issues
+        notes += _ssm_notes
+    elif gateway_on and not env_key:
         issues.append("the model gateway is enabled but no provider key (SIGIL_ANTHROPIC_API_KEY / "
                       "ANTHROPIC_API_KEY) is in this environment, so it will not start.")
     try:
@@ -1512,6 +1531,50 @@ def _metering_report(env: "dict | None" = None, probe=None) -> "tuple[dict, list
                 f"VIGIL_MODEL_GATEWAY_PORT?), so metered runs cannot reach the gateway.")
     section["ok"] = not issues
     return section, issues, notes
+
+
+_SSM_KEY_PARAMETER_ENV = "VIGIL_ANTHROPIC_KEY_SSM_PARAMETER"
+
+
+def _probe_ssm_parameter_type(region: str, name: str) -> str:
+    """The TYPE of SSM parameter ``name`` (read without decryption: doctor never handles the key). Raises
+    ``ValueError`` (``vigil_core.aws_ssm.SsmParameterError``) with a fixed message when it cannot be read."""
+    from vigil_core.aws_ssm import SsmParameterError, parameter_type
+    if shutil.which("aws") is None:
+        raise SsmParameterError("the aws CLI is not installed or not on PATH (install awscli v2 on this host)")
+    return parameter_type(region, name)
+
+
+def _ssm_provider_key_report(e: dict, name: str, ssm_probe, env_key: bool) -> "tuple[list, list]":
+    """(issues, notes) for a gateway whose provider key comes only from SSM parameter ``name``."""
+    issues: list = []
+    notes: list = []
+    if env_key:
+        notes.append(f"{_SSM_KEY_PARAMETER_ENV} is set, so the model gateway reads its key only from SSM; the provider "
+                     f"key also present in this environment (SIGIL_ANTHROPIC_API_KEY / ANTHROPIC_API_KEY) is ignored.")
+    try:
+        from vigil_core.aws_ssm import SECURE_STRING, check_parameter_name, check_region
+    except ImportError:
+        notes.append("vigil_core is not importable here, so the SSM provider key was not checked.")
+        return issues, notes
+    try:
+        check_parameter_name(name)
+        region = check_region(e.get("VIGIL_AWS_REGION") or "")
+    except ValueError as exc:
+        issues.append(f"the model gateway's provider key comes from SSM but cannot be read: {exc}. The gateway will "
+                      f"not start.")
+        return issues, notes
+    try:
+        ptype = (ssm_probe or _probe_ssm_parameter_type)(region, name)
+    except Exception as exc:  # noqa: BLE001 — every probe failure is a refusal with its fixed message
+        issues.append(f"the model gateway's provider key comes from SSM but cannot be read: "
+                      f"{exc if isinstance(exc, ValueError) else type(exc).__name__}. The gateway will not start "
+                      f"(check the host's instance role allows ssm:GetParameter on it).")
+        return issues, notes
+    if ptype != SECURE_STRING:
+        issues.append(f"SSM parameter {name} is a {ptype}, not a SecureString: the gateway refuses it. Re-create it as "
+                      f"a SecureString (AWS-DEPLOY.md).")
+    return issues, notes
 
 
 def _runtime_env() -> dict:
@@ -1584,6 +1647,25 @@ def _settle_spool_dir() -> Path:
         v = ((_parse_env_file(Path.home() / ".config" / "vigil" / "settle-drain.env") or {}).get("VIGIL_SETTLE_SPOOL")
              or "").strip()
     return Path(v).expanduser() if v else Path.home() / ".sigil" / "spool" / "settle"
+
+def _doctor_seam_base(repo: Path) -> str:
+    """The seam directory the money probes (paused launches, unfinished settles) read — the tree the launch path
+    actually uses, not just this shell's: the ONE seam every configured seam unit agrees on
+    (``seam_base_units.seam_base_agreement``); else ``VIGIL_BASE_DIR`` in this environment, through the shared
+    resolver; else ``<repo>/.vigil-live``. When the configured units disagree that is already a HARD issue, and the
+    probes fall back to this environment's seam. Never raises."""
+    try:
+        from .seam_base_units import seam_base_agreement
+        units = seam_base_agreement(repo, parse_env=_parse_env_file)[0].get("units") or {}
+        if units and len({os.path.realpath(v) for v in units.values()}) == 1:
+            return str(next(iter(units.values())))
+    except Exception:  # noqa: BLE001 — an unreadable unit model falls back to this environment's seam
+        pass
+    if os.environ.get("VIGIL_BASE_DIR"):
+        from vigil_core.seam_base import resolve_seam_base
+        return resolve_seam_base()
+    return str(repo / ".vigil-live")
+
 
 #: How many unreadable-pause-marker slugs the doctor ISSUE line names before summarising the rest as a count
 #: (the full list is in ``report["paused_launches"]["unreadable"]``) — keeps one bad directory from flooding it.
@@ -1961,7 +2043,7 @@ def collect(repo_root) -> dict:
 
         from .live.credit_lease_pause import (STORE_LOOKUP_FAILS, pause_store_unreadable, paused_launches,
                                               pauses_root, unreadable_pause_markers)
-        _pbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+        _pbase = _doctor_seam_base(repo)
         _paused, _expired, _n_settled = _split_pause_holds(_pbase, paused_launches(_pbase), now=_time.time())
         _n_launches = len(_paused)
         _n_holds = sum(len(nn) for _s, nn in _paused)
@@ -2041,7 +2123,7 @@ def collect(repo_root) -> dict:
             import time as _time
 
             from .live.credit_lease_broker import unfinished_settlements
-            _sbase = os.environ.get("VIGIL_BASE_DIR") or str(repo / ".vigil-live")
+            _sbase = _doctor_seam_base(repo)
             _unf = unfinished_settlements(_sbase, now=_time.time(), grace=_UNFINISHED_SETTLE_GRACE_S)
             if _unf:
                 report["launch_settlements"] = {"unfinished": sorted({s for s, _n in _unf})}
@@ -2080,7 +2162,7 @@ def collect(repo_root) -> dict:
                        f"more than {_mins} minutes: the refund has not landed, and a new launch on that host is "
                        f"refused with a retry until it does, or (tombstone_failed) the settled lease could not be "
                        f"retired from the seam. The drain prints the cause each pass (its unit's journal); typically "
-                       f"the seam (VIGIL_SETTLE_BASE_DIR), the spine or the spool is not writable by the drain's user. "
+                       f"the seam (VIGIL_BASE_DIR), the spine or the spool is not writable by the drain's user. "
                        f"Fix it; the drain finishes the settle on its next pass (retires such a lease within "
                        f"{_mins} minutes).")
             if _err:
@@ -2092,6 +2174,47 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the settle probe must never crash the report
         report.setdefault("launch_settlements", {})["drain_record"] = f"{type(exc).__name__}: {exc}"
         _note(f"the settle drain's record of unfinished settles could not be read: {exc}")
+    # A customer launch settle HELD for the owner: the settle could not tell how much of the reservation to return to
+    # each credit bucket, so it moved nothing. Whichever path refused it (the customer's cancel, the settle drain, the
+    # reservations sweep, the superseded release), the sovereign gate names the launch in this durable alarm
+    # ($SIGIL_HOME/alarms/launch-settle-held.json). A HARD issue until each named launch settles
+    # (`launch_settlements["held"]`, slugs only); an unreadable record is a HARD issue too. Absent alarm => nothing
+    # is added. Best-effort: never raises.
+    try:
+        _held_alarm = home / "alarms" / "launch-settle-held.json"
+        if _held_alarm.exists() or _held_alarm.is_symlink():
+            _held_slugs: "list[str]" = []
+            _unreadable = False
+            try:
+                import json as _json
+                if _held_alarm.is_symlink():
+                    raise ValueError("a symlink")
+                _rec = _json.loads(_held_alarm.read_text(encoding="utf-8"))
+                _entries = _rec.get("held") if isinstance(_rec, dict) else None
+                if not isinstance(_entries, list) or not all(
+                        isinstance(e, dict) and isinstance(e.get("slug"), str) and e["slug"] for e in _entries):
+                    raise ValueError("malformed")
+                _held_slugs = sorted({e["slug"][:96] for e in _entries})
+            except (OSError, ValueError, AttributeError, TypeError):
+                _unreadable = True
+            if _unreadable:
+                report.setdefault("launch_settlements", {})["held"] = ["(unreadable)"]
+                _issue(f"the record of customer launch settles held for the owner ({_display_path(_held_alarm)}) "
+                       f"cannot be read: one or more launches may be holding a customer's reserved credits. Check "
+                       f"the file (it is JSON, written by the cockpit, the settle drain and `sigil ops-sweep`), then "
+                       f"see the runbook hosting-and-persistence (held settles).")
+            elif _held_slugs:
+                report.setdefault("launch_settlements", {})["held"] = _held_slugs
+                _more = f" and {len(_held_slugs) - 10} more" if len(_held_slugs) > 10 else ""
+                _issue(f"{len(_held_slugs)} customer launch settle(s) are held for the owner "
+                       f"({', '.join(_held_slugs[:10])}{_more}): each settle could not tell how much of the "
+                       f"reservation to return to the plan bucket and how much to the wallet, so nothing moved and "
+                       f"the customer's reserved credits stay reserved. Settle each one as the runbook "
+                       f"hosting-and-persistence describes (held settles); `sigil ops-sweep reservations --apply` "
+                       f"then clears this, as does the launch's next settle.")
+    except Exception as exc:  # noqa: BLE001 — the held-settle probe must never crash the report
+        report.setdefault("launch_settlements", {})["held_record"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the record of held customer launch settles could not be read: {exc}")
 
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.
@@ -2102,6 +2225,47 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the seam-coverage probe must never crash the report
         report["money_seam_backup"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # E3a — every configured money-seam unit must resolve ONE seam base; a disagreement is HARD (a drain reading
+    # another tree settles nothing). Nothing configured ⇒ nothing added. Best-effort: never raises.
+    try:
+        from .seam_base_units import seam_base_agreement
+        report["seam_base"], _sb_issues = seam_base_agreement(repo, parse_env=_parse_env_file,
+                                                              display=_display_path)
+        for _m in _sb_issues:
+            _issue(_m)
+    except Exception as exc:  # noqa: BLE001 — the seam-base probe must never crash the report
+        report["seam_base"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the seam-base agreement probe could not run: {exc}")
+
+    # Seam migration — once seam units are configured, launch-seam records still held in a former seam directory
+    # (``$SIGIL_HOME/.vigil-live``, a writer unit's ``<WorkingDirectory>/.vigil-live``, a retired
+    # VIGIL_SETTLE_BASE_DIR, VIGIL_SEAM_LEGACY_DIRS) must be carried into the seam the units use by
+    # `sigil seam migrate`; until its journal commits that tree at its current digest it is a HARD issue (one per
+    # tree). Only class paths are hashed; no file is otherwise read. The seam is the one the cockpit and the settle
+    # drain agree on (``seam_migration.migration_seam``; an operator console keeping its engine home elsewhere does not
+    # hide it). Nothing configured ⇒ no key (byte-identical); units that disagree are already a HARD issue above.
+    # Best-effort: never raises.
+    try:
+        from .seam_base_units import unit_details
+        _sm_units = unit_details(repo, parse_env=_parse_env_file)
+        if _sm_units:
+            from .seam_migration import legacy_candidates, migration_seam, unmigrated_legacy
+            _sm_seam = migration_seam(_sm_units)
+            if _sm_seam is None:
+                report["seam_migration"] = {"skipped": "the configured units disagree on the seam base"}
+            else:
+                _sm_left = unmigrated_legacy(_sm_seam, legacy_candidates(_sm_seam, units=_sm_units))
+                report["seam_migration"] = {"seam": _display_path(_sm_seam), "legacy": [
+                    {"path": _display_path(x["path"]), "reason": x["reason"], "files": x["files"]} for x in _sm_left]}
+                for x in _sm_left:
+                    _issue(f"seam migration: {_display_path(x['path'])} holds {x['files']} launch-seam record(s) "
+                           f"not carried into the seam {_display_path(_sm_seam)} ({x['reason']}). With the cockpit, "
+                           f"the customer server and the settle drain stopped, run `sigil seam migrate` (it reports "
+                           f"what it will carry), then `sigil seam migrate --apply` as the service user.")
+    except Exception as exc:  # noqa: BLE001 — the seam-migration probe must never crash the report
+        report["seam_migration"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the seam-migration probe could not run: {exc}")
 
     # NET-4 (#73) — network-recovery / telemetry posture. ADVISORY (never _issue, never flips `ok`); default
     # (nothing configured) adds no note. Best-effort: never raises.
@@ -2137,6 +2301,29 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the metering probe must never crash the report
         report["metering"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # GO-LIVE §1/§6 — the systemd user units this host has installed: one cockpit on 127.0.0.1:8733 (the console
+    # proxy-only in front of sigil-cockpit), ~/.sigil/venv as the hash-locked sovereign venv, the settle/money
+    # settings every settling process must share, customer Google sign-in, and edge units whose stop timeout outlasts
+    # the edge's drain (RELEASE §2.6). Each is silent until its units or files exist (default output
+    # unchanged); a finding is a HARD issue. Read from the files the units load (deploy_checks). Best-effort.
+    from . import deploy_checks as _dc
+    _home = Path.home()
+    for _key, _check in (("cockpit_port", lambda: _dc.cockpit_port_report(_home, repo)),
+                         ("sovereign_venv", lambda: _dc.sovereign_venv_report(_home, repo)),
+                         ("must_match_flags", lambda: _dc.must_match_report(_home, repo)),
+                         ("customer_signin", lambda: _dc.customer_signin_report(_home, repo)),
+                         ("edge_stop_timeout", lambda: _dc.edge_stop_timeout_report(_home, repo))):
+        try:
+            _sec, _iss, _nts = _check()
+            report[_key] = _sec
+            for _m in _iss:
+                _issue(_m)
+            for _m in _nts:
+                _note(_m)
+        except Exception as exc:  # noqa: BLE001 — a deployment check must never crash the report
+            report[_key] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+            _note(f"the {_key} check could not run: {exc}")
     return report
 
 
@@ -2332,6 +2519,41 @@ def render(report: dict) -> str:
                      + (f"; cancelled runs: {mt.get('cancel_settlement')}" if mt.get("cancel_settlement") else "")
                      + (f"; daily ceiling ${mt.get('daily_limit_usd')}" if mt.get("daily_limit_usd") else ""))
 
+    dep = [(k, report.get(k)) for k in ("cockpit_port", "sovereign_venv", "must_match_flags", "customer_signin",
+                                        "edge_stop_timeout")]
+    dep = [(k, d) for k, d in dep if isinstance(d, dict) and d.get("configured") and "error" not in d]
+    if dep:
+        # GO-LIVE §1/§6: rendered ONLY when the units/files a check reads exist (default output unchanged).
+        lines.append("\nDeployment units (systemd user units installed on this host):")
+        for k, d in dep:
+            if k == "cockpit_port":
+                ck = (f"cockpit unit on {d.get('cockpit_addr')}" if d.get("cockpit_installed", True)
+                      else "no cockpit unit installed")
+                lines.append(f"  {_mark(bool(d.get('ok')))}console: {d.get('console_mode')}; {ck}"
+                             + (f"; console federates to {d['sovereign_addr']}" if d.get("sovereign_addr") else "")
+                             + ("; --domain is EMPTY" if d.get("domain") == "empty" else ""))
+            elif k == "sovereign_venv":
+                lines.append(f"  {_mark(bool(d.get('ok')))}{d.get('path')}: "
+                             + ("MISSING" if d.get("exists") is False else
+                                f"symlink to {d.get('target')}" if d.get("symlink") else "NOT a symlink"))
+            elif k == "customer_signin":
+                g = d.get("google", {})
+                lines.append(f"  {_mark(bool(d.get('ok')))}customer Google sign-in: "
+                             + "; ".join(f"{v} in the {'customer edge' if p == 'customer' else p}"
+                                         for p, v in g.items())
+                             + ("; inside the installed app: " + ("on" if d.get("handoff") else "OFF")
+                                if g.get("customer") == "on" else ""))
+            elif k == "edge_stop_timeout":
+                lines.append(f"  {_mark(bool(d.get('ok')))}edge stop timeouts: "
+                             + "; ".join(f"{u} {v if isinstance(v, str) else format(v, 'g') + ' s'}"
+                                         for u, v in d.get("units", {}).items()))
+            else:
+                procs = ", ".join(p for p in d.get("processes", {}) if p != "ops-sweep")
+                lines.append(f"  {_mark(bool(d.get('ok')))}settle/money settings "
+                             + ("agree" if d.get("ok") else "DISAGREE") + f" across {procs}"
+                             + ("" if "ops-sweep" not in d.get("processes", {}) else
+                                "; an ops-sweep shell reading only sigil.env "
+                                + ("agrees" if d.get("ops_sweep_agrees") else "differs (see notes)")))
     issues = report.get("issues", [])
     if issues:
         lines.append("\nAction needed (blocks bring-up):")

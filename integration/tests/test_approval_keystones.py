@@ -207,12 +207,15 @@ def test_strix_hook_hard_deny_always_raises():
         _run(hook.on_tool_start(_ctx("exec_command", '{"command":"ls"}'), None, _Tool("exec_command")))
 
 
-def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
+def test_strix_hook_binds_and_shows_the_real_command(tmp_path, monkeypatch):
     # END-TO-END with the REAL broker + crypto (red-pen BLOCK-1 regression). The hook MUST bind + display the
     # ACTUAL command from the ToolContext: a token the owner signs for command A must NOT authorize command B,
     # and the pending request the owner sees must contain the real command (not a constant).
     from vigil_integration.warden_gate import _build_strix_approver
 
+    # Unattended: no token is ever signed DURING a poll window here, so a 0 s window gives the same verdicts
+    # as the 300 s product default — set it explicitly rather than lean on the suite-wide conftest default.
+    monkeypatch.setenv("VIGIL_APPROVAL_WAIT_SECONDS", "0")
     base, kp, authority = _provisioned(tmp_path)
     root = B.approvals_root(base)
     approver = _build_strix_approver(base)  # reads the persisted authority + approvals under base
@@ -240,6 +243,11 @@ def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
     # stays blocked. (Before BLOCK-1's fix the digest was a constant and B would have run under A's signature.)
     with pytest.raises(WardenDenied):
         _run(hook.on_tool_start(_ctx("exec_command", cmd_b), None, _Tool("exec_command")))
+    # ... and the owner sees B as its OWN pending request, bound to a digest that differs from the one A's
+    # token was signed for (the per-action binding itself, not only the single-use ledger, keeps B blocked).
+    pend_b = [p for p in B.list_pending(root) if "attacker" in p.args_preview]
+    assert len(pend_b) == 1
+    assert pend_b[0].action_digest != action_a.action_digest
 
 
 def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):

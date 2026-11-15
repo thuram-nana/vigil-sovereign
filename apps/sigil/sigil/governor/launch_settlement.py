@@ -73,6 +73,11 @@ from .postpaid import _PP_CREDIT_CORE, POSTPAID_CREDIT_SIGNAL, SETTLE_ENTRY_PREF
 from .wallet import _GRANT_CORE, CREDIT_GRANT_SIGNAL  # noqa: E402
 
 LAUNCH_SETTLED_SIGNAL = "governor.launch_settled"
+#: A customer cancel that was HELD for the owner (``launch_gate.PLAN_DEBIT_PRUNED``: nothing moved) leaves this marker
+#: for its lease ``(org_id, slug, nonce)``, so the reservation the customer was told stays reserved can never be
+#: started afterwards (``SettlementEvidence.cancel_held``; ``LaunchGate.publish_lease`` refuses it). It only ever
+#: REFUSES a start — the safe direction — so it is accepted unsigned, as the kill switch's engage is.
+LAUNCH_CANCEL_HELD_SIGNAL = "launch.cancel_held"
 SETTLED_RECORD_VERSION = 2
 _SETTLED_CORE_V2 = ("signal", "v", "org_id", "slug", "nonce", "mode", "reserved", "consumed", "refund_plan",
                     "refund_wallet", "refund_postpaid", "plan_period_end", "basis", "issued_at")
@@ -238,6 +243,7 @@ class SettlementEvidence:
     decision: Optional[SettlementDecision] = None   # ...its decision, when it is a well-formed v2 record
     malformed: bool = False               # ...True when that first record is owner-signed but unusable (or v1)
     landed: "set[str]" = field(default_factory=set)   # verified settle entries on the spine: wallet/plan/postpaid
+    cancel_held: bool = False             # a customer cancel of this lease was held for the owner: never start it
 
     @property
     def settled(self) -> bool:
@@ -270,6 +276,10 @@ def scan_settlement(store, trusted_pubkey: Optional[str], *, org_id: str, slug: 
         if not isinstance(p, dict) or p.get("org_id") != org_id:
             continue
         sig = p.get("signal")
+        if sig == LAUNCH_CANCEL_HELD_SIGNAL:
+            if p.get("slug") == s and p.get("nonce") == n:
+                ev.cancel_held = True
+            continue
         if sig == LAUNCH_SETTLED_SIGNAL:
             if ev.record_seq is not None or p.get("slug") != s or p.get("nonce") != n:
                 continue

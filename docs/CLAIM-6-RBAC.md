@@ -250,7 +250,7 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
 - **Per-user RBAC + authenticated-principal attribution on the offense gated API (W16-12, #518).** The
   loopback external API (`framework.v2.api`) — the OTHER offense HTTP surface, previously gated only by an
   optional shared bearer (`CRUCIBLE_API_KEY`, off by default) with no users/roles/attribution — now consumes
-  the SAME model: `api.server.ApiHandler._authorize` enforces `role_can(role, offense_perm_for(path))` for
+  the SAME model: `api.server.ApiHandler._authorize` enforces `role_can_global(role, offense_perm_for(path))` for
   its two POST routes (`/api/v1/tool/invoke`, `/api/v1/import` → operator-tier `run_engagement`, added to the
   ONE `OFFENSE_ACTION_PERM` map), verifying the proxy's hop-signed role via the shared
   `vigil_core.hopauth.verify_hop_assertion` (the console STAMP/VERIFY and the proxy STAMP are now one
