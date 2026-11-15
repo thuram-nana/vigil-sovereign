@@ -79,7 +79,8 @@ def _log_safe(value, limit: int = _LOG_FIELD_MAX, *, token: bool = False) -> str
     if len(s) > limit:
         # the marker contains a space, which a token-mode value cannot (it is escaped) — so it is unforgeable
         out.append(f"...[+{len(s) - limit} chars]")
-    return "".join(out)
+    # every CR/LF is already an escape above; stated explicitly so a line break can never reach a log record
+    return "".join(out).replace("\r", "").replace("\n", "")
 
 # a POST body is bounded so an untrusted client cannot exhaust memory. Generous enough
 # for a real third-party report, far below a DoS.
