@@ -146,7 +146,14 @@ the spine** — never the source of truth.
   any later settle of the launch finds it already settled and never refunds it twice. A launch leaves the alarm
   when its next settle finds it settled, or at the next `ops-sweep reservations --apply` once the spine (or its
   seam settlement marker) shows it settled; the file goes when it names none. Never edit the file by hand while
-  a launch it names is unsettled.
+  a launch it names is unsettled. A held customer cancel also writes a `launch.cancel_held` record on the spine:
+  that reservation can never be started afterwards, even without the alarm file.
+
+  The alarm file is not in the backups (`alarms` is a documented exclusion): after a restore, the next
+  `ops-sweep reservations --apply` (or the next settle attempt of the launch) names a still-held launch again,
+  and the spine's cancel records keep a cancelled one from starting. Settle the launch by its settle entries —
+  the owner grants to the entry ids above, never a sweep run over it while it is held — and only then let the
+  sweep drop it from the alarm.
 
   **Expired paused launches.** A paused launch whose lease window closed (or whose pause was lifted only
   after it closed) can no longer run. `vigil doctor` reports it as a hard issue once the settle grace
