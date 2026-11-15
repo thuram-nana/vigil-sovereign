@@ -131,6 +131,11 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
             pass
 
 
+#: The printable ASCII characters an id component may hold (no separator), mapped to themselves: the value handed
+#: on is read from this table, so it holds only checked characters (and static analysis can see that).
+_COMPONENT_TABLE = {chr(i): chr(i) for i in range(0x20, 0x7F) if chr(i) not in "/\\"}
+
+
 def _safe_component(value: Any) -> str:
     """A filesystem-safe id component: no separators, no ``..``, no NUL, no whitespace/control chars (a
     newline could otherwise name a ``signed/a\\nb.json`` file). Returns "" if unsafe. request_ids are 16-hex
@@ -140,7 +145,9 @@ def _safe_component(value: Any) -> str:
         return ""
     if any(ord(c) < 0x20 or ord(c) == 0x7f for c in s):
         return ""
-    return s
+    if any(c not in _COMPONENT_TABLE for c in s):         # non-ASCII: not an id we mint
+        return ""
+    return "".join(_COMPONENT_TABLE[c] for c in s)
 
 
 # ---------------------------------------------------------------------------------------------------

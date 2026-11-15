@@ -138,10 +138,7 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
         target = (dest / member.name).resolve()
         if target != dest and dest not in target.parents:
             raise SpineError(f"refusing to extract backup member outside the target dir: {member.name!r}")
-    try:
-        tar.extractall(str(dest), filter="data")            # py3.12+: strips absolute/.. and unsafe links
-    except TypeError:                                       # pragma: no cover — older Python without `filter`
-        tar.extractall(str(dest))
+    tar.extractall(str(dest), filter="data")                # py3.12+ (the floor): strips absolute/.. and unsafe links
 
 
 def _open_store_over(spine_dir: Path, data_name: str, **store_kw) -> SpineStore:

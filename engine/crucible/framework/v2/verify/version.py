@@ -124,6 +124,38 @@ def _in_osv_range(ver: _Ver, rng: dict) -> bool:
 _CMP_RE = re.compile(r"^\s*(>=|<=|==|=|>|<|~=)?\s*(.+?)\s*$")
 
 
+_OPS = (">=", "<=", "==", "=", ">", "<", "~=")      # the _CMP_RE alternation order
+
+
+def _value(r: str):
+    r"""What ``\s*(.+?)\s*$`` captures from ``r`` (``.`` never matches a newline), or None."""
+    v = r.strip()
+    if v:
+        return None if "\n" in v else v
+    # whitespace only: the lazy group takes ONE character the trailing \s*$ can leave — the last non-newline one
+    # (or, before a final newline, the one before it)
+    for k in range(len(r) - 1, -1, -1):
+        if r[k] != "\n" and ("\n" not in r[k + 1:] or r[k + 1:] == "\n" or r[k + 1:].strip() == ""):
+            return r[k]
+    return None
+
+
+def _cmp_clause(c: str):
+    r"""_CMP_RE.match(c) -> (op or None, value) | None, for r"^\s*(>=|<=|==|=|>|<|~=)?\s*(.+?)\s*$"."""
+    lead = c.lstrip()
+    for op in _OPS:
+        if lead.startswith(op) and lead[len(op):]:
+            v = _value(lead[len(op):])
+            if v is not None:
+                return op, v
+    if not c:
+        return None
+    v = _value(lead) if lead else _value(c)
+    return (None, v) if v is not None else None
+
+
+
+
 def _in_comparator_string(ver: _Ver, spec: str) -> bool:
     """Membership in a comma/space-separated comparator string like ``>=1.0.0,<2.0.0`` (all clauses
     must hold). FAIL-CLOSED: an unparseable clause, or an operator whose exact semantics we do not
@@ -139,13 +171,13 @@ def _in_comparator_string(ver: _Ver, spec: str) -> bool:
         "==": lambda b: ver.ge(b) and ver.le(b), "=": lambda b: ver.ge(b) and ver.le(b),
     }
     for c in clauses:
-        m = _CMP_RE.match(c)
-        if not m:
+        parsed = _cmp_clause(c)
+        if parsed is None:
             return False
-        op = m.group(1) or "=="
+        op = parsed[0] or "=="
         if op not in ops:
             return False                      # un-modelled operator (e.g. ~=) -> fail-closed
-        bound = _Ver(m.group(2))
+        bound = _Ver(parsed[1])
         if not bound.ok or not ops[op](bound):
             return False
     return True

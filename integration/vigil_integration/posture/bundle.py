@@ -101,5 +101,5 @@ def export_posture_bundle(
     # the shipped VIGIL-free verifier (a copy, so the bundle is self-contained)
     if _VERIFIER_SRC.is_file():
         shutil.copyfile(_VERIFIER_SRC, out / "verify_offline.py")
-        os.chmod(out / "verify_offline.py", 0o644)
+        os.chmod(out / "verify_offline.py", 0o600)   # same as the rest of the bundle until it is published
     return out

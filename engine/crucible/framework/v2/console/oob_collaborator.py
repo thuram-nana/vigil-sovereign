@@ -61,6 +61,9 @@ from ..common import paths
 # (alnum plus ``-_.``, no separator, no "..", no leading dot). It names a directory under the state dir, so a
 # hostile value must never traverse out of it.
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+#: The characters a slug may hold, mapped to themselves: the value handed on is read from this table, so it holds
+#: only checked characters (and static analysis can see that).
+_SLUG_TABLE = {c: c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"}
 
 # The managed relay is loopback-only, ALWAYS. This is not configurable from a request; it is the invariant.
 _HOST = "127.0.0.1"
@@ -100,7 +103,7 @@ def _safe_slug(slug: str) -> str:
     s = str(slug or "").strip()
     if ".." in s or _SLUG_RE.match(s) is None:
         raise ValueError(f"unsafe oob slug: {slug!r}")
-    return s
+    return "".join(_SLUG_TABLE[c] for c in s)
 
 
 def _slug_dir(slug: str) -> Path:

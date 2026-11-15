@@ -2224,6 +2224,11 @@ def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -
     if host not in _CLONE_HOSTS:            # SSRF boundary — public git hosts only (never internal/metadata)
         return {"ok": False, "error": f"clone source host {host or '(none)'!r} is not an allowed git host "
                                       f"(allowed: {', '.join(sorted(_CLONE_HOSTS))})"}
+    # the checked URL, rebuilt from the URL characters it may hold (RFC 3986), before it reaches the git argv
+    try:
+        repo = _si.token(repo, maxlen=2048, extra="/?#[]!$&'()*+,;=%~")
+    except ValueError:
+        return {"ok": False, "error": "the repository URL holds characters a git URL cannot"}
     if _chat_killswitch_tripped(cid or str(chat_id or "")):
         return {"ok": False, "error": "clone refused: the engagement kill-switch is engaged"}
     # WARDEN tier, honored: auto opens; queue opens only when the operator personally invoked it; else deny.

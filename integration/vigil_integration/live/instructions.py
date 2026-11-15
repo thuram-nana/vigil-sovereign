@@ -25,6 +25,9 @@ from typing import Optional
 # so it can never traverse out of the instructions dir.
 _SAFE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _MAX_SLUG = 128
+#: The characters a slug may hold, mapped to themselves: the value handed on is read from this table, so it holds
+#: only checked characters (and static analysis can see that).
+_SLUG_TABLE = {c: c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"}
 _MAX_TEXT = 4000
 _MAX_PENDING = 200          # bound a single drain so a flood can't blow up a think prompt
 
@@ -33,7 +36,7 @@ def _safe_slug(slug: str) -> str:
     s = str(slug or "")
     if ".." in s or len(s) > _MAX_SLUG or not _SAFE_SLUG.match(s):
         raise ValueError(f"unsafe engagement slug: {slug!r}")
-    return s
+    return "".join(_SLUG_TABLE[c] for c in s)
 
 
 def _crucible_root_freestanding() -> Path:
