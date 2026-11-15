@@ -522,6 +522,52 @@ def test_a_customer_cancel_of_a_held_launch_says_it_is_held_alarms_and_moves_not
     assert _buckets(s2) == (0, 15) and _entries(s2, "settle-") == 0
 
 
+def test_a_held_cancel_leaves_a_marker_so_the_reservation_can_never_be_started(world):
+    # the customer was told the reservation is cancelled (its credits held for the operator): a later start — from
+    # the customer, or a re-publish after the held-settle alarm file was lost (a restore leaves it out) — is refused
+    from sigil.governor.launch_settlement import LAUNCH_CANCEL_HELD_SIGNAL, scan_settlement
+    from sigil.ui.launch_gate import CANCEL_HELD_START_DETAIL
+    from sigil.ui.provision import ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)
+    _hard_prune_past_the_reserve(world)
+    with pytest.raises(ProvisionDenied):
+        build_provisioner(_store(world)).launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    s2 = _store(world)
+    marks = [x.payload for x in s2.iter_records() if (x.payload or {}).get("signal") == LAUNCH_CANCEL_HELD_SIGNAL]
+    assert marks == [{"signal": LAUNCH_CANCEL_HELD_SIGNAL, "org_id": ORG, "slug": r["slug"], "nonce": r["nonce"]}]
+    g = LaunchGate(s2)
+    assert scan_settlement(s2, g.owner_key.public_key_b64, org_id=ORG, slug=r["slug"], nonce=r["nonce"]).cancel_held
+    out = g.publish_lease(signed_lease=r["lease"], expect_org_id=ORG)
+    assert out == {"ok": False, "error": CANCEL_HELD_START_DETAIL}, out
+    from sigil.governor import settle_hold
+    settle_hold.held_alarm_path().unlink()                          # the alarm file gone: the marker still holds
+    assert LaunchGate(_store(world)).publish_lease(signed_lease=r["lease"], expect_org_id=ORG)["ok"] is False
+    assert _buckets(_store(world)) == (0, 15)                       # nothing moved
+
+
+def test_a_held_cancel_whose_marker_cannot_be_written_is_not_reported_cancelled(world, monkeypatch):
+    from sigil.governor.launch_settlement import LAUNCH_CANCEL_HELD_SIGNAL
+    from sigil.ui.provision import LAUNCH_REFUND_HELD_DETAIL, ProvisionDenied, build_provisioner
+    s = _store(world)
+    _seat(s, wallet=20, plan=5)
+    r = _reserve(s, units=10, publish=False)
+    _hard_prune_past_the_reserve(world)
+    p = build_provisioner(_store(world))
+    real = p.store.append
+
+    def _append(**kw):
+        if (kw.get("payload") or {}).get("signal") == LAUNCH_CANCEL_HELD_SIGNAL:
+            raise OSError("disk full")
+        return real(**kw)
+    monkeypatch.setattr(p.store, "append", _append)
+    with pytest.raises(ProvisionDenied) as ei:
+        p.launch_cancel("u", ORG, r["lease"], now=NOW + 60)
+    assert str(ei.value) != LAUNCH_REFUND_HELD_DETAIL and "retry" in str(ei.value)
+    assert _audits(_store(world), "refund_held") == []
+
+
 def test_a_customer_cancel_of_a_started_launch_is_still_refused_as_started(world):
     from sigil.ui.provision import ProvisionDenied, build_provisioner
     s = _store(world)

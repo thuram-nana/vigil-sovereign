@@ -74,6 +74,10 @@ _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is 
 #: reservation, there is no lease) while the reserve's plan debit record has left the live spine window: nothing
 #: moves until the owner restores it.
 PLAN_DEBIT_PRUNED = "plan_debit_pruned"
+#: What a customer is told when they start a reservation whose cancel was held for the owner
+#: (``launch_settlement.LAUNCH_CANCEL_HELD_SIGNAL``): it was cancelled, so it never runs.
+CANCEL_HELD_START_DETAIL = ("this reservation was cancelled and cannot be started; its credits stay reserved, not "
+                            "spent, until the operator returns them")
 
 #: What a customer is told while the owner's kill switch refuses a new reservation or a start — engaged, or (fail-
 #: closed) unreadable. It names no mechanism and no state of the service: the reason stays in the server log.
@@ -1003,6 +1007,8 @@ class LaunchGate:
             if ev.settled or is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
                 return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
                         "re-published"}
+            if ev.cancel_held:
+                return {"ok": False, "error": CANCEL_HELD_START_DETAIL}
             # the owner's kill switch, read under the locks: an engaged kill switch starts nothing new (a reserved,
             # unstarted launch stays cancellable; nothing is minted or written here)
             halted = self._halt_refusal()

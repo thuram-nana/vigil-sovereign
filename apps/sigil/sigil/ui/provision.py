@@ -1751,7 +1751,16 @@ class Provisioner:
         if r.get("refused") == PLAN_DEBIT_PRUNED:
             # HELD for the owner (nothing moved): the settle cannot tell this reservation's plan share from its wallet
             # share. The gate has named it in the held-settle alarm `vigil doctor` reports; the customer is told the
-            # truth (not "started"), and the audit is critical.
+            # truth (not "started"), and the audit is critical. The cancel marker goes on the spine first: the
+            # customer was told this reservation is cancelled, so it must never start afterwards (publish_lease reads
+            # the marker under the settle lock). A marker that cannot be written fails the cancel, to be retried.
+            from ..governor.launch_settlement import LAUNCH_CANCEL_HELD_SIGNAL
+            try:
+                self.store.append(kind="event", source="provision", actor="WARDEN",
+                                  payload={"signal": LAUNCH_CANCEL_HELD_SIGNAL, "org_id": str(_cdoc.org_id),
+                                           "slug": str(_cdoc.engagement_slug), "nonce": str(_cdoc.nonce)})
+            except Exception as e:  # noqa: BLE001 — no marker, no "cancelled" answer: the customer retries
+                raise ProvisionDenied("launch cancel could not be recorded (retry)") from e
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refund_held", reason=PLAN_DEBIT_PRUNED,
                         critical=True)
