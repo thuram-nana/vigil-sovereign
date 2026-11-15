@@ -218,10 +218,11 @@ class WellKnownFetcher:
         self._total = float(total_timeout)
         self._max_bytes = int(max_bytes)
         self._resolver = resolver
-        self._ctx = ssl_context if ssl_context is not None else ssl.create_default_context()
+        ctx = ssl_context if ssl_context is not None else ssl.create_default_context()
         # Pin the TLS floor EXPLICITLY on whichever context is used (do not rely on the interpreter's default,
         # which varies by version) — reject TLSv1 / TLSv1.1 for this outbound ownership-verification fetch.
-        self._ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        self._ctx = ctx
         self._monotonic = monotonic
         self._doh_resolver = str(doh_resolver or _DEFAULT_DOH_RESOLVER)
 
