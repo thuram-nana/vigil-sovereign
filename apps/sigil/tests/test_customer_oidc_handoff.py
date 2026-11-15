@@ -375,6 +375,20 @@ def _whoami(ep, set_cookie):
 import http.cookies  # noqa: E402  (used by _whoami)
 
 
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
+
 def _app_finishes_google(ep, idp, *, sub="g-sub-1", email="founder@gmail.com", ip=None):
     """An installed app starts a hand-off; the person finishes Google sign-in in another browser (no cookies) on the
     same phone, so from the same client address `ip`."""
@@ -828,14 +842,13 @@ vm.runInContext(src.slice(a, b) + "\n" + src.slice(c, e) +
 
 
 def _app(dataset, standalone):
-    r = subprocess.run(["node", "-e", _APP_HARNESS, str(APP / "app.js"),
+    r = subprocess.run([_need_node(), "-e", _APP_HARNESS, str(APP / "app.js"),
                         json.dumps({"dataset": dataset, "standalone": standalone})],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_the_installed_app_starts_the_handoff_with_the_challenge_of_a_verifier_it_keeps():
     out = _app({"googleSignin": "1", "oidcHandoff": "1"}, True)
     assert out["handoffOn"] is True and len(out["assigned"]) == 1
@@ -849,7 +862,6 @@ def test_the_installed_app_starts_the_handoff_with_the_challenge_of_a_verifier_i
     assert json.loads(out["stored"]["vigil.oidc.handoff"])["verifier"] == verifier   # (no IndexedDB here)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 @pytest.mark.parametrize("dataset,standalone", [({"googleSignin": "1", "oidcHandoff": "1"}, False),
                                                 ({"googleSignin": "1", "oidcHandoff": "0"}, True),
                                                 ({"googleSignin": "0", "oidcHandoff": "1"}, True)])

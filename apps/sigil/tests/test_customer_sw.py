@@ -17,6 +17,7 @@ In the style of test_bridge_webapp.py, these assert:
 from __future__ import annotations
 
 import http.client
+import os
 import json
 import re
 import shutil
@@ -29,9 +30,22 @@ import pytest
 from sigil.ui import custui
 from sigil.ui.custui import build_app_snapshot, build_customer_server
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 SW = (APP / "sw.js").read_text(encoding="utf-8")
-_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 # every path (relative to the scope) the worker must leave to the network
 NETWORK_ONLY_PATHS = ["api/customer/whoami", "api/customer/billing", "api/customer/notifications",
@@ -134,7 +148,7 @@ def _worker_src(build="cccccccccccc", shell=SHELL) -> str:
 
 def _run_worker(requests, *, offline=False, src=None):
     cfg = json.dumps({"scope": SCOPE, "offline": offline, "requests": requests})
-    r = subprocess.run(["node", "-e", _SW_HARNESS, src or _worker_src(), cfg], capture_output=True, text=True,
+    r = subprocess.run([_need_node(), "-e", _SW_HARNESS, src or _worker_src(), cfg], capture_output=True, text=True,
                        timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
@@ -152,7 +166,6 @@ _LEFT_ALONE = ([["GET", SCOPE + p] for p in NETWORK_ONLY_PATHS]
                   ["GET", SCOPE + "unknown.css"], ["GET", SCOPE + "deep/route", "navigate"]])
 
 
-@_node
 def test_api_probes_version_and_every_non_get_are_never_answered_or_stored():
     out = _run_worker(_LEFT_ALONE)
     for key, ans in out["answers"].items():
@@ -160,7 +173,6 @@ def test_api_probes_version_and_every_non_get_are_never_answered_or_stored():
     assert out["puts"] == 0 and out["fetched"] == []            # never stored, never even fetched by the worker
 
 
-@_node
 def test_the_shell_is_served_from_this_builds_cache():
     out = _run_worker([["GET", SCOPE + "tokens.css?v=aaaaaaaaaaaa"], ["GET", SCOPE + "app.js?v=bbbbbbbbbbbb"]])
     assert list(out["answers"].values()) == ["cached:" + SCOPE + "tokens.css?v=aaaaaaaaaaaa",
@@ -168,7 +180,6 @@ def test_the_shell_is_served_from_this_builds_cache():
     assert out["puts"] == 0
 
 
-@_node
 def test_the_root_page_goes_to_the_network_first_and_falls_back_only_offline():
     reqs = [["GET", SCOPE, "navigate"], ["GET", SCOPE + "index.html", "navigate"],
             ["GET", SCOPE + "?status=successful", "navigate"]]
@@ -183,7 +194,6 @@ def test_the_root_page_goes_to_the_network_first_and_falls_back_only_offline():
         "GET " + SCOPE + "nope navigate": None}
 
 
-@_node
 def test_install_stores_exactly_the_shell_and_activate_deletes_every_other_cache():
     out = _run_worker([])
     assert [a[1] for a in out["added"]] == [SCOPE, SCOPE + "tokens.css?v=aaaaaaaaaaaa", SCOPE + "app.js?v=bbbbbbbbbbbb"]
@@ -194,7 +204,6 @@ def test_install_stores_exactly_the_shell_and_activate_deletes_every_other_cache
     assert out["skip"] == 1                                       # SKIP_WAITING obeyed, the other message not
 
 
-@_node
 def test_the_check_fails_when_the_worker_would_answer_an_api_request():
     # negative control: a worker that drops the api rule answers (and could serve) an api path — the test sees it
     broken = _worker_src().replace("var NETWORK_ONLY = [/^api\\//, /^api$/,", "var NETWORK_ONLY = [")
@@ -293,13 +302,12 @@ A, B = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
 def _pwa(**cfg):
     base = {"page": A, "server": A, "path": "/", "controller": True, "waiting": False}
     base.update(cfg)
-    r = subprocess.run(["node", "-e", _PWA_HARNESS, json.dumps(base), str(APP / "pwa.js")], capture_output=True,
+    r = subprocess.run([_need_node(), "-e", _PWA_HARNESS, json.dumps(base), str(APP / "pwa.js")], capture_output=True,
                        text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-@_node
 def test_the_worker_is_registered_only_at_the_origin_root():
     assert _pwa()["registered"] == [["sw.js", {"scope": "./"}]]
     for path in ("/customer/", "/customer", "/index.html", "/x/"):
@@ -307,7 +315,6 @@ def test_the_worker_is_registered_only_at_the_origin_root():
     assert _pwa(sw=False)["registered"] == []                       # no service worker support: nothing breaks
 
 
-@_node
 def test_a_waiting_worker_behind_an_older_page_shows_the_notice_and_switches_only_on_refresh():
     out = _pwa(page=A, server=B, waiting=True)
     assert out["notices"] == 1 and out["posted"] == [] and out["reloads"] == 0
@@ -315,13 +322,11 @@ def test_a_waiting_worker_behind_an_older_page_shows_the_notice_and_switches_onl
     assert out["posted"] == [{"type": "SKIP_WAITING"}] and out["reloads"] == 1
 
 
-@_node
 def test_a_waiting_worker_behind_a_current_page_switches_quietly_without_a_reload():
     out = _pwa(page=B, server=B, waiting=True, controllerchange=True)
     assert out["posted"] == [{"type": "SKIP_WAITING"}] and out["notices"] == 0 and out["reloads"] == 0
 
 
-@_node
 def test_the_first_install_needs_no_switch():
     out = _pwa(page=A, server=A, waiting=True, controller=False, controllerchange=True)
     assert out["posted"] == [] and out["notices"] == 0 and out["reloads"] == 0

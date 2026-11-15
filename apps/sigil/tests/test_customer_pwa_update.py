@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import json
 import shutil
 import subprocess
@@ -16,9 +17,22 @@ from pathlib import Path
 
 import pytest
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 A, B = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
 
@@ -82,7 +96,7 @@ const notices = () => body.children.filter(c => c.id === "vigil-update");
 
 def _run(build, server, actions=()):
     cfg = json.dumps({"build": build, "server": server, "actions": list(actions)})
-    r = subprocess.run(["node", "-e", _HARNESS, cfg, str(APP / "pwa.js")], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_need_node(), "-e", _HARNESS, cfg, str(APP / "pwa.js")], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -153,7 +167,7 @@ vm.runInContext(src.slice(start, end), ctx);
 
 
 def test_app_js_reports_every_404_and_still_rejects():
-    r = subprocess.run(["node", "-e", _HOOK_HARNESS, str(APP / "app.js")], capture_output=True, text=True,
+    r = subprocess.run([_need_node(), "-e", _HOOK_HARNESS, str(APP / "app.js")], capture_output=True, text=True,
                        timeout=30)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout) == {"notFound": 2, "errs": [404, 404, 401, 503]}

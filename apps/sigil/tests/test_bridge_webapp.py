@@ -331,16 +331,13 @@ vm.runInContext(SRC, ctx);
 
 
 def test_the_worker_stores_only_the_shell_waits_for_the_owner_and_never_touches_api():
-    if not shutil.which("node"):
-        print("  SKIP  node not present")
-        return
     src = _read("service-worker.js").replace("__COMPANION_BUILD__", "abcdef012345")
     code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     assert ".put(" not in code, "the worker must store nothing at run time"
     reqs = [["GET", "/static/app.js"], ["GET", "/static/index.html"], ["GET", "/api/snapshot"],
             ["GET", "/api/stream"], ["POST", "/api/action"], ["POST", "/static/app.js"],
             ["GET", "/static/app.js?x=1"], ["GET", "/static/unknown.js"], ["GET", "/"]]
-    out = subprocess.run(["node", "-e", _SW_HARNESS, src, json.dumps({"requests": reqs})], capture_output=True,
+    out = subprocess.run([_need_node(), "-e", _SW_HARNESS, src, json.dumps({"requests": reqs})], capture_output=True,
                          text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     log = json.loads(out.stdout)

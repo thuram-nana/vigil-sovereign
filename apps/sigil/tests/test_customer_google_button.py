@@ -13,6 +13,7 @@ The app's own functions run under node, extracted verbatim from app.js.
 from __future__ import annotations
 
 import http.client
+import os
 import json
 import shutil
 import subprocess
@@ -23,8 +24,21 @@ import pytest
 
 from sigil.ui.custui import build_customer_server
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 APP_JS = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app" / "app.js"
-_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 
 def _src() -> str:
@@ -140,14 +154,13 @@ console.log(JSON.stringify(out));
 
 def _run(dataset, hash_=""):
     js = _src()
-    r = subprocess.run(["node", "-e", _HARNESS, _google_section(js), _fn(js, "pageFlag"), _fn(js, "googleError"),
+    r = subprocess.run([_need_node(), "-e", _HARNESS, _google_section(js), _fn(js, "pageFlag"), _fn(js, "googleError"),
                         json.dumps({"dataset": dataset, "hash": hash_})],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-@_node
 def test_the_button_shows_only_with_the_flag_and_starts_the_relative_login():
     on = _run({"googleSignin": "1"})
     assert on["button"] == "Continue with Google" and on["btnTag"].startswith("button")
@@ -159,7 +172,6 @@ def test_the_button_shows_only_with_the_flag_and_starts_the_relative_login():
         assert _run(ds)["button"] is None, ds
 
 
-@_node
 def test_a_google_sign_in_that_did_not_complete_says_so_once_and_shows_sign_in():
     out = _run({"googleSignin": "1"}, hash_="#oidc=err")
     assert out["handled"] is True and out["replaced"] == ["/#/login"] and out["hashAfter"] == "#/login"

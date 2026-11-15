@@ -42,6 +42,20 @@ from sigil.ui.login_ratelimit import LoginRateLimiter
 from sigil.ui.provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited, Provisioner,
                                 _signup_org_id, _signup_username)
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
 APP_JS = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app" / "app.js"
@@ -816,14 +830,13 @@ console.log(JSON.stringify({ body: ctx.proofBody("su", "su-email"), errors }));
 
 
 def _proof(mode, values):
-    r = subprocess.run(["node", "-e", _HARNESS, _fn(_js(), "proofBody"), json.dumps({"mode": mode,
+    r = subprocess.run([_need_node(), "-e", _HARNESS, _fn(_js(), "proofBody"), json.dumps({"mode": mode,
                                                                                      "values": values})],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_the_code_goes_with_the_address_it_was_sent_to():
     out = _proof("code", {"su-email": "a@acme.com", "su-code": "123 456", "su-token": "tok"})
     assert out == {"body": {"email": "a@acme.com", "code": "123456"}, "errors": []}

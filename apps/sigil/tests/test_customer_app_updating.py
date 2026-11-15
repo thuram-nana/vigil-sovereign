@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import json
 import shutil
 import subprocess
@@ -15,9 +16,22 @@ from pathlib import Path
 
 import pytest
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 _UI_JS = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app" / "ui.js"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 # Loads ui.js in a sandbox whose fetch replays SCRIPT (a list of [status, retryAfter|null, body]) and records every
 # call; setTimeout records the requested wait and runs at once. Prints {calls, waits, result|error}.
@@ -51,7 +65,7 @@ _PAGE = "<!doctype html><title>VIGIL is updating</title>"
 
 
 def _run(script, op):
-    r = subprocess.run(["node", "-e", _HARNESS, json.dumps(script), op, str(_UI_JS)],
+    r = subprocess.run([_need_node(), "-e", _HARNESS, json.dumps(script), op, str(_UI_JS)],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)

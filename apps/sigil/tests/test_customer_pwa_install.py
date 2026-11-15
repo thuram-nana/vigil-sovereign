@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import http.client
+import os
 import json
 import re
 import shutil
@@ -27,9 +28,22 @@ import pytest
 from sigil import config
 from sigil.ui.custui import build_customer_server
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 ENV_EXAMPLE = Path(__file__).resolve().parents[1] / "deploy" / "customer.env.example"
-_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile Safari"
 ANDROID = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
@@ -103,13 +117,12 @@ const find = (id) => body.children.find(c => c.id === id);
 def _run(**cfg):
     base = {"flag": "0", "ua": ANDROID, "path": "/", "actions": []}
     base.update(cfg)
-    r = subprocess.run(["node", "-e", _HARNESS, json.dumps(base), str(APP / "pwa.js")], capture_output=True,
+    r = subprocess.run([_need_node(), "-e", _HARNESS, json.dumps(base), str(APP / "pwa.js")], capture_output=True,
                        text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-@_node
 def test_chromium_gets_an_install_button_that_opens_the_dialog_once():
     out = _run(actions=["bip"])
     assert out["prevented"] == 1 and out["button"] == "Install app"
@@ -119,7 +132,6 @@ def test_chromium_gets_an_install_button_that_opens_the_dialog_once():
     assert out["button"] is None and out["prompts"] == 0
 
 
-@_node
 def test_nothing_is_offered_under_the_console_mount():
     out = _run(path="/customer/", actions=["bip"])
     assert out["prevented"] == 1 and out["button"] is None
@@ -127,7 +139,6 @@ def test_nothing_is_offered_under_the_console_mount():
     assert out["manifest"] is False and out["headLinks"] == 1      # the icon link stays
 
 
-@_node
 def test_the_root_mount_keeps_its_manifest():
     out = _run(path="/")
     assert out["manifest"] is True and out["headLinks"] == 2
@@ -137,7 +148,6 @@ IPAD = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Ver
 IOS_CHROME = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/140.0 Mobile Safari"
 
 
-@_node
 def test_the_ios_guide_needs_the_flag_an_ios_browser_and_no_install_yet():
     shown = _run(flag="1", ua=IPHONE)
     assert shown["iosRole"] == "dialog" and "Install VIGIL on your iPhone" in shown["ios"]
@@ -154,7 +164,6 @@ def test_the_ios_guide_needs_the_flag_an_ios_browser_and_no_install_yet():
         assert _run(**cfg)["ios"] is None, cfg
 
 
-@_node
 def test_the_guide_points_at_share_and_shows_the_ios_glyphs():
     iphone = _run(flag="1", ua=IPHONE)
     assert "vigil-ios-down" in iphone["iosClass"]                           # Safari's bottom toolbar
@@ -166,13 +175,11 @@ def test_the_guide_points_at_share_and_shows_the_ios_glyphs():
         assert "Tap Share at the top of the screen." in up["iosSteps"][0]
 
 
-@_node
 def test_dismissing_the_ios_guide_is_remembered():
     out = _run(flag="1", ua=IPHONE, actions=["dismiss-ios"])
     assert out["ios"] is None and out["stored"] == {"vigil.ios_install.dismissed": "1"}
 
 
-@_node
 def test_the_guide_goes_away_when_the_app_becomes_installed():
     out = _run(flag="1", ua=IPHONE, actions=["now-standalone"])
     assert out["ios"] is None and out["stored"] == {}                       # gone, and not recorded as dismissed

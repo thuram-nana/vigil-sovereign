@@ -4,6 +4,7 @@ re-reads the session. Executed under node: the real doLogout and the real clearC
 """
 from __future__ import annotations
 
+import os
 import json
 import shutil
 import subprocess
@@ -11,9 +12,22 @@ from pathlib import Path
 
 import pytest
 
+
+def _need_node() -> str:
+    """The node binary (callers use it as argv[0]), or a SKIP where node is absent — except in CI
+    (GITHUB_ACTIONS) or where VIGIL_REQUIRE_NODE is set (every CI job that runs this file sets it): there a
+    missing node FAILS, so these executed-JS proofs can never go green unrun."""
+    node = shutil.which("node")
+    if node is None:
+        if (os.environ.get("GITHUB_ACTIONS") == "true"
+                or (os.environ.get("VIGIL_REQUIRE_NODE") or "").strip().lower() in {"1", "true", "yes", "on"}):
+            pytest.fail("node is required here (CI or VIGIL_REQUIRE_NODE) but is not on PATH: this job must "
+                        "EXECUTE these JS tests")
+        pytest.skip("node not installed")
+    return node
+
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 _HARNESS = r"""
 const vm = require("vm"), fs = require("fs");
@@ -48,7 +62,7 @@ actx.doLogout().then(() => console.log(JSON.stringify({ order, left: Object.keys
 
 
 def _run(**cfg):
-    r = subprocess.run(["node", "-e", _HARNESS, json.dumps(cfg), str(APP / "app.js"), str(APP / "pwa.js")],
+    r = subprocess.run([_need_node(), "-e", _HARNESS, json.dumps(cfg), str(APP / "app.js"), str(APP / "pwa.js")],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
