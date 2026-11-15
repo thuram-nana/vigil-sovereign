@@ -77,6 +77,15 @@ fi
 """
 
 
+_RELOAD = r"""#!/usr/bin/env bash
+# stand-in for `nginx -t && systemctl reload nginx`: logged; a proxy that uses the upstream include (`follow`) now
+# tries the ports in the order the include names them
+echo "reload" >> "$FAKE_STATE/log"
+[ -e "$FAKE_STATE/reload_fails" ] && exit 1
+if [ -e "$FAKE_STATE/follow" ]; then
+  sed -n 's/^server 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$FAKE_STATE/upstream.conf" | tr '\n' ' ' > "$FAKE_STATE/proxy"
+fi
+"""
 _PROXY = {"customer": (8734, 8744), "public": (8735, 8745)}      # the shipped vhosts' upstreams, first port first
 _URL = {"VIGIL_EDGE_SWAP_CUSTOMER_URL": "https://app.example.test", "VIGIL_EDGE_SWAP_PUBLIC_URL": "https://example.test"}
 
@@ -86,7 +95,7 @@ _SHIPPED_STOP = {"customer": "1min 30s", "public": "20s"}
 
 
 def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), settle_exits=(), settle_mute=(),
-          env=None, proxy=None, builds=None, disk_build="feed", stop=None):
+          env=None, proxy=None, builds=None, disk_build="feed", stop=None, reload_fails=False):
     state, bin_ = tmp_path / "state", tmp_path / "bin"
     for d in (state / "active", state / "listening", state / "stop", bin_):
         d.mkdir(parents=True, exist_ok=True)
@@ -99,14 +108,23 @@ def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), settle
         (state / "listening" / str(p)).write_text((builds or {}).get(p, "01d0"))   # the running build
     (state / "build_on_disk").write_text(disk_build)                               # what a new edge serves
     (state / "proxy").write_text(" ".join(str(p) for p in (_PROXY.get(edge, ()) if proxy is None else proxy)))
+    if proxy is None:                                       # the shipped vhost: its upstream is the include
+        (state / "follow").touch()
+    if reload_fails:
+        (state / "reload_fails").touch()
+    ports = _PROXY.get(edge, (0, 0))
+    (state / "upstream.conf").write_text(f"server 127.0.0.1:{ports[0]} max_fails=0;\n"
+                                         f"server 127.0.0.1:{ports[1]} backup max_fails=0;\n")
     (state / "broken").write_text("".join(f"{u}\n" for u in broken))
     (state / "dies").write_text("".join(f"{u}\n" for u in dies))
     (state / "settle_exits").write_text("".join(f"{u}\n" for u in settle_exits))
     (state / "settle_mute").write_text("".join(f"{p}\n" for p in settle_mute))
-    for name, body in (("systemctl", _SYSTEMCTL), ("curl", _CURL), ("sleep", _SLEEP)):
+    for name, body in (("systemctl", _SYSTEMCTL), ("curl", _CURL), ("sleep", _SLEEP), ("nginx-reload", _RELOAD)):
         (bin_ / name).write_text(body)
         (bin_ / name).chmod(0o755)
-    e = {"PATH": f"{bin_}:{os.environ['PATH']}", "FAKE_STATE": str(state), "VIGIL_EDGE_SWAP_HEALTH_S": "5", **_URL}
+    e = {"PATH": f"{bin_}:{os.environ['PATH']}", "FAKE_STATE": str(state), "VIGIL_EDGE_SWAP_HEALTH_S": "5",
+         "VIGIL_EDGE_SWAP_UPSTREAM_FILE": str(state / "upstream.conf"), "VIGIL_EDGE_SWAP_NGINX_RELOAD": "nginx-reload",
+         "VIGIL_EDGE_SWAP_NGINX_DRAIN_S": "2", **_URL}
     e.update(env or {})
     r = subprocess.run(["bash", str(SCRIPT), edge], capture_output=True, text=True, timeout=30, env=e)
     log = (state / "log").read_text().splitlines() if (state / "log").exists() else []
@@ -115,7 +133,8 @@ def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), settle
 
 
 def _hop(old: str, new: str) -> list:
-    return [f"start {new}", "sleep 3", f"enable {new}", f"stop {old}", f"disable {old}"]
+    # nginx is pointed at the new edge (include rewritten, reloaded, old workers drained) BEFORE the old one stops
+    return [f"start {new}", "sleep 3", "reload", "sleep 2", f"enable {new}", f"stop {old}", f"disable {old}"]
 
 
 @pytest.mark.parametrize("edge,old,first,second", [
@@ -364,9 +383,37 @@ def test_the_swap_names_the_vhost_ports():
     # the script's default ports are the two servers of each shipped nginx upstream
     script = SCRIPT.read_text(encoding="utf-8")
     rp = REPO / "apps" / "sigil" / "deploy" / "reverse-proxy"
-    for vhost, a, b in (("vigil-customer.nginx.conf", 8734, 8744), ("vigil-public.nginx.conf", 8735, 8745)):
-        conf = (rp / vhost).read_text(encoding="utf-8")
-        assert f"server 127.0.0.1:{a} max_fails=0;" in conf
-        assert f"server 127.0.0.1:{b} backup max_fails=0;" in conf
+    for edge, a, b in (("customer", 8734, 8744), ("public", 8735, 8745)):
+        conf = (rp / f"vigil-{edge}.nginx.conf").read_text(encoding="utf-8")
+        servers = (rp / f"vigil-{edge}.upstream.conf").read_text(encoding="utf-8")
+        assert f"include /etc/nginx/vigil/{edge}-upstream.conf;" in conf      # the include the swap rewrites ...
+        assert f"server 127.0.0.1:{a} max_fails=0;" in servers               # ... at rest: first port first
+        assert f"server 127.0.0.1:{b} backup max_fails=0;" in servers
         assert f":-{a}}}" in script and f":-{b}}}" in script
+    assert 'upstream_file="${VIGIL_EDGE_SWAP_UPSTREAM_FILE:-/etc/nginx/vigil/$edge-upstream.conf}"' in script
     assert 'settle_s="${VIGIL_EDGE_SWAP_SETTLE_S:-3}"' in script
+
+
+def test_a_reload_that_fails_puts_the_include_back_and_the_old_edge_keeps_serving(tmp_path):
+    before_text = "server 127.0.0.1:8734 max_fails=0;\nserver 127.0.0.1:8744 backup max_fails=0;\n"
+    r, acts, running = _swap(tmp_path, "customer", active=["sigil-customer@8734.service"], listening=[8734],
+                             reload_fails=True)
+    assert r.returncode == 1 and "nginx did not reload" in r.stderr
+    assert acts == ["start sigil-customer@8744.service", "sleep 3", "reload", "reload",
+                    "stop sigil-customer@8744.service"]                  # never stops the running edge
+    assert running == ["sigil-customer@8734.service"]
+    assert (tmp_path / "state" / "upstream.conf").read_text() == before_text
+
+
+def test_without_a_writable_upstream_include_nothing_changes(tmp_path):
+    r, acts, running = _swap(tmp_path, "customer", active=["sigil-customer@8734.service"], listening=[8734],
+                             env={"VIGIL_EDGE_SWAP_UPSTREAM_FILE": str(tmp_path / "missing.conf")})
+    assert r.returncode == 1 and "missing or not writable" in r.stderr and "nothing was changed" in r.stderr
+    assert acts == [] and running == ["sigil-customer@8734.service"]
+
+
+def test_after_a_swap_the_include_is_back_at_rest(tmp_path):
+    r, _acts, _running = _swap(tmp_path, "customer", active=["sigil-customer@8734.service"], listening=[8734])
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "state" / "upstream.conf").read_text() == \
+        (REPO / "apps/sigil/deploy/reverse-proxy/vigil-customer.upstream.conf").read_text().split("\n", 3)[3]

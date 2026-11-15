@@ -20,10 +20,19 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   checkout under a running edge changes nothing it serves; the new process serves the new files.
 - A new edge accepts connections only once it has read its files; until then its port refuses them and nginx
   keeps using the old edge, so a new edge that fails at startup drops nothing.
+- The two servers live in an include (`/etc/nginx/vigil/<edge>-upstream.conf`, shipped as
+  `vigil-{customer,public}.upstream.conf`). Before a swap stops the old edge it rewrites that include to name the
+  NEW port first, reloads nginx gracefully (new workers take the new upstream; the old ones finish what they hold)
+  and waits a few seconds. From then on no new connection reaches the old edge, so stopping it cannot lose a
+  request — not even a POST that had just connected. A reload that fails puts the include back, stops the new edge
+  and leaves the old one serving. Settings: `VIGIL_EDGE_SWAP_UPSTREAM_FILE` (the include, default
+  `/etc/nginx/vigil/<edge>-upstream.conf`), `VIGIL_EDGE_SWAP_NGINX_RELOAD` (default
+  `sudo -n nginx -t -q && sudo -n systemctl reload nginx`) and `VIGIL_EDGE_SWAP_NGINX_DRAIN_S` (3, the wait after
+  the reload).
 - A stopping edge (SIGTERM, `ui/graceful.py`) serves every connection it accepted, including the ones still waiting
-  in its listen queue, then closes. On Linux it first stops taking new connection attempts; such an attempt is
-  refused about a second later and nginx gives it to the other port before any byte of the request was sent, so
-  this holds for a POST too.
+  in its listen queue, then closes. Where the kernel allows a socket filter it also first stops taking new
+  connection attempts (an extra safeguard; some kernels, GitHub's runners among them, refuse it and the edge logs
+  why).
 - It exits only once every request it accepted is answered, waiting up to its drain deadline. The customer edge
   waits up to 75 s, longer than its slowest call to the cockpit (60 s, a sign-up or recovery email sent inline;
   45 s, a checkout or a Google sign-in), so an action the cockpit is still completing reaches the customer as the
@@ -66,6 +75,13 @@ slowest action in flight — at most 75 s for the customer edge (a sign-up email
 cp apps/sigil/deploy/systemd/sigil-customer@.service apps/sigil/deploy/systemd/sigil-public@.service \
    ~/.config/systemd/user/
 systemctl --user daemon-reload
+# the upstream includes the swap rewrites, owned by the deploy user (the vhosts include them)
+sudo install -d -m 755 /etc/nginx/vigil
+sudo install -o "$USER" -m 644 apps/sigil/deploy/reverse-proxy/vigil-customer.upstream.conf /etc/nginx/vigil/customer-upstream.conf
+sudo install -o "$USER" -m 644 apps/sigil/deploy/reverse-proxy/vigil-public.upstream.conf /etc/nginx/vigil/public-upstream.conf
+# the swap reloads nginx itself: allow exactly these two commands without a password
+echo "$USER ALL=(root) NOPASSWD: /usr/sbin/nginx -t -q, /usr/bin/systemctl reload nginx" \
+  | sudo tee /etc/sudoers.d/vigil-edge-swap >/dev/null && sudo chmod 440 /etc/sudoers.d/vigil-edge-swap
 sudo nginx -t && sudo systemctl reload nginx        # after installing the current vhosts (both ports upstream)
 export VIGIL_EDGE_SWAP_CUSTOMER_URL=https://app.vigilguard.net
 export VIGIL_EDGE_SWAP_PUBLIC_URL=https://vigilguard.net

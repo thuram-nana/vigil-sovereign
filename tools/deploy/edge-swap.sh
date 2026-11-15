@@ -20,11 +20,19 @@
 #      /readyz, which is 503 while the cockpit restarts);
 #   2. waits VIGIL_EDGE_SWAP_SETTLE_S more seconds with both edges up and checks
 #      that the new one still runs and answers /healthz;
-#   3. enables the new instance, stops the old one — which first answers every
+#   3. points nginx at the new instance FIRST: rewrites the vhost's upstream
+#      include (VIGIL_EDGE_SWAP_UPSTREAM_FILE) to name the new port first and
+#      the old one as backup, reloads nginx gracefully (VIGIL_EDGE_SWAP_NGINX_RELOAD:
+#      `nginx -t` then `systemctl reload nginx`), and waits
+#      VIGIL_EDGE_SWAP_NGINX_DRAIN_S for the old nginx workers to hand over. From
+#      then on no new connection reaches the old edge, so stopping it can lose
+#      nothing — not even a request that had just connected. A reload that fails
+#      puts the file back, stops the new instance and leaves the old one serving;
+#   4. enables the new instance, stops the old one — which first answers every
 #      request it accepted (graceful SIGTERM, ui/graceful.py; the customer edge
 #      waits up to 75 s for an action the cockpit is still completing) — and
 #      disables it, so a reboot starts the edge that is running now;
-#   4. checks THROUGH THE REVERSE PROXY that the proxy reaches the new edge:
+#   5. checks THROUGH THE REVERSE PROXY that the proxy reaches the new edge:
 #      <url>/version.json must name the build the new edge serves.
 # Before the first hop, <url>/version.json must name the running edge's build,
 # so a wrong URL changes nothing.
@@ -49,6 +57,9 @@
 # Settings (environment): VIGIL_EDGE_SWAP_CUSTOMER_URL / VIGIL_EDGE_SWAP_PUBLIC_URL
 # (required) — the address the reverse proxy serves that edge at;
 # VIGIL_EDGE_SWAP_HEALTH_S (30) — the wait for /healthz; VIGIL_EDGE_SWAP_SETTLE_S (3);
+# VIGIL_EDGE_SWAP_UPSTREAM_FILE (/etc/nginx/vigil/<edge>-upstream.conf, writable by this user: GO-LIVE §7);
+# VIGIL_EDGE_SWAP_NGINX_RELOAD (sudo -n nginx -t -q && sudo -n systemctl reload nginx);
+# VIGIL_EDGE_SWAP_NGINX_DRAIN_S (3) — the wait after the reload before the old edge stops;
 # the ports VIGIL_CUSTOMER_PORT / VIGIL_CUSTOMER_ALT_PORT (8734 / 8744) and
 # VIGIL_PUBLIC_PORT / VIGIL_PUBLIC_ALT_PORT (8735 / 8745).
 # =============================================================================
@@ -71,6 +82,9 @@ if [ -z "$url" ]; then
 fi
 url="${url%/}"
 health_s="${VIGIL_EDGE_SWAP_HEALTH_S:-30}"
+upstream_file="${VIGIL_EDGE_SWAP_UPSTREAM_FILE:-/etc/nginx/vigil/$edge-upstream.conf}"
+reload_cmd="${VIGIL_EDGE_SWAP_NGINX_RELOAD:-sudo -n nginx -t -q && sudo -n systemctl reload nginx}"
+nginx_drain_s="${VIGIL_EDGE_SWAP_NGINX_DRAIN_S:-3}"
 settle_s="${VIGIL_EDGE_SWAP_SETTLE_S:-3}"
 
 sc() { systemctl --user "$@"; }
@@ -143,6 +157,28 @@ for u in "$cur" "$unit@$a.service" "$unit@$b.service"; do
   fi
 done
 
+# nginx is switched to the new edge before the old one stops (step 3): its upstream include must be writable here
+if [ ! -f "$upstream_file" ] || [ ! -w "$upstream_file" ]; then
+  echo "edge-swap: $upstream_file is missing or not writable by $(id -un): install the shipped" \
+       "apps/sigil/deploy/reverse-proxy/vigil-$edge.upstream.conf there, owned by this user (docs/runbooks/EDGE-SWAP.md);" \
+       "nothing was changed" >&2
+  exit 1
+fi
+
+# point_nginx <first> <backup>: the upstream include names <first> first and <backup> as backup, nginx reloaded.
+# On a failed reload the previous include is put back (and reloaded) and it returns 1.
+point_nginx() {
+  local before
+  before="$(cat "$upstream_file")"
+  printf 'server 127.0.0.1:%s max_fails=0;\nserver 127.0.0.1:%s backup max_fails=0;\n' "$1" "$2" > "$upstream_file"
+  if bash -c "$reload_cmd"; then
+    return 0
+  fi
+  printf '%s\n' "$before" > "$upstream_file"
+  bash -c "$reload_cmd" || true
+  return 1
+}
+
 running_build="$(build_at "http://127.0.0.1:$at")"
 if [ -z "$running_build" ]; then
   echo "edge-swap: the running edge on port $at does not answer /version.json; restart it once" \
@@ -182,6 +218,13 @@ hop() {
     sc stop "$new" || true
     exit 1
   fi
+  if ! point_nginx "$port" "$at"; then
+    echo "edge-swap: nginx did not reload with $upstream_file naming port $port first; the file is back as it" \
+         "was; stopping $new — $cur keeps serving" >&2
+    sc stop "$new" || true
+    exit 1
+  fi
+  sleep "$nginx_drain_s"                          # the old nginx workers hand over; nothing new reaches $cur
   sc enable "$new"
   sc stop "$cur"                                  # graceful: the old edge answers what it accepted, then exits
   sc disable "$cur"

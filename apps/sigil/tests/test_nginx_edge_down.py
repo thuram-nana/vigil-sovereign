@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -68,8 +69,10 @@ def test_the_vhost_answers_edge_down_errors_and_nothing_else(edge):
     assert "proxy_next_upstream error timeout;" in loc                      # never http_5xx, never non_idempotent
     assert not any("non_idempotent" in d or "http_50" in d for d in _directives(text))
     # max_fails=0 on both: nginx never marks a port unavailable (one dropped request must not take the edge out)
-    assert _directives(_block(text, f"upstream {up} {{"))[1:] == [
-        f"server 127.0.0.1:{a} max_fails=0;", f"server 127.0.0.1:{b} backup max_fails=0;", "}"]
+    assert _directives(_block(text, f"upstream {up} {{"))[1:] == [f"include /etc/nginx/vigil/{edge}-upstream.conf;", "}"]
+    # the include the edge swap rewrites, at rest: the first port first, the second as backup
+    assert _directives(_servers(edge)) == [
+        f"server 127.0.0.1:{a} max_fails=0;", f"server 127.0.0.1:{b} backup max_fails=0;"]
     assert not any("fail_timeout" in d for d in _directives(text))
     assert "add_header Retry-After 5 always;" in named
     assert 'add_header Cache-Control "no-store" always;' in named
@@ -88,6 +91,11 @@ def test_the_customer_vhost_outwaits_the_edges_longest_cockpit_hop():
     assert m, found[0]
     longest = max([custui._HOP_TIMEOUT_S, *custui._SLOW_HOP_TIMEOUTS_S.values()])
     assert int(m.group(1)) >= longest + 15, (found[0], longest)
+
+
+def _servers(edge: str) -> str:
+    """The shipped upstream include of ``edge`` (vigil-<edge>.upstream.conf)."""
+    return (_RP / f"vigil-{edge}.upstream.conf").read_text(encoding="utf-8")
 
 
 # ── behaviour under a real nginx ─────────────────────────────────────────────────────────────────────────────
@@ -158,20 +166,24 @@ def nginx(tmp_path):
     if _NGINX is None:
         pytest.skip("nginx not installed")
     procs = []
+    ctl: dict = {}
 
     def start(edge: str, upstream_port: int, backup_port: "int | None" = None) -> int:
         conf_path, primary, backup, up = _CONFS[edge]
         text = conf_path.read_text(encoding="utf-8")
         backup_port = backup_port or _free_port()                # by default nothing listens on the backup port
-        ups = (_block(text, f"upstream {up} {{")
-               .replace(f"server 127.0.0.1:{primary} ", f"server 127.0.0.1:{upstream_port} ")
-               .replace(f"server 127.0.0.1:{backup} backup ", f"server 127.0.0.1:{backup_port} backup "))
-        assert f"127.0.0.1:{upstream_port} " in ups and f"127.0.0.1:{backup_port} backup" in ups
-        loc = _block(text, "location / {")
-        named = _block(text, "location @vigil_unavailable {")
         port = _free_port()
         d = tmp_path / f"nginx-{edge}-{port}"
         d.mkdir()
+        servers = d / "upstream.conf"                            # the shipped include, ports moved to the test's
+        servers.write_text(_servers(edge)
+                           .replace(f"server 127.0.0.1:{primary} ", f"server 127.0.0.1:{upstream_port} ")
+                           .replace(f"server 127.0.0.1:{backup} backup ", f"server 127.0.0.1:{backup_port} backup "),
+                           encoding="utf-8")
+        ups = _block(text, f"upstream {up} {{").replace(f"/etc/nginx/vigil/{edge}-upstream.conf", str(servers))
+        assert str(servers) in ups
+        loc = _block(text, "location / {")
+        named = _block(text, "location @vigil_unavailable {")
         user = "user root;\n" if os.geteuid() == 0 else ""
         (d / "nginx.conf").write_text(
             f"{user}daemon off;\npid {d}/nginx.pid;\nerror_log {d}/error.log;\nevents {{}}\nhttp {{\n"
@@ -182,6 +194,7 @@ def nginx(tmp_path):
         p = subprocess.Popen([_NGINX, "-p", str(d), "-c", str(d / "nginx.conf"), "-e", str(d / "error.log")],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         procs.append(p)
+        ctl[port] = (p, servers)
         end = time.monotonic() + 10
         while time.monotonic() < end:
             assert p.poll() is None, p.stderr.read().decode() if p.stderr else "nginx exited"
@@ -192,6 +205,15 @@ def nginx(tmp_path):
                 time.sleep(0.05)
         raise AssertionError("nginx did not start")
 
+    def point(port: int, first: int, backup: int) -> None:
+        """What edge-swap.sh does before it stops the old edge: the include names ``first`` first, then nginx
+        reloads gracefully (SIGHUP: new workers take the new upstream, the old ones finish what they hold)."""
+        p, servers = ctl[port]
+        servers.write_text(f"server 127.0.0.1:{first} max_fails=0;\nserver 127.0.0.1:{backup} backup max_fails=0;\n",
+                           encoding="utf-8")
+        p.send_signal(signal.SIGHUP)
+
+    start.point = point                                          # type: ignore[attr-defined]
     yield start
     for p in procs:
         p.terminate()
@@ -370,8 +392,9 @@ def _client(port, method, tag, stop, results):
 @pytest.mark.parametrize("edge", sorted(_CONFS))
 def test_a_swap_done_like_the_script_loses_no_request(nginx, edge):
     # tools/deploy/edge-swap.sh in both directions, three times over: start the new edge on the free port, let it
-    # answer, then stop the old one with the edges' graceful stop — under four clients sending POSTs back to back
-    # and one sending GETs. Every request is answered by an edge (never nginx's unavailable page), and every POST
+    # answer, point nginx at it first (the upstream include rewritten, a graceful reload), wait for the old nginx
+    # workers to hand over, then stop the old one with the edges' graceful stop — under four clients sending POSTs
+    # back to back and one sending GETs. Every request is answered by an edge (never nginx's unavailable page), and every POST
     # reaches exactly one edge exactly once (nginx never re-sends one, so none may be lost on the way).
     pa, pb = _free_port(), _free_port()
     edges = {"B": _Upstream("ok", "B", pb)}                     # the edge currently runs on the BACKUP port
@@ -386,12 +409,16 @@ def test_a_swap_done_like_the_script_loses_no_request(nginx, edge):
         for _ in range(3):
             edges["A"] = _Upstream("ok", "A", pa)                # new edge on the primary port ...
             time.sleep(0.4)
+            nginx.point(port, pa, pb)                            # ... nginx sends new connections there ...
+            time.sleep(1.0)
             old = edges.pop("B")
             old.close()                                          # ... and the old one (backup port) stops
             received += old.post_ids
             time.sleep(0.2)
             edges["B"] = _Upstream("ok", "B", pb)                # new edge on the backup port ...
             time.sleep(0.4)
+            nginx.point(port, pb, pa)                            # ... nginx sends new connections there ...
+            time.sleep(1.0)
             old = edges.pop("A")
             old.close()                                          # ... and the old one (primary port) stops
             received += old.post_ids
