@@ -31,6 +31,7 @@ import hmac
 import http.cookies
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import threading
@@ -409,6 +410,9 @@ class Handler(BaseHTTPRequestHandler):
     def _download(self, path, filename):
         """Stream a file as an attachment (Wave 3 backup download). `filename` is already regex-validated by
         `durability.resolve_backup` (only `backup-…enc`), so it is safe in the Content-Disposition header."""
+        safe = str(filename)
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", safe):   # defence in depth: never a CR/LF/quote in a header
+            return self._deny(404, "no such backup")
         try:
             size = path.stat().st_size
         except OSError:
@@ -416,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
