@@ -1,0 +1,226 @@
+"""Graceful stop for the sovereign HTTP servers: the cockpit (`sigil serve`), the customer edge
+(`sigil serve-customer`) and the public site (`sigil serve-public`).
+
+On SIGTERM (what `systemctl stop|restart` sends) or SIGINT the server:
+  1. sets ``server.stopping`` — every long-lived stream loop (the cockpit's SSE feeds) checks it and ends;
+  2. stops accepting and closes its listening socket, so a new connection is refused at once (the reverse proxy
+     in front answers it) instead of queueing behind a server that is going away;
+  3. waits for every request already accepted to finish, up to its drain deadline — :data:`DRAIN_DEADLINE_S` for
+     the public site, :data:`PROVISIONER_DRAIN_DEADLINE_S` for the cockpit and the customer edge, each shorter
+     than its unit's ``TimeoutStopSec``, so a drain always ends before systemd would SIGKILL;
+  4. closes the server (the cockpit writes its pending failed-login counts there) and returns.
+A second signal during the drain ends the wait at once. A companion server in the same process (the cockpit's
+model gateway) is stopped from the same moment and within the same deadline (``on_stop``).
+
+Request threads stay daemon threads, so a request still running at the deadline cannot hold the process past it.
+stdlib only (FATAL-2).
+"""
+from __future__ import annotations
+
+import inspect
+import signal
+import socket
+import sys
+import threading
+import time
+from typing import Any, Callable, Optional
+
+#: How long the public site waits for accepted requests to finish (sigil-public allows TimeoutStopSec=20; a test
+#: pins the deadline below it).
+DRAIN_DEADLINE_S = 10.0
+#: How long the cockpit and the customer edge wait for accepted requests to finish: longer than the slowest
+#: edge→cockpit action the customer edge waits for (custui._SLOW_HOP_TIMEOUTS_S — an email sent inline, 60 s), so
+#: a stop never ends a request whose answer the edge, and so the customer, is still waiting for. A stop with
+#: nothing in flight is still immediate. sigil-cockpit and sigil-customer allow TimeoutStopSec=75 (a test pins
+#: both relations).
+PROVISIONER_DRAIN_DEADLINE_S = 65.0
+
+
+def _say(log: Callable[[str], None], msg: str) -> None:
+    """Write a log line; one that cannot be written (a closed stdout) never interrupts the stop."""
+    try:
+        log(msg)
+    except Exception:  # noqa: BLE001 — the stop must complete whatever happened to the log stream
+        pass
+
+
+class GracefulMixin:
+    """Mix into a ``ThreadingHTTPServer`` (before it in the bases): counts the requests in flight and exposes
+    ``stopping``, the event stream loops observe."""
+
+    # socketserver's own close-time join waits for every request thread with no bound; the drain above is the
+    # bounded wait, so the server's close never blocks past it.
+    block_on_close = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.stopping = threading.Event()
+        self._inflight = 0
+        self._inflight_cv = threading.Condition()
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Counted on the ACCEPT thread, before the request thread starts, so a drain that begins right after an
+        # accept always sees it.
+        with self._inflight_cv:
+            self._inflight += 1
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_done()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_done()
+
+    def _request_done(self) -> None:
+        with self._inflight_cv:
+            self._inflight -= 1
+            self._inflight_cv.notify_all()
+
+    def inflight(self) -> int:
+        with self._inflight_cv:
+            return self._inflight
+
+    def wait_drained(self, deadline_s: float, *, abort: Optional[threading.Event] = None) -> bool:
+        """Block until no request is in flight (True) or ``deadline_s`` passes / ``abort`` is set (False)."""
+        end = time.monotonic() + max(0.0, deadline_s)
+        with self._inflight_cv:
+            while self._inflight > 0:
+                left = end - time.monotonic()
+                if left <= 0 or (abort is not None and abort.is_set()):
+                    return False
+                self._inflight_cv.wait(min(left, 0.1))
+            return True
+
+
+def _close_listener(srv: Any) -> None:
+    """Close the listening socket so new connections are refused at once (the server's own `server_close` still
+    runs after the drain; closing twice is harmless)."""
+    sock = getattr(srv, "socket", None)
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _takes_poll_interval(srv: Any) -> bool:
+    try:
+        return "poll_interval" in inspect.signature(srv.serve_forever).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def graceful_stop(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
+                  abort: Optional[threading.Event] = None, log: Callable[[str], None] = print,
+                  serving: bool = True) -> bool:
+    """Stop a ``GracefulMixin`` server: signal the streams, stop accepting, drain within the deadline. Returns
+    True when every accepted request finished in time. Call it from a thread other than the one inside
+    ``serve_forever`` (``shutdown`` waits for that loop to return); pass ``serving=False`` when that loop has
+    already ended. A log line that cannot be written (a closed stdout) never interrupts the stop."""
+    stopping = getattr(srv, "stopping", None)
+    if stopping is not None:
+        stopping.set()
+    if serving:
+        srv.shutdown()                  # serve_forever returns; nothing new is accepted
+    _close_listener(srv)
+    if not hasattr(srv, "wait_drained"):
+        return True                     # a server without GracefulMixin keeps no count: nothing to wait for
+    n = srv.inflight()
+    if n:
+        _say(log, f"  stopping: waiting up to {drain_deadline_s:g} s for {n} request(s) in flight")
+    drained = srv.wait_drained(drain_deadline_s, abort=abort)
+    if not drained:
+        _say(log, f"  stopping: {srv.inflight()} request(s) still running at the deadline; closing")
+    return drained
+
+
+def serve_until_signal(srv: Any, *, drain_deadline_s: float = DRAIN_DEADLINE_S,
+                       stop: Optional[threading.Event] = None, log: Callable[[str], None] = print,
+                       on_stop: Optional[Callable[[float], None]] = None) -> bool:
+    """Serve ``srv`` until SIGTERM/SIGINT (or ``stop`` is set), then stop gracefully (:func:`graceful_stop`) and
+    close it. ``on_stop(drain_deadline_s)`` runs on its own thread from the moment the stop begins — a companion
+    server in this process stops accepting at the same time as ``srv`` and drains in the same window — and is
+    waited for until the deadline (or a second signal). Signal handlers are installed only on the main thread and
+    are restored on return. Returns True when the drain (and ``on_stop``) finished within the deadline."""
+    stop = stop if stop is not None else threading.Event()
+    force = threading.Event()
+
+    def _on_signal(signum, _frame):  # noqa: ANN001
+        if stop.is_set():
+            force.set()                 # a second signal ends the drain wait at once
+        stop.set()
+
+    previous: dict = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                previous[sig] = signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass
+    failure: list = []
+
+    def _serve() -> None:
+        try:
+            if _takes_poll_interval(srv):
+                srv.serve_forever(poll_interval=0.25)   # a stop is noticed within a quarter second
+            else:
+                srv.serve_forever()
+        except KeyboardInterrupt:       # an interrupt raised inside the loop is a stop request, as on the main thread
+            stop.set()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the calling thread below
+            failure.append(exc)
+
+    worker = threading.Thread(target=_serve, name="sigil-http-serve", daemon=True)
+    worker.start()
+    drained = True
+    companion: Optional[threading.Thread] = None
+
+    def _companion() -> None:
+        try:
+            on_stop(drain_deadline_s)   # type: ignore[misc]  # set whenever this thread is started
+        except Exception as exc:  # noqa: BLE001 — a companion's failure never stops this server's own drain
+            _say(log, f"  stopping: the companion stop failed: {type(exc).__name__}: {exc}")
+
+    try:
+        while not stop.wait(0.5):
+            if not worker.is_alive():   # serve_forever ended on its own (it failed): stop and report it
+                break
+    except KeyboardInterrupt:           # SIGINT before the handler was installed
+        stop.set()
+    finally:
+        end = time.monotonic() + max(0.0, drain_deadline_s)
+        if on_stop is not None:
+            companion = threading.Thread(target=_companion, name="sigil-http-stop-companion", daemon=True)
+            companion.start()
+        try:
+            drained = graceful_stop(srv, drain_deadline_s=drain_deadline_s, abort=force, log=log,
+                                    serving=worker.is_alive())
+        finally:
+            try:
+                srv.server_close()
+            finally:
+                if companion is not None:
+                    companion.join(0 if force.is_set() else max(0.0, end - time.monotonic()))
+                    drained = drained and not companion.is_alive()
+                worker.join(timeout=5)
+                for sig, h in previous.items():
+                    try:
+                        signal.signal(sig, h)
+                    except (ValueError, OSError):
+                        pass
+                try:
+                    sys.stdout.flush()
+                except Exception:  # noqa: BLE001 — a closed stdout must not turn a clean stop into a failure
+                    pass
+    if failure:
+        raise failure[0]                # a serve loop that failed fails the process (systemd restarts it)
+    return drained

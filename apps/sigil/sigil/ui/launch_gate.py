@@ -15,6 +15,11 @@ the owner key reserve the credits and mint a ``CreditLaunchLease``:
      seam-writer could forge with the owner's public key). The G0 mint is the only legitimate producer.
   4. CREDIT BALANCE (spend): ``CreditMeter.available(org_id, now) >= units`` (units in [1, 1e6], fail-closed).
 
+Before all four, the OWNER'S SWITCHES: the governor kill switch and the owner's ``customer_launch`` latch
+(``governor.customer_latch``), read fresh from the spine on every check (an off-switch is honoured at once, no
+restart) and fail-closed. They refuse only a NEW reservation (and the kill switch a start); cancel, settle, pause,
+resume and release of an existing launch never consult them, so held credits are never stranded.
+
 Only then, under the spine lock (all four conjuncts RE-CHECKED inside it — TOCTOU): RESERVE the credits and
 MINT the owner-signed lease. The reservation is bound to OWNER-SIGNED LEDGER RECORDS, never to a wire amount:
   * reserve SPENDS plan-credits-first then the wallet (``_spend``) and then ENFORCES an availability-delta
@@ -69,6 +74,11 @@ _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is 
 #: reservation, there is no lease) while the reserve's plan debit record has left the live spine window: nothing
 #: moves until the owner restores it.
 PLAN_DEBIT_PRUNED = "plan_debit_pruned"
+
+#: What a customer is told while the owner's kill switch refuses a new reservation or a start — engaged, or (fail-
+#: closed) unreadable. It names no mechanism and no state of the service: the reason stays in the server log.
+_HALTED = ("new assessment launches are paused right now; your existing launches can still be cancelled, paused and "
+           "resumed — please try again later")
 
 
 def _refusal(refuse_if: Optional[Callable[[], Optional[str]]]) -> Optional[str]:
@@ -125,6 +135,30 @@ class LaunchGate:
             self._cost_ledger, budget_tokens=config.global_pool_tokens())
         self._base_dir = base_dir
         self._lock = spine_lock(getattr(store, "path", ""))
+
+    def _owner_pub(self) -> Optional[str]:
+        return self.owner_key.public_key_b64 if self.owner_key is not None else None
+
+    def _halt_refusal(self) -> Optional[str]:
+        """The governor kill switch, read fresh (an engage is honoured at once, no restart): the customer-facing
+        refusal while it is engaged, else None. A kill switch that cannot be read refuses (fail-closed) with the same
+        customer-facing text; why it could not be read goes to the server log only."""
+        from ..governor.killswitch import KillSwitch
+        try:
+            engaged = KillSwitch.reader(self.store, trusted_pubkey=self._owner_pub()).is_engaged()
+        except Exception as e:  # noqa: BLE001 — an unreadable kill switch never green-lights a new launch
+            import logging
+            logging.getLogger(__name__).warning("a new launch was refused: the kill switch could not be read (%s)",
+                                                type(e).__name__)
+            return _HALTED
+        return _HALTED if engaged else None
+
+    def _new_launch_refusal(self) -> Optional[str]:
+        """The two owner switches over a NEW reservation: the kill switch, then the owner's ``customer_launch``
+        latch (``governor.customer_latch``). Both are read fresh each call and fail closed. Cancel, settle, pause,
+        resume and release of an existing reservation never consult them."""
+        from ..governor.customer_latch import refusal
+        return self._halt_refusal() or refusal(self.store, "customer_launch", trusted_pubkey=self._owner_pub())
 
     def _seam_base(self) -> str:
         """This gate's explicit ``base_dir``, else the shared default — through the ONE seam-base resolver every
@@ -280,6 +314,9 @@ class LaunchGate:
 
         def _gated() -> Optional[str]:
             """Return None if all four conjuncts hold, else the refusal reason. Resolved LIVE each call."""
+            switched = self._new_launch_refusal()     # the owner's kill switch and customer_launch latch first
+            if switched is not None:
+                return switched
             if not self.orgs.admit_customer(username=requester, org_id=oid, permission="run_engagement"):
                 return "requester may not launch assessments for this org (membership is not testing authority)"
             if not self.ownership.has_current_proof(oid, h, now=now_ts):
@@ -966,6 +1003,11 @@ class LaunchGate:
             if ev.settled or is_lease_settled(self._seam_base(), doc.engagement_slug, doc.nonce):
                 return {"ok": False, "error": "this lease has already been settled/canceled and cannot be "
                         "re-published"}
+            # the owner's kill switch, read under the locks: an engaged kill switch starts nothing new (a reserved,
+            # unstarted launch stays cancellable; nothing is minted or written here)
+            halted = self._halt_refusal()
+            if halted is not None:
+                return {"ok": False, "error": halted}
             # the billing mode as it is NOW, under the locks (another process may have marked it since the unlocked read)
             was_metered = self._launch_was_metered(doc.engagement_slug, doc.nonce)
             cur = read_credit_lease(self._seam_base(), doc.engagement_slug)

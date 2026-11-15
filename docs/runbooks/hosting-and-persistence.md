@@ -54,7 +54,9 @@ the spine** — never the source of truth.
   owner‑signed `governor.launch_settled` record carrying its whole decision (mode, reservation,
   consumption and the exact plan / wallet / postpaid refund split), and a later settle that finds it
   finishes it at the recorded amounts. **Set the flag identically for the cockpit, the customer
-  server, the settle drain and `ops-sweep`.** A lost or stale settlement marker then cannot re‑open the
+  server, the settle drain and `ops-sweep`** (once in `$SIGIL_HOME/sigil.env` covers all four) — `vigil doctor`
+  reads the env files the installed units load, reports a disagreement between the units as a hard issue, and
+  notes a value a shell reading only that `sigil.env` would not see. A lost or stale settlement marker then cannot re‑open the
   refund of a settled launch — but only while BOTH hold: the launch was settled by a process with the
   flag on (or a refund of it landed), and its owner‑signed evidence is still in the LIVE spine. A hard
   prune past the settle removes that evidence (the scan is live, not snapshot‑seeded), after which a lost

@@ -233,7 +233,7 @@ def test_unit_is_a_bounded_failing_oneshot():
     timeout = float(next(ln for ln in lines if ln.startswith("TimeoutStartSec=")).split("=", 1)[1])
     worst = wait + rd._PROBE_DEADLINE_S + rd.DOCTOR_DEADLINE_S
     assert timeout > worst, "TimeoutStartSec must be a hard backstop above the worst-case gate duration"
-    assert "Environment=VIGIL_BIN=/home/kali/vigil/.venv-offense/bin/vigil" in lines   # user PATH lacks ~/.local/bin
+    assert "Environment=VIGIL_BIN=%h/vigil/.venv-offense/bin/vigil" in lines   # user PATH lacks ~/.local/bin
 
 
 def test_unit_orders_after_but_never_starts_or_blocks_the_ui():

@@ -174,10 +174,10 @@ optionally Ollama (local VLM), a WireGuard/Tailscale tunnel (phone companion), a
 (gesture input on Linux).
 
 ```bash
-# 1. Python environment + dependencies
-python3 -m venv ~/.sigil/venv
-~/.sigil/venv/bin/pip install -r requirements.txt
-#    (cryptography, huggingface-hub, kuzu, mcp, onnxruntime, pydantic, qdrant-client, tokenizers)
+# 1. Python environment + dependencies: the hash-locked venv, built from the repository root with
+#    SIGIL_HOME unset. It installs every dependency from hash-pinned requirements (envs/build_envs.sh) and
+#    links ~/.sigil/venv -> .venv-sovereign, the path the systemd units run.
+(cd ../.. && ./bootstrap.sh)
 
 # 2. Local vector store (Qdrant on loopback)
 docker run -d --name sigil-qdrant --restart unless-stopped -p 127.0.0.1:6333:6333 \

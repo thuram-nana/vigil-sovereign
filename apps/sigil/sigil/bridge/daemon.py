@@ -168,12 +168,23 @@ class BridgeDaemon:
                                           "tier": "A0", "decision": "auto"})
 
     def panic_engage(self, *, by: str = "phone") -> int:
-        """Halt the mesh from the phone. ANY engage halts (fail-safe) — no signature needed for the
-        SAFE direction. Release stays owner-only at the desktop (the dangerous direction is signed)."""
-        from ..governor.killswitch import SIGNAL as KS_SIGNAL
-        return self.store.append(kind="event", source="mesh", actor="DEVICE",
-                                 payload={"signal": KS_SIGNAL, "state": "engaged", "by": by,
-                                          "reason": "panic halt from phone", "tier": "A0", "decision": "auto"})
+        """Halt the mesh from the phone. ANY governor-shaped engage halts (fail-safe) — no signature needed
+        for the SAFE direction, so the bridge (which holds no private key) records the halt in the governor's
+        own record shape. Release stays owner-only at the desktop (the dangerous direction is signed)."""
+        from ..governor.killswitch import append_engage
+        return append_engage(self.store, owner_key=None, by=by, reason="panic halt from phone", actor="DEVICE")
+
+    def latch_off(self, name, *, by: str = "phone") -> "dict[str, int]":
+        """Turn one of the owner's customer latches OFF from the phone — or all of them (``name == "all"``). OFF is
+        the safe direction, so the bridge records it unsigned in the governor's record shape and it takes effect at
+        once; turning a latch back ON stays an owner-signed act at the desktop (``sigil latch on``). An unknown name
+        raises ``ValueError`` and records nothing. Returns ``{latch: seq}``."""
+        from ..governor.customer_latch import LATCHES, turn_off
+        if not isinstance(name, str) or (name != "all" and name not in LATCHES):
+            raise ValueError(f"unknown customer latch (expected one of {', '.join(LATCHES)} or all)")
+        names = list(LATCHES) if name == "all" else [name]
+        return {n: turn_off(self.store, n, owner_key=None, by=by, reason="off from phone", actor="DEVICE")
+                for n in names}
 
     def relay(self, text: str) -> str:
         """Relay a KERNEL command — the same T0-router + WARDEN gate + signed action log as voice/UI."""

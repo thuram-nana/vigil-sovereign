@@ -19,11 +19,11 @@ Full walk-through with prerequisites is in the [README](README.md#setup)
 (Linux, Python 3.13, Rust for the kernel, Docker for Qdrant). Summary:
 
 ```bash
-# 1. venv + dependencies (README canonical layout: venv under ~/.sigil)
-python3 -m venv ~/.sigil/venv
-~/.sigil/venv/bin/pip install -e .          # installs the `sigil` console command
-#   add optional stacks as needed:  pip install -e ".[all]"   (voice, secrets, capture)
-#   or the minimal runtime only:    pip install -r requirements.txt   (no console script)
+# 1. the hash-locked venv: from the repository root (two levels up), with SIGIL_HOME unset
+(cd ../.. && ./bootstrap.sh)    # builds .venv-sovereign from hash-pinned requirements (envs/build_envs.sh),
+                                # with the `sigil` console command, and links ~/.sigil/venv -> .venv-sovereign
+#   Install nothing into ~/.sigil/venv by hand: every sigil unit runs it, and `vigil doctor` reports a
+#   ~/.sigil/venv that is not that link as a hard issue once a unit runs it.
 
 # 2. Local vector store (Qdrant on loopback)
 docker run -d --name sigil-qdrant --restart unless-stopped -p 127.0.0.1:6333:6333 \
@@ -224,7 +224,7 @@ sigil index && sigil graph
 ```bash
 git -C ~/sigil pull                       # (run git yourself; the runbook does not)
 cd ~/sigil
-~/.sigil/venv/bin/pip install -e .        # or -e ".[all]"
+(cd ../.. && ./bootstrap.sh)              # rebuild the hash-locked venv (SIGIL_HOME unset)
 cd kernel && cargo build --release && cd ..   # rebuild the kernel if it changed
 sigil doctor                              # re-check the install
 ~/.sigil/venv/bin/pytest -q               # run the test suite before trusting the upgrade
@@ -249,7 +249,7 @@ forward-compatible; an upgrade never rewrites existing records.
 | Phone can't pair / requests rejected | device not authorized, or TLS fingerprint mismatch | re-run `sigil mesh authorize <id> <pubkey>` confirming the fingerprint the phone shows; check `sigil mesh list-devices`; a changed TLS fingerprint means MITM — investigate, do not blindly re-pin |
 | Bridge denies every request (403/401) | anti-rebind Host/Origin gate, or a revoked device | reach it via the exact bound `IP:PORT` (not a hostname); confirm the device is still in `list-devices` |
 | `keyring` check fails | no OS keyring backend | optional — secrets fall back to `~/.sigil/sigil.env` (`0600`); install the `secrets` extra for a real backend |
-| Unit won't start under systemd | wrong `ExecStart` path | ensure the venv `sigil` exists (`pip install -e .`), or switch the unit's `ExecStart` to the `python -m sigil` alternative line |
+| Unit won't start under systemd | wrong `ExecStart` path | `vigil doctor` names it; ensure `~/.sigil/venv` is the link to `.venv-sovereign` (re-run `./bootstrap.sh` from the repository root with `SIGIL_HOME` unset) |
 
 ---
 

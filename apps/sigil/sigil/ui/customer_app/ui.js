@@ -87,20 +87,36 @@
     if (token()) hh["X-SIGIL-Token"] = token();
     return hh;
   }
+  // While VIGIL restarts, the customer edge answers 503 {"error":"updating"} with Retry-After: that request reached
+  // nothing and changed nothing (the reverse proxy answers 503 with Retry-After while the edge itself restarts).
+  // A READ that meets a 503 with Retry-After is sent again, at most READ_RETRIES times, after the advised wait
+  // (1-10 s). A POST is NEVER sent again by this code: the error is reported, and only the person who made the
+  // request can repeat it.
+  const READ_RETRIES = 3;
+  const UPDATING_READ = "VIGIL is updating. Back in a few seconds.";
+  const UPDATING_WRITE = "VIGIL is updating. Nothing was changed. Please try again in a few seconds.";
+  function _retryAfterMs(r) {
+    const s = parseInt((r.headers && r.headers.get && r.headers.get("Retry-After")) || "", 10);
+    return (isFinite(s) && s > 0 ? Math.min(s, 10) : 0) * 1000;
+  }
+  function _isUpdating(r, data) { return r.status === 503 && !!data && data.error === "updating"; }
+  function _sleep(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
   async function getJSON(url) {
     // Symmetric with postJSON: on a non-2xx, carry the SERVER'S error body up to the caller
     // (message + .status + .data) instead of the old opaque "500 <url>". Read panels used to
     // catch this and render a generic "offline/empty" state, masking a real backend 4xx/5xx as
     // "plane down" — the single biggest source of silent-ish failures in the UI.
-    const r = await fetch(url, { headers: _headers(), credentials: "same-origin" });
-    const txt = await r.text();
-    let data = null; try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
-    if (!r.ok) {
-      const err = new Error((data && data.error) || (r.status + " " + url));
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetch(url, { headers: _headers(), credentials: "same-origin" });
+      const txt = await r.text();
+      let data = null; try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
+      if (r.ok) return data;
+      const wait = r.status === 503 ? _retryAfterMs(r) : 0;
+      if (wait > 0 && attempt < READ_RETRIES) { await _sleep(wait); continue; }
+      const err = new Error(_isUpdating(r, data) ? UPDATING_READ : ((data && data.error) || (r.status + " " + url)));
       err.status = r.status; err.data = data; err.url = url;
       throw err;
     }
-    return data;
   }
   async function postJSON(url, body) {
     const r = await fetch(url, {
@@ -110,7 +126,10 @@
     });
     const txt = await r.text();
     let data = null; try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
-    if (!r.ok) { const err = new Error((data && data.error) || (r.status + " " + url)); err.status = r.status; err.data = data; throw err; }
+    if (!r.ok) {
+      const err = new Error(_isUpdating(r, data) ? UPDATING_WRITE : ((data && data.error) || (r.status + " " + url)));
+      err.status = r.status; err.data = data; throw err;
+    }
     return data;
   }
   // -- chunked upload: a big file over the SAME small-JSON POST plane ----------------------------

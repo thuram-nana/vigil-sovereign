@@ -2295,6 +2295,27 @@ def collect(repo_root) -> dict:
             _note(_m)
     except Exception as exc:  # noqa: BLE001 — the metering probe must never crash the report
         report["metering"] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+
+    # GO-LIVE §1/§6 — the systemd user units this host has installed: one cockpit on 127.0.0.1:8733 (the console
+    # proxy-only in front of sigil-cockpit), ~/.sigil/venv as the hash-locked sovereign venv, and the settle/money
+    # settings every settling process must share. Each is silent until its units or files exist (default output
+    # unchanged). Read only from the files the units load (deploy_checks), never from this process's environment, so
+    # `vigil-ready.service` and an operator's shell reach the same verdict. Best-effort.
+    from . import deploy_checks as _dc
+    _home = Path.home()
+    for _key, _check in (("cockpit_port", lambda: _dc.cockpit_port_report(_home, repo)),
+                         ("sovereign_venv", lambda: _dc.sovereign_venv_report(_home, repo)),
+                         ("must_match_flags", lambda: _dc.must_match_report(_home, repo))):
+        try:
+            _sec, _iss, _nts = _check()
+            report[_key] = _sec
+            for _m in _iss:
+                _issue(_m)
+            for _m in _nts:
+                _note(_m)
+        except Exception as exc:  # noqa: BLE001 — a deployment check must never crash the report
+            report[_key] = {"error": f"{type(exc).__name__}: {exc}", "configured": False}
+            _note(f"the {_key} check could not run: {exc}")
     return report
 
 
@@ -2490,6 +2511,29 @@ def render(report: dict) -> str:
                      + (f"; cancelled runs: {mt.get('cancel_settlement')}" if mt.get("cancel_settlement") else "")
                      + (f"; daily ceiling ${mt.get('daily_limit_usd')}" if mt.get("daily_limit_usd") else ""))
 
+    dep = [(k, report.get(k)) for k in ("cockpit_port", "sovereign_venv", "must_match_flags")]
+    dep = [(k, d) for k, d in dep if isinstance(d, dict) and d.get("configured") and "error" not in d]
+    if dep:
+        # GO-LIVE §1/§6: rendered ONLY when the units/files a check reads exist (default output unchanged).
+        lines.append("\nDeployment units (systemd user units installed on this host):")
+        for k, d in dep:
+            if k == "cockpit_port":
+                ck = (f"cockpit unit on {d.get('cockpit_addr')}" if d.get("cockpit_installed", True)
+                      else "no cockpit unit installed")
+                lines.append(f"  {_mark(bool(d.get('ok')))}console: {d.get('console_mode')}; {ck}"
+                             + (f"; console federates to {d['sovereign_addr']}" if d.get("sovereign_addr") else "")
+                             + ("; --domain is EMPTY" if d.get("domain") == "empty" else ""))
+            elif k == "sovereign_venv":
+                lines.append(f"  {_mark(bool(d.get('ok')))}{d.get('path')}: "
+                             + ("MISSING" if d.get("exists") is False else
+                                f"symlink to {d.get('target')}" if d.get("symlink") else "NOT a symlink"))
+            else:
+                procs = ", ".join(p for p in d.get("processes", {}) if p != "ops-sweep")
+                lines.append(f"  {_mark(bool(d.get('ok')))}settle/money settings "
+                             + ("agree" if d.get("ok") else "DISAGREE") + f" across {procs}"
+                             + ("" if "ops-sweep" not in d.get("processes", {}) else
+                                "; an ops-sweep shell reading only sigil.env "
+                                + ("agrees" if d.get("ops_sweep_agrees") else "differs (see notes)")))
     issues = report.get("issues", [])
     if issues:
         lines.append("\nAction needed (blocks bring-up):")

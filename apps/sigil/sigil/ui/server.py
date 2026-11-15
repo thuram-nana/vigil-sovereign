@@ -52,6 +52,7 @@ from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
 from ..spine.verify import verify_record
 from . import actions as _actions
+from .graceful import PROVISIONER_DRAIN_DEADLINE_S, GracefulMixin, serve_until_signal
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -111,6 +112,8 @@ class FailedTokenCache:
 # serves the last projected value. Not a scale target: it bounds how often an anonymous caller triggers work.
 METRICS_PROJECTION_TTL_S = 10.0
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+#: The content types of the cockpit's two static assets (`_serve_static`); every other response is no-store.
+_STATIC_CTYPES = ("application/javascript", "text/css")
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
 # bytes. The tag (a versioned, NUL-terminated label) namespaces the signature so a login proof can never be
@@ -139,7 +142,7 @@ BOOTSTRAP_PATHS = frozenset({
 })
 
 
-class UIServer(ThreadingHTTPServer):
+class UIServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
@@ -383,6 +386,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Every answer but the two token-free static assets (app.js, style.css) is no-store: the JSON plane, the
+        # probes and the token-bearing page are never kept by a browser or an intermediary.
+        if not ctype.startswith(_STATIC_CTYPES):
+            self.send_header("Cache-Control", "no-store")
         sc = getattr(self, "_pending_set_cookie", None)   # Slice 1c-ii: a queued session Set-Cookie, if any
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -406,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1193,6 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         # Bind `state` to THIS browser: an HttpOnly, SameSite=Lax cookie set here and re-checked at the
         # callback. SameSite=Lax still rides the IdP's top-level GET redirect back to us, but a cross-site
         # POST/subresource cannot carry it; HttpOnly keeps script from reading it; Path scopes it to /api/oidc.
@@ -1355,7 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
             since = -1                                          # any malformed cursor → from genesis
         tailer = SpineTailer(self.server.store(), since_seq=since)
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 for ev in tailer.poll():
                     self.wfile.write(b"data: " + _json_bytes(ev) + b"\n\n")
@@ -1363,7 +1372,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")                    # heartbeat / flush
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return                                               # client closed — end the stream
 
@@ -1393,7 +1402,7 @@ class Handler(BaseHTTPRequestHandler):
         from ..voice.hud_status import read_status
         last_state = None
         try:
-            while True:
+            while not self.server.stopping.is_set():            # a stopping server ends the feed (ui/graceful)
                 sent = False
                 # S4: fan out the voice FSM state (idle/listening/thinking/speaking) from the EPHEMERAL 0600
                 # status file — deduped (emit only on change). It is read-only telemetry, never the spine.
@@ -1421,7 +1430,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
                 if not sent:
-                    time.sleep(0.25)
+                    self.server.stopping.wait(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -1932,9 +1941,9 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     gw = model_gateway.start_from_env()
     if gw is not None:
         print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        srv.shutdown()
-    finally:
-        srv.server_close()                        # writes any pending failed-login counts (FailedAuthnCoalescer)
+    # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted — here or at the model gateway — and the requests
+    # in flight finish within graceful.PROVISIONER_DRAIN_DEADLINE_S (longer than any action the customer edge waits
+    # for), the gateway's metered as they finish; then server_close writes any pending failed-login counts
+    # (FailedAuthnCoalescer).
+    serve_until_signal(srv, drain_deadline_s=PROVISIONER_DRAIN_DEADLINE_S,
+                       on_stop=None if gw is None else (lambda d: model_gateway.stop(gw, drain_s=d)))

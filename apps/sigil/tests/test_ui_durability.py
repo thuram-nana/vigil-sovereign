@@ -6,6 +6,7 @@ never stored/logged/audited/echoed; download is path-traversal-safe; restore alw
 """
 from __future__ import annotations
 
+import http.client
 import json
 import shutil
 import threading
@@ -98,6 +99,20 @@ def test_backup_then_list_then_download_roundtrip():
     # download returns the ciphertext bytes
     code, raw = _req(port, f"/api/backup/download/{bid}", raw=True)
     assert code == 200 and isinstance(raw, (bytes, bytearray)) and len(raw) == d["size"]
+
+
+def test_a_backup_download_is_never_cached():
+    _s, port = _serve()
+    code, d = _req(port, "/api/backup", method="POST", body={"passphrase": PASSPHRASE})
+    assert code == 200, d
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", f"/api/backup/download/{d['id']}",
+                 headers={"Host": f"127.0.0.1:{port}", "X-SIGIL-Token": TOKEN})
+    r = conn.getresponse()
+    r.read()
+    conn.close()
+    assert r.status == 200 and r.getheader("Content-Disposition", "").startswith("attachment")
+    assert r.getheader("Cache-Control") == "no-store"
 
 
 def test_download_is_path_traversal_safe():

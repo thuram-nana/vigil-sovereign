@@ -27,6 +27,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from ..bridge.daemon import bind_ok  # noqa: E402  (the ONE loopback/private bind invariant — reused, not re-authored)
+from .graceful import GracefulMixin, serve_until_signal  # noqa: E402  (stdlib-only graceful stop)
 
 # The packaged content tree (ships with the sigil package, so it deploys wherever sigil does).
 _PUBLIC_ROOT = Path(__file__).resolve().parent / "public_site"
@@ -47,7 +48,7 @@ _CTYPES = {
 _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site is a mistake — refuse
 
 
-class PublicServer(ThreadingHTTPServer):
+class PublicServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, root=None, catalog_path=None):
@@ -252,7 +253,4 @@ def serve_public(*, host: str = "127.0.0.1", port=None, root=None) -> None:
     srv = build_public_server(host=host, port=port, root=root)
     bound_port = srv.server_address[1]
     print(f"  vigil public site on http://{host}:{bound_port}  (static; keyless + cookieless; root={srv.root})")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    serve_until_signal(srv)          # SIGTERM/SIGINT: finish the requests in flight, then exit (ui/graceful)

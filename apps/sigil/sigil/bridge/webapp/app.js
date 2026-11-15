@@ -234,6 +234,7 @@ function actionLabel(path) {                          // human name for a queued
   if (path === "/api/relay") { return "relay"; }
   if (path === "/api/action") { return "approval"; }
   if (path === "/api/gesture/arm") { return "gesture arm"; }
+  if (path === "/api/latch-off") { return "customer switch OFF"; }
   return path;
 }
 
@@ -344,6 +345,7 @@ async function refreshCockpit() {
     return '<b>' + esc(a) + '</b><span>' + esc(v.actions) + ' actions &middot; ' + esc(v.interrupts) + ' interrupts</span>';
   }).join("") || '<span class="empty">none</span>';
   $("#activity").innerHTML = kv(s.recent_by_agent) || '<span class="empty">quiet</span>';
+  $("#latch-state").innerHTML = kv(s.customer_latches) || '<span class="empty">unknown</span>';
   var l = s.ingest_lag || {};
   $("#lag").innerHTML = '<b>head</b><span>' + esc(l.head_seq) + '</span>'
     + '<b>since checkpoint</b><span>' + esc(l.records_since_checkpoint) + '</span>';
@@ -485,6 +487,22 @@ async function onRelay() {
   renderOutbox();
 }
 
+/* ---------------------------------------------------------------- customer switch OFF-buttons */
+/* The owner's customer latches: an OFF is the safe direction, so the phone sends it as a device-signed,
+ * replay-gated envelope exactly like PANIC (the latch name is INSIDE the signed args). It refuses only NEW
+ * launches / sign-ups / purchases / trials; turning a switch back ON is an owner-signed act at the desktop. */
+var LATCHES = ["customer_launch", "customer_signup", "checkout", "trial"];
+async function onLatchOff(name) {
+  if (name !== "all" && LATCHES.indexOf(name) < 0) { return; }
+  var m = $("#latch-msg");
+  var res = await effectfulPost("/api/latch-off", "latch_off", { latch: name });
+  if (res.queued) { m.innerHTML = '<span class="outbox">switch-off signed &amp; queued offline (freshness-bound &mdash; re-tap when online if it is refused as stale).</span>'; }
+  else if (res.ok) { m.innerHTML = '<span style="color:var(--red)">OFF: ' + esc((res.body.off || []).join(", ")) + '</span>'; await clearFailedFor("/api/latch-off"); }
+  else { m.innerHTML = '<span style="color:var(--red)">switch-off refused: ' + esc((res.body && res.body.error) || res.status) + '</span>'; }
+  renderOutbox();
+  refreshCockpit();
+}
+
 /* ----------------------------------------------------------------------- gesture arm request */
 /* The phone-side twin of sigil.gesture.session :: sign_arm_request. The signed CORE is EXACTLY the
  * _ARM_CORE tuple {signal,device_id,nonce,ts,ttl_seconds}; we sign canonicalJson(core) with the SAME
@@ -550,6 +568,7 @@ document.addEventListener("click", function (e) {
     if (act === "panic") { return onPanic(); }
     if (act === "relay") { return onRelay(); }
     if (act === "arm-gesture") { return onArm(); }
+    if (act === "latch-off") { return onLatchOff(btn.dataset.latch); }
     if (act === "recall") { return doRecall(); }
     if (act === "copy-pub") { return copyText(DEVICE.pubB64).then(function (ok) { btn.textContent = ok ? "Copied" : "Select above to copy"; }); }
     if (act === "copy-cmd") {

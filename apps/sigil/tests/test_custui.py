@@ -308,16 +308,17 @@ def test_password_reset_severs_existing_sessions(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
-def test_dead_provisioner_is_502(tmp_path, monkeypatch):
+def test_dead_provisioner_is_503_updating(tmp_path, monkeypatch):
     from sigil import config
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
-    # point the edge at a closed loopback port (no sovereign there)
+    # point the edge at a closed loopback port (no sovereign there): the connection is refused, so the request
+    # reached nothing — the edge says "updating" (503), stays up, never crashes or mints
     edge, ep = _edge("http://127.0.0.1:1", str(tmp_path / "custsessions"))
     try:
         c, r = _post(_opener(), ep, "/api/customer/signup/request", {"email": "x@acme.com"})
-        assert c == 502, (c, r)                                   # edge stays up; never crashes or mints
+        assert c == 503 and r == {"error": "updating"}, (c, r)
     finally:
         edge.shutdown()
 
@@ -778,6 +779,7 @@ def _oidc_login(ep):
     """GET the edge /oidc/login (no redirect-follow); capture state+nonce from the authorize URL + the sid cookie."""
     st, hdr, _ = _edge_raw(ep, "/api/customer/oidc/login")
     assert st == 302, (st, hdr)
+    assert hdr.get("Cache-Control") == "no-store", hdr                 # the single-use state is never cached
     loc = hdr.get("Location")
     params = parse_qs(urlparse(loc).query)
     sid = http.cookies.SimpleCookie(hdr.get("Set-Cookie"))["vigil_customer_oidc_sid"].value
@@ -821,6 +823,7 @@ def test_oidc_full_round_trip_mints_a_customer_session_never_an_operator(tmp_pat
         st, hdr, _ = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
                                cookie=f"vigil_customer_oidc_sid={sid}")
         assert st == 302 and hdr.get("Location") == "/", (st, hdr)   # success → into the SPA
+        assert hdr.get("Cache-Control") == "no-store", hdr           # the session-minting redirect is never cached
         setck = hdr.get("Set-Cookie") or ""
         assert f"{CUSTOMER_COOKIE}=" in setck, setck                  # a CUSTOMER session cookie was minted
         session = http.cookies.SimpleCookie(setck)[CUSTOMER_COOKIE].value
@@ -878,6 +881,7 @@ def test_oidc_callback_email_unverified_lands_signed_out(tmp_path, monkeypatch):
         st, hdr, _ = _edge_raw(ep, f"/api/customer/oidc/callback?code=auth-1&state={state}",
                                cookie=f"vigil_customer_oidc_sid={sid}")
         assert st == 302 and hdr.get("Location") == "/#oidc=err"     # failure → signed-out landing
+        assert hdr.get("Cache-Control") == "no-store", hdr
         assert CUSTOMER_COOKIE not in (hdr.get("Set-Cookie") or "")  # NO session minted
     finally:
         sov.shutdown(); edge.shutdown()

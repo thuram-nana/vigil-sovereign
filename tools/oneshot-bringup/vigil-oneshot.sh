@@ -767,7 +767,7 @@ mode_status(){
 mode_down(){
   banner "DOWN (stop the UI units)"
   require_user_systemd
-  # 'systemctl --user stop vigil-command' runs ExecStop=vigil down (containment).
+  # 'systemctl --user stop vigil-command' runs ExecStop=vigil down: it stops the UI and keeps its boot start.
   user_systemctl stop vigil-command.service 2>/dev/null && ok "vigil-command.service stopped (ran 'vigil down')" || warn "vigil-command.service was not running"
   user_systemctl stop vigil-bringup.service 2>/dev/null && ok "vigil-bringup.service stopped" || warn "vigil-bringup.service was not running"
   info "The MERIDIAN range (if started by this script) keeps running; stop it with: $TARGETBIN down meridian --base-dir $REPO/.target-live"

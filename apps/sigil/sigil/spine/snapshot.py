@@ -624,6 +624,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
     from ..governor.killswitch import _CORE as _KS_CORE
+    from ..governor.killswitch import phone_halt_written as _ks_phone_halt
+    # the ONE writer-shape predicate the live latch folds use (kind "event", source "governor"), never restated
+    from ..governor.authn import governor_written as _governor_written
     from ..governor.promotion import SIGNAL as _PROMO_SIGNAL
     from ..governor.promotion import _CORE as _PROMO_CORE
     from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE, cap_descriptor
@@ -781,19 +784,22 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         n = None
                     if n is not None and n > nonce.get(dev, -1):
                         nonce[dev] = n
-        # --- killswitch latch (engage=any, release=owner-verified + ANTI-REPLAY FRESH, IN ORDER) ---
-        if sig == _KS_SIGNAL:
+        # --- killswitch latch (engage=any governor/phone halt, release=owner-verified governor record + ANTI-REPLAY
+        #     FRESH, IN ORDER) — mirror killswitch._apply_killswitch_record EXACTLY, writer shape included ---
+        gov_written = _governor_written(r)
+        if sig == _KS_SIGNAL and (gov_written or _ks_phone_halt(r)):
             state = p.get("state")
             if state == "engaged":
                 ks_engaged = True
-            elif state == "released" and verify_signed(p, _KS_CORE, vpk):
+            elif state == "released" and gov_written and verify_signed(p, _KS_CORE, vpk):
                 issued = as_issued_at(p.get("issued_at"))
                 if issued > ks_issued:              # mirror _scan_engaged EXACTLY: stale/replayed ⇒ no effect
                     ks_issued = issued
                     ks_engaged = False
         # --- capability latch (disable=any, enable=owner-verified, IN ORDER, per capability). No isinstance
-        #     guard on the key — mirror the scan, which keys on p.get("capability") unconditionally. ---
-        if sig == _CAPLATCH_SIGNAL:
+        #     guard on the key — mirror the scan, which keys on p.get("capability") unconditionally. Governor-written
+        #     records only, exactly as capability._apply_capability_record. ---
+        if sig == _CAPLATCH_SIGNAL and gov_written:
             state = p.get("state")
             if state == "disabled":
                 cap_latch[p.get("capability")] = False
