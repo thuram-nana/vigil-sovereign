@@ -321,9 +321,10 @@ vm.runInContext(SRC, ctx);
     L.fetch({ request: { method: m, url: "https://phone.wg" + u }, respondWith: (x) => { res = x; } });
     log.answers[m + " " + u] = res === null ? null : (await res).body;
   }
-  L.message({ data: { type: "nope" } });
+  L.message({ origin: "https://phone.wg", data: { type: "nope" } });
+  L.message({ origin: "https://evil.example", data: { type: "SKIP_WAITING" } });   // another origin: ignored
   log.skipBeforeAsk = log.skip;
-  L.message({ data: { type: "SKIP_WAITING" } });
+  L.message({ origin: "https://phone.wg", data: { type: "SKIP_WAITING" } });
   log.caches = Object.keys(store);
   console.log(JSON.stringify(log));
 })();

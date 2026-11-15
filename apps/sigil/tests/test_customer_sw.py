@@ -129,8 +129,9 @@ vm.runInContext(SRC, ctx);
     listeners.fetch({ request: { method, url, mode: mode || "cors" }, respondWith: (p) => { res = p; } });
     answers[method + " " + url + " " + (mode || "")] = res === null ? null : (await res).body;
   }
-  listeners.message({ data: { type: "OTHER" } });
-  listeners.message({ data: { type: "SKIP_WAITING" } });
+  listeners.message({ origin: self.location.origin, data: { type: "OTHER" } });
+  listeners.message({ origin: "https://evil.example", data: { type: "SKIP_WAITING" } });   // another origin: ignored
+  listeners.message({ origin: self.location.origin, data: { type: "SKIP_WAITING" } });
   log.answers = answers;
   log.caches = Object.keys(store);
   console.log(JSON.stringify(log));

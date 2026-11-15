@@ -61,6 +61,9 @@ self.addEventListener("activate", function (e) {
 });
 
 self.addEventListener("message", function (e) {
+  // only this app's own pages may ask the waiting worker to take over (a worker hears its own clients alone, but
+  // the origin is checked explicitly)
+  if (e.origin !== self.location.origin) return;
   if (e.data && e.data.type === "SKIP_WAITING") self.skipWaiting();
 });
 
