@@ -19,8 +19,9 @@ _UI_PORTS = (("proxy", 8770), ("cockpit", 8733), ("console", 8787), ("api", 8799
 def find_repo_root() -> Path:
     """Best-effort repo root — the dir holding `.venv-offense` / `.vigil-live` / `docker-compose.yml`.
     Anchors on the offense venv (a console/CLI runs IN `repo/.venv-offense`, so `sys.prefix`'s parent is
-    the repo), then the cwd. Never raises; falls back to the venv parent. Shared by the readiness report
-    and the services bring-up so both agree on which tree to inspect/act on."""
+    the repo), then the cwd, then the checkout this module was loaded from. Never raises; falls back to the venv
+    parent. Shared by the readiness report and the services bring-up so both agree on which tree to inspect/act
+    on."""
     import sys
     for start in (Path(sys.prefix).parent, Path.cwd()):
         try:
@@ -30,6 +31,11 @@ def find_repo_root() -> Path:
         for cand in [start, *start.parents]:
             if (cand / ".venv-offense").exists():
                 return cand
+    # no offense venv (a sovereign-only host, a CI job on a system Python): the checkout this module was loaded
+    # from, when it is one — its shipped unit files are what the deployment checks compare against
+    here = Path(__file__).resolve().parents[2]
+    if (here / "apps" / "sigil" / "deploy" / "systemd").is_dir() and (here / "infra" / "systemd").is_dir():
+        return here
     return Path(sys.prefix).parent
 
 

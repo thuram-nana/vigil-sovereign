@@ -55,6 +55,8 @@ def _say(log: Callable[[str], None], msg: str) -> None:
 #: Once new connection attempts are dropped, how long a stop waits for the handshakes already under way to land in
 #: the listen queue before it serves the queue and closes (a loopback handshake takes microseconds).
 HANDSHAKE_GRACE_S = 0.2
+#: Why the last attempt to hold new connections failed (``_hold_new_connections``), or "" when none has.
+HOLD_UNAVAILABLE = ""
 
 _SO_ATTACH_FILTER = 26                     # Linux, <asm-generic/socket.h>
 # A classic-BPF socket filter that drops a TCP segment with SYN set and ACK clear — a new connection attempt — and
@@ -141,7 +143,9 @@ def _hold_new_connections(srv: Any) -> bool:
         fprog = struct.pack("HP", len(_DROP_NEW_CONNECTIONS), ctypes.addressof(prog))
         sock.setsockopt(socket.SOL_SOCKET, _SO_ATTACH_FILTER, fprog)
         return True
-    except (OSError, ValueError, ImportError, AttributeError):
+    except (OSError, ValueError, ImportError, AttributeError) as e:
+        global HOLD_UNAVAILABLE
+        HOLD_UNAVAILABLE = f"{type(e).__name__}: {e}"            # why, for the operator's log and the tests
         return False
 
 
@@ -224,6 +228,9 @@ def graceful_stop(srv: Any, *, drain_deadline_s: Optional[float] = None,
             abort.wait(HANDSHAKE_GRACE_S)
         else:
             time.sleep(HANDSHAKE_GRACE_S)
+    elif sys.platform.startswith("linux") and getattr(srv, "socket", None) is not None:
+        _say(log, f"  stopping: new connections could not be held ({HOLD_UNAVAILABLE}); one arriving in the "
+                  f"next instant may be reset")
     _serve_waiting_connections(srv)     # every connection the kernel accepted is served, never reset
     _close_listener(srv)
     if not hasattr(srv, "wait_drained"):

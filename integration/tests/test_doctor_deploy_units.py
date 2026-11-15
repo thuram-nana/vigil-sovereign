@@ -612,3 +612,12 @@ def test_a_proxy_only_console_is_not_compared_for_the_seam_base(tmp_path, monkey
     sec, issues = seam_base_agreement(_REPO, home)
     assert issues == [] and sec["proxy_only"] == ["vigil-command.service"]
     assert set(sec["units"]) == {"sigil-cockpit.service", "vigil-settle-drain.service"}
+
+
+def test_the_repo_root_is_this_checkout_without_an_offense_venv(tmp_path, monkeypatch):
+    # a sovereign-only host or a CI job on a system Python: no .venv-offense above sys.prefix or the cwd, so the
+    # checkout this module came from is the repo (its shipped units are what `sigil latch` and the doctor read)
+    import sys
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "python"))
+    monkeypatch.chdir(tmp_path)
+    assert _doc.find_repo_root() == _REPO

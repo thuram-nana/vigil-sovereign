@@ -517,7 +517,7 @@ def test_a_stopping_listener_takes_no_new_connection_but_keeps_the_ones_queued()
     srv = _Srv(("127.0.0.1", 0), _Quick)
     port = srv.server_address[1]
     queued = socket.create_connection(("127.0.0.1", port), timeout=5)       # handshake done before the hold
-    assert graceful._hold_new_connections(srv) is True
+    assert graceful._hold_new_connections(srv) is True, graceful.HOLD_UNAVAILABLE
     t0 = time.monotonic()
     with pytest.raises(socket.timeout):                                     # a new attempt is not taken ...
         socket.create_connection(("127.0.0.1", port), timeout=0.5)
