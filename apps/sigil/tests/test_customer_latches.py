@@ -477,6 +477,22 @@ def test_status_doctor_and_dashboard_read_the_switches(home, capsys):
     assert snapshot(store)["customer_latches"]["trial"] == "off"
 
 
+def test_latch_runs_on_a_segmented_home_and_refuses_a_home_with_no_spine(home, capsys, monkeypatch, tmp_path):
+    # a migrated home keeps its spine as segments + a manifest, with no single data file: latch must run there
+    from sigil import cli
+    from sigil.spine.manifest import SpineLayout
+    seg = tmp_path / "seg" / "spine.jsonl"
+    seg.parent.mkdir()
+    SpineLayout.for_path(seg).manifest_path.write_text("{}", encoding="utf-8")
+    assert not seg.exists() and cli._spine_present(seg) is True
+    missing = tmp_path / "none" / "spine.jsonl"
+    assert cli._spine_present(missing) is False
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: type("S", (), {"path": missing})())
+    with pytest.raises(SystemExit) as e:
+        _cli("status")
+    assert e.value.code == 2 and "there is no spine" in capsys.readouterr().err
+
+
 def test_status_and_doctor_give_no_switch_verdict_from_another_home(home, capsys, monkeypatch, tmp_path):
     # a shell whose SIGIL_HOME is not the cockpit's would read another spine's switches: say so, give no verdict
     from sigil import cli
