@@ -407,7 +407,7 @@ def test_the_customer_edge_waits_past_its_slowest_cockpit_hop():
     assert customer >= longest + 15, (customer, longest)
     assert customer == custui.drain_deadline_s()
     assert object.__new__(PublicServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
-    assert object.__new__(UIServer).drain_deadline() == graceful.DRAIN_DEADLINE_S
+    assert object.__new__(UIServer).drain_deadline() == graceful.PROVISIONER_DRAIN_DEADLINE_S
     assert graceful.DRAIN_DEADLINE_S < longest           # why the customer edge needs its own
 
 
