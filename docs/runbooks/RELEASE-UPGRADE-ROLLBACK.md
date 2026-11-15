@@ -197,11 +197,26 @@ records what was in them.
 git checkout --detach "$SHA"
 ./bootstrap.sh
 vigil --version
+# install the release's version of every unit this host has installed (a release can change a unit)
+for u in ~/.config/systemd/user/*.service ~/.config/systemd/user/*.timer; do
+  [ -f "$u" ] && [ ! -L "$u" ] || continue
+  for d in apps/sigil/deploy/systemd infra/systemd; do
+    if [ -f "$d/${u##*/}" ] && ! cmp -s "$d/${u##*/}" "$u"; then
+      diff -u "$u" "$d/${u##*/}" || :; cp "$d/${u##*/}" "$u"
+    fi
+  done
+done
 ```
 
 `bootstrap.sh` rebuilds the two hash-locked venvs, the WARDEN kernel and the egress guard
 (`envs/build_envs.sh`) and links `~/.sigil/venv` to `.venv-sovereign`; `vigil doctor` reports that link if
-it is anything else.
+it is anything else. Plain `./bootstrap.sh` does not touch the installed units, so the loop installs the
+release's copy of each unit this host has and prints what changed; 2.8 reloads systemd before anything starts.
+A release can change a unit in a way the code relies on — the customer edge, for example, finishes an action
+the cockpit is still completing for up to 75 s, and its units allow 90 s before systemd kills it; with a unit
+from an older release (20 s) a stop would cut such an action, the customer told it failed. Keep local changes in
+drop-ins (`systemctl --user edit <unit>`), which the loop leaves alone. `vigil doctor` (2.9) reports an edge unit
+whose stop timeout is too short, and `tools/deploy/edge-swap.sh` refuses to swap with one.
 
 ### 2.7 Migrate the sovereign data store
 

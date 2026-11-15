@@ -54,8 +54,10 @@ def test_the_procedure_runs_in_the_safe_order():
         "systemctl --user start vigil-backup-push.service",          # back up with the OLD build, writers stopped
         'git checkout --detach "$SHA"',                              # only now change the code
         "./bootstrap.sh",
+        'cp "$d/${u##*/}" "$u"',                                     # the release's units, before any start
         "vigil upgrade --check",
         "vigil upgrade\n",
+        "systemctl --user daemon-reload",                            # systemd reads the re-installed units
         "systemctl --user start sigil-cockpit.service",              # the cockpit first
         'xargs -r systemctl --user start < "$U/timers"',             # then the drains
         'xargs -r systemctl --user start < "$U/services"',           # then exactly the recorded services

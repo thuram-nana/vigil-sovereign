@@ -15,6 +15,10 @@ so a development checkout's `vigil doctor` output is unchanged:
 * :func:`must_match_report` — the settle and money settings that must hold the SAME value in every process that
   settles a customer launch (``config.settle_spine_record_enabled``, OWNER DECISION OD-4, and the metered
   settle's pricing) agree across the cockpit, the customer edge, the settle drain and ``sigil ops-sweep``.
+* :func:`customer_signin_report` — customer Google sign-in agrees between the customer edge and the cockpit.
+* :func:`edge_stop_timeout_report` — every installed edge unit (``sigil-{customer,public}{,@}.service``) lets
+  systemd wait for that edge's drain before it kills a stopping edge; a unit installed by an older release keeps
+  its shorter timeout until it is re-installed.
 
 Every value is read from the files the units load: the installed unit and its drop-ins under
 ``~/.config/systemd/user`` (``Environment=`` and ``EnvironmentFile=``, ``%h`` expanded), then ``sigil.env`` under
@@ -24,6 +28,7 @@ sigil or framework import (FATAL-2). Never raises: an unreadable file reads as a
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -551,3 +556,71 @@ def customer_signin_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
                      "there and restart the customer edge.")
     section = {"configured": True, "google": google, "handoff": handoff, "ok": not issues}
     return section, issues, notes
+
+
+# ── the edges' stop timeout ───────────────────────────────────────────────────────────────────────────────────────
+#: The stop timeout each edge's units must allow: the edge's drain deadline (custui.drain_deadline_s 75 s for the
+#: customer edge; ui/graceful.DRAIN_DEADLINE_S 10 s for the public site) + the handshake grace + 5 s. The same floor
+#: tools/deploy/edge-swap.sh enforces; a sovereign test pins both to the servers' deadlines.
+EDGE_STOP_FLOOR_S = {"customer": 81, "public": 16}
+_EDGE_UNITS = (("customer", "sigil-customer.service"), ("customer", "sigil-customer@.service"),
+               ("public", "sigil-public.service"), ("public", "sigil-public@.service"))
+#: systemd's default stop timeout (DefaultTimeoutStopSec) when a unit sets none.
+_SYSTEMD_DEFAULT_STOP_S = 90.0
+_SPAN_UNITS = {"": 1.0, "s": 1.0, "sec": 1.0, "second": 1.0, "seconds": 1.0, "us": 1e-6, "usec": 1e-6,
+               "ms": 1e-3, "msec": 1e-3, "m": 60.0, "min": 60.0, "minute": 60.0, "minutes": 60.0,
+               "h": 3600.0, "hr": 3600.0, "hour": 3600.0, "hours": 3600.0, "d": 86400.0, "day": 86400.0,
+               "days": 86400.0}
+_SPAN_PART = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([a-z]*)")
+
+
+def parse_timespan(raw: str) -> "float | None":
+    """A systemd time span as a unit file writes it ("90", "90s", "1min 30s", "1min30s", "infinity") in seconds;
+    None when it cannot be read."""
+    v = (raw or "").strip()
+    if v == "infinity":
+        return float("inf")
+    total, pos = 0.0, 0
+    for m in _SPAN_PART.finditer(v):
+        if m.start() != pos or m.group(2) not in _SPAN_UNITS:
+            return None
+        total += float(m.group(1)) * _SPAN_UNITS[m.group(2)]
+        pos = m.end()
+    return total if v and pos == len(v) else None
+
+
+def edge_stop_timeout_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
+    """(section, issues, notes) for the stop timeout of every INSTALLED edge unit (with its drop-ins; the last
+    ``TimeoutStopSec=``/``TimeoutSec=`` wins, none means systemd's default 90 s). Silent until one is installed.
+
+    HARD: below ``EDGE_STOP_FLOOR_S`` — systemd would kill a stopping edge while it still finishes an action it
+    accepted (the action done, the customer told it failed, a retry doing it twice). NOTE: a value it cannot read."""
+    del repo                                           # only the installed units matter (never the repo's copies)
+    units: dict = {}
+    issues: list = []
+    notes: list = []
+    for edge, name in _EDGE_UNITS:
+        u = UnitView(name, home=home)
+        if not u.installed:
+            continue
+        raw = None
+        for k, v in u.directives:
+            if k in ("TimeoutStopSec", "TimeoutSec"):
+                raw = v
+        secs = _SYSTEMD_DEFAULT_STOP_S if raw is None or raw == "" else parse_timespan(raw)
+        floor = EDGE_STOP_FLOOR_S[edge]
+        if secs is None:
+            units[name] = "unreadable"
+            notes.append(f"{name}: TimeoutStopSec={raw!r} could not be read; a stopping {edge} edge needs systemd to "
+                         f"wait at least {floor} s. Install this release's unit (RELEASE-UPGRADE-ROLLBACK.md §2.6).")
+            continue
+        units[name] = secs
+        if secs < floor:
+            issues.append(f"{name} lets systemd stop the {edge} edge after {secs:g} s (TimeoutStopSec), but a "
+                          f"stopping {edge} edge may need {floor} s to finish the requests it accepted: systemd would "
+                          f"kill it part way through an action (the action done, the customer told it failed). "
+                          f"Install this release's unit: cp apps/sigil/deploy/systemd/{name} ~/.config/systemd/user/ "
+                          f"&& systemctl --user daemon-reload (RELEASE-UPGRADE-ROLLBACK.md §2.6).")
+    if not units:
+        return {"configured": False}, [], []
+    return {"configured": True, "units": units, "ok": not issues}, issues, notes

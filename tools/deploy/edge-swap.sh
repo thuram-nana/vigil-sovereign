@@ -28,11 +28,20 @@
 #      <url>/version.json must name the build the new edge serves.
 # Before the first hop, <url>/version.json must name the running edge's build,
 # so a wrong URL changes nothing.
-# If a new edge does not become healthy, or stops answering during the settle,
-# it is stopped and the running edge keeps serving; the script exits 1. If the
-# proxy does not reach a new edge (a vhost or Caddyfile naming one port only),
-# the swap hops back to the port the proxy reached — the proxy had no edge for
-# those few seconds, as in a restart — and exits 1.
+# Before the first hop, every unit the swap stops or leaves running must let
+# systemd wait for that drain (TimeoutStopUSec at least the edge's drain + 6 s:
+# 81 s for the customer edge, 16 s for the public site, as the shipped units
+# allow). A unit installed from an older release keeps its old, shorter timeout
+# until it is re-installed, and systemd would kill the old edge part way through
+# an action — the action done, the customer told it failed. The swap then
+# changes nothing and names the units to re-install (RELEASE-UPGRADE-ROLLBACK.md
+# §2.6). If a new edge does not become healthy, or stops answering during the
+# settle, it is stopped and the running edge keeps serving; the script exits 1.
+# If the proxy does not reach a new edge (a vhost or Caddyfile naming one port
+# only), the swap hops back to the port the proxy reached and exits 1. The proxy
+# has no edge from the moment the old edge stops taking connections until it
+# exits, which is as long as its slowest action still in flight, at most the
+# drain (75 s for the customer edge) — as in a restart of the plain unit.
 #
 # The new process reads the code and files on disk now: check out the release
 # first (docs/runbooks/EDGE-SWAP.md).
@@ -46,11 +55,13 @@
 set -euo pipefail
 
 edge="${1:-}"
+# need_stop_s: the stop timeout every unit of that edge must allow — the edge's drain deadline (custui.drain_deadline_s
+# 75 s; the public site ui/graceful.DRAIN_DEADLINE_S 10 s) + the handshake grace + 5 s (a test pins both values).
 case "$edge" in
   customer) a="${VIGIL_CUSTOMER_PORT:-8734}"; b="${VIGIL_CUSTOMER_ALT_PORT:-8744}"; unit=sigil-customer
-            url_var=VIGIL_EDGE_SWAP_CUSTOMER_URL; url="${VIGIL_EDGE_SWAP_CUSTOMER_URL:-}" ;;
+            url_var=VIGIL_EDGE_SWAP_CUSTOMER_URL; url="${VIGIL_EDGE_SWAP_CUSTOMER_URL:-}"; need_stop_s=81 ;;
   public)   a="${VIGIL_PUBLIC_PORT:-8735}";   b="${VIGIL_PUBLIC_ALT_PORT:-8745}";   unit=sigil-public
-            url_var=VIGIL_EDGE_SWAP_PUBLIC_URL; url="${VIGIL_EDGE_SWAP_PUBLIC_URL:-}" ;;
+            url_var=VIGIL_EDGE_SWAP_PUBLIC_URL; url="${VIGIL_EDGE_SWAP_PUBLIC_URL:-}"; need_stop_s=16 ;;
   *) echo "usage: $0 customer|public" >&2; exit 2 ;;
 esac
 if [ -z "$url" ]; then
@@ -64,6 +75,29 @@ settle_s="${VIGIL_EDGE_SWAP_SETTLE_S:-3}"
 
 sc() { systemctl --user "$@"; }
 active() { sc is-active --quiet "$1"; }
+# the stop timeout systemd gives unit $1, in whole seconds (systemd prints e.g. "1min 30s"); empty when unreadable
+stop_timeout_s() {
+  local v w n u t=0
+  v="$(sc show -p TimeoutStopUSec --value "$1" 2>/dev/null || true)"
+  [ -n "$v" ] || return 0
+  if [ "$v" = infinity ]; then
+    echo 999999
+    return 0
+  fi
+  for w in $v; do
+    n="${w%%[!0-9]*}"; u="${w#"$n"}"
+    [ -n "$n" ] || return 0
+    case "$u" in
+      us|ms) ;;
+      s) t=$((t + n)) ;;
+      min) t=$((t + n * 60)) ;;
+      h) t=$((t + n * 3600)) ;;
+      d) t=$((t + n * 86400)) ;;
+      *) return 0 ;;
+    esac
+  done
+  echo "$t"
+}
 healthy() { curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$1/healthz" 2>/dev/null; }
 # the build an edge serves, read from <base>/version.json; empty when it does not answer
 build_at() {
@@ -95,6 +129,19 @@ else
   echo "edge-swap: no $edge edge is running; start one first: systemctl --user start $unit@$a.service" >&2
   exit 1
 fi
+
+# every unit this swap stops, or leaves running, must let a stopping edge finish its drain (see the header)
+for u in "$cur" "$unit@$a.service" "$unit@$b.service"; do
+  got="$(stop_timeout_s "$u")"
+  if [ -z "$got" ] || [ "$got" -lt "$need_stop_s" ]; then
+    echo "edge-swap: systemd would stop $u after ${got:-?}s (TimeoutStopUSec), but a stopping $edge edge may" \
+         "need ${need_stop_s}s to finish the requests it accepted; install this release's units first:" \
+         "cp apps/sigil/deploy/systemd/$unit.service apps/sigil/deploy/systemd/$unit@.service" \
+         "~/.config/systemd/user/ && systemctl --user daemon-reload (RELEASE-UPGRADE-ROLLBACK.md §2.6);" \
+         "nothing was changed" >&2
+    exit 1
+  fi
+done
 
 running_build="$(build_at "http://127.0.0.1:$at")"
 if [ -z "$running_build" ]; then

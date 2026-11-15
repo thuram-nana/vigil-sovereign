@@ -30,7 +30,10 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   cockpit's own answer — never as the unavailable page for an email that was sent, a checkout that was created or
   a sign-in code that was spent. The public site serves only files and waits up to 10 s. Stopping the old
   customer edge therefore takes up to 75 s while such an action is in flight; its units allow 90 s
-  (`TimeoutStopSec`).
+  (`TimeoutStopSec`). Units installed by an older release may allow less (20 s); the swap reads the stop timeout
+  systemd will apply to every unit it stops or leaves running (`systemctl --user show -p TimeoutStopUSec`) and,
+  below the edge's drain + 6 s (81 s for the customer edge, 16 s for the public site), changes nothing and names
+  the units to re-install (`RELEASE-UPGRADE-ROLLBACK.md` §2.6). `vigil doctor` reports such a unit too.
 - `tools/deploy/edge-swap.sh customer|public` moves the edge in hops, out to the second port and back to the
   first, so the edge always comes to rest on the FIRST port. There nginx's first try succeeds; on the second port
   alone, every request would first meet the refused first port, and nginx would log a `connect() failed (111:
@@ -46,12 +49,16 @@ delivered by that swap alone — no full upgrade, nothing else restarted.
   (`VIGIL_EDGE_SWAP_CUSTOMER_URL` / `VIGIL_EDGE_SWAP_PUBLIC_URL`, required): before the first hop
   `<url>/version.json` must name the build of the edge running now (so a wrong URL changes nothing), and after
   each hop the build of the new edge. If the proxy does not reach the new edge — a vhost that still names one port,
-  or a Caddyfile — the script moves the edge back to the port the proxy reached and exits 1. The proxy has no
-  edge for those few seconds, as in a restart; nothing stays unreachable.
+  or a Caddyfile — the script moves the edge back to the port the proxy reached and exits 1. Nothing stays
+  unreachable, but on such a proxy every request gets the unavailable page from the moment the old edge stops
+  taking connections until it exits: as long as its slowest action still in flight, at most 75 s for the customer
+  edge (10 s for the public site), as in a restart.
 
 The Caddy examples (`*.Caddyfile`) name one port only, so behind Caddy do not swap: the swap would find that Caddy
 does not reach the second port, move the edge back and exit 1. Restart the plain unit there instead
-(`systemctl --user restart sigil-customer.service`), which leaves the edge unreachable for a few seconds.
+(`systemctl --user restart sigil-customer.service`). That leaves the edge unreachable until the old edge has
+answered what it accepted and the new one is up: a few seconds when nothing slow is in flight, and up to the
+slowest action in flight — at most 75 s for the customer edge (a sign-up email sent inline) — when one is.
 
 ## One-time setup
 
@@ -68,7 +75,10 @@ tools/deploy/edge-swap.sh public                    # moves sigil-public.service
 
 The two `export` lines belong in the deploy user's shell profile, so every later swap has them. Run either the
 plain unit or the instances, never the plain unit and the first-port instance together. The full upgrade
-(`RELEASE-UPGRADE-ROLLBACK.md` §2.4) records and stops the instances like every other unit.
+(`RELEASE-UPGRADE-ROLLBACK.md` §2.4) records and stops the instances like every other unit, and installs each
+release's version of the units (§2.6). On a host set up before the customer edge's longer drain, install the
+current `sigil-customer.service` and `sigil-public.service` the same way before the first swap (the `cp` above
+covers the template units only); the swap refuses until every unit allows the drain.
 
 ## Swap an edge
 

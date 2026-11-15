@@ -8,9 +8,10 @@ is checked exactly. Each hop:
 and the swap always ENDS ON THE FIRST PORT (out to the second and back), where nginx's first try succeeds.
 A new edge that never answers, dies, or stops answering during the settle is stopped and the old one is never
 touched; a proxy that does not reach the new port gets the edge moved back to the port it reached and the swap
-fails; a wrong or missing proxy URL, nothing running, a busy port or a wrong argument changes nothing. The template
-units are pinned to the plain units' lifecycle, env file and hardening, and the release runbook's stop list covers
-their instances.
+fails; a wrong or missing proxy URL, nothing running, a busy port or a wrong argument changes nothing. A unit whose
+stop timeout (as systemd reports it) is shorter than that edge's drain — a unit installed by an older release —
+stops the swap before anything changes, naming the units to re-install. The template units are pinned to the plain
+units' lifecycle, env file and hardening, and the release runbook's stop list covers their instances.
 """
 from __future__ import annotations
 
@@ -28,6 +29,12 @@ UNITS = REPO / "apps" / "sigil" / "deploy" / "systemd"
 _SYSTEMCTL = r"""#!/usr/bin/env bash
 # stand-in: systemctl --user <verb> <unit>; state in $FAKE_STATE/{active,listening}; every call logged
 [ "$1" = "--user" ] && shift
+if [ "$1" = show ]; then   # show -p TimeoutStopUSec --value <unit>: the stop timeout, as systemd prints it
+  u="${@: -1}"
+  echo "$*" >> "$FAKE_STATE/shows"
+  if [ -e "$FAKE_STATE/stop/$u" ]; then cat "$FAKE_STATE/stop/$u"; else cat "$FAKE_STATE/stop_default"; fi
+  exit 0
+fi
 verb="$1"; shift
 [ "$verb" = "is-active" ] && [ "$1" = "--quiet" ] && shift
 unit="$1"
@@ -74,11 +81,18 @@ _PROXY = {"customer": (8734, 8744), "public": (8735, 8745)}      # the shipped v
 _URL = {"VIGIL_EDGE_SWAP_CUSTOMER_URL": "https://app.example.test", "VIGIL_EDGE_SWAP_PUBLIC_URL": "https://example.test"}
 
 
+#: What `systemctl show -p TimeoutStopUSec` prints for the shipped units (TimeoutStopSec=90 / =20).
+_SHIPPED_STOP = {"customer": "1min 30s", "public": "20s"}
+
+
 def _swap(tmp_path, edge, *, active=(), listening=(), broken=(), dies=(), settle_exits=(), settle_mute=(),
-          env=None, proxy=None, builds=None, disk_build="feed"):
+          env=None, proxy=None, builds=None, disk_build="feed", stop=None):
     state, bin_ = tmp_path / "state", tmp_path / "bin"
-    for d in (state / "active", state / "listening", bin_):
+    for d in (state / "active", state / "listening", state / "stop", bin_):
         d.mkdir(parents=True, exist_ok=True)
+    (state / "stop_default").write_text(_SHIPPED_STOP.get(edge, "1min 30s"))
+    for u, value in (stop or {}).items():                                         # a unit's own stop timeout
+        (state / "stop" / u).write_text(value)
     for u in active:
         (state / "active" / u).touch()
     for p in listening:
@@ -251,6 +265,71 @@ def test_nothing_running_a_busy_port_or_a_wrong_argument_changes_nothing(tmp_pat
     assert r.returncode == 1 and acts == [] and "already answers on port 8744" in r.stderr
     r, acts, _ = _swap(tmp_path / "c", "cockpit")
     assert r.returncode == 2 and acts == []
+
+
+# ---- the units' stop timeout: long enough for the edge's drain ------------------------------------------------
+@pytest.mark.parametrize("edge,start,stale,short", [
+    ("customer", "sigil-customer.service", "sigil-customer.service", "20s"),     # installed before the drain grew
+    ("customer", "sigil-customer.service", "sigil-customer@8744.service", "20s"),  # an instance it would start
+    ("customer", "sigil-customer@8734.service", "sigil-customer@8734.service", "1min 15s"),
+    ("public", "sigil-public@8735.service", "sigil-public@8745.service", "15s"),
+])
+def test_a_unit_that_would_kill_a_draining_edge_stops_the_swap_before_anything_changes(tmp_path, edge, start, stale,
+                                                                                       short):
+    # the review's case: units installed by an older release keep TimeoutStopSec=20; a swap would have systemd kill
+    # the old customer edge 20 s into a 30 s sign-up, the sign-up done and the customer shown "unavailable"
+    r, acts, running = _swap(tmp_path, edge, active=[start], listening=[_PROXY[edge][0]], stop={stale: short})
+    assert r.returncode == 1 and acts == [] and running == [start]
+    assert f"systemd would stop {stale} after" in r.stderr and "nothing was changed" in r.stderr
+    assert f"cp apps/sigil/deploy/systemd/sigil-{edge}.service apps/sigil/deploy/systemd/sigil-{edge}@.service" in r.stderr
+    assert "daemon-reload" in r.stderr and "RELEASE-UPGRADE-ROLLBACK.md §2.6" in r.stderr
+    assert not [ln for ln in _log(tmp_path) if ln.startswith("curl")]          # refused before anything else
+
+
+def test_the_swap_reads_the_stop_timeout_of_every_unit_it_stops_or_leaves_running(tmp_path):
+    r, _acts, _running = _swap(tmp_path, "customer", active=["sigil-customer.service"], listening=[8734])
+    assert r.returncode == 0, r.stderr
+    shows = (tmp_path / "state" / "shows").read_text().splitlines()
+    assert shows == [f"show -p TimeoutStopUSec --value {u}" for u in
+                     ("sigil-customer.service", "sigil-customer@8734.service", "sigil-customer@8744.service")]
+
+
+@pytest.mark.parametrize("value,ok", [
+    ("1min 30s", True), ("1min 21s", True), ("81s", True), ("2h", True), ("infinity", True),
+    ("1min 20s 900ms", False), ("80s", False), ("20s", False),
+    ("", False), ("garbage", False),                        # unreadable: fail closed
+    ("1min 30s 1y", False),                                 # a time unit it does not read: fail closed, even when
+                                                            # the parts it reads would pass
+])
+def test_the_stop_timeout_systemd_prints_is_read_exactly(tmp_path, value, ok):
+    r, acts, _running = _swap(tmp_path, "customer", active=["sigil-customer@8734.service"], listening=[8734],
+                              stop={"sigil-customer@8744.service": value})
+    assert (r.returncode == 0) is ok, (value, r.stderr)
+    if not ok:
+        assert acts == [] and "nothing was changed" in r.stderr
+
+
+def test_the_swaps_stop_timeout_floor_is_each_edges_drain_plus_the_units_margin():
+    # need_stop_s in the script = the server's drain deadline + the handshake grace + 5 s, the same margin the
+    # shipped units are pinned to (test_graceful_stop.py) — so the swap accepts exactly the units that are safe
+    import math
+
+    from sigil.ui import graceful
+    from sigil.ui.custui import CustomerServer
+    from sigil.ui.pubui import PublicServer
+    script = SCRIPT.read_text(encoding="utf-8")
+    floors = [int(v) for v in re.findall(r"need_stop_s=(\d+) ;;", script)]
+    want = [math.ceil(object.__new__(cls).drain_deadline() + graceful.HANDSHAKE_GRACE_S + 5)
+            for cls in (CustomerServer, PublicServer)]
+    assert floors == want == [81, 16]
+    # `vigil doctor` holds the installed units to the same floor (integration/vigil_integration/deploy_checks.py,
+    # read as text: the sovereign tests never import the integration package)
+    checks = (REPO / "integration" / "vigil_integration" / "deploy_checks.py").read_text(encoding="utf-8")
+    assert f'EDGE_STOP_FLOOR_S = {{"customer": {want[0]}, "public": {want[1]}}}' in checks
+    for edge, floor in zip(("customer", "public"), floors):
+        for unit in (f"sigil-{edge}.service", f"sigil-{edge}@.service"):
+            stop = int(_directives(UNITS / unit)["TimeoutStopSec"][-1])
+            assert stop >= floor, (unit, stop, floor)                  # the shipped units pass the swap's check
 
 
 # ---- the template units ---------------------------------------------------------------------------------------
