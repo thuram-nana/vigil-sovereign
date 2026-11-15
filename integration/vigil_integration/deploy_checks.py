@@ -646,6 +646,14 @@ def must_match_report(home: Path, repo: Path) -> "tuple[dict, list, list]":
                      f"from the units. {fix}.")
     section = {"configured": True, "processes": where, "flags": flags, "ok": not issues,
                "ops_sweep_agrees": not notes}
+    record = {p: v for p, v in flags.get("VIGIL_SETTLE_SPINE_RECORD", {}).items() if p != "ops-sweep"}
+    if record and set(record.values()) == {"off"}:
+        # OD-4 (owner decision): production settles with the spine record on. Off everywhere is consistent (no hard
+        # issue), but a settle a stop interrupts is then not finished by itself after a restart.
+        notes.append("VIGIL_SETTLE_SPINE_RECORD is off in every process that settles customer launches; production "
+                     "runs with it on (each settle is recorded on the spine first, so one a crash or a stop "
+                     f"interrupts is finished after the restart). {once}: VIGIL_SETTLE_SPINE_RECORD=1, and restart "
+                     "the units.")
     return section, issues, notes
 
 

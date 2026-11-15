@@ -766,8 +766,8 @@ def test_the_env_example_ships_the_production_value_and_leaves_step_up_unset():
     lines = [ln.strip() for ln in text.splitlines()]
     assert "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED=1" in lines
     assert "VIGIL_TRIAL_PREVIEW_ENABLED=1" in lines                # the founder role needs the preview on
-    assert not any(ln.startswith(("VIGIL_CUSTOMER_STEPUP_REQUIRED=", "VIGIL_CUSTOMER_PROD_EXECUTION=",
-                                  "VIGIL_SETTLE_SPINE_RECORD=")) for ln in lines)
+    assert not any(ln.startswith(("VIGIL_CUSTOMER_STEPUP_REQUIRED=", "VIGIL_CUSTOMER_PROD_EXECUTION=")) for ln in lines)
+    assert "VIGIL_SETTLE_SPINE_RECORD=1" in lines                  # OD-4: the owner's production value
 
 
 # --- the owner's founder_tester latch: OFF withholds the founder role from NEW sign-ups only -------------------
