@@ -3635,18 +3635,21 @@ def await_drains(*, run: Callable[..., Any] = subprocess.run, wait_s: Optional[f
 
 
 def _verify_sovereign_containment(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
-    """After `_contain_sovereign_units`: every sovereign timer, service, bridge instance and drain is neither
-    running (``deactivating`` included: a unit still draining has not stopped) nor enabled. Returns the leaks (empty
-    ⇒ contained); skips cleanly with no user manager."""
+    """After `_contain_sovereign_units`: every sovereign timer, service and bridge instance is neither running
+    (``deactivating`` included: a unit still draining has not stopped) nor enabled, and every drain is not enabled.
+    A drain still finishing a pass is NOT a leak: it is never interrupted, exits on its own and starts no further
+    pass once its timer is stopped and disabled (`await_drains` reports it separately). Returns the leaks (empty ⇒
+    contained); skips cleanly with no user manager."""
     if not _user_manager_reachable(run=run):
         return []
     leaks: list[str] = []
     units = (list(_SOVEREIGN_TIMERS) + list(_SOVEREIGN_EDGES) + [_SOVEREIGN_WRITER] + _bridge_instances(run=run)
              + list(_SOVEREIGN_ONESHOTS) + list(_DRAIN_SERVICES))
     for unit in units:
-        _rc, active, _e = _systemctl("is-active", unit, run=run)
-        if active.strip() in _STILL_RUNNING:
-            leaks.append(f"{unit} is still {active.strip()}")
+        if unit not in _DRAIN_SERVICES:
+            _rc, active, _e = _systemctl("is-active", unit, run=run)
+            if active.strip() in _STILL_RUNNING:
+                leaks.append(f"{unit} is still {active.strip()}")
         _rc, enabled, _e = _systemctl("is-enabled", unit, run=run)
         if enabled.strip() in ("enabled", "enabled-runtime"):
             leaks.append(f"{unit} is still {enabled.strip()}")

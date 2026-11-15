@@ -9,7 +9,8 @@ flight is never interrupted — panic waits for it ONCE, bounded, after everythi
 pids are killed), and reports a pass still running after the bound; a fleet kill waits once after every revocation.
 A panic running inside the command unit's own cgroup (the console's PANIC button) contains everything else first and
 stops the command unit last. The post-condition check covers every one of these units, running (`deactivating`
-included) or enabled. `vigil down` touches none of them.
+included) or enabled — except a drain still finishing a pass, which is reported as finishing, never as a leak to
+stop by hand (only a drain left enabled is one). `vigil down` touches none of them.
 
 Framework-free (a fake `systemctl`, an injected clock): runs in the integration two-env boundary leg.
 
@@ -169,8 +170,31 @@ def test_a_drain_pass_still_running_after_the_bound_is_reported_not_interrupted(
     assert 10.0 <= clock.t < 13.0                                        # bounded: panic is never blocked
     assert "stop" not in ctl.verbs_for("vigil-billing-drain.service")
     assert any("vigil-billing-drain.service is still finishing a pass" in a for a in actions)
-    leaks = uiproxy._verify_sovereign_containment(run=ctl)
-    assert leaks == ["vigil-billing-drain.service is still active"]       # surfaced, never assumed contained
+    # a pass still finishing is reported above as such, NOT as a leak to stop by hand: it must never be interrupted
+    assert uiproxy._verify_sovereign_containment(run=ctl) == []
+
+
+def test_a_drain_left_enabled_is_still_a_leak(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    ctl = FakeSystemd()
+    real = ctl.__call__
+
+    def stuck(argv, **kw):                       # the drain service refuses to be disabled
+        if argv[2:] == ["disable", "vigil-settle-drain.service"]:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        return real(argv, **kw)
+    ctl.enabled.add("vigil-settle-drain.service")
+    _contain(stuck)
+    assert uiproxy._verify_sovereign_containment(run=stuck) == ["vigil-settle-drain.service is still enabled"]
+
+
+def test_the_bridge_template_is_never_stopped_or_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    ctl = FakeSystemd(bridges=(*_BRIDGES, uiproxy._BRIDGE_TEMPLATE))
+    assert uiproxy._BRIDGE_TEMPLATE not in uiproxy._bridge_instances(run=ctl)
+    _contain(ctl)
+    assert ctl.verbs_for(uiproxy._BRIDGE_TEMPLATE) == []
+    assert all("disable" in ctl.verbs_for(b) for b in _BRIDGES)
 
 
 def test_no_user_manager_contains_nothing():
@@ -320,7 +344,9 @@ def test_a_panic_inside_the_command_unit_contains_everything_before_stopping_it(
     assert calls[-1] == ("stop", uiproxy._SERVICE_UNIT)                       # its own unit is stopped LAST
     assert clock.slept == []                                     # no drain wait while the command unit still runs
     assert "vigil-settle-drain.service is still finishing a pass" in captured.out
-    assert "containment did NOT fully hold" in captured.err      # verified and reported before the self-stop
+    # verified and reported before the self-stop (a drain still finishing is no leak: it is reported as finishing)
+    assert "containment verified" in captured.out and captured.err == ""
+    assert captured.out.index("containment verified") < captured.out.index("stopping it now ends this process")
     assert "stopping it now ends this process" in captured.out
     assert killed == []                                          # the pid kill would end this process: it comes last
 
@@ -392,3 +418,14 @@ def test_a_stop_still_draining_is_reported_as_stopping_and_as_a_leak(tmp_path, m
     assert any(a.startswith("WARNING: sigil-customer.service is still stopping after") for a in actions)
     assert not any("could not stop sigil-customer.service" in a for a in actions)
     assert "sigil-customer.service is still deactivating" in uiproxy._verify_sovereign_containment(run=slow)
+
+
+def test_a_fleet_drain_wait_that_fails_is_reported_not_raised(monkeypatch):
+    def boom():
+        raise OSError("no bus")
+    monkeypatch.setattr(uiproxy, "run_panic", lambda **kw: 0)
+    roster = [fleet_monitor.FleetInstance(instance_id="i0", base_dir="/b0")]
+    rep = fleet_monitor.fan_out_kill(roster, signed_revocation="SIGNED", revoke_fn=lambda sig, path: None,
+                                     drain_wait_fn=boom)
+    assert rep["drains"]["waited"] is True
+    assert rep["drains"]["still_running"] == ["could not check the drains: OSError: no bus"]
