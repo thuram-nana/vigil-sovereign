@@ -57,8 +57,8 @@ _ONNX_SOURCES: dict[str, dict[str, str]] = {
         "repo": "qdrant/bge-small-en-v1.5-onnx-q",
         "onnx": "model_optimized.onnx",
         "revision": "aa8f8b060edb00e03bfdd08813a2949946c8ba55",
-        "onnx_sha256": "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
-        "tokenizer_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "onnx_sha256": "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",  # gitleaks:allow — a public file hash
+        "tokenizer_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",  # gitleaks:allow — a public file hash
     },
 }
 _TOKENIZER_FILE = "tokenizer.json"
