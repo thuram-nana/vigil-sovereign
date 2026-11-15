@@ -410,9 +410,11 @@ class Handler(BaseHTTPRequestHandler):
     def _download(self, path, filename):
         """Stream a file as an attachment (Wave 3 backup download). `filename` is already regex-validated by
         `durability.resolve_backup` (only `backup-…enc`), so it is safe in the Content-Disposition header."""
-        safe = str(filename)
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", safe):   # defence in depth: never a CR/LF/quote in a header
+        # Rebuilt from its parsed parts (never the request's text) so the header can only ever hold this shape.
+        m = re.fullmatch(r"backup-(\d{8})-(\d{6})-([0-9a-f]{6})\.enc", str(filename))
+        if m is None:
             return self._deny(404, "no such backup")
+        safe = f"backup-{int(m.group(1)):08d}-{int(m.group(2)):06d}-{int(m.group(3), 16):06x}.enc"
         try:
             size = path.stat().st_size
         except OSError:
