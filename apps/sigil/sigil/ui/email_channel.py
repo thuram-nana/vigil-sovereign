@@ -430,8 +430,8 @@ class EmailCodeLedger:
             rec = self._read(Path(e.path)) if not e.name.startswith(".") else None
             if self._live(rec, now):
                 codes += 1
-            elif self._strike_live(rec, now):
-                strikes.append((float(rec.get("strike_exp")), e.path))   # type: ignore[arg-type]
+            elif rec is not None and self._strike_live(rec, now):
+                strikes.append((float(rec.get("strike_exp") or 0.0), e.path))
             else:
                 self._unlink(e.path)
         if len(strikes) > self.max_strikes:
