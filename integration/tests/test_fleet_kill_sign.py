@@ -103,7 +103,8 @@ def test_cmd_fleet_kill_prints_every_drain_still_running(tmp_path, monkeypatch, 
                 "could not check the drains: OSError: no bus"]
     monkeypatch.setattr(fm, "fan_out_kill", lambda *a, **k: {
         "totals": {"instances": 1, "panic_ok": 1, "revoke_ok": 1, "revoke_refused": 0, "revoke_error": 0},
-        "instances": [], "drains": {"waited": True, "still_running": warnings}})
+        "reason": "drill", "revocation_supplied": True, "instances": [],
+        "drains": {"waited": True, "still_running": warnings}})
     assert cli._cmd_fleet_kill(SimpleNamespace(roster=str(roster), revocation=str(rev_path), reason="drill",
                                                yes=True)) == 0
     out = capsys.readouterr().out
