@@ -219,6 +219,9 @@ and says to close the page unless the person just tapped *Continue with Google* 
 most 3 sign-ins per account and 16 per network wait at once. The network rule does not tell apart two clients on the
 same network (one Wi-Fi, one office or carrier address range): there, the code and the page's warning are what
 stand in the way. A person whose phone changes network mid-way (Wi-Fi to mobile data) is asked to start again.
+The rule needs the reverse proxy to pass each visitor's own address: the shipped nginx vhost does, including
+behind Cloudflare (`real_ip_header CF-Connecting-IP` from Cloudflare's ranges only). A proxy that passes its own
+peer instead (for example the Caddy example placed behind Cloudflare) would show every visitor as Cloudflare.
 
 Check on a real iPhone before announcing: open `https://app.<your-domain>` in Safari, follow the guide to add VIGIL
 to the Home Screen, open it from there, tap *Continue with Google*, finish in the browser that opens, go back to
