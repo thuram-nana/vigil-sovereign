@@ -36,6 +36,13 @@ _PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
     # best-effort estimate until a published rate is known.
     "claude-fable-5": _FLAGSHIP_PER_M,
     "claude-mythos-5": _FLAGSHIP_PER_M,
+    # Opus 4.5 and later list at $5 / $25 (cache read $0.50, 5-minute write $6.25) — a third of the Opus 4 / 4.1
+    # rate. Without these rows "claude-opus-4" matches them by substring and a scan stops at a third of what its
+    # budget allowed. Longest key wins, so each row beats the "claude-opus-4" family row.
+    "claude-opus-4-8": (5.0, 25.0, 0.50, 6.25),
+    "claude-opus-4-7": (5.0, 25.0, 0.50, 6.25),
+    "claude-opus-4-6": (5.0, 25.0, 0.50, 6.25),
+    "claude-opus-4-5": (5.0, 25.0, 0.50, 6.25),
     "claude-opus-4": (15.0, 75.0, 1.50, 18.75),
     "claude-opus-3": (15.0, 75.0, 1.50, 18.75),
     "claude-3-opus": (15.0, 75.0, 1.50, 18.75),
