@@ -2,13 +2,20 @@
 
 * The edge writes data-onboarding="1" into the page at startup only while VIGIL_CUSTOMER_ONBOARDING is on; otherwise
   "0". The value counts in the build id, so turning the guide on or off is a new build the open pages are told about.
-* With the flag on: after a sign-in the click-through tour opens once per account in this browser; Skip guide (or Esc)
-  and Finish both record the outcome so it never opens again, and the tab a step happens on lights up in the top bar.
-  The Guide screen (#/guide) shows every chapter — testing a host, Red-Pen on GitHub, AEGIS monitoring, billing —
-  step by step, and replays the tour. While a screen loads, the VIGIL wordmark brightens and dims.
-* With the flag off: no tour, no Guide tab, #/guide is the home screen, and every loading state is the exact text node
-  it was before.
-* The copy names no model or engine, quotes no price and never estimates what a run costs.
+* With the flag on: after a sign-in the app asks the SERVER (api/customer/onboarding, see
+  test_customer_onboarding_state.py) whether this account still has the tour ahead of it — "pending" until the person
+  finishes or skips it, on any device. Pending opens the click-through tour (once per page load); done/skipped never
+  does; a tour finished in this browser whose record did not reach the server is sent again rather than re-shown; and
+  when the server cannot be asked, this browser's memory decides. Skip guide (or Esc) and Finish both record the
+  outcome, here and on the server, and the tab a step happens on lights up in the top bar.
+* The Guide screen (#/guide) covers the WHOLE app, chapter by chapter, step by step — account and sign-in, the
+  workspace and team, credits and plans, proving a host, testing it, Red-Pen on GitHub, AEGIS monitoring, statement and
+  invoices — plus the questions first-time users ask, and replays the tour. Every screen the app routes to is covered
+  (a new screen fails the coverage census until the guide covers it). While a screen loads, the VIGIL wordmark
+  brightens and dims.
+* With the flag off: no tour, no server call, no Guide tab, #/guide is the home screen, and every loading state is the
+  exact text node it was before.
+* The copy names no model or engine, quotes no price or credit amount, and mentions an estimate only to rule it out.
 
 guide.js and the customer UI kit run under node with a minimal DOM; app.js's wiring functions are extracted verbatim.
 
@@ -21,6 +28,11 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * the app ignores the page flag                        -> test_with_the_flag_off_the_app_is_unchanged
   * the edge always writes "1"                           -> test_the_edge_writes_the_flag_into_the_page
   * a model / engine name or a price in the copy         -> test_the_copy_follows_the_product_rules
+  * the app ignores the server's done/skipped            -> test_the_server_decides_whether_the_tour_opens
+  * the app never re-sends a locally finished tour       -> test_the_server_decides_whether_the_tour_opens
+  * the tour's outcome is not sent to the server         -> test_closing_the_tour_records_it_on_the_server
+  * a screen of the app missing from the guide           -> test_the_guide_covers_every_screen_of_the_app
+  * the Team step offers a role a customer cannot grant  -> test_the_team_step_offers_only_the_roles_a_customer_can_grant
 """
 from __future__ import annotations
 
@@ -132,10 +144,15 @@ function button(root, label) { return root.querySelectorAll("button").filter(b =
 """
 
 
-def _node(script: str) -> dict:
-    prog = (_DOM + f"\nrequire({json.dumps(str(UI_JS))});\nrequire({json.dumps(str(GUIDE_JS))});\n"
-            "const G = window.VIGIL_GUIDE; const h = window.VUI.h; const out = {};\n" + script
-            + "\nprocess.stdout.write(JSON.stringify(out));")
+def _node(script: str, *, is_async: bool = False) -> dict:
+    head = (_DOM + f"\nrequire({json.dumps(str(UI_JS))});\nrequire({json.dumps(str(GUIDE_JS))});\n"
+            "const G = window.VIGIL_GUIDE; const h = window.VUI.h; const out = {};\n")
+    if is_async:      # the scenario awaits the app's async calls; anything that throws fails the run
+        prog = (head + "const tick = () => new Promise(r => setTimeout(r, 0));\n(async () => {\n" + script
+                + "\n})().then(() => process.stdout.write(JSON.stringify(out)),"
+                " e => { console.error(e && e.stack || e); process.exit(3); });")
+    else:
+        prog = head + script + "\nprocess.stdout.write(JSON.stringify(out));"
     r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
@@ -237,12 +254,19 @@ out.back = text(panel().querySelector(".cust-tour-count"));
     # each step that happens on a top-bar screen lights exactly that tab; the others light nothing
     assert by_title["Buy credits"]["lit"] == ["#/billing"] and by_title["Bring in your team"]["lit"] == ["#/team"]
     assert by_title["Register the host"]["lit"] == ["#/assets"] and by_title["Launch an assessment"]["lit"] == ["#/assessments"]
-    assert by_title["Connect your GitHub account"]["lit"] == [] and by_title["Welcome to VIGIL"]["lit"] == []
+    assert by_title["Read your statement"]["lit"] == ["#/billing"] and by_title["You're ready"]["lit"] == ["#/guide"]
+    for title in ("Welcome to VIGIL", "Protect your account", "Notifications", "Connect your GitHub account",
+                  "Turn on monitoring for a host"):
+        assert by_title[title]["lit"] == [], title
     # the journey is click by click: every chapter step in the tour lists its clicks and where they happen
     for s in steps[1:-1]:
         assert s["clicks"] >= 3 and s["where"].startswith("Where: "), s
-    assert {"Connect your GitHub account", "Red-Pen reviews every pull request", "Fix a finding",
-            "Choose an AEGIS plan", "Turn on monitoring for a host"} <= set(by_title)
+    assert [s["title"] for s in steps] == [
+        "Welcome to VIGIL", "Protect your account", "Bring in your team", "Notifications", "Buy credits",
+        "How credits are spent", "Register the host", "Publish one proof", "Confirm and verify", "Launch an assessment",
+        "Follow it while it runs", "Read your findings", "Connect your GitHub account",
+        "Red-Pen reviews every pull request", "Fix a finding", "Choose an AEGIS plan", "Turn on monitoring for a host",
+        "Read your statement", "You're ready"]
 
 
 def test_skip_and_escape_close_the_tour_for_good():
@@ -264,7 +288,7 @@ out.escGone = !t.el.parentNode; out.stored2 = s2._m["vigil.guide.v1.ben"];
 out.reopen = G.shouldOpen({ enabled: true, username: "ben", storage: s2 });
 """)
     assert out["how1"] == "skipped" and out["gone"] is True and out["stored1"] == "skipped"
-    assert out["litBefore"] == ["#/billing"] and out["litAfter"] == [] and out["touring"] is False
+    assert out["litBefore"] == ["#/team"] and out["litAfter"] == [] and out["touring"] is False
     assert out["afterArrow"].startswith("Step 2 of") and out["afterLeft"].startswith("Step 1 of")
     assert out["escGone"] is True and out["stored2"] == "skipped" and out["reopen"] is False
 
@@ -294,28 +318,54 @@ const steps = () => g.querySelectorAll(".cust-guide-step");
 out.openFirst = steps().map(e => !e.querySelector(".cust-guide-detail").hidden);
 steps()[1].querySelector(".cust-guide-step-head").click();
 out.afterToggle = steps().map(e => !e.querySelector(".cust-guide-detail").hidden);
-button(g, "Go to Team").click();
+out.goFirst = g.querySelectorAll("button").filter(b => b.textContent.indexOf("Go to ") === 0).length;
 button(steps()[0], "Mark as done").click();
 out.doneLabel = steps()[0].querySelectorAll("button").map(b => b.textContent);
 out.doneKey = Object.keys(s._m);
 button(g, "Replay the welcome tour").click();
-tabs().filter(b => b.textContent === "Red-Pen and GitHub")[0].click();
-out.redpen = steps().map(e => e.querySelector(".cust-guide-step-title").textContent);
-tabs().filter(b => b.textContent === "AEGIS monitoring")[0].click();
-out.aegis = steps().map(e => e.querySelector(".cust-guide-step-title").textContent);
+const tab = name => tabs().filter(b => b.textContent === name)[0].click();
+const titles = () => steps().map(e => e.querySelector(".cust-guide-step-title").textContent);
+tab("Your workspace");
+out.workspace = titles();
+button(g, "Go to Team").click(); button(g, "Go to Overview").click();
+tab("Red-Pen and GitHub");
+out.redpen = titles();
+out.redpenClicks = steps().map(e => e.querySelectorAll("li").map(li => li.textContent));
+tab("AEGIS monitoring");
+out.aegis = titles();
 out.aegisClicks = steps()[0].querySelectorAll("li").map(li => li.textContent);
+tab("Statement and invoices");
+button(g, "Go to Invoices").click();
+tab("Questions");
+out.faqPressed = tabs().map(b => b.getAttribute("aria-pressed"));
+out.faq = g.querySelectorAll("details").map(d => [d.querySelector("summary").textContent, text(d.querySelector("p"))]);
+out.faqSteps = steps().length;
+tab("Get started");
+out.backToFirst = titles()[0];
 out.navs = navs; out.replays = replays;
 """)
-    assert out["tabs"] == ["Get started", "Add credits", "Prove you control a host", "Test a host", "Red-Pen and GitHub",
-                           "AEGIS monitoring", "Statement and invoices"]
+    assert out["tabs"] == ["Get started", "Your workspace", "Credits and plans", "Prove you control a host",
+                           "Test a host", "Red-Pen and GitHub", "AEGIS monitoring", "Statement and invoices", "Questions"]
     assert out["pressed"][0] == "true" and set(out["pressed"][1:]) == {"false"}
-    assert out["openFirst"] == [True, False] and out["afterToggle"] == [True, True]
-    assert out["navs"] == ["#/team"] and out["replays"] == 1
+    assert out["openFirst"] == [True] + [False] * 5 and out["afterToggle"] == [True, True] + [False] * 4
+    assert out["goFirst"] == 0                         # sign-in steps happen before the top bar: no "Go to" button
+    assert out["navs"] == ["#/team", "#/", "#/invoices"] and out["replays"] == 1
     assert "✓ Done" in out["doneLabel"] and out["doneKey"] == ["vigil.guide.v1.step.ana.start.account"]
+    assert out["workspace"] == ["The Overview", "Bring in your team", "Notifications"]
     assert out["redpen"] == ["Connect your GitHub account", "Red-Pen reviews every pull request",
-                             "Review a whole repository", "Fix a finding"]
-    assert out["aegis"] == ["Choose an AEGIS plan", "Turn on monitoring for a host", "Connect your traffic and see events"]
+                             "Choose what blocks a merge", "Review a whole repository", "Fix a finding",
+                             "Disconnect a repository"]
+    connect, pr = out["redpenClicks"][0], out["redpenClicks"][1]
+    assert any("Connect GitHub" in c for c in connect) and any("Only select repositories" in c for c in connect)
+    assert any("Install" in c for c in connect)
+    assert any("reproduce" in c for c in pr) and any("block the merge" in c for c in pr)
+    assert out["aegis"] == ["Choose an AEGIS plan", "Turn on monitoring for a host", "Connect your traffic and see events",
+                            "Change or stop monitoring"]
     assert any("Observe" in c for c in out["aegisClicks"]) and any("Respond" in c for c in out["aegisClicks"])
+    assert out["faqPressed"][-1] == "true" and set(out["faqPressed"][:-1]) == {"false"}
+    assert len(out["faq"]) >= 8 and out["faqSteps"] == 0 and all(q and a for q, a in out["faq"])
+    assert "How much will an assessment cost?" in [q for q, _ in out["faq"]]
+    assert out["backToFirst"] == "Create your account"
 
 
 def test_the_loader_is_the_wordmark():
@@ -333,12 +383,16 @@ out.imgs = l.querySelectorAll("img").map(i => [i.getAttribute("src"), i.classNam
 
 
 # --- the copy -----------------------------------------------------------------------------------------------------------
-_FORBIDDEN = re.compile(r"\b(claude|anthropic|opus|sonnet|haiku|strix|nyx|ultracode|gpt|openai|llm)\b|\$\s?\d",
-                        re.IGNORECASE)
+_FORBIDDEN = re.compile(r"\b(claude|anthropic|opus|sonnet|haiku|fable|strix|nyx|ultracode|gpt|openai|llm)\b"
+                        r"|[$€£]\s?\d|\b\d[\d,.]*\s*credits?\b|\bmargin\b", re.IGNORECASE)
+
+
+def _guide() -> dict:
+    return _node("out.chapters = G.CHAPTERS; out.tour = G.TOUR; out.faq = G.FAQ;")
 
 
 def test_the_copy_follows_the_product_rules():
-    out = _node("out.chapters = G.CHAPTERS; out.tour = G.TOUR;")
+    out = _guide()
     texts = []
     for ch in out["chapters"]:
         texts += [ch["title"], ch["lead"]]
@@ -346,17 +400,77 @@ def test_the_copy_follows_the_product_rules():
             texts += [st["title"], st["where"], st["why"], *st["clicks"]]
     for t in out["tour"]:
         texts += [t.get("title", ""), *t.get("body", [])]
+    for f in out["faq"]:
+        texts += [f["q"], f["a"]]
     blob = "\n".join(texts)
     assert not _FORBIDDEN.search(blob), _FORBIDDEN.search(blob).group(0)
     for sentence in re.split(r"(?<=[.!?])\s+", blob):          # an estimate is only ever mentioned to rule it out
-        if re.search(r"estimat|quote", sentence, re.IGNORECASE):
-            assert re.search(r"\bnever\b|\bno\b", sentence, re.IGNORECASE), sentence
+        if re.search(r"estimat|quote|predict", sentence, re.IGNORECASE):
+            assert re.search(r"\bnever\b|\bno\b|\bnot\b", sentence, re.IGNORECASE), sentence
     ids = {ch["id"]: [s["id"] for s in ch["steps"]] for ch in out["chapters"]}
-    assert ids["redpen"] == ["connect", "pr", "system", "fix"] and ids["aegis"] == ["plans", "monitor", "events"]
+    assert ids["redpen"] == ["connect", "pr", "settings", "system", "fix", "disconnect"]
+    assert ids["aegis"] == ["plans", "monitor", "events", "manage"]
     for t in out["tour"]:                                       # every tour step points at a real guide step
         if "chapter" in t:
             assert t["step"] in ids[t["chapter"]], t
     assert {t["chapter"] for t in out["tour"] if "chapter" in t} == set(ids)    # the tour visits every chapter
+    for ch in out["chapters"]:                                  # every step is complete: where, clicks, why
+        assert len(ch["steps"]) == len(set(ids[ch["id"]])), ch["id"]
+        for st in ch["steps"]:
+            assert st["where"] and st["why"] and len(st["clicks"]) >= 2, (ch["id"], st["id"])
+
+
+def test_the_team_step_offers_only_the_roles_a_customer_can_grant():
+    """The Team step names exactly the roles the provisioner lets a customer grant (never one that carries testing),
+    and the roles answer in the Questions tab agrees: only the founder, and an Operator VIGIL grants, read findings."""
+    from sigil.ui.provision import _CUSTOMER_GRANTABLE_ROLES
+    shown = {"org_admin": "Admin", "analyst": "Analyst", "viewer": "Viewer"}
+    out = _guide()
+    team = next(st for ch in out["chapters"] for st in ch["steps"] if (ch["id"], st["id"]) == ("workspace", "team"))
+    offer = next(c for c in team["clicks"] if "choose a role:" in c)
+    named = set(re.findall(r"[A-Z][a-z]+", offer.split("choose a role:", 1)[1]))
+    assert named == {shown[r] for r in _CUSTOMER_GRANTABLE_ROLES}, (named, sorted(_CUSTOMER_GRANTABLE_ROLES))
+    assert any("Operator" in c and "only by VIGIL" in c for c in team["clicks"])
+    faq = {f["q"]: f["a"] for f in out["faq"]}["Who in my organization can see our findings?"]
+    assert "founder" in faq and "VIGIL has made an Operator" in faq
+
+
+def test_the_guide_covers_every_screen_of_the_app():
+    """The census: every route app.js knows is covered by the guide — a top-bar screen by steps that happen on it
+    (with its "Go to" button), the screens before sign-in and the payment return page by name — and so are the bell,
+    sign-out, installing the app, and the screens still to come (Account security, Code, Monitoring). A new screen in
+    app.js fails here until the guide covers it."""
+    src = APP_JS.read_text(encoding="utf-8")
+    i = src.index("  var ROUTES = {")
+    routes = set(re.findall(r'^    "(#/[^"]*)": function', src[i:src.index("\n  };", i)], re.M))
+    top_bar = set(re.findall(r'navLink\("[^"]+", "(#/[^"]*)"\)', src))
+    out = _guide()
+    steps = {(ch["id"], st["id"]): st for ch in out["chapters"] for st in ch["steps"]}
+    step_routes = {st["route"] for st in steps.values() if st.get("route")}
+    # the screens that have no tab, each with the guide step that walks through it and words that step must use
+    by_name = {
+        "#/login": (("start", "signin"), "Sign in"),
+        "#/signup": (("start", "account"), "Create an account"),
+        "#/recover": (("start", "recover"), "Forgot your password?"),
+        "#/google-code": (("start", "signin"), "6-digit code"),
+        "#/billing/return": (("credits", "buy"), "Payment received"),
+    }
+    assert routes == top_bar | set(by_name), "a new screen in app.js must be added to the guide (and to this census)"
+    assert top_bar - {"#/guide"} <= step_routes                                  # every tab has its steps
+    assert "#/guide" in {t["route"] for t in out["tour"] if t.get("route")}       # the tour ends on the Guide
+    for route, (key, words) in by_name.items():
+        st = steps[key]
+        assert any(words in c for c in st["clicks"]), (route, words)
+    assert any("Payment not completed" in c for c in steps[("billing", "payments")]["clicks"])
+    # the parts of the app that are not a screen of their own
+    for key in (("workspace", "notifications"), ("start", "signout"), ("start", "install"), ("start", "security")):
+        assert key in steps, key
+    # the screens still to come are described where they will be
+    wheres = {st["where"] for st in steps.values()}
+    assert {"Account security", "Code", "Monitoring", "GitHub"} <= wheres
+    # the questions tab answers the cost question without a number
+    faq = {f["q"]: f["a"] for f in out["faq"]}
+    assert "does not estimate" in faq["How much will an assessment cost?"]
 
 
 # --- app.js wiring --------------------------------------------------------------------------------------------------------
@@ -367,43 +481,61 @@ def _fn(src: str, name: str) -> str:
     return src[i:j + 4]
 
 
+def _line(src: str, pattern: str) -> str:
+    """One of app.js's own module-level lines, verbatim (so the harness runs what ships, not a copy of it)."""
+    m = re.search(pattern, src, re.M)
+    assert m, f"app.js no longer has a line matching {pattern!r}"
+    return m.group(0)
+
+
 def _flag_lines(src: str) -> str:
     """app.js's own two lines that decide whether the guide is on (verbatim)."""
-    guide = re.search(r"^  var GUIDE = window\.VIGIL_GUIDE;$", src, re.M)
-    on = re.search(r"^  var GUIDE_ON = .*;$", src, re.M)
-    assert guide and on, "app.js no longer decides GUIDE / GUIDE_ON on one line each"
-    return guide.group(0) + "\n" + on.group(0)
+    return (_line(src, r"^  var GUIDE = window\.VIGIL_GUIDE;$") + "\n" + _line(src, r"^  var GUIDE_ON = .*;$"))
 
 
-def _app_wiring(flag: str, authed: bool, username: str = "ana") -> dict:
-    src = APP_JS.read_text(encoding="utf-8")
-    prog = r"""
-document.body.dataset.onboarding = %s;
-let who = %s;
+# The app's world, stubbed: who is signed in, what the server answers about the tour, and every call made to it.
+_APP_ENV = r"""
+document.body.dataset.onboarding = %(flag)s;
+let who = %(who)s;
 const state = { get: () => ({ who }) };
 function authed() { return !!(who && who.authenticated); }
-function nav() {}
+const navs = []; function nav(r) { navs.push(r); }
+const calls = [];
+let server = %(server)s;            // {state} answers 200; {status} fails with that status
+let postFails = false;
+const VUI = window.VUI;
+VUI.getJSON = async p => { calls.push(["GET", p]); if (server.status) { const e = new Error("x"); e.status = server.status; throw e; }
+                           return { ok: true, state: server.state }; };
+VUI.postJSON = async (p, b) => { calls.push(["POST", p, b]); if (postFails) { const e = new Error("x"); e.status = 502; throw e; }
+                                 return { ok: true, state: b.state }; };
+const ls = memStore(false);
+Object.defineProperty(globalThis, "localStorage", { value: ls, configurable: true, writable: true });
 let opened = 0;
-%s
-%s
-%s
-%s
-function openGuideTour() { opened++; }
-%s
-const holder = loadingHolder("Loading…");
-out.holder = [holder.tagName, holder.className, holder.textContent];
-maybeOpenTour();
-out.opened = opened;
-""" % (json.dumps(flag), json.dumps({"authenticated": authed, "username": username}), _fn(src, "pageFlag"),
-       _flag_lines(src), _fn(src, "guideStore"), _fn(src, "loadingHolder"), _fn(src, "maybeOpenTour"))
-    return _node(prog)
+"""
+
+
+def _app(flag: str = "1", *, authed: bool = True, username: str = "ana", server: "dict | None" = None,
+         real_open: bool = False) -> str:
+    """The harness: the stubs above plus app.js's own guide wiring, extracted verbatim."""
+    src = APP_JS.read_text(encoding="utf-8")
+    env = _APP_ENV % {"flag": json.dumps(flag), "who": json.dumps({"authenticated": authed, "username": username}),
+                      "server": json.dumps(server or {"state": "pending"})}
+    opener = (_fn(src, "openGuideTour") if real_open else "function openGuideTour() { opened++; }")
+    return "\n".join([env, _fn(src, "pageFlag"), _flag_lines(src), _line(src, r"^  var API = \"[^\"]*\";"),
+                      _fn(src, "guideStore"), _fn(src, "loadingHolder"), _fn(src, "recordTour"), opener,
+                      _line(src, r"^  var tourChecked = .*;$"), _fn(src, "maybeOpenTour")])
 
 
 def test_with_the_flag_off_the_app_is_unchanged():
     for flag in ("0", "__VIGIL_ONBOARDING__", ""):
-        out = _app_wiring(flag, authed=True)
+        out = _node(_app(flag) + r"""
+const holder = loadingHolder("Loading…");
+out.holder = [holder.tagName, holder.className, holder.textContent];
+maybeOpenTour(); await tick();
+out.opened = opened; out.calls = calls;
+""", is_async=True)
         assert out["holder"] == ["P", "cust-muted", "Loading…"], flag          # exactly the node every screen showed
-        assert out["opened"] == 0, flag
+        assert out["opened"] == 0 and out["calls"] == [], flag                 # no tour and no call to the server
     src = APP_JS.read_text(encoding="utf-8")
     assert '"#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); }' in src
     assert '.concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])' in src
@@ -414,6 +546,94 @@ def test_with_the_flag_off_the_app_is_unchanged():
 
 
 def test_with_the_flag_on_the_app_loads_with_the_wordmark_and_opens_the_tour_after_sign_in():
-    on = _app_wiring("1", authed=True)
-    assert on["holder"][0] == "DIV" and on["holder"][1] == "cust-loader" and on["opened"] == 1
-    assert _app_wiring("1", authed=False)["opened"] == 0                    # never on the sign-in screens
+    out = _node(_app("1") + r"""
+const holder = loadingHolder("Loading…");
+out.holder = [holder.tagName, holder.className];
+maybeOpenTour(); await tick();
+out.opened = opened; out.calls = calls;
+""", is_async=True)
+    assert out["holder"] == ["DIV", "cust-loader"] and out["opened"] == 1
+    assert out["calls"] == [["GET", "api/customer/onboarding"]]
+    anon = _node(_app("1", authed=False) + "maybeOpenTour(); await tick(); out.opened = opened; out.calls = calls;",
+                 is_async=True)
+    assert anon == {"opened": 0, "calls": []}                               # never on the sign-in screens
+
+
+def _decide(server: dict, local: "str | None" = None, *, then: str = "") -> dict:
+    pre = f'ls.setItem("vigil.guide.v1.ana", {json.dumps(local)});' if local else ""
+    return _node(_app("1", server=server) + pre + r"""
+maybeOpenTour(); await tick();
+maybeOpenTour(); await tick();                      // render() runs again and again: asked once per page load
+""" + then + r"""
+out.opened = opened; out.calls = calls; out.local = G.localState("ana", ls);
+out.again = G.shouldOpen({ enabled: true, username: "ana", storage: ls });
+""", is_async=True)
+
+
+def test_the_server_decides_whether_the_tour_opens():
+    get = ["GET", "api/customer/onboarding"]
+    # a first sign-in (the server says pending): the tour opens, once
+    out = _decide({"state": "pending"})
+    assert out["opened"] == 1 and out["calls"] == [get]
+    # finished or skipped on ANY device: never opens here, and this browser now remembers it too
+    for answer in ("done", "skipped"):
+        out = _decide({"state": answer})
+        assert out["opened"] == 0 and out["calls"] == [get] and out["local"] == answer, answer
+        assert out["again"] is False
+    # the server still says pending but the tour was closed in this browser (that record did not land): it is sent
+    # again, and the tour is not shown again
+    for local in ("done", "skipped"):
+        out = _decide({"state": "pending"}, local)
+        assert out["opened"] == 0, local
+        assert out["calls"] == [get, ["POST", "api/customer/onboarding", {"state": local}]], local
+    # the server cannot be asked: this browser's memory decides
+    for status in (500, 502, 503, 404):
+        assert _decide({"status": status})["opened"] == 1, status
+        out = _decide({"status": status}, "skipped")
+        assert out["opened"] == 0 and out["calls"] == [get], status           # nothing is sent on a guess
+    # the session ended (401): no tour and no guess — each render asks again, so the sign-in that follows gets its answer
+    out = _decide({"status": 401}, then=r"""
+out.before = opened;
+server = { state: "pending" }; maybeOpenTour(); await tick();
+""")
+    assert out["before"] == 0 and out["opened"] == 1 and out["calls"] == [get, get, get]
+
+
+def test_a_sign_out_or_account_switch_while_asking_opens_nothing():
+    out = _node(_app("1") + r"""
+let release;
+VUI.getJSON = p => { calls.push(["GET", p]); return new Promise(r => { release = () => r({ ok: true, state: "pending" }); }); };
+maybeOpenTour();
+who = { authenticated: true, username: "ben" };      // another account signed in before the answer came back
+release(); await tick();
+out.switched = opened;
+who = { authenticated: false };
+maybeOpenTour(); await tick();
+out.signedOut = opened; out.calls = calls.length;
+""", is_async=True)
+    assert out == {"switched": 0, "signedOut": 0, "calls": 1}
+
+
+def test_closing_the_tour_records_it_on_the_server():
+    out = _node(_app("1", real_open=True) + r"""
+maybeOpenTour(); await tick();                        // pending: the real tour opens
+const t1 = document.body.querySelector(".cust-tour");
+out.open = !!t1;
+button(t1, "Skip guide").click(); await tick();
+out.afterSkip = calls.slice(1);
+openGuideTour();                                      // the Guide screen's "Replay the welcome tour"
+const t2 = document.body.querySelector(".cust-tour");
+for (let i = 0; i < G.TOUR.length - 1; i++) button(t2, "Next").click();
+button(t2, "Finish").click(); await tick();
+out.afterFinish = calls.slice(1 + out.afterSkip.length);
+postFails = true;                                     // the record cannot be sent: nothing breaks, it is kept here
+openGuideTour();
+document.key("Escape"); await tick(); await tick();
+out.failedSend = calls[calls.length - 1];
+out.local = G.localState("ana", ls);
+""", is_async=True)
+    url = "api/customer/onboarding"
+    assert out["open"] is True
+    assert out["afterSkip"] == [["POST", url, {"state": "skipped"}]]
+    assert out["afterFinish"] == [["POST", url, {"state": "done"}]]
+    assert out["failedSend"] == ["POST", url, {"state": "skipped"}] and out["local"] == "skipped"

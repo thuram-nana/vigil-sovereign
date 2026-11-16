@@ -29,9 +29,11 @@
  * one tap away). The code is sent with the email address it went to; it works once, for 10 minutes.
  *
  * ONBOARDING. When the edge has the onboarding guide on (data-onboarding="1", VIGIL_CUSTOMER_ONBOARDING), the app
- * (guide.js) opens a skippable click-through tour after a person's first sign-in in this browser, adds a Guide screen
- * (#/guide) to the top bar, and shows the VIGIL wordmark brightening and dimming while a screen loads. Off, all three
- * are absent and every screen renders exactly as before.
+ * (guide.js) opens a skippable click-through tour after a person's first sign-in — and at each sign-in after it, on
+ * any device, until they finish or skip it: the SERVER keeps that answer per account (GET/POST api/customer/onboarding,
+ * for the session's account only) and this browser remembers it too, for when the server cannot be asked. It also
+ * adds a Guide screen (#/guide) covering the whole app to the top bar, and shows the VIGIL wordmark brightening and
+ * dimming while a screen loads. Off, all of it is absent (no call is made) and every screen renders exactly as before.
  */
 (function () {
   "use strict";
@@ -77,15 +79,38 @@
   function loadingHolder(text) {
     return GUIDE_ON ? GUIDE.loader(h, text) : h("p.cust-muted", { text: text });
   }
+  // The tour's outcome goes to the server, so it never opens again on any device (best effort: this browser remembers
+  // it too, and the next sign-in sends it again if this send did not land).
+  function recordTour(how) {
+    VUI.postJSON(API + "/onboarding", { state: how }).catch(function () { /* remembered locally; re-sent later */ });
+  }
   function openGuideTour() {
     var w = state.get().who || {};
-    GUIDE.openTour({ h: h, doc: document, username: w.username, storage: guideStore(), nav: nav });
+    GUIDE.openTour({ h: h, doc: document, username: w.username, storage: guideStore(), nav: nav, onClose: recordTour });
   }
-  // After a sign-in: the tour opens once per account in this browser until it is finished or skipped.
+  // After a sign-in: the SERVER says whether this account still has the tour ahead of it ("pending" until it is
+  // finished or skipped, on any device). Asked once per account per page load. If the server cannot be asked, this
+  // browser's memory decides. A tour finished here whose record did not reach the server is sent again, not re-shown.
+  var tourChecked = {};
   function maybeOpenTour() {
     if (!GUIDE_ON || !authed()) return;
-    var w = state.get().who || {};
-    if (GUIDE.shouldOpen({ enabled: true, username: w.username, storage: guideStore() })) openGuideTour();
+    var u = String((state.get().who || {}).username || "");
+    if (!u || tourChecked[u]) return;
+    tourChecked[u] = true;
+    (async function () {
+      var server = null;
+      try { var r = await VUI.getJSON(API + "/onboarding"); server = r && r.state; }
+      catch (e) {
+        if (e && e.status === 401) { tourChecked[u] = false; return; }   // the session ended: ask again after sign-in
+        server = null;
+      }
+      if (!authed() || String((state.get().who || {}).username || "") !== u) return;   // signed out / switched since
+      var store = guideStore();
+      if (server === "done" || server === "skipped") { GUIDE.markDone(u, store, server); return; }
+      var local = GUIDE.localState(u, store);
+      if (server === "pending" && local) { recordTour(local); return; }
+      if (server === "pending" || GUIDE.shouldOpen({ enabled: true, username: u, storage: store })) openGuideTour();
+    })();
   }
   function viewGuideScreen() {
     var w = state.get().who || {};

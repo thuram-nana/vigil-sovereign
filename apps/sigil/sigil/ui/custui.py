@@ -575,6 +575,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         # no session -> 401 (no cross-origin data leak); same-origin reads (the customer SPA) carry the cookie.
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/onboarding" and _onboarding_on():     # the tour's state (flag OFF -> unknown-route 404)
+            return self._onboarding(None)
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
@@ -973,6 +975,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._monitoring(action, body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
+        if action == "onboarding" and _onboarding_on():              # the tour closed (flag OFF -> unknown-action 404)
+            return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -1085,6 +1089,20 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("monitor_revoke", requester, payload)
         return self._json(r, c)
 
+    def _onboarding(self, body: "dict | None"):
+        """The onboarding tour's state for the SESSION's account: read it (GET, ``body`` None) or record that the tour
+        was finished / skipped (POST ``{state}``). Account-level: the REQUESTER is the server-side session username,
+        never a body field, so no one can read or set another account's tour."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        if body is None:
+            c, r = self._provision("onboarding_get", requester, {"ip": self._ip()})
+        else:
+            c, r = self._provision("onboarding_set", requester, {"state": str(body.get("state", "")), "ip": self._ip()})
+        return self._json(r, c)
+
     def _mfa(self, action: str, body: dict):
         """Customer MFA (E3b TOTP): the acting REQUESTER is taken from the SERVER-side session — NEVER the
         body. MFA is ACCOUNT-level (a customer enrolls/verifies their OWN factor, not an org's), so the gate
@@ -1173,6 +1191,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _onboarding_on() -> bool:
+    from .. import config as _config
+    return _config.customer_onboarding_enabled()
 
 
 def _checkout_on() -> bool:

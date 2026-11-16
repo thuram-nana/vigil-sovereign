@@ -270,3 +270,6 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
   .cust-loader-mark { animation: none; opacity: 0.85; }
   .cust-nav-link.cust-nav-spot { animation: none; }
 }
+.cust-guide-faq { padding: 14px 16px; }
+.cust-guide-faq summary { cursor: pointer; font-weight: 600; }
+.cust-guide-faq p { margin-top: 10px; }

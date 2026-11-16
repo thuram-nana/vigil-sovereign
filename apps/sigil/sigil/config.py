@@ -203,6 +203,9 @@ CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP
 # with customer_passkey_enabled() false the edge's passkey routes are absent and nothing is minted.
 CUSTOMER_PASSKEY_CHALLENGE_DIR = _customer / "passkey_challenges"   # single-use WebAuthn challenges (edge)
 CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-credential_id monotonic sign-count floor
+# Whether each customer account has finished or skipped the onboarding tour (ui/onboarding_store.py): a UI preference,
+# never money or authority — one hashed-name JSON file per account. Losing it only shows the tour once more.
+CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
 # Slice E3c — step-up MFA. How recently a customer must have proven a fresh factor (TOTP code / passkey
 # assertion) for a sensitive op (launch / target-verify / member grant+revoke) to proceed when enforcement
 # is ON. The session's `mfa_at` is stamped by the edge on a fresh factor proof; the provisioner refuses a
@@ -301,8 +304,10 @@ def customer_checkout_enabled() -> bool:
 
 def customer_onboarding_enabled() -> bool:
     """True iff the customer app shows the onboarding guide (`VIGIL_CUSTOMER_ONBOARDING` affirmative): a skippable
-    click-through tour after a person's first sign-in in a browser, a Guide screen in the top bar (testing a host,
-    Red-Pen on GitHub, AEGIS monitoring, billing) and the VIGIL wordmark brightening and dimming while a screen loads.
+    click-through tour after a person's first sign-in — on any device, until they finish or skip it (the answer is
+    kept server-side, ``ui/onboarding_store.py``, and the edge's ``api/customer/onboarding`` route exists only while
+    this is on) — a Guide screen in the top bar (the whole app, end to end) and the VIGIL wordmark brightening and
+    dimming while a screen loads.
     OFF by default: the guide walks through flows that must be live first (launching from the app, Red-Pen, the
     monitoring screen). Read when the customer edge starts (it is written into the page), so a change takes effect at
     the edge's next start."""
