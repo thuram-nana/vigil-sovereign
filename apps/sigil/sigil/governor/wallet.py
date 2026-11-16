@@ -110,9 +110,18 @@ def _check_entry_id(entry_id: Optional[str]) -> str:
     return e
 
 
-def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set) -> None:
+#: the entry-id prefix of a launch's RESERVE debits (``governor.launch_reservations.RESERVE_WALLET_PREFIX``; repeated
+#: here because that module imports this one). The fold remembers each such debit's amount (W2b: a launch's
+#: allowance extensions are settled from them).
+_RESERVE_WALLET = "reserve-wallet:"
+
+
+def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set,
+                         reserve_amounts: "Optional[dict]" = None) -> None:
     """Fold ONE record into (granted, debited, seen) — THE wallet fold body, shared by the full `_fold` and the
-    verified fold cache (Front C S0c) so the two can never diverge."""
+    verified fold cache (Front C S0c) so the two can never diverge. With ``reserve_amounts``, each launch RESERVE
+    debit's credits are also kept by ``(org_id, entry_id)`` — for the LIVE window only: a hard prune carries the
+    totals and the seen-set across, never the per-entry amounts (a caller that needs a pruned one holds the settle)."""
     p = r.payload
     if not isinstance(p, dict):
         return
@@ -140,19 +149,23 @@ def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set) -
         granted[oid] = granted.get(oid, 0) + amount
     else:
         debited[oid] = debited.get(oid, 0) + amount
+        if reserve_amounts is not None and eid.startswith(_RESERVE_WALLET):
+            reserve_amounts[(oid, eid)] = amount
 
 
 class _WalletView:
-    """The cached wallet fold: exactly the full fold's (granted, debited, seen)."""
+    """The cached wallet fold: exactly the full fold's (granted, debited, seen), plus the live window's launch
+    reserve debit amounts (``reserve_amounts``)."""
 
-    __slots__ = ("granted", "debited", "seen")
+    __slots__ = ("granted", "debited", "seen", "reserve_amounts")
 
-    def __init__(self, granted: dict, debited: dict, seen: set) -> None:
+    def __init__(self, granted: dict, debited: dict, seen: set, reserve_amounts: "Optional[dict]" = None) -> None:
         self.granted, self.debited, self.seen = granted, debited, seen
+        self.reserve_amounts: dict = {} if reserve_amounts is None else reserve_amounts
 
 
 def _wallet_step(view: _WalletView, r, resolver) -> None:
-    _apply_wallet_record(r, resolver, view.granted, view.debited, view.seen)
+    _apply_wallet_record(r, resolver, view.granted, view.debited, view.seen, view.reserve_amounts)
 
 
 _WALLET_FOLD = FoldCache("governor.wallet", step=_wallet_step)
@@ -298,6 +311,25 @@ class WalletRegistry:
         if hit is not _UNCACHED:
             return bool(hit)
         return key in self._fold()[2]
+
+    def reserve_debit(self, org_id: str, entry_id: str) -> "Optional[int]":
+        """The credits of the launch RESERVE debit ``(org_id, entry_id)`` (an ``reserve-wallet:`` entry), or None when
+        the live spine window does not hold it — never folded, or removed by a hard prune (``has_debit_entry`` tells
+        the two apart: the seen-set survives a prune, the amount does not)."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str)
+                and entry_id.startswith(_RESERVE_WALLET)):
+            return None
+        key = (org_id, entry_id)
+        hit = self._cached(lambda v: v.reserve_amounts.get(key))
+        if hit is not _UNCACHED:
+            return hit
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        (granted, debited, seen), since = self._seed(snap)
+        amounts: dict = {}
+        for r in self.store.iter_records(since_seq=since):
+            _apply_wallet_record(r, resolver, granted, debited, seen, amounts)
+        return amounts.get(key)
 
     def balances(self) -> list[Balance]:
         """Every tenant with ledger activity, in org_id order (the per-tenant billing view)."""

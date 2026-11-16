@@ -65,6 +65,33 @@ _SETTLE: "dict[str, tuple[str, tuple[str, ...], str]]" = {
 }
 
 
+#: W2b — a launch's ALLOWANCE EXTENSION k (k = 1, 2, ...) is an extra owner-signed wallet debit of the SAME launch,
+#: under ``reserve-wallet:{slug}:{nonce}:x{k}``. It belongs to the lease ``(slug, nonce)``: it is reserved and
+#: settled with it, in ONE exactly-once settle transaction (``LaunchGate.extend_reservation`` / ``settle_launch``).
+EXTENSION_MARK = "x"
+
+
+def extension_entry_id(slug: str, nonce: str, k: int) -> str:
+    """The wallet debit entry id of extension ``k`` (>= 1) of launch ``(slug, nonce)``."""
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise ValueError("an extension index is an integer >= 1")
+    return f"{RESERVE_WALLET_PREFIX}{slug}:{nonce}:{EXTENSION_MARK}{k}"
+
+
+def _extension_of(entry_id: object) -> "Optional[tuple[str, str, int]]":
+    """``(slug, nonce, k)`` from ``reserve-wallet:<slug>:<nonce>:x<k>``, or None. ``k`` is a canonical decimal >= 1
+    (no sign, no leading zero), so one extension has exactly one entry id."""
+    if not isinstance(entry_id, str) or not entry_id.startswith(RESERVE_WALLET_PREFIX):
+        return None
+    parts = entry_id[len(RESERVE_WALLET_PREFIX):].split(":")
+    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2].startswith(EXTENSION_MARK):
+        return None
+    digits = parts[2][len(EXTENSION_MARK):]
+    if not digits.isdigit() or not digits.isascii() or digits.startswith("0"):
+        return None
+    return parts[0], parts[1], int(digits)
+
+
 def _lease_of(entry_id: object, prefix: str) -> "Optional[tuple[str, str]]":
     """``(slug, nonce)`` from ``<prefix><slug>:<nonce>``, or None (neither part may be empty or hold a ':')."""
     if not isinstance(entry_id, str) or not entry_id.startswith(prefix):
@@ -98,6 +125,8 @@ class Reservation:
     seq: int                    # the seq of its FIRST verified reserve record
     issued_at: float            # ...and that record's issued_at (the reserve time)
     units: "dict[str, int]" = field(default_factory=dict)   # bucket (wallet|plan|postpaid) -> credits (first wins)
+    #: W2b: the launch's allowance extensions, extension index k -> credits (wallet; first record per k wins)
+    extensions: "dict[int, int]" = field(default_factory=dict)
 
     @property
     def key(self) -> "tuple[str, str, str]":
@@ -105,7 +134,8 @@ class Reservation:
 
     @property
     def reserved(self) -> int:
-        return sum(self.units.values())
+        """Everything the launch holds: its reserve plus every allowance extension."""
+        return sum(self.units.values()) + sum(self.extensions.values())
 
 
 @dataclass
@@ -172,6 +202,8 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
         cores: "tuple[tuple[str, ...], ...]"
         bucket: Optional[str] = None
         tag: Optional[str] = None                     # a settle entry's landed tag (None: a decision record)
+        ext: "Optional[tuple[str, str, int]]" = None  # W2b: an allowance extension's (slug, nonce, k)
+        ext_k = 0
         if sig == LAUNCH_SETTLED_SIGNAL:
             s, n = p.get("slug"), p.get("nonce")
             if not (isinstance(s, str) and isinstance(n, str) and s and n):
@@ -182,6 +214,9 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
         elif sig in _RESERVE:
             prefix, core, bucket = _RESERVE[sig]
             lease, cores = _lease_of(p.get("entry_id"), prefix), (core,)
+            ext = _extension_of(p.get("entry_id")) if sig == CREDIT_DEBIT_SIGNAL and lease is None else None
+            if ext is not None:
+                lease, ext_k = (ext[0], ext[1]), ext[2]
         elif sig in _SETTLE:
             prefix, core, tag = _SETTLE[sig]
             lease, cores = _lease_of(p.get("entry_id"), prefix), (core,)
@@ -217,5 +252,8 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
         if res is None:
             res = ix.reservations[key] = Reservation(oid, lease[0], lease[1], seq=int(r.seq),
                                                      issued_at=_issued_at(p.get("issued_at")))
-        res.units.setdefault(bucket, _credits(p.get("credits")))   # first record per bucket wins (idempotent)
+        if ext is not None:
+            res.extensions.setdefault(ext_k, _credits(p.get("credits")))   # first record per extension wins
+        else:
+            res.units.setdefault(bucket, _credits(p.get("credits")))   # first record per bucket wins (idempotent)
     return ix

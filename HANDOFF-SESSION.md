@@ -466,8 +466,9 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 
 0. ~~Merge #1130~~ — **merged 2026-11-16** (`503e06af`).
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
-   hardest money slice; read §11.3–§11.4 first. **W2a is built (§11.17)**; W2b (extendable allowances) and W2c
-   (exact settlement) remain.
+   hardest money slice; read §11.3–§11.4 first. **W2a is built (§11.17, PR #1131); W2b-1 is built (§11.18,
+   stacked on W2a — push it after #1131 merges)**; W2b-2 (gateway admission against the allowance), W2b-3 (explicit
+   depth) and W2c (exact settlement) remain.
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -1164,6 +1165,48 @@ AND per verified domain (add the domain dedup if missing) and that the full repo
 A signed contract or a paid invoice credits the same wallet (`governor/invoices.py`; verify the paid-invoice → grant
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
+
+### 11.18 W2b-1 — DONE (stacked on W2a; see §5): allowance extensions in the launch's own settle unit
+**Design decisions (read before W2b-2):**
+- **An extension is part of the SAME launch**, not a new reservation: one more owner-signed WALLET debit with
+  `entry_id = reserve-wallet:{slug}:{nonce}:x{k}` (k = 1, 2, … consecutive; canonical decimal). The launch's ONE
+  exactly-once settle (`_settle_once`, keyed `(slug, nonce)`) refunds or keeps it with the rest. (A separate nonce per
+  extension was rejected: the superseded sweep / E7 would see a live run's extension as a superseded launch and refund
+  it mid-run.)
+- **Prepaid WALLET only.** Consumption eats the lease's expiring plan share first and the rest is refunded to the
+  wallet — so settling on `reserved = lease units + Σ extensions` keeps K4-1 and the plan/wallet split unchanged.
+  A **postpaid** credit-line launch is NOT extended yet (`extend_reservation` refuses with `insufficient` → the run
+  pauses at its reservation); postpaid extensions are a follow-up (they need `postpaid.in_flight_reserved` to fold
+  `…:x{k}` keys under their launch).
+- **Prune durability.** The wallet fold now also keeps each `reserve-wallet:` debit's AMOUNT for the live window
+  (`WalletRegistry.reserve_debit`; `_WalletView.reserve_amounts`, maintained by the shared `_apply_wallet_record`, so
+  the S0 audit still matches). An extension in the prune-durable seen-set whose amount left the live window HOLDS a
+  fresh settle (`PLAN_DEBIT_PRUNED`, the existing owner alarm) — never guessed.
+- **No race with settle.** `extend_reservation` runs under `self._lock` + the cross-process `settle_lock` and refuses
+  once the launch's meter is closed; every fresh settle of a metered launch closes the meter inside the same critical
+  section, then RE-READS the extension total (`allowance_check`) and retries with nothing written if it changed since
+  the decision was built.
+- **Verified (handoff "check, don't assume" #1):** the gateway runs IN the cockpit process (`ui/server.py::serve` →
+  `model_gateway.start_from_env()`), the same process as the Provisioner / `LaunchGate` — W2b-2 can call
+  `extend_reservation` in-process (no keyless hop).
+**What changed:** `governor/wallet.py` (`reserve_debit`, `reserve_amounts`); `governor/launch_reservations.py`
+(`extension_entry_id`, `_extension_of`, `Reservation.extensions`, `reserved` sums both); `ui/launch_gate.py`
+(`extension_total`, `reserved_with_extensions`, `extend_reservation`, `_held_for`; `settle_launch` settles on lease +
+extensions — only for a launch published metered, so a flat settle reads nothing more; `_settle_once(allowance_check=)`;
+E7 `_release_refusal` → `metered` for any extended launch); `inbound/completion_spool.py` and `ops_sweeps.py` /
+`paused_expiry_settle.py` (`_paused_metered_charge(..., org_id=)`) clamp the metered charge to lease + extensions.
+**Tests:** `apps/sigil/tests/test_allowance_extensions.py` (15). 11 mutants, all RED (drain clamps to the lease; extend
+a closed meter; skip the balance check; drop the in-lock re-check; settle on a pruned extension; settle ignores
+extensions; index ignores extensions; E7 may release; paused charge clamps to the lease; fold forgets amounts;
+non-consecutive k).
+**Next — W2b-2 (gateway admission against the allowance):** the gateway gets an in-process allowance source from
+`serve()` (`LaunchGate(srv.store)`): before forwarding, `charged_mc + pending_mc + worst_mc > 1000 × (lease units +
+extensions)` → `extend_reservation(credits=CHUNK)` (`VIGIL_ALLOWANCE_CHUNK_CREDITS`, an engineering holding size,
+default 100 — not a price) → refused `insufficient` → a NON-retryable 403 "credits exhausted" (W3 then pauses the run).
+`start_from_env` must refuse to start without the allowance source while `VIGIL_METERED_BILLING` is on (fail closed).
+The grant's `cap_nano_usd` becomes a high technical ceiling (a leaked token is still bounded by the wallet). Settle
+stays on `credits_for_cost` until W2c switches it to the recorded `charge_mc` with the per-org remainder.
+**Then — W2b-3:** the explicit depth in the lease (§11.5 h) and the first reservation sized `min(available, CHUNK)`.
 
 ### 11.17 W2a — DONE (PR on `claude/cool-meitner-v9fq6d`, see §5): what it is
 Implements §11.5 (a) + (b). No admission or settlement change: admission still runs on the grant's provider-cost cap
