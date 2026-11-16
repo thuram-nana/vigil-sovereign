@@ -350,3 +350,14 @@ def test_without_ssm_a_missing_env_key_is_still_hard():
     env = {k: v for k, v in _SSM.items() if k != "VIGIL_ANTHROPIC_KEY_SSM_PARAMETER"}
     issues = d._metering_report(env, probe=_alive, ssm_probe=_ssm_type("SecureString"))[1]
     assert any("no provider key" in m for m in issues)
+
+
+def test_the_published_rate_card_is_checked():
+    """W2a: the gateway charges every response from the published rate card and refuses to start on a malformed
+    owner override, so doctor reports which card is in force and a malformed one as a hard issue."""
+    section, issues, _notes = d._metering_report(dict(ON), probe=_alive)
+    assert issues == [] and section["rate_card"] == "published defaults"
+    for bad in ("{not json", '{"ai": {}, "worker_minute": "1"}', '{"ai": {"input_tokens": "0"}}'):
+        section, issues, _notes = d._metering_report({**ON, "VIGIL_RATE_CARD": bad}, probe=_alive)
+        assert any("VIGIL_RATE_CARD" in i for i in issues), (bad, issues)
+        assert section.get("ok") is False

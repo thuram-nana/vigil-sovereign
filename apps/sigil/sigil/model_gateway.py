@@ -107,6 +107,7 @@ from .reuse import assert_no_offense
 assert_no_offense()
 
 from vigil_core import model_metering as mm  # noqa: E402
+from vigil_core.rate_card import DEFAULT_RATE_CARD, RateCard  # noqa: E402
 from vigil_core.model_grant import ModelGrant, decode_token  # noqa: E402
 
 __all__ = ["GatewayConfig", "GrantMeter", "MeterBusy", "MeterTotals", "ModelGateway", "config_from_env", "start",
@@ -183,6 +184,14 @@ class MeterTotals:
     closed: bool
     unconfirmed_nano: int = 0
     open_requests: int = 0
+    #: the CUSTOMER's charge for the confirmed responses, in milli-credits, as the gateway recorded it from the
+    #: published rate card (pricing design §0.2); never derived from ``cost_nano`` (internal cost, invariant I10)
+    charged_mc: int = 0
+    #: the worst-case customer charge of the requests still in flight (their ``open`` lines' ``reserved_mc``)
+    pending_mc: int = 0
+    #: usage recorded without a customer charge (a meter written before W2, or by a meter with no rate card): the
+    #: caller prices it with the card in force (:meth:`RateCard.charge`) when it needs a customer amount
+    unpriced_usage: mm.Usage = field(default_factory=mm.Usage)
 
 
 @dataclass
@@ -195,6 +204,10 @@ class _LaunchState:
     closed: bool = False
     poisoned: bool = False                                   # the file failed after a call: refuse the launch
     opens: "dict[str, int]" = field(default_factory=dict)   # request id -> reserved (unmatched ``open`` lines)
+    opens_mc: "dict[str, int]" = field(default_factory=dict)  # request id -> its worst-case customer charge (mc)
+    charged_mc: int = 0                                     # customer charge of the confirmed responses (mc)
+    pending_mc: int = 0                                     # worst-case customer charge of the requests in flight
+    unpriced_usage: mm.Usage = field(default_factory=mm.Usage)  # usage lines with no recorded charge
     boots: "dict[str, str]" = field(default_factory=dict)   # request id -> the gateway process that wrote its open
     orphaned: "dict[str, int]" = field(default_factory=dict)  # request id -> reserved, for ``orphan`` lines (replay)
     unwritten: list = field(default_factory=list)           # (line, extra unconfirmed) a failed write still owes
@@ -277,8 +290,12 @@ class GrantMeter:
     Across all launches the meter also keeps what VIGIL's account is committed to: the pending reservations and the
     spend of the current UTC day, for the gateway's daily ceiling (design §5.2)."""
 
-    def __init__(self, meter_dir: Path, *, gateway: bool = False, lock_wait_s: float = 2.0):
+    def __init__(self, meter_dir: Path, *, gateway: bool = False, lock_wait_s: float = 2.0,
+                 rate_card: Optional[RateCard] = None):
         self.dir = Path(meter_dir)
+        #: the published rate card the customer charge of each response is computed from (W2a). None: the meter
+        #: records no customer charge (a read-only meter: the settle step, the statement, tests of the cost path)
+        self.rate_card = rate_card
         self._states: "dict[str, _LaunchState]" = {}
         self._guard = threading.Lock()
         self._money = threading.Lock()                 # guards the account-wide counters below
@@ -452,23 +469,32 @@ class GrantMeter:
             rid = str(line.get("rid"))
             if kind == "open":
                 st.opens[rid] = int(line["reserved"])
+                st.opens_mc[rid] = int(line.get("reserved_mc", 0))
                 st.boots[rid] = str(line.get("boot", ""))
             elif kind in ("usage", "release"):
                 st.opens.pop(rid, None)
+                st.opens_mc.pop(rid, None)
                 # a record that arrives after its request was given up as an orphan supersedes the orphan: the
                 # request is counted once, as what it really was
                 st.unconfirmed_nano -= st.orphaned.pop(rid, 0)
                 if kind == "usage":
-                    st.usage = st.usage + mm.Usage(**line["usage"])
+                    usage = mm.Usage(**line["usage"])
+                    st.usage = st.usage + usage
                     st.spent_nano += int(line["cost_nano"])
                     st.unconfirmed_nano += int(line.get("held_nano", 0))
                     st.requests += 1
+                    if "charge_mc" in line:
+                        st.charged_mc += int(line["charge_mc"])
+                    else:
+                        st.unpriced_usage = st.unpriced_usage + usage
             elif kind == "orphan":
                 st.opens.pop(rid, None)
+                st.opens_mc.pop(rid, None)               # unconfirmed: VIGIL's cost, never the customer's (I9)
                 st.orphaned[rid] = int(line["reserved"])
                 st.unconfirmed_nano += int(line["reserved"])
             elif kind == "close":
                 st.closed = True
+        st.pending_mc = sum(st.opens_mc.values())
         return st
 
     def _orphan(self, fd: int, st: _LaunchState, rids: "list[str]", *, now: float) -> None:
@@ -481,6 +507,7 @@ class GrantMeter:
             self._day_spend(day)                        # seed the day BEFORE these lines are on disk
         for rid in rids:
             reserved = st.opens.pop(rid)
+            st.pending_mc = max(0, st.pending_mc - st.opens_mc.pop(rid, 0))
             self._write(fd, {"kind": "orphan", "ts": now, "rid": rid, "reserved": reserved})
             st.orphaned[rid] = reserved
             st.unconfirmed_nano += reserved
@@ -501,9 +528,13 @@ class GrantMeter:
                             self._orphan(fd, st, [r for r in st.opens if st.boots.get(r) != self.boot],
                                          now=time.time())
                         st.opens.clear()
+                        st.opens_mc.clear()
+                        st.pending_mc = 0
                 else:
                     st = self._replay(mid)
                     st.opens.clear()                    # this process tracks only the requests it admits itself
+                    st.opens_mc.clear()
+                    st.pending_mc = 0
                 self._states[mid] = st
             return st
 
@@ -570,12 +601,16 @@ class GrantMeter:
 
     def reserve(self, grant: ModelGrant, max_output_cost: int, output_price: int, *, now: float,
                 input_cost: int = 0, daily_limit_nano: Optional[int] = None,
-                wait_s: float = 0.0) -> "tuple[str, int, str]":
+                wait_s: float = 0.0, worst_mc: Optional[Callable[[int], int]] = None) -> "tuple[str, int, str]":
         """Reserve the worst case of one request — ``input_cost`` plus its output — and write its ``open`` line.
         Returns ``(rid, reserved_nano, "")``, with the output part lowered to what the run's cap still allows, or
         ``("", 0, reason)`` when the request must be refused: ``closed`` (the run was settled), ``budget`` (the cap
         is spent), ``held`` (it would fit but for requests still in flight, after waiting ``wait_s``), ``capacity``
-        (the account's daily ceiling) or ``meter`` (the meter cannot be written: nothing may be forwarded)."""
+        (the account's daily ceiling) or ``meter`` (the meter cannot be written: nothing may be forwarded).
+
+        ``worst_mc`` maps the output tokens finally reserved to the request's worst-case CUSTOMER charge in
+        milli-credits (``RateCard.request_worst_mc``); with a rate card on this meter it is written on the ``open``
+        line as ``reserved_mc`` and held as pending customer charge until the request settles."""
         mid = grant.meter_id
         if output_price <= 0:
             return "", 0, "meter"
@@ -597,6 +632,9 @@ class GrantMeter:
                 if wait <= 0 or not st.cond.wait(timeout=wait):
                     return "", 0, "held"
             reserved = input_cost + min(max_output_cost, affordable * output_price)
+            reserved_mc = 0
+            if self.rate_card is not None and worst_mc is not None:
+                reserved_mc = int(worst_mc((reserved - input_cost) // output_price))
             with self._money:
                 if daily_limit_nano is not None and (
                         self._day_spend(_utc_day(now)) + self._global_pending + reserved > daily_limit_nano):
@@ -610,8 +648,11 @@ class GrantMeter:
                     if self._closed_elsewhere(mid):     # re-checked under the file lock the settle step holds
                         st.closed = True
                         raise _Closed()
-                    self._write(fd, {"kind": "open", "ts": now, "rid": rid, "reserved": reserved,
-                                     "org_id": grant.org_id, "grant_id": grant.grant_id, "boot": self.boot})
+                    line = {"kind": "open", "ts": now, "rid": rid, "reserved": reserved,
+                            "org_id": grant.org_id, "grant_id": grant.grant_id, "boot": self.boot}
+                    if self.rate_card is not None and worst_mc is not None:
+                        line["reserved_mc"] = reserved_mc
+                    self._write(fd, line)
             except _Closed:
                 with self._money:
                     self._global_pending -= reserved
@@ -627,10 +668,12 @@ class GrantMeter:
                 return "", 0, "meter"
             st.pending_nano += reserved
             st.opens[rid] = reserved
+            st.opens_mc[rid] = reserved_mc
+            st.pending_mc += reserved_mc
             return rid, reserved, ""
 
     def _settle(self, grant: ModelGrant, rid: str, line: dict, *, cost: int, held: int, usage: Optional[mm.Usage],
-                now: float) -> None:
+                now: float, charge_reservation: bool = False) -> None:
         """Write one request's closing line and move its reservation out of ``pending``. If the line cannot be
         written the spend is still counted in memory (at no less than the reservation), the launch is refused until
         the line is written (:meth:`flush_unwritten` retries it), and its settle waits for that — never free, never
@@ -639,10 +682,22 @@ class GrantMeter:
         st = self._state(mid)
         with st.cond:
             reserved = st.opens.pop(rid, 0)
+            reserved_mc = st.opens_mc.pop(rid, 0)
             with self._money:
                 day = _utc_day(now)
                 self._day_spend(day)                    # seed the day BEFORE this line is on disk
             record = {**line, "ts": now, "rid": rid}
+            charge_mc = None
+            if usage is not None and self.rate_card is not None:
+                # the customer's charge for this response, from the published card (W2a). A response the meter could
+                # not read is charged its reservation (§10.4: it never runs free); a cut-off response's unreported
+                # part is unconfirmed spend — VIGIL's cost, never charged (I9).
+                charge_mc, rates = self.rate_card.charge(usage)
+                if charge_reservation:
+                    charge_mc = max(charge_mc, reserved_mc)
+                    record["charged_reservation"] = True
+                record["charge_mc"] = charge_mc
+                record["rates"] = rates
             try:
                 with self._locked(mid) as fd:
                     self._write(fd, record)
@@ -653,9 +708,14 @@ class GrantMeter:
                 st.unwritten.append((record, extra))
                 held += extra
             st.pending_nano = max(0, st.pending_nano - reserved)
+            st.pending_mc = max(0, st.pending_mc - reserved_mc)
             if usage is not None:
                 st.usage = st.usage + usage
                 st.requests += 1
+                if charge_mc is not None:
+                    st.charged_mc += charge_mc
+                else:
+                    st.unpriced_usage = st.unpriced_usage + usage
             st.spent_nano += cost
             st.unconfirmed_nano += held
             with self._money:
@@ -668,7 +728,7 @@ class GrantMeter:
         self._settle(grant, rid, {"kind": "release"}, cost=0, held=0, usage=None, now=now)
 
     def commit(self, grant: ModelGrant, rid: str, usage: mm.Usage, cost_nano: int, *, request_id: str, now: float,
-               held_nano: int = 0) -> None:
+               held_nano: int = 0, charge_reservation: bool = False) -> None:
         """Record one metered response and release its reservation. ``held_nano`` is spend the response did not
         confirm (it was cut off): counted against the cap, not billed. Recorded even when the meter was closed
         while the request was in flight: Anthropic bills it either way, so the meter must show it."""
@@ -676,7 +736,8 @@ class GrantMeter:
                 "request_id": request_id, "usage": usage.as_dict(), "cost_nano": cost_nano}
         if held_nano:
             line["held_nano"] = held_nano
-        self._settle(grant, rid, line, cost=cost_nano, held=held_nano, usage=usage, now=now)
+        self._settle(grant, rid, line, cost=cost_nano, held=held_nano, usage=usage, now=now,
+                     charge_reservation=charge_reservation)
 
     def owed(self) -> int:
         """How many records a failed write still owes, across every launch."""
@@ -741,7 +802,8 @@ class GrantMeter:
     def totals(self, mid: str) -> MeterTotals:
         st = self._state(mid)
         with st.cond:
-            return MeterTotals(st.usage, st.spent_nano, st.requests, st.closed, st.unconfirmed_nano, len(st.opens))
+            return MeterTotals(st.usage, st.spent_nano, st.requests, st.closed, st.unconfirmed_nano, len(st.opens),
+                               st.charged_mc, st.pending_mc, st.unpriced_usage)
 
     def pending(self, mid: str) -> int:
         st = self._state(mid)
@@ -751,13 +813,21 @@ class GrantMeter:
     def usage_records(self, mid: str) -> "list[dict[str, Any]]":
         """Every metered response of a launch, oldest first, read from disk with its hash chain checked (raises
         ``ValueError`` if broken or malformed): ``{"ts", "model", "request_id", "usage"}`` with ``usage`` a
-        :class:`~vigil_core.model_metering.Usage`. Read-only; the customer's per-charge statement is built from it."""
+        :class:`~vigil_core.model_metering.Usage`, plus — on a line the gateway priced (W2a) — ``charge_mc``, the
+        ``rates`` that applied (``unit -> [mc, per]``) and ``charged_reservation``. Read-only; the customer's
+        per-charge statement is built from it."""
         out: "list[dict[str, Any]]" = []
         try:
             for line, _h in self._lines(mid):
                 if line["kind"] == "usage":
-                    out.append({"ts": float(line["ts"]), "model": str(line.get("model", "")),
-                                "request_id": str(line.get("request_id", "")), "usage": mm.Usage(**line["usage"])})
+                    rec: "dict[str, Any]" = {"ts": float(line["ts"]), "model": str(line.get("model", "")),
+                                             "request_id": str(line.get("request_id", "")),
+                                             "usage": mm.Usage(**line["usage"])}
+                    if "charge_mc" in line:                      # W2a: the charge and the rates that applied
+                        rec["charge_mc"] = int(line["charge_mc"])
+                        rec["rates"] = {str(u): [int(r[0]), int(r[1])] for u, r in dict(line.get("rates", {})).items()}
+                        rec["charged_reservation"] = bool(line.get("charged_reservation", False))
+                    out.append(rec)
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"meter file {mid[:8]}… is corrupt (a malformed record: {type(exc).__name__})") from None
         return out
@@ -765,7 +835,8 @@ class GrantMeter:
     def verify(self, mid: str) -> MeterTotals:
         """Re-read the launch's file from disk, checking the hash chain (raises ``ValueError`` if broken)."""
         st = self._replay(mid)
-        return MeterTotals(st.usage, st.spent_nano, st.requests, st.closed, st.unconfirmed_nano, len(st.opens))
+        return MeterTotals(st.usage, st.spent_nano, st.requests, st.closed, st.unconfirmed_nano, len(st.opens),
+                           st.charged_mc, st.pending_mc, st.unpriced_usage)
 
 
 class _Closed(Exception):
@@ -803,6 +874,7 @@ class GatewayConfig:
     concurrency_wait_s: float = 30.0            # how long a request over a limit waits before a rate_limit_error
     max_connections: int = 256                  # open client connections; one over is closed unanswered
     daily_limit_nano: Optional[int] = None      # account-wide spend ceiling per UTC day (None = no ceiling)
+    rate_card: RateCard = DEFAULT_RATE_CARD     # the published customer rates each response is charged at (W2a)
 
 
 class _Refusal(Exception):
@@ -851,7 +923,7 @@ class ModelGateway:
         _check_upstream(config.upstream)
         self.config = config
         self.prices = dict(config.prices) if config.prices is not None else mm.price_table()
-        self.meter = GrantMeter(config.meter_dir, gateway=True)
+        self.meter = GrantMeter(config.meter_dir, gateway=True, rate_card=config.rate_card)
         if config.opener is not None:
             self._opener = config.opener
         elif urllib.parse.urlsplit(config.upstream).scheme == "http":
@@ -1391,21 +1463,25 @@ class _Handler(BaseHTTPRequestHandler):
             read = min(cached, tokens)
             return read * row.cache_read + (tokens - read) * rate
 
-        cost = input_cost(gw.input_bound_tokens(raw_len, found))
+        tokens_in = gw.input_bound_tokens(raw_len, found)
+        cost = input_cost(tokens_in)
         headroom = gw.meter.headroom(grant)
         if cost + _MIN_OUTPUT_TOKENS * row.output > headroom:
             # the loose bound does not fit what is left: ask the provider for the tight one (free)
             counted = self._count_input(shaped, headers)
             if counted is not None:
-                cost = input_cost(counted * _COUNT_MARGIN[0] // _COUNT_MARGIN[1] + _INPUT_MARGIN_TOKENS)
+                tokens_in = counted * _COUNT_MARGIN[0] // _COUNT_MARGIN[1] + _INPUT_MARGIN_TOKENS
+                cost = input_cost(tokens_in)
             elif headroom >= _MIN_OUTPUT_TOKENS * row.output:
                 # no count, and the budget is not spent: "cannot size this request now" is retryable, never the
                 # terminal "budget is reached"
                 raise _Refusal(529, "overloaded_error", "VIGIL cannot size this request right now; retry shortly",
                                retry_after=5)
+        card = gw.config.rate_card
         rid, reserved, reason = gw.meter.reserve(
             grant, shaped["max_tokens"] * row.output, row.output, now=now, input_cost=cost,
-            daily_limit_nano=gw.config.daily_limit_nano, wait_s=gw.config.concurrency_wait_s)
+            daily_limit_nano=gw.config.daily_limit_nano, wait_s=gw.config.concurrency_wait_s,
+            worst_mc=lambda out_tokens: card.request_worst_mc(tokens_in, cached, out_tokens))
         if reason == "capacity":
             _log.error("model gateway: the daily spend ceiling is reached; refusing new model requests")
             raise _Refusal(529, "overloaded_error", "VIGIL is at capacity; the run will be retried")
@@ -1512,6 +1588,9 @@ class _Handler(BaseHTTPRequestHandler):
             _log.error("model gateway: unreadable usage on a response for grant %s; charging the reservation",
                        grant.grant_id[:8])
             usage, cost = mm.Usage(), self._ticket.reserved
+            self._ticket.commit(usage, cost, request_id=request_id, charge_reservation=True)
+            self._remember(grant, usage)
+            return
         self._ticket.commit(usage, cost, request_id=request_id)
         self._remember(grant, usage)
 
@@ -1586,7 +1665,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif unreadable:
                 _log.error("model gateway: unreadable stream usage for grant %s; charging at least the "
                            "reservation", grant.grant_id[:8])
-                ticket.commit(usage, max(cost, ticket.reserved), request_id=request_id)
+                ticket.commit(usage, max(cost, ticket.reserved), request_id=request_id, charge_reservation=True)
             elif not terminal:
                 # cut off before its final usage: what was generated is billed by the provider but unknown here.
                 # The reported part is charged; the rest of the reservation is held as unconfirmed spend.
@@ -1614,10 +1693,11 @@ class _Ticket:
             self._done = True
             return True
 
-    def commit(self, usage: mm.Usage, cost_nano: int, *, request_id: str, held_nano: int = 0) -> None:
+    def commit(self, usage: mm.Usage, cost_nano: int, *, request_id: str, held_nano: int = 0,
+               charge_reservation: bool = False) -> None:
         if self._first():
             self.meter.commit(self.grant, self.rid, usage, cost_nano, request_id=request_id, now=self._clock(),
-                              held_nano=held_nano)
+                              held_nano=held_nano, charge_reservation=charge_reservation)
 
     def hold(self) -> None:
         if self._first():
@@ -1824,8 +1904,9 @@ def config_from_env() -> GatewayConfig:
     def egress_check(url: str) -> None:
         sovereignty.assert_endpoint_permitted(url, purpose="customer-run model call")
 
+    from vigil_core.rate_card import rate_card
     return GatewayConfig(api_key=key, owner_pubkey=owner, meter_dir=config.MODEL_METER_DIR,
-                         egress_check=egress_check, prices=mm.price_table(),
+                         egress_check=egress_check, prices=mm.price_table(), rate_card=rate_card(),
                          tenant_concurrency=_int_env("VIGIL_GATEWAY_TENANT_CONCURRENCY", 4),
                          global_concurrency=_int_env("VIGIL_GATEWAY_GLOBAL_CONCURRENCY", 32),
                          daily_limit_nano=_daily_limit_nano())

@@ -1493,6 +1493,11 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
         model = _mm.run_model(e)
         if model not in prices:
             raise _mm.MeteringError(f"the run model {model!r} ({_mm.RUN_MODEL_ENV}) has no price in the table")
+        # the published customer rates (W2a): the gateway charges every response from this card and refuses to start
+        # on a malformed one, so a bad override is a hard issue here (RateCardError is a ValueError)
+        from vigil_core.rate_card import RATE_CARD_ENV, rate_card as _rate_card
+        _rate_card(e)
+        section["rate_card"] = "owner override" if (e.get(RATE_CARD_ENV) or "").strip() else "published defaults"
         section["floor_credits"] = floor
         for name in ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "VIGIL_GATEWAY_GLOBAL_CONCURRENCY"):
             raw = (e.get(name) or "").strip()
