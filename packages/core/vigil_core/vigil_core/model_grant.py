@@ -31,6 +31,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 import secrets
 from typing import Optional
 
@@ -40,14 +41,34 @@ from .canonical import canonical_json
 from .crypto import IntegrityError, sign, verify_one
 from .spine_domains import DOMAIN_TAGS
 
-__all__ = ["EFFORTS", "MAX_GRANT_LIFETIME_S", "ModelGrant", "TOKEN_PREFIX", "decode_token", "encode_token", "meter_id",
-           "model_grant_signing_bytes", "new_grant_id"]
+__all__ = ["EFFORTS", "MAX_GRANT_LIFETIME_S", "ModelGrant", "STOP_CREDITS_EXHAUSTED", "STOP_HEADER", "TOKEN_PREFIX",
+           "decode_token", "encode_token", "gateway_url", "meter_id", "model_grant_signing_bytes", "new_grant_id"]
 
 _MODEL_GRANT_DOMAIN = DOMAIN_TAGS["model-grant"]
 TOKEN_PREFIX = "vmg1"
 EFFORTS = ("high", "xhigh", "max")            # design §3: Quick = high, Deep = xhigh, Max / Fix = max
 _MAX_TOKEN_CHARS = 4096                       # a real token is ~500 chars; anything far larger is refused unread
 MAX_GRANT_LIFETIME_S = 7 * 86_400 + 3_600     # a launch lease lasts at most a week; a grant never outlives one
+
+#: M1c-2 — the model gateway's address, as the grant seam names it and a metered run dials it: exactly
+#: ``http://<loopback>:<port>`` with an optional trailing slash — no userinfo, path or query, nothing a client could read
+#: as another host. The grant is a bearer token, so it is only ever sent to this address.
+_GATEWAY_URL = re.compile(r"http://(?:127\.0\.0\.1|\[::1\]|localhost):([0-9]{1,5})/?")
+
+#: M1c-2 — the response header the model gateway sets on a refusal that STOPS a metered run (it is never retried and
+#: never failed over to another provider), naming why. One shared constant, so the engine tells a credit pause (hold the
+#: launch for a top-up, W3) from a failure without matching the refusal's wording across the planes.
+STOP_HEADER = "x-vigil-stop"
+STOP_CREDITS_EXHAUSTED = "credits_exhausted"
+
+
+def gateway_url(url: object) -> Optional[str]:
+    """``url`` (stripped) when it is exactly a loopback model-gateway URL (see ``_GATEWAY_URL``), else None."""
+    u = str(url if url is not None else "").strip()
+    m = _GATEWAY_URL.fullmatch(u)
+    if m is None or not 1 <= int(m.group(1)) <= 65535:
+        return None
+    return u
 
 
 def new_grant_id() -> str:

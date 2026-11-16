@@ -153,3 +153,24 @@ def test_a_grant_lasts_at_most_a_week():
     with pytest.raises(ValueError, match="at most a week"):
         _grant(not_after=issued + mg.MAX_GRANT_LIFETIME_S + 1)
     assert mg.MAX_GRANT_LIFETIME_S == 7 * 86_400 + 3_600           # the launch lease's longest life, plus slack
+
+
+# M1c-2 — the gateway address rule both planes apply (the grant seam on write and read; a metered engine before it
+# sends the grant). Mutation-verify target: widen the rule (e.g. allow any host) -> this test reds.
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8742", "http://127.0.0.1:8742/", "http://[::1]:9",
+                                 "http://localhost:1", "  http://127.0.0.1:65535  "])
+def test_a_loopback_gateway_url_is_accepted(url):
+    assert mg.gateway_url(url) == url.strip()
+
+
+@pytest.mark.parametrize("url", [None, "", "https://api.anthropic.com", "http://10.0.0.5:8742",
+                                 "http://evil.example:8742", "ftp://127.0.0.1:1", "http://127.0.0.1:8742@evil.example/",
+                                 "http://127.0.0.1:8742.evil.example", "http://localhost:8742/v1", "http://[::1]:0",
+                                 "http://127.0.0.1:99999", "http://127.0.0.1:8742?x=1", "http://127.0.0.1:",
+                                 "https://127.0.0.1:8742", "http://user@127.0.0.1:8742", 8742])
+def test_anything_else_is_not_a_gateway_url(url):
+    assert mg.gateway_url(url) is None
+
+
+def test_the_stop_header_names_the_credit_stop():
+    assert mg.STOP_HEADER == "x-vigil-stop" and mg.STOP_CREDITS_EXHAUSTED == "credits_exhausted"

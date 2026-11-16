@@ -3,7 +3,10 @@ AnthropicBackend — live LLM via the Anthropic Messages API.
 
 Activates when:
   - the `anthropic` package is importable, AND
-  - ANTHROPIC_API_KEY is set in env.
+  - ANTHROPIC_API_KEY is set in env — or, in a METERED customer run (PRICING M1c-2, ``kernel.metered``), the run's
+    model grant (``VIGIL_MODEL_GRANT``) and its loopback model gateway (``ANTHROPIC_BASE_URL``) are: the client is
+    then built for that grant and that gateway only, with no ambient proxy, and the gateway's credit stop is a
+    terminal ``CreditsExhausted``.
 
 Default model: claude-sonnet-4-6 (override via CRUCIBLE_ANTHROPIC_MODEL).
 Default max_tokens: 4096 (override on the Prompt).
@@ -37,7 +40,8 @@ import random
 import time
 
 from ...common import logging as v2log
-from ...common.errors import BackendError, BackendOverloaded, BackendUnavailable
+from ...common.errors import BackendError, BackendOverloaded, BackendUnavailable, CreditsExhausted
+from .. import metered as _metered
 from ..llm import (
     LLMBackend,
     LLMResult,
@@ -74,6 +78,12 @@ _MAX_BACKOFF_S = 20.0
 # longer simply gets retried after the cap and, if still failing, exhausts to a failover.
 _MAX_RETRY_AFTER_S = _MAX_BACKOFF_S
 _JITTER = random.Random()   # non-deterministic jitter (anti-thundering-herd); off the replay path
+#: vigil_core.model_grant.STOP_CREDITS_EXHAUSTED, restated so this module imports no vigil_core at load (a test pins the
+#: two equal): the value of the gateway's ``x-vigil-stop`` header when a metered run's credits are exhausted.
+_CREDITS_EXHAUSTED_STOP = "credits_exhausted"
+#: The URL patterns an environment proxy is mounted on (``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY``); a metered
+#: client mounts each to no proxy.
+_PROXY_PATTERNS = ("http://", "https://", "all://")
 
 
 def _retry_after_seconds(exc: Exception) -> float | None:
@@ -128,10 +138,13 @@ class AnthropicBackend(LLMBackend):
             import anthropic  # noqa: F401
         except ImportError as e:
             raise BackendUnavailable(f"anthropic SDK not installed: {e}") from e
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if not (_metered.metered_mode() or os.environ.get("ANTHROPIC_API_KEY")):
             raise BackendUnavailable("ANTHROPIC_API_KEY not set")
         # construct lazily on first use to avoid network on import
         self._client: object | None = None
+        # M1c-2: what the cached client was built for — None (the environment's key) or the metered (grant, gateway)
+        # pair — so a change of mode or of grant always rebuilds it
+        self._client_for: "tuple[str, str] | None" = None
         self.model = os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", _DEFAULT_MODEL)
         # ZDR flag: explicit constructor arg wins; otherwise read env. The env read lives in
         # `kernel.sovereignty` so this backend and every other direct-Anthropic-SDK egress site
@@ -148,12 +161,38 @@ class AnthropicBackend(LLMBackend):
             import anthropic  # noqa: F401
         except ImportError:
             return False, "anthropic SDK not installed"
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if _metered.metered_mode():
+            if _metered.gateway_base() is None:
+                return False, "metered run without a loopback model gateway (ANTHROPIC_BASE_URL)"
+        elif not os.environ.get("ANTHROPIC_API_KEY"):
             return False, "ANTHROPIC_API_KEY not set"
         zdr_marker = " [ZDR]" if self.zdr else ""
         return True, f"ready (model={self.model}){zdr_marker}"
 
     def _client_obj(self) -> object:
+        # M1c-2 METERED RUN: the client is built for the run's model grant and the loopback model gateway ONLY —
+        # never the persisted provider key (no hot-reload), never another host. No gateway ⇒ no client (fail closed:
+        # the SDK would otherwise fall back to api.anthropic.com and send it the grant). The cache is keyed on the
+        # (grant, gateway) pair, so the next run's grant — or the end of the metered run — rebuilds it.
+        grant = _metered.model_grant()
+        if grant is not None:
+            base = _metered.gateway_base()
+            if base is None:
+                raise BackendUnavailable("a metered run needs its loopback model gateway (ANTHROPIC_BASE_URL); "
+                                         "refusing to send its grant anywhere else")
+            if self._client is None or getattr(self, "_client_for", None) != (grant, base):
+                import anthropic
+                # The grant is a bearer token, so no ambient HTTP(S)_PROXY / ALL_PROXY may sit between the run and
+                # its loopback gateway: trust_env=False, AND the proxy patterns mounted to no proxy — SDK 2.x mounts the
+                # environment's proxies whatever trust_env says (a test double without the factory gets the default)
+                factory = getattr(anthropic, "DefaultHttpxClient", None)
+                http = (factory(trust_env=False, mounts=dict.fromkeys(_PROXY_PATTERNS))
+                        if factory is not None else None)
+                self._client = anthropic.Anthropic(max_retries=0, api_key=grant, base_url=base, http_client=http)
+                self._client_for = (grant, base)
+            return self._client
+        if getattr(self, "_client_for", None) is not None:   # leaving a metered run: never reuse its grant's client
+            self._client, self._client_for = None, None
         # HOT-RELOAD: in the managed engine, pick up a key re-sealed through the UI with no restart. The SDK
         # reads ANTHROPIC_API_KEY from the env at construction, so refresh the env first and INVALIDATE the
         # cached client when the key actually changed, forcing a rebuild with the fresh key.
@@ -200,6 +239,10 @@ class AnthropicBackend(LLMBackend):
                 return client.messages.create(**create_kwargs)  # type: ignore[attr-defined]
             except Exception as e:  # noqa: BLE001 — classify below; never leak a raw SDK error
                 last = e
+                if _metered.stop_reason(e) == _CREDITS_EXHAUSTED_STOP:
+                    # M1c-2: the gateway stopped this run for want of credits — terminal, never retried or failed
+                    # over (W3 holds the launch for a top-up)
+                    raise CreditsExhausted(f"the model gateway stopped this run: {e}") from e
                 transient, retry_after = _classify_transient(e)
                 if transient and api_attempt < _MAX_API_ATTEMPTS:
                     delay = retry_after if retry_after is not None else _backoff_delay(api_attempt)

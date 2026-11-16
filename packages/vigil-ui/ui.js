@@ -6,6 +6,24 @@
    Exposed on window.VUI.
    ========================================================================== */
 (function () {
+  // -- display names (UI ONLY) -------------------------------------------------
+  // The owner shows the vendored agentic engine as "NYX" on every screen (2026-11-16) while the backend keeps its own
+  // identifiers: the strix modules, routes and STRIX_* settings, signed "strix.*" ids, the vendored Strix package and
+  // its licence credit. So only TEXT a person reads is renamed, here at render time, for the UI's own strings and for
+  // backend messages alike: the capitalised word "Strix" and the standalone upper-case word "STRIX". Lower-case
+  // identifiers (strix.graph, vigil/strix-sandbox), setting names (STRIX_LLM: "_" is a word character, so no word
+  // boundary), every attribute the code keys on (ids, classes, option values, URLs, data-*) and raw <pre>/<code>
+  // text (evidence must read exactly as recorded) are never touched.
+  const DISPLAY_RENAMES = [[/\bStrix\b/g, "NYX"], [/\bSTRIX\b/g, "NYX"]];
+  const RAW_TEXT_TAGS = { PRE: 1, CODE: 1, KBD: 1, SAMP: 1, TEXTAREA: 1, SCRIPT: 1, STYLE: 1 };
+  const VISIBLE_ATTRS = { title: 1, "aria-label": 1, placeholder: 1, alt: 1 };
+  function displayText(s) {
+    let out = String(s);
+    for (let i = 0; i < DISPLAY_RENAMES.length; i++) out = out.replace(DISPLAY_RENAMES[i][0], DISPLAY_RENAMES[i][1]);
+    return out;
+  }
+  function isRawText(el) { return !!(el && el.tagName && RAW_TEXT_TAGS[String(el.tagName).toUpperCase()]); }
+
   // -- h(): hyperscript. h('div.card#x', {onClick, dataset,...}, [children]) --
   function h(tag, props, children) {
     let tagName = "div", id = null; const classes = [];
@@ -26,14 +44,14 @@
       const v = props[k];
       if (v == null || v === false) continue;
       if (k === "class") el.className = (el.className ? el.className + " " : "") + v;
-      else if (k === "text") el.textContent = v;
+      else if (k === "text") el.textContent = isRawText(el) ? v : displayText(v);
       else if (k === "html") el.innerHTML = v; // caller guarantees static/trusted (icons only)
       else if (k === "dataset") { for (const d in v) el.dataset[d] = v[d]; }
       else if (k === "style" && typeof v === "object") { for (const s in v) el.style[s] = v[s]; }
       else if (k.slice(0, 2) === "on" && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
       else if (k === "for") el.htmlFor = v;
       else if (v === true) el.setAttribute(k, "");
-      else el.setAttribute(k, v);
+      else el.setAttribute(k, VISIBLE_ATTRS[k] ? displayText(v) : v);
     }
     append(el, children);
     return el;
@@ -42,7 +60,7 @@
     if (children == null) return;
     if (Array.isArray(children)) children.forEach(function (c) { append(el, c); });
     else if (children instanceof Node) el.appendChild(children);
-    else el.appendChild(document.createTextNode(String(children)));
+    else el.appendChild(document.createTextNode(isRawText(el) ? String(children) : displayText(children)));
   }
   function clear(el) { while (el && el.firstChild) el.removeChild(el.firstChild); return el; }
   function mount(el, node) { clear(el); append(el, node); return el; }
@@ -379,7 +397,7 @@
     return h("span.glyph", { html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + (P[name] || P.dot) + '"/></svg>' });
   }
 
-  window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store,
+  window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store, displayText: displayText,
     getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, sseErrorToast: sseErrorToast,
     authUrl: authUrl,
     toast: toast, errorBanner: errorBanner, clearErrorBanner: clearErrorBanner,

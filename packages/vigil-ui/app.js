@@ -830,7 +830,7 @@
 
   // ---- drawer ----------------------------------------------------------------
   function openDrawer(title, body) {
-    V.$("#drawer-title").textContent = title || "Detail";
+    V.$("#drawer-title").textContent = V.displayText(title || "Detail");   // the UI-only display names (ui.js)
     V.mount(V.$("#drawer-body"), body);
     applyDrawerState();                       // honour the operator's remembered dock/size each open
     const d = V.$("#drawer"); d.classList.add("open"); d.setAttribute("aria-hidden", "false");
@@ -3704,7 +3704,7 @@
     // lane headers
     GRAPH_LANES.forEach(function (l, i) {
       const t = svgEl("text", { x: padL + i * laneW, y: 16, "font-size": 10, fill: "var(--text-2)",
-        "font-family": "var(--font-mono)" }); t.textContent = l.label; svg.appendChild(t);
+        "font-family": "var(--font-mono)" }); t.textContent = V.displayText(l.label); svg.appendChild(t);
     });
     // place nodes (last CAP per lane), remember positions by event id
     const nodeEls = [];
@@ -3736,7 +3736,7 @@
         stroke: isFactFinding ? "var(--st-confirmed)" : "var(--bg-0)", "stroke-width": isFactFinding ? 2 : 1.4 });
       const label = svgEl("text", { x: e._gx + 10, y: e._gy + 3.5, "font-size": 9, fill: "var(--text-1)",
         "font-family": "var(--font-mono)" });
-      label.textContent = (m.label || e.kind).slice(0, 12);
+      label.textContent = V.displayText(m.label || e.kind).slice(0, 12);
       g.appendChild(dot); g.appendChild(label);
       g.addEventListener("click", function () { V.toast((m.label || e.kind) + ": " + ((m.sum && m.sum(e.payload)) || "")); });
       svg.appendChild(g);
