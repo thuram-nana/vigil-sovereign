@@ -13,16 +13,15 @@
 > **⇒ TAKE OVER FROM §15 (the exact take-off point at the end of 2026-11-16), then read §0.**
 >
 > **Verified state at the end of 2026-11-16 (two local sessions):**
-> - `origin/main` = **`198b8f37`** (#1140). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
+> - `origin/main` = **`4c977a4b`** (#1141). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
 >   (W2b-2), **#1134 (W2b-3, `02bfcdcf`)**, **#1135 (Dependabot PR A: the z3-solver floor, `9eb4f64a`)**, **#1136
 >   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**, **#1138 (M1c-2a: the engine guards + the Strix prices,
 >   `71610f3b`)**, **#1139 (NYX: the UI-only display name of the Strix engine, `a43b4a31`)**, **#1140 (W2c-1: exact
->   milli-credit settlement + the floor retired, `198b8f37`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are
->   closed as superseded (#1120 was closed earlier).
-> - **Open PRs:** **#1137** (this handoff) and **#1141** (the in-app onboarding guide: a skippable first-sign-in tour
->   whose finished/skipped answer is kept SERVER-SIDE per account, the Guide screen covering the whole app, and the
->   VIGIL wordmark loader — behind `VIGIL_CUSTOMER_ONBOARDING`, default OFF). Merge each when its 15 required checks
->   are green (§15.1). **The complete list of what is left to code is §15.11.**
+>   milli-credit settlement + the floor retired, `198b8f37`)**, **#1141 (the in-app onboarding guide with the tour's
+>   answer kept server-side, `4c977a4b`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are closed as superseded
+>   (#1120 was closed earlier).
+> - **Open PR:** **#1137** (this handoff). Merge when its 15 required checks are green (§15.1). **The complete list
+>   of what is left to code is §15.11.**
 > - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
 >   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
 >   gates (§6); the floor is retired. **W5 dispute timing DECIDED (owner, 2026-11-16):** remove the disputed credits
@@ -1532,14 +1531,14 @@ re-verify with §15.10 before acting (another session may have moved things sinc
 ### 15.1 Exact state
 | Item | State | Anchor |
 |---|---|---|
-| `origin/main` | **`198b8f37`** (merge of #1140) | `git log --first-parent --oneline origin/main` |
+| `origin/main` | **`4c977a4b`** (merge of #1141) | `git log --first-parent --oneline origin/main` |
 | W2b-3 (explicit depth in the lease + the first allowance) | **MERGED** #1134 → `02bfcdcf` | §11.20 |
 | Dependabot **PR A** — z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras | **MERGED** #1135 → `9eb4f64a`; closed #1121, #1124, #1126 (pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`); #1120 had been closed earlier | §13.3 |
 | Dependabot **PR B** — the anthropic SDK 2.8 | **MERGED** #1136 → `a43f8fd3`; closed #1122, #1125 | §15.3 |
 | **W2c-1** — exact milli-credit settlement + the floor retired | **MERGED #1140** → `198b8f37` (squashed `793cd477` + the mypy / wording fix `cb6645d7`; 23 mutants red; all 15 required checks green) | §11.21, §15.2 (the build record) |
 | **NYX** — the agentic engine shown as "NYX" in the UI only | **MERGED #1139** → `a43b4a31` (8 mutants red) | §15.4 |
 | **M1c-2a** — the engine guards + the Strix prices | **MERGED #1138** → `71610f3b` (17 mutants red) | §15.5 — next: **M1c-2b** |
-| **Onboarding guide** — first-time users, end to end | **PR #1141** (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, plus the SERVER-SIDE tour state (`ui/onboarding_store.py`, provision `onboarding_get` / `onboarding_set`, edge `api/customer/onboarding`), behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 42 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 item 0 — merge when green; the flag waits for the screens of §15.11 C |
+| **Onboarding guide** — first-time users, end to end | **MERGED #1141** → `4c977a4b` (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, plus the SERVER-SIDE tour state (`ui/onboarding_store.py`, provision `onboarding_get` / `onboarding_set`, edge `api/customer/onboarding`), behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 42 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 item 0 — the flag waits for the screens of §15.11 C |
 | Everything after (W2c-2, W3, W4, W5, W6, G1, wallet E2E, R1–R5, Front C S1–S4, Gate 5, A1/O1/L1) | not started | §15.6, §5 |
 
 Strict branch protection ⇒ each open PR must be brought up to date with `main` after every merge (rebase, re-run CI).
@@ -1953,8 +1952,7 @@ for b in claude/billing-w2c1-exact-settle claude/ui-nyx-display-name claude/bill
 Everything the program still needs, in build order. Each line is one or more PRs built per §0.2. "Owner" marks what
 only the owner can do. Nothing here is server work (§6).
 
-**A. Open PRs.** #1141 (onboarding guide + server-side tour state) and #1137 (this file) — merge when their 15
-required checks are green, bringing the other up to date with `main` after each merge.
+**A. Open PRs.** #1137 (this file) — merge when its 15 required checks are green. (#1141 merged → `4c977a4b`.)
 
 **B. Money and metering (the wallet program, §11).**
 1. **W2c-2** — `balance_after_mc` on every statement line; "remaining" vs "available to start work"; take
@@ -2011,4 +2009,3 @@ are delegated to the agent behind their gates (§6) once a deployment exists.
 
 **G. Housekeeping.** Delete merged `claude/*` branches; split `test_smt_unknown_region_is_a_noop_without_z3` into its
 two cases; keep this file current at the end of every session.
-
