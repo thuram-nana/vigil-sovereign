@@ -94,3 +94,25 @@ def test_format_credits():
     assert format_credits(-1500) == "-1.500"
     with pytest.raises(RateCardError):
         format_credits(1.5)  # type: ignore[arg-type]
+
+
+def test_charge_is_the_sum_of_the_lines_with_the_rates_that_applied():
+    amount, rates = DEFAULT_RATE_CARD.charge(Usage(input_tokens=1000, output_tokens=200))
+    assert amount == 2500                                    # 1.250 + 1.250 credits
+    assert rates == {"input_tokens": [1_250_000, 1_000_000], "output_tokens": [6_250_000, 1_000_000]}
+    assert DEFAULT_RATE_CARD.charge(Usage()) == (0, {})
+
+
+def test_request_worst_mc_mirrors_the_gateway_worst_case():
+    # 400 cached tokens at the cache-read rate, the other 600 at the dearest shaped-input rate (the 5-minute cache
+    # write, 1,563 > 1,250 input), 100 output tokens: (400*125 + 600*1563 + 100*6250) credits per million, rounded
+    # up once to 0.001 credit -> 1612.8 mc -> 1613 mc
+    assert DEFAULT_RATE_CARD.request_worst_mc(1000, 400, 100) == 1613
+    assert DEFAULT_RATE_CARD.request_worst_mc(1000, 5000, 0) == 125      # the cached part is capped at the input
+    assert DEFAULT_RATE_CARD.request_worst_mc(0, 0, 0) == 0
+    # never below what the same usage is actually charged when it is all fresh input + output
+    actual, _ = DEFAULT_RATE_CARD.charge(Usage(input_tokens=1000, output_tokens=100))
+    assert DEFAULT_RATE_CARD.request_worst_mc(1000, 0, 100) >= actual
+    for bad in (-1, True, 1.0):
+        with pytest.raises(RateCardError):
+            DEFAULT_RATE_CARD.request_worst_mc(bad, 0, 0)  # type: ignore[arg-type]

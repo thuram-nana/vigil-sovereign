@@ -135,6 +135,30 @@ class RateCard:
                 lines.append(ChargeLine(unit, r.label, q, r, r.amount(q)))
         return lines
 
+    def charge(self, usage: Usage) -> "tuple[int, dict[str, list[int]]]":
+        """What one metered response is charged: ``(amount_mc, rates)``, where ``amount_mc`` is the sum of its
+        :meth:`ai_lines` and ``rates`` maps each unit it used to the ``[mc, per]`` rate that applied — recorded with
+        the charge so a later change to the card never re-prices it, and the statement shows the rate that was used."""
+        lines = self.ai_lines(usage)
+        return sum(ln.amount_mc for ln in lines), {ln.unit: [ln.rate.mc, ln.rate.per] for ln in lines}
+
+    def request_worst_mc(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> int:
+        """The most one model request may be charged, in milli-credits: its input at the dearest rate a shaped
+        request can be billed at (input or a 5-minute cache write — the gateway removes 1-hour writes), except the
+        ``cached_tokens`` of a prefix the request re-sends unchanged, which are priced at the cache-read rate, plus
+        ``output_tokens`` at the output rate; rounded up once, to 0.001 credit. It mirrors the gateway's provider-cost
+        worst case (``model_gateway._admit``), in customer credits."""
+        for name, v in (("input_tokens", input_tokens), ("cached_tokens", cached_tokens),
+                        ("output_tokens", output_tokens)):
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= _MAX_QUANTITY:
+                raise RateCardError(f"{name} must be a non-negative integer, got {v!r}")
+        a = self.ai                                  # every AI token rate is per 1,000,000 tokens (AI_UNITS)
+        read = min(cached_tokens, input_tokens)
+        dearest = max(a["input_tokens"].mc, a["cache_write_5m_tokens"].mc, a["cache_read_tokens"].mc)
+        total = (read * a["cache_read_tokens"].mc + (input_tokens - read) * dearest
+                 + output_tokens * a["output_tokens"].mc)
+        return -(-total // 1_000_000)
+
     def worker_line(self, seconds: int) -> ChargeLine:
         """Scan-worker time: the rate is per minute, charged by the second (``ceil(seconds × rate / 60)``)."""
         if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:

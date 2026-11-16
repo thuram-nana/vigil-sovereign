@@ -1847,3 +1847,27 @@ def test_a_record_that_lands_after_its_orphan_counts_the_request_once(tmp_path):
     t = gw.GrantMeter(d).verify(g.meter_id)
     assert [ln["kind"] for ln in _lines(d, g)] == ["open", "orphan", "usage"]
     assert (t.cost_nano, t.unconfirmed_nano) == (100 * OUT, 0)          # what it really cost, counted once
+
+
+# ---------------- W2a: the customer charge (milli-credits) recorded on every metered response ----------------
+
+def test_a_response_is_recorded_with_its_customer_charge(gateway, upstream, tmp_path):
+    g = _grant()
+    assert _call(gateway, BODY, _tok(g))[0] == 200
+    opened, used = _lines(tmp_path / "meter", g)
+    assert opened["kind"] == "open" and opened["reserved_mc"] > 0
+    # USAGE at the published card, hand-worked: input 1,000 x 1,250 = 1.250; output 2,000 x 6,250 = 12.500; cache read
+    # 10,000 x 125 = 1.250; 5-min writes 3,000 x 1,563 = 4.689; 1-hour writes 1,000 x 2,500 = 2.500 credits
+    assert used["charge_mc"] == 22_189 and "charged_reservation" not in used
+    assert set(used["rates"]) == {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_5m_tokens",
+                                  "cache_write_1h_tokens"}
+    t = gw.GrantMeter(tmp_path / "meter").verify(g.meter_id)
+    assert (t.charged_mc, t.pending_mc, t.cost_nano) == (22_189, 0, USAGE_COST)
+
+
+def test_an_unreadable_response_is_charged_its_reserved_customer_maximum(gateway, upstream, tmp_path):
+    upstream.mode = "deep"
+    g = _grant()
+    assert _call(gateway, BODY, _tok(g))[0] == 200
+    opened, used = _lines(tmp_path / "meter", g)
+    assert used["charged_reservation"] is True and used["charge_mc"] == opened["reserved_mc"] > 0

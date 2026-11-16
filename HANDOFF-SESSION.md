@@ -464,9 +464,10 @@ path; (c) **sealed-anchor fast check** via the manifest boundary hash; (d) `HAND
 
 Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, mutation-verified, red-penned).
 
-0. **Merge #1130** (design docs + W1 + this handoff) once its 15 required checks are green.
+0. ~~Merge #1130~~ — **merged 2026-11-16** (`503e06af`).
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
-   hardest money slice; read §11.3–§11.4 first.
+   hardest money slice; read §11.3–§11.4 first. **W2a is built (§11.17)**; W2b (extendable allowances) and W2c
+   (exact settlement) remain.
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -966,7 +967,9 @@ VIGIL's cybersecurity functionality."
   no charge on a guess; defer (retry) or quarantine, and surface it in `vigil doctor`.
 - **I9** Limits are enforced in CODE (gateway, scheduler, LaunchGate) — never by agent instructions. Concurrency,
   late usage reports or uncontrolled external calls cannot push usage past prepaid authorization; spend that cannot be
-  confirmed is VIGIL's cost, never the customer's.
+  confirmed is VIGIL's cost, never the customer's. **One deliberate exception (M1, §10.4, kept by W2a):** a 200
+  response whose usage the gateway cannot read (malformed, unpriceable) is charged its reservation, so it never runs
+  free; the meter flags it (`charged_reservation`) and the statement shows it as its own line.
 - **I10** Internal provider cost (nano-USD) stays in the cost ledger / meter's `cost_nano`; it never feeds a
   customer amount (customer amounts come only from the rate card).
 
@@ -1162,7 +1165,34 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.16 W1 — DONE (in #1130): what it is
+### 11.17 W2a — DONE (PR on `claude/cool-meitner-v9fq6d`, see §5): what it is
+Implements §11.5 (a) + (b). No admission or settlement change: admission still runs on the grant's provider-cost cap
+until W2b; settle still uses `cost_nano` until W2c.
+- `vigil_core/rate_card.py`: `RateCard.charge(usage) -> (amount_mc, {unit: [mc, per]})` and
+  `RateCard.request_worst_mc(input_tokens, cached_tokens, output_tokens)` (cached prefix at cache-read, the rest at
+  max(input, 5-min write, cache-read), + output; one ceil — mirrors `_admit`'s provider-cost worst case).
+- `model_gateway.GrantMeter(..., rate_card=)`: with a card, every `open` line carries `reserved_mc` and every `usage`
+  line `charge_mc` + `rates` (+ `charged_reservation: true` for an unreadable 200, charged `max(lines, reserved_mc)`).
+  A hold, a release, an orphan and a cut-off response's held part are never charged. `_LaunchState` / `MeterTotals`
+  gain `charged_mc`, `pending_mc`, `unpriced_usage` (usage recorded without a charge — a pre-W2a meter or a meter
+  with no card); `_replay_records` rebuilds them; `usage_records` returns the recorded charge + rates.
+- `GatewayConfig.rate_card` (default `DEFAULT_RATE_CARD`; `config_from_env` loads `rate_card()` — a malformed
+  `VIGIL_RATE_CARD` raises a `ValueError`, so `start_from_env` logs and does not start: metered runs fail closed).
+- `_admit` passes `worst_mc=lambda out: card.request_worst_mc(tokens_in, cached, out)` to `reserve`.
+- `ui/billing.py::_priced_lines`: the statement shows the RECORDED charge and rates (a later card change never
+  re-prices past usage); a pre-W2a record is priced with the card in force; the lines always sum to the charge.
+- `vigil doctor` (`_metering_report`): validates the card; a malformed override is a hard issue; reports
+  `rate_card: published defaults | owner override`.
+- Tests: `apps/sigil/tests/test_meter_customer_charge.py` (10), two end-to-end in `test_model_gateway.py`
+  (hand-worked 22.189 credits for the fixture's usage; an unreadable response charged its reservation),
+  `packages/core/vigil_core/tests/test_rate_card.py` (+2), `integration/tests/test_doctor_metering.py` (+1).
+  9 mutants, all RED (held part charged; orphan charged; no max on unreadable; pending not dropped; replay ignores
+  the recorded charge; statement re-prices; worst case ignores the 5-min write rate; no `reserved_mc`; doctor skips
+  the card).
+- **Next (W2b):** admission against the ALLOWANCE in mc (`charged_mc + pending_mc + worst_mc > allowance_mc` →
+  extend, else refuse → W3), using these fields.
+
+### 11.16 W1 — DONE (merged in #1130): what it is
 - `packages/core/vigil_core/vigil_core/rate_card.py` — `MC_PER_CREDIT=1000`; `Rate(unit, mc, per, label).amount(q)
   = ceil(q × mc / per)`; `RateCard.ai_lines(usage)`, `.worker_line(seconds)` (per-minute rate charged per second),
   `.premium_line(name, calls)` (unpriced → `RateCardError`), `.published()` (credits only); `DEFAULT_RATE_CARD` = the

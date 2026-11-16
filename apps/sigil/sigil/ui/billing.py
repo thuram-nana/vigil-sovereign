@@ -75,6 +75,40 @@ def billing_rates() -> dict[str, Any]:
     return {"rates": rate_card().published()}
 
 
+def _priced_lines(rec: "dict[str, Any]", card) -> "tuple[list[dict[str, Any]], int]":
+    """One metered response's statement lines and its charge (mc). A response the gateway priced (W2a) is shown at
+    the charge and the rates RECORDED with it — a later change to the card never re-prices past usage; one recorded
+    before W2a is priced with the card in force. A response the meter could not read was charged its reservation
+    (§10.4): the part above its unit lines is its own line, so the lines always add up to the charge (I4)."""
+    from vigil_core.rate_card import AI_UNITS, ChargeLine, Rate, format_credits
+
+    if "charge_mc" not in rec:
+        lines = card.ai_lines(rec["usage"])
+        return [ln.as_dict() for ln in lines], sum(ln.amount_mc for ln in lines)
+    labels = {unit: (field, label) for unit, field, label, _per in AI_UNITS}
+    out: "list[dict[str, Any]]" = []
+    total = 0
+    for unit, (mc, per) in rec.get("rates", {}).items():
+        if unit not in labels:
+            continue                                        # a unit this build does not know: shown in the total
+        field, label = labels[unit]
+        qty = int(getattr(rec["usage"], field))
+        rate = Rate(unit, mc, per, label)
+        ln = ChargeLine(unit, label, qty, rate, rate.amount(qty))
+        out.append(ln.as_dict())
+        total += ln.amount_mc
+    charge = int(rec["charge_mc"])
+    if charge != total:
+        extra = charge - total
+        unread = bool(rec.get("charged_reservation"))
+        out.append({"unit": "reserved_maximum" if unread else "other",
+                    "label": ("Response the meter could not read: charged its reserved maximum" if unread
+                              else "Other charges recorded with this response"),
+                    "quantity": 1, "rate": format_credits(extra), "rate_per": 1,
+                    "credits": format_credits(extra), "amount_mc": extra})
+    return out, charge
+
+
 def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_dir, limit: int = 500) -> dict[str, Any]:
     """The per-charge usage statement of ONE org, newest first: each metered AI request of each of the org's scans,
     priced line by line from the published rate card (operation, time, quantity, unit rate, credits). Tenant-scoped:
@@ -106,12 +140,10 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
             continue
         scan_mc = 0
         for rec in records:
-            lines = card.ai_lines(rec["usage"])
-            amount = sum(ln.amount_mc for ln in lines)
+            lines, amount = _priced_lines(rec, card)
             scan_mc += amount
             charges.append({"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": "AI analysis",
-                            "lines": [ln.as_dict() for ln in lines], "credits": format_credits(amount),
-                            "amount_mc": amount})
+                            "lines": lines, "credits": format_credits(amount), "amount_mc": amount})
         total_mc += scan_mc
         scan.update(status="ok", requests=len(records), credits=format_credits(scan_mc), amount_mc=scan_mc)
         scans.append(scan)
