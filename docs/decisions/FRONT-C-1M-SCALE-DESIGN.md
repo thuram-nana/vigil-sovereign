@@ -129,6 +129,7 @@ returns an immutable value or a copy.
    Authorised 2026-11-10.
 2. ✅ **S0's trust model:** the fold index is a cache of the signed spine, bound to a chain head, never
    authoritative; on any doubt the code falls back to the full verified fold. Authorised 2026-11-10.
-3. ⏳ **Set the scale targets** for S4 (users, concurrent engagements, p99 login / page latency, appends/s at
-   peak). These are capacity numbers — the owner's, not the agent's. **Still open.**
+3. ✅ **Scale targets for S4** (owner, 2026-11-16): a first acceptance run at **100,000** registered users, then
+   **1,000,000**; **10,000** concurrent engagements; p99 login and page latency under **500 ms**. The appends/s
+   target follows from S1's measurement at that load.
 4. ✅ **Order:** S0 first (it is useful at any scale and unblocks every later measurement). Authorised 2026-11-10.
