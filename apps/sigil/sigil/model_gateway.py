@@ -121,6 +121,24 @@ BUDGET_PATH = "/v1/vigil/budget"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _PASS_RESPONSE_HEADERS = ("request-id", "retry-after", "x-should-retry")
 _MIN_OUTPUT_TOKENS = 1024        # below this a request cannot do useful work: the run's budget is reached
+#: W2b-2: what a run is told when its prepaid credits cannot cover another request (a NON-retryable error: the runner
+#: stops, and W3 pauses the scan until the wallet is topped up)
+CREDITS_EXHAUSTED = "VIGIL: this scan's prepaid credits are exhausted; it pauses until the wallet is topped up"
+
+
+def _fit_tokens(worst_mc: "Callable[[int], int]", room_mc: int, most: int) -> int:
+    """The largest output-token count ``t`` in ``[0, most]`` whose worst-case charge ``worst_mc(t)`` fits in
+    ``room_mc``, or -1 when not even ``t = 0`` (the input alone) fits. ``worst_mc`` is non-decreasing in ``t``."""
+    if most < 0 or worst_mc(0) > room_mc:
+        return -1
+    lo, hi = 0, most
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if worst_mc(mid) <= room_mc:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 # --- what a request may carry (allowlists: a field, tool or beta the meter cannot price never reaches the provider)
 _DROPPED_KEYS = ("temperature", "top_p", "top_k",          # sampling: the run's model rejects them
@@ -601,7 +619,8 @@ class GrantMeter:
 
     def reserve(self, grant: ModelGrant, max_output_cost: int, output_price: int, *, now: float,
                 input_cost: int = 0, daily_limit_nano: Optional[int] = None,
-                wait_s: float = 0.0, worst_mc: Optional[Callable[[int], int]] = None) -> "tuple[str, int, str]":
+                wait_s: float = 0.0, worst_mc: Optional[Callable[[int], int]] = None,
+                allowance_mc: Optional[int] = None) -> "tuple[str, int, str]":
         """Reserve the worst case of one request — ``input_cost`` plus its output — and write its ``open`` line.
         Returns ``(rid, reserved_nano, "")``, with the output part lowered to what the run's cap still allows, or
         ``("", 0, reason)`` when the request must be refused: ``closed`` (the run was settled), ``budget`` (the cap
@@ -610,7 +629,13 @@ class GrantMeter:
 
         ``worst_mc`` maps the output tokens finally reserved to the request's worst-case CUSTOMER charge in
         milli-credits (``RateCard.request_worst_mc``); with a rate card on this meter it is written on the ``open``
-        line as ``reserved_mc`` and held as pending customer charge until the request settles."""
+        line as ``reserved_mc`` and held as pending customer charge until the request settles.
+
+        ``allowance_mc`` (W2b-2): what the launch's prepaid reservation lets it be CHARGED in all, in milli-credits.
+        The request is admitted only if its worst-case charge fits beside the charges already confirmed and those
+        still in flight — its output lowered to fit, like the cap — or refused ``allowance`` when not even the
+        smallest useful request fits beside the confirmed charges (the run's credits are exhausted). Unconfirmed
+        spend never counts here (it is VIGIL's cost, never the customer's)."""
         mid = grant.meter_id
         if output_price <= 0:
             return "", 0, "meter"
@@ -626,6 +651,14 @@ class GrantMeter:
                 if (left - input_cost) // output_price < _MIN_OUTPUT_TOKENS:
                     return "", 0, "budget"
                 affordable = (left - st.pending_nano - input_cost) // output_price
+                if allowance_mc is not None:
+                    if worst_mc is None or self.rate_card is None:
+                        return "", 0, "meter"            # cannot price against the allowance: never admit blind
+                    most = max_output_cost // output_price
+                    if _fit_tokens(worst_mc, allowance_mc - st.charged_mc, most) < _MIN_OUTPUT_TOKENS:
+                        return "", 0, "allowance"
+                    affordable = min(affordable,
+                                     _fit_tokens(worst_mc, allowance_mc - st.charged_mc - st.pending_mc, most))
                 if affordable >= _MIN_OUTPUT_TOKENS:
                     break
                 wait = deadline - time.monotonic()
@@ -875,6 +908,12 @@ class GatewayConfig:
     max_connections: int = 256                  # open client connections; one over is closed unanswered
     daily_limit_nano: Optional[int] = None      # account-wide spend ceiling per UTC day (None = no ceiling)
     rate_card: RateCard = DEFAULT_RATE_CARD     # the published customer rates each response is charged at (W2a)
+    #: W2b-2: the in-process source of each metered launch's ALLOWANCE (``ui.launch_gate.LaunchAllowance``):
+    #: ``allowance_mc(grant) -> int | None``, ``available_credits(grant) -> int``, ``extend(grant, credits) -> dict``.
+    #: None: no allowance check (the cap alone binds) — refused when ``allowance_required`` (metered billing is on).
+    allowance: Any = None
+    allowance_required: bool = False
+    allowance_chunk_credits: int = 100          # the credits one extension holds at least (a holding size, not a price)
 
 
 class _Refusal(Exception):
@@ -940,6 +979,11 @@ class ModelGateway:
         self._body_total = 0
         self._prefixes: "dict[str, list[tuple]]" = {}
         self._prefix_guard = threading.Lock()
+        self._allowances: "dict[str, int]" = {}                 # W2b-2: meter id -> the launch's allowance (mc)
+        self._extend_locks: "dict[str, threading.Lock]" = {}
+        self._extend_guard = threading.Lock()
+        if config.allowance_chunk_credits < 1:
+            raise ValueError("the allowance chunk must be at least 1 credit")
         self._stop = threading.Event()
         self._flusher = threading.Thread(target=self._flush_loop, name="model-gateway-flush", daemon=True)
         self._flusher.start()
@@ -1275,6 +1319,46 @@ class ModelGateway:
             h["anthropic-beta"] = beta
         return urllib.request.Request(url, data=json.dumps(body).encode(), headers=h, method="POST")
 
+    def ensure_allowance(self, grant: ModelGrant, need_mc: int) -> int:
+        """W2b-2 — the launch's allowance (mc) with room, if the wallet allows, for a request whose worst-case charge
+        is ``need_mc``: when the confirmed charges, the requests in flight and this one would pass it, ONE allowance
+        extension is taken from the wallet (at least ``allowance_chunk_credits``, at most the wallet's balance) through
+        the in-process source. One decision per launch at a time (a per-launch lock), so concurrent requests never
+        extend twice for the same shortfall. A wallet that cannot cover it leaves the allowance as it is: the request
+        is then lowered to fit or refused as exhausted. Raises a retryable refusal when the allowance cannot be read
+        or extended right now (a busy lock), never a pause."""
+        src = self.config.allowance
+        mid = grant.meter_id
+        with self._extend_guard:
+            lock = self._extend_locks.setdefault(mid, threading.Lock())
+        with lock:
+            cur = self._allowances.get(mid)
+            if cur is None:
+                cur = src.allowance_mc(grant)
+                if cur is None:
+                    if self.meter.is_closed(mid):
+                        return 0                         # settled: the meter refuses it as closed
+                    raise _Refusal(529, "overloaded_error", "VIGIL cannot read this run's allowance right now",
+                                   retry_after=5)
+                self._allowances[mid] = cur
+            t = self.meter.totals(mid)
+            short = t.charged_mc + t.pending_mc + need_mc - cur
+            if short <= 0:
+                return cur
+            want = max(self.config.allowance_chunk_credits, -(-short // 1000))
+            credits = min(want, int(src.available_credits(grant)))
+            if credits < 1:
+                return cur                               # nothing to draw: lowered to fit, or exhausted
+            out = src.extend(grant, credits)
+            if out.get("ok"):
+                fresh = src.allowance_mc(grant)
+                cur = fresh if fresh is not None else cur + 1000 * credits
+                self._allowances[mid] = cur
+            elif out.get("retry"):
+                raise _Refusal(429, "rate_limit_error", "this run's allowance is being extended; retry shortly",
+                               retry_after=5)
+            return cur
+
     def input_bound_tokens(self, raw_len: int, found: Mapping[str, int]) -> int:
         """An upper bound on a request's input tokens from what the gateway can see: a token is never shorter than
         one byte of the request's text, plus an allowance per image, the definition of each Anthropic-defined tool
@@ -1478,10 +1562,20 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _Refusal(529, "overloaded_error", "VIGIL cannot size this request right now; retry shortly",
                                retry_after=5)
         card = gw.config.rate_card
+
+        def worst(out_tokens: int) -> int:
+            return card.request_worst_mc(tokens_in, cached, out_tokens)
+
+        allowance: Optional[int] = None
+        if gw.config.allowance is not None:
+            allowance = gw.ensure_allowance(grant, worst(shaped["max_tokens"]))
+        elif gw.config.allowance_required:
+            # metered billing is on but no allowance source is wired: never admit a request the wallet does not back
+            raise _Refusal(529, "overloaded_error", "VIGIL cannot check this run's credits right now", retry_after=5)
         rid, reserved, reason = gw.meter.reserve(
             grant, shaped["max_tokens"] * row.output, row.output, now=now, input_cost=cost,
             daily_limit_nano=gw.config.daily_limit_nano, wait_s=gw.config.concurrency_wait_s,
-            worst_mc=lambda out_tokens: card.request_worst_mc(tokens_in, cached, out_tokens))
+            worst_mc=worst, allowance_mc=allowance)
         if reason == "capacity":
             _log.error("model gateway: the daily spend ceiling is reached; refusing new model requests")
             raise _Refusal(529, "overloaded_error", "VIGIL is at capacity; the run will be retried")
@@ -1492,6 +1586,8 @@ class _Handler(BaseHTTPRequestHandler):
                            "retry shortly", retry_after=5)
         if reason == "closed":
             raise _Refusal(403, "permission_error", "this run's model grant is closed (the run was settled)")
+        if reason == "allowance":
+            raise _Refusal(403, "permission_error", CREDITS_EXHAUSTED)
         if reason:
             raise _Refusal(403, "permission_error", "this run's budget is reached")
         self._ticket = _Ticket(gw.meter, grant, rid, reserved, gw.config.clock)
@@ -1884,7 +1980,7 @@ def _daily_limit_nano() -> Optional[int]:
     return int(usd * 1_000_000_000)
 
 
-def config_from_env() -> GatewayConfig:
+def config_from_env(allowance: Any = None) -> GatewayConfig:
     """The gateway's configuration from the sovereign environment: the ONE provider key
     (``SIGIL_ANTHROPIC_API_KEY`` / ``ANTHROPIC_API_KEY``, or — with ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set —
     only that AWS SSM SecureString: ``sigil.provider_key``), the owner public key, the meter directory, the
@@ -1909,10 +2005,12 @@ def config_from_env() -> GatewayConfig:
                          egress_check=egress_check, prices=mm.price_table(), rate_card=rate_card(),
                          tenant_concurrency=_int_env("VIGIL_GATEWAY_TENANT_CONCURRENCY", 4),
                          global_concurrency=_int_env("VIGIL_GATEWAY_GLOBAL_CONCURRENCY", 32),
-                         daily_limit_nano=_daily_limit_nano())
+                         daily_limit_nano=_daily_limit_nano(),
+                         allowance=allowance, allowance_required=config.metered_billing_enabled(),
+                         allowance_chunk_credits=_int_env("VIGIL_ALLOWANCE_CHUNK_CREDITS", 100))
 
 
-def start_from_env() -> "Optional[_Server]":
+def start_from_env(allowance: Any = None) -> "Optional[_Server]":
     """Start the gateway once per process iff ``VIGIL_MODEL_GATEWAY_ENABLED``, on ``VIGIL_MODEL_GATEWAY_PORT``
     (loopback). Returns the running server, or None when disabled or misconfigured — a misconfiguration is
     logged and the cockpit carries on; customer runs then fail closed (they cannot reach a gateway), and
@@ -1920,13 +2018,18 @@ def start_from_env() -> "Optional[_Server]":
     from . import config
     if not config.model_gateway_enabled():
         return None
+    if config.metered_billing_enabled() and allowance is None:
+        # W2b-2: a metered run may only be charged what its prepaid reservation backs; without the allowance source
+        # the gateway cannot check that, so it does not start (metered runs fail closed; `vigil doctor` says why)
+        _log.error("model gateway not started: metered billing needs the launch allowance source")
+        return None
     port = config.model_gateway_port()
     with _RUNNING_LOCK:
         running = _RUNNING.get(str(port))
         if running is not None:
             return running
         try:
-            server, _t = start(config_from_env(), port=port)
+            server, _t = start(config_from_env(allowance), port=port)
         except (ValueError, OSError, mm.MeteringError) as exc:          # a misconfiguration: one line, no traceback
             _log.error("model gateway not started: %s", exc)
             return None

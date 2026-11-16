@@ -1499,7 +1499,9 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
         _rate_card(e)
         section["rate_card"] = "owner override" if (e.get(RATE_CARD_ENV) or "").strip() else "published defaults"
         section["floor_credits"] = floor
-        for name in ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "VIGIL_GATEWAY_GLOBAL_CONCURRENCY"):
+        _mm.grant_ceiling_credits(e)             # W2b-2: a run grant's technical ceiling (an engineering bound)
+        for name in ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "VIGIL_GATEWAY_GLOBAL_CONCURRENCY",
+                     "VIGIL_ALLOWANCE_CHUNK_CREDITS"):
             raw = (e.get(name) or "").strip()
             if raw and (not raw.isdigit() or int(raw) < 1):
                 raise _mm.MeteringError(f"{name} must be a whole number of at least 1, got {raw!r}")

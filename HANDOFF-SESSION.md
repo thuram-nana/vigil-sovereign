@@ -466,9 +466,9 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 
 0. ~~Merge #1130~~ — **merged 2026-11-16** (`503e06af`).
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
-   hardest money slice; read §11.3–§11.4 first. **W2a is built (§11.17, PR #1131); W2b-1 is built (§11.18,
-   stacked on W2a — push it after #1131 merges)**; W2b-2 (gateway admission against the allowance), W2b-3 (explicit
-   depth) and W2c (exact settlement) remain.
+   hardest money slice; read §11.3–§11.4 first. **W2a is merged (§11.17, #1131); W2b-1 is merged (§11.18,
+   #1132, `cc227ccc`); W2b-2 is built (§11.19, its own PR off main)**; W2b-3 (explicit depth) and W2c (exact
+   settlement) remain.
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -1166,7 +1166,40 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.18 W2b-1 — DONE (stacked on W2a; see §5): allowance extensions in the launch's own settle unit
+### 11.19 W2b-2 — DONE (its own PR off main after #1132; see §5): gateway admission against the prepaid allowance
+- `model_gateway.GrantMeter.reserve(..., allowance_mc=)`: a request is admitted only if its worst-case CUSTOMER charge
+  fits beside the launch's confirmed charges and the requests in flight (output lowered to fit, like the cap); when
+  not even the smallest useful request (1,024 output tokens) fits beside the confirmed charges → refused
+  `allowance`. Unconfirmed spend never counts (I9). `_fit_tokens` = binary search on the monotone worst case.
+- `ModelGateway.ensure_allowance(grant, need_mc)`: one decision per launch at a time (per-meter lock); caches the
+  allowance; when short, takes ONE extension of `max(VIGIL_ALLOWANCE_CHUNK_CREDITS (default 100), shortfall)`
+  credits, capped at the wallet balance, through the in-process source. A busy settle lock → retryable 429; an
+  unreadable allowance → retryable 529; a wallet that cannot cover it → the request is lowered or refused with a
+  NON-retryable **403 `permission_error` `CREDITS_EXHAUSTED`** (W3 turns that into a pause).
+- `GatewayConfig.allowance` / `allowance_required` / `allowance_chunk_credits`; `config_from_env(allowance)` sets
+  `allowance_required = metered_billing_enabled()`; **`start_from_env(allowance=)` refuses to start while metered
+  billing is on and no source is given** (logged; metered runs fail closed; doctor reports the gateway not answering).
+  A gateway with `allowance_required` and no source admits nothing (529).
+- `ui/launch_gate.py::LaunchAllowance(gate)` — the source: `allowance_mc(grant)` = 1000 × (the OWNER-SIGNED seam
+  lease's `units_reserved` + extensions), verified under the owner key and bound to the grant's (org, slug, nonce);
+  None on any mismatch, unverifiable lease or pruned extension. `available_credits`, `extend` →
+  `LaunchGate.extend_reservation`. `ui/server.py::serve` passes `LaunchAllowance(LaunchGate(srv.store))`.
+- The published grant's `cap_nano_usd` is now a technical CEILING: `usd_cap(max(units, VIGIL_GRANT_CEILING_CREDITS))`
+  (`vigil_core.model_metering.grant_ceiling_credits`, default 1,000,000 credits — an engineering bound on a leaked
+  token, not a price; the owner may change it). `vigil doctor` validates both new settings.
+- Tests: `test_model_gateway.py` (+11: admitted inside; extends first; exhausted 403 with nothing upstream; max_tokens
+  lowered to fit; confirmed charges count; busy/unreadable retryable; required-without-source admits nothing;
+  concurrent requests extend once; `_fit_tokens`; no metered start without a source); `test_allowance_extensions.py`
+  (+3: the real source reads the signed lease + extensions and refuses another launch / org; never reads a pruned
+  extension; grant capped at the ceiling); `test_doctor_metering.py` (+1); `test_graceful_stop.py` now pins that the
+  cockpit passes a `LaunchAllowance`; `test_metered_billing.py` pins the ceiling cap. 13 mutants, all RED.
+- **Note for the next agent:** running `mypy` on `packages/core/vigil_core` from a worktree OUTSIDE the repo path
+  reports 7 pre-existing errors in `run_budget` / `install_manifest` / `highwater` / `signed_build_manifest` that do not
+  appear from the repo path (same files) — an environment artefact; CI and the in-repo run are clean.
+- **Next — W2b-3:** the explicit depth in the owner-signed lease (§11.5 h) and the first reservation sized
+  `min(available, CHUNK)` at `launch_reserve`; then **W2c**; then **W3** (the 403 becomes a pause + resume).
+
+### 11.18 W2b-1 — DONE (merged in #1132, `cc227ccc`): allowance extensions in the launch's own settle unit
 **Design decisions (read before W2b-2):**
 - **An extension is part of the SAME launch**, not a new reservation: one more owner-signed WALLET debit with
   `entry_id = reserve-wallet:{slug}:{nonce}:x{k}` (k = 1, 2, … consecutive; canonical decimal). The launch's ONE
@@ -1208,7 +1241,7 @@ The grant's `cap_nano_usd` becomes a high technical ceiling (a leaked token is s
 stays on `credits_for_cost` until W2c switches it to the recorded `charge_mc` with the per-org remainder.
 **Then — W2b-3:** the explicit depth in the lease (§11.5 h) and the first reservation sized `min(available, CHUNK)`.
 
-### 11.17 W2a — DONE (PR on `claude/cool-meitner-v9fq6d`, see §5): what it is
+### 11.17 W2a — DONE (merged in #1131, `9164ec92`): what it is
 Implements §11.5 (a) + (b). No admission or settlement change: admission still runs on the grant's provider-cost cap
 until W2b; settle still uses `cost_nano` until W2c.
 - `vigil_core/rate_card.py`: `RateCard.charge(usage) -> (amount_mc, {unit: [mc, per]})` and

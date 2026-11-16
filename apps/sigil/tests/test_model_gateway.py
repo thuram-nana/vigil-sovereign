@@ -1871,3 +1871,159 @@ def test_an_unreadable_response_is_charged_its_reserved_customer_maximum(gateway
     assert _call(gateway, BODY, _tok(g))[0] == 200
     opened, used = _lines(tmp_path / "meter", g)
     assert used["charged_reservation"] is True and used["charge_mc"] == opened["reserved_mc"] > 0
+
+
+# ---------------- W2b-2: admission against the run's prepaid ALLOWANCE (milli-credits) ----------------
+
+class _Allowance:
+    """A stand-in for ``ui.launch_gate.LaunchAllowance``: an allowance (mc), a wallet balance, and extensions."""
+
+    def __init__(self, allowance_mc, available=0, extend_out=None, extend_s=0.0):
+        self.mc, self.available, self.extend_out, self.extends = allowance_mc, available, extend_out, []
+        self.extend_s = extend_s                  # how long an extension takes (a spine write, in the real source)
+
+    def allowance_mc(self, grant):
+        return self.mc
+
+    def available_credits(self, grant):
+        return self.available
+
+    def extend(self, grant, credits):
+        self.extends.append(credits)
+        time.sleep(self.extend_s)
+        if self.extend_out is not None:
+            return self.extend_out
+        self.available -= credits
+        self.mc += 1000 * credits
+        return {"ok": True}
+
+
+def test_a_request_inside_the_allowance_is_admitted(upstream, tmp_path):
+    src = _Allowance(10 ** 9)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        g = _grant()
+        assert _call(server, BODY, _tok(g))[0] == 200 and src.extends == []
+    finally:
+        _stop(server)
+
+
+def test_a_request_past_the_allowance_extends_it_first(upstream, tmp_path):
+    src = _Allowance(1_000, available=5_000)                      # 1 credit held; 5,000 in the wallet
+    server = _start(upstream, tmp_path / "meter", allowance=src, allowance_chunk_credits=100)
+    try:
+        assert _call(server, BODY, _tok(_grant()))[0] == 200
+        assert len(src.extends) == 1 and src.extends[0] >= 100   # at least one chunk, once
+    finally:
+        _stop(server)
+
+
+def test_a_request_the_wallet_cannot_back_is_refused_as_exhausted(upstream, tmp_path):
+    src = _Allowance(1_000, available=0)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        status, _h, body = _call(server, BODY, _tok(_grant()))
+        err = json.loads(body)["error"]
+        assert status == 403 and err["type"] == "permission_error" and err["message"] == gw.CREDITS_EXHAUSTED
+        assert upstream.seen == []                                  # nothing reached the provider
+    finally:
+        _stop(server)
+
+
+def test_max_tokens_is_lowered_to_fit_the_allowance(upstream, tmp_path):
+    # first learn the request's worst case at its full max_tokens from the open line the gateway writes
+    src = _Allowance(10 ** 9)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        g = _grant()
+        assert _call(server, BODY, _tok(g))[0] == 200
+        opened = _lines(tmp_path / "meter", g)[0]
+        full_worst = opened["reserved_mc"]                          # the worst case at the full max_tokens
+    finally:
+        _stop(server)
+    # an allowance that holds the input and ~2,000 output tokens (2,000 x 6.25 mc), and an empty wallet
+    room = full_worst - (BODY["max_tokens"] - 2_000) * 6_250 // 1_000
+    upstream.seen.clear()
+    server = _start(upstream, tmp_path / "meter2", allowance=_Allowance(room, available=0))
+    try:
+        assert _call(server, BODY, _tok(_grant(nonce="n-2")))[0] == 200
+        sent = upstream.seen[-1]["body"]["max_tokens"]
+        assert 1_024 <= sent < BODY["max_tokens"]
+    finally:
+        _stop(server)
+
+
+def test_a_busy_extension_or_an_unreadable_allowance_is_retryable(upstream, tmp_path):
+    server = _start(upstream, tmp_path / "meter", allowance=_Allowance(1_000, available=500,
+                                                                     extend_out={"ok": False, "retry": True}))
+    try:
+        assert _call(server, BODY, _tok(_grant()))[0] == 429
+    finally:
+        _stop(server)
+    server = _start(upstream, tmp_path / "meter2", allowance=_Allowance(None))
+    try:
+        assert _call(server, BODY, _tok(_grant()))[0] == 529 and upstream.seen == []
+    finally:
+        _stop(server)
+
+
+def test_metered_billing_without_an_allowance_source_admits_nothing(upstream, tmp_path):
+    server = _start(upstream, tmp_path / "meter", allowance_required=True)
+    try:
+        assert _call(server, BODY, _tok(_grant()))[0] == 529 and upstream.seen == []
+    finally:
+        _stop(server)
+
+
+def test_concurrent_requests_extend_once(upstream, tmp_path):
+    # the extension takes a while, so the three requests overlap inside the allowance decision: one extends, the
+    # others wait for it and find the room it made
+    src = _Allowance(1_000, available=10 ** 6, extend_s=0.4)
+    server = _start(upstream, tmp_path / "meter", allowance=src, allowance_chunk_credits=100_000)
+    try:
+        token = _tok(_grant())
+        out: list = []
+        threads = [threading.Thread(target=lambda: out.append(_call(server, BODY, token)[0])) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert out == [200, 200, 200] and len(src.extends) == 1
+    finally:
+        _stop(server)
+
+
+def test_fit_tokens_finds_the_largest_output_that_fits():
+    def worst(t):
+        return 100 + t * 3
+    assert gw._fit_tokens(worst, 400, 10_000) == 100
+    assert gw._fit_tokens(worst, 99, 10_000) == -1
+    assert gw._fit_tokens(worst, 10 ** 9, 50) == 50
+
+
+def test_the_gateway_does_not_start_metered_without_the_allowance_source(monkeypatch, caplog):
+    monkeypatch.setenv("VIGIL_MODEL_GATEWAY_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    with caplog.at_level("ERROR", logger="sigil.model_gateway"):
+        assert gw.start_from_env() is None
+    assert "needs the launch allowance source" in caplog.text
+
+
+def test_confirmed_charges_count_against_the_allowance(upstream, tmp_path):
+    # learn the request's worst case, then allow exactly that much with an empty wallet: the first request fits;
+    # once its 22.189 credits are confirmed, a second identical request no longer does
+    probe = _start(upstream, tmp_path / "probe", allowance=_Allowance(10 ** 9))
+    try:
+        g0 = _grant(nonce="probe")
+        assert _call(probe, BODY, _tok(g0))[0] == 200
+        full_worst = _lines(tmp_path / "probe", g0)[0]["reserved_mc"]
+    finally:
+        _stop(probe)
+    server = _start(upstream, tmp_path / "meter", allowance=_Allowance(full_worst, available=0))
+    try:
+        token = _tok(_grant())
+        assert _call(server, BODY, token)[0] == 200
+        status, _h, body = _call(server, BODY, token)
+        assert status == 403 and json.loads(body)["error"]["message"] == gw.CREDITS_EXHAUSTED
+    finally:
+        _stop(server)

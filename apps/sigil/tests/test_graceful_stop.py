@@ -649,12 +649,21 @@ def test_the_cockpit_stops_with_the_provisioner_deadline_and_stops_its_gateway(t
     seen = _captured_serve(monkeypatch, server)
     fake_gw = SimpleNamespace(server_address=("127.0.0.1", 0))
     stopped: list = []
-    monkeypatch.setattr(model_gateway, "start_from_env", lambda: fake_gw if gateway_on else None)
+    sources: list = []
+
+    def fake_start(allowance=None):
+        sources.append(allowance)
+        return fake_gw if gateway_on else None
+
+    monkeypatch.setattr(model_gateway, "start_from_env", fake_start)
     monkeypatch.setattr(model_gateway, "stop", lambda gw, *, drain_s=None: stopped.append((gw, drain_s)))
     spine = tmp_path / "spine.jsonl"
     SpineStore(spine).append(kind="message", source="x", actor="user", payload={"text": "hi"})
     server.serve(token="graceful-token", host="127.0.0.1", port=0, spine_path=spine)
     assert seen["drain_deadline_s"] == graceful.PROVISIONER_DRAIN_DEADLINE_S
+    # W2b-2: the cockpit hands its gateway the in-process allowance source over its own spine
+    from sigil.ui.launch_gate import LaunchAllowance
+    assert len(sources) == 1 and isinstance(sources[0], LaunchAllowance)
     if not gateway_on:
         assert seen["on_stop"] is None
         return
