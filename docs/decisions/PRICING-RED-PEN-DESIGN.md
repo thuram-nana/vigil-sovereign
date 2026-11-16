@@ -80,7 +80,18 @@ verified domain, ownership proof still required; the full report unlocks on the 
 off by default: below the customer's trigger it buys their chosen pack, never past their monthly cap, and paused scans
 then resume on their own.
 
-**0.9 Testing.** The wallet is validated with simulated provider usage, sandbox payments, concurrency tests and
+**0.9 Non-negotiable billing principle (owner, 2026-11-16).** VIGIL **never** calculates, predicts, estimates, quotes
+or displays the expected total cost of a Quick, Deep, Max or any other assessment. The customer journey is exactly:
+buy prepaid credits → see them in the wallet → launch any authorised assessment with no price estimate → credits are
+deducted automatically from metered consumption → the dashboard shows credits consumed and remaining, continuously →
+on insufficient credit, billable work pauses safely with completed work preserved → the customer buys more credits and
+resumes from the checkpoint. Every customer-facing usage amount is in **credits**, never a computed monetary scan cost.
+Quick, Deep and Max are assessment depths, **not pricing tiers**. No scan cost estimator, cost-prediction engine,
+quotation system or mandatory calibration is built. Internal provider-cost accounting exists only for SIGIL's financial
+management and never produces a customer-facing estimate. This principle overrides every mention of an estimate, a
+quote, a tier budget or calibration elsewhere in this document.
+
+**0.10 Testing.** The wallet is validated with simulated provider usage, sandbox payments, concurrency tests and
 failure injection. No real payment method is charged and no production AI credit is consumed in testing without the
 owner's explicit authorisation.
 
@@ -213,14 +224,14 @@ A customer makes three independent choices for every run.
 | **Retest** — re-run the proof of each finding the customer says they fixed: Verified Fixed / Still Vulnerable | opt-in, small | yes | yes |
 | **AEGIS virtual patch** — block attacks on a finding inline while the customer fixes it | per-host subscription | yes | not applicable |
 
-Fix never runs unless the customer asks for it, per finding or for all of them, and approves its estimate. A customer
+Fix never runs unless the customer asks for it, per finding or for all of them (no estimate is shown, §0.9). A customer
 who only wants to know their vulnerabilities gets a complete, proven report and is never charged for fixing.
 
 ## 3. Getting the work you paid for
 
 | Commitment | How it is kept |
 |---|---|
-| **Know the price first** | Before any run the customer sees an estimate (typical cost and range, from calibration §9 M5) and what that depth covers, and sets a budget. The default budget is the tier's 90th-percentile cost, rounded up to 50 credits |
+| **Know the rates first** | Before any run the customer sees the published usage rates (§0.2) and what the chosen depth covers. No scan estimate or quote is ever shown (§0.9); an optional per-scan limit is available |
 | **No money for a run that cannot work** | A free **preflight** runs before credits are reserved: the target is reachable, the ownership proof is current, the supplied credentials log in, the repository clones. It makes no model calls |
 | **Always a report** | 10% of the budget is held back for the report. When the run reaches 90% of its budget the engine stops testing and writes up what it found, so a budget-limited run still delivers its findings and its coverage map |
 | **Never pay twice for the same ground** | A run that reached its budget can be **continued** with more credits; it resumes from where it stopped (Strix `--resume`), it does not start over |
@@ -500,8 +511,9 @@ and a monthly cap per repository.
 
 ## 8. Risks stated plainly
 
-- **Multi-agent runs spend many tokens.** The gateway reserves every request against the cap and the estimate is shown first, but a customer's
-  first Max run may still cost more than they expected. The UI must make the estimate and the budget unmissable.
+- **Multi-agent runs spend many tokens.** The gateway reserves every request against the prepaid balance, and the
+  dashboard shows credits consumed and remaining live, so a customer always sees a Max run's consumption as it happens;
+  the wallet balance and the optional per-scan limit bound it (§0.4).
 - **Ultracode is new** (it launched with Opus 4.8 in May 2026) and its behaviour can change. Pin the Claude Code
   version and re-calibrate when it moves.
 - **Opus 4.8 vs Opus 5 / 5.5.** Opus 5 costs the same and Opus 5.5 costs 20% less, but both add elevated cybersecurity
