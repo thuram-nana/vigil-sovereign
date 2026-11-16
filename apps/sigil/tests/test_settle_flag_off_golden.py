@@ -11,6 +11,10 @@ charge and the unpaused metered sweep refund.
 With the flag ON the same scenarios write the SAME records plus exactly one ``governor.launch_settled`` decision per
 fresh settle, and the same results and seam files.
 
+W2c-1: a metered CHARGE (:data:`EXACT_SCENARIOS`) records its exact (v3) decision whatever the flag says — the record
+is the only place the org's sub-credit remainder moves — so with the flag off those scenarios write main's records
+plus exactly that one decision; every other scenario (flat, cancel, refund, postpaid) writes exactly main's.
+
 This module uses only the API main has, so the capture can be re-run on main:
   PYTHONPATH=apps/sigil:integration:packages/core/vigil_core python -c \
     "import sys; sys.path.insert(0, 'apps/sigil/tests'); import test_settle_flag_off_golden as g, json; print(json.dumps(g._golden()))"
@@ -42,7 +46,11 @@ from vigil_integration.jobs.completion_signal import emit_completion_signal
 
 ORG, HOST, NOW = "org_a", "apme.cm", 2000.0
 LATE = NOW + 8 * 3600 + 2 * 86400                # past an 8h lease window + the 1-day sweep TTL
-USAGE = mm.Usage(output_tokens=10_650)
+# W2c-1: a metered charge is priced from the usage at the published rate card — 8,640 output tokens at the default
+# 6.25 milli-credits each = exactly 54 credits — which is what main's cost-plus rule charged for USAGE_COST ($0.26625
+# at the fixture's markup 2 = 53.25 -> 54). So the money records equal main's capture, and re-running the capture on
+# main still yields it.
+USAGE = mm.Usage(output_tokens=8_640)
 USAGE_COST = 266_250_000
 _ENV = ("VIGIL_METERED_BILLING", mm.MARGIN_ENV, mm.CANCEL_ENV, "VIGIL_RUN_FLOOR_CREDITS", "VIGIL_MODEL_PRICES",
         "VIGIL_RUN_MODEL", "VIGIL_SETTLE_SPINE_RECORD", "VIGIL_COST_LEDGER_WRITE", "VIGIL_SETTLE_LOCK_WAIT_S",
@@ -695,11 +703,19 @@ GOLDEN: dict = json.loads(r"""
 """)
 
 
+#: The scenarios that settle a metered CHARGE (W2c-1: an exact settle, which always records its v3 decision).
+EXACT_SCENARIOS = ("metered_completed", "metered_d3_canceled", "metered_failed_past_expiry", "metered_d4_paused")
+
+
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_flag_off_golden_spine_sequences_equal_main(name):
     got = json.loads(json.dumps(_scenario(name)))
+    decisions = [x for x in got["records"] if x[1] == "governor.launch_settled"]
+    assert len(decisions) == (1 if name in EXACT_SCENARIOS else 0), got["records"]
+    if decisions:
+        assert got["records"][0] == decisions[0]       # recorded BEFORE any money moves
+    got["records"] = [x for x in got["records"] if x[1] != "governor.launch_settled"]
     assert got == GOLDEN[name]
-    assert "governor.launch_settled" not in [x[1] for x in got["records"]]
 
 
 @pytest.mark.parametrize("name", SCENARIOS)

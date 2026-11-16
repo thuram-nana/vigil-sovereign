@@ -261,8 +261,8 @@ def test_a_retired_pricing_setting_removes_the_target_line_with_the_billing_refu
         with _env(VIGIL_BILLING_TARGET_MARGIN=decoy, **{name: "2"}, **others):
             ov = margin.margin_overview(store, cost_rate=RATE)
         assert ov["target_margin_set"] is False
-        assert ov["target_margin_issue"] == (f"{name} is set: remove it; the only pricing input is "
-                                             f"VIGIL_BILLING_TARGET_MARGIN")
+        assert ov["target_margin_issue"] == (f"{name} is set: remove it; it is a retired pricing setting (a customer "
+                                             f"is charged from the published rate card)")
         assert all(t["target_revenue_minor"] is None for t in ov["tenants"])
         # the ACTUAL margin is unaffected: the target line is display-only.
         assert next(x for x in ov["tenants"] if x["org_id"] == "acme")["margin_minor"] == 10200

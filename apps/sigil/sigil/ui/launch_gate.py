@@ -362,8 +362,8 @@ class LaunchGate:
                 acc = self.arrears.accrued(oid)
                 if depth is not None:
                     # W2b-3: a metered launch draws min(headroom, chunk) — refused only when the line's headroom
-                    # cannot cover one useful model request
-                    if (acct.credit_limit - acc) * MC_PER_CREDIT < min_mc:
+                    # cannot cover one useful model request. W2c-1: the headroom less the org's sub-credit remainder
+                    if self._exact_room(oid, acct.credit_limit - acc) * MC_PER_CREDIT < min_mc:
                         return (f"over postpaid credit line: the {acct.credit_limit}-credit limit has no room left "
                                 f"for another assessment (org {oid})")
                 elif acc + u > acct.credit_limit:
@@ -376,8 +376,9 @@ class LaunchGate:
                     return (f"postpaid line is OVERDUE (unpaid arrears invoice past net terms, org {oid}): settle "
                             f"the outstanding invoice before launching new assessments")
             elif depth is not None:
-                # W2b-3: the wallet is the limit (no amount is quoted — pricing design §0.9)
-                if self.meter.available(oid, now_ts) * MC_PER_CREDIT < min_mc:
+                # W2b-3: the wallet is the limit (no amount is quoted — pricing design §0.9). W2c-1: its EXACT balance,
+                # less the org's sub-credit remainder, in whole credits
+                if self._exact_room(oid, self.meter.available(oid, now_ts)) * MC_PER_CREDIT < min_mc:
                     return "insufficient credits to start an assessment: top up your wallet to continue"
             elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
@@ -408,6 +409,13 @@ class LaunchGate:
                 re = self._one_launch_locked(held, kp.public_key_b64, oid, h, slug, non, ix, now_ts=now_ts)
             if re is not None:
                 return {"ok": False, "error": re}
+            if depth is not None and not one:
+                # W2c-1: a metered reserve is sized from the org's EXACT balance, whose remainder only a settle moves
+                # (under the cross-process settle lock), so it holds that lock from the sizing through the debit. E7
+                # took it above already.
+                locked = self._settle_lock_into(held)
+                if locked is not None:
+                    return locked
             acct = self.postpaid.account(oid)
             split: "dict[str, Any]" = {}
             if acct is not None and acct.is_enabled():
@@ -417,7 +425,13 @@ class LaunchGate:
                 # is touched, so a postpaid tenant never consumes wallet/plan credits.
                 before_acc = self.arrears.accrued(oid)
                 if depth is not None:                     # W2b-3: the chunk (never below one useful request), at
-                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), acct.credit_limit - before_acc)   # most the headroom
+                    # most the headroom — W2c-1: the whole credits it holds less the org's remainder. A draw that does
+                    # not take the settle lock (another process's flat reserve) can land between the _gated() check and
+                    # the settle lock — a settle only ever adds room — so the start check is repeated on the size.
+                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), self._exact_room(oid, acct.credit_limit - before_acc))
+                    if u < 1 or u * MC_PER_CREDIT < min_mc:
+                        return {"ok": False, "error": f"over postpaid credit line: the {acct.credit_limit}-credit limit "
+                                f"has no room left for another assessment (org {oid})"}
                 self.arrears.accrue(oid, u, engagement_id=slug,
                                     entry_id=f"{RESERVE_ENTRY_PREFIX}{slug}:{non}", issued_at=now_ts)
                 if self.arrears.accrued(oid) - before_acc < u:
@@ -425,7 +439,13 @@ class LaunchGate:
             else:
                 before = self.meter.available(oid, now_ts)
                 if depth is not None:                     # W2b-3: the chunk (never below one useful request), at
-                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), before)   # most the live balance
+                    # most the live balance — W2c-1: the whole credits its EXACT value holds. A draw that does not take
+                    # the settle lock (another process's flat reserve) can land between the _gated() check and the
+                    # settle lock — a settle only ever adds room — so the start check is repeated on the size.
+                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), self._exact_room(oid, before))
+                    if u < 1 or u * MC_PER_CREDIT < min_mc:
+                        return {"ok": False, "error": "insufficient credits to start an assessment: top up your "
+                                "wallet to continue"}
                 plan_part = self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent)
                 if before - self.meter.available(oid, now_ts) < u:
                     # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
@@ -457,6 +477,51 @@ class LaunchGate:
             "lease": signed.model_dump(mode="json"),
             "trust_root": trust_root.model_dump(mode="json"),
         }
+
+    # -- W2c-1: the exact (milli-credit) balance ---------------------------------------------------------------------
+    def _exact_room(self, oid: str, balance: int) -> int:
+        """The whole credits a METERED draw may take from ``balance`` (whole credits: the plan + wallet available, or a
+        credit line's headroom): ``max(0, 1000 x balance - r) // 1000``, where ``r`` is the org's sub-credit usage
+        remainder (``WalletRegistry.remainder_mc``) — so a reserve never takes the part of a credit the org already
+        used. Read the balance BEFORE calling (the remainder is read last), under the settle lock for the binding
+        check."""
+        return max(0, MC_PER_CREDIT * int(balance) - self.wallet.remainder_mc(oid)) // MC_PER_CREDIT
+
+    def _settle_lock_into(self, held: Any) -> Optional[dict]:
+        """Take the cross-process settle lock into ``held`` (kept until the caller's debit is written) — or the
+        refusal: ``retry`` while it is busy, fail-closed when it cannot be used. Nothing is written either way."""
+        from ..governor.launch_settlement import settle_lock
+        try:
+            held.enter_context(settle_lock(self.store))
+        except ValueError as e:
+            return {"ok": False, "error": f"could not take the cross-process settle lock (fail-closed): "
+                    f"{type(e).__name__}"}
+        except OSError:
+            return {"ok": False, "retry": True, "error": "billing is busy right now; please retry the launch in a "
+                    "moment"}
+        return None
+
+    @staticmethod
+    def metered_use_mc(slug: str, nonce: str) -> int:
+        """W2c-1 — what metered launch ``(slug, nonce)`` used, EXACTLY, in milli-credits: the sum of its meter's
+        responses, each priced as the customer's statement prices it (``ui.billing._priced_lines``): the charge
+        recorded with a response the gateway priced (W2a — never re-priced), else its usage priced line by line with
+        the rate card in force. Only confirmed usage is on the meter (I9). Call it once the meter is CLOSED, so the
+        total is final. Raises ``MeteringError`` while a retired pricing setting is present and ``RateCardError`` on a
+        malformed card (the caller defers: never a guessed charge — both are ``ValueError``s, so catch them first), and
+        ``ValueError`` on a broken meter (quarantine)."""
+        from vigil_core import model_metering as mm
+        from vigil_core.model_grant import meter_id
+        from vigil_core.rate_card import rate_card
+        from .. import config
+        from ..model_gateway import GrantMeter
+        for name in mm.obsolete_pricing_settings():
+            raise mm.MeteringError(mm.obsolete_setting_refusal(name))
+        card = rate_card()
+        used = 0
+        for rec in GrantMeter(config.MODEL_METER_DIR).usage_records(meter_id(str(slug), str(nonce))):
+            used += int(rec["charge_mc"]) if "charge_mc" in rec else int(card.charge(rec["usage"])[0])
+        return used
 
     # -- W2b: allowance extensions (the prepaid pay-as-you-go wallet, pricing design §0.4) -------------------------
     def extension_total(self, org_id: str, slug: str, nonce: str) -> "tuple[int, bool]":
@@ -493,9 +558,10 @@ class LaunchGate:
         lock taken here, so no extension can land once a settle has begun); its base reservation is a PREPAID one on
         the spine (a postpaid credit line is not extended yet — the run pauses instead); the seam has not marked it
         settled; and the wallet holds ``credits``. The extension is decided and written under ``self._lock`` and the
-        cross-process ``settle_lock``. Returns ``{ok, k, credits, extended, reserved_base_known}`` or
-        ``{ok: False, error, insufficient?}`` (``insufficient``: the wallet cannot cover it — the caller pauses the
-        run, W3)."""
+        cross-process ``settle_lock``. W2c-1: "holds ``credits``" is the wallet's EXACT balance — less the org's
+        sub-credit usage remainder — in whole credits (``Balance.spendable``). Returns ``{ok, k, credits, extended,
+        reserved_base_known}`` or ``{ok: False, error, insufficient?}`` (``insufficient``: the wallet cannot cover it —
+        the caller pauses the run, W3)."""
         from contextlib import ExitStack
         from .. import config
         from ..governor.launch_reservations import extension_entry_id
@@ -554,10 +620,13 @@ class LaunchGate:
             k = 1
             while self.wallet.has_debit_entry(oid, extension_entry_id(s, non, k)):
                 k += 1
-            before = self.wallet.available(oid)
-            if before < credits:
+            # W2c-1: an extension draws the WALLET only, so the wallet's exact balance (less the org's sub-credit
+            # remainder, which no settle moves while this lock is held) must cover it — one fold read gives both
+            bal = self.wallet.balance(oid)
+            if bal.spendable < credits:
                 return {"ok": False, "insufficient": True,
-                        "error": f"insufficient credits to continue: need {credits}, have {before}"}
+                        "error": f"insufficient credits to continue: need {credits}, have {bal.spendable}"}
+            before = bal.available
             self.wallet.debit(oid, credits, engagement_id=s, entry_id=extension_entry_id(s, non, k),
                               issued_at=now_ts)
             if before - self.wallet.available(oid) < credits:
@@ -569,7 +638,8 @@ class LaunchGate:
     def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any,
                       expect_org_id: Optional[str] = None,
                       refuse_if: Optional[Callable[[], Optional[str]]] = None,
-                      basis: str = "settle", finish_only: bool = False) -> dict:
+                      basis: str = "settle", finish_only: bool = False,
+                      consumed_mc: Optional[int] = None) -> dict:
         """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. The refund
         is bound to the OWNER-SIGNED LEASE, never to a wire amount — ``signed_lease`` (the object
         ``reserve_launch`` returned) is VERIFIED under a locally-pinned owner trust root and
@@ -595,11 +665,25 @@ class LaunchGate:
         ``verify_customer_launch_lease`` before it burns the single-use floor — so a settled lease is no
         longer a live bearer capability. The ``reserved - refund == consumed`` net-spend invariant is
         load-bearing on this refund path, and K4-5 settle-on-completion asserts net-spend ==
-        metered-consumption end-to-end."""
+        metered-consumption end-to-end.
+
+        W2c-1 — the EXACT settle of a metered charge: ``consumed_mc`` (with ``consumed_units=0``) is what the run used
+        in milli-credits (:meth:`metered_use_mc`), clamped to the launch's whole allowance (``1000 x (lease units +
+        extensions)``). Inside the settle critical section, on a FRESH settle only, the org's sub-credit remainder
+        ``r`` is read and the settle keeps ``floor((r + consumed_mc) / 1000)`` whole credits of the reservation —
+        never rounded up — carrying the rest as the new remainder. That decision is recorded as ONE owner-signed v3
+        ``governor.launch_settled`` record whatever ``VIGIL_SETTLE_SPINE_RECORD`` says: it is the only place the
+        remainder moves, so each settle moves it exactly once. Refused for a launch not published metered. A
+        not-fresh settle finishes the RECORDED decision and ignores ``consumed_mc``."""
         from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
         kp = self.owner_key
         if kp is None:
             return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
+        if consumed_mc is not None:
+            if isinstance(consumed_mc, bool) or not isinstance(consumed_mc, int) or consumed_mc < 0:
+                return {"ok": False, "error": "consumed_mc must be a non-negative integer"}
+            if consumed_units != 0:
+                return {"ok": False, "error": "an exact settle takes consumed_mc only (consumed_units must be 0)"}
         try:
             signed = SignedCreditLaunchLease.model_validate(signed_lease)
         except Exception:  # noqa: BLE001 — a malformed lease is a fail-closed refusal
@@ -621,7 +705,11 @@ class LaunchGate:
         try:
             may_extend = self._launch_was_metered(s, non)
         except OSError:
+            if consumed_mc is not None:
+                return {"ok": False, "retry": True, "error": "the launch's billing mode cannot be read right now; retry"}
             may_extend = True
+        if consumed_mc is not None and not may_extend:
+            return {"ok": False, "error": "an exact settle is for a launch published metered only"}
         ext, ext_pruned = self.extension_total(oid, s, non) if may_extend else (0, False)
         reserved += ext
         if ext_pruned:
@@ -653,14 +741,18 @@ class LaunchGate:
         # lease without it (minted with the flag off, or postpaid) settles from the reserve records (None).
         lease_split = ((int(doc.plan_reserved), doc.plan_period_end) if doc.plan_reserved is not None
                        else None)
+        # W2c-1: never more than the launch's whole allowance (it can never claw back more than it holds)
+        exact_mc = min(consumed_mc, MC_PER_CREDIT * reserved) if consumed_mc is not None else None
         return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only,
-                                        lease_split=lease_split, allowance_check=_allowance_unchanged)
+                                        lease_split=lease_split, allowance_check=_allowance_unchanged,
+                                        exact_mc=exact_mc)
 
     def _settle_reservation(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float,
                             refuse_if: Optional[Callable[[], Optional[str]]], basis: str,
                             finish_only: bool = False,
                             lease_split: "Optional[tuple[int, Optional[float]]]" = None,
-                            allowance_check: Optional[Callable[[], Optional[str]]] = None) -> dict:
+                            allowance_check: Optional[Callable[[], Optional[str]]] = None,
+                            exact_mc: Optional[int] = None) -> dict:
         """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
         used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
         bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
@@ -669,7 +761,12 @@ class LaunchGate:
 
         ``lease_split`` is where a prepaid decision's plan share comes from: the signed lease's
         ``(plan_reserved, plan_period_end)``; None — a signed lease that does not carry it, or E7, which has no
-        lease — for the reserve's plan debit record, plus the pruned-record refusal below."""
+        lease — for the reserve's plan debit record, plus the pruned-record refusal below.
+
+        ``exact_mc`` (W2c-1, already clamped to ``1000 x reserved``): the decision is EXACT. ``_settle_once`` reads the
+        org's remainder ``r`` inside its critical section and builds it with ``exact(r)``: ``floor((r + exact_mc) /
+        1000)`` whole credits kept, split exactly as a flat settle of that many credits (``_split``), plus the exact
+        fields. ``consumed`` is then 0 and only builds the provisional decision the exact one replaces."""
         from ..governor.launch_settlement import SettlementDecision
         # PRICING M1c: every FRESH settle (completion, customer cancel, abandoned-lease sweep) closes the run's model
         # meter and retires its grant — inside the settle critical section, after the caller's precondition, before
@@ -686,6 +783,7 @@ class LaunchGate:
         # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
         # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via `_settle_once` + the reverse
         # entry_id. consumed == 0 (cancel) fully reverses the draw.
+        cmc = int(exact_mc) if exact_mc is not None else 0       # the exact closures below run only with exact_mc
         if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
             pp_eid = f"{SETTLE_ENTRY_PREFIX}{s}:{non}"
 
@@ -699,9 +797,14 @@ class LaunchGate:
                 self.arrears.settle(oid, d.refund_postpaid, entry_id=pp_eid, issued_at=now_ts)
                 return {"refunded": d.refund_postpaid, "refunded_plan": 0, "refunded_wallet": 0, "wrote": True}
 
+            def _exact_postpaid(r: int) -> Any:
+                d = (r + cmc) // MC_PER_CREDIT             # floor: a charge is never rounded up
+                return SettlementDecision.postpaid(reserved, d, basis).with_exact(cmc, r)
+
             return self._settle_once(oid, s, non, reserved, consumed, now_ts,
                                      SettlementDecision.postpaid(reserved, consumed, basis), _move_postpaid,
-                                     refuse_if, finish_only, allowance_check=allowance_check)
+                                     refuse_if, finish_only, allowance_check=allowance_check,
+                                     exact=_exact_postpaid if exact_mc is not None else None)
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
@@ -734,9 +837,17 @@ class LaunchGate:
             plan_pe = plan_deb[1] if plan_deb else None
             if plan_deb is None:
                 refuse_if = self._pruned_plan_debit_check(oid, plan_deb_eid, refuse_if)
-        refund = reserved - consumed
-        plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
-        wallet_refund = refund - plan_refund               # the rest (wallet portion + any plan over-consumption)
+        def _split(kept: int) -> "Optional[tuple[int, int]]":
+            """``(plan_refund, wallet_refund)`` of a settle that keeps ``kept`` credits, or None when it breaks the
+            invariant below."""
+            refund = reserved - kept
+            plan_refund = max(0, from_plan - kept)         # consumption eats the plan (expiring) portion first
+            wallet_refund = refund - plan_refund           # the rest (wallet portion + any plan over-consumption)
+            if (plan_refund < 0 or wallet_refund < 0 or plan_refund + wallet_refund != refund
+                    or reserved - refund != kept):
+                return None
+            return plan_refund, wallet_refund
+
         # MONEY-DOCTRINE INVARIANT (K4-1): net spend == metered consumption and NEITHER bucket is over-refunded.
         # The sum/net-spend clauses hold by construction (wallet_refund := refund - plan_refund; refund :=
         # reserved - consumed); the load-bearing clause is ``plan_refund < 0 or wallet_refund < 0``, which FIRES
@@ -744,10 +855,12 @@ class LaunchGate:
         # (from_plan > reserved). Without it an inflated plan_refund would be granted while a NEGATIVE
         # wallet_refund is silently skipped (``if wallet_refund > 0``) — a net OVER-refund / under-charge. A drift
         # here is an internal inconsistency, not a wire value: refuse (fail-closed, no credits moved) rather than
-        # move the wrong amount, so net spend can never fall below metered consumption. Checked BEFORE the lock.
-        if (plan_refund < 0 or wallet_refund < 0 or plan_refund + wallet_refund != refund
-                or reserved - refund != consumed):
+        # move the wrong amount, so net spend can never fall below metered consumption. Checked BEFORE the lock (an
+        # exact settle's split is checked again inside it, on the credits it keeps: a violation writes nothing).
+        split = _split(consumed)
+        if split is None:
             return {"ok": False, "error": "internal: refund invariant violated (bucket split / net-spend)"}
+        plan_refund, wallet_refund = split
         plan_eid, wallet_eid = f"settle-plan:{s}:{non}", f"settle-wallet:{s}:{non}"
 
         def _move_prepaid(d: Any, landed: "set[str]", durable: bool) -> dict:
@@ -768,9 +881,19 @@ class LaunchGate:
 
         decision = SettlementDecision.prepaid(reserved, consumed, plan_refund, wallet_refund,
                                               plan_pe if plan_pe is not None else 0.0, basis)
+
+        def _exact_prepaid(r: int) -> Any:
+            d = (r + cmc) // MC_PER_CREDIT                 # floor: a charge is never rounded up
+            kept = _split(d)
+            if kept is None:
+                raise ValueError("refund invariant violated (bucket split / net-spend)")
+            return SettlementDecision.prepaid(reserved, d, kept[0], kept[1], plan_pe if plan_pe is not None else 0.0,
+                                              basis).with_exact(cmc, r)
+
         return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
                                                                _move_prepaid, refuse_if, finish_only,
-                                                               allowance_check=allowance_check))
+                                                               allowance_check=allowance_check,
+                                                               exact=_exact_prepaid if exact_mc is not None else None))
 
     @staticmethod
     def _track_hold(oid: str, s: str, non: str, out: dict) -> dict:
@@ -832,7 +955,8 @@ class LaunchGate:
     def _settle_once(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float, decision: Any,
                      move: "Callable[[Any, set[str], bool], dict]",
                      refuse_if: Optional[Callable[[], Optional[str]]], finish_only: bool,
-                     allowance_check: Optional[Callable[[], Optional[str]]] = None) -> dict:
+                     allowance_check: Optional[Callable[[], Optional[str]]] = None,
+                     exact: Optional[Callable[[int], Any]] = None) -> dict:
         """THE exactly-once settle transaction of lease ``(s, non)``, shared by the prepaid and postpaid paths.
         ``decision`` is what THIS caller would decide (a ``SettlementDecision``); ``move(d, landed, durable)`` moves
         the money of decision ``d`` — writing only the settle entries NOT already ``landed`` (and, when ``durable``,
@@ -852,7 +976,12 @@ class LaunchGate:
         cost-ledger settle -> the nonce-matched tombstone (LAST, so a settle a crash interrupted is still found by the
         drain's re-drive and the sweep). A NOT-fresh settle re-asserts a lost marker and, when the spine carries a
         well-formed decision, finishes it — the recorded entries not yet landed, at the RECORDED amounts, never its
-        own — so a crash can neither strand the refund nor pay it twice; its meter close is best-effort (OD-8)."""
+        own — so a crash can neither strand the refund nor pay it twice; its meter close is best-effort (OD-8).
+
+        EXACT (W2c-1): with ``exact``, a FRESH settle reads the org's remainder ``r`` once its meter is closed and the
+        allowance re-checked — inside the critical section, so no other settle moves ``r`` in between — and settles on
+        ``exact(r)`` instead of ``decision``; that v3 decision is ALWAYS recorded (the remainder moves only through
+        it), whatever the settle-record flag says. A not-fresh settle never reads ``r``."""
         from contextlib import ExitStack
         from .. import config
         from ..governor.launch_settlement import record_launch_settled, scan_settlement, settle_lock
@@ -900,6 +1029,16 @@ class LaunchGate:
                 changed = _refusal(allowance_check)
                 if changed:
                     return {"ok": False, "retry": True, "error": changed}
+                if exact is not None:
+                    try:
+                        r = self.wallet.remainder_mc(oid)
+                    except OSError:
+                        return busy
+                    try:
+                        decision = exact(r)
+                    except ValueError as e:                  # an internal invariant: nothing was written
+                        return {"ok": False, "error": f"internal: settlement decision invariant violated "
+                                f"(fail-closed): {type(e).__name__}"}
             else:
                 meter_refusal = self._close_model_meter(s, non, now_ts)
                 if meter_refusal is not None:                # OD-8: settled already — never strand its refund on it
@@ -907,7 +1046,7 @@ class LaunchGate:
                     logging.getLogger(__name__).warning("a settled launch's model meter could not be closed: %s",
                                                         meter_refusal.get("error"))
             recorded = False
-            if fresh and config.settle_spine_record_enabled():
+            if fresh and (decision.exact or config.settle_spine_record_enabled()):
                 try:
                     record_launch_settled(self.store, kp, org_id=oid, slug=s, nonce=non, decision=decision,
                                           issued_at=now_ts)
@@ -965,6 +1104,8 @@ class LaunchGate:
                "net_spend": decided.consumed if decided is not None else consumed}
         if not fresh and moved.get("wrote"):
             out.update(rolled_forward=True, basis=decided.basis)
+        if decided is not None and decided.exact:
+            out.update(consumed_mc=int(decided.consumed_mc), remainder_mc=int(decided.remainder_after))
         return out
 
     def _write_cost_settle_if_missing(self, oid: str, slug: str, nonce: str, consumed: int, reserved: int,
@@ -1754,7 +1895,8 @@ class LaunchAllowance:
         return 1000 * (int(doc.units_reserved) + ext)
 
     def available_credits(self, grant: Any) -> int:
-        return int(self.gate.wallet.available(grant.org_id))
+        # W2c-1: the wallet's EXACT balance in whole credits (a sizing hint, read unlocked: the extension re-checks it)
+        return int(self.gate.wallet.balance(grant.org_id).spendable)
 
     def extend(self, grant: Any, credits: int) -> dict:
         import time as _time

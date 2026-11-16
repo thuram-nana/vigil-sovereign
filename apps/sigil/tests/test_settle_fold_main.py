@@ -88,8 +88,8 @@ _iss = itertools.count(1)
 ORG, HOST, NOW = "org_a", "apme.cm", 2000.0
 LATE = NOW + 3600.0 + 100.0                    # past a 1h lease's not_after + the sweep ttl (50)
 MLATE = NOW + 8 * 3600 + 2 * 86400             # past a default (8h) lease window + a 1-day ttl (metered helpers)
-USAGE = mm.Usage(output_tokens=10_650)
-USAGE_COST = 266_250_000                       # 54 credits with the test markup below
+USAGE = mm.Usage(output_tokens=8_640)          # W2c-1: exactly 54 credits at the published rate card (6.25 mc each)
+USAGE_COST = 266_250_000                       # the provider cost the meter records
 _TEST_MARKUP_INPUT = "0.5"                     # the meter tests' fixture input (see test_metered_billing)
 
 
@@ -858,7 +858,7 @@ def test_a_meter_retry_writes_no_decision(flag, monkeypatch):
         assert gov.watcher().drain().get("deferred") == 1 and _avail(s) == 100
         live.commit(grant, rid, USAGE, USAGE_COST, request_id="r2", now=NOW)
         out = gov.watcher().drain()
-        assert out["settled"] == 1 and _avail(s) == 1_000 - 107      # charged FRESH: both responses
+        assert out["settled"] == 1 and _avail(s) == 1_000 - 108      # charged FRESH: both responses (2 x 54)
     finally:
         live.shutdown()
 

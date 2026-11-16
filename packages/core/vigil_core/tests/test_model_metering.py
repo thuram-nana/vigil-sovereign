@@ -167,9 +167,9 @@ def test_the_target_margin_is_required_exact_and_bounded():
 
 
 def test_a_retired_pricing_setting_is_refused():
-    # ONE pricing number: a deploy still carrying an earlier knob is refused, whatever its value, so it can never
-    # sit next to the margin unnoticed
-    assert mm.OBSOLETE_PRICING_ENVS == ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K")
+    # a deploy still carrying a retired pricing knob is refused, whatever its value, so it can never sit in a deploy
+    # unnoticed (the per-run floor joined them on 2026-11-16: a metered run is charged exactly what it used)
+    assert mm.OBSOLETE_PRICING_ENVS == ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K", "VIGIL_RUN_FLOOR_CREDITS")
     assert mm.obsolete_pricing_settings({mm.MARGIN_ENV: "0.5"}) == ()
     for name in mm.OBSOLETE_PRICING_ENVS:
         for value in ("", "3", "junk"):
@@ -178,8 +178,8 @@ def test_a_retired_pricing_setting_is_refused():
             for fn in (mm.target_margin, mm.billing_markup):
                 with pytest.raises(mm.MeteringError) as exc:
                     fn(env)
-                assert str(exc.value) == (f"{name} is set: remove it; the only pricing input is "
-                                          f"VIGIL_BILLING_TARGET_MARGIN")
+                assert str(exc.value) == (f"{name} is set: remove it; it is a retired pricing setting (a customer "
+                                          f"is charged from the published rate card)")
     both = {n: "1" for n in mm.OBSOLETE_PRICING_ENVS}
     assert mm.obsolete_pricing_settings(both) == mm.OBSOLETE_PRICING_ENVS
     with pytest.raises(mm.MeteringError, match="VIGIL_BILLING_MARKUP_K is set"):
@@ -200,11 +200,15 @@ def test_the_cancel_settlement_defaults_to_metered_and_refuses_an_unknown_value(
     assert mm.CANCEL_POLICIES == ("metered", "refund")
 
 
-def test_the_floor_parses_and_refuses_junk():
-    assert mm.run_floor_credits({}) == 25 and mm.run_floor_credits({mm.FLOOR_ENV: "0"}) == 0
-    for bad in ("-1", "2.5", "x"):
-        with pytest.raises(mm.MeteringError):
-            mm.run_floor_credits({mm.FLOOR_ENV: bad})
+def test_the_floor_is_a_retired_setting():
+    # owner decision 2026-11-16: a metered run is charged exactly what it used — there is no per-run minimum, and a
+    # deploy that still sets one is refused (never silently ignored)
+    assert mm.FLOOR_ENV == "VIGIL_RUN_FLOOR_CREDITS" and mm.FLOOR_ENV in mm.OBSOLETE_PRICING_ENVS
+    assert not hasattr(mm, "run_floor_credits") and not hasattr(mm, "DEFAULT_FLOOR_CREDITS")
+    assert "run_floor_credits" not in mm.__all__
+    for value in ("", "0", "25"):
+        with pytest.raises(mm.MeteringError, match="VIGIL_RUN_FLOOR_CREDITS is set"):
+            mm.target_margin({mm.MARGIN_ENV: "0.5", mm.FLOOR_ENV: value})
 
 
 def test_credits_round_up_and_clamp():

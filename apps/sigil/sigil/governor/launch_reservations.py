@@ -36,8 +36,8 @@ assert_no_offense()
 from . import key_history as _kh  # noqa: E402
 from .authn import verify_signed  # noqa: E402
 from .launch_settlement import (  # noqa: E402
-    _SETTLED_CORE_V1, _SETTLED_CORE_V2, LAUNCH_SETTLED_SIGNAL, SETTLE_PLAN_PREFIX, SETTLE_WALLET_PREFIX,
-    SettlementEvidence, _decision_from,
+    LAUNCH_SETTLED_SIGNAL, SETTLE_PLAN_PREFIX, SETTLE_WALLET_PREFIX, SettlementEvidence, decision_of,
+    verified_settle_core,
 )
 from .metering import _PLAN_DEBIT_CORE, _PLAN_GRANT_CORE, PLAN_DEBIT_SIGNAL, PLAN_GRANT_SIGNAL  # noqa: E402
 from .postpaid import (  # noqa: E402
@@ -208,9 +208,9 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
             s, n = p.get("slug"), p.get("nonce")
             if not (isinstance(s, str) and isinstance(n, str) and s and n):
                 continue
-            # any owner-signed decision record SETTLES the lease, a malformed or legacy one included (exactly as
-            # scan_settlement reads it)
-            lease, cores = (s, n), (_SETTLED_CORE_V2, _SETTLED_CORE_V1)
+            # any owner-signed decision record (v3, v2 or the legacy v1) SETTLES the lease, a malformed one included
+            # (exactly as scan_settlement reads it: verified_settle_core below)
+            lease, cores = (s, n), ()
         elif sig in _RESERVE:
             prefix, core, bucket = _RESERVE[sig]
             lease, cores = _lease_of(p.get("entry_id"), prefix), (core,)
@@ -234,7 +234,8 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
         if resolver is None:
             resolver = _kh.key_resolver(store, current=trusted_pubkey)
         key_at = resolver.at(r.seq)
-        matched = next((c for c in cores if verify_signed(p, c, key_at)), None)
+        matched = (verified_settle_core(p, key_at) if sig == LAUNCH_SETTLED_SIGNAL
+                   else next((c for c in cores if verify_signed(p, c, key_at)), None))
         if matched is None:
             continue                                  # fail-closed: unsigned / forged / wrong-epoch record
         if bucket is None:
@@ -245,7 +246,7 @@ def scan_reservations(store, trusted_pubkey: Optional[str], *, org_id: Optional[
                     ev.landed.add(tag)
                 else:                                 # the FIRST verified decision record (a later one is skipped above)
                     ev.record_seq = int(r.seq)
-                    ev.decision = _decision_from(p) if matched is _SETTLED_CORE_V2 else None
+                    ev.decision = decision_of(p, matched)
                     ev.malformed = ev.decision is None
             continue
         res = ix.reservations.get(key)

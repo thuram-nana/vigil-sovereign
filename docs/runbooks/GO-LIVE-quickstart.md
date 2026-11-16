@@ -157,9 +157,12 @@ elsewhere, change `--sovereign-addr` to match (`vigil doctor` reports a mismatch
 screens federate to an offense console and API on this host (127.0.0.1:8787 / :8799) when you run them
 (`docs/architecture/HA-PROFILE.md` §1.1). Do not also run a plain `vigil up` on this host.
 
-**Settings every settling process must share.** `VIGIL_SETTLE_SPINE_RECORD` and the metered-settle pricing
-(`VIGIL_BILLING_TARGET_MARGIN`, `VIGIL_RUN_FLOOR_CREDITS`, `VIGIL_BILLING_CANCEL_SETTLEMENT`) must hold the same
-value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. Either:
+**Settings every settling process must share.** `VIGIL_SETTLE_SPINE_RECORD` and what a metered settle charges by
+(`VIGIL_RATE_CARD` when you override the published rates, `VIGIL_BILLING_CANCEL_SETTLEMENT`) must hold the same
+value in the cockpit, the customer edge, the settle drain and the shell that runs `sigil ops-sweep`. With metered
+billing on, `VIGIL_SETTLE_SPINE_RECORD` must be on (`vigil doctor`: a hard issue otherwise). A metered run is charged
+exactly what it used, so `VIGIL_RUN_FLOOR_CREDITS` is retired: remove it wherever it is set (`vigil doctor` reports it
+as a hard issue, and metered launches and settles wait until it is gone). Either:
 
 1. set each once in `$SIGIL_HOME/sigil.env` — every sigil process reads it beneath its own env file, and so does
    a shell that exports the cockpit's `SIGIL_HOME` — or
