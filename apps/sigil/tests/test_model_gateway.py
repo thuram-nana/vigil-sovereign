@@ -1248,8 +1248,11 @@ def test_a_crashed_gateways_leftovers_never_block_a_settle(upstream, tmp_path, m
     # the restarted gateway records the leftover as it starts: nobody needs to touch the launch for it to settle
     server = _start(upstream, d)
     try:
-        assert [ln["kind"] for ln in _lines(d, g)] == ["open", "orphan"]
-        assert server.gateway.meter._daily.get(gw._utc_day(NOW), 0) >= reserved     # and the day counts it
+        lines = _lines(d, g)
+        assert [ln["kind"] for ln in lines] == ["open", "orphan"]
+        # ... and the day counts it: the day the restarted gateway recorded the orphan on (its own wall clock), not
+        # the test's pinned NOW — a run that crosses UTC midnight puts the two on different days
+        assert server.gateway.meter._daily.get(gw._utc_day(float(lines[1]["ts"])), 0) >= reserved
         t = gw.GrantMeter(d).close(g.meter_id, now=NOW)                 # a live gateway, yet no MeterBusy
         assert (t.cost_nano, t.unconfirmed_nano, t.closed) == (0, reserved, True)
     finally:

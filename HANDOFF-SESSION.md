@@ -150,6 +150,10 @@ workflows or test layout.
 - **Snapshot-seeded folds:** never key a cache on `(base_seq, snapshot_seq)` alone — the neutered-control tests
   (`test_snapshot_fold_{wallet,metering,subscription}.py`) swap the seed under the same boundary. S0 keys on the
   loaded `SnapshotState` **by value** (see §4.2).
+- **Midnight-crossing tests.** `apps/sigil/tests/test_model_gateway.py` pins `NOW` to noon UTC of the day the module
+  is IMPORTED, while a restarted gateway stamps the orphans it records with the real clock. A CI run that starts
+  before 00:00 UTC and reaches such a test after it fails (#1130 hit it). Assert a day from the record's OWN `ts`, never
+  from `NOW`, wherever the gateway wrote it on its own clock; re-check by shifting `NOW` back 86,400 s locally.
 - **Monitoring subscription plans** must be catalog plan ids (`aegis_observe_1h|5h`, `aegis_respond_1h|5h`).
 - **A lock bump must also regenerate the committed offense SBOM.** After changing
   `engine/crucible/framework/v2/requirements.lock.txt`, run `cd engine/crucible && python3 -m
