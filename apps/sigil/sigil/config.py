@@ -299,6 +299,16 @@ def customer_checkout_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_onboarding_enabled() -> bool:
+    """True iff the customer app shows the onboarding guide (`VIGIL_CUSTOMER_ONBOARDING` affirmative): a skippable
+    click-through tour after a person's first sign-in in a browser, a Guide screen in the top bar (testing a host,
+    Red-Pen on GitHub, AEGIS monitoring, billing) and the VIGIL wordmark brightening and dimming while a screen loads.
+    OFF by default: the guide walks through flows that must be live first (launching from the app, Red-Pen, the
+    monitoring screen). Read when the customer edge starts (it is written into the page), so a change takes effect at
+    the edge's next start."""
+    return (os.environ.get("VIGIL_CUSTOMER_ONBOARDING") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_ios_install_banner_enabled() -> bool:
     """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
     carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
