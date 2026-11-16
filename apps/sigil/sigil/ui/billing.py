@@ -67,6 +67,60 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
     }
 
 
+def billing_rates() -> dict[str, Any]:
+    """The published usage rates (pricing design §0.2), in credits only. Rates are public: the same card for every
+    tenant, read from ``vigil_core.rate_card`` (the owner's ``VIGIL_RATE_CARD`` override when set). Nothing here
+    estimates or quotes what an assessment will cost (design §0.9)."""
+    from vigil_core.rate_card import rate_card
+    return {"rates": rate_card().published()}
+
+
+def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_dir, limit: int = 500) -> dict[str, Any]:
+    """The per-charge usage statement of ONE org, newest first: each metered AI request of each of the org's scans,
+    priced line by line from the published rate card (operation, time, quantity, unit rate, credits). Tenant-scoped:
+    only the org's own owner-signed launch reservations are read, and each scan's meter is found from its
+    ``(slug, nonce)`` alone, so another tenant's usage is structurally never in the result. A meter whose hash chain
+    does not verify is reported as unavailable, never priced. Every amount is in credits; the model is never named.
+    PURE read: no key, no lock, no write."""
+    from vigil_core.model_grant import meter_id
+    from vigil_core.rate_card import format_credits, rate_card
+
+    from ..governor.launch_reservations import scan_reservations
+    from ..model_gateway import GrantMeter
+
+    card = rate_card()
+    meter = GrantMeter(meter_dir)
+    ix = scan_reservations(store, trusted_pubkey, org_id=org_id)
+    scans: list[dict[str, Any]] = []
+    charges: list[dict[str, Any]] = []
+    total_mc = 0
+    for r in sorted(ix.reservations.values(), key=lambda r: r.seq, reverse=True):
+        if r.org_id != org_id:
+            continue
+        scan: dict[str, Any] = {"scan": r.slug, "launch": r.nonce, "started_at": r.issued_at}
+        try:
+            records = meter.usage_records(meter_id(r.slug, r.nonce))
+        except ValueError:
+            scan.update(status="unavailable", detail="this scan's usage record failed its integrity check")
+            scans.append(scan)
+            continue
+        scan_mc = 0
+        for rec in records:
+            lines = card.ai_lines(rec["usage"])
+            amount = sum(ln.amount_mc for ln in lines)
+            scan_mc += amount
+            charges.append({"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": "AI analysis",
+                            "lines": [ln.as_dict() for ln in lines], "credits": format_credits(amount),
+                            "amount_mc": amount})
+        total_mc += scan_mc
+        scan.update(status="ok", requests=len(records), credits=format_credits(scan_mc), amount_mc=scan_mc)
+        scans.append(scan)
+    charges.sort(key=lambda c: c["ts"], reverse=True)
+    n = max(1, min(int(limit), 5000))
+    return {"org_id": org_id, "currency": "credits", "scans": scans, "charges": charges[:n],
+            "count": len(charges), "credits": format_credits(total_mc), "amount_mc": total_mc}
+
+
 def _invoice_json(inv) -> dict[str, Any]:
     return {"invoice_id": inv.invoice_id, "kind": inv.kind, "price_id": inv.price_id,
             "amount_minor": inv.amount_minor, "currency": inv.currency, "credits": inv.credits,

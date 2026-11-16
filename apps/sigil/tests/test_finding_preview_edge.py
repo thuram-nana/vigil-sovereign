@@ -23,7 +23,8 @@ from sigil.ui import custui
 from sigil.ui.target_authorization import _customer_slug
 
 _SCANNED = {"/api/customer/billing", "/api/customer/invoices", "/api/customer/assessments",
-            "/api/customer/assessments/findings", "/api/customer/assets", "/api/customer/notifications"}
+            "/api/customer/assessments/findings", "/api/customer/assets", "/api/customer/notifications",
+            "/api/customer/billing/rates", "/api/customer/billing/usage"}
 _FIELDS = ("HTV", "RC", "SUM", "OCD", "AM")
 
 
@@ -76,6 +77,8 @@ def test_no_locked_detail_leaves_any_customer_read_route(tmp_path, monkeypatch):
         for path in sorted(_SCANNED):
             code, body = _get(op, ep, path)
             blob += json.dumps(body)
+            if path.startswith("/api/customer/billing/"):              # the W1 rates + usage reads are live
+                assert code == 200 and body.get("rates", body.get("currency")), (path, code, body)
         for ref in refs[1:]:
             for f in _FIELDS:
                 assert f"S-{f}-{ref}" not in blob, (ref, f)

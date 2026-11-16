@@ -1694,6 +1694,10 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)
         if action == "billing_invoices":
             return p.customer_invoices(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "billing_rates":
+            return p.customer_billing_rates(requester, str(body.get("org_id", "")), ip=ip)
+        if action == "billing_usage":
+            return p.customer_billing_usage(requester, str(body.get("org_id", "")), ip=ip)
         if action == "assessment_summary":
             return p.customer_assessments(requester, str(body.get("org_id", "")), ip=ip)
         if action == "assessment_findings":

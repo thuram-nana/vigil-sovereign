@@ -2072,6 +2072,30 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_billing",
                                    lambda s, o: _billing.billing_overview(s, o, now=_t.time()))
 
+    def customer_billing_rates(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """The published usage rates (credits only), for a member of the session org."""
+        from vigil_core.rate_card import RateCardError
+
+        from . import billing as _billing
+        try:
+            return self._customer_read(requester, requester_org_id, "view_billing", lambda s, o: _billing.billing_rates())
+        except RateCardError:
+            raise ProvisionDenied("the published rates are unavailable") from None
+
+    def customer_billing_usage(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """The session org's per-charge usage statement (credits only)."""
+        from vigil_core.rate_card import RateCardError
+
+        from .. import config as _config
+        from . import billing as _billing
+        pub = getattr(self.orgs, "trusted_pubkey", None)
+        try:
+            return self._customer_read(
+                requester, requester_org_id, "view_billing",
+                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR))
+        except RateCardError:
+            raise ProvisionDenied("the published rates are unavailable") from None
+
     def customer_invoices(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         from . import billing as _billing
         return self._customer_read(requester, requester_org_id, "view_invoices",
