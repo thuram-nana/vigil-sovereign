@@ -25,8 +25,9 @@
 >   are green (§15.1). **The complete list of what is left to code is §15.11.**
 > - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
 >   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
->   gates (§6); the floor is retired. **One OPEN owner question** waits for W5 (§11.8): are disputed credits removed
->   on `charge.dispute.created` / `funds_withdrawn`, or only when the dispute closes `lost`?
+>   gates (§6); the floor is retired. **W5 dispute timing DECIDED (owner, 2026-11-16):** remove the disputed credits
+>   when the dispute OPENS (`charge.dispute.created` / `funds_withdrawn`) and give them back automatically when it is
+>   won (`funds_reinstated` / closed `won`). **Red-Pen (D) is built together with the customer app's Code screen.**
 > - Every money number the program needs is now **decided by the owner** (§11.2, §12, §13). Nothing in this file is
 >   a proposal waiting for a decision except where it says "OPEN".
 >
@@ -1880,6 +1881,10 @@ customer run's model call leaves the engine — the items M1c-2a already did are
 - **Payment provider = Stripe**; Flutterwave development paused (its code stays; build nothing new on it).
 - **NYX** is the UI-only display name of the Strix engine (§15.4).
 - **The floor is retired** (W2c-1) and the rate card is the customer price (§11.2).
+- **W5 disputes** (pick-one, 2026-11-16): remove the disputed credits when the dispute OPENS / funds are withdrawn;
+  re-grant automatically when it is won. **Red-Pen R1–R5 is built together with the Code screen** (tests use a fake
+  GitHub; the owner registers the real GitHub App). The owner asked for ALL of §15.11 B + C (+ D) to be built by
+  parallel agents and strictly tested (2026-11-16).
 - The owner asked what "the margin value" means: `VIGIL_BILLING_TARGET_MARGIN` is the owner's private target margin
   over the METERED AI cost, set at deploy and never in the repo. Since W2c-1 no settle reads it: customers are charged
   from the published rate card; the margin sets the USD ceiling of a run's model grant (`billing_markup()` at publish)
@@ -1962,9 +1967,9 @@ required checks are green, bringing the other up to date with `main` after each 
    `think_claude` / `codefix_runner` grant use; Strix children via the loopback gateway; `uiproxy._child_env` key
    exclusion + the doctor HARD issue; the wire test (§15.5).
 4. **W4** — worker-time and premium-API metering (§11.7).
-5. **W5** — chargebacks / reversals / refunds + the low-balance alert, on Stripe. **Owner question first** (pick-one):
-   remove disputed credits when the dispute opens / funds are withdrawn, or only when it closes `lost` (re-grant on
-   `funds_reinstated`)? (§11.8)
+5. **W5** — chargebacks / reversals / refunds + the low-balance alert, on Stripe. **Decided (owner, 2026-11-16):**
+   remove the disputed credits when the dispute opens / funds are withdrawn; re-grant automatically when it is won
+   (`funds_reinstated` / closed `won`) (§11.8).
 6. **W6** — the customer billing dashboard (§11.9; see C5 below for its screens).
 7. **G1** — the gateway at scale: capacity from the provider's rate-limit headers, per-tenant fair share, a
    provider-account pool, the loss alarm (§11.11).
@@ -2001,7 +2006,7 @@ spending limit, System reviews on demand / on a schedule, Fix this.
 
 **F. Owner-only (never the agent's, §6).** The GitHub App registration; the live Stripe secret + webhook secret; the
 Anthropic key + workspace + spend limits; the target margin and trial credits at deploy; the AWS KMS key for
-evidence-DEK escrow; DNS / TLS; the CodeQL by-design dismissals; the W5 dispute question. The three production flips
+evidence-DEK escrow; DNS / TLS; the CodeQL by-design dismissals. The three production flips
 are delegated to the agent behind their gates (§6) once a deployment exists.
 
 **G. Housekeeping.** Delete merged `claude/*` branches; split `test_smt_unknown_region_is_a_noop_without_z3` into its
