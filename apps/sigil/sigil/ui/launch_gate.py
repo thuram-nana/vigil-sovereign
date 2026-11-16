@@ -500,6 +500,12 @@ class LaunchGate:
                     return {"ok": False, "error": "this launch is settling or settled: its meter is closed"}
                 if is_lease_settled(self._seam_base(), s, non):
                     return {"ok": False, "error": "this launch is settled"}
+                from vigil_integration.live.credit_lease_pause import lease_pause_state
+                paused = lease_pause_state(self._seam_base(), s, non)
+                if paused is True:
+                    return {"ok": False, "paused": True, "error": "this launch is paused"}
+                if paused is not False:
+                    return {"ok": False, "retry": True, "error": "this launch's pause state cannot be read"}
             except (OSError, ValueError):
                 return busy
             k = 1
@@ -1322,7 +1328,10 @@ class LaunchGate:
             grant_id=hashlib.sha256(f"model-grant\0{slug}\0{nonce}".encode()).hexdigest()[:32],
             org_id=str(doc.org_id), engagement_slug=slug, nonce=nonce, model=model,
             effort=run_tier.effort_for(run_tier.run_tier_for_units(units)),
-            cap_nano_usd=mm.usd_cap_nano_for_credits(units, markup=mm.billing_markup()),
+            # W2b-2: the binding customer limit is the run's prepaid ALLOWANCE, checked by the gateway on every
+            # request; the grant's cap is only a technical ceiling on what a leaked token could ever spend
+            cap_nano_usd=mm.usd_cap_nano_for_credits(max(units, mm.grant_ceiling_credits()),
+                                                     markup=mm.billing_markup()),
             not_after=float(doc.not_before.timestamp()) + MAX_GRANT_LIFETIME_S,
             issued_at=float(doc.not_before.timestamp()))
         token = encode_token(grant, owner_key.private_key_b64)
@@ -1658,3 +1667,47 @@ class LaunchGate:
             out["expired"] = True
             out["detail"] = _RESUMED_EXPIRED_DETAIL
         return out
+
+
+class LaunchAllowance:
+    """W2b-2 — the model gateway's in-process view of a metered launch's ALLOWANCE: what its prepaid reservation lets
+    it be charged, in milli-credits (``1000 x (the lease's units + its allowance extensions)``), the org's wallet
+    balance, and the extension itself. The gateway runs in the cockpit process, beside the Provisioner, so this is a
+    direct call into :class:`LaunchGate` — never a keyless hop.
+
+    The lease's units come from the OWNER-SIGNED lease on the seam, verified under the pinned owner key and bound to
+    the grant's ``(org, slug, nonce)``; an unverifiable lease, a different launch on the seam, or an extension whose
+    amount left the live spine window gives None (the gateway then refuses the request as retryable — never admits
+    it blind)."""
+
+    def __init__(self, gate: "LaunchGate"):
+        self.gate = gate
+
+    def allowance_mc(self, grant: Any) -> Optional[int]:
+        from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
+        from vigil_integration.live.credit_lease_broker import read_credit_lease
+        kp = self.gate.owner_key
+        if kp is None:
+            return None
+        b = read_credit_lease(self.gate._seam_base(), str(grant.engagement_slug))
+        if b is None:
+            return None
+        root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, _why = verify_credit_launch_lease(b.signed_lease, root)
+        doc = b.signed_lease.document
+        if not ok or (doc.org_id, doc.engagement_slug, doc.nonce) != (grant.org_id, grant.engagement_slug,
+                                                                       grant.nonce):
+            return None
+        ext, pruned = self.gate.extension_total(grant.org_id, grant.engagement_slug, grant.nonce)
+        if pruned:
+            return None
+        return 1000 * (int(doc.units_reserved) + ext)
+
+    def available_credits(self, grant: Any) -> int:
+        return int(self.gate.wallet.available(grant.org_id))
+
+    def extend(self, grant: Any, credits: int) -> dict:
+        import time as _time
+        return self.gate.extend_reservation(org_id=grant.org_id, slug=grant.engagement_slug, nonce=grant.nonce,
+                                            credits=int(credits), now=_time.time())

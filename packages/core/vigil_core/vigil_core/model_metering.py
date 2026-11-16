@@ -447,6 +447,24 @@ def cancel_settlement(env: Optional[Mapping[str, str]] = None) -> str:
     return raw
 
 
+#: W2b-2: the technical ceiling of one run's model grant, in credits. The binding customer limit is the run's prepaid
+#: ALLOWANCE (the gateway checks it on every request); this only bounds what a leaked grant token could ever spend.
+#: An engineering bound, not a price; the owner may lower or raise it.
+GRANT_CEILING_ENV = "VIGIL_GRANT_CEILING_CREDITS"
+DEFAULT_GRANT_CEILING_CREDITS = 1_000_000
+
+
+def grant_ceiling_credits(env: Optional[Mapping[str, str]] = None) -> int:
+    """``VIGIL_GRANT_CEILING_CREDITS`` (a whole number >= 1), default :data:`DEFAULT_GRANT_CEILING_CREDITS`."""
+    env = os.environ if env is None else env
+    raw = (env.get(GRANT_CEILING_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_GRANT_CEILING_CREDITS
+    if not raw.isdigit() or not raw.isascii() or int(raw) < 1:
+        raise MeteringError(f"{GRANT_CEILING_ENV} must be a whole number of credits >= 1, got {raw!r}")
+    return int(raw)
+
+
 def run_floor_credits(env: Optional[Mapping[str, str]] = None) -> int:
     """The per-run minimum charge in credits (``VIGIL_RUN_FLOOR_CREDITS``, default 25 = $0.25)."""
     env = os.environ if env is None else env

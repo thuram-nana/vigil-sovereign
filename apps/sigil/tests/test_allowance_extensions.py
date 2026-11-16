@@ -278,3 +278,57 @@ def test_a_flat_launch_settle_never_reads_extensions(monkeypatch):
 
     monkeypatch.setattr(g, "extension_total", boom)
     assert g.settle_launch(signed_lease=r["lease"], consumed_units=900, now=NOW, expect_org_id=ORG)["ok"]
+
+
+# ---------------- W2b-2: the gateway's in-process allowance source ----------------
+
+@pytest.mark.parametrize("pause_state", [True, None], ids=["paused", "unreadable"])
+def test_an_extension_refuses_a_paused_or_unreadable_launch(monkeypatch, pause_state):
+    from vigil_integration.live import credit_lease_pause
+    s = _store()
+    _owner, r, g = _reserve(s)
+    before = _avail(s)
+    monkeypatch.setattr(credit_lease_pause, "lease_pause_state", lambda *_a: pause_state)
+    out = g.extend_reservation(org_id=ORG, slug=r["slug"], nonce=r["nonce"], credits=100, now=NOW)
+    assert not out["ok"] and not out.get("insufficient")
+    assert out.get("paused") if pause_state else out.get("retry")
+    assert _avail(s) == before and g.extension_total(ORG, r["slug"], r["nonce"]) == (0, False)
+
+def _grant_of(r, **over):
+    base = dict(grant_id="0" * 32, org_id=ORG, engagement_slug=r["slug"], nonce=r["nonce"], model="claude-opus-4-8",
+                effort="high", cap_nano_usd=10 ** 13, not_after=NOW + 86_400, issued_at=NOW - 60)
+    base.update(over)
+    return ModelGrant(**base)
+
+
+def test_the_allowance_source_reads_the_signed_lease_and_its_extensions():
+    from sigil.ui.launch_gate import LaunchAllowance
+    s = _store()
+    _owner, r, g = _reserve(s)
+    src = LaunchAllowance(g)
+    grant = _grant_of(r)
+    assert src.allowance_mc(grant) == 900_000 and src.available_credits(grant) == 4_100
+    assert src.extend(grant, 300)["ok"]
+    assert src.allowance_mc(grant) == 1_200_000 and src.available_credits(grant) == 3_800
+    assert src.allowance_mc(_grant_of(r, nonce="other")) is None                 # not the launch on the seam
+    assert src.allowance_mc(_grant_of(r, org_id="org_b")) is None
+
+
+def test_the_allowance_source_never_reads_a_pruned_extension(monkeypatch):
+    from sigil.ui.launch_gate import LaunchAllowance
+    s = _store()
+    _owner, r, g = _reserve(s)
+    assert g.extend_reservation(org_id=ORG, slug=r["slug"], nonce=r["nonce"], credits=50, now=NOW)["ok"]
+    monkeypatch.setattr(g.wallet, "reserve_debit", lambda oid, eid: None)
+    assert LaunchAllowance(g).allowance_mc(_grant_of(r)) is None                  # the gateway refuses, retryable
+
+
+def test_the_published_grant_is_capped_at_the_ceiling_not_the_reservation(monkeypatch):
+    from vigil_integration.live.model_grant_broker import read_model_grant
+    from vigil_core.model_grant import decode_token
+    monkeypatch.setenv(mm.GRANT_CEILING_ENV, "12345")
+    s = _store()
+    owner, r, _g = _reserve(s)
+    bundle = read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"], expect_nonce=r["nonce"])
+    grant, _why = decode_token(bundle.token, owner.public_key_b64)
+    assert grant.cap_nano_usd == mm.usd_cap_nano_for_credits(12_345, markup=mm.billing_markup())

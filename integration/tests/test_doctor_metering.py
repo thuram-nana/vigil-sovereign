@@ -361,3 +361,13 @@ def test_the_published_rate_card_is_checked():
         section, issues, _notes = d._metering_report({**ON, "VIGIL_RATE_CARD": bad}, probe=_alive)
         assert any("VIGIL_RATE_CARD" in i for i in issues), (bad, issues)
         assert section.get("ok") is False
+
+
+def test_the_allowance_chunk_and_the_grant_ceiling_are_checked():
+    """W2b-2: the allowance chunk and the grant ceiling are whole numbers >= 1; a bad one is a hard issue."""
+    assert d._metering_report({**ON, "VIGIL_ALLOWANCE_CHUNK_CREDITS": "250",
+                               mm.GRANT_CEILING_ENV: "50000"}, probe=_alive)[1] == []
+    for name, bad in (("VIGIL_ALLOWANCE_CHUNK_CREDITS", "0"), ("VIGIL_ALLOWANCE_CHUNK_CREDITS", "1.5"),
+                      (mm.GRANT_CEILING_ENV, "0"), (mm.GRANT_CEILING_ENV, "-3"), (mm.GRANT_CEILING_ENV, "lots")):
+        issues = d._metering_report({**ON, name: bad}, probe=_alive)[1]
+        assert any(name in i for i in issues), (name, bad, issues)

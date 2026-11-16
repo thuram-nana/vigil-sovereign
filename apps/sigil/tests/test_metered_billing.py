@@ -21,7 +21,7 @@ model grant BEFORE the lease) → usage on the run's gateway meter → a governa
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * mint the grant even with metering off                     -> test_metering_off_mints_nothing_and_settles_flat
-  * cap the grant at the units instead of usd_cap(units)      -> test_the_grant_is_bound_to_the_verified_lease
+  * cap the grant at the units instead of the ceiling (W2b-2) -> test_the_grant_is_bound_to_the_verified_lease
   * publish the lease when the grant cannot be minted         -> test_a_refused_pricing_config_refuses_the_publish
   * publish without a cancel policy                           -> test_a_refused_pricing_config_refuses_the_publish
   * charge a failed run its usage                             -> test_each_outcome_settles_metered
@@ -191,7 +191,9 @@ def test_the_grant_is_bound_to_the_verified_lease(monkeypatch, units, effort):
         lease.org_id, lease.engagement_slug, lease.nonce)
     assert grant.model == "claude-opus-4-8"
     assert grant.effort == effort == run_tier.effort_for(run_tier.run_tier_for_units(units))
-    assert grant.cap_nano_usd == mm.usd_cap_nano_for_credits(units, markup=Fraction(2)) == units * 5_000_000
+    # W2b-2: the grant's cap is the technical ceiling (the binding limit is the prepaid allowance the gateway checks)
+    assert grant.cap_nano_usd == mm.usd_cap_nano_for_credits(mm.DEFAULT_GRANT_CEILING_CREDITS, markup=Fraction(2)) \
+        == mm.DEFAULT_GRANT_CEILING_CREDITS * 5_000_000
     # valid from the lease's start for the longest grant lifetime: always past the lease window (at most a week),
     # so a run armed late in its window, or resumed after it, keeps its model access until its settle closes the meter
     assert (grant.issued_at, grant.not_after) == (lease.not_before.timestamp(),
