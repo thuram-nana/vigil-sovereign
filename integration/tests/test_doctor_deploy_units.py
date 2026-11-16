@@ -400,19 +400,19 @@ def test_ops_sweep_alone_disagreeing_is_a_note_naming_what_its_shell_must_export
 
 
 def test_a_pricing_value_missing_from_the_ops_sweep_shell_is_a_note_that_never_prints_it(tmp_path):
-    v = f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n"
+    v = f"VIGIL_RATE_CARD={_VALUE}\n"
     _money_host(tmp_path, cockpit=v, drain=v)
     sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
     notes = [n for n in notes if not n.startswith("VIGIL_SETTLE_SPINE_RECORD is off in every process")]
     assert issues == [] and len(notes) == 1
     assert "set in cockpit, settle-drain; unset in ops-sweep" in notes[0]
-    assert "export the same VIGIL_BILLING_TARGET_MARGIN as ~/.sigil/cockpit.env" in notes[0]
+    assert "export the same VIGIL_RATE_CARD as ~/.sigil/cockpit.env" in notes[0]
     assert _VALUE not in notes[0] and _VALUE not in repr(sec)
 
 
 def test_one_value_in_sigil_env_reaches_every_unit(tmp_path):
     # the remedy the issue names: set it once in $SIGIL_HOME/sigil.env, which every sigil process reads
-    _money_host(tmp_path, sigil_env=f"VIGIL_SETTLE_SPINE_RECORD=1\nVIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
+    _money_host(tmp_path, sigil_env=f"VIGIL_SETTLE_SPINE_RECORD=1\nVIGIL_RATE_CARD={_VALUE}\n")
     sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
     assert issues == [] and notes == [] and set(sec["flags"]["VIGIL_SETTLE_SPINE_RECORD"].values()) == {"on"}
 
@@ -447,13 +447,25 @@ def test_golive_durable_volume_with_the_flag_once_in_its_sigil_env_agrees_everyw
 
 
 def test_a_pricing_setting_set_in_the_cockpit_only_is_a_hard_issue_and_its_value_is_never_printed(tmp_path):
-    _money_host(tmp_path, cockpit=f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
+    _money_host(tmp_path, cockpit=f"VIGIL_RATE_CARD={_VALUE}\n")
     sec, issues, _notes = dc.must_match_report(tmp_path, _REPO)
     assert len(issues) == 1
-    assert issues[0].startswith("VIGIL_BILLING_TARGET_MARGIN must be the same")
+    assert issues[0].startswith("VIGIL_RATE_CARD must be the same")
     assert "set in cockpit; unset in settle-drain" in issues[0]
     assert _VALUE not in issues[0] and _VALUE not in repr(sec)
-    assert "customer" not in sec["flags"]["VIGIL_BILLING_TARGET_MARGIN"]   # the customer edge does not settle
+    assert "customer" not in sec["flags"]["VIGIL_RATE_CARD"]               # the customer edge does not settle
+
+
+def test_what_a_settle_charges_by_must_match_and_the_owner_margin_is_not_asked_of_the_settlers(tmp_path):
+    # W2c-1: a metered settle charges at the rate card's price (VIGIL_RATE_CARD prices a response recorded before the
+    # gateway priced responses itself), so the card must match; no settle reads the owner's target margin, so it is
+    # never required beside the settle drain or in the operator's shell (it stays in the cockpit, which publishes)
+    names = {name for name, _kind, _procs in dc.MUST_MATCH}
+    assert {"VIGIL_RATE_CARD", "VIGIL_BILLING_CANCEL_SETTLEMENT", "VIGIL_SETTLE_SPINE_RECORD"} <= names
+    assert "VIGIL_BILLING_TARGET_MARGIN" not in names and "VIGIL_RUN_FLOOR_CREDITS" not in names
+    _money_host(tmp_path, cockpit=f"VIGIL_BILLING_TARGET_MARGIN={_VALUE}\n")
+    _sec, issues, notes = dc.must_match_report(tmp_path, _REPO)
+    assert issues == [] and not any("VIGIL_BILLING_TARGET_MARGIN" in n for n in notes)
 
 
 def test_two_different_pricing_values_are_a_hard_issue(tmp_path):
@@ -500,7 +512,7 @@ def _isolated(monkeypatch, tmp_path) -> Path:
     monkeypatch.setenv("SIGIL_HOME", str(home / ".sigil"))
     monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "base"))
     (tmp_path / "base").mkdir()
-    for k in ("VIGIL_SETTLE_SPINE_RECORD", "VIGIL_BILLING_TARGET_MARGIN", "VIGIL_RUN_FLOOR_CREDITS",
+    for k in ("VIGIL_SETTLE_SPINE_RECORD", "VIGIL_BILLING_TARGET_MARGIN", "VIGIL_RUN_FLOOR_CREDITS", "VIGIL_RATE_CARD",
               "VIGIL_BILLING_CANCEL_SETTLEMENT", "SERVICE_RESULT"):
         monkeypatch.delenv(k, raising=False)
     return home

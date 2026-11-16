@@ -50,7 +50,9 @@ from vigil_integration.jobs.completion_signal import emit_completion_signal
 _iss = itertools.count(1)
 ORG, HOST, NOW = "org_a", "apme.cm", 2000.0
 TEST_MARGIN = "0.5"                              # a test fixture (markup 2), not a pricing decision
-BIG = mm.Usage(output_tokens=300_000)            # $7.50 x 2 = 1,500 credits: more than the 900 the lease holds
+# W2c-1: priced at the published rate card — 240,000 output tokens at the default 6.25 milli-credits each = exactly
+# 1,500 credits: more than the 900 the lease holds (BIG_COST is what the meter records as the provider's cost)
+BIG = mm.Usage(output_tokens=240_000)
 BIG_COST = 7_500_000_000
 
 
@@ -237,12 +239,16 @@ def test_e7_never_releases_an_extended_launch():
 
 
 def test_the_paused_abandoned_charge_clamps_to_lease_and_extensions():
-    from sigil.ops_sweeps import _paused_metered_charge
+    from sigil.ops_sweeps import _paused_metered_use_mc
     s = _store()
     _owner, r, g = _reserve(s)
     assert g.extend_reservation(org_id=ORG, slug=r["slug"], nonce=r["nonce"], credits=1_000, now=NOW)["ok"]
     _spend(r, BIG, BIG_COST)
-    assert _paused_metered_charge(g, r["slug"], r["nonce"], 900, NOW, org_id=ORG) == 1_500
+    used = _paused_metered_use_mc(g, r["slug"], r["nonce"], NOW)
+    assert used == 1_500_000                                             # exactly what the run used (milli-credits)
+    out = g.settle_launch(signed_lease=r["lease"], consumed_units=0, consumed_mc=used, now=NOW, basis="sweep:paused")
+    # clamped to ALL the launch holds (900 + the 1,000 extension), never to the lease alone
+    assert out["ok"] and out["net_spend"] == 1_500 and _avail(s) == 5_000 - 1_500
 
 
 def test_extension_entry_ids_are_canonical():

@@ -7,10 +7,12 @@ by the owner's paused-launch rule; with ``config.paused_expiry_settle_enabled()`
 same pass, once the settle grace has passed.
 
 HOW MUCH — the sweep's rule for a launch the customer paused and never resumed (owner decision 2026-11-13), the same
-code (``ops_sweeps._paused_metered_charge``): a launch published METERED is charged its confirmed metered use (its
-meter is closed first; ``min(reservation, max(floor, ceil(cost x markup)))``, and nothing when it made no request
-and has no confirmed spend); a FLAT launch has no meter, so it is refunded in full. The decision record (settle
-record on) carries the sweep's bases (``sweep:paused`` / ``sweep:refund``).
+code (``ops_sweeps._paused_metered_use_mc``): a launch published METERED is charged its confirmed metered use,
+exactly (its meter is closed first; ``settle_launch(consumed_mc=...)`` keeps the whole credits of it, clamped to the
+reservation, and carries the sub-credit rest as the org's remainder — W2c-1), and nothing when it made no request
+and has no confirmed spend; a FLAT launch has no meter, so it is refunded in full. The decision record carries the
+sweep's bases (``sweep:paused`` / ``sweep:refund``): an exact charge always records it, a refund with the settle
+record on.
 
 EXACTLY ONCE, and never ahead of a completion: each settle goes through ``LaunchGate.settle_launch`` — owner-pinned
 lease verify, then the cross-process settle lock and the spine + seam "already settled?" check — so it can never
@@ -56,7 +58,7 @@ def _still_due(precondition: "Callable[[], Optional[str]]", base: str, slug: str
 
 def _settle_one(gate: Any, d: Any, *, now: float, spool: Path, base: str, grace: Optional[float]) -> dict:
     from .ops_sweeps import (
-        _moved, _paused_metered_charge, _pending_completions, _settle_precondition, _SweepDefer,
+        _moved, _paused_metered_use_mc, _pending_completions, _settle_precondition, _SweepDefer,
     )
     slug, nonce = d.slug, d.nonce
     signed = d.bundle.signed_lease
@@ -69,19 +71,20 @@ def _settle_one(gate: Any, d: Any, *, now: float, spool: Path, base: str, grace:
         metered = bool(gate._launch_was_metered(slug, nonce))
     except OSError as e:
         return {"status": "deferred", "error": f"billing mode unreadable: {type(e).__name__}"}
-    consumed = 0
+    consumed_mc: Optional[int] = None
     if metered:
         try:
-            consumed = _paused_metered_charge(gate, slug, nonce, int(signed.document.units_reserved), now,
-                                              org_id=str(signed.document.org_id))
+            consumed_mc = _paused_metered_use_mc(gate, slug, nonce, now)
         except _SweepDefer as e:
             return {"status": e.status, "error": str(e)}
         except ValueError as e:
             return {"status": "settle_failed", "error": f"the run's model meter is broken: {e}"}
     refuse_if = _still_due(_settle_precondition(spool, (slug, nonce), base, metered=metered, paused=True),
                            base, slug, nonce, d.not_after, now, grace)
-    r = gate.settle_launch(signed_lease=signed.model_dump(mode="json"), consumed_units=consumed, now=now,
-                           basis=("sweep:paused" if consumed > 0 else "sweep:refund"), refuse_if=refuse_if)
+    exact = {"consumed_mc": consumed_mc} if consumed_mc is not None else {}   # W2c-1: a metered charge
+    r = gate.settle_launch(signed_lease=signed.model_dump(mode="json"), consumed_units=0, now=now,
+                           basis=("sweep:paused" if consumed_mc is not None else "sweep:refund"), refuse_if=refuse_if,
+                           **exact)
     if r.get("refused"):
         return {"status": str(r["refused"])}
     if not r.get("ok") and r.get("retry"):
@@ -90,8 +93,8 @@ def _settle_one(gate: Any, d: Any, *, now: float, spool: Path, base: str, grace:
         return {"status": "settle_failed", "error": str(r.get("error", ""))}
     if r.get("action") == "launch_already_settled":
         return {"status": "settle_completed", **_moved(r)} if r.get("rolled_forward") else {"status": "already_settled"}
-    if consumed > 0:
-        return {"status": "charged_paused", "charged": consumed, "refunded": int(r.get("refunded", 0))}
+    if consumed_mc is not None:
+        return {"status": "charged_paused", "charged": int(r.get("net_spend", 0)), "refunded": int(r.get("refunded", 0))}
     return {"status": "settled", "refunded": int(r.get("refunded", 0))}
 
 
@@ -99,7 +102,7 @@ def settle_expired_paused_launches(gate: Any, *, now: float, completion_spool: "
                                    scope: str = "*", grace: Optional[float] = None) -> "list[dict]":
     """Settle every expired paused launch due at ``now`` on ``gate``'s seam (only ``scope``'s, unless ``*``).
     Returns one row per due launch: ``status`` ``settled`` (with ``refunded``), ``charged_paused`` (with ``charged``
-    and ``refunded``), ``settle_completed`` (a recorded settle finished), ``already_settled``, a refusal reason
+    — the whole credits the exact settle kept, W2c-1 — and ``refunded``), ``settle_completed`` (a recorded settle finished), ``already_settled``, a refusal reason
     (``completion_pending`` / ``completion_unknown`` / ``pause_changed`` / ``pause_unknown`` / ``not_due``),
     ``deferred`` / ``deferred_config`` (retried next pass), ``settle_failed`` (with ``error``), or ``legacy_hold`` /
     ``journal_unreadable`` (held for the owner by the seam migration; never settled here). Never raises for one

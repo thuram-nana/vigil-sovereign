@@ -30,8 +30,8 @@ from vigil_core import model_metering as mm
 ORG, HOST = "org_a", "apme.cm"
 GRACE = 86400.0                                        # the default VIGIL_PAUSED_EXPIRY_SETTLE_GRACE_SECONDS
 TEST_MARGIN = "0.5"                                    # a test fixture (markup 2), not a pricing decision
-USAGE = mm.Usage(output_tokens=10_650)
-USAGE_COST = 266_250_000                               # 54 credits at the test markup (as test_metered_billing)
+USAGE = mm.Usage(output_tokens=8_640)                  # W2c-1: exactly 54 credits at the published rate card
+USAGE_COST = 266_250_000                               # (as test_metered_billing); the provider cost the meter records
 
 _iss = itertools.count(1)
 

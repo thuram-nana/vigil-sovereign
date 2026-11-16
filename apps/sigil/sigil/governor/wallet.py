@@ -53,6 +53,7 @@ from .orgs import org_tenant_id  # noqa: E402  (org_id validation == tenant-id v
 from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors accounts._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
+from vigil_core.rate_card import MC_PER_CREDIT  # noqa: E402  (W2c-1: one credit = 1,000 milli-credits)
 
 CREDIT_GRANT_SIGNAL = "governor.credit_grant"
 CREDIT_DEBIT_SIGNAL = "governor.credit_debit"
@@ -110,6 +111,13 @@ def _check_entry_id(entry_id: Optional[str]) -> str:
     return e
 
 
+#: W2c-1 — ``governor.launch_settlement.LAUNCH_SETTLED_SIGNAL``, repeated here because that module imports this one (a
+#: test pins the two equal). Its v3 (exact) decision records carry the org's sub-credit usage: the wallet fold sums
+#: their ``consumed_mc`` (``launch_settlement.fold_exact_settle``), so one fold read gives the balance AND the remainder.
+_SETTLED_SIGNAL = "governor.launch_settled"
+#: ``launch_settlement.EXACT_RECORD_VERSION``, repeated for the same reason (pinned equal by the same test).
+_EXACT_SETTLED_VERSION = 3
+
 #: the entry-id prefix of a launch's RESERVE debits (``governor.launch_reservations.RESERVE_WALLET_PREFIX``; repeated
 #: here because that module imports this one). The fold remembers each such debit's amount (W2b: a launch's
 #: allowance extensions are settled from them).
@@ -117,15 +125,22 @@ _RESERVE_WALLET = "reserve-wallet:"
 
 
 def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set,
-                         reserve_amounts: "Optional[dict]" = None) -> None:
-    """Fold ONE record into (granted, debited, seen) — THE wallet fold body, shared by the full `_fold` and the
+                         reserve_amounts: "Optional[dict]" = None, usage: "Optional[dict]" = None) -> None:
+    """Fold ONE record into (granted, debited, seen, usage) — THE wallet fold body, shared by the full `_fold` and the
     verified fold cache (Front C S0c) so the two can never diverge. With ``reserve_amounts``, each launch RESERVE
     debit's credits are also kept by ``(org_id, entry_id)`` — for the LIVE window only: a hard prune carries the
-    totals and the seen-set across, never the per-entry amounts (a caller that needs a pruned one holds the settle)."""
+    totals and the seen-set across, never the per-entry amounts (a caller that needs a pruned one holds the settle).
+    W2c-1: an exact (v3) settle decision adds its ``consumed_mc`` to ``usage[org]`` once per lease — the seen-set is
+    updated whatever ``usage`` is, so every fold of the spine consumes the same keys."""
     p = r.payload
     if not isinstance(p, dict):
         return
     sig = p.get("signal")
+    if sig == _SETTLED_SIGNAL:
+        if p.get("v") == _EXACT_SETTLED_VERSION:  # only an exact decision carries usage (no work for v1 / v2)
+            from .launch_settlement import fold_exact_settle   # lazy: that module imports this one
+            fold_exact_settle(p, resolver.at(r.seq), seen, usage if usage is not None else {})
+        return
     if sig != CREDIT_GRANT_SIGNAL and sig != CREDIT_DEBIT_SIGNAL:
         return
     oid = p.get("org_id")
@@ -154,18 +169,20 @@ def _apply_wallet_record(r, resolver, granted: dict, debited: dict, seen: set,
 
 
 class _WalletView:
-    """The cached wallet fold: exactly the full fold's (granted, debited, seen), plus the live window's launch
+    """The cached wallet fold: exactly the full fold's (granted, debited, seen, usage), plus the live window's launch
     reserve debit amounts (``reserve_amounts``)."""
 
-    __slots__ = ("granted", "debited", "seen", "reserve_amounts")
+    __slots__ = ("granted", "debited", "seen", "usage", "reserve_amounts")
 
-    def __init__(self, granted: dict, debited: dict, seen: set, reserve_amounts: "Optional[dict]" = None) -> None:
+    def __init__(self, granted: dict, debited: dict, seen: set, usage: "Optional[dict]" = None,
+                 reserve_amounts: "Optional[dict]" = None) -> None:
         self.granted, self.debited, self.seen = granted, debited, seen
+        self.usage: dict = {} if usage is None else usage
         self.reserve_amounts: dict = {} if reserve_amounts is None else reserve_amounts
 
 
 def _wallet_step(view: _WalletView, r, resolver) -> None:
-    _apply_wallet_record(r, resolver, view.granted, view.debited, view.seen, view.reserve_amounts)
+    _apply_wallet_record(r, resolver, view.granted, view.debited, view.seen, view.reserve_amounts, view.usage)
 
 
 _WALLET_FOLD = FoldCache("governor.wallet", step=_wallet_step)
@@ -177,6 +194,7 @@ class Balance:
     org_id: str
     granted: int        # Σ honored grant credits (lifetime)
     debited: int        # Σ honored debit credits (lifetime)
+    usage_mc: int = 0   # W2c-1: Σ consumed_mc of the org's exact (metered) settles (lifetime, milli-credits)
 
     @property
     def available(self) -> int:
@@ -184,6 +202,22 @@ class Balance:
         ledger never debits past the balance, so `granted - debited` is already >= 0 in practice; the clamp is
         defence-in-depth against a forged over-debit (which can only harm the attacker's own tenant)."""
         return max(0, self.granted - self.debited)
+
+    @property
+    def remainder_mc(self) -> int:
+        """W2c-1: the org's sub-credit metered usage not yet debited as a whole credit (0..999 milli-credits)."""
+        return self.usage_mc % MC_PER_CREDIT
+
+    @property
+    def exact_available_mc(self) -> int:
+        """The exact wallet balance in milli-credits: whole credits less the remainder already used."""
+        return MC_PER_CREDIT * self.available - self.remainder_mc
+
+    @property
+    def spendable(self) -> int:
+        """The whole credits the exact wallet balance can hold (never negative) — what a WALLET draw (an allowance
+        extension) may take."""
+        return max(0, self.exact_available_mc) // MC_PER_CREDIT
 
 
 class WalletRegistry:
@@ -237,15 +271,15 @@ class WalletRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
-    def _seed(self, snap) -> "tuple[tuple[dict, dict, set], int]":
-        """((granted, debited, seen), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, set, dict], int]":
+        """((granted, debited, seen, usage), since): the HARD-PRUNE SEED from `snap`, or the empty genesis start when
         the trusted pubkey differs from the snapshot's."""
         if not seed_applies(snap, self.trusted_pubkey, self.store):
             # Only when NOTHING is pruned (`seed_applies` raises on a pruned spine it cannot seed, and carries
             # the seed across a rotation the succession validates): the genesis scan is then the whole fold.
-            return ({}, {}, set()), -1
+            return ({}, {}, set(), {}), -1
         return (dict(snap.wallet_granted_map()), dict(snap.wallet_debited_map()),
-                set(snap.wallet_seen_set())), snap.base_seq - 1
+                set(snap.wallet_seen_set()), dict(snap.wallet_usage_map())), snap.base_seq - 1
 
     def _cached(self, reader):
         """`reader(view)` over the verified incremental wallet fold (`fold_read.cached_read`, flag-gated), else
@@ -257,7 +291,7 @@ class WalletRegistry:
         return cached_read(_WALLET_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
                            reader=reader)
 
-    def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
+    def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set, dict[Any, int]]:
         """Fold the spine into (granted_total, debited_total, seen) where `seen` is the set of consumed
         (org_id, entry_id) idempotency keys. Each signed record is authenticated under the owner pubkey valid
         AT ITS SEQ; a record whose (org_id, entry_id) is already in `seen` is ignored (idempotent — the
@@ -268,26 +302,31 @@ class WalletRegistry:
         genesis (byte-identical under the empty snapshot)."""
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        (granted, debited, seen), since = self._seed(snap)
+        (granted, debited, seen, usage), since = self._seed(snap)
         for r in self.store.iter_records(since_seq=since):
-            _apply_wallet_record(r, resolver, granted, debited, seen)
-        return granted, debited, seen
+            _apply_wallet_record(r, resolver, granted, debited, seen, usage=usage)
+        return granted, debited, seen, usage
 
     def balance(self, org_id: str) -> Balance:
         """The current credit position for `org_id` (fail-closed: an unknown/empty org reads as all-zero)."""
         if not isinstance(org_id, str) or not org_id:
             return Balance(org_id="", granted=0, debited=0)
         hit = self._cached(lambda v: Balance(org_id=org_id, granted=v.granted.get(org_id, 0),
-                                             debited=v.debited.get(org_id, 0)))
+                                             debited=v.debited.get(org_id, 0), usage_mc=v.usage.get(org_id, 0)))
         if hit is not _UNCACHED:
             return hit
-        granted, debited, _ = self._fold()
-        return Balance(org_id=org_id, granted=granted.get(org_id, 0), debited=debited.get(org_id, 0))
+        granted, debited, _, usage = self._fold()
+        return Balance(org_id=org_id, granted=granted.get(org_id, 0), debited=debited.get(org_id, 0),
+                       usage_mc=usage.get(org_id, 0))
 
     def available(self, org_id: str) -> int:
         """Spendable credits for `org_id` right now (0 for unknown). The scalar the later pre-scan / mid-scan
         gates test ( > 0 to proceed, fail-closed)."""
         return self.balance(org_id).available
+
+    def remainder_mc(self, org_id: str) -> int:
+        """W2c-1: the org's sub-credit metered usage not yet debited (0..999 milli-credits; 0 for unknown)."""
+        return self.balance(org_id).remainder_mc
 
     def has_grant_entry(self, org_id: str, entry_id: str) -> bool:
         """True iff an owner-signed GRANT with this (org_id, entry_id) has been folded — membership of the fold's
@@ -325,21 +364,23 @@ class WalletRegistry:
             return hit
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        (granted, debited, seen), since = self._seed(snap)
+        (granted, debited, seen, usage), since = self._seed(snap)
         amounts: dict = {}
         for r in self.store.iter_records(since_seq=since):
-            _apply_wallet_record(r, resolver, granted, debited, seen, amounts)
+            _apply_wallet_record(r, resolver, granted, debited, seen, amounts, usage)
         return amounts.get(key)
 
     def balances(self) -> list[Balance]:
         """Every tenant with ledger activity, in org_id order (the per-tenant billing view)."""
-        hit = self._cached(lambda v: _balances(v.granted, v.debited))
+        hit = self._cached(lambda v: _balances(v.granted, v.debited, v.usage))
         if hit is not _UNCACHED:
             return hit
-        granted, debited, _ = self._fold()
-        return _balances(granted, debited)
+        granted, debited, _, usage = self._fold()
+        return _balances(granted, debited, usage)
 
 
-def _balances(granted: dict, debited: dict) -> list[Balance]:
+def _balances(granted: dict, debited: dict, usage: "Optional[dict]" = None) -> list[Balance]:
+    usage = usage or {}
     orgs = sorted(set(granted) | set(debited))
-    return [Balance(org_id=str(o), granted=granted.get(o, 0), debited=debited.get(o, 0)) for o in orgs]
+    return [Balance(org_id=str(o), granted=granted.get(o, 0), debited=debited.get(o, 0),
+                    usage_mc=usage.get(o, 0)) for o in orgs]

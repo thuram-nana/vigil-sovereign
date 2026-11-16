@@ -11,12 +11,15 @@ model grant BEFORE the lease) → usage on the run's gateway meter → a governa
   * a pricing configuration the metering core refuses — including no target margin or no cancel-settlement
     policy — refuses the publish: no lease, no grant (a run never starts unmetered); a failed lease write removes
     the grant it published;
-  * a completed run pays ``min(reservation, max(floor, ceil(confirmed cost x markup / $0.01)))``; a cancelled run
-    pays that under the ``metered`` policy and 0 under ``refund``; a failed run pays 0; only confirmed spend is billed;
+  * a completed run pays exactly what it used, at the published rate card's price, never more than the reservation
+    (W2c-1: whole credits, the sub-credit rest carried as the org's remainder; the per-run floor is retired, owner
+    decision 2026-11-16); a cancelled run pays that under the ``metered`` policy and 0 under ``refund``; a failed run
+    pays 0; only confirmed spend is billed;
   * EVERY settle path (completion, customer cancel, abandoned-lease sweep) closes the meter — the gateway admits
     nothing after it — and removes the grant;
-  * a request still in flight, or a pricing setting unset at settle time, DEFERS the settle (back to incoming/,
-    retried next drain); a broken meter refuses it (quarantined) — nothing is refunded or charged on a guess;
+  * a request still in flight, a malformed rate card or a retired pricing setting at settle time DEFERS the settle
+    (back to incoming/, retried next drain); a broken meter refuses it (quarantined) — nothing is refunded or charged
+    on a guess; a metered settle reads no target margin;
   * the cockpit starts the gateway once from the environment, and not at all when it is disabled or has no key.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
@@ -31,7 +34,7 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * quarantine (or settle) a busy meter instead of deferring  -> test_a_request_in_flight_defers_the_settle
   * settle with the policy unset instead of deferring         -> test_an_unset_policy_at_settle_defers_it
   * bill unconfirmed spend                                    -> test_only_confirmed_spend_is_billed
-  * ignore the reservation clamp                              -> test_the_floor_and_the_clamp_hold
+  * ignore the reservation clamp                              -> test_nothing_used_is_free_and_the_clamp_holds
   * settle on a corrupt meter                                 -> test_a_corrupt_meter_refuses_the_settle
 """
 from __future__ import annotations
@@ -64,8 +67,11 @@ from vigil_integration.live.model_grant_broker import grant_path, read_model_gra
 _iss = itertools.count(1)
 ORG, HOST, NOW = "org_a", "apme.cm", 2000.0
 TEST_MARGIN = "0.5"                              # a test fixture (markup 2), not a pricing decision
-USAGE = mm.Usage(output_tokens=10_650)
-USAGE_COST = 266_250_000                         # $0.26625 x 2 = 53.25 -> 54 credits
+# W2c-1: a metered run is charged exactly what it used at the published rate card's price — 8,640 output tokens at
+# the default 6.25 milli-credits each = exactly 54 credits (no remainder carried) — and the provider cost of those
+# tokens is what the meter records as spend ($25/MTok: $0.216)
+USAGE = mm.Usage(output_tokens=8_640)
+USAGE_COST = 216_000_000
 
 
 @pytest.fixture(autouse=True)
@@ -169,7 +175,7 @@ def test_a_launch_published_flat_settles_flat_after_the_flag_is_on(monkeypatch):
     assert pub["ok"]
     _metered(monkeypatch)                              # the owner turns metering on while it runs
     assert _settle(s, owner, r, "completed")["settled"] == 1
-    assert _avail(s) == 100                            # the flat rule (the whole reservation), never the floor
+    assert _avail(s) == 100                            # the flat rule (the whole reservation)
     assert not config.MODEL_METER_DIR.exists()         # and no meter was opened for it
 
 
@@ -356,7 +362,7 @@ def test_a_launch_marked_metered_is_re_published_with_its_grant(monkeypatch):
 
 def test_a_launch_started_flat_is_re_published_flat_after_the_flag_is_on(monkeypatch):
     # the billing mode is decided once, at the first publish: a double-click after the owner turns metering on must
-    # never switch a run already under way unmetered to metered (it would settle at the floor)
+    # never switch a run already under way unmetered to metered (it has no meter: what it used cannot be read)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, r, g, pub = _reserve(s)                                       # started flat
     assert pub["ok"]
@@ -366,7 +372,7 @@ def test_a_launch_started_flat_is_re_published_flat_after_the_flag_is_on(monkeyp
     assert read_model_grant(os.environ["VIGIL_BASE_DIR"], r["slug"]) is None
     assert not (config.MODEL_METER_DIR / f"{meter_id(r['slug'], r['nonce'])}.metered").exists()
     assert _settle(s, owner, r, "completed")["settled"] == 1
-    assert _avail(s) == 100                                              # the flat charge, never the floor
+    assert _avail(s) == 100                                              # the flat charge
 
 
 def test_the_customer_start_retried_after_the_flag_is_on_keeps_the_run_flat(monkeypatch):
@@ -519,7 +525,7 @@ def test_a_metered_launch_the_customer_paused_and_never_resumed_is_charged_for_w
 
 def test_a_paused_metered_launch_that_used_nothing_is_refunded(monkeypatch):
     """Charged for what it used: a paused launch with no model request and no confirmed spend (it may never have
-    started, e.g. the worker was down) used nothing, so it is refunded; the floor covers a run's start-up only."""
+    started, e.g. the worker was down) used nothing, so it is refunded."""
     from sigil.ops_sweeps import sweep_abandoned_reservations
     from vigil_integration.live.credit_lease_pause import record_lease_pause
     _metered(monkeypatch)
@@ -531,8 +537,9 @@ def test_a_paused_metered_launch_that_used_nothing_is_refunded(monkeypatch):
     assert _avail(s) == 1_000 and _closed(r)
 
 
-def test_a_paused_launch_with_one_request_and_no_confirmed_spend_pays_the_floor(monkeypatch):
-    """A request was made (the run started) but its spend was never confirmed: the run's start-up floor applies."""
+def test_a_paused_launch_with_one_request_and_no_confirmed_spend_is_refunded(monkeypatch):
+    """A request was made (the run started) but its spend was never confirmed: unconfirmed spend is VIGIL's cost (I9)
+    and the per-run floor is retired (owner decision 2026-11-16), so it used nothing billable — refunded in full."""
     from sigil.ops_sweeps import sweep_abandoned_reservations
     from vigil_integration.live.credit_lease_pause import record_lease_pause
     _metered(monkeypatch)
@@ -541,9 +548,8 @@ def test_a_paused_launch_with_one_request_and_no_confirmed_spend_pays_the_floor(
     _spend(r, mm.Usage(), 0, held=10 ** 9)
     record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
     done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
-    floor = mm.run_floor_credits()
-    assert [(x["status"], x["charged"]) for x in done] == [("charged_paused", floor)]
-    assert _avail(s) == 1_000 - floor
+    assert [(x["status"], x["refunded"]) for x in done] == [("refunded", 900)]
+    assert _avail(s) == 1_000
 
 
 def test_a_paused_charge_bills_only_confirmed_spend(monkeypatch):
@@ -671,7 +677,7 @@ def test_a_paused_charge_never_exceeds_the_reservation(monkeypatch):
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     _owner, r, g, _pub = _reserve(s)
-    _spend(r, USAGE, USAGE_COST * 20)                                    # ~1065 credits of use against 900 reserved
+    _spend(r, mm.Usage(output_tokens=20 * 8_640), USAGE_COST * 20)       # 1,080 credits of use against 900 reserved
     record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
     done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
     assert [(x["status"], x["charged"], x["refunded"]) for x in done] == [("charged_paused", 900, 0)]
@@ -702,10 +708,14 @@ def test_a_paused_charge_waits_on_its_pricing_configuration(monkeypatch):
     _owner, r, g, _pub = _reserve(s)
     _spend(r, USAGE, USAGE_COST)
     record_lease_pause(os.environ["VIGIL_BASE_DIR"], r["slug"], r["nonce"])
-    monkeypatch.delenv(mm.MARGIN_ENV)                                     # the margin is unset at sweep time
+    monkeypatch.setenv("VIGIL_RATE_CARD", "{not json")                    # the rate card is malformed at sweep time
     done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
     assert [x["status"] for x in done] == ["deferred_config"]
     assert _avail(s) == 100                                              # nothing settled; the next pass retries
+    monkeypatch.delenv("VIGIL_RATE_CARD")
+    monkeypatch.delenv(mm.MARGIN_ENV)                                     # no settle reads the margin (W2c-1)
+    done = sweep_abandoned_reservations(g, now=LATER, ttl_s=86400, apply=True, completion_spool=_spool())["items"]
+    assert [(x["status"], x["charged"]) for x in done] == [("charged_paused", 54)] and _avail(s) == 1_000 - 54
 
 
 def test_a_flat_launch_paused_and_abandoned_is_refunded(monkeypatch):
@@ -820,7 +830,7 @@ def test_a_request_in_flight_defers_the_settle(monkeypatch):
         live.commit(grant, rid, USAGE, USAGE_COST, request_id="r2", now=NOW)
         out = w.drain()
         assert out["settled"] == 1 and "deferred" not in out, out
-        assert _avail(s) == 1_000 - 107                                    # both responses: $0.5325 x 2 -> 107
+        assert _avail(s) == 1_000 - 108                                    # both responses: 2 x 54 credits
     finally:
         live.shutdown()
 
@@ -847,15 +857,25 @@ def test_a_mistyped_policy_at_settle_defers_it(monkeypatch):
     assert w.drain()["settled"] == 1 and _avail(s) == 1_000
 
 
-def test_an_unset_margin_at_settle_defers_a_charge_but_not_a_failure(monkeypatch):
+def test_a_malformed_rate_card_at_settle_defers_a_charge_but_not_a_failure(monkeypatch):
+    _metered(monkeypatch)
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, r, _g, _pub = _reserve(s)
+    _spend(r, USAGE, USAGE_COST)
+    monkeypatch.setenv("VIGIL_RATE_CARD", "{not json")
+    out = _settle(s, owner, r, "completed")
+    assert out["deferred"] == 1 and out["deferred_config"] == 1 and _avail(s) == 100   # a configuration wait: alarm
+    assert _settle(s, owner, r, "failed")["settled"] == 1 and _avail(s) == 1_000   # a failed run needs no price
+
+
+def test_a_metered_settle_reads_no_target_margin(monkeypatch):
+    """W2c-1: a metered run is settled at the rate card's price, exactly — an unset margin never holds a charge."""
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, r, _g, _pub = _reserve(s)
     _spend(r, USAGE, USAGE_COST)
     monkeypatch.delenv(mm.MARGIN_ENV)
-    out = _settle(s, owner, r, "completed")
-    assert out["deferred"] == 1 and out["deferred_config"] == 1 and _avail(s) == 100   # a configuration wait: alarm
-    assert _settle(s, owner, r, "failed")["settled"] == 1 and _avail(s) == 1_000   # a failed run needs no price
+    assert _settle(s, owner, r, "completed")["settled"] == 1 and _avail(s) == 1_000 - 54
 
 
 def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeypatch, tmp_path, capsys):
@@ -890,7 +910,7 @@ def test_the_settle_drain_fails_its_unit_while_a_charge_waits_on_pricing(monkeyp
     cli.cmd_settle_drain(a)                                              # transient only: no exit
 
 
-@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
+@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K", "VIGIL_RUN_FLOOR_CREDITS"])
 def test_flat_billing_ignores_a_retired_pricing_setting(monkeypatch, name):
     # the refusal guards metered pricing only: the default (flat) launch and settle never read a pricing setting
     monkeypatch.setenv(name, "2")
@@ -901,10 +921,10 @@ def test_flat_billing_ignores_a_retired_pricing_setting(monkeypatch, name):
     assert not config.MODEL_METER_DIR.exists()
 
 
-@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K"])
+@pytest.mark.parametrize("name", ["VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K", "VIGIL_RUN_FLOOR_CREDITS"])
 def test_a_retired_pricing_setting_at_settle_defers_a_charge(monkeypatch, name):
-    # the margin is the only pricing input: a stale second knob refuses to price, so the charge waits (it is not
-    # settled on a guess) until the setting is removed
+    # a stale pricing knob (the per-run floor included: retired by the owner on 2026-11-16) refuses to price, so the
+    # charge waits (it is not settled on a guess) until the setting is removed
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, r, _g, _pub = _reserve(s)
@@ -916,10 +936,10 @@ def test_a_retired_pricing_setting_at_settle_defers_a_charge(monkeypatch, name):
 
 
 @pytest.mark.parametrize("usage, cost, charged", [
-    (mm.Usage(), 0, 25),                                                 # nothing used: the floor
-    (mm.Usage(output_tokens=10 ** 6), 25_000 * 10 ** 6, 900),            # $25 x 2 = 5,000 credits: the clamp
+    (mm.Usage(), 0, 0),                                                  # nothing used: nothing charged (no floor)
+    (mm.Usage(output_tokens=10 ** 6), 25_000 * 10 ** 6, 900),            # 6,250 credits of use: the clamp
 ])
-def test_the_floor_and_the_clamp_hold(monkeypatch, usage, cost, charged):
+def test_nothing_used_is_free_and_the_clamp_holds(monkeypatch, usage, cost, charged):
     _metered(monkeypatch)
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, r, _g, _pub = _reserve(s)

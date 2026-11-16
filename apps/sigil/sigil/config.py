@@ -543,7 +543,12 @@ def settle_spine_record_enabled() -> bool:
     earlier launch in ``_earlier_launch_in_flight``; and the spine check in ``pause_launch``. Settle evidence already on the spine (a refund grant, a postpaid settle) is honoured either
     way. OWNER DECISION OD-4: set it IDENTICALLY for every process that settles — the cockpit, the customer
     server, the settle-drain and ``ops-sweep`` — or a process with it off settles without a record its crash
-    could be finished from."""
+    could be finished from.
+
+    W2c-1: it does NOT gate an EXACT (v3) decision record. A metered charge (``settle_launch(consumed_mc=...)``)
+    records its decision whatever this says — the record is the only place the org's sub-credit remainder moves — so
+    with it off a metered charge still appends exactly one record; flat, cancel and refund settles are unchanged.
+    The finish paths above stay gated, so `vigil doctor` reports metered billing with this off as a hard issue."""
     return (os.environ.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
