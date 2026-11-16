@@ -13,14 +13,16 @@
 > **⇒ TAKE OVER FROM §15 (the exact take-off point at the end of 2026-11-16), then read §0.**
 >
 > **Verified state at the end of 2026-11-16 (two local sessions):**
-> - `origin/main` = **`a43f8fd3`** (#1136). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
+> - `origin/main` = **`a43b4a31`** (#1139). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
 >   (W2b-2), **#1134 (W2b-3, `02bfcdcf`)**, **#1135 (Dependabot PR A: the z3-solver floor, `9eb4f64a`)**, **#1136
->   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are closed as
->   superseded (#1120 was closed earlier).
-> - **Open PRs:** **#1137** (this handoff), **#1138** (M1c-2a: a metered run reaches a model only through the gateway,
->   with its grant — engine guards + the Strix Opus 4.5+ prices), **#1139** (NYX: the UI-only display name of the
->   Strix engine). **Ready for its PR:** `claude/billing-w2c1-exact-settle` (W2c-1, exact milli-credit settlement + the
->   floor retired — code, tests and 23 mutants done; the full-suite run and the PR are the last steps). See §15.1.
+>   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**, **#1138 (M1c-2a: the engine guards + the Strix prices,
+>   `71610f3b`)**, **#1139 (NYX: the UI-only display name of the Strix engine, `a43b4a31`)**. Dependabot #1121, #1122,
+>   #1124, #1125, #1126 are closed as superseded (#1120 was closed earlier).
+> - **Open PRs:** **#1137** (this handoff), **#1140** (W2c-1: exact milli-credit settlement + the floor retired —
+>   `793cd477` + the type / wording fix `cb6645d7`, updated with `main`; its first CI run failed on the mypy ratchet and
+>   one stale wording pin, both fixed), **#1141** (the in-app onboarding guide: a skippable first-sign-in tour, the
+>   Guide screen with testing / Red-Pen on GitHub / AEGIS / billing, and the VIGIL wordmark loader — behind
+>   `VIGIL_CUSTOMER_ONBOARDING`, default OFF). Merge each when its 15 required checks are green (§15.1).
 > - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
 >   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
 >   gates (§6); the floor is retired. **One OPEN owner question** waits for W5 (§11.8): are disputed credits removed
@@ -336,6 +338,7 @@ record and is kept as history.
 |---|---|---|
 | `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
 | multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
+| `VIGIL_CUSTOMER_ONBOARDING` | the customer app's onboarding guide: the first-sign-in tour, the Guide screen and the wordmark loader (#1141) | owner, once the flows it walks through are live |
 | `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0: every request-path registry read — §4.2) + the cockpit's boot warm-up / audit thread | owner (production); tests set it |
 | `VIGIL_FOLD_CACHE_AUDIT_S` | seconds between the cockpit's rebuild-and-compare audits (default 21600; 0 = warm-up only) | operator |
 | `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (Stripe: `VIGIL_BILLING_PROVIDER=stripe` + `VIGIL_BILLING_ENABLE_STRIPE` + `VIGIL_STRIPE_SECRET_KEY` + `VIGIL_STRIPE_WEBHOOK_SECRET` + `VIGIL_STRIPE_API_VERSION`) | owner |
@@ -1527,13 +1530,14 @@ re-verify with §15.10 before acting (another session may have moved things sinc
 ### 15.1 Exact state
 | Item | State | Anchor |
 |---|---|---|
-| `origin/main` | **`a43f8fd3`** (merge of #1136) | `git log --first-parent --oneline origin/main` |
+| `origin/main` | **`71610f3b`** (merge of #1138) | `git log --first-parent --oneline origin/main` |
 | W2b-3 (explicit depth in the lease + the first allowance) | **MERGED** #1134 → `02bfcdcf` | §11.20 |
 | Dependabot **PR A** — z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras | **MERGED** #1135 → `9eb4f64a`; closed #1121, #1124, #1126 (pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`); #1120 had been closed earlier | §13.3 |
 | Dependabot **PR B** — the anthropic SDK 2.8 | **MERGED** #1136 → `a43f8fd3`; closed #1122, #1125 | §15.3 |
-| **W2c-1** — exact milli-credit settlement + the floor retired | **BUILT** on branch `claude/billing-w2c1-exact-settle` (`862a2640`): production code (`9c747e19`), the existing tests moved to the exact settle (`638bf8e9`), `test_exact_settle.py` 25 tests (`9cbb5ae5`), the cross-process and real-prune tests (`862a2640`); 23 mutants red; no PR yet | §15.2 — **the next action: full suites → PR** |
-| **NYX** — the agentic engine shown as "NYX" in the UI only | **PR #1139** (`5bf2cf3c`, on `a43f8fd3`): built, tested (762 UI-kit tests), 8 mutants red | §15.4 — merge when green |
-| **M1c-2a** — the engine guards + the Strix prices | **PR #1138** (`84c376b7`, on `a43f8fd3`): 17 mutants red | §15.5 — merge when green; then **M1c-2b** |
+| **W2c-1** — exact milli-credit settlement + the floor retired | **PR #1140** — the branch `claude/billing-w2c1-exact-settle` is now ONE squashed commit `793cd477` on `71610f3b` (the WIP history `9c747e19`…`862a2640` was folded into it); 23 mutants red; 769 targeted tests pass on it | §15.2 — merge when green |
+| **NYX** — the agentic engine shown as "NYX" in the UI only | **MERGED #1139** → `a43b4a31` (8 mutants red) | §15.4 |
+| **M1c-2a** — the engine guards + the Strix prices | **MERGED #1138** → `71610f3b` (17 mutants red) | §15.5 — next: **M1c-2b** |
+| **Onboarding guide** — first-time users, end to end | **PR #1141** (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 10 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 — merge when green; the owner turns the flag on once the flows it shows are live |
 | Everything after (W2c-2, W3, W4, W5, W6, G1, wallet E2E, R1–R5, Front C S1–S4, Gate 5, A1/O1/L1) | not started | §15.6, §5 |
 
 Strict branch protection ⇒ each open PR must be brought up to date with `main` after every merge (rebase, re-run CI).
@@ -1821,6 +1825,16 @@ customer run's model call leaves the engine — the items M1c-2a already did are
   whether `anthropic-zdr` counts as the grant backend.
 
 ### 15.6 After W2c-1, NYX and M1c-2 — the rest of the program (unchanged order, §5)
+0. **The onboarding guide** (owner request, 2026-11-16) = **#1141**, in the customer app itself: a skippable
+   click-through tour after a person's first sign-in (once per account per browser, localStorage
+   `vigil.guide.v1.<username>`; Skip / Esc / Finish recorded), a Guide screen (`#/guide`: 7 chapters — get started,
+   credits, prove control, test a host, Red-Pen and GitHub, AEGIS monitoring, statement — each step with its clicks,
+   "Go to <screen>", "Mark as done", "Replay the welcome tour"), and the VIGIL wordmark brightening and dimming while a
+   screen loads. Behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF): the guide walks through flows that must be live
+   before customers see it — launching / pausing from the app (the app still says "arrives with the run driver"), the
+   credit pause (W3), Red-Pen + the GitHub App (R1–R5; the owner registers the App), the Monitoring screen (only the
+   API exists today), the Team screen (still "soon"), the statement's balance-after (W2c-2 / W6). Keep its copy in step
+   with those slices as they land (the test pins the chapter / step ids and the copy rules).
 1. **W2c-2** (§11.5 j + k): `balance_after_mc` per statement line, "remaining" vs "available to start work"; take
    `ENVELOPE_TOKENS_PER_CREDIT` off every metered path (the EC-5 cost settle still multiplies the exact debit by it);
    show the customer the EXACT balance (floor of `exact_available_mc`) on `billing_overview` / the wallet card.
@@ -1864,6 +1878,10 @@ customer run's model call leaves the engine — the items M1c-2a already did are
   tampering, so they stay). Always `CRUCIBLE_ROOT=<worktree>/engine/crucible CRUCIBLE_ROOT_STRICT=1`.
 - **Stage by path, never `git add -A`:** tests regenerate `engine/crucible/targets/127-0-0-1/charter.md` (a stray copy
   nearly shipped in PR B).
+- **Run the mypy ratchet on every slice before its PR** (`PATH=<venv>/bin:$PATH bash tools/governance/mypy_ratchet.sh`):
+  #1140's first CI run failed on new type errors in three modules. Locally the ratchet also prints a STALE line for
+  `sigil/voice/components.py` (identical on `main`, an environment difference): read the module list it names, not
+  just the exit status.
 - **Fake `anthropic` modules in tests** have no `DefaultHttpxClient` — that is why `bounded_http_client()` returns
   None for them (43 console tests went red before that).
 - **`git fetch` over SSH can hang** — wrap it in `timeout 60`.
