@@ -13,16 +13,16 @@
 > **⇒ TAKE OVER FROM §15 (the exact take-off point at the end of 2026-11-16), then read §0.**
 >
 > **Verified state at the end of 2026-11-16 (two local sessions):**
-> - `origin/main` = **`a43b4a31`** (#1139). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
+> - `origin/main` = **`198b8f37`** (#1140). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
 >   (W2b-2), **#1134 (W2b-3, `02bfcdcf`)**, **#1135 (Dependabot PR A: the z3-solver floor, `9eb4f64a`)**, **#1136
 >   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**, **#1138 (M1c-2a: the engine guards + the Strix prices,
->   `71610f3b`)**, **#1139 (NYX: the UI-only display name of the Strix engine, `a43b4a31`)**. Dependabot #1121, #1122,
->   #1124, #1125, #1126 are closed as superseded (#1120 was closed earlier).
-> - **Open PRs:** **#1137** (this handoff), **#1140** (W2c-1: exact milli-credit settlement + the floor retired —
->   `793cd477` + the type / wording fix `cb6645d7`, updated with `main`; its first CI run failed on the mypy ratchet and
->   one stale wording pin, both fixed), **#1141** (the in-app onboarding guide: a skippable first-sign-in tour, the
->   Guide screen with testing / Red-Pen on GitHub / AEGIS / billing, and the VIGIL wordmark loader — behind
->   `VIGIL_CUSTOMER_ONBOARDING`, default OFF). Merge each when its 15 required checks are green (§15.1).
+>   `71610f3b`)**, **#1139 (NYX: the UI-only display name of the Strix engine, `a43b4a31`)**, **#1140 (W2c-1: exact
+>   milli-credit settlement + the floor retired, `198b8f37`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are
+>   closed as superseded (#1120 was closed earlier).
+> - **Open PRs:** **#1137** (this handoff) and **#1141** (the in-app onboarding guide: a skippable first-sign-in tour
+>   whose finished/skipped answer is kept SERVER-SIDE per account, the Guide screen covering the whole app, and the
+>   VIGIL wordmark loader — behind `VIGIL_CUSTOMER_ONBOARDING`, default OFF). Merge each when its 15 required checks
+>   are green (§15.1). **The complete list of what is left to code is §15.11.**
 > - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
 >   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
 >   gates (§6); the floor is retired. **One OPEN owner question** waits for W5 (§11.8): are disputed credits removed
@@ -30,8 +30,9 @@
 > - Every money number the program needs is now **decided by the owner** (§11.2, §12, §13). Nothing in this file is
 >   a proposal waiting for a decision except where it says "OPEN".
 >
-> Order of work (details §5): **#1130 → W2 → W3 → M1c-2 → W4 → W5 → W6 → G1 → Gate-5-lite (wallet E2E, simulated)
-> → Red-Pen R1–R5 → Front C S1–S4 → Gate 5 → A1**, with the two Dependabot PRs (§13.3) slotted in whenever CI is idle.
+> Order of work (details §5, the full list §15.11): **W2c-2 → W3 → M1c-2b → W4 → W5 → W6 → G1 → Gate-5-lite (wallet
+> E2E, simulated) → Red-Pen R1–R5 → Front C S1–S4 → Gate 5 → A1 / O1 / L1**, with the customer-app screens of §15.11 C
+> built alongside (each before the onboarding guide can be switched on).
 
 ---
 
@@ -338,7 +339,7 @@ record and is kept as history.
 |---|---|---|
 | `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
 | multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
-| `VIGIL_CUSTOMER_ONBOARDING` | the customer app's onboarding guide: the first-sign-in tour, the Guide screen and the wordmark loader (#1141) | owner, once the flows it walks through are live |
+| `VIGIL_CUSTOMER_ONBOARDING` | the customer app's onboarding guide: the first-sign-in tour (finished/skipped kept server-side per account: edge `GET/POST api/customer/onboarding` → provision `onboarding_get` / `onboarding_set` → `ui/onboarding_store.py`, `SIGIL_HOME/customer/onboarding/`; all three absent while OFF), the Guide screen and the wordmark loader (#1141) | owner, once the flows it walks through are live (§15.11 C) |
 | `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0: every request-path registry read — §4.2) + the cockpit's boot warm-up / audit thread | owner (production); tests set it |
 | `VIGIL_FOLD_CACHE_AUDIT_S` | seconds between the cockpit's rebuild-and-compare audits (default 21600; 0 = warm-up only) | operator |
 | `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (Stripe: `VIGIL_BILLING_PROVIDER=stripe` + `VIGIL_BILLING_ENABLE_STRIPE` + `VIGIL_STRIPE_SECRET_KEY` + `VIGIL_STRIPE_WEBHOOK_SECRET` + `VIGIL_STRIPE_API_VERSION`) | owner |
@@ -490,9 +491,9 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
    hardest money slice; read §11.3–§11.4 first. **W2a is merged (§11.17, #1131); W2b-1 is merged (§11.18,
    #1132, `cc227ccc`); W2b-2 is merged (§11.19, #1133, `454d9ac3`); W2b-3 is merged (§11.20, #1134, `02bfcdcf`)**;
-   **W2c-1** (f + g: exact settlement with the per-org remainder, the floor retired) is IN PROGRESS on
-   `claude/billing-w2c1-exact-settle` (§15.2); **W2c-2** (j + k: balance-after on the statement, the envelope
-   constant off every metered path, the exact customer-visible balance) follows it (§15.6).
+   **W2c-1** (f + g: exact settlement with the per-org remainder, the floor retired) is **merged (#1140,
+   `198b8f37`, §11.21 / §15.2)**; **W2c-2** (j + k: balance-after on the statement, the envelope constant off every
+   metered path, the exact customer-visible balance) is NEXT (§15.6, §15.11).
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -545,7 +546,7 @@ allowance chunks).
 
 ## 7. DEFINITION OF 100% — the closing gates
 1. ✅ Pause/resume chain (PR-1..PR-5). ✅ Front A (except the owner-blocked KMS escrow). ✅ Front B surface.
-2. ⏳ **The wallet** — W1 ✅ (#1130); W2a ✅, W2b-1 ✅, W2b-2 ✅, W2b-3 ✅ (#1131–#1134); W2c-1 in progress; W2c-2,
+2. ⏳ **The wallet** — W1 ✅ (#1130); W2a ✅, W2b-1 ✅, W2b-2 ✅, W2b-3 ✅ (#1131–#1134); W2c-1 ✅ (#1140); W2c-2,
    W3–W6 to build; the simulated wallet E2E (§11.12) green.
 3. ⏳ **Metered offense** — M1 ✅, M1c-1 ✅, M1c-2 in progress (part 1 of 6, §15.5); G1 to build.
 4. ⏳ **Red-Pen** — R1–R5 to build.
@@ -1219,7 +1220,7 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.21 W2c-1 — BUILT (branch `claude/billing-w2c1-exact-settle`, PR to follow): exact settlement, the floor retired
+### 11.21 W2c-1 — MERGED (#1140 → `198b8f37`, 2026-11-16): exact settlement, the floor retired
 Implements §11.5 (f) and (g). The decided design, everything built, the tests, the mutants and the risks are in §15.2;
 when its PR merges, move that text here. In one line: the owner-signed `governor.launch_settled` v3 decision is the only
 place an org's sub-credit remainder moves; the wallet fold derives the remainder from the lifetime Σ `consumed_mc`
@@ -1530,14 +1531,14 @@ re-verify with §15.10 before acting (another session may have moved things sinc
 ### 15.1 Exact state
 | Item | State | Anchor |
 |---|---|---|
-| `origin/main` | **`71610f3b`** (merge of #1138) | `git log --first-parent --oneline origin/main` |
+| `origin/main` | **`198b8f37`** (merge of #1140) | `git log --first-parent --oneline origin/main` |
 | W2b-3 (explicit depth in the lease + the first allowance) | **MERGED** #1134 → `02bfcdcf` | §11.20 |
 | Dependabot **PR A** — z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras | **MERGED** #1135 → `9eb4f64a`; closed #1121, #1124, #1126 (pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`); #1120 had been closed earlier | §13.3 |
 | Dependabot **PR B** — the anthropic SDK 2.8 | **MERGED** #1136 → `a43f8fd3`; closed #1122, #1125 | §15.3 |
-| **W2c-1** — exact milli-credit settlement + the floor retired | **PR #1140** — the branch `claude/billing-w2c1-exact-settle` is now ONE squashed commit `793cd477` on `71610f3b` (the WIP history `9c747e19`…`862a2640` was folded into it); 23 mutants red; 769 targeted tests pass on it | §15.2 — merge when green |
+| **W2c-1** — exact milli-credit settlement + the floor retired | **MERGED #1140** → `198b8f37` (squashed `793cd477` + the mypy / wording fix `cb6645d7`; 23 mutants red; all 15 required checks green) | §11.21, §15.2 (the build record) |
 | **NYX** — the agentic engine shown as "NYX" in the UI only | **MERGED #1139** → `a43b4a31` (8 mutants red) | §15.4 |
 | **M1c-2a** — the engine guards + the Strix prices | **MERGED #1138** → `71610f3b` (17 mutants red) | §15.5 — next: **M1c-2b** |
-| **Onboarding guide** — first-time users, end to end | **PR #1141** (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 10 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 — merge when green; the owner turns the flag on once the flows it shows are live |
+| **Onboarding guide** — first-time users, end to end | **PR #1141** (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, plus the SERVER-SIDE tour state (`ui/onboarding_store.py`, provision `onboarding_get` / `onboarding_set`, edge `api/customer/onboarding`), behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 42 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 item 0 — merge when green; the flag waits for the screens of §15.11 C |
 | Everything after (W2c-2, W3, W4, W5, W6, G1, wallet E2E, R1–R5, Front C S1–S4, Gate 5, A1/O1/L1) | not started | §15.6, §5 |
 
 Strict branch protection ⇒ each open PR must be brought up to date with `main` after every merge (rebase, re-run CI).
@@ -1548,7 +1549,7 @@ Strict branch protection ⇒ each open PR must be brought up to date with `main`
 2026-11-16, so `mergeStateStatus` is not a reliable gate: before merging, confirm each of the 15 names in
 `.github/required-status-checks.txt` is green on the PR head yourself.
 
-### 15.2 W2c-1 — finish it (the next action)
+### 15.2 W2c-1 — MERGED (#1140 → `198b8f37`); kept as the build record
 **What it is.** §11.5 (f) exact settlement and (g) the floor retired. The design was chosen on 2026-11-16 from three
 independent designs (a v3 decision record / a separate remainder ledger / "minimal"); the winner is "minimal": no new
 record type, fold, registry or lock.
@@ -1825,16 +1826,37 @@ customer run's model call leaves the engine — the items M1c-2a already did are
   whether `anthropic-zdr` counts as the grant backend.
 
 ### 15.6 After W2c-1, NYX and M1c-2 — the rest of the program (unchanged order, §5)
-0. **The onboarding guide** (owner request, 2026-11-16) = **#1141**, in the customer app itself: a skippable
-   click-through tour after a person's first sign-in (once per account per browser, localStorage
-   `vigil.guide.v1.<username>`; Skip / Esc / Finish recorded), a Guide screen (`#/guide`: 7 chapters — get started,
-   credits, prove control, test a host, Red-Pen and GitHub, AEGIS monitoring, statement — each step with its clicks,
-   "Go to <screen>", "Mark as done", "Replay the welcome tour"), and the VIGIL wordmark brightening and dimming while a
-   screen loads. Behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF): the guide walks through flows that must be live
-   before customers see it — launching / pausing from the app (the app still says "arrives with the run driver"), the
-   credit pause (W3), Red-Pen + the GitHub App (R1–R5; the owner registers the App), the Monitoring screen (only the
-   API exists today), the Team screen (still "soon"), the statement's balance-after (W2c-2 / W6). Keep its copy in step
-   with those slices as they land (the test pins the chapter / step ids and the copy rules).
+0. **The onboarding guide** (owner request, 2026-11-16) = **#1141**, in the customer app itself, behind
+   `VIGIL_CUSTOMER_ONBOARDING` (default OFF; all of it — the tour, the Guide tab, the loader, the server route and
+   the cockpit actions — is absent while OFF):
+   - **The tour** opens after a person's first sign-in and at each sign-in after it, **on any device, until they
+     finish or skip it**. The answer is kept SERVER-SIDE per account: the app asks `GET api/customer/onboarding`
+     (once per page load; `pending` / `done` / `skipped`) and records the outcome with `POST {state}`. The edge relays
+     for the SESSION's account only (never a body field) → provision `onboarding_get` / `onboarding_set` (flag-gated
+     in `_provision_dispatch` too) → `Provisioner.onboarding_state` / `onboarding_record` (ACTIVE customers only,
+     `done` / `skipped` only; the same answer again writes nothing and only the FIRST close is audited as
+     `provision.audit` `onboarding_record`, so a customer cannot grow the signed spine by re-posting) →
+     `ui/onboarding_store.py`: one sha256-named 0600 JSON file per account in `SIGIL_HOME/customer/onboarding/`
+     (0700; O_NOFOLLOW; anything odd reads `pending`; outside backups like the rest of `customer/` — a restore shows
+     the tour once more). The browser also remembers the answer (`vigil.guide.v1.<username>`): it decides only when
+     the server cannot be asked, and a tour closed here whose record did not land is re-sent, not re-shown. Skip /
+     Esc / Finish all record; the top-bar tab of each step is lit.
+   - **The Guide screen** (`#/guide`) covers the whole app: 8 chapters — Get started (account, sign-in incl. Google
+     and passkey, account security, install, password reset, sign-out), Your workspace (Overview, Team + roles,
+     notifications), Credits and plans (buy, plans, trial, how credits are spent, rates, low balance + auto top-up),
+     Prove you control a host, Test a host (launch, follow / pause / resume / cancel, findings, retest), Red-Pen and
+     GitHub (connect the App step by step, PR reviews, merge-blocking settings, whole-repo review, Fix this,
+     disconnect), AEGIS monitoring (plans, turn on, events, change / stop), Statement and invoices — plus a
+     Questions tab (9 answers). Each step: where, the clicks in order, why, "Go to <screen>", "Mark as done".
+     The Team step offers only the roles a customer can grant (`provision._CUSTOMER_GRANTABLE_ROLES`: Admin, Analyst,
+     Viewer — test-pinned; Operator is granted only by VIGIL); the launch step offers Quick and Deep only — **add
+     Max to the guide when L1 lands** (there is no Max launch product before it).
+   - **Tests:** `test_customer_onboarding.py` (the tour, the Guide, the loader, the copy rules — no model / engine
+     names, no price or credit amount, an estimate only to rule it out — the server-decides scenarios, and a
+     **screen census**: every route in app.js `ROUTES` must be covered, so a new screen fails CI until the guide
+     covers it) and `test_customer_onboarding_state.py` (store, provisioner, cockpit dispatch, edge stub + real hop).
+   - **Before the flag goes on:** the screens the guide already describes must exist — §15.11 C. Keep the copy in
+     step as each lands (the census + the chapter / step ids are test-pinned).
 1. **W2c-2** (§11.5 j + k): `balance_after_mc` per statement line, "remaining" vs "available to start work"; take
    `ENVELOPE_TOKENS_PER_CREDIT` off every metered path (the EC-5 cost settle still multiplies the exact debit by it);
    show the customer the EXACT balance (floor of `exact_available_mc`) on `billing_overview` / the wallet card.
@@ -1921,3 +1943,67 @@ gh pr list --repo thuram-nana/vigil-sovereign --state open
 for b in claude/billing-w2c1-exact-settle claude/ui-nyx-display-name claude/billing-m1c2-strix-prices; do
   echo "== $b"; git log --oneline origin/main..origin/$b; done
 ```
+
+### 15.11 EVERYTHING LEFT TO CODE — the complete list (end of 2026-11-16)
+Everything the program still needs, in build order. Each line is one or more PRs built per §0.2. "Owner" marks what
+only the owner can do. Nothing here is server work (§6).
+
+**A. Open PRs.** #1141 (onboarding guide + server-side tour state) and #1137 (this file) — merge when their 15
+required checks are green, bringing the other up to date with `main` after each merge.
+
+**B. Money and metering (the wallet program, §11).**
+1. **W2c-2** — `balance_after_mc` on every statement line; "remaining" vs "available to start work"; take
+   `ENVELOPE_TOKENS_PER_CREDIT` off every metered path; show the EXACT balance (floor of `exact_available_mc`) on
+   `billing_overview` and the wallet card (§15.6 item 1).
+2. **W3** — pause on insufficient credit, resume after a top-up (continuation lease bound to the SAME meter; the 7-day
+   grant TTL counted from the pause) (§11.6).
+3. **M1c-2b** — the offense wiring through the gateway: `CreditsExhausted` → pause at the engage seam (past the
+   PhaseLedger swallow-wrappers); `routing_override=False` in the worker; `engage_worker` grant scope;
+   `think_claude` / `codefix_runner` grant use; Strix children via the loopback gateway; `uiproxy._child_env` key
+   exclusion + the doctor HARD issue; the wire test (§15.5).
+4. **W4** — worker-time and premium-API metering (§11.7).
+5. **W5** — chargebacks / reversals / refunds + the low-balance alert, on Stripe. **Owner question first** (pick-one):
+   remove disputed credits when the dispute opens / funds are withdrawn, or only when it closes `lost` (re-grant on
+   `funds_reinstated`)? (§11.8)
+6. **W6** — the customer billing dashboard (§11.9; see C5 below for its screens).
+7. **G1** — the gateway at scale: capacity from the provider's rate-limit headers, per-tenant fair share, a
+   provider-account pool, the loss alarm (§11.11).
+8. **Wallet E2E (simulated)** — the whole §11.1 journey in one test, fake upstream + sandbox payments (§11.12).
+9. **A1** auto top-up (§11.13), **O1** the owner money view, **L1** live Max (§10.6).
+
+**C. Customer-app screens the onboarding guide already describes but that do not exist yet** (the API mostly does;
+each is a UI slice with its own tests; the guide flag stays OFF until all of C is in):
+1. **Assessments: launch and control** — depth picker (Quick / Deep; Max only with L1) → `launch/reserve` → `launch/start`;
+   Pause / Resume / Cancel (`launch/pause|resume|cancel`, PR-4b flag); live state and what a run has used so far;
+   **Retest** on a finding. The app still says "Launching a new assessment arrives with the run driver."
+2. **Team** — list members, Add member (email + role), change role, Remove (the member-management provision actions
+   exist; `#/team` is still `viewSoon`).
+3. **Account security** — TOTP enrolment (`mfa/totp/enroll`, `mfa/verify`) and passkey enrolment
+   (`passkey/enroll/*`), plus **passkey sign-in** on the sign-in screen (`passkey/login/*`); the step-up prompt for a
+   sensitive action (today a purchase only shows an error asking for a fresh check).
+4. **Monitoring (AEGIS)** — the screen: choose a verified host, Observe / Respond, step-up, events list, Turn off
+   (`api/customer/monitoring*` exists behind `VIGIL_CUSTOMER_MONITORING_ENABLED`); and on **Billing**, the AEGIS plan
+   offers rendered as plans for 1 / 5 hosts (today `offerLine` would print an AEGIS plan as "Plan: 0 credits").
+5. **Billing (W6)** — Rates view (`billing/rates` read exists), the statement with balance-after (`billing/usage`
+   read exists), credits on hold for running assessments, live consumption per run, the low-balance notice (W5),
+   Auto top-up settings (A1).
+6. **Code (Red-Pen)** — Connect GitHub (the App install round-trip), the repository list, per-repo merge-blocking
+   threshold + monthly spending limit, Red-Pen System (now / schedule), Fix this → re-checked fix PR (never merged by
+   VIGIL), disconnect — this is Red-Pen R1–R5 (D below) seen from the app.
+7. **Overview** — bring credits, hosts, assessments and monitoring together (today: account + workspace only).
+
+**D. Red-Pen R1 → R5** (§12; design §7) — the GitHub App (owner registers it, with `checks:write`), PR reviews that
+post only reproduced FACTs, the "VIGIL Red-Pen" check blocking Critical / High, per-repo threshold + monthly
+spending limit, System reviews on demand / on a schedule, Fix this.
+
+**E. Scale and the closing gates.** Front C **S1, S2a–c, S3, S4** (§4.4, §13.1: 100,000 then 1,000,000 users);
+**Gate 5** — the hands-on end-to-end with evidence, Stripe TEST mode (§13.2).
+
+**F. Owner-only (never the agent's, §6).** The GitHub App registration; the live Stripe secret + webhook secret; the
+Anthropic key + workspace + spend limits; the target margin and trial credits at deploy; the AWS KMS key for
+evidence-DEK escrow; DNS / TLS; the CodeQL by-design dismissals; the W5 dispute question. The three production flips
+are delegated to the agent behind their gates (§6) once a deployment exists.
+
+**G. Housekeeping.** Delete merged `claude/*` branches; split `test_smt_unknown_region_is_a_noop_without_z3` into its
+two cases; keep this file current at the end of every session.
+
