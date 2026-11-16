@@ -261,6 +261,27 @@ def read_verified_launch_units(slug: str, host: str, tenant: Optional[str], *,
         return None
 
 
+def read_verified_launch_depth(slug: str, host: str, tenant: Optional[str], *,
+                               base_dir: Any = None, now: Optional[float] = None) -> Optional[str]:
+    """W2b-3 — the launch's assessment DEPTH (``quick | deep | max``) from the VERIFIED + BOUND credit-launch lease for
+    ``slug`` (the SAME owner-pinned verify + bind the arm uses), or ``None`` when no lease verifies / binds. A lease
+    that names its depth (a launch reserved with metered billing, whose units are only an allowance chunk) gives it;
+    one that names none (every flat launch, every lease minted before W2b-3) keeps the tier derived from its signed
+    ``units_reserved`` — ``vigil_core.run_tier.lease_depth``, the rule the sovereign grant uses, so both planes agree
+    by construction. The lease model refuses an unknown depth when it is read, before this sees it. Verify-ONLY (it
+    never consumes the single-use floor); never raises."""
+    base = base_dir if base_dir is not None else _base_dir()
+    t = time.time() if now is None else float(now)
+    ok, _reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t)
+    if not ok or doc is None:
+        return None
+    try:
+        from vigil_core.run_tier import lease_depth
+        return lease_depth(doc)
+    except Exception:  # noqa: BLE001 — defence-in-depth: an unreadable depth is "no verified depth" (fail-safe)
+        return None
+
+
 def read_verified_launch_nonce(slug: str, host: str, tenant: Optional[str], *,
                                base_dir: Any = None, now: Optional[float] = None) -> Optional[str]:
     """pause/resume PR-3 — the OWNER-SIGNED, keyless lease NONCE for ``slug`` from the VERIFIED + BOUND

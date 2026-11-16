@@ -306,6 +306,12 @@ class CompletionSpoolWatcher:
         except OSError as exc:
             raise CompletionSpoolDeferred(f"the run's billing mode could not be read: {exc}") from exc
         if not metered:
+            if getattr(lease_doc, "run_tier", None) is not None and str(outcome) == "completed":
+                # W2b-3: a lease that names its depth was reserved for METERED billing (an allowance chunk, extended as
+                # the run goes) and is never published flat. With neither its metered marker nor its meter on disk,
+                # what the run used cannot be read: quarantine it for a human, never charge the flat whole chunk (I8).
+                raise CompletionSpoolError("this launch was reserved for metered billing but its meter is not on "
+                                           "disk: its charge cannot be read (quarantined, never charged in full)")
             return self._consumed(outcome, reserved), None
         from vigil_core import model_metering as mm
         from vigil_core.model_grant import meter_id

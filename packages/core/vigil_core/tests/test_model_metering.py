@@ -292,3 +292,22 @@ def test_a_stream_total_never_reprices_the_cache_write_split():
     m.feed({"type": "message_start", "message": {"usage": {"input_tokens": 1}}})
     m.feed({"type": "message_delta", "usage": {"cache_creation_input_tokens": 70}})
     assert (m.usage.cache_write_5m_tokens, m.usage.cache_write_1h_tokens) == (70, 0)
+
+
+def test_allowance_chunk_credits_default_override_and_refusals():
+    """W2b-3: the credits a metered launch holds at a time (its first allowance, each extension's least) — a holding
+    granularity, not a price. One reader for the launch gate, the gateway and doctor."""
+    assert mm.allowance_chunk_credits({}) == mm.DEFAULT_ALLOWANCE_CHUNK_CREDITS == 100
+    assert mm.allowance_chunk_credits({mm.ALLOWANCE_CHUNK_ENV: " 250 "}) == 250
+    assert mm.allowance_chunk_credits({mm.ALLOWANCE_CHUNK_ENV: ""}) == 100
+    for bad in ("0", "-5", "1.5", "abc", "１０", "1e3"):
+        with pytest.raises(mm.MeteringError):
+            mm.allowance_chunk_credits({mm.ALLOWANCE_CHUNK_ENV: bad})
+
+
+def test_allowance_chunk_credits_has_the_launch_gates_upper_bound():
+    # a chunk the launch gate would refuse (above the most one launch may reserve) is refused here too, so doctor and
+    # the gateway never accept a setting that would refuse every metered launch (red-pen MONEY-3)
+    assert mm.allowance_chunk_credits({mm.ALLOWANCE_CHUNK_ENV: str(mm.MAX_ALLOWANCE_CHUNK_CREDITS)}) == 1_000_000
+    with pytest.raises(mm.MeteringError):
+        mm.allowance_chunk_credits({mm.ALLOWANCE_CHUNK_ENV: str(mm.MAX_ALLOWANCE_CHUNK_CREDITS + 1)})

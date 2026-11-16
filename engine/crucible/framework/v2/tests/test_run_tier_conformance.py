@@ -30,6 +30,14 @@ def test_every_run_tier_profile_is_a_real_engage_profile():
     assert rt.engage_profile_for("nonsense") in engage.ENGAGEMENT_PROFILES
 
 
+def test_every_depth_resolves_to_a_real_engage_profile():
+    # W2b-3: a lease may name any assessment depth (quick | deep | max); each must resolve to a profile the engine
+    # knows, and Max runs the full roster (never the fail-safe "surface" an unknown name gets).
+    for depth in rt.DEPTHS:
+        assert rt.engage_profile_for(depth) in engage.ENGAGEMENT_PROFILES, depth
+    assert rt.engage_profile_for("max") == "full"
+
+
 def test_every_profile_kwargs_key_is_a_real_run_engagement_kwarg():
     # profile_kwargs must only ever emit kwargs run_engagement actually accepts — else the keyless worker
     # that splats them would crash. Introspect the real signature.

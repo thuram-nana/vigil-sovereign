@@ -126,6 +126,16 @@ _MIN_OUTPUT_TOKENS = 1024        # below this a request cannot do useful work: t
 CREDITS_EXHAUSTED = "VIGIL: this scan's prepaid credits are exhausted; it pauses until the wallet is topped up"
 
 
+def min_request_mc(card: Any) -> int:
+    """W2b-3: the least the gateway ever RESERVES for one model request that can do useful work, in milli-credits, at
+    ``card``'s rates — the prepaid worst case of ``_admit`` for the smallest possible request: one token of content
+    plus the framing margin both input bounds always add (``_INPUT_MARGIN_TOKENS``), all at the dearest input rate
+    (a prepaid reservation never counts on a cached prefix), and the smallest useful output (``_MIN_OUTPUT_TOKENS``).
+    A balance below it can never have a request admitted, so a metered launch is refused before it starts; above it,
+    whether a given request fits depends on its real prompt, which the gateway decides per request."""
+    return int(card.request_worst_mc(_INPUT_MARGIN_TOKENS + 1, 0, _MIN_OUTPUT_TOKENS))
+
+
 def _fit_tokens(worst_mc: "Callable[[int], int]", room_mc: int, most: int) -> int:
     """The largest output-token count ``t`` in ``[0, most]`` whose worst-case charge ``worst_mc(t)`` fits in
     ``room_mc``, or -1 when not even ``t = 0`` (the input alone) fits. ``worst_mc`` is non-decreasing in ``t``."""
@@ -2036,7 +2046,7 @@ def config_from_env(allowance: Any = None) -> GatewayConfig:
                          global_concurrency=_int_env("VIGIL_GATEWAY_GLOBAL_CONCURRENCY", 32),
                          daily_limit_nano=_daily_limit_nano(),
                          allowance=allowance, allowance_required=config.metered_billing_enabled(),
-                         allowance_chunk_credits=_int_env("VIGIL_ALLOWANCE_CHUNK_CREDITS", 100))
+                         allowance_chunk_credits=mm.allowance_chunk_credits())
 
 
 def start_from_env(allowance: Any = None) -> "Optional[_Server]":

@@ -2,11 +2,17 @@
 
 A launch PRODUCT (``catalog.LaunchProduct``) is one of a small, fixed set of run tiers — ``"quick"`` (a
 surface-roster, cheaper-model, small-budget run) or ``"deep"`` (a full-roster, capable-model, large-budget
-run). The run tier is NOT a new owner-signed field: it is DERIVED from the launch's already-signed
+run). For a flat launch the run tier is NOT a signed field: it is DERIVED from the launch's already-signed
 ``units_reserved`` by a fixed units band, so EC-7 adds NO snapshot-schema bump and no new signed record. Both
 planes import this leaf — the sovereign catalog (to DEFINE + VALIDATE the products) and the offense engine (to
 RESOLVE the run profile / model-routing lever) — over the same two-process boundary as ``token_budget`` /
 ``run_budget``.
+
+W2b-3 (the prepaid wallet, pricing design §0): Quick, Deep and Max are assessment DEPTHS (:data:`DEPTHS`), not
+pricing tiers. A launch reserved with metered billing holds an allowance chunk from the wallet, so its units say
+nothing about its depth: its owner-signed lease names the depth explicitly (``CreditLaunchLease.run_tier``), and
+:func:`lease_depth` reads it. A lease that names none (every flat launch, every lease minted before W2b-3) keeps the
+tier derived from its units — never ``"max"``, which only an explicit depth selects.
 
 FATAL-2: stdlib ONLY (``os``) — NO ``framework.*``, NO ``sigil.*``, NO offense symbol. The run tier maps to
 the engine's engagement-profile vocabulary (``engage`` profiles ``surface|deep|full``) and to the EC-2a
@@ -29,9 +35,15 @@ unit sizes the catalog offers; the catalog validator enforces that consistency f
 from __future__ import annotations
 
 import os
+from typing import Any
 
 # The PRODUCT run-tier vocabulary (fixed; an unknown tier is rejected fail-closed by the catalog validator).
 RUN_TIERS: tuple[str, ...] = ("quick", "deep")
+
+# The ASSESSMENT DEPTHS a customer chooses (owner, 2026-11-11 and 2026-11-16; pricing design §2.2): VIGIL · Quick,
+# Deep and Max. A superset of RUN_TIERS: the units band derives only quick / deep; "max" exists only as an explicit,
+# owner-signed lease depth (W2b-3).
+DEPTHS: tuple[str, ...] = ("quick", "deep", "max")
 
 # The units BAND boundary: a launch whose signed units_reserved is <= this is "quick", else "deep". PLACEHOLDER
 # (owner tunes via VIGIL_QUICK_MAX_UNITS); must sit between the quick + deep product unit sizes AND at/above the
@@ -40,12 +52,12 @@ RUN_TIERS: tuple[str, ...] = ("quick", "deep")
 _QUICK_MAX_UNITS_DEFAULT = 10
 
 # run_tier → engagement profile (engage profiles: surface|deep|full). "quick" = the surface (low-impact)
-# roster; "deep" = the full roster. A plain-string contract; the engine conformance test pins its validity.
-_ENGAGE_PROFILE: dict[str, str] = {"quick": "surface", "deep": "full"}
+# roster; "deep" and "max" = the full roster. A plain-string contract; the engine conformance test pins its validity.
+_ENGAGE_PROFILE: dict[str, str] = {"quick": "surface", "deep": "full", "max": "full"}
 
 # run_tier → the EC-2a model-routing lever. "quick" turns routing ON (the cheaper per-binding tiers are
-# active); "deep" leaves it OFF (every binding stays on its capable model — the fullest, most thorough run).
-_ROUTING_ENABLED: dict[str, bool] = {"quick": True, "deep": False}
+# active); "deep" and "max" leave it OFF (every binding stays on its capable model — the fullest, most thorough run).
+_ROUTING_ENABLED: dict[str, bool] = {"quick": True, "deep": False, "max": False}
 
 
 def quick_max_units() -> int:
@@ -83,14 +95,29 @@ def run_tier_for_units(units: int) -> str:
     return "quick" if u <= quick_max_units() else "deep"
 
 
-# run_tier → the model effort level a METERED run's grant pins (PRICING design §2.2): Quick = high, Deep = xhigh.
-# (Max = max arrives with the Max product, M3.)
-_EFFORT: dict[str, str] = {"quick": "high", "deep": "xhigh"}
+# depth → the model effort level a METERED run's grant pins (PRICING design §2.2): Quick = high, Deep = xhigh,
+# Max = max.
+_EFFORT: dict[str, str] = {"quick": "high", "deep": "xhigh", "max": "max"}
+
+
+def depth_of(explicit: Any, units: Any) -> str:
+    """A launch's assessment depth: the depth its owner-signed lease names (``explicit``, W2b-3), else — a lease that
+    names none — the tier derived from its reserved ``units`` (:func:`run_tier_for_units`, never ``"max"``). An
+    explicit value that is not a depth resolves to ``"quick"`` (the smaller-impact depth, never a silent escalation;
+    the lease validator refuses one before it gets here)."""
+    if explicit is None:
+        return run_tier_for_units(units)
+    return explicit if explicit in DEPTHS else "quick"
+
+
+def lease_depth(doc: Any) -> str:
+    """:func:`depth_of` for a credit-launch lease document: its explicit ``run_tier`` and its ``units_reserved``."""
+    return depth_of(getattr(doc, "run_tier", None), getattr(doc, "units_reserved", None))
 
 
 def effort_for(run_tier: str) -> str:
-    """The effort a run of ``run_tier`` is pinned to; an unknown tier resolves to the quick tier's (the cheaper,
-    smaller-impact default — never a silent escalation)."""
+    """The effort a run of depth ``run_tier`` is pinned to; an unknown depth resolves to the quick depth's (the
+    cheaper, smaller-impact default — never a silent escalation)."""
     return _EFFORT.get(run_tier, _EFFORT["quick"])
 
 
