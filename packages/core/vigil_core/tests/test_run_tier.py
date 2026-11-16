@@ -120,3 +120,48 @@ def test_each_tier_pins_its_effort_and_an_unknown_tier_never_escalates():
     assert rt.effort_for("quick") == "high" and rt.effort_for("deep") == "xhigh"
     assert rt.effort_for("bogus") == "high" and rt.effort_for("") == "high"
     assert set(rt.RUN_TIERS) <= set(rt._EFFORT)
+
+
+# ---- W2b-3: the explicit assessment depth (quick | deep | max) ----------------------------------------------
+# Mutation-verify targets (each neuter reds a NAMED test):
+#   * drop "max" from DEPTHS                                  -> test_depths_are_the_three_assessment_depths
+#   * effort_for("max") falls back to "high"                  -> test_max_depth_pins_max_effort_the_full_roster_capable_models
+#   * depth_of ignores the explicit depth (always the band)    -> test_depth_of_prefers_the_named_depth_else_the_band
+#   * depth_of lets a non-depth through                       -> test_depth_of_prefers_the_named_depth_else_the_band
+
+def test_depths_are_the_three_assessment_depths():
+    """Owner (2026-11-11 / 2026-11-16, pricing design §2.2): VIGIL · Quick, Deep and Max are assessment DEPTHS; the
+    units band (RUN_TIERS) never derives "max"."""
+    assert rt.DEPTHS == ("quick", "deep", "max")
+    assert set(rt.RUN_TIERS) < set(rt.DEPTHS)
+    assert all(rt.run_tier_for_units(u) != "max" for u in (-1, 0, 1, 10, 11, 10 ** 9, None, "x"))
+
+
+def test_max_depth_pins_max_effort_the_full_roster_capable_models():
+    assert [rt.effort_for(d) for d in rt.DEPTHS] == ["high", "xhigh", "max"]
+    assert rt.engage_profile_for("max") == "full"
+    assert rt.routing_enabled_for("max") is False         # every binding on its capable model
+
+
+def test_depth_of_prefers_the_named_depth_else_the_band(monkeypatch):
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+    # a metered launch's units are an allowance chunk: the named depth decides, whatever the band says
+    assert rt.depth_of("quick", 100) == "quick" and rt.depth_of("max", 1) == "max" and rt.depth_of("deep", 1) == "deep"
+    # a lease that names none keeps the tier its units derive (every flat / pre-W2b-3 lease)
+    assert rt.depth_of(None, 20) == "deep" and rt.depth_of(None, 3) == "quick" and rt.depth_of(None, None) == "quick"
+    # a value that is not a depth never escalates
+    for bad in ("ultra", "", "MAX", 3):
+        assert rt.depth_of(bad, 20) == "quick", bad
+
+
+def test_lease_depth_reads_a_lease_document(monkeypatch):
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+
+    class _Doc:
+        def __init__(self, units, tier=None):
+            self.units_reserved, self.run_tier = units, tier
+
+    assert rt.lease_depth(_Doc(100, "quick")) == "quick"
+    assert rt.lease_depth(_Doc(3, "max")) == "max"
+    assert rt.lease_depth(_Doc(20)) == "deep" and rt.lease_depth(_Doc(3)) == "quick"
+    assert rt.lease_depth(object()) == "quick"            # nothing readable: the smaller-impact depth

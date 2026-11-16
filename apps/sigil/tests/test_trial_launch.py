@@ -301,3 +301,23 @@ def test_a_restored_suffix_list_is_picked_up(tmp_path):
     assert load_rules(f) is None
     f.write_bytes(PSL_PATH.read_bytes())
     assert load_rules(f) is not None
+
+
+def test_a_metered_trial_launch_passes_its_depth_and_the_chunk(monkeypatch):
+    """W2b-3: the locked-trial branch makes its OWN reserve call — with metered billing on it must pass the same depth
+    and allowance chunk as the ordinary branch (the trial product's depth; never the product's units)."""
+    from vigil_core import model_metering as mm
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    monkeypatch.delenv(mm.ALLOWANCE_CHUNK_ENV, raising=False)
+    seen: list = []
+
+    def _cap(self, *, requester, org_id, host, units, now, **kw):
+        seen.append({"org": org_id, "units": units, **kw})
+        return {"ok": True, "slug": "s", "host": host, "units_reserved": units, "nonce": "n1",
+                "not_before": 0.0, "not_after": 0.0, "lease": {}, "trust_root": {}}
+    monkeypatch.setattr("sigil.ui.launch_gate.LaunchGate.reserve_launch", _cap)
+    p, s = _prov(monkeypatch)
+    _trial(s, "org_a")
+    _prove(s, "org_a", "acme.io")
+    _launch(p, "org_a", "acme.io")
+    assert seen == [{"org": "org_a", "units": mm.DEFAULT_ALLOWANCE_CHUNK_CREDITS, "depth": "quick"}]

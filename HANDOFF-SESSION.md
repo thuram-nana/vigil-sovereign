@@ -10,10 +10,10 @@
 > §10 of this file). Slice **W1** (published rate card + per-charge usage statement) is built; **W2 → W6** are
 > specified in §11.5–§11.9 in enough detail to implement directly.
 >
-> **Verified takeover state on 2026-11-16:**
-> - `origin/main` = `cc227ccc` (#1132). #1130 (W1), #1131 (W2a), and #1132 (W2b-1) are merged.
-> - **OPEN: #1133**, W2b-2, on `claude/cool-meitner-v9fq6d`. Takeover review fixes are being validated;
->   this slice is not finished until its updated head passes all 15 required checks. See §11.19.
+> **Verified takeover state on 2026-11-16 (local takeover session):**
+> - `origin/main` = `454d9ac3` (#1133). #1130 (W1), #1131 (W2a), #1132 (W2b-1) and #1133 (W2b-2) are merged.
+> - **IN REVIEW: W2b-3** (explicit depth in the lease + the first allowance sized `min(available, chunk)`), its own
+>   PR off `454d9ac3`. See §11.20. Next: W2c (§11.5 f, g, j, k).
 > - Every money number the program needs is now **decided by the owner** (§11.2, §12, §13). Nothing in this file is
 >   a proposal waiting for a decision except where it says "OPEN".
 >
@@ -47,7 +47,9 @@ confirmed findings (each fix mutation-verified) → PR → merge only on CI gree
   two missing tests).
 
 ### 0.3 Owner's NEVER-CROSS lines (verbatim intent — never do these)
-1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION` or the multi-shard production flag.
+1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION`, the multi-shard production flag or `VIGIL_METERED_BILLING`
+   **before its gate is green**. The owner delegated these three flips to the agent on 2026-11-16 (§6): each is
+   flipped on the production deployment only when its own gate passes, then reported — never early.
 2. Do **not** inject or commit a real Flutterwave secret (`VIGIL_FLW_SECRET_KEY` is read from env at call time;
    tests use dummies).
 3. Do **not** ratify money numbers — margins, $/token, catalog prices, **scale targets**.
@@ -464,8 +466,9 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 0. ~~Merge #1130~~ — **merged 2026-11-16** (`503e06af`).
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
    hardest money slice; read §11.3–§11.4 first. **W2a is merged (§11.17, #1131); W2b-1 is merged (§11.18,
-   #1132, `cc227ccc`); W2b-2 is built (§11.19, its own PR off main)**; W2b-3 (explicit depth) and W2c (exact
-   settlement) remain.
+   #1132, `cc227ccc`); W2b-2 is merged (§11.19, #1133, `454d9ac3`); W2b-3 is built (§11.20, its own PR off
+   main)**; W2c remains: exact settlement with the per-org remainder (f), the floor retired (g), balance-after on the
+   statement (j), the envelope constant off every metered path (k) — expect two PRs (W2c-1 f+g, W2c-2 j+k).
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -489,9 +492,17 @@ W2); the tier budgets 450 / 5,000 / 20,000 as charging caps (M3's "re-budget the
 allowance chunks).
 
 ## 6. OWNER-ONLY (never the agent's)
-- **Flips:** `VIGIL_CUSTOMER_PROD_EXECUTION`; the multi-shard production flag (after S4 is green);
-  `VIGIL_FOLD_CACHE_ENABLED` in production; **`VIGIL_METERED_BILLING`** (only after W2 + W3 + M1c-2 are merged and the
-  wallet E2E §11.12 is green); `VIGIL_MODEL_GATEWAY_ENABLED` in production.
+- **No server work is in scope (owner, 2026-11-16):** the program builds the customer app — code, tests, CI. No agent
+  deploys to or changes any server until the owner brings a deployment back into scope.
+- **Flips the owner DELEGATED to the agent (2026-11-16, pick-one answers)**, for when the customer app has a
+  deployment — the agent flips each one only when its gate is green, verifies the service is healthy, and reports it:
+  - `VIGIL_CUSTOMER_PROD_EXECUTION` — after **Gate 5** passes (§13.2), with its evidence;
+  - **`VIGIL_METERED_BILLING`** (with `VIGIL_MODEL_GATEWAY_ENABLED`, which it requires) — after W2 + W3 + M1c-2 are
+    merged and the wallet E2E (§11.12) is green, and only once the owner has set the target margin and the
+    Anthropic key on the server (`vigil doctor` must report no hard issue);
+  - the multi-shard production flag — after S4 is green (§13.1; the flag arrives with S2–S4).
+- **Flips that stay the owner's:** `VIGIL_FOLD_CACHE_ENABLED` in production; `VIGIL_MODEL_GATEWAY_ENABLED` in production
+  other than as part of the metered flip above.
 - **Secrets / accounts:** the live Flutterwave secret + webhook secret; the Anthropic API key in the sovereign secret
   store (or SSM) for the gateway; a dedicated Anthropic workspace (or several, for G1) with Console spend limits;
   Anthropic auto-reload with a cap; an Anthropic admin key (O1 reconciliation); Bedrock / Vertex accounts if G1's
@@ -820,7 +831,8 @@ All behind `VIGIL_METERED_BILLING` / `VIGIL_MODEL_GATEWAY_ENABLED`, default OFF;
 - **`VIGIL_METERED_BILLING` must NOT be enabled before W2 + W3 + M1c-2** (§11): today a launch reserves a small fixed
   number of units (`VIGIL_LAUNCH_UNITS`, default 10, or a catalog product's 3 / 20), so a metered run would stop at
   once. W2 replaces this with wallet-backed extendable allowances. (Was: "not before M3".) The flip is the owner's.
-- The effort is derived from the units band until M3 puts an explicit tier in the owner-signed lease.
+- The effort is derived from the units band for a lease that names no depth; a metered launch's lease names its
+  depth explicitly since W2b-3 (§11.20).
 - The offense plane does not yet route its model calls through the gateway (M1c-2).
 
 ### 10.6 Remaining slices, in order (design §9)
@@ -1163,7 +1175,77 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.19 W2b-2 — OPEN (#1133; built, takeover validation in progress; see §5): gateway admission against the prepaid allowance
+### 11.20 W2b-3 — BUILT (its own PR off `454d9ac3`): the explicit depth in the lease + the first allowance
+Implements §11.5 (c) and (h). Behind `VIGIL_METERED_BILLING` (OFF); a flat launch passes, reserves, signs and settles
+exactly as before (I7).
+- **Depths** (`vigil_core/run_tier.py`): `DEPTHS = ("quick", "deep", "max")` — a superset of the units band's
+  `RUN_TIERS`, which never derives `max`. Effort Quick = high, Deep = xhigh, Max = max; Max runs the full roster with
+  model routing off. `depth_of(named, units)` / `lease_depth(doc)`: the depth the lease names, else the tier its units
+  derive; a value that is not a depth resolves to Quick (never an escalation).
+- **The lease** (`vigil_core/credit_lease.py`): the prepared v2 field `run_tier` carries the depth (now any `DEPTHS`
+  value), and a new optional field `version` = `LEASE_DEPTH_VERSION` (3) marks a lease that names one — the "bump the
+  lease document version" of §11.5 (h). Every older reader is `extra="forbid"` without that field, so it REFUSES a
+  depth lease instead of re-deriving a tier from its allowance chunk; a version-3 lease must name its depth; a reader
+  refuses a version it does not know. Leases that name no depth carry neither field and keep their exact bytes (the
+  golden v1 fixture is unchanged). Every depth lease the gate mints carries the version; a v2-format lease naming a
+  `run_tier` without one (the prepared format of `8a26cf65`, never minted by any release) is still read.
+- **The first allowance** (`ui/launch_gate.py::reserve_launch(..., depth=)`): a metered launch holds
+  `min(max(chunk, one useful request), live balance)` — plan credits count and are drawn plan-first; a postpaid
+  launch draws from its credit line's live headroom instead — sized under the spine lock. It is refused, nothing
+  debited and no amount quoted, when that cannot cover ONE useful model request: `model_gateway.min_request_mc` =
+  the least the gateway ever reserves for one (one token of content + the 1,000-token framing margin, at the dearest
+  input rate, which is what a prepaid reservation always uses, + 1,024 output tokens) = **7.965 credits** at the
+  published card. The floor of one request matters because a postpaid or plan-funded launch cannot be extended.
+  The bound is a SOUND lower bound (it never refuses a launch that could make a request): between it and about 8.1
+  credits a launch may start yet see its first request refused, depending on the provider's count of the shaped
+  prompt (the gateway's per-tenant system block is in it) — such a run has no admitted request and is never charged
+  (pre-W3 it fails and is refunded; W3 pauses it for a top-up).
+- **The chunk** is read by ONE function, `vigil_core.model_metering.allowance_chunk_credits()` (1 to 1,000,000,
+  default 100 — a holding size, not a price), used by the launch path, the gateway (`config_from_env`) and doctor.
+- **The product selects a depth** (`ui/provision.py::launch_reserve`, both the ordinary and the locked-trial branch):
+  metered → the product's depth (Quick when none is chosen) and the chunk, never the product's units. No Max product
+  is offered yet: Max on live systems needs L1's controls first (design §6).
+- **The grant's effort** comes from `lease_depth(doc)` (`_publish_model_grant`); re-publishing still mints the
+  identical grant.
+- **Fail-closed edges:** a lease that names a depth is never published flat (metering resolved off after it was
+  reserved → refused; the customer cancels it for a full refund); a completed launch whose lease names a depth but
+  whose meter and metered marker are gone is quarantined by the completion drain, never charged its whole chunk.
+- **Engine / worker:** `framework/v2/launch_lease.read_verified_launch_depth` (verify-only, same owner-pinned
+  verify + bind); `jobs/engage_worker.py` runs the depth the lease names for the EC-7 roster / routing (an injected
+  `read_depth` outranks `read_units`; every value passes through `depth_of`).
+- **Interim limits, for W2c and later:** (1) the metered settle still prices with `credits_for_cost` and the per-run
+  floor, clamped to lease + extensions — with the chunk as the reservation the 25-credit floor now binds in full on a
+  tiny run; W2c (f, g) settles the recorded `charge_mc` exactly and retires the floor. (2) `ENVELOPE_TOKENS_PER_CREDIT`
+  (the EC-3 engine hard budget, the EC-5 cost ledger — both default-OFF) still multiplies the lease units, which are
+  now only the first chunk: W2c (k) must take it off every metered path before the metered flip. (3) Postpaid
+  launches are still not extended (§11.18). (4) Reserves and the gateway's extensions run in the one cockpit process
+  (the spine RLock serialises them); a multi-process layout (Front C S2+) must take the cross-process settle lock in
+  the reserve too.
+- **Tests:** `apps/sigil/tests/test_launch_depth.py` (new), `test_trial_launch.py` (+1),
+  `packages/core/vigil_core/tests/test_run_tier.py` (+4), `test_credit_lease.py` (+4), `test_model_metering.py`
+  (+2), `engine/crucible/framework/v2/tests/test_launch_lease.py` (+2), `test_run_tier_conformance.py` (+1),
+  `integration/tests/test_engage_runner.py` (+2). **37 mutants, all RED** (sizing, the lock, the one-request floor
+  and start check for prepaid and postpaid, the input margin, the depth and version stamps, version refusals, the
+  flat-publish refusal, the meterless quarantine, product → depth, the trial branch, the chunk reader + its bound,
+  the gateway / doctor readers, the engine and worker depth reads, the depth vocabulary).
+- **Red-pen:** three lenses (money / lease + planes / spec + tests) and a verifier (10 findings CONFIRMED, 4 merged
+  as duplicates, none refuted on substance — every one folded, each with a test and a mutant); folded: the start check ignored the
+  gateway's input margin (7–8 credit wallets admitted but never servable); a first allowance could be below one
+  request (postpaid / plan-only launches stuck); no upper bound on the chunk; no lease version (an older plane would
+  misread a quick / deep depth lease); a meterless depth lease could settle flat for its whole chunk; unpinned
+  branches (postpaid threshold, trial branch, plan funding, worker injection, the invalid-chunk audit); docstrings
+  that claimed W2c's exact pay-for-use settle.
+- **Local evidence:** the slice's suites pass locally except failures that are identical on `main` and come from
+  this machine (an onnxruntime older than the lock; a UI socket timeout under load). Tests that spawn an isolated
+  verifier need a venv whose editable installs point at the slice (the shared `.venv-sovereign` resolves to another
+  checkout); with one, they pass.
+- **Next — W2c-1:** exact settlement with the per-org milli-credit remainder (§11.5 f) — snapshot-durable, signed into
+  a v3 settle decision, enforcement and display on the exact balance (reserve and extension must draw from
+  `1000 × available − r`, or the exact balance can go below zero by up to the remainder) — and the floor retired from
+  the metered settle (g). Then **W2c-2:** balance-after per statement line (j) and `ENVELOPE_TOKENS_PER_CREDIT` off
+  every metered path (k).
+
+### 11.19 W2b-2 — DONE (merged in #1133, `454d9ac3`): gateway admission against the prepaid allowance
 - `model_gateway.GrantMeter.reserve(..., allowance_mc=)`: a request is admitted only if its worst-case CUSTOMER charge
   fits beside the launch's confirmed charges and the requests in flight (output lowered to fit, like the cap); when
   not even the smallest useful request (1,024 output tokens) fits beside the confirmed charges → refused

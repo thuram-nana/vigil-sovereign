@@ -1309,7 +1309,14 @@ class Provisioner:
         per-launch units (``config.LAUNCH_UNITS``), byte-identical to pre-EC-7b. The run tier is then DERIVED
         at engage time from these signed units (vigil_core.run_tier), so the product choice flows through the
         already-signed ``units_reserved`` — no new signed field. Returns the signed lease for the edge to
-        relay; the offense launch verifies it before any traffic."""
+        relay; the offense launch verifies it before any traffic.
+
+        W2b-3 — with metered billing on (``config.metered_billing_enabled``) a launch selects a DEPTH, never an
+        amount: the chosen product's depth (Quick when none is chosen) is named in the owner-signed lease, and the
+        launch holds the allowance chunk (``VIGIL_ALLOWANCE_CHUNK_CREDITS``) from the wallet — at most the balance,
+        sized by the gate under its lock; the run extends it as it goes, and its settle charges its metered use
+        (W2c makes that exact to the milli-credit and retires the per-run floor). The product's units are not used.
+        With metered billing off nothing here changes."""
         t = self._now() if now is None else float(now)
         from .. import config
         from ..governor import catalog
@@ -1330,6 +1337,7 @@ class Provisioner:
         # Fail-closed on an unknown / not-offered product; empty product_id keeps the default units.
         units = int(config.LAUNCH_UNITS)
         pid = str(product_id or "").strip()
+        product = None
         if pid:
             product = catalog.launch_product(pid)    # None when unknown, not offered, or EC-7 flag off
             if product is None:
@@ -1337,6 +1345,18 @@ class Provisioner:
                             target=host, outcome="denied")
                 raise ProvisionDenied(f"unknown or unavailable launch product: {pid!r}")
             units = int(product.units)
+        sized: "dict[str, str]" = {}
+        if config.metered_billing_enabled():
+            # W2b-3: a metered launch selects a DEPTH (the product's, else Quick) and holds the allowance chunk; the
+            # gate sizes it to the live balance under its lock. A flat launch passes exactly what it passed before.
+            from vigil_core import model_metering as mm
+            try:
+                units = mm.allowance_chunk_credits()
+            except mm.MeteringError as e:
+                self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied("assessments cannot start right now: a billing setting is invalid") from e
+            sized["depth"] = product.run_tier if product is not None else "quick"
         if self._preview_locked(requester_org_id):
             # Pricing S7: a locked trial org — trial product only, one registrable domain (first claim wins,
             # with proof history), and the global daily cap. The checks AND the reserve run under ONE hold of
@@ -1344,12 +1364,12 @@ class Provisioner:
             with self._lock:
                 domain = self._trial_launch_check(requester, requester_org_id, host, pid, now=t)
                 r = LaunchGate(self.store).reserve_launch(
-                    requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+                    requester=requester, org_id=requester_org_id, host=host, units=units, now=t, **sized)
                 if r.get("ok"):
                     self._trial_launch_commit(requester_org_id, domain, now=t)
         else:
             r = LaunchGate(self.store).reserve_launch(
-                requester=requester, org_id=requester_org_id, host=host, units=units, now=t)
+                requester=requester, org_id=requester_org_id, host=host, units=units, now=t, **sized)
         if not r.get("ok"):
             self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
                         target=host, outcome="denied")

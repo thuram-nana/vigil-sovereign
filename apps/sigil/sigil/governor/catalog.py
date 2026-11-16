@@ -191,7 +191,12 @@ class LaunchProduct:
     """One EC-7 tiered launch product. `units` is the credits this launch reserves (the existing signed
     units_reserved); `run_tier` (RUN_TIERS) is the declared tier, which MUST equal the band-derived tier for
     those units (validated fail-closed when EC-7 is offered — see `_validate_launch_product_band`) so the
-    product definition and the runtime derivation never diverge."""
+    product definition and the runtime derivation never diverge.
+
+    W2b-3: with metered billing on, a product selects its DEPTH (`run_tier`) and nothing else — the launch holds the
+    allowance chunk from the wallet and names the depth in its owner-signed lease; `units` is not used
+    (`provision.launch_reserve`). There is no Max product yet: Max on live systems needs the L1 controls first (one
+    rate limit per engagement, governed tools only — pricing design §6)."""
     product_id: str
     display_name: str
     run_tier: str

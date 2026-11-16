@@ -260,3 +260,44 @@ def test_expect_nonce_refuses_another_launchs_lease_before_the_consume(monkeypat
     # no expect_nonce: the conjunct is absent (byte-identical for every other caller)
     ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=2000.0, consume=False)
     assert ok, reason
+
+
+# ---- W2b-3: the launch's depth, read from the verified lease -------------------------------------------------
+
+def _depth_lease(owner, *, units, run_tier=None, nonce="n1", issued=1000.0):
+    t = datetime.fromtimestamp(issued, tz=timezone.utc)
+    named = {} if run_tier is None else {"run_tier": run_tier, "version": 3}   # as the sovereign gate mints it
+    doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=units,
+                            not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=8), nonce=nonce,
+                            issued_at=issued, **named)
+    return sign_credit_launch_lease(doc, {"owner": owner.private_key_b64})
+
+
+@pytest.mark.parametrize("units,named,expected", [
+    (100, "quick", "quick"),   # a metered launch's allowance chunk would band as "deep": the lease names Quick
+    (3, "max", "max"),         # only a named depth selects Max
+    (5, "deep", "deep"),
+    (20, None, "deep"),        # a lease that names no depth keeps the tier its units derive
+    (3, None, "quick"),
+])
+def test_read_verified_launch_depth_names_or_derives(monkeypatch, units, named, expected):
+    """Mutation target: read the units band instead of the named depth -> the (100, quick) and (3, max) rows red."""
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _depth_lease(owner, units=units, run_tier=named))
+    assert LL.read_verified_launch_depth(SLUG, HOST, ORG, base_dir=base, now=1000.0) == expected
+    # verify-only: reading the depth never burns the launch's single use
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0)
+    assert ok, reason
+
+
+def test_read_verified_launch_depth_is_none_without_a_verified_bound_lease(monkeypatch):
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, _depth_lease(owner, units=3, run_tier="max"))
+    assert LL.read_verified_launch_depth(SLUG, HOST, "org_other", base_dir=base, now=1000.0) is None   # tenant
+    assert LL.read_verified_launch_depth(SLUG, "other.cm", ORG, base_dir=base, now=1000.0) is None     # host
+    assert LL.read_verified_launch_depth(SLUG, HOST, ORG, base_dir=base, now=99_000.0) is None         # window
+    forger = generate_keypair()
+    base2 = tempfile.mkdtemp()
+    write_credit_lease(base2, SLUG, _depth_lease(forger, units=3, run_tier="max"), _owner_root(forger))
+    assert LL.read_verified_launch_depth(SLUG, HOST, ORG, base_dir=base2, now=1000.0) is None          # not owner's

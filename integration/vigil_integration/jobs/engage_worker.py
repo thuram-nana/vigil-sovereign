@@ -189,13 +189,22 @@ def _default_run_tier_enabled() -> bool:
     return run_tier.tiered_products_enabled()
 
 
-def _default_read_units(slug: str, host: str, tenant: Optional[str], *, base_dir: Any, now: Any) -> Optional[int]:
-    """Read the launch's OWNER-SIGNED ``units_reserved`` via the SAME verified+bound lease EC-3 reads for its
-    ceiling (authoritative, verify-ONLY — never consumes the single-use floor, never trusts ``job.extra``).
-    Lazy (two-env): ``framework`` is imported only here. Fail-closed: any missing / forged / wrong-host /
-    wrong-tenant / expired / settled lease ⇒ ``None`` (the caller then classifies the SMALLER 'quick' tier)."""
-    from framework.v2.launch_lease import read_verified_launch_units
-    return read_verified_launch_units(slug, host, tenant, base_dir=base_dir, now=now)
+def _default_read_depth(slug: str, host: str, tenant: Optional[str], *, base_dir: Any, now: Any) -> Optional[str]:
+    """Read the launch's OWNER-SIGNED depth via the SAME verified+bound lease EC-3 reads for its ceiling
+    (authoritative, verify-ONLY — never consumes the single-use floor, never trusts ``job.extra``): the depth the lease
+    names (W2b-3, a metered launch), else the tier its signed ``units_reserved`` derive. Lazy (two-env): ``framework``
+    is imported only here. Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / settled lease ⇒
+    ``None`` (the caller then classifies the SMALLER 'quick' tier)."""
+    from framework.v2.launch_lease import read_verified_launch_depth
+    return read_verified_launch_depth(slug, host, tenant, base_dir=base_dir, now=now)
+
+
+def _depth_from_units(read_units: "Callable[..., Optional[int]]") -> "Callable[..., Optional[str]]":
+    """A depth reader over an injected units reader (tests): the tier those units derive (None/bad ⇒ "quick")."""
+    def _read(*a: Any, **k: Any) -> Optional[str]:
+        from vigil_core import run_tier
+        return run_tier.run_tier_for_units(read_units(*a, **k))
+    return _read
 
 
 @contextlib.contextmanager
@@ -265,6 +274,7 @@ def make_engage_worker(
     prod_execution_enabled: "Optional[Callable[[], bool]]" = None,
     run_tier_enabled: "Optional[Callable[[], bool]]" = None,
     read_units: "Optional[Callable[..., Optional[int]]]" = None,
+    read_depth: "Optional[Callable[..., Optional[str]]]" = None,
     now: Any = None,
     finding_spool_dir: Any = None,
     completion_spool_dir: Any = None,
@@ -279,16 +289,18 @@ def make_engage_worker(
     failure RAISES (``JobRunner`` turns a worker error into a ``failed`` outcome + ``release_delivery``, so
     the work is re-driveable, never a silent false-clean).
 
-    EC-7 (tiered Quick/Deep products): when ``run_tier_enabled()`` is True the worker DERIVES the run tier
-    from the launch's OWNER-SIGNED ``units_reserved`` (``read_units`` — the SAME verified+bound lease EC-3
-    reads, authoritative, never the tamperable ``job.extra``) and overlays the tier's engagement roster
+    EC-7 (tiered Quick/Deep products): when ``run_tier_enabled()`` is True the worker reads the run's depth
+    from the launch's OWNER-SIGNED lease (``read_depth`` — the SAME verified+bound lease EC-3 reads,
+    authoritative, never the tamperable ``job.extra``): the depth the lease names (W2b-3: a metered launch, whose
+    units are only an allowance chunk), else the tier its ``units_reserved`` derive (an injected ``read_units``
+    derives it the same way) — and overlays the depth's engagement roster
     (``engage.profile_kwargs`` — a 'deep' launch runs the full browser/SSO/GraphQL/access-control roster, a
     'quick' launch the lean default) + sets the EC-2a model-routing lever for the run (quick ⇒ cheaper tiers
     on; deep ⇒ capable models). OFF by default ⇒ byte-identical: no derivation, run_engagement's own default
     roster, ``CRUCIBLE_MODEL_ROUTING`` untouched. A bad/absent/unverifiable lease fails SAFE to the smaller
     'quick' tier (never silently escalates a run to the fuller, more expensive 'deep').
 
-    ``run`` / ``prod_execution_enabled`` / ``run_tier_enabled`` / ``read_units`` / ``trust_root`` are
+    ``run`` / ``prod_execution_enabled`` / ``run_tier_enabled`` / ``read_units`` / ``read_depth`` / ``trust_root`` are
     injectable for tests (a mock engine + mock flags + a stub units reader + an explicit owner root) so the
     full wiring is exercised deterministically without a live scan."""
     def _worker(job: SecurityJob) -> Any:
@@ -343,20 +355,21 @@ def make_engage_worker(
         if nonce:
             kwargs["launch_nonce"] = nonce
         # EC-7 — tiered Quick/Deep run profile (default-OFF ⇒ byte-identical). When the owner has enabled
-        # tiered products, DERIVE the run tier from the launch's OWNER-SIGNED units_reserved (the SAME
-        # verified+bound lease EC-3 reads for its token ceiling — authoritative, never the tamperable
-        # job.extra), then OVERLAY the tier's engagement roster (additively — the profile system only ever
-        # UNIONS flags on) and HOLD the EC-2a routing lever for the run. A bad / absent / unverifiable lease ⇒
-        # units=None ⇒ "quick" (fail-SAFE: the smaller-impact, cheaper tier — never a silent escalation to the
-        # fuller, costlier "deep").
+        # tiered products, read the run's depth from the launch's OWNER-SIGNED lease (the SAME verified+bound lease
+        # EC-3 reads for its token ceiling — authoritative, never the tamperable job.extra): the depth it names
+        # (W2b-3), else the tier its units_reserved derive. Then OVERLAY the depth's engagement roster (additively —
+        # the profile system only ever UNIONS flags on) and HOLD the EC-2a routing lever for the run. A bad / absent /
+        # unverifiable lease ⇒ None ⇒ "quick" (fail-SAFE: the smaller-impact, cheaper depth — never a silent
+        # escalation to a fuller, costlier one).
         tier_enabled = run_tier_enabled if run_tier_enabled is not None else _default_run_tier_enabled
-        read_u = read_units if read_units is not None else _default_read_units
+        read_d = (read_depth if read_depth is not None
+                  else _depth_from_units(read_units) if read_units is not None else _default_read_depth)
         routing_override: Optional[bool] = None
         if tier_enabled():
             from framework.v2.engage import profile_kwargs as _engage_profile_kwargs
             from vigil_core import run_tier
-            units = read_u(job.slug, host, (job.tenant_id or None), base_dir=base_dir, now=now)
-            tier = run_tier.run_tier_for_units(units)              # None/bad ⇒ "quick" (fail-safe)
+            tier = run_tier.depth_of(read_d(job.slug, host, (job.tenant_id or None), base_dir=base_dir, now=now)
+                                     or "quick", None)             # None/bad ⇒ "quick" (fail-safe)
             kwargs["profile"] = run_tier.engage_profile_for(tier)  # surface|full — the roster NAME (manifest-recorded)
             kwargs.update(_engage_profile_kwargs(kwargs["profile"]))   # the enable_* passes that roster turns ON
             routing_override = run_tier.routing_enabled_for(tier)  # quick ⇒ cheaper tiers on; deep ⇒ capable models

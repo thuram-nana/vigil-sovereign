@@ -58,6 +58,7 @@ assert_no_offense()
 from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed re-entrant txn lock)
 from ..governor.postpaid import (RESERVE_ENTRY_PREFIX,  # noqa: E402  (single-source the gate<->ledger entry-id scheme)
                                  SETTLE_ENTRY_PREFIX, postpaid_is_overdue)
+from vigil_core.rate_card import MC_PER_CREDIT  # noqa: E402  (W2b-3: one credit = 1,000 milli-credits)
 
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
@@ -277,10 +278,23 @@ class LaunchGate:
                                                  exc_info=True)
 
     def reserve_launch(self, *, requester: str, org_id: str, host: str, units: int, now: Any,
-                       duration_hours: Any = _DEFAULT_LEASE_HOURS, nonce: Optional[str] = None) -> dict:
+                       duration_hours: Any = _DEFAULT_LEASE_HOURS, nonce: Optional[str] = None,
+                       depth: Optional[str] = None) -> dict:
         """Authorize + reserve + mint for ONE launch. Returns ``{ok: True, lease, ...}`` with the signed lease
         on success, or ``{ok: False, error}`` (fail-closed) on any failing conjunct — and on a refusal NOTHING
-        is debited and NO lease is minted. ``units`` is the reservation cap (>= 1)."""
+        is debited and NO lease is minted. ``units`` is the reservation cap (>= 1).
+
+        W2b-3 (the prepaid wallet, pricing design §0.4): a METERED launch passes its assessment ``depth``
+        (``run_tier.DEPTHS``). Its lease then names the depth — the run grant's effort and the engine's roster come
+        from it — and ``units`` is the allowance CHUNK: the launch holds ``min(available, units)``, sized under the
+        lock from the live balance (so launches that race never hold more than the org has), and never less than one
+        model request that can do useful work (``model_gateway.min_request_mc`` at the published rate card: a
+        postpaid or plan-funded launch cannot be extended, so its first allowance must already fit one); allowance
+        extensions add more as the run uses it (:meth:`extend_reservation`). It is refused, with nothing debited,
+        when the balance (or a credit line's headroom) cannot cover that one request: such a run could never make
+        one. The lease carries ``version`` = ``LEASE_DEPTH_VERSION``, which a pre-W2b-3 reader refuses rather than
+        re-deriving a tier from the chunk. ``depth=None`` — every flat launch — is unchanged: exactly ``units`` is
+        reserved and the lease names no depth."""
         from ..governor.orgs import _check_org_id
         from ..governor.asset_ownership import _check_host
         from .target_authorization import _customer_slug
@@ -315,6 +329,18 @@ class LaunchGate:
         non = str(nonce) if nonce is not None else secrets.token_urlsafe(16)
         if not non or ":" in non:
             return {"ok": False, "error": "nonce must be a non-empty string without ':'"}
+        min_mc = 0
+        if depth is not None:
+            from vigil_core import run_tier
+            if depth not in run_tier.DEPTHS:
+                return {"ok": False, "error": f"depth must be one of {run_tier.DEPTHS}"}
+            from vigil_core.rate_card import rate_card
+            from ..model_gateway import min_request_mc
+            try:
+                min_mc = min_request_mc(rate_card())   # the least one useful model request is charged (mc)
+            except ValueError:                         # RateCardError: a malformed owner override (doctor: hard)
+                return {"ok": False, "error": "assessments cannot start right now: the published usage rates "
+                        "cannot be read (fail-closed)"}
 
         def _gated() -> Optional[str]:
             """Return None if all four conjuncts hold, else the refusal reason. Resolved LIVE each call."""
@@ -334,7 +360,13 @@ class LaunchGate:
                 # POSTPAID (PP-1): the credit conjunct is the owner-signed credit LINE, not the prepaid balance —
                 # admit the launch iff the drawn arrears plus this reservation stay within the signed limit.
                 acc = self.arrears.accrued(oid)
-                if acc + u > acct.credit_limit:
+                if depth is not None:
+                    # W2b-3: a metered launch draws min(headroom, chunk) — refused only when the line's headroom
+                    # cannot cover one useful model request
+                    if (acct.credit_limit - acc) * MC_PER_CREDIT < min_mc:
+                        return (f"over postpaid credit line: the {acct.credit_limit}-credit limit has no room left "
+                                f"for another assessment (org {oid})")
+                elif acc + u > acct.credit_limit:
                     return (f"over postpaid credit line: drawing {u} on top of {acc} accrued would exceed the "
                             f"{acct.credit_limit}-credit limit (org {oid})")
                 # PP-3 DUNNING: an OVERDUE line (any unpaid arrears invoice past its net-terms due date) refuses
@@ -343,6 +375,10 @@ class LaunchGate:
                 if postpaid_is_overdue(self.invoices, self.postpaid, oid, now_ts):
                     return (f"postpaid line is OVERDUE (unpaid arrears invoice past net terms, org {oid}): settle "
                             f"the outstanding invoice before launching new assessments")
+            elif depth is not None:
+                # W2b-3: the wallet is the limit (no amount is quoted — pricing design §0.9)
+                if self.meter.available(oid, now_ts) * MC_PER_CREDIT < min_mc:
+                    return "insufficient credits to start an assessment: top up your wallet to continue"
             elif self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
             # EC-5 GLOBAL COST POOL conjunct (AFTER the per-tenant credit conjunct): when the pool is ARMED and
@@ -380,12 +416,16 @@ class LaunchGate:
                 # mint NOTHING, so a reservation is ALWAYS backed by a real, incremental draw. No prepaid bucket
                 # is touched, so a postpaid tenant never consumes wallet/plan credits.
                 before_acc = self.arrears.accrued(oid)
+                if depth is not None:                     # W2b-3: the chunk (never below one useful request), at
+                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), acct.credit_limit - before_acc)   # most the headroom
                 self.arrears.accrue(oid, u, engagement_id=slug,
                                     entry_id=f"{RESERVE_ENTRY_PREFIX}{slug}:{non}", issued_at=now_ts)
                 if self.arrears.accrued(oid) - before_acc < u:
                     return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
             else:
                 before = self.meter.available(oid, now_ts)
+                if depth is not None:                     # W2b-3: the chunk (never below one useful request), at
+                    u = min(max(u, -(-min_mc // MC_PER_CREDIT)), before)   # most the live balance
                 plan_part = self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent)
                 if before - self.meter.available(oid, now_ts) < u:
                     # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
@@ -401,6 +441,9 @@ class LaunchGate:
             # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
             # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
             self._write_cost_reserve(oid, u, slug, non, now_ts)
+            if depth is not None:                         # W2b-3: the depth, named under the owner signature, in a
+                from vigil_core.credit_lease import LEASE_DEPTH_VERSION    # lease version an older reader refuses
+                split.update(run_tier=depth, version=LEASE_DEPTH_VERSION)
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
                 not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts, **split)
@@ -1171,6 +1214,12 @@ class LaunchGate:
         published_flat = (not was_metered and cur is not None
                           and str(cur.signed_lease.document.nonce) == str(doc.nonce))
         metered = was_metered or (config.metered_billing_enabled() and not published_flat)
+        if not metered and doc.run_tier is not None:
+            # W2b-3: a lease that names its depth was reserved for METERED billing — an allowance chunk the run extends
+            # as it goes. Published flat, a completed run would be charged that whole chunk. Billing changed after the
+            # reservation: refuse; a launch that never started is cancelled with a full refund.
+            return {"ok": False, "error": "this launch can no longer start because billing changed after it was "
+                    "reserved: cancel it (nothing is charged) and launch again"}
         # PRICING M1c: the seam holds one lease per org+host, so a newer launch's lease would replace one still
         # running — its completion could then never settle, and a customer cancel would read it as never started.
         # Where metering is involved (this launch, or the one on the seam), one launch per host is in flight at a time.
@@ -1302,8 +1351,8 @@ class LaunchGate:
     def _publish_model_grant(self, doc: Any, owner_key: Any) -> bool:
         """Mint the owner-signed model grant for ONE verified lease and publish its token on the seam (design
         §5.1). Every field comes from the verified lease or the owner's pricing config — never a wire value or the
-        clock: the cap is the most AI spend whose marked-up charge fits the reservation, the effort is the run
-        tier's, the grant is valid from the lease's start for the longest grant lifetime (a run armed inside the
+        clock: the cap is a technical ceiling (W2b-2), the effort is the launch's depth's (the depth the lease names,
+        W2b-3; for a lease that names none, the tier its units derive), the grant is valid from the lease's start for the longest grant lifetime (a run armed inside the
         lease window may outlive it — a late start, a resume — and must keep its model access; the settle closes the
         meter, after which the grant spends nothing), and the grant id is derived from the lease — so re-publishing a
         lease mints the identical grant. The launch is marked metered (beside its meter) before its grant is
@@ -1327,7 +1376,7 @@ class LaunchGate:
         grant = ModelGrant(
             grant_id=hashlib.sha256(f"model-grant\0{slug}\0{nonce}".encode()).hexdigest()[:32],
             org_id=str(doc.org_id), engagement_slug=slug, nonce=nonce, model=model,
-            effort=run_tier.effort_for(run_tier.run_tier_for_units(units)),
+            effort=run_tier.effort_for(run_tier.lease_depth(doc)),     # W2b-3: the depth the lease names
             # W2b-2: the binding customer limit is the run's prepaid ALLOWANCE, checked by the gateway on every
             # request; the grant's cap is only a technical ceiling on what a leaked token could ever spend
             cap_nano_usd=mm.usd_cap_nano_for_credits(max(units, mm.grant_ceiling_credits()),

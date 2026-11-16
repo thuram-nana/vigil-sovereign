@@ -465,6 +465,28 @@ def grant_ceiling_credits(env: Optional[Mapping[str, str]] = None) -> int:
     return int(raw)
 
 
+ALLOWANCE_CHUNK_ENV = "VIGIL_ALLOWANCE_CHUNK_CREDITS"
+DEFAULT_ALLOWANCE_CHUNK_CREDITS = 100
+#: The most one launch can reserve at once (the launch gate's own bound on a reservation), so a chunk the gate would
+#: refuse is refused here too — by doctor, the gateway and the launch path alike.
+MAX_ALLOWANCE_CHUNK_CREDITS = 1_000_000
+
+
+def allowance_chunk_credits(env: Optional[Mapping[str, str]] = None) -> int:
+    """``VIGIL_ALLOWANCE_CHUNK_CREDITS`` (a whole number from 1 to :data:`MAX_ALLOWANCE_CHUNK_CREDITS`), default
+    :data:`DEFAULT_ALLOWANCE_CHUNK_CREDITS`: the credits a metered launch holds from the wallet at a time — its first
+    allowance at launch (at most the balance) and the least one allowance extension adds. A holding granularity, not
+    a price: whatever the run does not use returns to the wallet at settle."""
+    env = os.environ if env is None else env
+    raw = (env.get(ALLOWANCE_CHUNK_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_ALLOWANCE_CHUNK_CREDITS
+    if not raw.isdigit() or not raw.isascii() or not 1 <= int(raw) <= MAX_ALLOWANCE_CHUNK_CREDITS:
+        raise MeteringError(f"{ALLOWANCE_CHUNK_ENV} must be a whole number of credits from 1 to "
+                            f"{MAX_ALLOWANCE_CHUNK_CREDITS}, got {raw!r}")
+    return int(raw)
+
+
 def run_floor_credits(env: Optional[Mapping[str, str]] = None) -> int:
     """The per-run minimum charge in credits (``VIGIL_RUN_FLOOR_CREDITS``, default 25 = $0.25)."""
     env = os.environ if env is None else env

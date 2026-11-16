@@ -63,6 +63,16 @@ ENVELOPE_TOKENS_PER_CREDIT: Final[int] = _env_int("VIGIL_ENVELOPE_TOKENS_PER_CRE
 #: is part of the signed document: changing, adding or stripping it breaks the owner signature.
 LEASE_V2_OPTIONAL_FIELDS: Final[tuple[str, ...]] = ("run_tier", "plan_reserved", "plan_period_end", "continue_of")
 
+#: W2b-3 — the lease document VERSION a lease that names its assessment depth carries. A metered launch's units are an
+#: allowance chunk that says nothing about its depth, so a reader that predates the explicit depth must REFUSE such a
+#: lease rather than re-derive a tier from its units: every older reader is ``extra="forbid"`` and knows no
+#: ``version`` field, so it refuses the lease outright (fail closed). Leases that name no depth carry no version and
+#: keep their exact bytes.
+LEASE_DEPTH_VERSION: Final[int] = 3
+#: The optional fields added with :data:`LEASE_DEPTH_VERSION` (left out of the document and the signing bytes while
+#: None, exactly like :data:`LEASE_V2_OPTIONAL_FIELDS`).
+LEASE_V3_OPTIONAL_FIELDS: Final[tuple[str, ...]] = ("version",)
+
 
 class CreditLaunchLease(BaseModel):
     """The per-launch credit reservation an offense launch is checked against (alongside its authority)."""
@@ -83,8 +93,10 @@ class CreditLaunchLease(BaseModel):
     # Each is None unless the minting code stamps it. A None field is left out of the serialized document AND out
     # of the signing bytes, so a lease that stamps none of them is byte-identical to a lease minted before they
     # existed (an older verifier keeps accepting it); a stamped field is covered by the owner signature.
-    run_tier: Optional[str] = Field(default=None, description="The launch product's run tier (a run_tier.RUN_TIERS "
-                                    "value), when the lease names it explicitly.")
+    run_tier: Optional[str] = Field(default=None, description="The launch's assessment depth (a run_tier.DEPTHS "
+                                    "value: quick | deep | max), when the lease names it explicitly. A launch reserved "
+                                    "with metered billing does (W2b-3): its units are an allowance chunk and say "
+                                    "nothing about its depth. Absent, the depth is derived from units_reserved.")
     plan_reserved: Optional[int] = Field(default=None, ge=0, description="How many of units_reserved the reserve "
                                          "took from the tenant's plan-credit tranche (the rest came from the wallet); "
                                          "None when the lease does not record the split.")
@@ -92,6 +104,10 @@ class CreditLaunchLease(BaseModel):
                                              "plan share came from; set exactly when plan_reserved > 0.")
     continue_of: Optional[str] = Field(default=None, min_length=1, description="The nonce of the same engagement's "
                                        "earlier launch this one continues, when it is a continuation.")
+    # --- optional v3 field (see ``LEASE_V3_OPTIONAL_FIELDS``) ------------------------------------------------------
+    version: Optional[int] = Field(default=None, description="The lease document version: absent on a lease that "
+                                   "names no depth (the v1 / v2 formats); LEASE_DEPTH_VERSION on one that names its "
+                                   "depth (W2b-3), which a reader that predates it refuses.")
 
     @model_validator(mode="after")
     def _check_window(self) -> "CreditLaunchLease":
@@ -102,9 +118,14 @@ class CreditLaunchLease(BaseModel):
     @model_validator(mode="after")
     def _check_v2_fields(self) -> "CreditLaunchLease":
         if self.run_tier is not None:
-            from .run_tier import RUN_TIERS
-            if self.run_tier not in RUN_TIERS:
-                raise ValueError(f"run_tier must be one of {RUN_TIERS}")
+            from .run_tier import DEPTHS
+            if self.run_tier not in DEPTHS:
+                raise ValueError(f"run_tier must be one of {DEPTHS}")
+        if self.version is not None:
+            if isinstance(self.version, bool) or self.version != LEASE_DEPTH_VERSION:
+                raise ValueError(f"version must be {LEASE_DEPTH_VERSION} (this reader knows no other lease version)")
+            if self.run_tier is None:
+                raise ValueError(f"a version-{LEASE_DEPTH_VERSION} lease names its assessment depth (run_tier)")
         if self.plan_reserved is not None and self.plan_reserved > self.units_reserved:
             raise ValueError("plan_reserved cannot exceed units_reserved")
         if self.plan_reserved:                              # a plan share names the tranche it came from
@@ -119,7 +140,7 @@ class CreditLaunchLease(BaseModel):
     def _drop_unset_v2_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
         data = handler(self)
         if isinstance(data, dict):
-            for key in LEASE_V2_OPTIONAL_FIELDS:
+            for key in (*LEASE_V2_OPTIONAL_FIELDS, *LEASE_V3_OPTIONAL_FIELDS):
                 if key in data and data[key] is None:
                     del data[key]
         return data
@@ -138,8 +159,9 @@ class SignedCreditLaunchLease(BaseModel):
 def credit_lease_signing_bytes(lease: CreditLaunchLease) -> bytes:
     """The exact bytes a signer signs / a verifier checks: the domain tag followed by the compact, sorted-key
     UTF-8 JSON of the document (byte-identical shape to ``authority_signing_bytes``). The document's serializer
-    leaves out every ``LEASE_V2_OPTIONAL_FIELDS`` entry whose value is None, so a lease without them signs the
-    same bytes as a pre-v2 lease, and a lease with one of them set covers it with the signature."""
+    leaves out every ``LEASE_V2_OPTIONAL_FIELDS`` / ``LEASE_V3_OPTIONAL_FIELDS`` entry whose value is None, so a lease
+    without them signs the same bytes as a pre-v2 lease, and a lease with one of them set covers it with the
+    signature."""
     return _LEASE_DOMAIN + canonical_json(lease.model_dump(mode="json"))
 
 

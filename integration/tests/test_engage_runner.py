@@ -45,11 +45,12 @@ def _owner_root(owner):
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)])
 
 
-def _lease(owner, *, nonce="n1", issued=1000.0, units=10):
+def _lease(owner, *, nonce="n1", issued=1000.0, units=10, run_tier=None):
     t = _dt.datetime.fromtimestamp(issued, tz=timezone.utc)
+    named = {} if run_tier is None else {"run_tier": run_tier, "version": 3}   # W2b-3: a metered launch's lease
     doc = CreditLaunchLease(engagement_slug=SLUG, org_id=ORG, scope_host=HOST, units_reserved=units,
                             not_before=t - _dt.timedelta(hours=1), not_after=t + _dt.timedelta(hours=8),
-                            nonce=nonce, issued_at=issued)
+                            nonce=nonce, issued_at=issued, **named)
     return sign_credit_launch_lease(doc, {"owner": owner.private_key_b64})
 
 
@@ -61,7 +62,7 @@ def _customer_authority(slug, scope, *, env="twin", issued_by="customer:org_a", 
 
 
 def _rig(monkeypatch, owner, *, env="twin", issued_by="customer:org_a", write_lease=True,
-         settled=False, now=1000.0, units=10):
+         settled=False, now=1000.0, units=10, run_tier=None):
     """Write a REAL owner-signed lease to a fresh seam (so the lease pre-check verifies for real) and
     monkeypatch the offense authority store: load_authority_root → the owner root (for the lease verify),
     load_verified_authority → a constructed customer authority (so authorize_action runs over it for real).
@@ -69,7 +70,8 @@ def _rig(monkeypatch, owner, *, env="twin", issued_by="customer:org_a", write_le
     from framework.v2.authority import store as authz_store
     base = tempfile.mkdtemp()
     if write_lease:
-        write_credit_lease(base, SLUG, _lease(owner, nonce="n1", issued=now, units=units), _owner_root(owner))
+        write_credit_lease(base, SLUG, _lease(owner, nonce="n1", issued=now, units=units, run_tier=run_tier),
+                           _owner_root(owner))
         if settled:
             record_lease_settlement(base, SLUG, "n1")
     monkeypatch.setattr(authz_store, "load_authority_root", lambda path=None: _owner_root(owner))
@@ -324,6 +326,42 @@ def test_worker_tier_fails_safe_to_quick_when_units_unverifiable(monkeypatch):
     assert calls[0]["profile"] == "surface"               # fail-safe ⇒ quick ⇒ surface (NOT deep/full)
     assert not any(k.startswith("enable_") for k in calls[0])
     assert routing_seen == ["1"]                           # quick ⇒ routing ON
+
+
+def test_worker_runs_the_depth_its_lease_names_not_its_units_band(monkeypatch):
+    # W2b-3: a metered launch holds an allowance CHUNK, so its units say nothing about its depth. A 100-unit lease
+    # that NAMES Quick runs the lean Quick roster with routing on (the band alone would derive "deep"); one naming
+    # Max runs the full roster on capable models (routing off), though its 3 units would band as "quick".
+    # Mutation target: derive the tier from the units band again -> both rows red.
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+    owner = generate_keypair()
+    for units, named, profile, routing in ((100, "quick", "surface", "1"), (3, "max", "full", "0")):
+        base = _rig(monkeypatch, owner, env="twin", units=units, run_tier=named)
+        calls, routing_seen = [], []
+        w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                               run=_capturing_run(calls, routing_seen))
+        assert w(_job())["facts"] == 0
+        assert calls[0]["profile"] == profile, named
+        assert routing_seen == [routing], named
+
+
+@pytest.mark.parametrize("read,profile,routing", [
+    (lambda *a, **k: "max", "full", "0"),     # an injected depth reader wins over the lease and over read_units
+    (lambda *a, **k: "ultra", "surface", "1"),  # a value that is not a depth never escalates: Quick
+    (lambda *a, **k: None, "surface", "1"),   # no verified depth: Quick
+])
+def test_worker_depth_reader_precedence_and_fail_safe(monkeypatch, read, profile, routing):
+    # W2b-3: read_depth (when injected) is the one depth source — read_units is ignored — and whatever it returns is
+    # sanitised through run_tier.depth_of, so a bad or missing value runs the smaller-impact Quick roster.
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=20)   # a deep-band lease: the injected reader must win
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                           read_units=lambda *a, **k: 20, read_depth=read, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    assert calls[0]["profile"] == profile and routing_seen == [routing]
 
 
 def test_worker_routing_env_is_restored_after_the_run(monkeypatch):

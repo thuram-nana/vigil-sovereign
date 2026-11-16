@@ -221,3 +221,51 @@ def test_every_run_tier_is_accepted():
     from vigil_core.run_tier import RUN_TIERS
     for tier in RUN_TIERS:
         assert _lease(run_tier=tier).run_tier == tier
+
+
+def test_every_assessment_depth_is_accepted_and_signed():
+    """W2b-3: a metered launch's lease names its depth (quick | deep | max) inside the owner signature; anything else
+    is refused when the lease is read (an older verifier, which knows no "max", refuses it too — fail closed)."""
+    from vigil_core.run_tier import DEPTHS
+    for depth in DEPTHS:
+        signed = _signed(run_tier=depth)
+        assert signed.document.run_tier == depth
+        assert f'"run_tier":"{depth}"'.encode() in credit_lease_signing_bytes(signed.document)
+        assert verify_credit_launch_lease(signed, _owner_root())[0]
+    for bad in ("ultra", "Max", "", "high"):
+        with pytest.raises(ValueError):
+            _lease(run_tier=bad)
+
+
+# --- W2b-3: the depth lease's document version ---------------------------------------------------------------
+
+def test_a_depth_lease_carries_its_version_inside_the_signature():
+    from vigil_core.credit_lease import LEASE_DEPTH_VERSION
+    signed = _signed(run_tier="deep", version=LEASE_DEPTH_VERSION)
+    assert verify_credit_launch_lease(signed, _owner_root())[0]
+    assert f'"version":{LEASE_DEPTH_VERSION}'.encode() in credit_lease_signing_bytes(signed.document)
+    raw = json.loads(signed.model_dump_json())
+    del raw["document"]["version"]                       # stripping the version breaks the owner signature
+    assert verify_credit_launch_lease(SignedCreditLaunchLease.model_validate(raw), _owner_root())[0] is False
+    assert "version" not in _lease().model_dump(mode="json")          # a lease that names no depth has none
+
+
+@pytest.mark.parametrize("bad", [dict(version=3), dict(version=2, run_tier="deep"), dict(version=4, run_tier="max"),
+                                 dict(version=True, run_tier="quick")])
+def test_a_lease_version_this_reader_does_not_know_is_refused(bad):
+    # a version names its depth, and a reader refuses any version it does not know (refuse-newer)
+    with pytest.raises(ValueError):
+        _lease(**bad)
+
+
+def test_a_pre_w2b3_reader_refuses_a_depth_lease_instead_of_misreading_it():
+    """An older reader is ``extra="forbid"`` with no ``version`` field: it must REFUSE a depth lease (fail closed)
+    rather than accept it and re-derive a tier from its allowance chunk (red-pen LEASE-1)."""
+    from pydantic import ConfigDict, ValidationError, create_model
+    from vigil_core.credit_lease import LEASE_DEPTH_VERSION, CreditLaunchLease
+    old_fields = {name: (object, None) for name in CreditLaunchLease.model_fields if name != "version"}
+    OldReader = create_model("OldReader", __config__=ConfigDict(extra="forbid"), **old_fields)
+    doc = _signed(run_tier="quick", units_reserved=100, version=LEASE_DEPTH_VERSION).document.model_dump(mode="json")
+    with pytest.raises(ValidationError, match="version"):
+        OldReader.model_validate(doc)
+    OldReader.model_validate(_lease().model_dump(mode="json"))          # a lease that names no depth still reads
