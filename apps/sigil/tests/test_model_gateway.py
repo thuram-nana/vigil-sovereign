@@ -2027,3 +2027,92 @@ def test_confirmed_charges_count_against_the_allowance(upstream, tmp_path):
         assert status == 403 and json.loads(body)["error"]["message"] == gw.CREDITS_EXHAUSTED
     finally:
         _stop(server)
+
+
+@pytest.mark.parametrize("read_raises", [False, True])
+def test_an_extension_requires_a_readable_signed_allowance_before_forwarding(upstream, tmp_path, read_raises):
+    class UnreadableAfterExtension(_Allowance):
+        readable = True
+
+        def allowance_mc(self, grant):
+            if not self.readable and read_raises:
+                raise OSError("allowance storage unavailable")
+            return self.mc if self.readable else None
+
+        def extend(self, grant, credits):
+            result = super().extend(grant, credits)
+            self.readable = False
+            return result
+
+    src = UnreadableAfterExtension(1_000, available=5_000)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        token = _tok(_grant())
+        for _ in range(2):
+            assert _call(server, BODY, token)[0] == 529
+        assert upstream.seen == [] and len(src.extends) == 1
+        src.readable = True
+        assert _call(server, BODY, token)[0] == 200
+        assert len(src.extends) == 1  # retry recovers the committed extension, never debits it twice
+    finally:
+        _stop(server)
+
+
+@pytest.mark.parametrize("refusal, status", [({"paused": True}, 403), ({"error": "unreadable"}, 529)])
+def test_an_extension_refusal_never_admits_a_smaller_request(upstream, tmp_path, refusal, status):
+    # Enough for a smaller request, but not the requested output. A refused extension must not be bypassed.
+    src = _Allowance(20_000, available=5_000, extend_out={"ok": False, **refusal})
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        assert _call(server, BODY, _tok(_grant()))[0] == status
+        assert upstream.seen == []
+    finally:
+        _stop(server)
+
+
+def test_customer_reservation_covers_an_early_cache_eviction(upstream, tmp_path):
+    body = {**BODY, "cache_control": {"type": "ephemeral"},
+            "messages": [{"role": "user", "content": "A" * 50_000}]}
+    src = _Allowance(10 ** 9)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        grant = _grant()
+        token = _tok(grant)
+        assert _call(server, body, token)[0] == 200
+        assert _call(server, body, token)[0] == 200
+        first, _usage, second, _usage2 = _lines(tmp_path / "meter", grant)
+        assert second["reserved"] < first["reserved"]  # internal provider-cost optimization is retained
+        assert second["reserved_mc"] == first["reserved_mc"]  # customer authorization covers a cache miss
+    finally:
+        _stop(server)
+
+
+def test_inflight_customer_reservations_cannot_share_the_same_allowance(tmp_path):
+    meter = gw.GrantMeter(tmp_path / "meter", rate_card=gw.DEFAULT_RATE_CARD)
+    grant = _grant()
+    worst = lambda tokens: gw.DEFAULT_RATE_CARD.request_worst_mc(1_000, 0, tokens)
+    allowance = worst(2_048)
+    first, _, why = meter.reserve(grant, 2_048 * OUT, OUT, now=NOW, worst_mc=worst, allowance_mc=allowance)
+    assert first and not why
+    second, _, why = meter.reserve(grant, 2_048 * OUT, OUT, now=NOW, worst_mc=worst, allowance_mc=allowance)
+    assert not second and why == "held"
+    meter.release(grant, first, now=NOW)
+    assert meter.reserve(grant, 2_048 * OUT, OUT, now=NOW, worst_mc=worst, allowance_mc=allowance)[0]
+
+
+def test_an_extension_interrupted_after_the_debit_is_recovered_before_retry(upstream, tmp_path):
+    class InterruptedExtension(_Allowance):
+        def extend(self, grant, credits):
+            super().extend(grant, credits)
+            raise OSError("extension response interrupted")
+
+    src = InterruptedExtension(1_000, available=5_000)
+    server = _start(upstream, tmp_path / "meter", allowance=src)
+    try:
+        token = _tok(_grant())
+        assert _call(server, BODY, token)[0] == 529
+        assert upstream.seen == [] and len(src.extends) == 1
+        assert _call(server, BODY, token)[0] == 200
+        assert len(src.extends) == 1
+    finally:
+        _stop(server)

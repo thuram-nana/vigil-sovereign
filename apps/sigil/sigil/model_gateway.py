@@ -1329,12 +1329,20 @@ class ModelGateway:
         or extended right now (a busy lock), never a pause."""
         src = self.config.allowance
         mid = grant.meter_id
+
+        def read_allowance() -> Optional[int]:
+            try:
+                return src.allowance_mc(grant)
+            except (OSError, ValueError):
+                raise _Refusal(529, "overloaded_error", "VIGIL cannot read this run's allowance right now",
+                               retry_after=5) from None
+
         with self._extend_guard:
             lock = self._extend_locks.setdefault(mid, threading.Lock())
         with lock:
             cur = self._allowances.get(mid)
             if cur is None:
-                cur = src.allowance_mc(grant)
+                cur = read_allowance()
                 if cur is None:
                     if self.meter.is_closed(mid):
                         return 0                         # settled: the meter refuses it as closed
@@ -1346,16 +1354,34 @@ class ModelGateway:
             if short <= 0:
                 return cur
             want = max(self.config.allowance_chunk_credits, -(-short // 1000))
-            credits = min(want, int(src.available_credits(grant)))
+            try:
+                credits = min(want, int(src.available_credits(grant)))
+            except (OSError, ValueError):
+                raise _Refusal(529, "overloaded_error", "VIGIL cannot read the available credits right now",
+                               retry_after=5) from None
             if credits < 1:
                 return cur                               # nothing to draw: lowered to fit, or exhausted
-            out = src.extend(grant, credits)
+            # An interrupted call may have committed a debit. Always recover the signed allowance on retry.
+            self._allowances.pop(mid, None)
+            try:
+                out = src.extend(grant, credits)
+            except (OSError, ValueError):
+                raise _Refusal(529, "overloaded_error", "VIGIL cannot extend this run's allowance right now",
+                               retry_after=5) from None
             if out.get("ok"):
-                fresh = src.allowance_mc(grant)
-                cur = fresh if fresh is not None else cur + 1000 * credits
+                fresh = read_allowance()
+                if fresh is None:
+                    raise _Refusal(529, "overloaded_error", "VIGIL cannot read this run's allowance right now",
+                                   retry_after=5)
+                cur = fresh
                 self._allowances[mid] = cur
             elif out.get("retry"):
                 raise _Refusal(429, "rate_limit_error", "this run's allowance is being extended; retry shortly",
+                               retry_after=5)
+            elif out.get("paused"):
+                raise _Refusal(403, "permission_error", "VIGIL: this scan is paused")
+            elif not out.get("insufficient"):
+                raise _Refusal(529, "overloaded_error", "VIGIL cannot extend this run's allowance right now",
                                retry_after=5)
             return cur
 
@@ -1564,7 +1590,10 @@ class _Handler(BaseHTTPRequestHandler):
         card = gw.config.rate_card
 
         def worst(out_tokens: int) -> int:
-            return card.request_worst_mc(tokens_in, cached, out_tokens)
+            # A provider may evict a cached prefix early. Prepaid authorization must cover that cache miss;
+            # actual cache hits are still charged at the recorded read rate. Keep the cost-only optimization.
+            prepaid = gw.config.allowance is not None or gw.config.allowance_required
+            return card.request_worst_mc(tokens_in, 0 if prepaid else cached, out_tokens)
 
         allowance: Optional[int] = None
         if gw.config.allowance is not None:

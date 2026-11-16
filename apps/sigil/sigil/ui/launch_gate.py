@@ -500,6 +500,12 @@ class LaunchGate:
                     return {"ok": False, "error": "this launch is settling or settled: its meter is closed"}
                 if is_lease_settled(self._seam_base(), s, non):
                     return {"ok": False, "error": "this launch is settled"}
+                from vigil_integration.live.credit_lease_pause import lease_pause_state
+                paused = lease_pause_state(self._seam_base(), s, non)
+                if paused is True:
+                    return {"ok": False, "paused": True, "error": "this launch is paused"}
+                if paused is not False:
+                    return {"ok": False, "retry": True, "error": "this launch's pause state cannot be read"}
             except (OSError, ValueError):
                 return busy
             k = 1

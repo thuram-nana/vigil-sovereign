@@ -10,13 +10,10 @@
 > §10 of this file). Slice **W1** (published rate card + per-charge usage statement) is built; **W2 → W6** are
 > specified in §11.5–§11.9 in enough detail to implement directly.
 >
-> **State on 2026-11-16 (session `session_01Uzcz55Eva4w7NRFfoQPArA`):**
-> - `main` = `7dd30c47` (merge of #1129). Merged this session: **#1128** ("PR 2" — enterprise waves: nginx-first
->   edge swap, founder latch, held-cancel marker, OD-4, doctor fixes, `console/safeinput.py`) and **#1129** (CodeQL
->   pass 2: allowlist-rebuilt paths/ids, linear parsers, tar `data` filter, TLS floor, posture bundle 0600).
-> - **OPEN: #1130** on branch `claude/cool-meitner-v9fq6d` — the owner's decisions of 2026-11-15/16 in the two
->   design docs + **W1 code** (+ this handoff). Merge it first when all 15 required checks are green (§0.3 standing
->   authorisation). If CI is red, fix it on that branch (it is yours now).
+> **Verified takeover state on 2026-11-16:**
+> - `origin/main` = `cc227ccc` (#1132). #1130 (W1), #1131 (W2a), and #1132 (W2b-1) are merged.
+> - **OPEN: #1133**, W2b-2, on `claude/cool-meitner-v9fq6d`. Takeover review fixes are being validated;
+>   this slice is not finished until its updated head passes all 15 required checks. See §11.19.
 > - Every money number the program needs is now **decided by the owner** (§11.2, §12, §13). Nothing in this file is
 >   a proposal waiting for a decision except where it says "OPEN".
 >
@@ -1166,7 +1163,7 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.19 W2b-2 — DONE (its own PR off main after #1132; see §5): gateway admission against the prepaid allowance
+### 11.19 W2b-2 — OPEN (#1133; built, takeover validation in progress; see §5): gateway admission against the prepaid allowance
 - `model_gateway.GrantMeter.reserve(..., allowance_mc=)`: a request is admitted only if its worst-case CUSTOMER charge
   fits beside the launch's confirmed charges and the requests in flight (output lowered to fit, like the cap); when
   not even the smallest useful request (1,024 output tokens) fits beside the confirmed charges → refused
@@ -1183,7 +1180,7 @@ no credits — check `governor/catalog.py` / `governor/subscription.py` grant no
 - `ui/launch_gate.py::LaunchAllowance(gate)` — the source: `allowance_mc(grant)` = 1000 × (the OWNER-SIGNED seam
   lease's `units_reserved` + extensions), verified under the owner key and bound to the grant's (org, slug, nonce);
   None on any mismatch, unverifiable lease or pruned extension. `available_credits`, `extend` →
-  `LaunchGate.extend_reservation`. `ui/server.py::serve` passes `LaunchAllowance(LaunchGate(srv.store))`.
+  `LaunchGate.extend_reservation`. `ui/server.py::serve` passes `LaunchAllowance(LaunchGate(srv.store()))`.
 - The published grant's `cap_nano_usd` is now a technical CEILING: `usd_cap(max(units, VIGIL_GRANT_CEILING_CREDITS))`
   (`vigil_core.model_metering.grant_ceiling_credits`, default 1,000,000 credits — an engineering bound on a leaked
   token, not a price; the owner may change it). `vigil doctor` validates both new settings.
@@ -1193,6 +1190,20 @@ no credits — check `governor/catalog.py` / `governor/subscription.py` grant no
   (+3: the real source reads the signed lease + extensions and refuses another launch / org; never reads a pruned
   extension; grant capped at the ceiling); `test_doctor_metering.py` (+1); `test_graceful_stop.py` now pins that the
   cockpit passes a `LaunchAllowance`; `test_metered_billing.py` pins the ceiling cap. 13 mutants, all RED.
+- **Takeover review, 2026-11-16:** cockpit wiring now supplies the actual `SpineStore`; the test exercises a
+  wallet read through it. Extensions refuse a paused or unreadable launch under the existing settle lock. Admission
+  requires a readable signed allowance after extending, invalidates its cache before a possibly committed debit,
+  and refuses non-insufficient extension errors. Interrupted extensions recover the signed debit before retrying.
+  Prepaid reservations cover an early provider cache eviction; actual cache-hit charges retain the recorded rate.
+- **Local evidence:** 329 gateway, extension, cockpit shutdown, metered billing, customer charge, usage statement,
+  and doctor tests passed. Sixteen takeover guard mutants went RED against named tests: in-flight/confirmed charges,
+  cache eviction, debit cache invalidation, paused/unreadable pause state, real store wiring, extension refusal,
+  signed allowance reread, interrupted debit, allowance enforcement, required source at admission/startup,
+  busy extension, extension shortfall, and grant ceiling. Restored-source verification passed (920 tests, 7 skipped, including documentation and CI-policy tests);
+  updated-head CI remains required; the prior session's 13-mutant report above is historical evidence, not a new run.
+- **Takeover tooling:** pinned ruff passed; money hygiene and staged gitleaks passed. Local mypy 2.3.1 completed
+  but its ratchet failed because `sigil/voice/components.py` appeared type-clean (stale ratchet entry). No ratchet
+  exemption was changed; the updated-head CI lint result is still required before merge.
 - **Note for the next agent:** running `mypy` on `packages/core/vigil_core` from a worktree OUTSIDE the repo path
   reports 7 pre-existing errors in `run_budget` / `install_manifest` / `highwater` / `signed_build_manifest` that do not
   appear from the repo path (same files) — an environment artefact; CI and the in-repo run are clean.

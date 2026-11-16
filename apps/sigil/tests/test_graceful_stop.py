@@ -664,6 +664,9 @@ def test_the_cockpit_stops_with_the_provisioner_deadline_and_stops_its_gateway(t
     # W2b-2: the cockpit hands its gateway the in-process allowance source over its own spine
     from sigil.ui.launch_gate import LaunchAllowance
     assert len(sources) == 1 and isinstance(sources[0], LaunchAllowance)
+    assert isinstance(sources[0].gate.store, SpineStore)
+    assert sources[0].gate.store.path == spine
+    assert sources[0].available_credits(SimpleNamespace(org_id="org_gateway_probe")) == 0
     if not gateway_on:
         assert seen["on_stop"] is None
         return

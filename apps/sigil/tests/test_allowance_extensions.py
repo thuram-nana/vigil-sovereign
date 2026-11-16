@@ -282,6 +282,18 @@ def test_a_flat_launch_settle_never_reads_extensions(monkeypatch):
 
 # ---------------- W2b-2: the gateway's in-process allowance source ----------------
 
+@pytest.mark.parametrize("pause_state", [True, None], ids=["paused", "unreadable"])
+def test_an_extension_refuses_a_paused_or_unreadable_launch(monkeypatch, pause_state):
+    from vigil_integration.live import credit_lease_pause
+    s = _store()
+    _owner, r, g = _reserve(s)
+    before = _avail(s)
+    monkeypatch.setattr(credit_lease_pause, "lease_pause_state", lambda *_a: pause_state)
+    out = g.extend_reservation(org_id=ORG, slug=r["slug"], nonce=r["nonce"], credits=100, now=NOW)
+    assert not out["ok"] and not out.get("insufficient")
+    assert out.get("paused") if pause_state else out.get("retry")
+    assert _avail(s) == before and g.extension_total(ORG, r["slug"], r["nonce"]) == (0, False)
+
 def _grant_of(r, **over):
     base = dict(grant_id="0" * 32, org_id=ORG, engagement_slug=r["slug"], nonce=r["nonce"], model="claude-opus-4-8",
                 effort="high", cap_nano_usd=10 ** 13, not_after=NOW + 86_400, issued_at=NOW - 60)

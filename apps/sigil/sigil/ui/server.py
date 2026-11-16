@@ -1963,7 +1963,7 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     from .launch_gate import LaunchAllowance, LaunchGate
     # W2b-2: the gateway checks every metered request against the launch's prepaid allowance through this in-process
     # source (the same process as the Provisioner and its LaunchGate), and extends it from the wallet when needed
-    gw = model_gateway.start_from_env(allowance=LaunchAllowance(LaunchGate(srv.store)))
+    gw = model_gateway.start_from_env(allowance=LaunchAllowance(LaunchGate(srv.store())))
     if gw is not None:
         print(f"  (model gateway → http://127.0.0.1:{gw.server_address[1]}; metering customer runs)")
     # SIGTERM/SIGINT: the SSE feeds end, nothing new is accepted — here or at the model gateway — and the requests
