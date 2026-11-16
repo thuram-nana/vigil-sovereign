@@ -1426,12 +1426,13 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
     Neither ``VIGIL_METERED_BILLING`` nor ``VIGIL_MODEL_GATEWAY_ENABLED`` set, and no retired pricing setting ⇒
     ``{"configured": False}`` and nothing else (default output unchanged). Otherwise HARD issues for a configuration that would bill wrongly or not at
     all: metered billing without the gateway, a gateway that does not answer, a provider key missing from the
-    sovereign environment, a pricing setting the metering core refuses (floor, price table, the gateway limits),
+    sovereign environment, a pricing setting the metering core refuses (price table, rate card, the gateway limits),
     and — with metered billing on — no target margin (the owner's, no default) or an unrecognised cancel-settlement
     policy (unset means metered; a typo refuses metered launches and defers cancelled-run settles). The target margin is the margin over METERED
     AI cost only (payment fees and hosting are outside it); its value is never printed. A retired pricing setting
-    (``VIGIL_BILLING_MARKUP_K`` / ``VIGIL_MARGIN_MULTIPLIER_K``) is a HARD issue whether or not either flag is on:
-    the margin is the only pricing input. ``probe(url) -> bool | None`` checks the gateway answers (tests inject
+    (``VIGIL_BILLING_MARKUP_K`` / ``VIGIL_MARGIN_MULTIPLIER_K`` / ``VIGIL_RUN_FLOOR_CREDITS``) is a HARD issue whether
+    or not either flag is on. With metered billing on, ``VIGIL_SETTLE_SPINE_RECORD`` off is a HARD issue too (W2c-1:
+    the passes that finish a settle a crash interrupted run only with it on). ``probe(url) -> bool | None`` checks the gateway answers (tests inject
     one); the default sends one unauthenticated request and expects the gateway's own 401.
 
     With ``VIGIL_ANTHROPIC_KEY_SSM_PARAMETER`` set (the gateway's key comes ONLY from that AWS SSM SecureString,
@@ -1462,6 +1463,12 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
         issues.append("VIGIL_METERED_BILLING is on but VIGIL_MODEL_GATEWAY_ENABLED is not: no customer run can reach "
                       "a model gateway, so every metered launch fails. Enable the gateway in the cockpit's "
                       "environment.")
+    if metered and (e.get("VIGIL_SETTLE_SPINE_RECORD") or "").strip().lower() not in _AFFIRMATIVE:
+        # W2c-1: every metered charge records its exact decision on the spine whatever the flag says, but the drain's
+        # and the sweep's passes that FINISH a settle a crash interrupted run only with the record on
+        issues.append("VIGIL_METERED_BILLING is on but VIGIL_SETTLE_SPINE_RECORD is not: a metered settle a crash "
+                      "interrupts would be finished only by a later settle of the same launch. Turn the settle record "
+                      "on (in the cockpit, customer, settle-drain and ops-sweep environments alike).")
     env_key = bool((e.get("SIGIL_ANTHROPIC_API_KEY") or e.get("ANTHROPIC_API_KEY") or "").strip())
     ssm_name = (e.get(_SSM_KEY_PARAMETER_ENV) or "").strip()
     if gateway_on and ssm_name:
@@ -1488,7 +1495,6 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
                 issues.append(f"metered billing has an invalid cancellation policy: {exc}. Fix or unset it (unset "
                               f"means metered: a cancelled run pays for what it used); metered launches and "
                               f"cancelled-run settles refuse until then.")
-        floor = _mm.run_floor_credits(e)
         prices = _mm.price_table(e)
         model = _mm.run_model(e)
         if model not in prices:
@@ -1498,7 +1504,6 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
         from vigil_core.rate_card import RATE_CARD_ENV, rate_card as _rate_card
         _rate_card(e)
         section["rate_card"] = "owner override" if (e.get(RATE_CARD_ENV) or "").strip() else "published defaults"
-        section["floor_credits"] = floor
         _mm.grant_ceiling_credits(e)             # W2b-2: a run grant's technical ceiling (an engineering bound)
         _mm.allowance_chunk_credits(e)           # W2b-3: the launch's first allowance and each extension's least
         for name in ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "VIGIL_GATEWAY_GLOBAL_CONCURRENCY"):
@@ -2521,7 +2526,6 @@ def render(report: dict) -> str:
         reach = ("not enabled" if not mt.get("gateway_enabled") else
                  {True: "answering", False: "NOT answering"}.get(mt.get("reachable"), "something else answers"))
         lines.append(f"\n{_mark(bool(mt.get('ok')))}billing: {mode}; model gateway {mt.get('url')}: {reach}"
-                     + (f"; floor {mt.get('floor_credits')} credits" if "floor_credits" in mt else "")
                      + ("; target margin set (over metered AI cost)" if mt.get("target_margin_set") else "")
                      + (f"; cancelled runs: {mt.get('cancel_settlement')}" if mt.get("cancel_settlement") else "")
                      + (f"; daily ceiling ${mt.get('daily_limit_usd')}" if mt.get("daily_limit_usd") else ""))

@@ -25,7 +25,9 @@ from vigil_integration import doctor as d
 _DECOY = "0." + str(3) + str(75)
 
 ON = {"VIGIL_METERED_BILLING": "1", "VIGIL_MODEL_GATEWAY_ENABLED": "1", "SIGIL_ANTHROPIC_API_KEY": "sk",
-      "VIGIL_GATEWAY_DAILY_LIMIT_USD": "500", mm.MARGIN_ENV: _DECOY, mm.CANCEL_ENV: "metered"}
+      "VIGIL_GATEWAY_DAILY_LIMIT_USD": "500", mm.MARGIN_ENV: _DECOY, mm.CANCEL_ENV: "metered",
+      "VIGIL_SETTLE_SPINE_RECORD": "1"}
+_RETIRED = "is set: remove it; it is a retired pricing setting (a customer is charged from the published rate card)"
 
 
 def _alive(url):
@@ -44,11 +46,12 @@ def test_a_healthy_metered_setup_is_reported_and_rendered():
     section, issues, notes = d._metering_report(dict(ON), probe=_alive)
     assert (issues, notes) == ([], [])
     assert section["ok"] and section["reachable"] is True and section["target_margin_set"] is True
-    assert section["floor_credits"] == 25 and section["url"] == "http://127.0.0.1:8742"
+    assert "floor_credits" not in section and section["url"] == "http://127.0.0.1:8742"   # the floor is retired
     assert section["cancel_settlement"] == "metered"
     out = d.render({"ok": True, "issues": [], "notes": [], "metering": section})
-    assert "billing: metered; model gateway http://127.0.0.1:8742: answering; floor 25 credits; target margin " \
+    assert "billing: metered; model gateway http://127.0.0.1:8742: answering; target margin " \
            "set (over metered AI cost); cancelled runs: metered; daily ceiling $500" in out
+    assert "floor" not in out.split("billing: metered", 1)[1].split("\n", 1)[0]
     assert _DECOY not in out and _DECOY not in repr(section)             # the owner's margin is never printed
 
 
@@ -59,7 +62,7 @@ def test_misconfigurations_are_hard_issues():
     assert any("provider key" in m for m in issues)
     issues = d._metering_report(dict(ON), probe=_dead)[1]
     assert any("does not answer" in m for m in issues)
-    for k, v in (("VIGIL_RUN_FLOOR_CREDITS", "-1"), ("VIGIL_MODEL_PRICES", "{"),
+    for k, v in (("VIGIL_MODEL_PRICES", "{"), ("VIGIL_RATE_CARD", "{"),
                  ("VIGIL_GATEWAY_TENANT_CONCURRENCY", "0"), ("VIGIL_GATEWAY_DAILY_LIMIT_USD", "-5")):
         section, issues, _ = d._metering_report({**ON, k: v}, probe=_alive)
         assert section["ok"] is False and any("refused" in m for m in issues), (k, v)
@@ -74,10 +77,23 @@ def test_misconfigurations_are_hard_issues():
     assert issues == [] and section["cancel_settlement"] == "metered"
 
 
+def test_metered_billing_without_the_settle_record_is_a_hard_issue():
+    # W2c-1: every metered charge records its exact decision whatever the flag says, but the drain's and the sweep's
+    # passes that FINISH a settle a crash interrupted run only with the settle record on
+    for off in ("", "0", "no"):
+        section, issues, _ = d._metering_report({**ON, "VIGIL_SETTLE_SPINE_RECORD": off}, probe=_alive)
+        assert section["ok"] is False and len(issues) == 1, (off, issues)
+        assert issues[0].startswith("VIGIL_METERED_BILLING is on but VIGIL_SETTLE_SPINE_RECORD is not"), issues
+    no_flag = {k: v for k, v in ON.items() if k != "VIGIL_SETTLE_SPINE_RECORD"}
+    assert any("VIGIL_SETTLE_SPINE_RECORD" in m for m in d._metering_report(no_flag, probe=_alive)[1])
+    flat = {"VIGIL_MODEL_GATEWAY_ENABLED": "1", "SIGIL_ANTHROPIC_API_KEY": "sk", "VIGIL_GATEWAY_DAILY_LIMIT_USD": "9"}
+    assert d._metering_report(flat, probe=_alive)[1] == []                 # flat billing never needs it
+
+
 def test_a_retired_pricing_setting_is_a_hard_issue_whether_or_not_metering_is_on():
     flat = {"VIGIL_MODEL_GATEWAY_ENABLED": "1", "SIGIL_ANTHROPIC_API_KEY": "sk", "VIGIL_GATEWAY_DAILY_LIMIT_USD": "9"}
     for name in mm.OBSOLETE_PRICING_ENVS:
-        says = f"{name} is set: remove it; the only pricing input is VIGIL_BILLING_TARGET_MARGIN"
+        says = f"{name} {_RETIRED}"
         section, issues, notes = d._metering_report({name: ""}, probe=_alive)          # nothing else configured
         assert section == {"configured": False, "ok": False} and notes == []
         assert len(issues) == 1 and issues[0].startswith(says), issues
@@ -88,12 +104,13 @@ def test_a_retired_pricing_setting_is_a_hard_issue_whether_or_not_metering_is_on
         assert section["target_margin_set"] is True                                     # the margin itself is fine
         assert _DECOY not in repr(section) + repr(issues)
     both = {n: "1" for n in mm.OBSOLETE_PRICING_ENVS}
-    assert len(d._metering_report(both, probe=_alive)[1]) == 2
+    assert len(d._metering_report(both, probe=_alive)[1]) == 3                # the floor is the third (2026-11-16)
     # the doctor surfaces it in the report it renders
     report = {"ok": False, "issues": d._metering_report(both, probe=_alive)[1], "notes": [],
               "metering": {"configured": False, "ok": False}}
     out = d.render(report)
     assert "VIGIL_MARGIN_MULTIPLIER_K is set: remove it" in out and "VIGIL_BILLING_MARKUP_K is set: remove it" in out
+    assert "VIGIL_RUN_FLOOR_CREDITS is set: remove it" in out
 
 
 def test_the_run_model_must_be_priced_and_concurrency_is_digits_only():
@@ -257,7 +274,7 @@ def test_collect_reports_a_retired_setting_on_a_flat_deploy(monkeypatch, tmp_pat
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
     monkeypatch.setenv("VIGIL_BILLING_MARKUP_K", "")
     report = d.collect(tmp_path)
-    says = "VIGIL_BILLING_MARKUP_K is set: remove it; the only pricing input is VIGIL_BILLING_TARGET_MARGIN"
+    says = f"VIGIL_BILLING_MARKUP_K {_RETIRED}"
     assert report["ok"] is False and any(m.startswith(says) for m in report["issues"])
     assert report["metering"] == {"configured": False, "ok": False}
     out = d.render(report)

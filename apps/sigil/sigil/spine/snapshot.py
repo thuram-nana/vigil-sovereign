@@ -52,7 +52,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 10  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 11  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
@@ -63,7 +63,8 @@ _MAX_SNAPSHOT_SCHEMA = 10  # refuse-newer gate (W5-3): a snapshot schema above t
 #                            (postpaid_arrears_debited/credited/seen); v9 (EC-4) ADDED the per-tenant cost
 #                            envelope ledger (cost_reserved/cost_settled/cost_seen); v10 (pricing S2) ADDED the
 #                            governor.trial_claim claims (trial_claim_row) and the governor.report_unlock ledger
-#                            (report_unlock_billing/report_unlock_owner). Every bump is
+#                            (report_unlock_billing/report_unlock_owner); v11 (W2c-1) ADDED the wallet's exact
+#                            metered usage total (wallet_usage_mc). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -75,13 +76,14 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 10  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    schema_version: int = 11  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
     #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
     #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
     #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
     #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger);
-    #                           9->10 pricing S2 (trial claims + report unlocks).
-    #                           Every snapshot this build emits carries the v10 keys; a pre-bump build refuses it
+    #                           9->10 pricing S2 (trial claims + report unlocks); 10->11 W2c-1 (the wallet's
+    #                           exact metered usage total).
+    #                           Every snapshot this build emits carries the v11 keys; a pre-bump build refuses it
     #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
@@ -192,6 +194,10 @@ class SnapshotState(BaseModel):
     #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
     #                                   NO sub-state) it MUST cross a prune or the first prune zeroes it.
     wallet_debited: list = []         # [[org_id, debited_total], ...] — Σ honored SaaS credit DEBITS per tenant.
+    wallet_usage_mc: list = []        # [[org_id, usage_mc], ...] — W2c-1: Σ consumed_mc of the org's EXACT (v3)
+    #                                   metered settle decisions (lifetime, milli-credits). The org's sub-credit
+    #                                   remainder is usage_mc % 1000, so it MUST cross a prune with the balance
+    #                                   (the v3 records' seen keys ride in wallet_seen, namespaced by their signal).
     wallet_seen: list = []            # [[signal, org_id, entry_id], ...] — consumed wallet idempotency keys,
     #                                   NAMESPACED BY SIGNAL (grant vs debit are disjoint dedup spaces), carried
     #                                   across a prune so a pruned grant/debit cannot be replayed to re-credit
@@ -326,6 +332,9 @@ class SnapshotState(BaseModel):
 
     def wallet_debited_map(self) -> dict[Any, int]:
         return {row[0]: row[1] for row in self.wallet_debited}
+
+    def wallet_usage_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.wallet_usage_mc}
 
     def wallet_seen_set(self) -> set:
         return {(row[0], row[1], row[2]) for row in self.wallet_seen}   # (signal, org_id, entry_id)
@@ -644,6 +653,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.wallet import (CREDIT_GRANT_SIGNAL as _WGRANT_SIGNAL, CREDIT_DEBIT_SIGNAL as _WDEBIT_SIGNAL,
                                    _GRANT_CORE as _WGRANT_CORE, _DEBIT_CORE as _WDEBIT_CORE,
                                    _as_credits as _w_as_credits)
+    # W2c-1: the exact-usage fold step, imported from its one definition (never restated)
+    from ..governor.launch_settlement import (EXACT_RECORD_VERSION as _LS_EXACT_V, LAUNCH_SETTLED_SIGNAL as _LS_SIGNAL,
+                                              fold_exact_settle as _ls_fold_exact)
     # plan-credit signed-cores + helpers imported from the live module (never restated — same drift guard); the
     # fold below carries per-(org, period_end) tranche totals + the consumed seen-set across a prune like wallet.
     from ..governor.metering import (PLAN_GRANT_SIGNAL as _PGRANT_SIGNAL, PLAN_DEBIT_SIGNAL as _PDEBIT_SIGNAL,
@@ -730,6 +742,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
+    w_usage: dict[Any, int] = dict(s.wallet_usage_map()) if s else {}       # org_id -> Σ exact consumed_mc
     p_granted: dict[Any, int] = dict(s.plan_granted_map()) if s else {}     # (org_id, period_end) -> Σ grants
     p_debited: dict[Any, int] = dict(s.plan_debited_map()) if s else {}     # (org_id, period_end) -> Σ debits
     p_seen: set = set(s.plan_seen_set()) if s else set()                    # consumed plan (sig, org, entry) keys
@@ -970,6 +983,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         cc_row[cckey] = [p.get("kind"), p.get("cose_alg"), p.get("public_key_spki_b64"),
                                          p.get("uv"), p.get("sealed_secret"), p.get("federated_iss"),
                                          p.get("federated_sub"), at]
+        # --- W2c-1: the wallet's exact metered usage — THE shared fold step (the same function the wallet fold and its
+        #     fold cache run), so the seed can never diverge from the live read. ---
+        if sig == _LS_SIGNAL and p.get("v") == _LS_EXACT_V:
+            _ls_fold_exact(p, vpk, w_seen, w_usage)
         # --- SaaS credit wallet: ADDITIVE grant/debit ledger, idempotent per (org_id, entry_id) — mirrors
         #     WalletRegistry._fold EXACTLY (verify under the key valid at the seq; a record whose key is already
         #     in w_seen is ignored, the replay/double-count guard; credits clamped >= 0). Both signals share the
@@ -1170,6 +1187,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],
+        wallet_usage_mc=[[o, u] for o, u in w_usage.items()],
         plan_granted=[[o, pe, c] for (o, pe), c in p_granted.items()],
         plan_debited=[[o, pe, c] for (o, pe), c in p_debited.items()],
         plan_seen=[[sg, o, e] for (sg, o, e) in p_seen],

@@ -1,19 +1,19 @@
 """vigil_core.model_metering — the cost table and the exact cost / credit arithmetic of a metered run (PRICING M1a).
 
-`docs/decisions/PRICING-RED-PEN-DESIGN.md` §2: a customer run is charged
+What a customer is CHARGED comes from the published rate card (``vigil_core.rate_card``, W2a): the model gateway
+prices each confirmed response from it, and a metered launch settles exactly what its run used, in milli-credits
+(W2c-1; the per-run floor is retired, owner decision 2026-11-16). This module is what those requests COST VIGIL:
+the provider price table, parsing a response's ``usage`` (a non-streamed body or a stream's ``message_start`` /
+``message_delta`` events) and the cost. ``cost_usd`` is priced from the usage Anthropic reports on each response.
 
-    charge_credits = min(reservation, max(FLOOR, ceil(cost_usd / (1 − target_margin) × 100)))
-
-where ``cost_usd`` is what the run's model requests cost VIGIL, priced from the usage Anthropic reports on each
-response, and ``target_margin`` is the owner's margin over that METERED AI cost only (the model requests the
-gateway meters; payment fees, hosting and every other cost are outside it, so the all-in margin is lower). It is set
-at DEPLOY time (``VIGIL_BILLING_TARGET_MARGIN``), is the ONLY pricing input, and is deliberately never committed:
-there is no default, and while it is unset every metered price raises, so metered billing cannot run on a guessed
-margin. A retired pricing setting (:data:`OBSOLETE_PRICING_ENVS`) still present in the environment is refused the
-same way, so no second pricing knob can sit next to the margin unnoticed. This module is that arithmetic and nothing else: the price table, parsing a response's ``usage`` (a
-non-streamed body or a stream's ``message_start`` / ``message_delta`` events), the cost, the credits, and the USD
-cap a reservation buys. The sovereign model gateway meters with it; the offense-side runtime caps (M2) price with
-the same table, so both planes price a token identically.
+``target_margin`` is the owner's margin over that METERED AI cost only (the model requests the gateway meters;
+payment fees, hosting and every other cost are outside it, so the all-in margin is lower). It is set at DEPLOY time
+(``VIGIL_BILLING_TARGET_MARGIN``) and is deliberately never committed: there is no default, and while it is unset
+every read of it raises, so nothing that needs it (the USD ceiling of a run's model grant) runs on a guessed margin.
+A retired pricing setting (:data:`OBSOLETE_PRICING_ENVS`) still present in the environment is refused the same way,
+so no stale pricing knob can sit in a deploy unnoticed. :func:`credits_for_cost` (the earlier cost-plus charge) is
+kept for its tests and legacy readers; no settle uses it. The offense-side runtime caps (M2) price with the same
+table as the gateway, so both planes price a token identically.
 
 Money is integers, never floats:
   * a price is published in USD per million tokens and held as **nano-USD per token** (USD/MTok × 1000, exactly:
@@ -41,7 +41,7 @@ __all__ = [
     "CREDIT_NANO_USD", "DEFAULT_PRICES", "MeteringError", "PriceRow", "StreamMeter", "Usage",
     "CANCEL_ENV", "CANCEL_POLICIES", "DEFAULT_RUN_MODEL", "MARGIN_ENV", "OBSOLETE_PRICING_ENVS", "RUN_MODEL_ENV",
     "billing_markup", "cancel_settlement", "cost_nano_usd", "run_model", "credits_for_cost", "format_usd",
-    "obsolete_pricing_settings", "obsolete_setting_refusal", "price_table", "run_floor_credits", "target_margin",
+    "obsolete_pricing_settings", "obsolete_setting_refusal", "price_table", "target_margin",
     "usage_from_api", "usd_cap_nano_for_credits",
 ]
 
@@ -50,16 +50,17 @@ CREDIT_NANO_USD = 10_000_000
 
 PRICES_ENV = "VIGIL_MODEL_PRICES"
 MARGIN_ENV = "VIGIL_BILLING_TARGET_MARGIN"
+#: The per-run minimum charge an earlier design read — RETIRED (owner decision 2026-11-16: a metered run is charged
+#: exactly what it used), so it is one of :data:`OBSOLETE_PRICING_ENVS`.
 FLOOR_ENV = "VIGIL_RUN_FLOOR_CREDITS"
 CANCEL_ENV = "VIGIL_BILLING_CANCEL_SETTLEMENT"
 DEFAULT_CANCEL_SETTLEMENT = "metered"   # owner decision 2026-11-13: a cancelled scan pays for what it used
 RUN_MODEL_ENV = "VIGIL_RUN_MODEL"
 DEFAULT_RUN_MODEL = "claude-opus-4-8"
 CANCEL_POLICIES = ("metered", "refund")
-#: Pricing settings an earlier design read. None is read now: the margin is the one pricing input, so a deploy that
-#: still carries one of these is refused rather than silently ignored.
-OBSOLETE_PRICING_ENVS = ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K")
-DEFAULT_FLOOR_CREDITS = 25
+#: Pricing settings an earlier design read. None is read now (a customer is charged from the published rate card),
+#: so a deploy that still carries one of these is refused rather than silently ignored.
+OBSOLETE_PRICING_ENVS = ("VIGIL_BILLING_MARKUP_K", "VIGIL_MARGIN_MULTIPLIER_K", FLOOR_ENV)
 _MAX_MARKUP = Fraction(100)               # a sanity bound: the margin is at most 0.99, so the markup at most 100
 _MAX_TOKENS_PER_FIELD = 10 ** 12          # far above any real response; bounds a hostile / corrupt count
 
@@ -388,17 +389,19 @@ def obsolete_pricing_settings(env: Optional[Mapping[str, str]] = None) -> "tuple
 
 def obsolete_setting_refusal(name: str) -> str:
     """The one sentence every refusal of a retired pricing setting uses (billing and doctor alike)."""
-    return f"{name} is set: remove it; the only pricing input is {MARGIN_ENV}"
+    return (f"{name} is set: remove it; it is a retired pricing setting (a customer is charged from the published "
+            f"rate card)")
 
 
 def target_margin(env: Optional[Mapping[str, str]] = None) -> Fraction:
     """The owner's target margin (``VIGIL_BILLING_TARGET_MARGIN``) as an exact fraction: a decimal strictly between 0
     and 1, at most 0.99. It is the margin over the run's METERED AI cost only — the model requests the gateway
     meters, priced from the table here. Payment fees, hosting and every other cost are not in it, so the all-in
-    margin is lower than this number. It is the only pricing input. It has NO default — the value is the owner's
-    and is set at deploy, never in this repository — so an unset, empty or malformed value RAISES, and every metered
-    price (and the launch that would need one) is refused. A retired pricing setting still present
-    (:func:`obsolete_pricing_settings`) raises too. Never falls back to a guess."""
+    margin is lower than this number. It is not what a customer is charged (the published rate card is): it sets the
+    USD ceiling of a metered run's model grant, and the owner's own money view reads it. It has NO default — the
+    value is the owner's and is set at deploy, never in this repository — so an unset, empty or malformed value
+    RAISES, and every reader (the metered launch that needs a grant ceiling included) is refused. A retired pricing
+    setting still present (:func:`obsolete_pricing_settings`) raises too. Never falls back to a guess."""
     env = os.environ if env is None else env
     for name in obsolete_pricing_settings(env):
         raise MeteringError(obsolete_setting_refusal(name))
@@ -433,7 +436,7 @@ def run_model(env: Optional[Mapping[str, str]] = None) -> str:
 
 def cancel_settlement(env: Optional[Mapping[str, str]] = None) -> str:
     """How a metered run the customer cancels settles (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` (charged
-    for what it used, at least the floor, never more than the reservation) or ``refund`` (charged nothing). Unset
+    exactly what it used, never more than the reservation) or ``refund`` (charged nothing). Unset
     means ``metered`` (the owner's decision of 2026-11-13: a cancelled scan pays for what it already used). An
     unrecognised value RAISES, so a typo never silently picks a policy; metered billing then refuses to launch or
     settle until it is fixed."""
@@ -485,21 +488,6 @@ def allowance_chunk_credits(env: Optional[Mapping[str, str]] = None) -> int:
         raise MeteringError(f"{ALLOWANCE_CHUNK_ENV} must be a whole number of credits from 1 to "
                             f"{MAX_ALLOWANCE_CHUNK_CREDITS}, got {raw!r}")
     return int(raw)
-
-
-def run_floor_credits(env: Optional[Mapping[str, str]] = None) -> int:
-    """The per-run minimum charge in credits (``VIGIL_RUN_FLOOR_CREDITS``, default 25 = $0.25)."""
-    env = os.environ if env is None else env
-    raw = env.get(FLOOR_ENV)
-    if raw is None or not raw.strip():
-        return DEFAULT_FLOOR_CREDITS
-    try:
-        v = int(raw.strip())
-    except ValueError:
-        raise MeteringError(f"{FLOOR_ENV} must be a whole number of credits, got {raw!r}") from None
-    if v < 0:
-        raise MeteringError(f"{FLOOR_ENV} must not be negative, got {raw!r}")
-    return v
 
 
 def _check_int(name: str, v: Any) -> int:

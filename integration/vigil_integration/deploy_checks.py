@@ -57,14 +57,16 @@ _AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.conf
 
 #: The settings every process that settles a customer launch must read identically, with the processes that
 #: read each. VIGIL_SETTLE_SPINE_RECORD: config.settle_spine_record_enabled (OD-4) names the cockpit, the
-#: customer server, the settle drain and ops-sweep. The pricing a metered settle charges by
-#: (vigil_core.model_metering.billing_markup / run_floor_credits / cancel_settlement) is read by every process
-#: that settles: the cockpit (customer cancel), the settle drain and `ops-sweep reservations --apply`.
+#: customer server, the settle drain and ops-sweep. What a metered settle charges by — the published rate card
+#: (vigil_core.rate_card.rate_card: it prices a response the gateway recorded before it priced responses itself)
+#: and the cancel policy (vigil_core.model_metering.cancel_settlement) — is read by every process that settles: the
+#: cockpit (customer cancel), the settle drain and `ops-sweep reservations --apply`. No settle reads the owner's
+#: target margin any more (W2c-1: a metered run is settled at the rate card's price, exactly), so it is not asked of
+#: the settle drain or the operator's shell; the cockpit reads it where a metered launch is published.
 _SETTLERS = ("cockpit", "settle-drain", "ops-sweep")
 MUST_MATCH: "tuple[tuple[str, str, tuple[str, ...]], ...]" = (
     ("VIGIL_SETTLE_SPINE_RECORD", "switch", ("cockpit", "customer", "settle-drain", "ops-sweep")),
-    ("VIGIL_BILLING_TARGET_MARGIN", "value", _SETTLERS),
-    ("VIGIL_RUN_FLOOR_CREDITS", "value", _SETTLERS),
+    ("VIGIL_RATE_CARD", "value", _SETTLERS),
     ("VIGIL_BILLING_CANCEL_SETTLEMENT", "value", _SETTLERS),
 )
 #: Process name → the unit whose files define its environment (ops-sweep runs from the operator's shell).
