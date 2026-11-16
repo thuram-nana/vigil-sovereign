@@ -576,3 +576,23 @@ def test_read_live_key_fails_safe_on_a_missing_store(monkeypatch, tmp_path):
     from vigil_integration.live.think_claude import _read_live_key
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "does-not-exist"))
     assert _read_live_key() is None
+
+
+# ---- the current-model list (anthropic SDK 2.x PR) -------------------------------------------------------
+
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"])
+def test_every_claude_5_model_gets_effort_and_adaptive_thinking(model, monkeypatch):
+    """Claude Haiku 5.5 was missing from the think step's current-model list (a copy of kernel.llm's, kept here so this
+    module imports no kernel at module scope), so it got neither its effort nor adaptive thinking."""
+    from vigil_integration.live import think_claude as tc
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "high")
+    assert tc._effort_kwargs(model) == {"output_config": {"effort": "high"}}
+    assert tc._thinking_kwargs(model) == {"thinking": {"type": "adaptive"}}
+    assert tc._effort_kwargs("claude-haiku-4-5") == {} and tc._thinking_kwargs("claude-haiku-4-5") == {}
+
+
+def test_the_think_steps_current_model_list_mirrors_the_kernels():
+    """The two copies must never drift. Runs where the engine is importable (the offense legs)."""
+    llm = pytest.importorskip("framework.v2.kernel.llm")
+    from vigil_integration.live import think_claude as tc
+    assert tc._CURRENT_MODEL_PREFIXES == llm._CURRENT_MODEL_PREFIXES

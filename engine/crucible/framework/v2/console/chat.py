@@ -2156,7 +2156,9 @@ def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model
                    "messages": _redact_history_for_egress(history) + [{"role": "user", "content": rcontent}]}
         if thinks:
             skwargs["thinking"] = {"type": "adaptive"}
-        client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks else anthropic.Anthropic(api_key=key)
+        from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
+        client = (anthropic.Anthropic(api_key=key, timeout=600.0, http_client=bounded_http_client()) if thinks
+                  else anthropic.Anthropic(api_key=key, http_client=bounded_http_client()))
         with client.messages.stream(**skwargs) as stream:
             for delta in stream.text_stream:            # only text deltas; thinking blocks are excluded
                 if delta:
@@ -2277,8 +2279,9 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     active_model = entry["model"]
 
     def _call(blocks):
-        client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks \
-            else anthropic.Anthropic(api_key=key)
+        from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
+        client = (anthropic.Anthropic(api_key=key, timeout=600.0, http_client=bounded_http_client()) if thinks
+                  else anthropic.Anthropic(api_key=key, http_client=bounded_http_client()))
         # M4.1 — route the cloud reasoning call through the ONE gateway chokepoint. The operator's files +
         # redacted session context ride the FIRST content block's text (the rest are image blocks — binary,
         # not text-redactable); the gateway masks any credential shape in that text (and the system) before
