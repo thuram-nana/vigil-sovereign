@@ -201,3 +201,75 @@ body.vigil-ios-guide-open .cust-shell { padding-bottom: 320px; }
 @media (prefers-reduced-motion: reduce) {
   .vigil-ios-down .vigil-ios-arrow, .vigil-ios-up .vigil-ios-arrow .vigil-ios-glyph { animation: none; }
 }
+
+/* ---- onboarding (guide.js; only while the edge has VIGIL_CUSTOMER_ONBOARDING on) ------------------------------ */
+/* the loader: the owner's wordmark brightening and dimming while a screen loads */
+.cust-loader { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 56px 0; }
+.cust-shell > .cust-loader { min-height: 60vh; }
+.cust-loader-mark { height: 29px; width: auto; animation: cust-breathe 1.8s ease-in-out infinite; }
+.cust-loader-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; }
+@keyframes cust-breathe {
+  0%, 100% { opacity: 0.28; filter: brightness(0.75); }
+  50% { opacity: 1; filter: brightness(1.2) drop-shadow(0 0 12px color-mix(in srgb, var(--text-0) 30%, transparent)); }
+}
+
+/* the first-sign-in tour: a frosted panel over a dimmed app; the top bar stays above it so the lit tab shows */
+body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
+.cust-tour { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-start; justify-content: center;
+  padding: calc(104px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--bg-0) 62%, transparent); -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px); overflow-y: auto; }
+.cust-tour-panel { width: min(640px, 100%); box-sizing: border-box; display: grid; gap: 16px; padding: 22px 24px;
+  background: color-mix(in srgb, var(--bg-1) 88%, transparent); -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%); border: 1px solid var(--border-strong); border-radius: var(--r-4);
+  box-shadow: var(--shadow-2); color: var(--text-0); outline: none; }
+.cust-tour-head, .cust-tour-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cust-tour-head .spacer, .cust-tour-foot .spacer { flex: 1 1 auto; }
+.cust-tour-count { font-size: var(--fs-xs); letter-spacing: var(--tracking-label); text-transform: uppercase;
+  color: var(--text-2); font-variant-numeric: tabular-nums; }
+.cust-tour-chapter { color: var(--owner); background: var(--owner-dim); }
+.cust-tour-body { display: grid; gap: 10px; }
+.cust-tour-body h2 { margin: 0; font-size: var(--fs-xl); line-height: var(--lh-tight); }
+.cust-tour-where { margin: 0; font-size: var(--fs-sm); color: var(--text-1); }
+.cust-tour-clicks { margin: 0; padding-left: 22px; display: grid; gap: 8px; line-height: var(--lh); }
+.cust-tour-clicks li::marker { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.cust-tour-why { margin: 0; padding: 12px 14px; border-radius: var(--r-2); background: var(--bg-2);
+  border: 1px solid var(--border); color: var(--text-1); font-size: var(--fs-sm); line-height: var(--lh); }
+.cust-tour-dots { display: flex; gap: 6px; flex-wrap: wrap; }
+.cust-tour-dot { width: 9px; height: 9px; padding: 0; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--border-strong); }
+.cust-tour-dot.on { background: var(--text-0); }
+.cust-nav-link.cust-nav-spot { opacity: 1; color: var(--text-0); background: var(--owner-dim);
+  box-shadow: 0 0 0 2px var(--owner); animation: cust-spot 1.8s ease-in-out infinite; }
+@keyframes cust-spot { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--owner) 45%, transparent); } }
+
+/* the Guide screen */
+.cust-guide { display: grid; gap: 18px; }
+.cust-guide-head { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.cust-guide-head p { margin: 0; max-width: 62ch; }
+.cust-guide-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.cust-guide-tab { font: inherit; font-size: var(--fs-sm); padding: 7px 14px; border-radius: var(--r-pill); cursor: pointer;
+  background: transparent; color: var(--text-1); border: 1px solid var(--border-strong); }
+.cust-guide-tab[aria-pressed="true"] { background: var(--primary-bg); color: var(--primary-fg); border-color: transparent; }
+.cust-guide-lead { margin: 0; color: var(--text-1); }
+.cust-guide-steps { display: grid; gap: 12px; }
+.cust-guide-step { padding: 0; overflow: hidden; }
+.cust-guide-step-head { width: 100%; display: flex; align-items: center; gap: 12px; padding: 14px 16px; text-align: left;
+  font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.cust-guide-step-title { flex: 1 1 auto; font-weight: 600; }
+.cust-guide-num { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  font-size: var(--fs-sm); font-weight: 600; background: var(--bg-3); font-variant-numeric: tabular-nums; }
+.cust-guide-num.done { background: color-mix(in srgb, var(--st-confirmed) 22%, transparent); color: var(--st-confirmed); }
+.cust-guide-detail { display: grid; gap: 12px; padding: 0 16px 16px 56px; }
+.cust-guide-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 560px) { .cust-guide-detail { padding-left: 16px; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .cust-loader-mark { animation: none; opacity: 0.85; }
+  .cust-nav-link.cust-nav-spot { animation: none; }
+}
+.cust-guide-faq { padding: 14px 16px; }
+.cust-guide-faq summary { cursor: pointer; font-weight: 600; }
+.cust-guide-faq p { margin-top: 10px; }

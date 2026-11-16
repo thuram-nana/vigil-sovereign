@@ -1604,6 +1604,16 @@ class Handler(BaseHTTPRequestHandler):
             return p.enroll_totp(requester, ip=ip)
         if action == "mfa_verify":
             return p.verify_mfa(requester, code=str(body.get("code", "")))
+        # The onboarding tour's server-side state (has this account finished or skipped it?). Account-level like
+        # MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_ONBOARDING is on, the same flag that gates the edge route.
+        if action in ("onboarding_get", "onboarding_set"):
+            from .. import config as _config
+            if not _config.customer_onboarding_enabled():
+                return None
+            if action == "onboarding_get":
+                return p.onboarding_state(requester)
+            return p.onboarding_record(requester, str(body.get("state", "")))
         # E3b-2 — customer passkey (WebAuthn). enroll binds to the SESSION requester (account-level);
         # login is a public bootstrap (no requester — the credential_id resolves the customer), like
         # oidc_finish. The registration/assertion material rides the body (b64url strings + the int cose_alg).

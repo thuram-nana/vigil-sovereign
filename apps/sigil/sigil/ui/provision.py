@@ -977,6 +977,39 @@ class Provisioner:
         uri = _totp.provisioning_uri(secret, account_name=(acct.email or requester), issuer="VIGIL")
         return {"ok": True, "method": "totp", "provisioning_uri": uri, "secret": secret}
 
+    def onboarding_state(self, requester: str) -> dict:
+        """The onboarding tour's state for the requesting customer's OWN account (``ui/onboarding_store``): ``pending``
+        until they finish (``done``) or skip (``skipped``) it. Account-level, like MFA: the requester is the
+        hop-bound session principal, never a body field, and must be an ACTIVE customer."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .onboarding_store import read_state
+        return {"ok": True, "state": read_state(requester)}
+
+    def onboarding_record(self, requester: str, state: str, *, now: "Optional[float]" = None) -> dict:
+        """Record that the requesting customer finished (``done``) or skipped (``skipped``) the onboarding tour, so it
+        does not open again on any device. Refuses any other state and an inactive account; writes nothing else.
+
+        BOUNDED: the same answer again writes nothing, and only the FIRST close (from ``pending``) is audited — one
+        ``provision.audit`` row per account — so no customer can grow the signed spine by re-posting the state (a
+        replayed tour still updates the stored answer)."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .onboarding_store import PENDING, STATES, read_state, write_state
+        if state not in STATES:
+            raise ProvisionError(f"state must be one of {', '.join(STATES)}")
+        prev = read_state(requester)
+        if prev == state:
+            return {"ok": True, "state": state}
+        t = self._now() if now is None else float(now)
+        try:
+            write_state(requester, state, now=t)
+        except OSError as e:
+            raise ProvisionError(f"the onboarding state could not be saved: {type(e).__name__}") from None
+        if prev == PENDING:
+            self._audit("onboarding_record", requester=requester, target=requester, outcome=state)
+        return {"ok": True, "state": state}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an
