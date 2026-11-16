@@ -197,7 +197,7 @@ class CompletionSpoolWatcher:
                 f"published lease (org={lease_doc.org_id!r}, host={lease_doc.scope_host!r}) does not hash to the "
                 f"completion slug {doc.engagement_slug!r} — refusing a tenant-mismatched settle")
         consumed, consumed_mc, guard = self._settle_inputs(doc.outcome.value, lease_doc)
-        exact = {"consumed_mc": consumed_mc} if consumed_mc is not None else {}   # W2c-1: a metered charge
+        exact: "dict[str, Any]" = {"consumed_mc": consumed_mc} if consumed_mc is not None else {}   # W2c-1: metered
         result = self._gate.settle_launch(
             signed_lease=bundle.signed_lease.model_dump(mode="json"), consumed_units=consumed,
             now=self._now(), expect_org_id=lease_doc.org_id, refuse_if=guard,

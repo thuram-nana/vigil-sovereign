@@ -783,6 +783,7 @@ class LaunchGate:
         # (refund = reserved - consumed, from the owner-signed lease) off the drawn balance; net arrears change
         # == consumed (the net-spend invariant). Idempotent per (slug, nonce) via `_settle_once` + the reverse
         # entry_id. consumed == 0 (cancel) fully reverses the draw.
+        cmc = int(exact_mc) if exact_mc is not None else 0       # the exact closures below run only with exact_mc
         if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
             pp_eid = f"{SETTLE_ENTRY_PREFIX}{s}:{non}"
 
@@ -797,8 +798,8 @@ class LaunchGate:
                 return {"refunded": d.refund_postpaid, "refunded_plan": 0, "refunded_wallet": 0, "wrote": True}
 
             def _exact_postpaid(r: int) -> Any:
-                d = (r + exact_mc) // MC_PER_CREDIT        # floor: a charge is never rounded up
-                return SettlementDecision.postpaid(reserved, d, basis).with_exact(exact_mc, r)
+                d = (r + cmc) // MC_PER_CREDIT             # floor: a charge is never rounded up
+                return SettlementDecision.postpaid(reserved, d, basis).with_exact(cmc, r)
 
             return self._settle_once(oid, s, non, reserved, consumed, now_ts,
                                      SettlementDecision.postpaid(reserved, consumed, basis), _move_postpaid,
@@ -882,12 +883,12 @@ class LaunchGate:
                                               plan_pe if plan_pe is not None else 0.0, basis)
 
         def _exact_prepaid(r: int) -> Any:
-            d = (r + exact_mc) // MC_PER_CREDIT            # floor: a charge is never rounded up
+            d = (r + cmc) // MC_PER_CREDIT                 # floor: a charge is never rounded up
             kept = _split(d)
             if kept is None:
                 raise ValueError("refund invariant violated (bucket split / net-spend)")
             return SettlementDecision.prepaid(reserved, d, kept[0], kept[1], plan_pe if plan_pe is not None else 0.0,
-                                              basis).with_exact(exact_mc, r)
+                                              basis).with_exact(cmc, r)
 
         return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
                                                                _move_prepaid, refuse_if, finish_only,

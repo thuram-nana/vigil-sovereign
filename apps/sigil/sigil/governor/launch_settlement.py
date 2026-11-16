@@ -206,16 +206,17 @@ class SettlementDecision:
             return "a plan refund needs its tranche's period_end"
         if not isinstance(self.basis, str) or not self.basis or len(self.basis) > _MAX_BASIS:
             return "basis is not a short string"
-        exact = (self.consumed_mc, self.remainder_before, self.remainder_after)
-        if any(v is not None for v in exact):
-            if not all(_amount(v) for v in exact):
+        cmc, rb, ra = self.consumed_mc, self.remainder_before, self.remainder_after
+        if cmc is not None or rb is not None or ra is not None:
+            if not (isinstance(cmc, int) and isinstance(rb, int) and isinstance(ra, int)
+                    and _amount(cmc) and _amount(rb) and _amount(ra)):
                 return "an exact decision needs consumed_mc, remainder_before and remainder_after as non-negative ints"
-            if self.remainder_before >= MC_PER_CREDIT or self.remainder_after >= MC_PER_CREDIT:
+            if rb >= MC_PER_CREDIT or ra >= MC_PER_CREDIT:
                 return "a remainder is not below one credit"
-            if self.consumed_mc > MC_PER_CREDIT * self.reserved:
+            if cmc > MC_PER_CREDIT * self.reserved:
                 return "consumed_mc exceeds the reservation"
             # the floor, exactly: never a charge rounded up, never a remainder dropped
-            if self.remainder_before + self.consumed_mc != MC_PER_CREDIT * self.consumed + self.remainder_after:
+            if rb + cmc != MC_PER_CREDIT * self.consumed + ra:
                 return "the exact consumption does not reconcile with the whole-credit debit and the remainder"
         return None
 
@@ -248,10 +249,10 @@ def record_launch_settled(store, owner_key, *, org_id: str, slug: str, nonce: st
     reason = (f"launch settled {s}:{n} ({d.mode}, consumed {int(d.consumed)} of {int(d.reserved)}, "
               f"{d.basis}) -> {oid}")
     if d.exact:            # W2c-1: the exact consumption and the org's remainder, inside the signed core
-        core.update(consumed_mc=int(d.consumed_mc), remainder_before=int(d.remainder_before),
-                    remainder_after=int(d.remainder_after))
-        reason = (f"launch settled {s}:{n} ({d.mode}, {int(d.consumed_mc)} mc -> {int(d.consumed)} of "
-                  f"{int(d.reserved)} credits, remainder {int(d.remainder_before)} -> {int(d.remainder_after)} mc, "
+        # (validate() above has proved all three are non-negative ints)
+        core.update(consumed_mc=d.consumed_mc, remainder_before=d.remainder_before, remainder_after=d.remainder_after)
+        reason = (f"launch settled {s}:{n} ({d.mode}, {d.consumed_mc} mc -> {int(d.consumed)} of "
+                  f"{int(d.reserved)} credits, remainder {d.remainder_before} -> {d.remainder_after} mc, "
                   f"{d.basis}) -> {oid}")
     payload = {**signed_payload(core, owner_key), "by": "owner", "requested_by": "owner", "tier": "A0",
                "decision": "auto", "reason": reason}
@@ -318,8 +319,8 @@ def fold_exact_settle(p: Any, key_at_seq: Any, seen: set, usage: dict) -> None:
         return
     seen.add(key)
     d = _decision_from(p)
-    if d is not None and d.exact:
-        usage[oid] = usage.get(oid, 0) + int(d.consumed_mc)
+    if d is not None and d.consumed_mc is not None:      # a well-formed exact decision
+        usage[oid] = usage.get(oid, 0) + d.consumed_mc
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -492,7 +493,7 @@ def evidence_to_json(ev: SettlementEvidence) -> dict:
         "mode": d.mode, "reserved": d.reserved, "consumed": d.consumed, "refund_plan": d.refund_plan,
         "refund_wallet": d.refund_wallet, "refund_postpaid": d.refund_postpaid,
         "plan_period_end": d.plan_period_end, "basis": d.basis}
-    if d is not None and d.exact:      # W2c-1: an exact decision round-trips with its three exact fields
+    if d is not None and dec is not None and d.exact:   # W2c-1: an exact decision round-trips with its exact fields
         dec.update(consumed_mc=d.consumed_mc, remainder_before=d.remainder_before, remainder_after=d.remainder_after)
     return {"record_seq": ev.record_seq, "malformed": bool(ev.malformed), "landed": sorted(ev.landed),
             "decision": dec}
