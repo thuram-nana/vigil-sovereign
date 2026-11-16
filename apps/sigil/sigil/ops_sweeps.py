@@ -138,15 +138,18 @@ def _pause_state(base: Any, slug: str, nonce: str) -> "Optional[bool]":
     return False
 
 
-def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now: float, *, org_id: str) -> int:
-    """What a metered launch the customer paused and never resumed used, in credits (owner decision 2026-11-13: it
-    is CHARGED for what it used, like a completed or customer-cancelled metered run): the run's meter is CLOSED
-    first, then ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))``. Only confirmed spend is
-    billed, and a launch with no recorded model request and no confirmed spend is charged nothing (it may never have
-    started; the floor covers a run's start-up). Raises :class:`_SweepDefer` when the settle must wait; a broken
-    meter raises ``ValueError``."""
+def _paused_metered_use_mc(gate: Any, slug: str, nonce: str, now: float) -> Optional[int]:
+    """What a metered launch the customer paused and never resumed used, EXACTLY, in milli-credits (owner decision
+    2026-11-13: it is CHARGED for what it used, like a completed or customer-cancelled metered run): the run's meter is
+    CLOSED first, then ``LaunchGate.metered_use_mc`` — each confirmed response at the rate card's price, as the
+    customer's statement shows it; ``settle_launch(consumed_mc=...)`` keeps the whole credits of it, clamped to what
+    the launch held, and carries the rest as the org's remainder (W2c-1; the per-run floor is retired, owner decision
+    2026-11-16). None when it used nothing (no recorded model request and no confirmed spend: it may never have
+    started — refunded in full). Raises :class:`_SweepDefer` when the settle must wait; a broken meter raises
+    ``ValueError``."""
     from vigil_core import model_metering as mm
     from vigil_core.model_grant import meter_id
+    from vigil_core.rate_card import RateCardError
     from . import config
     from .model_gateway import GrantMeter, MeterBusy
     try:
@@ -156,14 +159,12 @@ def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now:
     except OSError as e:
         raise _SweepDefer("deferred", f"the run's model meter cannot be written right now: {type(e).__name__}") from e
     if totals.requests == 0 and totals.cost_nano == 0:
-        return 0                                       # nothing was used (it may never have started): refunded
-    # W2b: the meter is closed, so the allowance is final — clamp to all the launch holds (lease + extensions)
-    reserved = gate.reserved_with_extensions(org_id=org_id, slug=slug, nonce=nonce, units_reserved=int(reserved))
+        return None                                    # nothing was used (it may never have started): refunded
     try:
-        return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
-                                   cap=int(reserved))
-    except mm.MeteringError as e:
+        used = gate.metered_use_mc(str(slug), str(nonce))
+    except (mm.MeteringError, RateCardError) as e:
         raise _SweepDefer("deferred_config", f"the charge waits on its pricing configuration: {e}") from e
+    return used if used > 0 else None
 
 
 def _held_snapshot(base: Any) -> "tuple[set, bool]":
@@ -271,8 +272,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     How an abandoned launch settles (owner decision 2026-11-13: a scan the customer paused and never resumed is
     charged for what it used):
       * published METERED and PAUSED by the customer (a cleanly-read pause marker holds its nonce, or the pause was
-        lifted only after the window closed) -> CHARGED its confirmed metered use, clamped to [floor, reservation]
-        (``charged_paused``); a paused launch that made no model request and has no confirmed spend is refunded;
+        lifted only after the window closed) -> CHARGED its confirmed metered use, exactly, clamped to its reservation
+        (``charged_paused``: ``charged`` is the whole credits the settle kept; the exact use is in its decision record);
+        a paused launch that made no model request and has no confirmed spend is refunded;
       * published metered, NOT paused -> a run VIGIL lost: refunded in full (``refunded``);
       * published metered, pause state UNREADABLE -> not settled (``pause_unknown``): never guessed either way;
       * published FLAT -> refunded in full: a flat launch has no meter, so what it used cannot be measured.
@@ -376,11 +378,10 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         if metered and paused is None:
             rows.append({**row, "status": "pause_unknown", **_metered_spend(gate, slug_, nonce_)})
             continue
-        consumed = 0
+        consumed_mc: Optional[int] = None
         if metered and paused:
             try:
-                consumed = _paused_metered_charge(gate, slug_, nonce_, int(doc.units_reserved), now,
-                                                  org_id=str(doc.org_id))
+                consumed_mc = _paused_metered_use_mc(gate, slug_, nonce_, now)
             except _SweepDefer as e:
                 rows.append({**row, "status": e.status, "error": str(e)})
                 continue
@@ -391,10 +392,11 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         # after them. So the settle RE-CHECKS both INSIDE its critical section (under the same cross-process lock the
         # settle-drain's charge and a pause take), right before it decides — a run whose completion exists by then is
         # never refunded or charged here, and a pause that landed since is priced by the next pass.
-        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=consumed, now=now,
-                               basis=("sweep:paused" if consumed > 0 else "sweep:refund"),
+        exact = {"consumed_mc": consumed_mc} if consumed_mc is not None else {}   # W2c-1: a metered charge
+        r = gate.settle_launch(signed_lease=b.signed_lease.model_dump(mode="json"), consumed_units=0, now=now,
+                               basis=("sweep:paused" if consumed_mc is not None else "sweep:refund"),
                                refuse_if=_settle_precondition(cast(Path, spool), (slug_, nonce_), base,  # apply => spool
-                                                              metered=metered, paused=bool(paused)))
+                                                              metered=metered, paused=bool(paused)), **exact)
         if r.get("refused"):
             rows.append({**row, "status": str(r["refused"]), **_metered_spend(gate, slug_, nonce_)})
         elif not r.get("ok") and r.get("retry"):
@@ -405,9 +407,9 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             rows.append({**row, "status": "settle_completed", **_moved(r), **_metered_spend(gate, slug_, nonce_)})
         elif r.get("action") == "launch_already_settled":
             rows.append({**row, "status": "already_settled"})
-        elif consumed > 0:
-            rows.append({**row, "status": "charged_paused", "charged": consumed, "refunded": int(r.get("refunded", 0)),
-                         **_metered_spend(gate, slug_, nonce_)})
+        elif consumed_mc is not None:
+            rows.append({**row, "status": "charged_paused", "charged": int(r.get("net_spend", 0)),
+                         "refunded": int(r.get("refunded", 0)), **_metered_spend(gate, slug_, nonce_)})
         else:
             rows.append({**row, "status": "refunded", "refunded": int(r.get("refunded", 0)),
                          **_metered_spend(gate, slug_, nonce_)})

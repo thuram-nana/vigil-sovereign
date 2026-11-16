@@ -196,11 +196,12 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolError(
                 f"published lease (org={lease_doc.org_id!r}, host={lease_doc.scope_host!r}) does not hash to the "
                 f"completion slug {doc.engagement_slug!r} — refusing a tenant-mismatched settle")
-        consumed, guard = self._settle_inputs(doc.outcome.value, lease_doc)
+        consumed, consumed_mc, guard = self._settle_inputs(doc.outcome.value, lease_doc)
+        exact = {"consumed_mc": consumed_mc} if consumed_mc is not None else {}   # W2c-1: a metered charge
         result = self._gate.settle_launch(
             signed_lease=bundle.signed_lease.model_dump(mode="json"), consumed_units=consumed,
             now=self._now(), expect_org_id=lease_doc.org_id, refuse_if=guard,
-            basis=f"completion:{doc.outcome.value}")
+            basis=f"completion:{doc.outcome.value}", **exact)
         if not result.get("ok"):
             if result.get("retry"):                    # a request still in flight, a meter / lock busy right now
                 raise CompletionSpoolDeferred(f"settle_launch deferred: {result.get('error')}")
@@ -275,10 +276,13 @@ class CompletionSpoolWatcher:
         """The billable units for ONE verified lease's terminal ``outcome`` (see :meth:`_settle_inputs`)."""
         return self._settle_inputs(outcome, lease_doc)[0]
 
-    def _settle_inputs(self, outcome: str, lease_doc: Any) -> "tuple[int, Optional[Callable[[], Optional[str]]]]":
-        """``(consumed, refuse_if)`` for ONE verified lease's terminal ``outcome``: the billable units, and the
-        settle's in-lock precondition (None except where the price was read from a record that can change before
-        the settle takes its lock — a metered FAILED run's paused-past-expiry record, below).
+    def _settle_inputs(self, outcome: str,
+                       lease_doc: Any) -> "tuple[int, Optional[int], Optional[Callable[[], Optional[str]]]]":
+        """``(consumed, consumed_mc, refuse_if)`` for ONE verified lease's terminal ``outcome``: the billable units of
+        a flat launch, what a metered launch used in milli-credits (W2c-1: ``settle_launch``'s exact settle; None when
+        it is charged nothing), and the settle's in-lock precondition (None except where the price was read from a
+        record that can change before the settle takes its lock — a metered FAILED run's paused-past-expiry record,
+        below).
 
         The billable units for ONE verified lease's terminal ``outcome``. The mode is the LAUNCH's, decided when it
         was published (its grant, metered marker or meter on disk — ``LaunchGate._launch_was_metered``), never the
@@ -286,8 +290,10 @@ class CompletionSpoolWatcher:
         launch published metered (PRICING M1c, design §4.3-§4.4) has its model gateway meter CLOSED first (no request
         is admitted after it, from any process), then:
 
-          * ``completed`` ⇒ ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))`` — the customer pays
-            for what the run used, never more than the reservation they approved;
+          * ``completed`` ⇒ what the run used, exactly (``LaunchGate.metered_use_mc``: each confirmed response at the
+            rate card's price, as the customer's statement shows it) — ``settle_launch`` keeps the whole credits of
+            it, carries the sub-credit rest as the org's remainder, and never keeps more than the launch held (W2c-1;
+            the per-run floor is retired, owner decision 2026-11-16);
           * ``canceled`` ⇒ the owner's named policy (``VIGIL_BILLING_CANCEL_SETTLEMENT``): ``metered`` as above, or
             ``refund`` = 0;
           * anything else (``failed``, VIGIL's side) ⇒ 0, except a launch the customer held paused through the end
@@ -296,9 +302,9 @@ class CompletionSpoolWatcher:
 
         Only CONFIRMED spend is billed: unconfirmed spend (a lost record, the unreported part of a cut-off response)
         is VIGIL's cost. The meter is keyed by the verified lease's own ``(engagement_slug, nonce)`` — never a wire
-        value. A request still in flight, a meter that cannot be written right now, or an unset pricing setting
-        DEFERS the settle (:class:`CompletionSpoolDeferred`, retried next drain); a meter whose hash chain is broken
-        REFUSES it (quarantined for a human) — never a guessed charge."""
+        value. A request still in flight, a meter that cannot be written right now, a malformed rate card or a
+        retired pricing setting still present DEFERS the settle (:class:`CompletionSpoolDeferred`, retried next
+        drain); a meter whose hash chain is broken REFUSES it (quarantined for a human) — never a guessed charge."""
         from .. import config
         reserved = int(lease_doc.units_reserved)
         try:
@@ -312,8 +318,9 @@ class CompletionSpoolWatcher:
                 # what the run used cannot be read: quarantine it for a human, never charge the flat whole chunk (I8).
                 raise CompletionSpoolError("this launch was reserved for metered billing but its meter is not on "
                                            "disk: its charge cannot be read (quarantined, never charged in full)")
-            return self._consumed(outcome, reserved), None
+            return self._consumed(outcome, reserved), None, None
         from vigil_core import model_metering as mm
+        from vigil_core.rate_card import RateCardError
         from vigil_core.model_grant import meter_id
         from ..model_gateway import GrantMeter, MeterBusy
         try:
@@ -325,11 +332,8 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolDeferred(f"the run's model meter could not be closed: {exc}") from exc
         except ValueError as exc:
             raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
-        # W2b: the meter is closed, so the launch's allowance is final — clamp the charge to ALL it holds (its lease
-        # plus every allowance extension), never to the lease alone (that would refund extension usage)
-        reserved = self._gate.reserved_with_extensions(
-            org_id=str(lease_doc.org_id), slug=str(lease_doc.engagement_slug), nonce=str(lease_doc.nonce),
-            units_reserved=reserved)
+        # the meter is closed, so what the run used is final; settle_launch clamps it to ALL the launch holds (its
+        # lease plus every allowance extension, W2b)
         guard: "Optional[Callable[[], Optional[str]]]" = None
         if str(outcome) not in ("completed", "canceled"):
             # A FAILED run is free (VIGIL's failure) — unless the customer held it paused through the end of its
@@ -350,15 +354,17 @@ class CompletionSpoolWatcher:
 
             guard = _pause_guard
             if not held or (totals.requests == 0 and totals.cost_nano == 0):
-                return 0, guard
+                return 0, None, guard
         try:
             if str(outcome) == "canceled" and mm.cancel_settlement() == "refund":
-                return 0, guard
-            return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
-                                       cap=reserved), guard
-        except mm.MeteringError as exc:
+                return 0, None, guard
+            used = self._gate.metered_use_mc(str(lease_doc.engagement_slug), str(lease_doc.nonce))
+        except (mm.MeteringError, RateCardError) as exc:
             raise CompletionSpoolDeferred(f"metered settle waits on its pricing configuration: {exc}",
                                           config=True) from exc
+        except ValueError as exc:
+            raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
+        return 0, (used if used > 0 else None), guard
 
     def _paused_past_expiry(self, lease_doc: Any) -> "Optional[bool]":
         try:

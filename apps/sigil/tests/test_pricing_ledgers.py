@@ -7,7 +7,7 @@ Load-bearing invariants (each guard is a mutation target):
   * report unlocks: a billing record may only unlock and the first per org wins; owner records are latest-wins by
     issued_at; an owner relock beats an earlier billing unlock, a later billing unlock does not override an owner
     relock, an owner unlock after a relock unlocks again; org A's records never affect org B;
-  * both cross a hard prune through the snapshot seed (schema v10), and `spine.prune` refuses a seed that drops
+  * both cross a hard prune through the snapshot seed (schema v10+), and `spine.prune` refuses a seed that drops
     one (the `stranded_*` tripwires);
   * an older snapshot loads with the new fields empty; the cached and full folds agree.
 """
@@ -318,10 +318,12 @@ def _marker(s):
     return s.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
 
 
-def test_schema_is_v10_and_an_older_snapshot_loads_with_empty_fields():
-    assert _MAX_SNAPSHOT_SCHEMA == 10 and SnapshotState().schema_version == 10
+def test_schema_is_v11_and_an_older_snapshot_loads_with_empty_fields():
+    assert _MAX_SNAPSHOT_SCHEMA == 11 and SnapshotState().schema_version == 11
     old = SnapshotState.from_folded({"schema_version": 9})
     assert old.trial_claim_row == [] and old.report_unlock_billing == [] and old.report_unlock_owner == []
+    v10 = SnapshotState.from_folded({"schema_version": 10})          # W2c-1: written before the exact-usage carry
+    assert v10.wallet_usage_mc == [] and v10.wallet_usage_map() == {}
 
 
 def test_claims_and_unlocks_survive_a_hard_prune(monkeypatch):

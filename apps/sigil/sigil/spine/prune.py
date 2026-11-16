@@ -614,6 +614,7 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
     so a seed emission regression is caught). Read-only."""
     from ..governor.wallet import (CREDIT_GRANT_SIGNAL, CREDIT_DEBIT_SIGNAL, _GRANT_CORE, _DEBIT_CORE,
                                    _as_credits)
+    from ..governor.launch_settlement import EXACT_RECORD_VERSION, LAUNCH_SETTLED_SIGNAL, fold_exact_settle
     from ..governor import key_history as _kh
     from ..governor.authn import verify_signed
     from ..governor.identity import owner_pubkey
@@ -622,15 +623,21 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
     below: list[SpineRecord] = []
     for seg in archived:
         below.extend(read_segment_records(store._layout.seg_path(seg)))
-    # the running balance + seen-set a genesis fold of [0..K) yields — the state that MUST survive the prune.
+    # the running balance + seen-set (+ W2c-1 exact usage) a genesis fold of [0..K) yields — the state that MUST
+    # survive the prune.
     granted: dict[Any, int] = {}
     debited: dict[Any, int] = {}
+    usage: dict[Any, int] = {}
     seen: set = set()
     for r in sorted(below, key=lambda r: r.seq):
         p = r.payload
         if not isinstance(p, dict):
             continue
         sig = p.get("signal")
+        if sig == LAUNCH_SETTLED_SIGNAL:
+            if p.get("v") == EXACT_RECORD_VERSION:   # W2c-1: the SAME exact-usage step the wallet fold and build() run
+                fold_exact_settle(p, resolver.at(r.seq), seen, usage)
+            continue
         if sig != CREDIT_GRANT_SIGNAL and sig != CREDIT_DEBIT_SIGNAL:
             continue
         oid, eid = p.get("org_id"), p.get("entry_id")
@@ -648,15 +655,17 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
             granted[oid] = granted.get(oid, 0) + amt
         else:
             debited[oid] = debited.get(oid, 0) + amt
-    active = set(granted) | set(debited)
+    active = set(granted) | set(debited) | set(usage)
     # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
     seed = SnapshotState.model_validate(
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     sg, sd, ss = seed.wallet_granted_map(), seed.wallet_debited_map(), seed.wallet_seen_set()
+    su = seed.wallet_usage_map()
     stranded: set = set()
     for o in active:
-        if sg.get(o, 0) != granted.get(o, 0) or sd.get(o, 0) != debited.get(o, 0):
-            stranded.add(str(o))          # a balance the seed fails to carry exactly
+        if (sg.get(o, 0) != granted.get(o, 0) or sd.get(o, 0) != debited.get(o, 0)
+                or su.get(o, 0) != usage.get(o, 0)):
+            stranded.add(str(o))          # a balance (or the exact usage behind its remainder) the seed fails to carry
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)

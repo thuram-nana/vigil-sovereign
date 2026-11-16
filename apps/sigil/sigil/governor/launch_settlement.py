@@ -71,6 +71,7 @@ from .metering import _PLAN_GRANT_CORE, PLAN_GRANT_SIGNAL  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402
 from .postpaid import _PP_CREDIT_CORE, POSTPAID_CREDIT_SIGNAL, SETTLE_ENTRY_PREFIX  # noqa: E402
 from .wallet import _GRANT_CORE, CREDIT_GRANT_SIGNAL  # noqa: E402
+from vigil_core.rate_card import MC_PER_CREDIT  # noqa: E402  (W2c-1: one credit = 1,000 milli-credits)
 
 LAUNCH_SETTLED_SIGNAL = "governor.launch_settled"
 #: A customer cancel that was HELD for the owner (``launch_gate.PLAN_DEBIT_PRUNED``: nothing moved) leaves this marker
@@ -81,6 +82,13 @@ LAUNCH_CANCEL_HELD_SIGNAL = "launch.cancel_held"
 SETTLED_RECORD_VERSION = 2
 _SETTLED_CORE_V2 = ("signal", "v", "org_id", "slug", "nonce", "mode", "reserved", "consumed", "refund_plan",
                     "refund_wallet", "refund_postpaid", "plan_period_end", "basis", "issued_at")
+#: W2c-1 — the EXACT (milli-credit) decision of a metered settle: the v2 core plus the run's exact consumption and the
+#: org's sub-credit usage remainder before and after it. ``consumed`` keeps its v2 meaning (the WHOLE credits the
+#: settle keeps of the reservation): ``remainder_before + consumed_mc == 1000 * consumed + remainder_after``. The
+#: record is the ONLY place the remainder moves (the wallet fold sums ``consumed_mc``), so a settle and its remainder
+#: are one signed commit.
+EXACT_RECORD_VERSION = 3
+_SETTLED_CORE_V3 = _SETTLED_CORE_V2 + ("consumed_mc", "remainder_before", "remainder_after")
 #: The E3bc-draft record (``consumed`` only). Read-only: a verified v1 record is SETTLED but malformed (it carries no
 #: split, so it is never rolled forward), and nothing writes it any more.
 _SETTLED_CORE_V1 = ("signal", "org_id", "slug", "nonce", "consumed", "issued_at")
@@ -147,6 +155,24 @@ class SettlementDecision:
     refund_postpaid: int
     plan_period_end: float
     basis: str
+    # W2c-1 — present together on an EXACT (v3) decision, absent (None) on a v2 one.
+    consumed_mc: Optional[int] = None
+    remainder_before: Optional[int] = None
+    remainder_after: Optional[int] = None
+
+    @property
+    def exact(self) -> bool:
+        """True for an exact (v3, milli-credit) decision."""
+        return self.consumed_mc is not None
+
+    def with_exact(self, consumed_mc: int, remainder_before: int) -> "SettlementDecision":
+        """This decision with its exact consumption and the org's remainder before it; ``remainder_after`` follows
+        (``(remainder_before + consumed_mc) % 1000``). The caller has already set ``consumed`` to the floor of the
+        whole credits — :meth:`validate` refuses a decision whose parts do not reconcile."""
+        from dataclasses import replace
+        return replace(self, consumed_mc=consumed_mc, remainder_before=remainder_before,
+                       remainder_after=(remainder_before + consumed_mc) % MC_PER_CREDIT
+                       if _amount(consumed_mc) and _amount(remainder_before) else -1)
 
     @classmethod
     def prepaid(cls, reserved: int, consumed: int, refund_plan: int, refund_wallet: int, plan_period_end: float,
@@ -180,6 +206,17 @@ class SettlementDecision:
             return "a plan refund needs its tranche's period_end"
         if not isinstance(self.basis, str) or not self.basis or len(self.basis) > _MAX_BASIS:
             return "basis is not a short string"
+        exact = (self.consumed_mc, self.remainder_before, self.remainder_after)
+        if any(v is not None for v in exact):
+            if not all(_amount(v) for v in exact):
+                return "an exact decision needs consumed_mc, remainder_before and remainder_after as non-negative ints"
+            if self.remainder_before >= MC_PER_CREDIT or self.remainder_after >= MC_PER_CREDIT:
+                return "a remainder is not below one credit"
+            if self.consumed_mc > MC_PER_CREDIT * self.reserved:
+                return "consumed_mc exceeds the reservation"
+            # the floor, exactly: never a charge rounded up, never a remainder dropped
+            if self.remainder_before + self.consumed_mc != MC_PER_CREDIT * self.consumed + self.remainder_after:
+                return "the exact consumption does not reconcile with the whole-credit debit and the remainder"
         return None
 
 
@@ -202,33 +239,87 @@ def record_launch_settled(store, owner_key, *, org_id: str, slug: str, nonce: st
     if decision.basis not in BASES:
         raise ValueError("invalid launch settlement decision: unknown basis")
     d = decision
-    core = {"signal": LAUNCH_SETTLED_SIGNAL, "v": SETTLED_RECORD_VERSION, "org_id": oid, "slug": s, "nonce": n,
+    core = {"signal": LAUNCH_SETTLED_SIGNAL, "v": EXACT_RECORD_VERSION if d.exact else SETTLED_RECORD_VERSION,
+            "org_id": oid, "slug": s, "nonce": n,
             "mode": d.mode, "reserved": int(d.reserved), "consumed": int(d.consumed),
             "refund_plan": int(d.refund_plan), "refund_wallet": int(d.refund_wallet),
             "refund_postpaid": int(d.refund_postpaid), "plan_period_end": float(d.plan_period_end),
             "basis": d.basis, "issued_at": float(issued_at)}
+    reason = (f"launch settled {s}:{n} ({d.mode}, consumed {int(d.consumed)} of {int(d.reserved)}, "
+              f"{d.basis}) -> {oid}")
+    if d.exact:            # W2c-1: the exact consumption and the org's remainder, inside the signed core
+        core.update(consumed_mc=int(d.consumed_mc), remainder_before=int(d.remainder_before),
+                    remainder_after=int(d.remainder_after))
+        reason = (f"launch settled {s}:{n} ({d.mode}, {int(d.consumed_mc)} mc -> {int(d.consumed)} of "
+                  f"{int(d.reserved)} credits, remainder {int(d.remainder_before)} -> {int(d.remainder_after)} mc, "
+                  f"{d.basis}) -> {oid}")
     payload = {**signed_payload(core, owner_key), "by": "owner", "requested_by": "owner", "tier": "A0",
-               "decision": "auto",
-               "reason": f"launch settled {s}:{n} ({d.mode}, consumed {int(d.consumed)} of {int(d.reserved)}, "
-                         f"{d.basis}) -> {oid}"}
+               "decision": "auto", "reason": reason}
     return store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
 
 def _decision_from(p: Any) -> "Optional[SettlementDecision]":
-    """The decision a VERIFIED v2 payload carries, or None when it fails an invariant (malformed)."""
-    if p.get("v") != SETTLED_RECORD_VERSION:
+    """The decision a VERIFIED v2 or v3 (exact) payload carries, or None when it fails an invariant (malformed) — a
+    v3 payload without its three exact fields included."""
+    v = p.get("v")
+    if v not in (SETTLED_RECORD_VERSION, EXACT_RECORD_VERSION):
         return None
     try:
+        exact = ({"consumed_mc": p.get("consumed_mc"), "remainder_before": p.get("remainder_before"),
+                  "remainder_after": p.get("remainder_after")} if v == EXACT_RECORD_VERSION else {})
+        if exact and any(x is None for x in exact.values()):
+            return None
         d = SettlementDecision(mode=p.get("mode"), reserved=p.get("reserved"), consumed=p.get("consumed"),
                                refund_plan=p.get("refund_plan"), refund_wallet=p.get("refund_wallet"),
                                refund_postpaid=p.get("refund_postpaid"), plan_period_end=p.get("plan_period_end"),
-                               basis=p.get("basis"))
+                               basis=p.get("basis"), **exact)
         if d.validate() is not None:
             return None
         return SettlementDecision(d.mode, d.reserved, d.consumed, d.refund_plan, d.refund_wallet, d.refund_postpaid,
-                                  float(d.plan_period_end), d.basis)
+                                  float(d.plan_period_end), d.basis, d.consumed_mc, d.remainder_before,
+                                  d.remainder_after)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def verified_settle_core(p: Any, key: Any) -> "Optional[tuple[str, ...]]":
+    """The core an owner-signed ``governor.launch_settled`` payload verifies under — v3, v2 or the legacy v1 — or None
+    (unsigned / forged / wrong epoch). Tries the core its ``v`` claims first, then every other: ANY owner-signed record
+    is a settlement (fail-closed), whatever version it claims; :func:`_decision_from` then decides if it is usable."""
+    claimed = _SETTLED_CORE_V3 if p.get("v") == EXACT_RECORD_VERSION else _SETTLED_CORE_V2
+    for core in (claimed, _SETTLED_CORE_V2 if claimed is _SETTLED_CORE_V3 else _SETTLED_CORE_V3, _SETTLED_CORE_V1):
+        if verify_signed(p, core, key):
+            return core
+    return None
+
+
+def decision_of(p: Any, core: "Optional[tuple[str, ...]]") -> "Optional[SettlementDecision]":
+    """The decision of a payload :func:`verified_settle_core` matched under ``core`` — usable only when that core is
+    the one its ``v`` claims (so every field the decision reads is signed), else None: the record still SETTLES the
+    lease but is malformed (never rolled forward, moves no remainder)."""
+    want = {SETTLED_RECORD_VERSION: _SETTLED_CORE_V2, EXACT_RECORD_VERSION: _SETTLED_CORE_V3}.get(p.get("v"))
+    return _decision_from(p) if want is not None and core is want else None
+
+
+def fold_exact_settle(p: Any, key_at_seq: Any, seen: set, usage: dict) -> None:
+    """W2c-1 — THE fold step of the org's lifetime exact usage (``usage[org] = Σ consumed_mc``), shared by the wallet
+    fold, its verified fold cache, ``SnapshotState.build`` and the prune tripwire so none can diverge. A
+    ``governor.launch_settled`` v3 record verified under the owner key valid at its seq counts ONCE per lease —
+    ``(signal, org, "slug:nonce")`` in the wallet's own (prune-durable) seen-set — and only when its decision is well
+    formed (a malformed one is still consumed, so a later copy can never count). v1 / v2 records carry no exact
+    usage and are skipped before any signature work. The org's remainder is ``usage[org] % 1000``."""
+    if not isinstance(p, dict) or p.get("signal") != LAUNCH_SETTLED_SIGNAL or p.get("v") != EXACT_RECORD_VERSION:
+        return
+    oid, s, n = p.get("org_id"), p.get("slug"), p.get("nonce")
+    if not (isinstance(oid, str) and oid and isinstance(s, str) and s and isinstance(n, str) and n):
+        return
+    key = (LAUNCH_SETTLED_SIGNAL, oid, f"{s}:{n}")
+    if key in seen or not verify_signed(p, _SETTLED_CORE_V3, key_at_seq):
+        return
+    seen.add(key)
+    d = _decision_from(p)
+    if d is not None and d.exact:
+        usage[oid] = usage.get(oid, 0) + int(d.consumed_mc)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -285,13 +376,13 @@ def scan_settlement(store, trusted_pubkey: Optional[str], *, org_id: str, slug: 
                 continue
             if resolver is None:
                 resolver = _kh.key_resolver(store, current=trusted_pubkey)
-            key = resolver.at(r.seq)
-            if verify_signed(p, _SETTLED_CORE_V2, key):
-                ev.record_seq = int(r.seq)
-                ev.decision = _decision_from(p)
-                ev.malformed = ev.decision is None
-            elif verify_signed(p, _SETTLED_CORE_V1, key):
+            core = verified_settle_core(p, resolver.at(r.seq))
+            if core is _SETTLED_CORE_V1:
                 ev.record_seq, ev.decision, ev.malformed = int(r.seq), None, True   # legacy: settled, never rolled
+            elif core is not None:
+                ev.record_seq = int(r.seq)
+                ev.decision = decision_of(p, core)
+                ev.malformed = ev.decision is None
             continue                                  # unsigned / forged / wrong-epoch: ignored (fail-closed)
         if sig not in wanted:
             continue
@@ -367,13 +458,13 @@ def scan_settlements_since(store, trusted_pubkey: Optional[str], *, keys: "Any",
                     continue
                 if resolver is None:
                     resolver = _kh.key_resolver(store, current=trusted_pubkey)
-                key_at = resolver.at(r.seq)
-                if verify_signed(p, _SETTLED_CORE_V2, key_at):
-                    ev.record_seq = int(r.seq)
-                    ev.decision = _decision_from(p)
-                    ev.malformed = ev.decision is None
-                elif verify_signed(p, _SETTLED_CORE_V1, key_at):
+                core = verified_settle_core(p, resolver.at(r.seq))
+                if core is _SETTLED_CORE_V1:
                     ev.record_seq, ev.decision, ev.malformed = int(r.seq), None, True
+                elif core is not None:
+                    ev.record_seq = int(r.seq)
+                    ev.decision = decision_of(p, core)
+                    ev.malformed = ev.decision is None
                 continue                              # unsigned / forged / wrong-epoch: ignored (fail-closed)
             eid = p.get("entry_id")
             if not isinstance(eid, str):
@@ -397,11 +488,14 @@ def scan_settlements_since(store, trusted_pubkey: Optional[str], *, keys: "Any",
 def evidence_to_json(ev: SettlementEvidence) -> dict:
     """``ev`` as plain JSON (its ``through`` excluded: a caller that persists it records the seq it is good to)."""
     d = ev.decision
+    dec = None if d is None else {
+        "mode": d.mode, "reserved": d.reserved, "consumed": d.consumed, "refund_plan": d.refund_plan,
+        "refund_wallet": d.refund_wallet, "refund_postpaid": d.refund_postpaid,
+        "plan_period_end": d.plan_period_end, "basis": d.basis}
+    if d is not None and d.exact:      # W2c-1: an exact decision round-trips with its three exact fields
+        dec.update(consumed_mc=d.consumed_mc, remainder_before=d.remainder_before, remainder_after=d.remainder_after)
     return {"record_seq": ev.record_seq, "malformed": bool(ev.malformed), "landed": sorted(ev.landed),
-            "decision": None if d is None else {
-                "mode": d.mode, "reserved": d.reserved, "consumed": d.consumed, "refund_plan": d.refund_plan,
-                "refund_wallet": d.refund_wallet, "refund_postpaid": d.refund_postpaid,
-                "plan_period_end": d.plan_period_end, "basis": d.basis}}
+            "decision": dec}
 
 
 def evidence_from_json(obj: Any, *, through: int) -> SettlementEvidence:
@@ -418,9 +512,13 @@ def evidence_from_json(obj: Any, *, through: int) -> SettlementEvidence:
         raise ValueError("bad malformed / landed")
     decision = None
     if dec is not None:
-        decision = _decision_from({**dec, "v": SETTLED_RECORD_VERSION}) if isinstance(dec, dict) else None
-        if decision is None or set(dec) != {"mode", "reserved", "consumed", "refund_plan", "refund_wallet",
-                                            "refund_postpaid", "plan_period_end", "basis"}:
+        v2_keys = {"mode", "reserved", "consumed", "refund_plan", "refund_wallet", "refund_postpaid",
+                   "plan_period_end", "basis"}
+        exact_keys = v2_keys | {"consumed_mc", "remainder_before", "remainder_after"}
+        keys = set(dec) if isinstance(dec, dict) else set()
+        v = EXACT_RECORD_VERSION if keys == exact_keys else SETTLED_RECORD_VERSION
+        decision = _decision_from({**dec, "v": v}) if isinstance(dec, dict) else None
+        if decision is None or keys not in (v2_keys, exact_keys):
             raise ValueError("bad decision")
     if (rs is None) != (decision is None and not malformed) or (malformed and decision is not None):
         raise ValueError("decision / record mismatch")
