@@ -72,7 +72,8 @@ def _settle_one(gate: Any, d: Any, *, now: float, spool: Path, base: str, grace:
     consumed = 0
     if metered:
         try:
-            consumed = _paused_metered_charge(gate, slug, nonce, int(signed.document.units_reserved), now)
+            consumed = _paused_metered_charge(gate, slug, nonce, int(signed.document.units_reserved), now,
+                                              org_id=str(signed.document.org_id))
         except _SweepDefer as e:
             return {"status": e.status, "error": str(e)}
         except ValueError as e:

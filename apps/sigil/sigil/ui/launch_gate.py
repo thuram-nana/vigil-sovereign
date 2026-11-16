@@ -415,6 +415,108 @@ class LaunchGate:
             "trust_root": trust_root.model_dump(mode="json"),
         }
 
+    # -- W2b: allowance extensions (the prepaid pay-as-you-go wallet, pricing design §0.4) -------------------------
+    def extension_total(self, org_id: str, slug: str, nonce: str) -> "tuple[int, bool]":
+        """``(credits, pruned)``: the sum of launch ``(slug, nonce)``'s allowance extensions (wallet debits
+        ``reserve-wallet:{slug}:{nonce}:x{k}``, k = 1, 2, ... consecutively), and whether one of them is known to the
+        prune-durable seen-set but no longer readable in the live spine window (its amount is then unknown: a fresh
+        settle is HELD for the owner, never guessed)."""
+        from ..governor.launch_reservations import extension_entry_id
+        total, pruned, k = 0, False, 1
+        while True:
+            eid = extension_entry_id(str(slug), str(nonce), k)
+            if not self.wallet.has_debit_entry(org_id, eid):
+                return total, pruned
+            amount = self.wallet.reserve_debit(org_id, eid)
+            if amount is None:
+                pruned = True
+            else:
+                total += amount
+            k += 1
+
+    def reserved_with_extensions(self, *, org_id: str, slug: str, nonce: str, units_reserved: int) -> int:
+        """What launch ``(slug, nonce)`` holds in all: the lease's ``units_reserved`` plus its allowance extensions
+        (W2b) — the cap a metered charge is clamped to."""
+        ext, _pruned = self.extension_total(org_id, slug, nonce)
+        return int(units_reserved) + ext
+
+    def extend_reservation(self, *, org_id: str, slug: str, nonce: str, credits: int, now: Any) -> dict:
+        """W2b — extend a RUNNING metered launch's allowance by ``credits`` from the org's WALLET: one more
+        owner-signed reserve debit of the SAME launch, ``reserve-wallet:{slug}:{nonce}:x{k}`` (k = the next index),
+        which the launch's one exactly-once settle refunds or keeps with the rest of its reservation.
+
+        Refused with nothing debited unless: the owner key is here; the launch was published metered and its model
+        meter is NOT closed (every settle of a metered launch closes the meter first, under the same cross-process
+        lock taken here, so no extension can land once a settle has begun); its base reservation is a PREPAID one on
+        the spine (a postpaid credit line is not extended yet — the run pauses instead); the seam has not marked it
+        settled; and the wallet holds ``credits``. The extension is decided and written under ``self._lock`` and the
+        cross-process ``settle_lock``. Returns ``{ok, k, credits, extended, reserved_base_known}`` or
+        ``{ok: False, error, insufficient?}`` (``insufficient``: the wallet cannot cover it — the caller pauses the
+        run, W3)."""
+        from contextlib import ExitStack
+        from .. import config
+        from ..governor.launch_reservations import extension_entry_id
+        from ..governor.launch_settlement import settle_lock
+        from ..governor.orgs import _check_org_id
+        from ..model_gateway import GrantMeter
+        from vigil_core.model_grant import meter_id
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+
+        if self.owner_key is None:
+            return {"ok": False, "error": "an allowance extension must be owner-signed (internal: no owner key)"}
+        try:
+            oid = _check_org_id(org_id)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        s, non = str(slug or ""), str(nonce or "")
+        if not s or not non or ":" in s or ":" in non:
+            return {"ok": False, "error": "a launch is named by a non-empty slug and nonce without ':'"}
+        if isinstance(credits, bool) or not isinstance(credits, int) or not 1 <= credits <= _MAX_UNITS:
+            return {"ok": False, "error": f"credits must be an integer in [1, {_MAX_UNITS}]"}
+        try:
+            now_ts = self._as_dt(now).timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        if not self._launch_was_metered(s, non):
+            return {"ok": False, "error": "only a metered launch's allowance is extended"}
+        if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
+            return {"ok": False, "insufficient": True,
+                    "error": "a postpaid launch's allowance is not extended yet: the run pauses at its reservation"}
+        if not (self.wallet.has_debit_entry(oid, f"reserve-wallet:{s}:{non}")
+                or self.meter.plan.has_debit_entry(oid, f"reserve-plan:{s}:{non}")):
+            return {"ok": False, "error": "no prepaid reservation of this launch is on the spine"}
+        busy = {"ok": False, "retry": True, "error": "the settle lock is busy right now; retry the extension"}
+        with ExitStack() as held:
+            held.enter_context(self._lock)
+            try:
+                held.enter_context(settle_lock(self.store))
+            except ValueError as e:
+                return {"ok": False, "error": f"could not take the cross-process settle lock (fail-closed): "
+                        f"{type(e).__name__}"}
+            except OSError:
+                return busy
+            try:
+                if GrantMeter(config.MODEL_METER_DIR).is_closed(meter_id(s, non)):
+                    return {"ok": False, "error": "this launch is settling or settled: its meter is closed"}
+                if is_lease_settled(self._seam_base(), s, non):
+                    return {"ok": False, "error": "this launch is settled"}
+            except (OSError, ValueError):
+                return busy
+            k = 1
+            while self.wallet.has_debit_entry(oid, extension_entry_id(s, non, k)):
+                k += 1
+            before = self.wallet.available(oid)
+            if before < credits:
+                return {"ok": False, "insufficient": True,
+                        "error": f"insufficient credits to continue: need {credits}, have {before}"}
+            self.wallet.debit(oid, credits, engagement_id=s, entry_id=extension_entry_id(s, non, k),
+                              issued_at=now_ts)
+            if before - self.wallet.available(oid) < credits:
+                return {"ok": False, "error": "this allowance extension did not apply (fail-closed)"}
+            extended, _pruned = self.extension_total(oid, s, non)
+        return {"ok": True, "action": "allowance_extended", "org_id": oid, "slug": s, "nonce": non, "k": k,
+                "credits": credits, "extended": extended}
+
     def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any,
                       expect_org_id: Optional[str] = None,
                       refuse_if: Optional[Callable[[], Optional[str]]] = None,
@@ -460,6 +562,29 @@ class LaunchGate:
             return {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
         doc = signed.document
         oid, s, non, reserved = doc.org_id, doc.engagement_slug, doc.nonce, int(doc.units_reserved)
+        # W2b: everything the launch holds — its lease's reservation plus its allowance extensions (wallet). An
+        # extension known to the prune-durable seen-set whose amount left the live window HOLDS a fresh settle for
+        # the owner (``PLAN_DEBIT_PRUNED``: a reserve debit record a hard prune removed), never guessed. Inside the
+        # settle critical section, after the run's meter is closed (no extension can land after that), the total is
+        # re-read; a change since this decision was built retries the settle with nothing written.
+        # Only a metered launch can hold extensions, so a flat launch's settle reads nothing more (byte-identical);
+        # a billing mode that cannot be read is treated as metered (the lookups then decide, fail-closed).
+        try:
+            may_extend = self._launch_was_metered(s, non)
+        except OSError:
+            may_extend = True
+        ext, ext_pruned = self.extension_total(oid, s, non) if may_extend else (0, False)
+        reserved += ext
+        if ext_pruned:
+            refuse_if = self._held_for(PLAN_DEBIT_PRUNED, refuse_if)
+
+        def _allowance_unchanged() -> Optional[str]:
+            if not may_extend:
+                return None
+            now_ext, now_pruned = self.extension_total(oid, s, non)
+            if (now_ext, now_pruned) != (ext, ext_pruned):
+                return "the launch's allowance changed while it settled; retry the settle"
+            return None
         # TENANT BINDING: when the caller is a customer (the edge passes its session org), the lease's org
         # MUST match — so a customer cannot cancel/settle another tenant's reservation by presenting its lease.
         if expect_org_id is not None and oid != expect_org_id:
@@ -480,12 +605,13 @@ class LaunchGate:
         lease_split = ((int(doc.plan_reserved), doc.plan_period_end) if doc.plan_reserved is not None
                        else None)
         return self._settle_reservation(oid, s, non, reserved, consumed, now_ts, refuse_if, basis, finish_only,
-                                        lease_split=lease_split)
+                                        lease_split=lease_split, allowance_check=_allowance_unchanged)
 
     def _settle_reservation(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float,
                             refuse_if: Optional[Callable[[], Optional[str]]], basis: str,
                             finish_only: bool = False,
-                            lease_split: "Optional[tuple[int, Optional[float]]]" = None) -> dict:
+                            lease_split: "Optional[tuple[int, Optional[float]]]" = None,
+                            allowance_check: Optional[Callable[[], Optional[str]]] = None) -> dict:
         """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
         used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
         bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
@@ -526,7 +652,7 @@ class LaunchGate:
 
             return self._settle_once(oid, s, non, reserved, consumed, now_ts,
                                      SettlementDecision.postpaid(reserved, consumed, basis), _move_postpaid,
-                                     refuse_if, finish_only)
+                                     refuse_if, finish_only, allowance_check=allowance_check)
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
@@ -594,7 +720,8 @@ class LaunchGate:
         decision = SettlementDecision.prepaid(reserved, consumed, plan_refund, wallet_refund,
                                               plan_pe if plan_pe is not None else 0.0, basis)
         return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
-                                                               _move_prepaid, refuse_if, finish_only))
+                                                               _move_prepaid, refuse_if, finish_only,
+                                                               allowance_check=allowance_check))
 
     @staticmethod
     def _track_hold(oid: str, s: str, non: str, out: dict) -> dict:
@@ -632,6 +759,13 @@ class LaunchGate:
             return []
         return [k for k in done if settle_hold.release_held(k[1], k[2])]
 
+    @staticmethod
+    def _held_for(reason: str, refuse_if: Optional[Callable[[], Optional[str]]]) -> Callable[[], Optional[str]]:
+        """``refuse_if`` extended to refuse a FRESH settle with ``reason`` (after the caller's own precondition)."""
+        def _check() -> Optional[str]:
+            return _refusal(refuse_if) or reason
+        return _check
+
     def _pruned_plan_debit_check(self, oid: str, plan_deb_eid: str,
                                  refuse_if: Optional[Callable[[], Optional[str]]]) -> Callable[[], Optional[str]]:
         """``refuse_if`` extended for a reservation without a lease-recorded plan/wallet split (a lease without it,
@@ -648,7 +782,8 @@ class LaunchGate:
 
     def _settle_once(self, oid: str, s: str, non: str, reserved: int, consumed: int, now_ts: float, decision: Any,
                      move: "Callable[[Any, set[str], bool], dict]",
-                     refuse_if: Optional[Callable[[], Optional[str]]], finish_only: bool) -> dict:
+                     refuse_if: Optional[Callable[[], Optional[str]]], finish_only: bool,
+                     allowance_check: Optional[Callable[[], Optional[str]]] = None) -> dict:
         """THE exactly-once settle transaction of lease ``(s, non)``, shared by the prepaid and postpaid paths.
         ``decision`` is what THIS caller would decide (a ``SettlementDecision``); ``move(d, landed, durable)`` moves
         the money of decision ``d`` — writing only the settle entries NOT already ``landed`` (and, when ``durable``,
@@ -711,6 +846,11 @@ class LaunchGate:
                 meter_refusal = self._close_model_meter(s, non, now_ts)
                 if meter_refusal is not None:
                     return meter_refusal
+                # W2b: the meter is closed, so no allowance extension can land any more — the reservation this
+                # decision was built on must still be the launch's whole reservation, or nothing is written
+                changed = _refusal(allowance_check)
+                if changed:
+                    return {"ok": False, "retry": True, "error": changed}
             else:
                 meter_refusal = self._close_model_meter(s, non, now_ts)
                 if meter_refusal is not None:                # OD-8: settled already — never strand its refund on it
@@ -1280,6 +1420,8 @@ class LaunchGate:
           full refund; ``metered_unknown`` when its billing mode cannot be read."""
         from vigil_integration.live.credit_lease_broker import is_lease_settled, read_credit_lease
         base = self._seam_base()
+        if getattr(res, "extensions", None):
+            return "metered"                      # W2b: an allowance extension proves the launch ran metered
         if not any(r.seq > res.seq for r in ix.of(oid, slug)):
             return "not_superseded"
         b = read_credit_lease(base, slug)

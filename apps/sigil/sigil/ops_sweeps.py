@@ -138,7 +138,7 @@ def _pause_state(base: Any, slug: str, nonce: str) -> "Optional[bool]":
     return False
 
 
-def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now: float) -> int:
+def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now: float, *, org_id: str) -> int:
     """What a metered launch the customer paused and never resumed used, in credits (owner decision 2026-11-13: it
     is CHARGED for what it used, like a completed or customer-cancelled metered run): the run's meter is CLOSED
     first, then ``min(reserved, max(floor, ceil(confirmed cost x markup / $0.01)))``. Only confirmed spend is
@@ -157,6 +157,8 @@ def _paused_metered_charge(gate: Any, slug: str, nonce: str, reserved: int, now:
         raise _SweepDefer("deferred", f"the run's model meter cannot be written right now: {type(e).__name__}") from e
     if totals.requests == 0 and totals.cost_nano == 0:
         return 0                                       # nothing was used (it may never have started): refunded
+    # W2b: the meter is closed, so the allowance is final — clamp to all the launch holds (lease + extensions)
+    reserved = gate.reserved_with_extensions(org_id=org_id, slug=slug, nonce=nonce, units_reserved=int(reserved))
     try:
         return mm.credits_for_cost(totals.cost_nano, markup=mm.billing_markup(), floor=mm.run_floor_credits(),
                                    cap=int(reserved))
@@ -377,7 +379,8 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
         consumed = 0
         if metered and paused:
             try:
-                consumed = _paused_metered_charge(gate, slug_, nonce_, int(doc.units_reserved), now)
+                consumed = _paused_metered_charge(gate, slug_, nonce_, int(doc.units_reserved), now,
+                                                  org_id=str(doc.org_id))
             except _SweepDefer as e:
                 rows.append({**row, "status": e.status, "error": str(e)})
                 continue

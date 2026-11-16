@@ -319,6 +319,11 @@ class CompletionSpoolWatcher:
             raise CompletionSpoolDeferred(f"the run's model meter could not be closed: {exc}") from exc
         except ValueError as exc:
             raise CompletionSpoolError(f"the run's model meter is broken: {exc}") from exc
+        # W2b: the meter is closed, so the launch's allowance is final — clamp the charge to ALL it holds (its lease
+        # plus every allowance extension), never to the lease alone (that would refund extension usage)
+        reserved = self._gate.reserved_with_extensions(
+            org_id=str(lease_doc.org_id), slug=str(lease_doc.engagement_slug), nonce=str(lease_doc.nonce),
+            units_reserved=reserved)
         guard: "Optional[Callable[[], Optional[str]]]" = None
         if str(outcome) not in ("completed", "canceled"):
             # A FAILED run is free (VIGIL's failure) — unless the customer held it paused through the end of its
