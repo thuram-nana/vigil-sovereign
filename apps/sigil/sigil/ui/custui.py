@@ -177,18 +177,21 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
     the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
-    "Continue with Google" button) and whether an installed app finishes it through the app hand-off. Each is a
-    non-secret on/off value and each counts in the build id."""
+    "Continue with Google" button), whether an installed app finishes it through the app hand-off, and whether the
+    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader). Each is a non-secret
+    on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
     handoff = google and _config.customer_oidc_handoff_enabled()
+    onboarding = _config.customer_onboarding_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
                                      _IOS_TAGS_SLOT: _IOS_TAGS if ios else "",
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
-                                     "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0"})
+                                     "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
+                                     "__VIGIL_ONBOARDING__": "1" if onboarding else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -572,6 +575,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
         # no session -> 401 (no cross-origin data leak); same-origin reads (the customer SPA) carry the cookie.
         if path in _READS:
             return self._customer_read_relay(_READS[path])
+        if path == "/api/customer/onboarding" and _onboarding_on():     # the tour's state (flag OFF -> unknown-route 404)
+            return self._onboarding(None)
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
@@ -970,6 +975,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._monitoring(action, body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
+        if action == "onboarding" and _onboarding_on():              # the tour closed (flag OFF -> unknown-action 404)
+            return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
@@ -1082,6 +1089,20 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("monitor_revoke", requester, payload)
         return self._json(r, c)
 
+    def _onboarding(self, body: "dict | None"):
+        """The onboarding tour's state for the SESSION's account: read it (GET, ``body`` None) or record that the tour
+        was finished / skipped (POST ``{state}``). Account-level: the REQUESTER is the server-side session username,
+        never a body field, so no one can read or set another account's tour."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        if body is None:
+            c, r = self._provision("onboarding_get", requester, {"ip": self._ip()})
+        else:
+            c, r = self._provision("onboarding_set", requester, {"state": str(body.get("state", "")), "ip": self._ip()})
+        return self._json(r, c)
+
     def _mfa(self, action: str, body: dict):
         """Customer MFA (E3b TOTP): the acting REQUESTER is taken from the SERVER-side session — NEVER the
         body. MFA is ACCOUNT-level (a customer enrolls/verifies their OWN factor, not an org's), so the gate
@@ -1170,6 +1191,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _onboarding_on() -> bool:
+    from .. import config as _config
+    return _config.customer_onboarding_enabled()
 
 
 def _checkout_on() -> bool:

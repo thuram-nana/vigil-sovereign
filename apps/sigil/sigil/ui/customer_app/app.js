@@ -27,6 +27,13 @@
  * EMAIL CODES. When the deployment sends them (the request answers code: true), the sign-up and password-reset emails
  * carry a 6-digit code beside the token, and the screens ask for "the 6-digit code from your email" (with the token
  * one tap away). The code is sent with the email address it went to; it works once, for 10 minutes.
+ *
+ * ONBOARDING. When the edge has the onboarding guide on (data-onboarding="1", VIGIL_CUSTOMER_ONBOARDING), the app
+ * (guide.js) opens a skippable click-through tour after a person's first sign-in — and at each sign-in after it, on
+ * any device, until they finish or skip it: the SERVER keeps that answer per account (GET/POST api/customer/onboarding,
+ * for the session's account only) and this browser remembers it too, for when the server cannot be asked. It also
+ * adds a Guide screen (#/guide) covering the whole app to the top bar, and shows the VIGIL wordmark brightening and
+ * dimming while a screen loads. Off, all of it is absent (no call is made) and every screen renders exactly as before.
  */
 (function () {
   "use strict";
@@ -61,6 +68,55 @@
   function pageFlag(name) {
     var ds = (document.body && document.body.dataset) || {};
     return ds[name] === "1";
+  }
+
+  // ---- onboarding (guide.js): the first-sign-in tour, the Guide screen, the branded loader ----------------------
+  var GUIDE = window.VIGIL_GUIDE;
+  var GUIDE_ON = !!(GUIDE && pageFlag("onboarding"));
+  function guideStore() { try { return window.localStorage; } catch (e) { return null; } }
+  // What a screen shows while it loads: the VIGIL wordmark brightening and dimming with the guide on, the plain text
+  // otherwise (exactly the node every screen showed before).
+  function loadingHolder(text) {
+    return GUIDE_ON ? GUIDE.loader(h, text) : h("p.cust-muted", { text: text });
+  }
+  // The tour's outcome goes to the server, so it never opens again on any device (best effort: this browser remembers
+  // it too, and the next sign-in sends it again if this send did not land).
+  function recordTour(how) {
+    VUI.postJSON(API + "/onboarding", { state: how }).catch(function () { /* remembered locally; re-sent later */ });
+  }
+  function openGuideTour() {
+    var w = state.get().who || {};
+    GUIDE.openTour({ h: h, doc: document, username: w.username, storage: guideStore(), nav: nav, onClose: recordTour });
+  }
+  // After a sign-in: the SERVER says whether this account still has the tour ahead of it ("pending" until it is
+  // finished or skipped, on any device). Asked once per account per page load. If the server cannot be asked, this
+  // browser's memory decides. A tour finished here whose record did not reach the server is sent again, not re-shown.
+  var tourChecked = {};
+  function maybeOpenTour() {
+    if (!GUIDE_ON || !authed()) return;
+    var u = String((state.get().who || {}).username || "");
+    if (!u || tourChecked[u]) return;
+    tourChecked[u] = true;
+    (async function () {
+      var server = null;
+      try { var r = await VUI.getJSON(API + "/onboarding"); server = r && r.state; }
+      catch (e) {
+        if (e && e.status === 401) { tourChecked[u] = false; return; }   // the session ended: ask again after sign-in
+        server = null;
+      }
+      if (!authed() || String((state.get().who || {}).username || "") !== u) return;   // signed out / switched since
+      var store = guideStore();
+      if (server === "done" || server === "skipped") { GUIDE.markDone(u, store, server); return; }
+      var local = GUIDE.localState(u, store);
+      if (server === "pending" && local) { recordTour(local); return; }
+      if (server === "pending" || GUIDE.shouldOpen({ enabled: true, username: u, storage: store })) openGuideTour();
+    })();
+  }
+  function viewGuideScreen() {
+    var w = state.get().who || {};
+    return shell(h("div", {}, [h("h2", { text: "Guide" }),
+      GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour })]),
+    "#/guide");
   }
 
   function field(id, label, type) {
@@ -477,7 +533,7 @@
   // scopes every read to the session org (admit_customer) — this UI never sends an org id. Guards against a
   // route change mid-flight, routes a 401 to login, and renders an honest card on 403 (role) or any error.
   function dataView(current, title, path, renderOk) {
-    var holder = h("div#cust-data", {}, h("p.cust-muted", { text: "Loading…" }));
+    var holder = h("div#cust-data", {}, loadingHolder("Loading…"));
     (async function () {
       var data;
       try { data = await VUI.getJSON(path); }
@@ -779,7 +835,7 @@
   async function loadFindings(slug, host) {
     var holder = VUI.$("#assess-findings");
     if (!holder) { return; }
-    VUI.mount(holder, h("p.cust-muted", { text: "Loading findings for " + host + "…" }));
+    VUI.mount(holder, loadingHolder("Loading findings for " + host + "…"));
     try {
       var d = await VUI.getJSON(API + "/assessments/findings");
       if (here() !== "#/assessments") { return; }
@@ -996,6 +1052,7 @@
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
     var props = { type: "button", text: label, onClick: function () { nav(hash); } };
     if (cur) props["aria-current"] = "page";
+    if (GUIDE_ON) props.dataset = { route: hash };          // the tour lights up the tab a step happens on
     return h("button.cust-nav-link", props);
   }
 
@@ -1004,6 +1061,7 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
       ? h("button.cust-nav-link", { type: "button", text: "Sign out (" + (w.username || "") + ")", onClick: doLogout })
@@ -1064,6 +1122,8 @@
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
     "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
+    // the guide off: #/guide is the home screen, exactly as any unknown route is
+    "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash
@@ -1086,7 +1146,7 @@
   }
 
   function render() {
-    if (!state.get().booted) { VUI.mount(root, h("div.cust-shell", {}, h("p.cust-muted", { text: "Loading…" }))); return; }
+    if (!state.get().booted) { VUI.mount(root, h("div.cust-shell", {}, loadingHolder("Loading…"))); return; }
     googleError();
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
@@ -1095,6 +1155,7 @@
     VUI.mount(root, view());
     setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it
     syncNtf();                     // start/stop the notification poll to match the live session + pref
+    maybeOpenTour();               // the guide on: the first-sign-in tour (once per account in this browser)
   }
 
   window.addEventListener("hashchange", render);
