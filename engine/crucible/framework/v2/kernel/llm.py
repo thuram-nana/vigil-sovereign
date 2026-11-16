@@ -35,7 +35,7 @@ from ..common import logging as v2log
 from ..common.errors import (
     BackendError, BackendOverloaded, BackendUnavailable, SovereigntyViolation,
 )
-from . import routing, sovereignty
+from . import metered, routing, sovereignty
 from .models import CallTrace
 
 
@@ -349,6 +349,44 @@ class LLMBackend(abc.ABC):
 
 _ENV_OVERRIDE = "CRUCIBLE_LLM_BACKEND"
 _cached_backend: LLMBackend | None = None
+#: M1c-2 — the backends that may serve a METERED run (``kernel.metered``): the Anthropic backend, whose client a
+#: metered run pins to the loopback model gateway and its grant (the ZDR-attested variant is the same client under
+#: another sovereignty name). Every other backend would reach a model outside the meter — or, for dry-run, fabricate
+#: the output of a paid run — so a metered run never selects, constructs or fails over to one.
+_METERED_BACKENDS = frozenset({"anthropic", "anthropic-zdr"})
+_metered_cached: "tuple[str, LLMBackend] | None" = None     # (the grant it serves, the backend)
+
+
+def _refuse_unmetered(name: str) -> None:
+    """Raise :class:`BackendUnavailable` when a METERED run would use backend ``name`` (anything but the gateway's
+    Anthropic backend). A no-op for an unmetered run."""
+    if metered.metered_mode() and name not in _METERED_BACKENDS:
+        raise BackendUnavailable(f"a metered run is served only through the model gateway (the anthropic backend); "
+                                 f"refusing {name!r}")
+
+
+def _metered_backend() -> LLMBackend:
+    """M1c-2 — the backend of a METERED run: ``CRUCIBLE_LLM_BACKEND`` when it names a gateway backend, else the first
+    gateway backend the sovereignty tier permits, and it must be available (its loopback gateway set). Kept apart from
+    the process-wide selection — an unmetered selection is neither reused nor replaced by a metered run — and cached
+    per grant, so the next run's grant gets its own backend. Fails closed (``BackendUnavailable``)."""
+    global _metered_cached
+    grant = metered.model_grant()
+    if _metered_cached is not None and _metered_cached[0] == grant:
+        return _metered_cached[1]
+    override = os.environ.get(_ENV_OVERRIDE, "").strip().lower()
+    names = [override] if override else [n for n in sovereignty.current().permitted_preference()
+                                         if n in _METERED_BACKENDS]
+    why = "no backend the sovereignty tier permits can serve it"
+    for name in names:
+        b = _construct(name)                         # refuses a non-gateway name; asserts the sovereignty tier
+        ok, note = b.is_available()
+        if ok:
+            _metered_cached = (str(grant), b)
+            _log.info("kernel.backend.selected", backend=b.name, reason="metered", note=note)
+            return b
+        why = note
+    raise BackendUnavailable(f"a metered run has no usable model gateway backend: {why}")
 
 
 def _construct(name: str) -> LLMBackend:
@@ -358,6 +396,7 @@ def _construct(name: str) -> LLMBackend:
     backend's SDK — strict tiers never import `anthropic`, `boto3`,
     or `google-auth` even to probe availability.
     """
+    _refuse_unmetered(name)                           # M1c-2: a metered run is served by the gateway backend only
     sovereignty.current().assert_permitted(name)
     if name == "anthropic":
         from .backends.anthropic import AnthropicBackend
@@ -404,6 +443,9 @@ def get_backend(force: str | None = None, refresh: bool = False) -> LLMBackend:
     if force is not None:
         return _construct(force)
 
+    if metered.metered_mode():
+        return _metered_backend()                    # M1c-2: never the process-wide (unmetered) selection
+
     if _cached_backend is not None and not refresh:
         return _cached_backend
 
@@ -446,8 +488,9 @@ def get_backend(force: str | None = None, refresh: bool = False) -> LLMBackend:
 
 
 def reset_cache() -> None:
-    global _cached_backend
+    global _cached_backend, _metered_cached
     _cached_backend = None
+    _metered_cached = None
 
 
 # EC-1b — L2 deterministic response cache seam. A deterministic completion (single-shot, temperature 0, older
@@ -673,7 +716,11 @@ def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult
     closed. When the shared core is absent the call still completes via the raw round-trip.
 
     EC-1b: a deterministic prompt on this explicit backend is first looked up in the L2 response cache; a
-    HIT returns with no provider round-trip; a MISS runs the gated path below unchanged, then stores."""
+    HIT returns with no provider round-trip; a MISS runs the gated path below unchanged, then stores.
+
+    M1c-2: a METERED run may pin only the gateway's Anthropic backend (anything else is refused before the cache or
+    the provider is consulted)."""
+    _refuse_unmetered(str(getattr(backend, "name", "") or ""))
     _hit = _l2_lookup(prompt, backend)
     if _hit is not None:
         return _hit
@@ -722,6 +769,10 @@ def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
     direct call that skips the chokepoint fails closed. The no-bypass guard depends on this self-assertion."""
     if _gw is not None:
         _gw.assert_in_egress("kernel.urk.raw")     # raw URK round-trips: reached only inside the gateway
+    if metered.metered_mode():
+        # M1c-2: a METERED run is served by the model gateway or not at all — NO failover: every other backend would
+        # reach a model outside the meter (or fabricate output); an overload surfaces to the run
+        return get_backend().complete(prompt)
     override = os.environ.get(_ENV_OVERRIDE, "").strip().lower()
     if override:
         return get_backend().complete(prompt)      # explicit operator choice: no failover

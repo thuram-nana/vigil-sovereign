@@ -108,7 +108,7 @@ assert_no_offense()
 
 from vigil_core import model_metering as mm  # noqa: E402
 from vigil_core.rate_card import DEFAULT_RATE_CARD, RateCard  # noqa: E402
-from vigil_core.model_grant import ModelGrant, decode_token  # noqa: E402
+from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER, ModelGrant, decode_token  # noqa: E402
 
 __all__ = ["GatewayConfig", "GrantMeter", "MeterBusy", "MeterTotals", "ModelGateway", "config_from_env", "start",
            "start_from_env"]
@@ -927,9 +927,11 @@ class GatewayConfig:
 
 
 class _Refusal(Exception):
-    def __init__(self, status: int, kind: str, message: str, *, retry_after: Optional[int] = None):
+    def __init__(self, status: int, kind: str, message: str, *, retry_after: Optional[int] = None,
+                 stop: Optional[str] = None):
         super().__init__(message)
         self.status, self.kind, self.message, self.retry_after = status, kind, message, retry_after
+        self.stop = stop            # M1c-2: why this refusal STOPS the run (vigil_core.model_grant.STOP_HEADER)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1465,9 +1467,13 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _refuse(self, r: _Refusal) -> None:
         self.close_connection = True              # the request body may be unread: never reuse this connection
+        headers = {}
+        if r.retry_after is not None:
+            headers["retry-after"] = str(r.retry_after)
+        if r.stop is not None:
+            headers[STOP_HEADER] = r.stop             # M1c-2: a metered engine tells a credit pause from a failure
         try:
-            self._send(r.status, _error_body(r.kind, r.message),
-                       {"retry-after": str(r.retry_after)} if r.retry_after is not None else None)
+            self._send(r.status, _error_body(r.kind, r.message), headers or None)
         except OSError:
             pass                                  # the client is gone or stalled: nothing to tell it
 
@@ -1626,7 +1632,7 @@ class _Handler(BaseHTTPRequestHandler):
         if reason == "closed":
             raise _Refusal(403, "permission_error", "this run's model grant is closed (the run was settled)")
         if reason == "allowance":
-            raise _Refusal(403, "permission_error", CREDITS_EXHAUSTED)
+            raise _Refusal(403, "permission_error", CREDITS_EXHAUSTED, stop=STOP_CREDITS_EXHAUSTED)
         if reason:
             raise _Refusal(403, "permission_error", "this run's budget is reached")
         self._ticket = _Ticket(gw.meter, grant, rid, reserved, gw.config.clock)

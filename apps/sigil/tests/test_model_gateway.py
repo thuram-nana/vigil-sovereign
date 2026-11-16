@@ -1930,6 +1930,20 @@ def test_a_request_the_wallet_cannot_back_is_refused_as_exhausted(upstream, tmp_
         _stop(server)
 
 
+def test_only_the_credit_stop_names_itself_to_the_run(upstream, tmp_path):
+    """M1c-2: the credit refusal carries ``x-vigil-stop: credits_exhausted`` (``vigil_core.model_grant``), so a
+    metered engine holds the run for a top-up instead of failing it; no other refusal carries the header."""
+    from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER
+    server = _start(upstream, tmp_path / "meter", allowance=_Allowance(1_000, available=0))
+    try:
+        status, headers, _b = _call(server, BODY, _tok(_grant()))
+        assert status == 403 and {k.lower(): v for k, v in headers.items()}.get(STOP_HEADER) == STOP_CREDITS_EXHAUSTED
+        status, headers, _b = _call(server, BODY, _tok(issued_at=NOW + 3_600, not_after=NOW + 7_200))
+        assert status == 403 and STOP_HEADER not in {k.lower() for k in headers}     # not valid yet: a failure
+    finally:
+        _stop(server)
+
+
 def test_max_tokens_is_lowered_to_fit_the_allowance(upstream, tmp_path):
     # first learn the request's worst case at its full max_tokens from the open line the gateway writes
     src = _Allowance(10 ** 9)

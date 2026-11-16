@@ -18,12 +18,24 @@ _spec.loader.exec_module(ap)
 
 
 def test_opus_cost_is_positive_and_uses_the_right_rate():
-    # 1,000,000 input + 1,000,000 output at Opus rates ($15 + $75 per M) = $90.
+    # 1,000,000 input + 1,000,000 output at the Opus 4.8 list rates ($5 + $25 per M) = $30. (The table used to
+    # match "claude-opus-4" here and charge the Opus 4 / 4.1 rate, $15 + $75 = 3x — a scan stopped at a third of
+    # its budget.)
     cost = ap.estimate_anthropic_cost(
         "anthropic/claude-opus-4-8",
         {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000, "total_tokens": 2_000_000},
     )
-    assert cost == pytest.approx(90.0)
+    assert cost == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("claude-opus-4-5", 30.0), ("claude-opus-4-6", 30.0), ("anthropic/claude-opus-4-7", 30.0),
+    ("claude-opus-4-8", 30.0),
+    ("claude-opus-4-1", 90.0), ("claude-opus-4", 90.0), ("claude-opus-4-20250514", 90.0),  # older Opus keep $15 / $75
+])
+def test_each_opus_generation_has_its_own_rate(model, expected):
+    u = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+    assert ap.estimate_anthropic_cost(model, u) == pytest.approx(expected)
 
 
 def test_the_disarm_scenario_yields_nonzero_cost():
@@ -36,7 +48,7 @@ def test_the_disarm_scenario_yields_nonzero_cost():
 
 
 def test_cache_tokens_priced_separately_and_not_double_charged():
-    # 10k prompt of which 8k are cache reads → 2k fresh input @15/M + 8k cache-read @1.5/M.
+    # 10k prompt of which 8k are cache reads → 2k fresh input @5/M + 8k cache-read @0.5/M (Opus 4.8).
     cost = ap.estimate_anthropic_cost(
         "claude-opus-4-8",
         {
@@ -45,7 +57,7 @@ def test_cache_tokens_priced_separately_and_not_double_charged():
             "prompt_tokens_details": {"cached_tokens": 8_000},
         },
     )
-    expected = (2_000 * 15.0 + 8_000 * 1.5) / 1_000_000
+    expected = (2_000 * 5.0 + 8_000 * 0.5) / 1_000_000
     assert cost == pytest.approx(expected)
 
 
@@ -57,7 +69,7 @@ def test_sonnet_and_haiku_have_distinct_rates():
 
 def test_total_only_usage_still_costs():
     cost = ap.estimate_anthropic_cost("claude-opus-4-8", {"total_tokens": 1_000_000})
-    assert cost == pytest.approx(15.0)  # priced at the input rate when no split is available
+    assert cost == pytest.approx(5.0)  # priced at the input rate when no split is available
 
 
 def test_non_anthropic_returns_none():

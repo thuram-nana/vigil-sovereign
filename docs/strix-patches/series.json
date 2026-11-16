@@ -496,6 +496,12 @@
    "file": "038-supply-chain-a14-bump-pyasn1-0-6-4-0-6-5-in-vend.patch",
    "sha256": "d55e0987f58cf9425218a23ed20d18e0954eb38a18ac6d069679d568ae51579e",
    "subject": "supply-chain(A14): bump pyasn1 0.6.4 -> 0.6.5 in vendor/strix/uv.lock"
+  },
+  {
+   "commit": "90ebbb69b25e95b69ed075414cda80c0442b5540",
+   "file": "039-m1c-2-strix-prices-opus-4-5-at-their-own-list-ra.patch",
+   "sha256": "76cf8f82a5a8da1975332995f9d5a9e79b5f2b8c80ff131cf64e6d8aa4730114",
+   "subject": "M1c-2: Strix prices Opus 4.5+ at their own list rate"
   }
  ],
  "schema": 1,
@@ -596,7 +602,7 @@
   "vendor/strix/strix/interface/tui/renderers/web_search_renderer.py": "cd145e859c335cd5a959e737b4cd0a2302fc77398dc9bac017357923dff9b232",
   "vendor/strix/strix/interface/utils.py": "fba12aa45116694f1e6373f8658bf56edaa591417706a59bfe94873328a84b7a",
   "vendor/strix/strix/report/__init__.py": "5fb9afa100eb95e08ececc75d24d310f6dd6bb84b00da0b263e29e284c9dca5e",
-  "vendor/strix/strix/report/anthropic_pricing.py": "114175e67481568fb7ab08105a10abe1afcc0edee90ee4698de5752e4b50d093",
+  "vendor/strix/strix/report/anthropic_pricing.py": "73a89ddc9d2a792250384cb050216c977eea1c42cef6d07a425d89505cf96085",
   "vendor/strix/strix/report/dedupe.py": "f4094770da0dd5616912685269098620f57d7df8c107e1600336a92cb303adb4",
   "vendor/strix/strix/report/degradation_hook.py": "7b80de0574c779802595f70b3188995780123aaf475ed05ed4a1f8a123781f7f",
   "vendor/strix/strix/report/proof_capture.py": "467c06149b76fff48970907f0ffa9d3bb2aad5b4a3be72df741606504aba231d",
@@ -734,7 +740,7 @@
   "vendor/strix/tests/test_skill_dir_extension.py": "80df0c836882a27b5d7007100e6a8baac78285bd5710af6c9432314a91f02ca8",
   "vendor/strix/tests/test_state_repo_context.py": "cb15fe926e8255a1c60850e324a9c771c911dc39fc2ab6b97ffff7b09afd24cd",
   "vendor/strix/tests_vigil/conftest.py": "d80ca1178799ec22789164cec7afefcc9b3538147f77e10f55bbe8439cffbd48",
-  "vendor/strix/tests_vigil/test_anthropic_pricing.py": "21df8733982f747cadb06f569d061a29ff2ec07a0661087de35b86e6f4716d2c",
+  "vendor/strix/tests_vigil/test_anthropic_pricing.py": "8886e2c485e285c9813e39aa6c216ad1b82208bbfd9a4866e68c1cfbbac38977",
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
   "vendor/strix/tests_vigil/test_lifecycle_teardown.py": "e34f90e1918955c60609591f52544f79d37b24bb9e924f3e76439a4a4b15a748",
   "vendor/strix/tests_vigil/test_proof_capture.py": "790f3652a81033c7ac6455076b53932bab381136fb50fc6866b9fb53f3638720",
