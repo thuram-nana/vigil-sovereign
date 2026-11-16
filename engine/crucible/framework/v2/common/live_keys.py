@@ -55,9 +55,14 @@ def refresh_live_anthropic_key() -> bool:
     ``os.environ['ANTHROPIC_API_KEY']`` in place from the CURRENT persisted key, so every in-process consumer
     and the Anthropic SDK (which reads the env) pick up a UI re-seal without a restart. Returns ``True`` iff
     the value CHANGED (so a caller that caches an SDK client can rebuild it on change). A no-op returning
-    ``False`` when the flag is unset or nothing is persisted (a shell-only operator is unaffected). Never
-    raises, never logs the value."""
+    ``False`` when the flag is unset, nothing is persisted (a shell-only operator is unaffected) or a metered run's
+    model grant is in the environment (M1c-2: the grant, never the provider key). Never raises, never logs the
+    value."""
     if os.environ.get("VIGIL_LIVE_KEY_RELOAD") != "1":
+        return False
+    if (os.environ.get("VIGIL_MODEL_GRANT") or "").strip():
+        # M1c-2: a METERED run spends its model grant through the gateway and holds no provider key — never read
+        # the persisted key into its environment (kernel.metered; restated here: this module imports nothing)
         return False
     fresh = read_persisted_anthropic_key()
     if not (isinstance(fresh, str) and fresh.strip()):

@@ -263,6 +263,13 @@ class BackendOverloaded(BackendError):
     to the next permitted backend in-tier rather than aborting the call (Speed X4)."""
 
 
+class CreditsExhausted(BackendError):
+    """PRICING M1c-2 — the model gateway STOPPED a metered run because its prepaid credits cannot cover another
+    request (the gateway's ``x-vigil-stop: credits_exhausted`` refusal). TERMINAL for this run: never retried, never
+    failed over (a different provider would spend outside the meter). Deliberately NOT a BackendOverloaded, and
+    distinct from a plain BackendError so the run can be HELD for a top-up (W3) instead of failed and refunded."""
+
+
 class MemoryStoreError(CrucibleError):
     """MLS-layer error (storage, embedding, recall)."""
 

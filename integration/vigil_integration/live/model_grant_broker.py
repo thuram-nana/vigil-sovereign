@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+from vigil_core.model_grant import gateway_url as _gateway_url
 
 from .credit_lease_broker import _atomic_write_json, _contained_child, _safe_component
 
@@ -61,15 +62,12 @@ def grant_path(base_dir: Any, slug: str) -> Optional[Path]:
     return p
 
 
-_LOOPBACK_URL = re.compile(r"http://(?:127\.0\.0\.1|\[::1\]|localhost):([0-9]{1,5})/?")
-
-
 def _check_url(url: str) -> str:
     """Exactly ``http://<loopback>:<port>`` (an optional trailing slash): nothing a client could read as another
-    host (userinfo, a path, a query)."""
-    u = str(url or "").strip()
-    m = _LOOPBACK_URL.fullmatch(u)
-    if m is None or not 1 <= int(m.group(1)) <= 65535:
+    host (userinfo, a path, a query). The one rule is ``vigil_core.model_grant.gateway_url``, which a metered engine
+    also applies before it sends the grant anywhere."""
+    u = _gateway_url(url)
+    if u is None:
         raise ValueError("the model gateway URL must be a loopback http URL")
     return u
 

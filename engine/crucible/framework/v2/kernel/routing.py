@@ -70,7 +70,12 @@ _TIER_ENV_PREFIX = "CRUCIBLE_MODEL_TIER_"   # + <TIER>.upper(), e.g. CRUCIBLE_MO
 def routing_enabled() -> bool:
     """True iff the operator opted into model-tier routing (``CRUCIBLE_MODEL_ROUTING`` truthy).
     Default OFF — with routing off the engine is byte-identical to pre-EC-2a (every tier resolves
-    to the backend's own model). Mirrors the truthy convention used by the other kernel opt-outs."""
+    to the backend's own model). Mirrors the truthy convention used by the other kernel opt-outs.
+    Always False for a METERED run (M1c-2, ``kernel.metered``): the model gateway serves only the grant's model, so
+    a routed cheaper model would be refused — whatever the worker scoped ``CRUCIBLE_MODEL_ROUTING`` to."""
+    from . import metered
+    if metered.metered_mode():
+        return False
     return os.environ.get(_ENABLE_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
