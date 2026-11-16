@@ -17,10 +17,10 @@
 >   (W2b-2), **#1134 (W2b-3, `02bfcdcf`)**, **#1135 (Dependabot PR A: the z3-solver floor, `9eb4f64a`)**, **#1136
 >   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are closed as
 >   superseded (#1120 was closed earlier).
-> - **In flight (branches on GitHub):** `claude/billing-w2c1-exact-settle` (W2c-1, exact milli-credit settlement + the
->   floor retired — production code complete, tests / mutants / red-pen / PR in progress), `claude/ui-nyx-display-name`
->   (NYX, the UI-only display name of the Strix engine — built, PR being opened), `claude/billing-m1c2-strix-prices`
->   (M1c-2 part 1 of 6). See §15.1.
+> - **Open PRs:** **#1137** (this handoff), **#1138** (M1c-2a: a metered run reaches a model only through the gateway,
+>   with its grant — engine guards + the Strix Opus 4.5+ prices), **#1139** (NYX: the UI-only display name of the
+>   Strix engine). **Ready for its PR:** `claude/billing-w2c1-exact-settle` (W2c-1, exact milli-credit settlement + the
+>   floor retired — code, tests and 23 mutants done; the full-suite run and the PR are the last steps). See §15.1.
 > - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
 >   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
 >   gates (§6); the floor is retired. **One OPEN owner question** waits for W5 (§11.8): are disputed credits removed
@@ -1216,6 +1216,14 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
+### 11.21 W2c-1 — BUILT (branch `claude/billing-w2c1-exact-settle`, PR to follow): exact settlement, the floor retired
+Implements §11.5 (f) and (g). The decided design, everything built, the tests, the mutants and the risks are in §15.2;
+when its PR merges, move that text here. In one line: the owner-signed `governor.launch_settled` v3 decision is the only
+place an org's sub-credit remainder moves; the wallet fold derives the remainder from the lifetime Σ `consumed_mc`
+(snapshot schema 11 carries it across a hard prune); a metered settle keeps ⌊(r + used)/1000⌋ whole credits; metered
+reserves (under the settle lock) and extensions draw from the exact balance; `VIGIL_RUN_FLOOR_CREDITS` is a retired
+setting; no settle reads the target margin.
+
 ### 11.20 W2b-3 — DONE (merged in #1134, `02bfcdcf`): the explicit depth in the lease + the first allowance
 Implements §11.5 (c) and (h). Behind `VIGIL_METERED_BILLING` (OFF); a flat launch passes, reserves, signs and settles
 exactly as before (I7).
@@ -1523,14 +1531,15 @@ re-verify with §15.10 before acting (another session may have moved things sinc
 | W2b-3 (explicit depth in the lease + the first allowance) | **MERGED** #1134 → `02bfcdcf` | §11.20 |
 | Dependabot **PR A** — z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras | **MERGED** #1135 → `9eb4f64a`; closed #1121, #1124, #1126 (pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`); #1120 had been closed earlier | §13.3 |
 | Dependabot **PR B** — the anthropic SDK 2.8 | **MERGED** #1136 → `a43f8fd3`; closed #1122, #1125 | §15.3 |
-| **W2c-1** — exact milli-credit settlement + the floor retired | **WORK IN PROGRESS** on branch `claude/billing-w2c1-exact-settle` (production code complete at `9c747e19`); a parallel session was finishing it (test updates, the new test modules, mutants, red-pen, PR) when this was written | §15.2 — **the next action if no W2c-1 PR exists** |
-| **NYX** — the agentic engine shown as "NYX" in the UI only | **BUILT, tested, mutation-verified**; branch `claude/ui-nyx-display-name` (rebased onto `a43f8fd3` by the parallel session, which was opening its PR) | §15.4 |
-| **M1c-2** — offense wiring through the model gateway | **PART 1 of 6** on branch `claude/billing-m1c2-strix-prices` (`aa5200d2`) — being continued by the session that wrote this section | §15.5 |
+| **W2c-1** — exact milli-credit settlement + the floor retired | **BUILT** on branch `claude/billing-w2c1-exact-settle` (`862a2640`): production code (`9c747e19`), the existing tests moved to the exact settle (`638bf8e9`), `test_exact_settle.py` 25 tests (`9cbb5ae5`), the cross-process and real-prune tests (`862a2640`); 23 mutants red; no PR yet | §15.2 — **the next action: full suites → PR** |
+| **NYX** — the agentic engine shown as "NYX" in the UI only | **PR #1139** (`5bf2cf3c`, on `a43f8fd3`): built, tested (762 UI-kit tests), 8 mutants red | §15.4 — merge when green |
+| **M1c-2a** — the engine guards + the Strix prices | **PR #1138** (`84c376b7`, on `a43f8fd3`): 17 mutants red | §15.5 — merge when green; then **M1c-2b** |
 | Everything after (W2c-2, W3, W4, W5, W6, G1, wallet E2E, R1–R5, Front C S1–S4, Gate 5, A1/O1/L1) | not started | §15.6, §5 |
 
-Strict branch protection ⇒ rebase each branch on `origin/main` right before its PR (`git fetch origin && git rebase
-origin/main`). **Two sessions worked in parallel at the end of 2026-11-16** (§15.8): one owned W2c-1 and NYX, the
-other owned this file and M1c-2. Whatever their PRs did after this was written is on GitHub — run §15.10 first.
+Strict branch protection ⇒ each open PR must be brought up to date with `main` after every merge (rebase, re-run CI).
+**Two sessions worked in parallel at the end of 2026-11-16** (§15.8); the second one (W2c-1 / NYX) ended at about
+15:00 EST, and everything it had — committed or not — was committed and pushed by the remaining session (NYX as
+#1139, W2c-1 as `638bf8e9`). Whatever happened after this was written is on GitHub — run §15.10 first.
 **Merge checks:** the classic branch-protection API answers "Branch not protected" and the rulesets list was empty on
 2026-11-16, so `mergeStateStatus` is not a reliable gate: before merging, confirm each of the 15 names in
 `.github/required-status-checks.txt` is green on the PR head yourself.
@@ -1621,9 +1630,19 @@ props, `_seed`/`_fold` 4-tuples, `remainder_mc`), `spine/snapshot.py` (schema 11
 `apps/sigil/tests/test_metered_billing.py` updated (78 pass: fixture usage = 8,640 output tokens = exactly 54 credits
 at the default card; floor tests rewritten; `test_a_metered_settle_reads_no_target_margin` added).
 
-**Remaining, in order:**
-1. **Update the existing tests that pin the old behaviour.** Red on the branch at `9c747e19` (a parallel session was
-   already editing the first four files — check the branch / worktree for newer commits first):
+**Status at `862a2640` (end of 2026-11-16):** steps 1–3 below are DONE — the regression set passes (977 sovereign
+settle / wallet / launch / gateway / statement tests + 100 doctor tests + 784 vigil_core + 496 docs), the three new
+test modules exist (`test_exact_settle.py` 25, `test_exact_settle_xproc.py` 1, `test_exact_settle_prune.py` 2 × 3
+fixtures), and 23 mutants are red (the list in step 3, minus "metered reserve skips the settle lock", "price the
+meter's aggregate", "evidence_from_json drops the exact fields" — still worth adding). An inline red-pen (step 4) found
+one wrong comment (the in-lock start check guards against a draw — another process's flat reserve — not a settle: a
+settle only ever adds room; fixed). **Left:** the whole sovereign suite with the fold cache off and on (a run was in
+progress at hand-off; locally `test_capability_ui.py::test_typed_ask_survives_a_voice_disable` and
+`test_aegis_multi_gateway.py::test_real_gateway_self_registers` fail identically on `main`), §11.21, then the PR.
+
+**The steps (kept for the record):**
+1. **Update the existing tests that pin the old behaviour.** These were red at `9c747e19`; `638bf8e9` updated all of
+   them plus `test_doctor_metering`, `test_doctor_deploy_units` and `test_model_metering`:
    - `apps/sigil/tests/test_allowance_extensions.py`: `test_the_settle_charges_extension_usage_and_refunds_the_rest`,
      `test_the_paused_abandoned_charge_clamps_to_lease_and_extensions` — charge = exact rate-card use (make the big
      usage 240,000 output tokens = exactly 1,500 credits).
@@ -1736,33 +1755,46 @@ Owner (2026-11-16): **"nyx will be only in ui, nothing changes in backend."** Th
 - Two more suites must stay green on it (the parallel session was fixing both when this was written):
   `test_ci_suite_legs` (the new test's node lookup must go through the shared failing gate) and
   `test_customer_kit_copies` (the customer `ui.js` fork must match outside its customer regions).
-- **To do if its PR is not merged yet:** a short red-pen (every customer page renders NYX; nothing the code keys on
-  changed; evidence blocks untouched; any other direct `textContent` writer in the UI packages), rebase on `main`, PR,
-  CI, merge; then add its PR number here.
+- **PR #1139.** Both copies of the kit carry the rule (`test_customer_kit_copies`), the node test goes through the
+  shared `_need_node` gate (`test_ci_suite_legs`); 8 mutants red; checked that the app's direct label writers and the
+  `Strix …` strings in `app.js` all render through `h()` / `displayText`. To do: CI green → merge (update with `main`
+  first if another PR merged).
 
 ### 15.5 M1c-2 — offense wiring through the gateway (the full map, 2026-11-16)
-Done on the branch: item (4) — `vendor/strix/strix/report/anthropic_pricing.py` rows for `claude-opus-4-5` … `4-8` at
-$5 / $25 / $0.50 / $6.25 (without them `claude-opus-4` matched by substring and Strix's own runtime cap stopped a run
-at a third of what it was allowed; 16 tests pass).
+**M1c-2a = PR #1138** (branch `claude/billing-m1c2-strix-prices`) — DONE pending CI:
+- item (4): `vendor/strix/strix/report/anthropic_pricing.py` rows for `claude-opus-4-5` … `4-8` at $5 / $25 / $0.50 /
+  $6.25 (without them `claude-opus-4` matched by substring and Strix's runtime cap stopped a run at a third of what it
+  was allowed);
+- `engine/crucible/framework/v2/kernel/metered.py` (`model_grant()`, `metered_mode()`, `gateway_base()`,
+  `stop_reason()`); `AnthropicBackend` builds a metered client for the grant + the LOOPBACK gateway only (rule:
+  `vigil_core.model_grant.gateway_url`, now shared with the grant seam), keyed on (grant, gateway), no client without a
+  gateway, no key hot-reload under a grant, and **no ambient proxy** (`trust_env=False` AND the proxy patterns mounted
+  to no proxy — SDK 2.x mounts the environment's proxies whatever `trust_env` says; verified on 2.8.0 and 0.120.2);
+- the gateway's credit refusal carries `x-vigil-stop: credits_exhausted` (`vigil_core.model_grant.STOP_HEADER` /
+  `STOP_CREDITS_EXHAUSTED`) and the backend raises it as a terminal `CreditsExhausted(BackendError)` (never retried,
+  never failed over);
+- `kernel/llm.py`: under a grant only `anthropic` / `anthropic-zdr` are constructed (`_refuse_unmetered`), selected
+  (`_metered_backend`, cached per grant, never touching the unmetered selection), pinned (`complete_with_backend`) —
+  no failover; `kernel/routing.py`: routing off under a grant.
+- Tests: `kernel/tests/test_metered_engine.py` (29 + a real-SDK wire test, skipped where the SDK is absent),
+  `test_model_gateway.py::test_only_the_credit_stop_names_itself_to_the_run`, vigil_core `gateway_url` cases; 17
+  mutants red.
 
-Remaining (from a read-only map of every place a customer run's model call leaves the engine):
-- **A stdlib-only engine helper** (e.g. `kernel/metered.py`): `model_grant()` = `VIGIL_MODEL_GRANT` (the grant TOKEN),
-  `metered_mode()`, `gateway_base()` = `ANTHROPIC_BASE_URL`. Every guard below reads it; FATAL-2 clean.
-- **`kernel/backends/anthropic.py::_client_obj`**: in metered mode never call `refresh_live_anthropic_key()`, REQUIRE
-  the gateway base URL (fail closed — never fall back to api.anthropic.com), build
-  `anthropic.Anthropic(max_retries=0, api_key=grant, base_url=gateway)` and key the cached client on (grant,
-  base_url). **`common/live_keys.refresh_live_anthropic_key`**: return False when `VIGIL_MODEL_GRANT` is set.
-- **The credit-exhaustion 403 must be distinguishable and terminal:** the gateway returns 403 `permission_error` for
-  several reasons; add a stable machine code (e.g. `error.code = "credits_exhausted"`, defined in `vigil_core` so
-  both planes share it without a cross-plane import) and classify it as a new terminal `CreditsExhausted
-  (BackendError)` — never retried, never failed over; map it at the engage seam to `EngagementPaused` so the worker
-  holds the lease for resume (no refund, no re-drive). Decide (engineering) whether M1c-2 or W3 owns that mapping.
-- **The I9 failover hole (load-bearing):** in metered mode `kernel/llm.py::_complete_with_failover_raw` must not fail
-  over (a gateway 429/529 would otherwise reach claude-code's OAuth, Bedrock / Vertex / Mistral / Azure with ambient
-  credentials, Ollama, or dryrun's fabricated output); `get_backend` / `_construct` force `anthropic` and refuse any
-  other name (incl. a `CRUCIBLE_LLM_BACKEND` override); reset the process-wide `_cached_backend` across the metered
-  scope. **Routing off when metered:** `kernel/routing.py::routing_enabled()` returns False when the grant is set,
-  and the worker forces `routing_override=False`.
+**CI note for #1138:** its first P5 run failed in `integration/tests/test_strix_patch_series.py` — any change under
+`vendor/strix` must be recorded with `python3 tools/vendoring/regen_strix_series.py` (fixed in `696707bf`). On this
+machine git renders a UTC author date as `Z` where the committed series (and CI) have `+00:00`, so the script also
+rewrites patches 037 / 038: keep only the NEW patch file and its `series.json` entry (+ the changed file hash), and
+re-run the test. A rebase changes the commit hash the patch names: regenerate after any rebase of that commit.
+
+**Remaining = M1c-2b** (nothing sets `VIGIL_MODEL_GRANT` until this lands; from the read-only map of every place a
+customer run's model call leaves the engine — the items M1c-2a already did are marked DONE):
+- DONE (M1c-2a): the metered helper, the grant-only client, the key-reload guard, the distinguishable terminal
+  credit stop, the no-failover / gateway-only selection, routing off.
+- **Map `CreditsExhausted` at the engage seam to a pause** (the worker holds the lease for resume — no refund, no
+  re-drive), or leave that mapping to W3; decide and record it. Note: the engine's reasoning phases run inside
+  PhaseLedger swallow-wrappers, so a `CreditsExhausted` raised there must be re-raised past them (as the customer-pause
+  `EngagementPaused` already is at a clean point), or a credit stop silently degrades the run.
+- **The worker forces `routing_override=False`** for a metered run (the engine guard is in; the worker scope is not).
 - **`jobs/engage_worker.py`:** read `model_grant_broker.read_model_grant(base, slug, expect_nonce=nonce)`; metered and
   no grant ⇒ refuse BEFORE the arm (never burn the single-use floor); a `_model_grant_scope` around the runner sets
   and restores EXACTLY: `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` = gateway / grant, `VIGIL_MODEL_GRANT`,
@@ -1822,6 +1854,11 @@ Remaining (from a read-only map of every place a customer run's model call leave
   worktrees at the same time (one merged #1136 while the other committed W2c-1). Before editing, check for a peer
   (`ListAgents`, `ps -ef | grep claude`), give each session its own worktree, and message the peer before touching
   shared state.
+- **Never `git stash` in a worktree.** The stash list is shared by every worktree of the repo: a `git stash` on a
+  clean tree saves nothing, and the `git stash pop` after it pops someone else's entry. On 2026-11-16 that applied the
+  main checkout's old `salvage-main-dirty-327behind-2026-09-30` stash into the W2c-1 worktree (conflicts); the worktree
+  was reset to its commit and the stash entry is still there, untouched (`git stash list`). To compare with the base,
+  use `git show origin/main:<path>` or a second worktree.
 - **`CRUCIBLE_ROOT`.** A test run without `CRUCIBLE_ROOT` set writes into the LIVE engine root (one run appended 3
   lines to `/home/kali/Music/PENTEST/crucible/framework/v2/.crucible-v2.log`; removing them was refused as log
   tampering, so they stay). Always `CRUCIBLE_ROOT=<worktree>/engine/crucible CRUCIBLE_ROOT_STRICT=1`.
@@ -1841,6 +1878,11 @@ Remaining (from a read-only map of every place a customer run's model call leave
   the "Generated with Claude Code" line (§0.8).
 
 ### 15.9 Local tooling recipes (this machine; re-create in a scratch dir)
+- The second session kept its own copies under `<scratchpad>/e0/` (`t.sh`, `mutate.py`, `ciwait.sh`, a venv copy whose
+  editable installs point at `e0/slice`, and the mutant specs `m1c2a_mutants.py`, `w2c1_mutants.py`,
+  `w2c1_xproc_mutant.py`, `w2c1_prune_mutants.py`). The scratchpad does not survive; the recipes below re-create
+  them. `t.sh` re-points `slice` to the worktree it is given — never run two worktrees' tests through one slice at
+  once.
 - **Test helper** `t.sh <worktree> <leg> <pytest args…>`: legs `sov` (PYTHONPATH = `apps/sigil:integration:
   packages/core/vigil_core`), `int` (+ `gateway`), `core` (`packages/core/vigil_core`), `off` / `eng` (offense venv
   `/home/kali/vigil/.venv-offense`, PYTHONPATH with `engine/crucible`); always a fresh `SIGIL_HOME=$(mktemp -d)`,
