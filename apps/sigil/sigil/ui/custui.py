@@ -260,6 +260,7 @@ def _provisioner_ready_debounced(host: str, port: int) -> bool:
 # The customer-plane READ routes relayed to the provisioner (module scope so a test can census every route that
 # can carry finding detail and run the preview leak scan over each). Flag-gated reads are routed separately.
 _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices": "billing_invoices",
+          "/api/customer/billing/rates": "billing_rates", "/api/customer/billing/usage": "billing_usage",
           "/api/customer/assessments": "assessment_summary",
           "/api/customer/assessments/findings": "assessment_findings",
           "/api/customer/assets": "assets_overview",

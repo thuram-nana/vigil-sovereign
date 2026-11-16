@@ -1,3 +1,5 @@
+> **Current handoff: `HANDOFF-SESSION.md` (2026-11-16) — start at its §11 (the prepaid wallet program).** This file
+> is the older AEGIS-SaaS milestone log, kept as history.
 
 ### Milestone 10 — AEGIS-SaaS (#42) on branch claude/aegis-saas-ph9x2k (NOT merged)
 - AE-0 (ac4cee5, +fold 02d2e42): sovereign MonitoringAuthorityRegistry; snapshot v6; prune tripwire;

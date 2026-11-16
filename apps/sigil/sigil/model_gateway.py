@@ -748,6 +748,20 @@ class GrantMeter:
         with st.cond:
             return st.pending_nano
 
+    def usage_records(self, mid: str) -> "list[dict[str, Any]]":
+        """Every metered response of a launch, oldest first, read from disk with its hash chain checked (raises
+        ``ValueError`` if broken or malformed): ``{"ts", "model", "request_id", "usage"}`` with ``usage`` a
+        :class:`~vigil_core.model_metering.Usage`. Read-only; the customer's per-charge statement is built from it."""
+        out: "list[dict[str, Any]]" = []
+        try:
+            for line, _h in self._lines(mid):
+                if line["kind"] == "usage":
+                    out.append({"ts": float(line["ts"]), "model": str(line.get("model", "")),
+                                "request_id": str(line.get("request_id", "")), "usage": mm.Usage(**line["usage"])})
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"meter file {mid[:8]}… is corrupt (a malformed record: {type(exc).__name__})") from None
+        return out
+
     def verify(self, mid: str) -> MeterTotals:
         """Re-read the launch's file from disk, checking the hash chain (raises ``ValueError`` if broken)."""
         st = self._replay(mid)
