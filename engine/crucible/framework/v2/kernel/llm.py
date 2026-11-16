@@ -208,14 +208,20 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 # is the SINGLE source of that model-family split; the anthropic backend + the Bedrock/Vertex wrappers
 # (all first-party anthropic-SDK `messages.create`) share sampling_create_kwargs below.
 _CURRENT_MODEL_PREFIXES = (
-    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
     "claude-opus-4-8", "claude-opus-4-7",
 )
 
 
 def is_current_model(model: str) -> bool:
-    """True if `model` is a current-generation Claude that takes output_config.effort and rejects sampling."""
+    """True if `model` is a current-generation Claude that takes output_config.effort and rejects sampling. A
+    platform-prefixed id (Bedrock's ``anthropic.claude-…`` / ``us.anthropic.claude-…`` inference profiles) is
+    judged by its ``claude-…`` part, so a current model on Bedrock is never mistaken for an older one (which would
+    send it a temperature it rejects)."""
     m = str(model or "")
+    at = m.find("claude-")
+    if at > 0 and m[at - 1] == ".":
+        m = m[at:]
     return any(m.startswith(p) for p in _CURRENT_MODEL_PREFIXES)
 
 
@@ -226,14 +232,36 @@ def resolve_effort(explicit: str | None) -> str | None:
     return val if val in EFFORT_LEVELS else None
 
 
-def sampling_create_kwargs(model: str, temperature: float, effort: str | None) -> dict:
-    """The model-appropriate reasoning knobs for a first-party anthropic-SDK `messages.create`:
-      * OLDER model  → {"temperature": ...}          (current models 400 if temperature is sent)
-      * CURRENT model→ {"output_config": {"effort"}}  only when an effort resolves; else {} (model default)
+#: The API version an OLDER model is kept on so it still takes its temperature. The anthropic SDK v1 removed
+#: ``temperature`` / ``top_p`` / ``top_k`` from ``messages.create()``, and API version 2026-10-21 (the v2 SDK's
+#: default) refuses them — a 400 even through ``extra_body``. The documented route for a request that relies on a
+#: sampling setting is to keep it on the last version that accepts one, with the value in the request body. Per
+#: platform the version travels in a header (first party) or in the body (Bedrock / Vertex; Bedrock serves
+#: 2026-10-21 only to Claude 4.7 and later). These are the versions SDK 0.x sent by default, so an older-model call
+#: is byte-for-byte what it was, whichever SDK major is installed.
+_LEGACY_SAMPLING_VERSION: dict[str, tuple[str, str]] = {
+    "anthropic": ("header", "2023-06-01"),
+    "bedrock": ("body", "bedrock-2023-05-31"),
+    "vertex": ("body", "vertex-2023-10-16"),
+}
+
+
+def sampling_create_kwargs(model: str, temperature: float, effort: str | None, *,
+                           platform: str = "anthropic") -> dict:
+    """The model-appropriate reasoning knobs for a first-party anthropic-SDK `messages.create` on ``platform``
+    (``anthropic`` / ``bedrock`` / ``vertex``):
+      * OLDER model  → the temperature in ``extra_body``, on the platform's legacy API version
+        (:data:`_LEGACY_SAMPLING_VERSION`) — never a top-level ``temperature`` keyword, which the SDK no longer has;
+      * CURRENT model→ {"output_config": {"effort"}}  only when an effort resolves; else {} (model default), on the
+        SDK's default API version.
     Never sends budget_tokens (deprecated / 400 on current models). One helper so anthropic/bedrock/vertex
-    stay consistent and a current-model selection on Bedrock/Vertex no longer sends a rejected temperature."""
+    stay consistent and a current-model selection on Bedrock/Vertex no longer sends a rejected temperature. An
+    unknown ``platform`` raises (a caller bug, never a silent version)."""
+    where, version = _LEGACY_SAMPLING_VERSION[platform]
     if not is_current_model(model):
-        return {"temperature": temperature}
+        if where == "header":
+            return {"extra_headers": {"anthropic-version": version}, "extra_body": {"temperature": temperature}}
+        return {"extra_body": {"anthropic_version": version, "temperature": temperature}}
     eff = resolve_effort(effort)
     return {"output_config": {"effort": eff}} if eff else {}
 

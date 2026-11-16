@@ -154,8 +154,9 @@ class VertexBackend(LLMBackend):
     def _client_obj(self) -> object:
         if self._client is None:
             from anthropic import AnthropicVertex
+            from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
             self._client = AnthropicVertex(
-                project_id=self.project, region=self.region,
+                project_id=self.project, region=self.region, http_client=bounded_http_client(),
             )
         return self._client
 
@@ -193,7 +194,7 @@ class VertexBackend(LLMBackend):
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a
                     # current model on Vertex previously 400'd on the unconditional temperature.
-                    **sampling_create_kwargs(effective_model, prompt.temperature, prompt.effort),
+                    **sampling_create_kwargs(effective_model, prompt.temperature, prompt.effort, platform="vertex"),
                 )
             except Exception as e:
                 raise BackendError(f"Vertex API error: {e}") from e

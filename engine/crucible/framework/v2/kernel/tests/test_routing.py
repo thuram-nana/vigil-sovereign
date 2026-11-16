@@ -242,7 +242,7 @@ def test_anthropic_sampling_regime_follows_effective_model(monkeypatch):
     cli = _CaptureClient()
     _bare_anthropic(_CURRENT)._create_with_backoff(cli, "s", "u", prompt, _OLD)
     assert cli.kw["model"] == _OLD
-    assert cli.kw.get("temperature") == 0.2          # from the EFFECTIVE (older) model, NOT self.model
+    assert cli.kw["extra_body"]["temperature"] == 0.2   # from the EFFECTIVE (older) model, NOT self.model
     assert "output_config" not in cli.kw
 
     # self.model OLDER, routed to a CURRENT model -> CURRENT family: NO temperature (effort unset -> omitted).

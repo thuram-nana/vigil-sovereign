@@ -135,7 +135,8 @@ def test_temperature_only_sent_to_models_that_accept_it(monkeypatch) -> None:
     be = _bare_anthropic()
     be.model = "claude-sonnet-4-6"
     be._create_with_backoff(_Client(), "sys", "user", prompt)
-    assert captured.get("temperature") == 0.2      # legacy model still gets it
+    assert captured["extra_body"]["temperature"] == 0.2   # legacy model still gets it (in the body: SDK v1+ has no
+    assert "temperature" not in captured                  # `temperature` keyword, and 2026-10-21 refuses it)
 
     assert A._supports_sampling("claude-sonnet-5") is False
     assert A._supports_sampling("claude-opus-4-8") is False
@@ -147,8 +148,10 @@ def test_temperature_only_sent_to_models_that_accept_it(monkeypatch) -> None:
 
 def test_sampling_create_kwargs_effort_vs_temperature(monkeypatch) -> None:
     monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
-    # older model → temperature ONLY, never output_config.effort
-    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, "high") == {"temperature": 0.2}
+    # older model → its temperature ONLY (in the body, on the legacy API version that still takes it — the anthropic
+    # SDK v1+ has no `temperature` keyword), never output_config.effort
+    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, "high") == {
+        "extra_headers": {"anthropic-version": "2023-06-01"}, "extra_body": {"temperature": 0.2}}
     # current model + no effort (no env) → {} (the model's own default; NEVER temperature/budget_tokens)
     assert llm.sampling_create_kwargs("claude-opus-5", 0.2, None) == {}
     # current model + explicit effort → output_config.effort, no temperature
@@ -346,3 +349,203 @@ def test_rate_limiter_is_invoked_once_per_sample() -> None:
 def test_rate_limiter_min_interval_is_noop_when_zero() -> None:
     RateLimiter(0.0)()          # returns immediately, no sleep
     RateLimiter(-1.0)()
+
+
+
+# --------------------------------------------------------------- anthropic SDK v1/v2 (Dependabot #1122 / #1125)
+# The SDK v1 removed `temperature` / `top_p` / `top_k` from `messages.create()` (a TypeError), and API version
+# 2026-10-21 — the v2 default — refuses them (a 400). An older model keeps its temperature on the legacy API version.
+# Mutation-verify targets:
+#   * send a top-level `temperature` again                    -> test_an_older_model_never_gets_a_temperature_keyword
+#   * pin every platform's legacy version in a header          -> test_each_platform_pins_its_own_legacy_version
+#   * read a Bedrock inference-profile id as an older model     -> test_a_platform_prefixed_current_model_is_current
+#   * an unknown platform falls back to the first-party version -> test_an_unknown_platform_is_a_caller_bug
+
+
+@pytest.mark.parametrize("platform", ["anthropic", "bedrock", "vertex"])
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-6", "anthropic.claude-3-5-sonnet-20241022-v2:0"])
+def test_an_older_model_never_gets_a_temperature_keyword(model, platform) -> None:
+    kw = llm.sampling_create_kwargs(model, 0.3, "high", platform=platform)
+    assert not {"temperature", "top_p", "top_k"} & set(kw), kw        # never a keyword the SDK no longer has
+    assert kw["extra_body"]["temperature"] == 0.3 and "output_config" not in kw
+
+
+def test_each_platform_pins_its_own_legacy_version() -> None:
+    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, None, platform="anthropic") == {
+        "extra_headers": {"anthropic-version": "2023-06-01"}, "extra_body": {"temperature": 0.2}}
+    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, None, platform="bedrock") == {
+        "extra_body": {"anthropic_version": "bedrock-2023-05-31", "temperature": 0.2}}
+    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, None, platform="vertex") == {
+        "extra_body": {"anthropic_version": "vertex-2023-10-16", "temperature": 0.2}}
+
+
+@pytest.mark.parametrize("model", ["anthropic.claude-opus-4-8-v1:0", "us.anthropic.claude-opus-4-7-v1:0",
+                                   "eu.anthropic.claude-sonnet-5-v1:0", "claude-opus-4-8"])
+def test_a_platform_prefixed_current_model_is_current(model, monkeypatch) -> None:
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    assert llm.is_current_model(model) is True
+    assert llm.sampling_create_kwargs(model, 0.2, "high", platform="bedrock") == {"output_config": {"effort": "high"}}
+    assert llm.is_current_model("xclaude-opus-4-8") is False          # only a dotted platform prefix is stripped
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-opus-4-8"])
+def test_an_unknown_platform_is_a_caller_bug(model, monkeypatch) -> None:
+    # for an older AND a current model: the platform is checked before the model-family split (never a silent default)
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "high")
+    with pytest.raises(KeyError):
+        llm.sampling_create_kwargs(model, 0.2, None, platform="azure")
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+                                   "us.anthropic.claude-haiku-5-5-v1:0"])
+def test_every_claude_5_model_is_current(model, monkeypatch) -> None:
+    """Claude Haiku 5.5 was missing from the current-model list, so it went down the older route (a temperature on the
+    legacy API version) and a current model rejects a temperature. Every Claude 5 model takes effort, never sampling."""
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    assert llm.is_current_model(model) is True
+    assert llm.sampling_create_kwargs(model, 0.2, "high") == {"output_config": {"effort": "high"}}
+
+
+def test_the_first_party_backend_keeps_an_older_model_on_its_legacy_version(monkeypatch) -> None:
+    """The first-party backend passes the helper's kwargs straight to messages.create: an older model goes out with the
+    legacy anthropic-version header and its temperature in the body; a current model with neither (red-pen B-EV-02)."""
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    captured: dict = {}
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                captured.clear()
+                captured.update(kw)
+                return "OK"
+
+    prompt = SimpleNamespace(temperature=0.2, max_tokens=64, effort="high")
+    be = _bare_anthropic()
+    be.model = "claude-sonnet-4-6"
+    be._create_with_backoff(_Client(), "sys", "user", prompt)
+    assert captured["extra_headers"] == {"anthropic-version": "2023-06-01"}
+    assert captured["extra_body"] == {"temperature": 0.2} and "output_config" not in captured
+    be.model = "claude-opus-4-8"
+    be._create_with_backoff(_Client(), "sys", "user", prompt)
+    assert "extra_headers" not in captured and "extra_body" not in captured
+    assert captured["output_config"] == {"effort": "high"}
+
+
+def test_the_real_sdk_sends_what_the_helper_builds(monkeypatch) -> None:
+    """Against the REAL anthropic SDK (v1+), offline: an older model goes out on 2023-06-01 with its temperature in the
+    body; a current model on the SDK's default version with its effort and no temperature. Skipped where the SDK (an
+    opt-in extra no lock pins) is not installed."""
+    anthropic = pytest.importorskip("anthropic", minversion="2.8.0")
+    httpx2 = pytest.importorskip("httpx2")
+    import json
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    seen: dict = {}
+
+    def handler(req):
+        seen["version"] = req.headers.get("anthropic-version")
+        seen["body"] = json.loads(req.content)
+        return httpx2.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": seen["body"]["model"],
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    client = anthropic.Anthropic(api_key="sk-test-offline", base_url="http://127.0.0.1:9", max_retries=0,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+    base = {"max_tokens": 8, "messages": [{"role": "user", "content": "x"}]}
+    client.messages.create(model="claude-haiku-4-5", **base,
+                           **llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, "high"))
+    assert seen["version"] == "2023-06-01" and seen["body"]["temperature"] == 0.2
+    assert "output_config" not in seen["body"]
+    client.messages.create(model="claude-opus-4-8", **base, **llm.sampling_create_kwargs("claude-opus-4-8", 0.2, "high"))
+    assert seen["version"] != "2023-06-01" and "temperature" not in seen["body"]
+    assert seen["body"]["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.parametrize("platform,module", [("bedrock", "anthropic.lib.bedrock._client"),
+                                             ("vertex", "anthropic.lib.vertex._client")])
+def test_the_real_sdk_keeps_the_legacy_body_version_on_bedrock_and_vertex(platform, module) -> None:
+    """The v2 SDK sets the body's anthropic_version with ``setdefault`` AFTER merging extra_body, so the legacy version
+    the helper sends survives (an older model on Bedrock is not served 2026-10-21)."""
+    pytest.importorskip("anthropic", minversion="2.8.0")
+    import importlib
+    from anthropic._models import FinalRequestOptions
+    mod = importlib.import_module(module)
+    kw = llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, None, platform=platform)
+    opts = FinalRequestOptions.construct(method="post", url="/v1/messages",
+                                         json_data={"model": "claude-haiku-4-5", **kw["extra_body"]})
+    if platform == "bedrock":
+        out = mod._prepare_options(opts)
+    else:
+        out = mod._prepare_options(opts, project_id="p", region="europe-west4")
+    assert out.json_data["anthropic_version"] == kw["extra_body"]["anthropic_version"]
+    assert out.json_data["temperature"] == 0.2
+
+
+@pytest.mark.parametrize("modname,cls,version", [("bedrock", "BedrockBackend", "bedrock-2023-05-31"),
+                                                 ("vertex", "VertexBackend", "vertex-2023-10-16")])
+def test_each_cloud_backend_sends_its_own_platform_legacy_version(modname, cls, version, monkeypatch) -> None:
+    """The Bedrock / Vertex backends name their own platform, so an older model there is kept on THAT platform's
+    legacy body version (never the first-party header), with its temperature in the body."""
+    import importlib
+
+    from pydantic import BaseModel
+
+    from framework.v2.kernel.llm import Prompt
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    mod = importlib.import_module(f"framework.v2.kernel.backends.{modname}")
+    seen: dict = {}
+
+    class _Messages:
+        @staticmethod
+        def create(**kw):
+            seen.update(kw)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"ok": true}')],
+                                   usage=SimpleNamespace(input_tokens=1, output_tokens=1))
+
+    be = getattr(mod, cls).__new__(getattr(mod, cls))          # bypass __init__ (no cloud SDK / credentials)
+    be.model, be.zdr = "claude-haiku-4-5", False
+    if modname == "bedrock":
+        be.region = "eu-west-1"
+    else:
+        be.region, be.project = "europe-west4", "p"
+    be._client_obj = lambda: SimpleNamespace(messages=_Messages())
+
+    class _S(BaseModel):
+        ok: bool
+
+    be.complete(Prompt(system="s", user="u", schema=_S, schema_name="S", cognitive_doc="", temperature=0.2,
+                       max_tokens=32))
+    assert seen["extra_body"] == {"anthropic_version": version, "temperature": 0.2}
+    assert "extra_headers" not in seen and "temperature" not in seen
+
+
+def test_the_real_bedrock_client_sends_the_legacy_body_version_end_to_end() -> None:
+    """End to end through the REAL ``AnthropicBedrock`` client (offline: a mock transport, dummy AWS keys), not the
+    SDK-private request hook: VIGIL's default Bedrock model (an older one) goes out on bedrock-2023-05-31 with its
+    temperature; a current Bedrock inference profile on the SDK's own version with its effort and no temperature.
+    Skipped where the SDK (an opt-in extra) or botocore (its Bedrock signer) is not installed."""
+    anthropic = pytest.importorskip("anthropic", minversion="2.8.0")
+    httpx2 = pytest.importorskip("httpx2")
+    pytest.importorskip("botocore")
+    import json
+    seen: dict = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx2.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    client = anthropic.AnthropicBedrock(aws_region="eu-west-1", aws_access_key="AKIAEXAMPLE", aws_secret_key="x",
+                                        http_client=anthropic.DefaultHttpxClient(
+                                            transport=httpx2.MockTransport(handler)))
+    base = {"max_tokens": 8, "messages": [{"role": "user", "content": "x"}]}
+    older, current = "anthropic.claude-3-5-sonnet-20241022-v2:0", "us.anthropic.claude-opus-4-8-v1:0"
+    client.messages.create(model=older, **base, **llm.sampling_create_kwargs(older, 0.2, "high", platform="bedrock"))
+    assert seen["body"]["anthropic_version"] == "bedrock-2023-05-31" and seen["body"]["temperature"] == 0.2
+    client.messages.create(model=current, **base,
+                           **llm.sampling_create_kwargs(current, 0.2, "high", platform="bedrock"))
+    assert seen["body"]["anthropic_version"] != "bedrock-2023-05-31" and "temperature" not in seen["body"]
+    assert seen["body"]["output_config"] == {"effort": "high"}

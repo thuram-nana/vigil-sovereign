@@ -154,7 +154,8 @@ class BedrockBackend(LLMBackend):
         if self._client is None:
             from anthropic import AnthropicBedrock
             # AnthropicBedrock picks up AWS creds via boto3's chain.
-            self._client = AnthropicBedrock(aws_region=self.region)
+            from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
+            self._client = AnthropicBedrock(aws_region=self.region, http_client=bounded_http_client())
         return self._client
 
     def _build_system(self, prompt: Prompt) -> str:
@@ -193,7 +194,7 @@ class BedrockBackend(LLMBackend):
                     max_tokens=prompt.max_tokens,
                     # temperature (older) / output_config.effort (current) via the shared helper — a
                     # current model on Bedrock previously 400'd on the unconditional temperature.
-                    **sampling_create_kwargs(effective_model, prompt.temperature, prompt.effort),
+                    **sampling_create_kwargs(effective_model, prompt.temperature, prompt.effort, platform="bedrock"),
                 )
             except Exception as e:
                 raise BackendError(f"Bedrock API error: {e}") from e

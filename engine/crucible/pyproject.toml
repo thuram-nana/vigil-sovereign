@@ -57,7 +57,9 @@ dependencies = [
 # hard deps: every import is try/except-guarded with a pure-Python/stdlib fallback,
 # and the default (extras-absent) path is byte-identical + deterministic.
 [project.optional-dependencies]
-anthropic   = ["anthropic>=0.40,<1"]
+# <2.9: the older-model legacy API-version route (kernel/llm.py sampling_create_kwargs) relies on Bedrock /
+# Vertex request preparation verified on 2.8 only; widen after re-verifying it on the new minor.
+anthropic   = ["anthropic>=2.8.0,<2.9"]
 embeddings  = ["sentence-transformers>=2,<6"]
 analysis    = ["semgrep>=1.185.0"]
 smt         = ["z3-solver>=5.4.1.0,<6"]

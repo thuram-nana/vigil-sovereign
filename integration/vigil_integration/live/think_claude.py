@@ -85,7 +85,7 @@ _MODEL_ENV_VARS = ("CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL")
 # the env here (no import of the kernel — the two-env boundary holds) and mirror kernel.llm's model split.
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _CURRENT_MODEL_PREFIXES = (
-    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
     "claude-opus-4-8", "claude-opus-4-7",
 )
 
@@ -1008,7 +1008,8 @@ def _build_live_client(api_key: str) -> Optional[Any]:
         logger.warning("anthropic SDK unavailable (%s) — cannot build a live client", type(exc).__name__)
         return None
     try:
-        return anthropic.Anthropic(api_key=api_key)
+        from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
+        return anthropic.Anthropic(api_key=api_key, http_client=bounded_http_client())
     except Exception as exc:  # noqa: BLE001 — never surface the key via the exception text
         logger.warning("live Claude client construction failed (%s)", type(exc).__name__)
         return None

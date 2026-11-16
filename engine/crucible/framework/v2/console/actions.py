@@ -5496,7 +5496,8 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     # ``user`` (idempotent with the assembly-time redaction), re-asserts the ladder (defense in depth), and
     # emits the unified audit record. The SDK round-trip runs only inside the egress context (bypass → closed).
     try:
-        client = anthropic.Anthropic(api_key=key)
+        from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
+        client = anthropic.Anthropic(api_key=key, http_client=bounded_http_client())
 
         def _invoke(red):
             if _gw is not None:
