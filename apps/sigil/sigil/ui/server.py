@@ -1614,6 +1614,14 @@ class Handler(BaseHTTPRequestHandler):
             if action == "onboarding_get":
                 return p.onboarding_state(requester)
             return p.onboarding_record(requester, str(body.get("state", "")))
+        # The Account security screen's read: the requesting account's own second factors (never a secret).
+        # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
+        # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.
+        if action == "security_status":
+            from .. import config as _config
+            if not _config.customer_security_ui_enabled():
+                return None
+            return p.security_status(requester)
         # E3b-2 — customer passkey (WebAuthn). enroll binds to the SESSION requester (account-level);
         # login is a public bootstrap (no requester — the credential_id resolves the customer), like
         # oidc_finish. The registration/assertion material rides the body (b64url strings + the int cose_alg).

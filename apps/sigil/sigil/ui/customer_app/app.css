@@ -273,3 +273,30 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .cust-guide-faq { padding: 14px 16px; }
 .cust-guide-faq summary { cursor: pointer; font-weight: 600; }
 .cust-guide-faq p { margin-top: 10px; }
+
+/* ---- account security (security.js; only while the edge has VIGIL_CUSTOMER_SECURITY_UI on) --------------------- */
+.cust-sec { display: grid; gap: 16px; max-width: 720px; }
+.cust-sec > p { margin: 0; }
+.cust-sec-card { display: grid; gap: 12px; }
+.cust-sec-card p { margin: 0; }
+.cust-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.cust-sec-head h3 { margin: 0; }
+.cust-sec-card .row, .cust-stepup .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.cust-sec-setup { display: grid; gap: 12px; padding: 14px 16px; border-radius: var(--r-2); background: var(--bg-2);
+  border: 1px solid var(--border); }
+.cust-sec-setup label, .cust-stepup label { font-size: 0.85rem; opacity: 0.8; }
+/* the QR code stays dark on white in both themes: scanners need that contrast */
+.cust-qr { width: 208px; height: 208px; max-width: 100%; border-radius: 8px; background: #ffffff; }
+.cust-totp-key { font-family: var(--font-mono, ui-monospace, monospace); font-size: 1.05rem; letter-spacing: 0.06em;
+  word-break: break-all; user-select: all; -webkit-user-select: all; }
+.cust-sec-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.cust-sec-msg:empty, .cust-stepup-msg:empty { display: none; }
+.cust-sec-msg, .cust-stepup-msg { color: var(--warn, #d9b34a); font-size: 0.9rem; }
+.cust-sec-setup .cust-code-input, .cust-stepup .cust-code-input { max-width: 14ch; }
+/* the step-up box opens inside the row of the action that asked for it (e.g. a Buy row), on its own line */
+.cust-stepup { flex: 1 1 100%; display: grid; gap: 8px; margin-top: 8px; padding: 14px 16px; border-radius: var(--r-2);
+  background: var(--bg-2); border: 1px solid var(--border-strong); }
+.cust-stepup p { margin: 0; }
+/* "Sign in with a passkey" on the sign-in screen */
+.cust-passkey-block { margin-top: 16px; }
+.cust-passkey { width: 100%; justify-content: center; margin-top: 12px; }
