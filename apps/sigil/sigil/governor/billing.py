@@ -298,7 +298,8 @@ class StripeBillingProvider(BillingProvider):
 
     Stripe is the DEFAULT provider (selected when `VIGIL_BILLING_PROVIDER` is unset), but constructing the adapter
     still requires an explicit opt-in — `enable_reference_adapter=True` or `VIGIL_BILLING_ENABLE_STRIPE=1` — a
-    deliberate money-safety belt so an incomplete Stripe config never silently starts taking live payments."""
+    deliberate money-safety belt: Stripe keys present in the environment never build the adapter (and so never open
+    a checkout) without that opt-in."""
 
     def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,

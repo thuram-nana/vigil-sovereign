@@ -348,9 +348,10 @@ folder outside the spool (it minted nothing).
 
 ## 9. Flutterwave webhook drain + transaction verifier (payments; default-OFF)
 
-> Flutterwave is the **retained, paused** processor: its development is paused and it is used only when you set
-> `VIGIL_BILLING_PROVIDER=flutterwave` explicitly. The **default** processor (unset `VIGIL_BILLING_PROVIDER`) is
-> Stripe — see §9b. Skip this section unless you are deliberately running the Flutterwave lane.
+> Flutterwave is the **retained, paused** processor. Customer checkout uses it only when you set
+> `VIGIL_BILLING_PROVIDER=flutterwave` explicitly — the **default** (unset `VIGIL_BILLING_PROVIDER`) is Stripe, §9b —
+> and this drain runs only when you enable it below. Skip this section unless you are deliberately running the
+> Flutterwave lane.
 
 `sigil billing-drain` ingests the inbound webhook spool, **server-side re-verifies** each transaction,
 and mints only via the owner catalog. It is fail-closed and mints **nothing** until you provision the
