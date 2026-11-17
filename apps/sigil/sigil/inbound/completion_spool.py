@@ -353,7 +353,11 @@ class CompletionSpoolWatcher:
                 return "pause_changed" if bool(now) != bool(held) else None
 
             guard = _pause_guard
-            if not held or (totals.requests == 0 and totals.cost_nano == 0):
+            # "used nothing" must count worker-time + premium charges (W4), not only AI responses: a paused-abandoned
+            # run that accrued worker time or a premium call used something, so it is charged for it. A run with no
+            # worker / premium charge has ``charged_mc == 0`` whenever ``requests == 0``, so for it the added clause
+            # changes nothing (byte-identical).
+            if not held or (totals.requests == 0 and totals.cost_nano == 0 and totals.charged_mc == 0):
                 return 0, None, guard
         try:
             if str(outcome) == "canceled" and mm.cancel_settlement() == "refund":

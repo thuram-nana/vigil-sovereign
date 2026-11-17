@@ -126,6 +126,29 @@ def _priced_lines(rec: "dict[str, Any]", card) -> "tuple[list[dict[str, Any]], i
     return out, charge
 
 
+def _charge_display(rec: "dict[str, Any]", card) -> "tuple[list[dict[str, Any]], int, str]":
+    """W4 — one charge record's statement lines, its amount (mc) and the customer-facing OPERATION name, dispatched
+    on the record's ``kind`` (``GrantMeter.charge_records``): ``ai`` -> the AI unit lines (``_priced_lines``) under
+    "AI analysis"; ``worker`` -> one "Scan-worker time" line (the billed seconds at the recorded per-second rate);
+    ``premium`` -> one line under the API's own label. A worker / premium charge keeps its RECORDED amount and rate
+    (never re-priced). The model is never named, every amount is in credits (invariant I5)."""
+    from vigil_core.rate_card import ChargeLine, Rate
+
+    kind = rec.get("kind", "ai")
+    if kind == "worker":
+        rate = Rate("worker_minutes", int(rec["rate_mc"]), int(rec["rate_per"]), "Scan-worker time")
+        ln = ChargeLine("worker_minutes", "Scan-worker time", int(rec["seconds"]), rate, int(rec["charge_mc"]))
+        return [ln.as_dict()], int(rec["charge_mc"]), "Scan-worker time"
+    if kind == "premium":
+        unit = str(rec.get("api") or "premium")
+        label = str(rec.get("label") or unit)
+        rate = Rate(unit, int(rec["rate_mc"]), int(rec["rate_per"]), label)
+        ln = ChargeLine(unit, label, int(rec["calls"]), rate, int(rec["charge_mc"]))
+        return [ln.as_dict()], int(rec["charge_mc"]), label
+    lines, amount = _priced_lines(rec, card)
+    return lines, amount, "AI analysis"
+
+
 def _balance_after_mc(grants, plan_grants, plan_tranches, charge_events, now: float) -> int:
     """W2c-2 — the EXACT remaining credit (milli-credits) after each metered charge, in timestamp order, and the
     final remaining (returned). Each event is a signed delta at an instant:
@@ -205,7 +228,7 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
         scan: dict[str, Any] = {"scan": r.slug, "launch": r.nonce, "started_at": r.issued_at}
         running = metered and r.key not in ix.settled    # a reserved-but-not-yet-settled launch still holds credit
         try:
-            records = meter.usage_records(meter_id(r.slug, r.nonce))
+            records = meter.charge_records(meter_id(r.slug, r.nonce))
         except ValueError:
             # a meter that fails its integrity check: never PRICED (no charge, not in remaining) and flagged
             # unavailable for the operator to quarantine. But its owner-signed RESERVATION is a real debit, so while
@@ -218,9 +241,9 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
             continue
         scan_mc = 0
         for idx, rec in enumerate(records):
-            lines, amount = _priced_lines(rec, card)
+            lines, amount, operation = _charge_display(rec, card)
             scan_mc += amount
-            charge = {"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": "AI analysis",
+            charge = {"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": operation,
                       "lines": lines, "credits": format_credits(amount), "amount_mc": amount}
             charges.append(charge)
             if metered:
@@ -230,7 +253,9 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
             # a RUNNING scan holds its allowance (reserved units + extensions) less what it has consumed so far —
             # credits earmarked for it, so unavailable to START new work.
             held_mc += max(0, MC_PER_CREDIT * r.reserved - scan_mc)
-        scan.update(status="ok", requests=len(records), credits=format_credits(scan_mc), amount_mc=scan_mc)
+        # ``requests`` stays the count of metered MODEL requests (worker-time and premium charges are lines, not requests)
+        scan.update(status="ok", requests=sum(1 for rec in records if rec.get("kind", "ai") == "ai"),
+                    credits=format_credits(scan_mc), amount_mc=scan_mc)
         scans.append(scan)
     charges.sort(key=lambda c: c["ts"], reverse=True)
     n = max(1, min(int(limit), 5000))
