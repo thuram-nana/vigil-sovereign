@@ -237,22 +237,24 @@
                    "AEGIS Respond does the same and can also block attacks on the host.",
                    "Choose a plan for 1 or 5 hosts and select Buy."],
           why: "AEGIS plans are monthly and billed on their own line. They never use your credits." },
-        { id: "monitor", title: "Turn on monitoring for a host", where: "Monitoring", route: null,
+        { id: "monitor", title: "Turn on monitoring for a host", where: "Monitoring", route: "#/monitoring",
           clicks: ["Make sure the host shows Verified in Assets.",
-                   "Open Monitoring and choose the host.",
-                   "Choose Observe or Respond, then confirm with your authenticator app.",
+                   "Select Monitoring in the top bar. It lists your hosts and whether AEGIS monitors each one.",
+                   "Select Turn on Observe to have AEGIS watch the host's traffic and report attacks, or Turn on Respond to also block them. Turn on Respond appears only when your plan includes Respond.",
+                   "Confirm with your authenticator app if VIGIL asks for a fresh code.",
                    "Monitoring starts for that host and runs until the end of your plan period."],
           why: "Turning monitoring on needs the founder or an admin. Without monitoring turned on, traffic to the host passes through AEGIS uninspected." },
-        { id: "events", title: "Connect your traffic and see events", where: "Monitoring", route: null,
+        { id: "events", title: "Connect your traffic and see events", where: "Monitoring", route: "#/monitoring",
           clicks: ["VIGIL sets your host up behind the managed AEGIS gateway with you.",
-                   "Open Monitoring to see the events for your hosts. Only your workspace sees them.",
-                   "The bell in the top bar tells you when something new arrives."],
+                   "Open Monitoring to see the events for your hosts, newest first. Only your workspace sees them.",
+                   "Each event shows when it happened, the host, the kind of attack, whether it was confirmed and what AEGIS did, such as Blocked.",
+                   "The list refreshes by itself while Monitoring is open. The bell in the top bar tells you when something new arrives."],
           why: "Each event is checked before it reaches you; a report that cannot be verified is never shown." },
-        { id: "manage", title: "Change or stop monitoring", where: "Monitoring", route: null,
-          clicks: ["Open Monitoring and choose the host.",
-                   "Select Turn off to stop monitoring it. Its traffic then passes through uninspected.",
-                   "Monitoring carries on when your plan renews, and ends when the plan is cancelled.",
-                   "Moving from Respond to Observe turns blocking off. Monitoring of a host also ends when its proof expires, so keep the proof current."],
+        { id: "manage", title: "Change or stop monitoring", where: "Monitoring", route: "#/monitoring",
+          clicks: ["Open Monitoring and find the host.",
+                   "Select Switch to Observe or Switch to Respond to change what AEGIS does. Moving from Respond to Observe turns blocking off.",
+                   "Select Turn off, then Yes, turn off, to stop monitoring it. Its traffic then passes through uninspected.",
+                   "Monitoring carries on when your plan renews, and ends when the plan is cancelled. It also ends when the host's proof expires, so keep the proof current."],
           why: "You can turn monitoring off at any time." },
       ],
     },
@@ -481,8 +483,9 @@
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
 
   /**
-   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter}. Chapter tabs on top; each step of
-   * the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as done".
+   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
+   * step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
+   * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides.
    */
   function viewGuide(env) {
     var h = env.h;
@@ -523,7 +526,7 @@
           draw();
         });
         var actions = [mark];
-        if (s.route && typeof env.nav === "function") {
+        if (s.route && typeof env.nav === "function" && (typeof env.shown !== "function" || env.shown(s.route))) {
           actions.unshift(h("button.btn", { type: "button", text: "Go to " + s.where,
                                             onClick: function () { env.nav(s.route); } }));
         }

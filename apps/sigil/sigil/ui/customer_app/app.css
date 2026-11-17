@@ -167,6 +167,18 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); flex-wrap: wrap; }
 .cust-offer p { margin: 2px 0 0; }
 
+/* C4 — the Monitoring (AEGIS) screen: host states, the in-place turn-off confirm, the events table */
+.cust-badge-on     { color: var(--ok, #6cd08a); border-color: var(--ok, #6cd08a); }
+.cust-badge-off    { opacity: 0.75; }
+.cust-badge-attack { color: var(--danger, #e2776c); border-color: var(--danger, #e2776c); }
+.cust-badge-signal { color: var(--warn, #d9b34a); border-color: var(--warn, #d9b34a); }
+.cust-mon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.cust-mon-actions p { margin: 0; }
+.cust-mon-confirm { margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--danger, #e2776c); }
+.cust-mon-confirm p { margin: 0; }
+.cust-mon-events { overflow-x: auto; }
+
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {
   position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60;
