@@ -24,6 +24,7 @@ from .reuse import assert_no_offense
 
 assert_no_offense()
 
+from vigil_core import model_metering as _mm  # noqa: E402
 from vigil_core.aws_ssm import SsmParameterError, read_secure_string  # noqa: E402
 from vigil_core.kek_backends import AwsRunner  # noqa: E402
 
@@ -65,3 +66,27 @@ def provider_key(env: Optional[Mapping[str, str]] = None, *, runner: Optional[Aw
         return read_secure_string(region, name, runner=runner)
     except SsmParameterError as exc:          # its message names the parameter only, never the CLI's output
         raise ProviderKeyError(f"the model gateway's provider key ({SSM_PARAMETER_ENV}): {exc}") from None
+
+
+def pool_accounts(env: Optional[Mapping[str, str]] = None) -> "list[dict[str, str]]":
+    """PRICING G1 — the provider-account POOL, with each account's KEY resolved. Reads the ``VIGIL_GATEWAY_POOL``
+    spec (``vigil_core.model_metering.gateway_pool_spec``, which validates the shape), then resolves each account's
+    ``key_env`` to its actual key from this environment. Returns a list of
+    ``{"id", "key", "workspace_id", "upstream", "kind"}``; ``[]`` when the pool is unset (the gateway then runs the
+    single default account from :func:`provider_key`). Fail-closed: a ``key_env`` that names no non-empty variable
+    raises :class:`ProviderKeyError`, so the gateway never starts an account with no key. The key VALUES are never
+    logged or put in an error message."""
+    e = os.environ if env is None else env
+    try:
+        spec = _mm.gateway_pool_spec(e)
+    except _mm.MeteringError as exc:
+        raise ProviderKeyError(str(exc)) from None
+    out: "list[dict[str, str]]" = []
+    for account in spec:
+        key = (e.get(account["key_env"]) or "").strip()
+        if not key:
+            raise ProviderKeyError(f"the G1 pool account {account['id']!r} has no key: its key_env "
+                                   f"{account['key_env']!r} is empty or unset")
+        out.append({"id": account["id"], "key": key, "workspace_id": account["workspace_id"],
+                    "upstream": account["upstream"], "kind": account["kind"]})
+    return out

@@ -1352,6 +1352,32 @@ def cmd_fold_cache(a) -> None:
           f"{fold_warm.ack_log_path()}")
 
 
+def cmd_gateway_loss(a) -> None:
+    """PRICING G1 — `sigil gateway-loss`: inspect or acknowledge the model gateway's LOSS ALARM. The gateway raises
+    it when the day's unconfirmed provider spend passes 2% of the day's confirmed spend and refuses new runs until
+    the day reconciles. `status` prints the current alarm (if any); `ack` acknowledges it once reconciled, which
+    resumes runs for the day (a durable marker the running gateway honours) and clears the alarm file."""
+    from . import config
+    from . import gateway_loss as gl
+    alarm_file = config.SIGIL_HOME / "alarms" / gl.LOSS_ALARM_NAME
+    if a.action == "status":
+        rec = gl.read_alarm(config.SIGIL_HOME)
+        if rec is None:
+            print("gateway-loss: no loss alarm is open")
+        elif rec.get("unreadable"):
+            print(f"gateway-loss: the alarm record {alarm_file} cannot be read", file=sys.stderr)
+            sys.exit(2)
+        else:
+            print(f"gateway-loss: OPEN for {rec.get('day')} — the day's unconfirmed provider spend has passed 2% of "
+                  f"the day's confirmed spend; new runs are refused. Reconcile, then `sigil gateway-loss ack`.")
+        return
+    by = a.by if a.by is not None else _login_name()
+    ledger = gl.LossLedger(alarm_file)
+    entry = ledger.acknowledge(by)
+    print(f"gateway-loss ack: {entry['by']} acknowledged the loss alarm for {entry['day']}; new runs resume for the "
+          f"day and the alarm is cleared (recorded in {alarm_file.parent / (alarm_file.stem + '.ack.jsonl')}).")
+
+
 def cmd_status(a) -> None:
     store, vi = SpineStore(), VectorIndex()
     ok, msg = store.verify()
@@ -4000,6 +4026,11 @@ def main(argv=None) -> None:
     pfc.add_argument("action", choices=["ack"])
     pfc.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
     pfc.set_defaults(fn=cmd_fold_cache)
+    pgl = sub.add_parser("gateway-loss", help="the model gateway's loss alarm (G1): `status` shows it, `ack` "
+                                              "acknowledges it once reconciled (resumes runs for the day)")
+    pgl.add_argument("action", choices=["status", "ack"])
+    pgl.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
+    pgl.set_defaults(fn=cmd_gateway_loss)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")
