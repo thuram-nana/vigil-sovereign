@@ -203,7 +203,16 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
     Invariant I4 (tested): on a complete spine the latest ``balance_after_mc`` == ``remaining_mc`` ==
     ``available_to_start_mc`` (no scan running) == the wallet's exact balance == what ``billing_overview`` reports as
     exact; ``remaining_mc`` and ``balance_after_mc`` are over the LIVE spine window (like the charges), the
-    prune-durable exact balance being the wallet fold (``billing_overview``)."""
+    prune-durable exact balance being the wallet fold (``billing_overview``).
+
+    W6 (same ``VIGIL_METERED_BILLING`` gate; the flag OFF ⇒ the per-scan shape is byte-identical): each scan also
+    carries ``running`` (bool — reserved but not yet settled), and a running scan carries ``held_mc`` — its OWN share
+    of the aggregate ``held_mc`` (its reserved allowance less what it has consumed, or the whole allowance when its
+    meter is unavailable). These only expose, per scan, the numbers already summed into ``held_mc``. Two top-level
+    totals join them: ``bought_mc`` (the org's ``topup`` purchases) and ``trial_mc`` (its ``trial`` grant), from the
+    SAME verified grant scan the balance-after timeline uses (``WalletRegistry.purchase_grants``) and over the same
+    live window — a ``refund`` return of a scan's unused reservation is never counted as bought. Nothing else changes.
+    The billing dashboard (W6 UI) renders the live consumption and these totals."""
     from vigil_core.model_grant import meter_id
     from vigil_core.rate_card import MC_PER_CREDIT, format_credits, rate_card
 
@@ -235,9 +244,13 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
             # it is still running it HOLDS its whole allowance (its consumption cannot be read, so none is assumed) —
             # otherwise available_to_start would drift above the wallet's authoritative exact balance.
             scan.update(status="unavailable", detail="this scan's usage record failed its integrity check")
-            scans.append(scan)
+            if metered:
+                scan["running"] = running                # W6: the dashboard lists running scans on their own
             if running:
-                held_mc += MC_PER_CREDIT * r.reserved
+                scan_held = MC_PER_CREDIT * r.reserved
+                held_mc += scan_held
+                scan["held_mc"] = scan_held               # W6: this scan's own share of the held credit
+            scans.append(scan)
             continue
         scan_mc = 0
         for idx, rec in enumerate(records):
@@ -249,10 +262,15 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
             if metered:
                 charge_events.append((rec["ts"], (r.seq, idx), amount, charge))
         total_mc += scan_mc
+        scan.update(status="ok", requests=len(records), credits=format_credits(scan_mc), amount_mc=scan_mc)
+        if metered:
+            scan["running"] = running
         if running:
             # a RUNNING scan holds its allowance (reserved units + extensions) less what it has consumed so far —
             # credits earmarked for it, so unavailable to START new work.
-            held_mc += max(0, MC_PER_CREDIT * r.reserved - scan_mc)
+            scan_held = max(0, MC_PER_CREDIT * r.reserved - scan_mc)
+            held_mc += scan_held
+            scan["held_mc"] = scan_held                   # W6: this scan's own share, for the live-consumption card
         # ``requests`` stays the count of metered MODEL requests (worker-time and premium charges are lines, not requests)
         scan.update(status="ok", requests=sum(1 for rec in records if rec.get("kind", "ai") == "ai"),
                     credits=format_credits(scan_mc), amount_mc=scan_mc)
@@ -266,10 +284,15 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
         t = float(now) if now is not None else _time.time()
         plan = PlanCreditLedger(store)
         plan_tranches = [(tr.period_end, tr.remaining) for tr in plan.tranches(org_id)]
-        remaining_mc = _balance_after_mc(WalletRegistry(store).purchase_events(org_id),
+        grants = WalletRegistry(store).purchase_grants(org_id)   # ONE verified scan: the timeline + the W6 totals
+        remaining_mc = _balance_after_mc([(iss, credits) for iss, credits, _kind in grants],
                                          plan.grant_events(org_id), plan_tranches, charge_events, t)
         available_to_start_mc = remaining_mc - held_mc   # the running scans' held allowances are not startable
-        out.update(remaining_mc=remaining_mc, available_to_start_mc=available_to_start_mc, held_mc=held_mc)
+        # W6: what the org BOUGHT (top-ups only) and its trial credits — never a refund return of an unused reservation
+        bought_mc = MC_PER_CREDIT * sum(credits for _iss, credits, kind in grants if kind == "topup")
+        trial_mc = MC_PER_CREDIT * sum(credits for _iss, credits, kind in grants if kind == "trial")
+        out.update(remaining_mc=remaining_mc, available_to_start_mc=available_to_start_mc, held_mc=held_mc,
+                   bought_mc=bought_mc, trial_mc=trial_mc)
     return out
 
 

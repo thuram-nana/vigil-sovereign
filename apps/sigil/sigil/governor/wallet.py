@@ -354,16 +354,27 @@ class WalletRegistry:
         timeline (``ui.billing.billing_usage``). It is a LIVE scan of the spine window (like the statement's charges),
         not snapshot-seeded — a grant a hard prune removed is no longer shown; the prune-durable position is the
         wallet fold (``balance``)."""
+        return [(issued_at, credits) for issued_at, credits, _kind in self.purchase_grants(org_id)]
+
+    def purchase_grants(self, org_id: str) -> "list[tuple[float, int, str]]":
+        """W6 — the grants :meth:`purchase_events` reports, each with its kind kept: ``(issued_at, credits, kind)``,
+        oldest first, ``kind`` being ``"topup"`` (credits the org BOUGHT) or ``"trial"``. It is the one verified scan
+        both use (owner-signed under the key valid at its seq, fail-closed; a replayed ``entry_id`` counted once;
+        ``refund`` settlement returns and ``subscription_refill`` excluded), so the statement's timeline and the billing
+        dashboard's bought / trial totals can never disagree. PURE read; a LIVE scan of the spine window, exactly like
+        :meth:`purchase_events` — not the prune-durable fold. (``balance().granted`` is NOT "bought": it also counts
+        every ``refund`` return of a scan's unused reservation.)"""
         if not isinstance(org_id, str) or not org_id:
             return []
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         seen: set = set()
-        out: "list[tuple[float, int]]" = []
+        out: "list[tuple[float, int, str]]" = []
         for r in self.store.iter_records():
             p = r.payload
             if not isinstance(p, dict) or p.get("signal") != CREDIT_GRANT_SIGNAL or p.get("org_id") != org_id:
                 continue
-            if p.get("kind") not in ("topup", "trial"):
+            kind = p.get("kind")
+            if kind not in ("topup", "trial"):
                 continue                               # refund / subscription_refill are not a purchase
             eid = p.get("entry_id")
             if not (isinstance(eid, str) and eid) or not verify_signed(p, _GRANT_CORE, resolver.at(r.seq)):
@@ -372,7 +383,7 @@ class WalletRegistry:
             if key in seen:
                 continue                               # idempotent: a replayed grant counts once
             seen.add(key)
-            out.append((_issued_at(p.get("issued_at")), _as_credits(p.get("credits"))))
+            out.append((_issued_at(p.get("issued_at")), _as_credits(p.get("credits")), str(kind)))
         out.sort(key=lambda e: e[0])
         return out
 

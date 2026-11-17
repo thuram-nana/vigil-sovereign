@@ -751,23 +751,230 @@
   }
   function here() { return (location.hash || "#/").split("?")[0]; }
 
+  // W6 / C5: the fuller Billing dashboard, behind VIGIL_CUSTOMER_BILLING_DASHBOARD (default OFF). With the flag off,
+  // viewBilling() is viewBillingClassic() — byte-identical to the Billing screen before W6 (the same two reads, the
+  // same cards). Every figure here is a CREDIT the server computed (W1 / W2c-2): this page never estimates, predicts
+  // a total, shows a reserved unit count, a money amount for a scan, or a model/engine name.
+  var BILLING_DASHBOARD_ON = pageFlag("billingDashboard");
+
   function viewBilling() {
-    return dataView("#/billing", "Billing", API + "/billing", function (d) {
-      var c = d.credits || {}, w = d.wallet || {}, s = d.subscription;
-      return h("div.cust-grid", {}, [
-        VUI.card("Credits", null, [
-          kv("Available", c.available), kv("Persistent (wallet)", c.persistent), kv("Plan (this period)", c.plan_live),
-        ]),
-        VUI.card("Wallet", null, [
-          kv("Granted", w.granted), kv("Debited", w.debited), kv("Available", w.available),
-        ]),
-        VUI.card("Subscription", null, s
-          ? [kv("Plan", s.plan_id), kv("Status", s.status), kv("Allotment", s.allotment),
-             kv("Active now", d.active ? "yes" : "no")]
-          : [h("p.cust-muted", { text: "No active subscription." })]),
-        buySection(),
+    return BILLING_DASHBOARD_ON ? viewBillingDashboard() : viewBillingClassic();
+  }
+
+  function viewBillingClassic() {
+    return dataView("#/billing", "Billing", API + "/billing", classicBillingCards);
+  }
+  // The Billing screen's cards as they were before W6, unchanged: the classic view, and the dashboard's view while the
+  // server sends no metered figures (with metered billing off, these flat-billing cards are the accurate picture).
+  function classicBillingCards(d) {
+    var c = d.credits || {}, w = d.wallet || {}, s = d.subscription;
+    return h("div.cust-grid", {}, [
+      VUI.card("Credits", null, [
+        kv("Available", c.available), kv("Persistent (wallet)", c.persistent), kv("Plan (this period)", c.plan_live),
+      ]),
+      VUI.card("Wallet", null, [
+        kv("Granted", w.granted), kv("Debited", w.debited), kv("Available", w.available),
+      ]),
+      VUI.card("Subscription", null, s
+        ? [kv("Plan", s.plan_id), kv("Status", s.status), kv("Allotment", s.allotment),
+           kv("Active now", d.active ? "yes" : "no")]
+        : [h("p.cust-muted", { text: "No active subscription." })]),
+      buySection(),
+    ]);
+  }
+
+  // ---- W6 dashboard ----------------------------------------------------------------------------------------------
+  // A balance in credits to 2 decimals, ALWAYS ROUNDED DOWN (never show more than the customer holds — pricing
+  // design §11.2). `mc` is milli-credits; a missing / non-finite value (a field the server did not send, e.g. the
+  // metered figures before metered billing is on) renders as "—".
+  function mc2(mc) {
+    var n = Number(mc);
+    if (mc == null || !isFinite(n)) return "—";
+    return (Math.floor(n / 10) / 100).toFixed(2);
+  }
+  function groupInt(n) {
+    var s = String(parseInt(n, 10));
+    return s === "NaN" ? "—" : s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  function viewBillingDashboard() {
+    return dataView("#/billing", "Billing", API + "/billing", function (ov) {
+      // The usage figures (held, live consumption, the statement as charges) exist only with metered billing: while
+      // the server sends no exact balance, the flat-billing cards are the accurate picture and are shown as always —
+      // with the published Rates, the server's low-balance notice and Auto top-up, which hold in either mode.
+      if (!ov || ov.exact_available_mc == null) {
+        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection(ov)]);
+      }
+      var usage = h("div#cust-bill-usage", {}, loadingHolder("Loading your usage…"));
+      loadBillingUsage(usage);                                 // held / live / statement, from billing/usage
+      return h("div", {}, [
+        lowBalanceNotice(ov),                                  // W5 field, only when the server flags it
+        h("div.cust-grid", {}, [billingCreditsCard(ov), billingSubscriptionCard(ov)]),
+        usage,
+        ratesSection(),                                        // the published rates, loaded on demand
+        autoTopupSection(ov),                                  // A1 settings when present, else "coming"
+        buySection(),                                          // the existing CHK-2 buy surface (unchanged)
       ]);
     });
+  }
+  function billingCreditsCard(ov) {
+    var c = ov.credits || {};
+    return VUI.card("Credits", null, [
+      kv("Available", mc2(ov.exact_available_mc)),             // the exact balance, 2 decimals, rounded down
+      kv("Plan (this period)", c.plan_live),
+    ]);
+  }
+  function billingSubscriptionCard(ov) {
+    var s = ov && ov.subscription;
+    return VUI.card("Subscription", null, s
+      ? [kv("Plan", s.plan_id), kv("Status", s.status), kv("Allotment", s.allotment),
+         kv("Active now", ov.active ? "yes" : "no")]
+      : [h("p.cust-muted", { text: "No active subscription." })]);
+  }
+  function lowBalanceNotice(ov) {
+    // W5 flags a low balance on the overview; render the notice only when it does (absent today → no notice).
+    if (!ov || !ov.low_balance) return null;
+    return h("div.card.cust-lowbal", {}, [
+      h("strong", { text: "Your balance is low." }),
+      h("p.cust-muted", { text: "Add credits so your assessments and reviews are not paused for credit." }),
+    ]);
+  }
+  function loadBillingUsage(holder) {
+    (async function () {
+      var u;
+      try { u = await VUI.getJSON(API + "/billing/usage"); }
+      catch (e) {
+        if (here() !== "#/billing") return;
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load your usage just now." }));
+      }
+      if (here() !== "#/billing") return;
+      VUI.mount(holder, billingUsageView(u));
+    })();
+  }
+  function billingUsageView(u) {
+    var cards = [billingUsageCard(u)];
+    var running = ((u && u.scans) || []).filter(function (s) { return s && s.running; });
+    if (running.length) cards.push(runningScansCard(running));
+    cards.push(statementCard(u));
+    return h("div", {}, cards);
+  }
+  function billingUsageCard(u) {
+    var rows = [];
+    if (u && u.held_mc != null) rows.push(kv("On hold for running assessments", mc2(u.held_mc)));
+    if (u && u.available_to_start_mc != null) rows.push(kv("Available to start work", mc2(u.available_to_start_mc)));
+    // bought = the org's top-up purchases only (never a refund of an unused reservation); trial shown apart from it
+    if (u && u.bought_mc != null) rows.push(kv("Credits bought", mc2(u.bought_mc)));
+    if (u && u.trial_mc) rows.push(kv("Trial credits", mc2(u.trial_mc)));
+    rows.push(kv("Credits used", (u && u.credits != null) ? u.credits : "—"));
+    return VUI.card("Usage", null, rows);
+  }
+  function runningScansCard(running) {
+    var rows = running.map(function (s) {
+      var used = (s.status === "ok" && s.credits != null) ? s.credits : "in progress";
+      return h("div.cust-kv", {}, [
+        h("span.k", { text: shortId(s.scan) }),
+        h("span", { text: "used " + used + " · on hold " + mc2(s.held_mc) }),
+      ]);
+    });
+    return VUI.card("Running assessments", null,
+      [h("p.cust-muted", { text: "What each running assessment has used so far, and what it holds." })].concat(rows));
+  }
+  function statementCard(u) {
+    var charges = (u && u.charges) || [];
+    if (!charges.length) {
+      return VUI.card("Statement", null, [h("p.cust-muted", {
+        text: "No charges yet. Each assessment and review lists its charges here after it runs." })]);
+    }
+    var shown = charges.slice(0, 50);
+    var body = [h("p.cust-muted", { text: "Every charge, newest first." })].concat(shown.map(chargeRow));
+    if (charges.length > shown.length) {
+      body.push(h("p.cust-muted", { text: "Showing the " + shown.length + " most recent charges." }));
+    }
+    return VUI.card("Statement", null, body);
+  }
+  function chargeRow(c) {
+    var kids = [h("div.cust-kv", {}, [
+      h("span.k", { text: fmtDate(c.ts) + " · " + (c.operation || "Usage") }),
+      h("span", { text: ((c.credits != null) ? c.credits : "—") + " credits" }),
+    ])];
+    (c.lines || []).forEach(function (ln) {
+      kids.push(h("div.cust-kv.cust-stmt-line", {}, [
+        h("span.k", { text: ln.label + " × " + groupInt(ln.quantity) }),
+        h("span", { text: rateText(ln) + " · " + ln.credits + " credits" }),
+      ]));
+    });
+    if (c.balance_after_mc != null) {
+      kids.push(h("div.cust-stmt-bal", { text: "Balance after: " + mc2(c.balance_after_mc) + " credits" }));
+    }
+    return h("div.cust-stmt-row", {}, kids);
+  }
+  // A line's rate, in credits: per-million for the token units, "each" for a per-one unit (e.g. a web search).
+  function rateText(ln) {
+    var per = ln.rate_per;
+    if (per === 1) return ln.rate + " each";
+    if (per === 1000000) return ln.rate + " per million";
+    return ln.rate + " per " + (per === "minute" ? "minute" : groupInt(per));
+  }
+  function shortId(x) {
+    var s = String(x == null ? "" : x);
+    return s.length > 28 ? s.slice(0, 27) + "…" : s;
+  }
+  function ratesSection() {
+    var holder = h("div#cust-bill-rates", {});
+    var btn = h("button.btn", { type: "button", text: "Rates" });
+    var open = false;
+    btn.addEventListener("click", function () {
+      if (open) { VUI.mount(holder, h("div", {})); open = false; btn.textContent = "Rates"; return; }
+      btn.disabled = true;
+      (async function () {
+        var d;
+        try { d = await VUI.getJSON(API + "/billing/rates"); }
+        catch (e) { btn.disabled = false; return err("Could not load the rates."); }
+        btn.disabled = false;
+        if (here() !== "#/billing") return;
+        open = true; btn.textContent = "Hide rates";
+        VUI.mount(holder, ratesList(d && d.rates));
+      })();
+    });
+    return VUI.card(null, null, [
+      h("div.cust-mon-actions", {}, [btn,
+        h("p.cust-muted", { text: "What each kind of usage is charged, in credits. The same for every customer." })]),
+      holder,
+    ]);
+  }
+  function ratesList(rates) {
+    if (!rates) return h("p.cust-muted", { text: "No rates to show." });
+    var rows = [];
+    (rates.ai || []).forEach(function (r) { rows.push(rateRow(r)); });
+    if (rates.worker) rows.push(rateRow(rates.worker));
+    (rates.premium || []).forEach(function (r) { rows.push(rateRow(r)); });
+    return h("div", {}, rows);
+  }
+  function rateRow(r) {
+    return h("div.cust-kv", {}, [h("span.k", { text: r.label }),
+      h("span", { text: r.credits + " credits " + perPhrase(r.per) })]);
+  }
+  function perPhrase(per) {
+    if (per === "minute") return "per minute";
+    if (per === 1) return "each";
+    if (per === 1000000) return "per million";
+    return "per " + groupInt(per);
+  }
+  // Auto top-up (A1). A1 is not merged in this build, so the section describes it and invents no endpoint. When A1
+  // adds its settings to the overview (`ov.auto_topup`) this shows them read-only; the EDIT form is A1's own slice
+  // (it owns the write endpoints and the step-up), gated behind A1's flag.
+  function autoTopupSection(ov) {
+    var at = ov && ov.auto_topup;
+    if (at && typeof at === "object") {
+      return VUI.card("Auto top-up", null, [
+        kv("Auto top-up", at.enabled ? "On" : "Off"),
+        kv("Starts when your balance falls below", at.trigger_mc != null ? mc2(at.trigger_mc) : "—"),
+        kv("Buys the pack", at.pack_name != null ? at.pack_name : "—"),
+        kv("Monthly limit", at.monthly_limit_credits != null ? String(at.monthly_limit_credits) : "—"),
+      ]);
+    }
+    return VUI.card("Auto top-up", null, [h("p.cust-muted", {
+      text: "Auto top-up adds credits for you so an assessment never pauses for credit. Choose the balance that "
+        + "starts it, the pack to buy and a monthly limit. This is coming soon." })]);
   }
 
   // ---- CHK-2: buy (hosted checkout) -----------------------------------------------------------------

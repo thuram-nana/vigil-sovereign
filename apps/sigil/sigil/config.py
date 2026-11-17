@@ -440,6 +440,17 @@ def customer_overview_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_OVERVIEW") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_billing_dashboard_enabled() -> bool:
+    """True iff the customer app shows the fuller Billing dashboard (`VIGIL_CUSTOMER_BILLING_DASHBOARD` affirmative;
+    W6 / C5): available credits, credits on hold for running assessments, live consumption per running scan, the
+    statement with each charge's rate and balance-after, the published Rates view, the low-balance notice and the
+    Auto top-up settings — all over the reads W1/W2c-2 already serve (`billing`, `billing/usage`, `billing/rates`).
+    OFF by default: the Billing screen is exactly as before — the Credits / Wallet / Subscription cards and Buy —
+    and no extra read is made. Read when the customer edge starts (it is written into the page and counts in the
+    build id), so a change takes effect at the edge's next start."""
+    return (os.environ.get("VIGIL_CUSTOMER_BILLING_DASHBOARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_ios_install_banner_enabled() -> bool:
     """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
     carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
