@@ -314,6 +314,17 @@ def customer_onboarding_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_ONBOARDING") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_team_ui_enabled() -> bool:
+    """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
+    ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account
+    (``POST api/customer/member/add`` → ``member_add``), and the change-role / remove buttons over the existing
+    member/grant and member/revoke routes. OFF by default: both routes and both cockpit actions are absent (404, exactly
+    an unknown route) and the Team tab shows the "being wired" card it always showed. Read when the customer edge starts
+    for the page (it is written into the page, so a change takes effect at the edge's next start) and on every request
+    by the edge and the cockpit for the routes."""
+    return (os.environ.get("VIGIL_CUSTOMER_TEAM_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_ios_install_banner_enabled() -> bool:
     """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
     carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays
