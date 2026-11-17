@@ -403,7 +403,8 @@ class ProviderAccount:
     """One provider account in the pool: a workspace key of the SAME provider (``kind == "anthropic"``). ``kind`` is
     the hook for a second cloud (Bedrock / Vertex) as OVERFLOW — but a different ``kind`` needs its own request API,
     egress allowlisting and prompt-cache scope, so the pool REFUSES to build an account of another kind (the gateway
-    reports it): the interface is here, the second cloud is not wired."""
+    reports it): the interface is here; a second cloud joins the pool only once its request API, egress
+    allowlist and prompt-cache scope are added."""
     account_id: str
     api_key: str = field(repr=False)        # never in a repr or a log line
     workspace_id: str = ""
@@ -445,7 +446,7 @@ class AccountPool:
                 raise ValueError(
                     f"account {account.account_id!r} is kind {account.kind!r}: the G1 pool holds one provider's "
                     f"workspace keys only. A second cloud (Bedrock / Vertex) as overflow needs its own request API "
-                    f"and egress allowlist — not wired; report it at the interface.")
+                    f"and egress allowlist; the pool refuses it at the interface until those are added.")
         ids = [a.account_id for a in accounts]
         if len(set(ids)) != len(ids):
             raise ValueError("every pool account needs a distinct account_id")

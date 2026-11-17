@@ -492,7 +492,7 @@ def allowance_chunk_credits(env: Optional[Mapping[str, str]] = None) -> int:
 
 GATEWAY_POOL_ENV = "VIGIL_GATEWAY_POOL"
 #: the one provider the G1 pool federates today (several workspace keys of it). A second cloud (Bedrock / Vertex) as
-#: overflow needs its own request API and egress allowlist and is NOT wired — a pool account of another kind is refused.
+#: overflow needs its own request API and egress allowlist; a pool account of another kind is refused at the interface.
 GATEWAY_POOL_KINDS = ("anthropic",)
 _ENV_NAME_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
@@ -533,7 +533,7 @@ def gateway_pool_spec(env: Optional[Mapping[str, str]] = None) -> "list[dict[str
                                 f"variable that holds its key")
         if kind not in GATEWAY_POOL_KINDS:
             raise MeteringError(f"{GATEWAY_POOL_ENV}: account {acc_id!r} is kind {kind!r}; the pool federates one "
-                                f"provider's workspace keys only (a second cloud as overflow is not wired)")
+                                f"provider's workspace keys only (a second cloud as overflow is refused at the interface)")
         out.append({"id": acc_id, "key_env": key_env, "kind": kind,
                     "workspace_id": str(item.get("workspace_id") or "").strip(),
                     "upstream": str(item.get("upstream") or "").strip()})
