@@ -47,7 +47,12 @@ _OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_
                         # Slice K6). Operator-tier (the per-org member who RUNS assessments sees their results),
                         # and DELIBERATELY NOT in _ORG_ADMIN: assessment output is testing-domain, so a billing
                         # tenant-admin does not auto-see security findings (billing-authz != testing-authz).
-                        "view_assessments"}
+                        "view_assessments",
+                        # Red-Pen R2 (decision O-4) — connect a GitHub repository, set its per-repo merge-blocking
+                        # threshold + monthly spending limit, and click "Fix this". A TESTING-domain capability
+                        # (code review is offense-adjacent), so it rides with the owner-granted `operator` and the
+                        # `founder`, and is DELIBERATELY NOT in `org_admin` (billing-authz != testing-authz).
+                        "manage_code"}
 _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
                       "manage_users", "toggle_protected_guard",
                       # SaaS tenancy — MONEY-MOVING + membership + org-lifecycle administration. Owner-tier
@@ -75,15 +80,16 @@ _ORG_ADMIN = frozenset({"read", "view_billing", "view_usage", "view_invoices",
                         # AE-1: a tenant-admin may request DEFENSIVE monitoring of the org's proven hosts
                         # (never offense — own != offense-test != observe != block).
                         "manage_monitoring"})
-# `founder` — the customer who signed the org up (owner-approved). Exactly `org_admin` plus the two
-# testing permissions a self-serve scan needs: `run_engagement` (register/prove a host, launch on it) and
-# `view_assessments` (read its own results). It is the ONE per-org role that carries `run_engagement`, and the
+# `founder` — the customer who signed the org up (owner-approved). Exactly `org_admin` plus the testing-domain
+# permissions a self-serve scan + Red-Pen code review need: `run_engagement` (register/prove a host, launch on it),
+# `view_assessments` (read its own results) and `manage_code` (connect a repo + set its per-repo policy, R2). It is
+# the ONE per-org role that carries `run_engagement`, and the
 # testing it allows still passes every launch gate: exact-host ownership proof, the recorded authorization
 # affirmation, the owner-pinned engagement authority and the credit reservation. It NEVER carries
 # `offense_authority`, `approve_a2`/`approve_a3`, `toggle_guard`, `config_nonsecret`, `queue_proposal`,
 # `manage_org`, `manage_users`, `secrets`, `promote` or `kill_release`, and it is never a global role. Only
 # the service owner grants it or changes a founder's membership (customer member management refuses both).
-_FOUNDER = _ORG_ADMIN | {"run_engagement", "view_assessments"}
+_FOUNDER = _ORG_ADMIN | {"run_engagement", "view_assessments", "manage_code"}
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
     "org_admin": _ORG_ADMIN, "founder": _FOUNDER,

@@ -30,6 +30,9 @@ Workflows:
     tenant's resources, or any assessment target (the grantable set excludes `operator`/`founder`/`owner`).
     A founder's own membership is never changed or revoked here: that is an owner act
     (`owner_set_member_role` / `owner_demote_founders`, the `sigil org` verbs).
+  * customer_members / add_member — the customer app's Team screen (VIGIL_CUSTOMER_TEAM_UI): the session org's member
+    list, and adding an EXISTING customer by the email of their account. Both are `manage_members` acts. There is no
+    invitation flow: a person without a VIGIL account is refused in plain words and nothing is recorded for them.
 
 FATAL-2: sovereign-side (`assert_no_offense` at import); no framework/strix.
 """
@@ -69,6 +72,15 @@ _ORG_ID_PREFIX = "org_"
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
 # The per-org role only the service owner grants or changes (vigil_core.rbac `founder`).
 _FOUNDER_ROLE = "founder"
+# The Team screen (VIGIL_CUSTOMER_TEAM_UI): the order its member list is shown in (then by name), and the refusals of
+# Add member a customer reads. A teammate is named by the email of their VIGIL account; there is no invitation flow,
+# so a person without an account is told to create one first. The labels named here are the app's own.
+_TEAM_ORDER = {"founder": 0, "org_admin": 1, "operator": 2, "analyst": 3, "viewer": 4}
+_ADD_NO_ACCOUNT = ("there is no VIGIL account for that email. Ask your teammate to create one with Create an account "
+                   "on the sign-in screen, then add them again")
+_ADD_ALREADY_MEMBER = ("that person is already a member of this workspace. To give them another role, use Change role "
+                       "on their row")
+_ADD_BAD_EMAIL = "enter the email address your teammate signs in to VIGIL with"
 # The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
 # one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
 _SIGNUP_CODE_EMAIL = (
@@ -977,6 +989,39 @@ class Provisioner:
         uri = _totp.provisioning_uri(secret, account_name=(acct.email or requester), issuer="VIGIL")
         return {"ok": True, "method": "totp", "provisioning_uri": uri, "secret": secret}
 
+    def onboarding_state(self, requester: str) -> dict:
+        """The onboarding tour's state for the requesting customer's OWN account (``ui/onboarding_store``): ``pending``
+        until they finish (``done``) or skip (``skipped``) it. Account-level, like MFA: the requester is the
+        hop-bound session principal, never a body field, and must be an ACTIVE customer."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .onboarding_store import read_state
+        return {"ok": True, "state": read_state(requester)}
+
+    def onboarding_record(self, requester: str, state: str, *, now: "Optional[float]" = None) -> dict:
+        """Record that the requesting customer finished (``done``) or skipped (``skipped``) the onboarding tour, so it
+        does not open again on any device. Refuses any other state and an inactive account; writes nothing else.
+
+        BOUNDED: the same answer again writes nothing, and only the FIRST close (from ``pending``) is audited — one
+        ``provision.audit`` row per account — so no customer can grow the signed spine by re-posting the state (a
+        replayed tour still updates the stored answer)."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .onboarding_store import PENDING, STATES, read_state, write_state
+        if state not in STATES:
+            raise ProvisionError(f"state must be one of {', '.join(STATES)}")
+        prev = read_state(requester)
+        if prev == state:
+            return {"ok": True, "state": state}
+        t = self._now() if now is None else float(now)
+        try:
+            write_state(requester, state, now=t)
+        except OSError as e:
+            raise ProvisionError(f"the onboarding state could not be saved: {type(e).__name__}") from None
+        if prev == PENDING:
+            self._audit("onboarding_record", requester=requester, target=requester, outcome=state)
+        return {"ok": True, "state": state}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an
@@ -1264,6 +1309,75 @@ class Provisioner:
                         outcome="revoked", critical=True)
             seq = self.orgs.revoke_membership(requester_org_id, member_username)
         return {"org_id": requester_org_id, "username": member_username, "seq": seq}
+
+    # -- the Team screen (VIGIL_CUSTOMER_TEAM_UI; the cockpit dispatch is absent while it is off) --------------------
+    def customer_members(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """The Team screen's read: the members of the SESSION org. Listing the team is an administrator's act —
+        `manage_members` (an `org_admin` or the `founder`) — because no per-org role lets members see each other
+        today; any other member, a non-member and a revoked member are refused (403). ``requester`` /
+        ``requester_org_id`` are the hop-bound session principal, never a body field, so no org's members are ever read
+        but the session's own.
+
+        Each row: the canonical ``username``, the per-org ``role`` as stored (a founder stays ``founder`` whatever the
+        founder kill switch admits it as — the app shows that row read-only), ``since`` (when the CURRENT grant was
+        signed: a role change restarts it) and ``email`` only when the customer registry holds an ACTIVE account with
+        one (an inactive account's member is listed without it). Founder first, then admins, operators, analysts and
+        viewers, each by name. A read: no lock, nothing minted, no owner key used."""
+        def project(_store, org_id: str) -> dict:
+            rows: "list[dict[str, object]]" = []
+            for m in self.orgs.memberships(org_id):
+                row: "dict[str, object]" = {"username": m.username, "role": m.role, "since": m.issued_at}
+                acct = self.customers.customer(m.username)
+                if acct is not None and acct.email:
+                    row["email"] = acct.email
+                rows.append(row)
+            rows.sort(key=lambda r: (_TEAM_ORDER.get(str(r["role"]), len(_TEAM_ORDER)),
+                                     str(r.get("email") or r["username"])))
+            return {"org_id": org_id, "members": rows, "count": len(rows)}
+        return self._customer_read(requester, requester_org_id, "manage_members", project)
+
+    def add_member(self, requester: str, requester_org_id: str, email: str, role: str, *, ip: str = "",
+                   mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """The Team screen's Add member: an administrator of THEIR org adds an EXISTING VIGIL customer, named by the
+        email of that customer's account, with a customer-grantable role. A member is otherwise identified by their
+        opaque server-made username, which no person knows, and there is NO invitation flow: an email with no active
+        account is refused in plain words, and nothing is sent to it or recorded about it.
+
+        Order (each step fail-closed, nothing written before the last): the role must be customer-grantable and the
+        email well-formed (pure input checks); then, inside the transaction lock and the cross-process membership lock
+        `grant_member` holds, the requester must hold `manage_members` in the SESSION org FIRST — so someone who may not
+        manage the team learns nothing about whether an email has an account — then the E3c step-up, then the per-org
+        rate guard (it counts every authorised attempt, a refused lookup included, so an administrator's probing is
+        bounded per org); then the lookup; then a current member of the org is refused (Add never changes an existing
+        member's role — that is member/grant); then the critical audit and the owner-signed grant, exactly as
+        `grant_member` writes them. Returns {org_id, username, role, seq}."""
+        t = self._now() if now is None else float(now)
+        if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
+            raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
+        from ..governor.customers import _check_email
+        try:
+            email_l = _check_email(email)
+        except ValueError:
+            raise ProvisionError(_ADD_BAD_EMAIL) from None
+        with self._lock, _members_lock(self.store):
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_members"):
+                self._audit("add_member", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            self._member_rate_guard(requester_org_id, now=t)   # after admit: only authorised churn is metered
+            acct = self.customers.by_email(email_l)
+            if acct is None:
+                raise ProvisionDenied(_ADD_NO_ACCOUNT)
+            member_username = _member_target(acct.username)
+            if self.orgs.membership_role(member_username, requester_org_id) is not None:
+                raise ProvisionDenied(_ADD_ALREADY_MEMBER)
+            # durable audit BEFORE the owner-signed grant (fail-closed; committed implies audited), as grant_member
+            self._audit("add_member", requester=requester, org_id=requester_org_id, target=member_username,
+                        outcome=f"role={role}", critical=True)
+            seq = self.orgs.grant_membership(requester_org_id, member_username, role,
+                                             issued_at=self._next_issued())
+        return {"org_id": requester_org_id, "username": member_username, "role": role, "seq": seq}
 
     # -- asset-ownership target registration (Slice G0 — billing != testing) ------------------------
     def target_challenge(self, requester: str, requester_org_id: str, host: str, *,
@@ -2058,7 +2172,15 @@ class Provisioner:
 
     def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                      now: "Optional[float]" = None) -> dict:
-        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership)."""
+        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership), and whether
+        the requester may turn monitoring on or off (``can_manage``: ``manage_monitoring``, decided HERE — the
+        founder or an org_admin — never by the client).
+
+        Only for such a requester, what the Monitoring screen needs to turn monitoring on: ``hosts``, the org's hosts
+        with a CURRENT ownership proof (host + the proof's expiry; never a challenge token), and ``plan``, the org's
+        active monitoring plan (host slots + whether it includes respond + its period end; no price) or None. An
+        org_admin cannot read the assets view (``view_assessments``), so the verified hosts come from here. A role that
+        cannot manage monitoring reads exactly the grants, as before."""
         t = self._now() if now is None else float(now)
         from ..governor.monitoring_authority import MonitoringAuthorityRegistry
         with self._lock:
@@ -2067,7 +2189,27 @@ class Provisioner:
             rows = [{"host": g.host, "mode": g.mode, "not_before": g.not_before, "not_after": g.not_after,
                      "active": reg.active_at(requester_org_id, g.host, now=t) is not None}
                     for g in reg.grants(requester_org_id)]
-        return {"org_id": requester_org_id, "grants": rows}
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            out: dict = {"org_id": requester_org_id, "grants": rows, "can_manage": can_manage}
+            if can_manage:
+                out["hosts"], out["plan"] = self._monitor_setup(requester_org_id, t)
+        return out
+
+    def _monitor_setup(self, org_id: str, now: float) -> "tuple[list[dict], Optional[dict]]":
+        """For ``monitor_list`` (a monitoring manager only): the org's hosts whose ownership proof is current at ``now``
+        (the proof ``grant`` requires) and its ACTIVE monitoring plan as the CATALOG defines it. Caller holds the lock."""
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        hosts = [{"host": a["host"], "expires_at": a["expires_at"]}
+                 for a in AssetOwnershipRegistry(self.store, owner_key=None).assets_overview(org_id, now=now)
+                 if a.get("status") == "verified"]
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            return hosts, None
+        return hosts, {"host_slots": plan.host_slots, "respond": plan.respond, "period_end": float(sub.period_end)}
 
     def monitor_events(self, requester: str, requester_org_id: str, *, ip: str = "", limit: int = 200) -> dict:
         """The SESSION org's drained AEGIS monitoring events (gateway-reported; org-scoped read)."""
@@ -2103,7 +2245,10 @@ class Provisioner:
             raise ProvisionDenied("the published rates are unavailable") from None
 
     def customer_billing_usage(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
-        """The session org's per-charge usage statement (credits only)."""
+        """The session org's per-charge usage statement (credits only). ``now`` is the DISPLAY instant — it decides
+        which plan tranches have expired for the balance-after timeline (W2c-2), exactly as ``billing_overview``'s
+        ``now`` reads a lapsed subscription."""
+        import time as _t
         from vigil_core.rate_card import RateCardError
 
         from .. import config as _config
@@ -2112,7 +2257,8 @@ class Provisioner:
         try:
             return self._customer_read(
                 requester, requester_org_id, "view_billing",
-                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR))
+                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR,
+                                                    now=_t.time()))
         except RateCardError:
             raise ProvisionDenied("the published rates are unavailable") from None
 

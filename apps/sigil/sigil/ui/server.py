@@ -1604,6 +1604,16 @@ class Handler(BaseHTTPRequestHandler):
             return p.enroll_totp(requester, ip=ip)
         if action == "mfa_verify":
             return p.verify_mfa(requester, code=str(body.get("code", "")))
+        # The onboarding tour's server-side state (has this account finished or skipped it?). Account-level like
+        # MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_ONBOARDING is on, the same flag that gates the edge route.
+        if action in ("onboarding_get", "onboarding_set"):
+            from .. import config as _config
+            if not _config.customer_onboarding_enabled():
+                return None
+            if action == "onboarding_get":
+                return p.onboarding_state(requester)
+            return p.onboarding_record(requester, str(body.get("state", "")))
         # E3b-2 — customer passkey (WebAuthn). enroll binds to the SESSION requester (account-level);
         # login is a public bootstrap (no requester — the credential_id resolves the customer), like
         # oidc_finish. The registration/assertion material rides the body (b64url strings + the int cose_alg).
@@ -1625,6 +1635,17 @@ class Handler(BaseHTTPRequestHandler):
         if action == "member_revoke":
             return p.revoke_member(requester, str(body.get("org_id", "")),
                                    str(body.get("member_username", "")), ip=ip, mfa_at=body.get("mfa_at"))
+        # The Team screen: the session org's member list, and adding an existing customer by the email of their
+        # account. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_TEAM_UI is on, the same flag that gates the
+        # edge routes; requester is the hop principal, org from the edge SESSION (never a free body field).
+        if action in ("members_list", "member_add"):
+            from .. import config as _config
+            if not _config.customer_team_ui_enabled():
+                return None
+            if action == "members_list":
+                return p.customer_members(requester, str(body.get("org_id", "")), ip=ip)
+            return p.add_member(requester, str(body.get("org_id", "")), str(body.get("email", "")),
+                                str(body.get("role", "")), ip=ip, mfa_at=body.get("mfa_at"))
         # Slice G0 — asset-ownership target registration. requester is the HMAC-bound hop principal (Finding
         # D); org_id comes from the edge's SERVER-side session (never a free body field a customer chose);
         # host/method are the customer's requested target. Gated in-service on admit_customer(run_engagement).

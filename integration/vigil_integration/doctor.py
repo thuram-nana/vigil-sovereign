@@ -1419,6 +1419,29 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
 _AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.config's affirmative set (a test pins it)
 
 
+def _offense_plane_metered_key_issue(e: "dict") -> str:
+    """M1c-2b — with metered billing on, the OFFENSE plane must hold NO provider key (a customer run reaches the
+    model only through the gateway with its owner-signed grant). Build the offense child env EXACTLY as uiproxy
+    does (``uiproxy._child_env(offense=True, base_env=e)``) and return a HARD-issue message if it would still carry
+    a provider key or the key hot-reload flag — else "". This verifies the invariant directly, so a regression in
+    the uiproxy strip surfaces as a doctor issue. Same plane (integration, stdlib-only uiproxy); never raises."""
+    try:
+        from . import uiproxy as _uip
+        off = _uip._child_env(offense=True, base_env=e)
+    except Exception:  # noqa: BLE001 — cannot reconstruct the offense env ⇒ invent no issue off a probe failure
+        return ""
+    leaked = sorted(k for k in ("SIGIL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY") if (off.get(k) or "").strip())
+    if leaked:
+        return ("VIGIL_METERED_BILLING is on but the offense plane would still inherit a provider key "
+                f"({', '.join(leaked)}); a metered customer run must reach the model ONLY through the gateway with "
+                "its grant. The offense children's environment must not carry the provider key.")
+    if (off.get("VIGIL_LIVE_KEY_RELOAD") or "") == "1":
+        return ("VIGIL_METERED_BILLING is on but the offense plane would hot-reload the persisted provider key "
+                "(VIGIL_LIVE_KEY_RELOAD is set for the offense children); a metered run must spend its grant "
+                "through the gateway, never a provider key.")
+    return ""
+
+
 def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "tuple[dict, list, list]":
     """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
     (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
@@ -1444,7 +1467,8 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
     metered = (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE
     gateway_on = (e.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _AFFIRMATIVE
     issues: list = _obsolete_pricing_issues(e)
-    if not metered and not gateway_on:
+    g1 = (e.get("VIGIL_GATEWAY_G1") or "").strip().lower() in _AFFIRMATIVE
+    if not metered and not gateway_on and not g1:
         if issues:
             return {"configured": False, "ok": False}, issues, []
         return {"configured": False}, [], []
@@ -1479,6 +1503,13 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
     elif gateway_on and not env_key:
         issues.append("the model gateway is enabled but no provider key (SIGIL_ANTHROPIC_API_KEY / "
                       "ANTHROPIC_API_KEY) is in this environment, so it will not start.")
+    if metered:
+        # M1c-2b — with metered billing on, the OFFENSE plane must hold NO provider key: a customer run reaches
+        # the model ONLY through the gateway with its owner-signed grant (the worker scopes it per run). The
+        # SOVEREIGN gateway legitimately holds the key (above), but the offense children must not inherit it.
+        _off_issue = _offense_plane_metered_key_issue(e)
+        if _off_issue:
+            issues.append(_off_issue)
     try:
         from vigil_core import model_metering as _mm
         if metered:
@@ -1523,6 +1554,22 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
         else:
             notes.append("no VIGIL_GATEWAY_DAILY_LIMIT_USD: the gateway has no account-wide daily spend ceiling "
                          "(set one, and a spend limit on the Anthropic workspace, to protect the account).")
+        # PRICING G1 — the gateway at scale: validate the provider-account POOL spec (shape + each key present).
+        if (e.get("VIGIL_GATEWAY_G1") or "").strip().lower() in _AFFIRMATIVE:
+            section["g1"] = True
+            if not gateway_on:
+                issues.append("VIGIL_GATEWAY_G1 is on but VIGIL_MODEL_GATEWAY_ENABLED is not: the scale gateway "
+                              "(pool, fair share, loss alarm) never starts. Enable the gateway too.")
+            try:
+                pool = _mm.gateway_pool_spec(e)
+            except _mm.MeteringError as exc:
+                issues.append(f"the G1 provider pool is misconfigured: {exc}")
+            else:
+                section["pool_accounts"] = len(pool) or 1
+                for acc in pool:
+                    if not (e.get(acc["key_env"]) or "").strip():
+                        issues.append(f"the G1 provider pool account {acc['id']!r} has no key: its key_env "
+                                      f"{acc['key_env']} is empty or unset, so the gateway will not start.")
     except ImportError:
         notes.append("vigil_core is not importable here, so the pricing configuration was not checked.")
     except ValueError as exc:                 # MeteringError is a ValueError
@@ -2266,6 +2313,41 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the billing-hold probe must never crash the report
         report["billing_holds_record"] = f"{type(exc).__name__}: {exc}"
         _note(f"the record of customer orgs on a billing hold could not be read: {exc}")
+
+    # PRICING G1 — the model gateway's LOSS ALARM ($SIGIL_HOME/alarms/gateway-loss.json). The gateway raises it when
+    # the day's UNCONFIRMED provider spend runs past 2% of the day's CONFIRMED spend (a crash loop / a leaking
+    # account / a bad pool, bleeding money that can never be billed): new runs are refused until the day reconciles
+    # or the owner acknowledges it (`sigil gateway-loss ack`). A raised alarm is a HARD issue; an unreadable record
+    # is a HARD issue too. Absent alarm => nothing is added (byte-identical). Best-effort: never raises.
+    try:
+        _loss_alarm = home / "alarms" / "gateway-loss.json"
+        if _loss_alarm.exists() or _loss_alarm.is_symlink():
+            _loss_ok = False
+            try:
+                import json as _json
+                if _loss_alarm.is_symlink():
+                    raise ValueError("a symlink")
+                _lrec = _json.loads(_loss_alarm.read_text(encoding="utf-8"))
+                _loss_ok = isinstance(_lrec, dict) and _lrec.get("tripped") is True
+            except (OSError, ValueError, AttributeError, TypeError):
+                _lrec = None
+            if not _loss_ok:
+                report.setdefault("gateway_loss", {})["state"] = "unreadable"
+                _issue(f"the model gateway's loss alarm ({_display_path(_loss_alarm)}) cannot be read: the gateway "
+                       f"may be refusing new runs over an unconfirmed-spend alarm. Check the file (JSON written by "
+                       f"the gateway), then `sigil gateway-loss ack` once reconciled.")
+            else:
+                _day = str(_lrec.get("day", "?"))
+                report.setdefault("gateway_loss", {}).update(
+                    {"state": "tripped", "day": _day})
+                _issue(f"the model gateway's loss alarm is OPEN for {_day}: the day's unconfirmed provider spend has "
+                       f"passed 2% of the day's confirmed spend, so the gateway is refusing new runs to stop the "
+                       f"loss. Investigate (a crash loop, a failing provider account, a misconfigured pool); it "
+                       f"clears when the day reconciles, or run `sigil gateway-loss ack` once you have reconciled "
+                       f"it to resume runs for the day.")
+    except Exception as exc:  # noqa: BLE001 — the loss-alarm probe must never crash the report
+        report.setdefault("gateway_loss", {})["error"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the model gateway loss alarm could not be read: {exc}")
 
     # #70 — is the cross-plane money seam inside the offense backup? ADVISORY; default (no settle drain
     # configured) adds nothing. Best-effort: never raises.

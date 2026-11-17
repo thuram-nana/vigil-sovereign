@@ -106,6 +106,8 @@ from .reuse import assert_no_offense
 
 assert_no_offense()
 
+from . import gateway_capacity as gc  # noqa: E402
+from . import gateway_loss as gl  # noqa: E402
 from vigil_core import model_metering as mm  # noqa: E402
 from vigil_core.rate_card import DEFAULT_RATE_CARD, RateCard  # noqa: E402
 from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER, ModelGrant, decode_token  # noqa: E402
@@ -319,16 +321,22 @@ class GrantMeter:
     spend of the current UTC day, for the gateway's daily ceiling (design §5.2)."""
 
     def __init__(self, meter_dir: Path, *, gateway: bool = False, lock_wait_s: float = 2.0,
-                 rate_card: Optional[RateCard] = None):
+                 rate_card: Optional[RateCard] = None, loss_ledger: "Any" = None):
         self.dir = Path(meter_dir)
         #: the published rate card the customer charge of each response is computed from (W2a). None: the meter
         #: records no customer charge (a read-only meter: the settle step, the statement, tests of the cost path)
         self.rate_card = rate_card
+        #: PRICING G1 — the loss ledger (``sigil.gateway_loss.LossLedger``) the meter feeds the day's confirmed /
+        #: unconfirmed provider-spend split so the 2% loss alarm can be evaluated. None: no split is tracked and no
+        #: alarm is touched (G1 off) — byte-identical to the pre-G1 meter.
+        self._loss = loss_ledger
         self._states: "dict[str, _LaunchState]" = {}
         self._guard = threading.Lock()
         self._money = threading.Lock()                 # guards the account-wide counters below
         self._global_pending = 0
         self._daily: "dict[str, int]" = {}
+        #: G1 only (``self._loss`` set): today's (confirmed, unconfirmed) spend split, kept beside ``_daily``
+        self._day_split: "dict[str, tuple[int, int]]" = {}
         self._gateway_fd: Optional[int] = None
         self._stopped = False
         self.boot = ""
@@ -541,8 +549,12 @@ class GrantMeter:
             st.unconfirmed_nano += reserved
             with self._money:
                 self._daily[day] = self._daily.get(day, 0) + reserved
+                if self._loss is not None:            # G1: an orphan is pure unconfirmed spend
+                    conf, unconf = self._day_split.get(day, (0, 0))
+                    self._day_split[day] = (conf, unconf + reserved)
             _log.error("model gateway: a request's record was lost (its gateway process ended between the call and "
                        "the meter); its reservation is counted as unconfirmed spend")
+        self._note_loss(day, now)                     # update the loss alarm from the new split
 
     def _state(self, mid: str) -> _LaunchState:
         with self._guard:
@@ -603,6 +615,8 @@ class GrantMeter:
         in production. Called under ``self._money``."""
         if day not in self._daily:
             total = 0
+            conf = 0        # G1: the day's confirmed and unconfirmed split, computed in the same scan
+            unconf = 0
             if self.dir.exists():
                 for p in self.dir.glob("*.jsonl"):
                     try:
@@ -612,13 +626,44 @@ class GrantMeter:
                             if _utc_day(float(line["ts"])) != day:
                                 continue
                             if line["kind"] == "usage":
-                                total += int(line["cost_nano"]) + int(line.get("held_nano", 0))
+                                c = int(line["cost_nano"])
+                                h = int(line.get("held_nano", 0))
+                                total += c + h
+                                conf += c
+                                unconf += h
                             elif line["kind"] == "orphan":
-                                total += int(line["reserved"])
+                                r = int(line["reserved"])
+                                total += r
+                                unconf += r
                     except (OSError, ValueError, KeyError, TypeError, AttributeError):
                         continue        # a corrupt file is the settle step's error to raise, not the ceiling's
             self._daily = {day: total}  # keep only today
+            if self._loss is not None:
+                self._day_split = {day: (conf, unconf)}   # keep only today's split, beside ``_daily``
         return self._daily[day]
+
+    def day_split(self, now: float) -> "tuple[int, int]":
+        """G1 — today's (confirmed, unconfirmed) provider spend in nano-USD: the split the loss ledger evaluates
+        against the 2% rule. Seeds the day from the meter files on the first read of a new UTC day, like the daily
+        ceiling, then tracks it as responses settle. (0, 0) when no loss ledger is attached (G1 off)."""
+        if self._loss is None:
+            return 0, 0
+        day = _utc_day(now)
+        with self._money:
+            self._day_spend(day)
+            return self._day_split.get(day, (0, 0))
+
+    def _note_loss(self, day: str, now: float) -> None:
+        """Push the day's split to the loss ledger so its alarm file tracks the live state. Called after a settle or
+        an orphan changes the split, outside ``self._money``. G1 only."""
+        if self._loss is None:
+            return
+        with self._money:
+            conf, unconf = self._day_split.get(day, (0, 0))
+        try:
+            self._loss.set_day(day, conf, unconf, now=now)
+        except Exception:  # noqa: BLE001 — an alarm update never breaks a settle (the ledger logs its own failure)
+            _log.exception("model gateway: could not update the loss alarm")
 
     # -- admission -------------------------------------------------------------------------------------------
     def headroom(self, grant: ModelGrant) -> int:
@@ -764,7 +809,11 @@ class GrantMeter:
             with self._money:
                 self._global_pending = max(0, self._global_pending - reserved)
                 self._daily[day] = self._daily.get(day, 0) + cost + held
+                if self._loss is not None:            # G1: track the confirmed / unconfirmed split beside _daily
+                    conf, unconf = self._day_split.get(day, (0, 0))
+                    self._day_split[day] = (conf + cost, unconf + held)
             st.cond.notify_all()
+        self._note_loss(day, now)                     # update the loss alarm from the new split (outside _money)
 
     def release(self, grant: ModelGrant, rid: str, *, now: float) -> None:
         """The request spent nothing: give its reservation back."""
@@ -798,6 +847,7 @@ class GrantMeter:
             with st.cond:
                 if not st.unwritten:
                     continue
+                touched_days: "set[str]" = set()
                 try:
                     with self._locked(mid) as fd:
                         while st.unwritten:
@@ -809,11 +859,17 @@ class GrantMeter:
                                 day = _utc_day(float(record["ts"]))
                                 if day in self._daily:
                                     self._daily[day] -= extra
+                                    if self._loss is not None and day in self._day_split:
+                                        conf, unconf = self._day_split[day]
+                                        self._day_split[day] = (conf, max(0, unconf - extra))
+                                        touched_days.add(day)
                             written += 1
                 except (OSError, ValueError):
                     continue
                 st.poisoned = False
                 st.cond.notify_all()
+            for day in touched_days:                            # G1: the owed records are written; loss drops
+                self._note_loss(day, time.time())
         return written
 
     # -- settle ----------------------------------------------------------------------------------------------
@@ -924,6 +980,18 @@ class GatewayConfig:
     allowance: Any = None
     allowance_required: bool = False
     allowance_chunk_credits: int = 100          # the credits one extension holds at least (a holding size, not a price)
+    #: PRICING G1 (default OFF). ``g1`` turns on capacity sized from the provider's rate-limit headers, the per-tenant
+    #: fair share, the provider-account pool with health + failover, and the loss alarm. With it off NONE of the below
+    #: is built and the gateway is byte-identical to its pre-G1 self.
+    g1: bool = False
+    #: the provider account pool (``gateway_capacity.ProviderAccount`` list); when empty under ``g1`` a single
+    #: default account is built from ``api_key`` / ``upstream``. Several workspace keys of the SAME provider.
+    accounts: "Sequence[Any]" = ()
+    loss_alarm_file: Optional[Path] = None      # where the loss alarm is written ($SIGIL_HOME/alarms/gateway-loss.json)
+    account_down_s: float = 30.0                # how long a provider account stays failed over after an error
+    health_interval_s: float = 15.0             # how often the health thread probes a down account back up (0 = off)
+    g1_seed_confirmed_nano: int = 0             # the day's confirmed spend to seed the loss ledger with at start
+    g1_seed_unconfirmed_nano: int = 0           # ... and its unconfirmed spend (both from the start-up meter scan)
 
 
 class _Refusal(Exception):
@@ -974,7 +1042,22 @@ class ModelGateway:
         _check_upstream(config.upstream)
         self.config = config
         self.prices = dict(config.prices) if config.prices is not None else mm.price_table()
-        self.meter = GrantMeter(config.meter_dir, gateway=True, rate_card=config.rate_card)
+        # PRICING G1 — the pool, the per-tenant fair share, the loss alarm (all OFF unless ``config.g1``)
+        self._pool: "Optional[gc.AccountPool]" = None
+        self._fair: "dict[str, gc.FairShareScheduler]" = {}
+        self._fair_guard = threading.Lock()
+        self._loss: "Optional[gl.LossLedger]" = None
+        if config.g1:
+            accounts = list(config.accounts) or [gc.ProviderAccount(
+                account_id="default", api_key=config.api_key, upstream=config.upstream)]
+            self._pool = gc.AccountPool(accounts, down_s=config.account_down_s)
+            if config.loss_alarm_file is not None:
+                self._loss = gl.LossLedger(config.loss_alarm_file, clock=config.clock)
+        self.meter = GrantMeter(config.meter_dir, gateway=True, rate_card=config.rate_card, loss_ledger=self._loss)
+        if self._loss is not None:
+            # seed the day from the meter files' own confirmed / unconfirmed split, so a restart still knows the
+            # day's loss position (the start-up sweep has just orphaned any crash leftovers into unconfirmed spend)
+            self._loss.seed(*self.meter.day_split(config.clock()), now=config.clock())
         if config.opener is not None:
             self._opener = config.opener
         elif urllib.parse.urlsplit(config.upstream).scheme == "http":
@@ -999,6 +1082,10 @@ class ModelGateway:
         self._stop = threading.Event()
         self._flusher = threading.Thread(target=self._flush_loop, name="model-gateway-flush", daemon=True)
         self._flusher.start()
+        self._health: "Optional[threading.Thread]" = None
+        if self._pool is not None and config.health_interval_s > 0 and self._pool.size() > 1:
+            self._health = threading.Thread(target=self._health_loop, name="model-gateway-health", daemon=True)
+            self._health.start()
 
     def _flush_loop(self) -> None:
         while not self._stop.wait(5.0):
@@ -1006,6 +1093,43 @@ class ModelGateway:
                 self.meter.flush_unwritten()
             except Exception:  # noqa: BLE001 — the flusher never dies; the next pass retries
                 _log.exception("model gateway: re-writing an owed meter record failed")
+
+    def _health_loop(self) -> None:
+        """G1 — probe every failed-over provider account back up with the free ``count_tokens`` endpoint (a tiny
+        request, metered by nobody). A probe that the provider answers (200, or even a 4xx that is NOT a 5xx /
+        connection error) means the account is reachable again, so it is restored to the pool."""
+        while not self._stop.wait(self.config.health_interval_s):
+            try:
+                self._probe_down_accounts()
+            except Exception:  # noqa: BLE001 — the health thread never dies; the next pass retries
+                _log.exception("model gateway: an account health probe failed")
+
+    def _probe_down_accounts(self) -> None:
+        pool = self._pool
+        if pool is None:
+            return
+        now = self.config.clock()
+        for account_id in pool.down_ids(now):
+            account = pool.account(account_id)
+            if self._probe_account(account):
+                pool.mark_up(account_id, self.config.clock())
+                _log.info("model gateway: provider account %s is reachable again; restored to the pool", account_id)
+
+    def _probe_account(self, account: "gc.ProviderAccount") -> bool:
+        """True iff ``account`` answers a tiny ``count_tokens`` probe without a 5xx / connection error (a 4xx still
+        means the account is reachable — the probe body is deliberately minimal). Never raises."""
+        body = {"model": mm.run_model(), "messages": [{"role": "user", "content": "x"}]}
+        try:
+            req = self._account_request(COUNT_TOKENS_PATH, body, {}, account)
+        except Exception:  # noqa: BLE001 — a bad upstream / egress refusal: treat as still down
+            return False
+        try:
+            with self._opener.open(req, timeout=min(10.0, self.config.upstream_timeout_s)):
+                return True
+        except urllib.error.HTTPError as e:
+            return e.code < 500            # a 4xx means reachable; a 5xx means still down
+        except Exception:  # noqa: BLE001 — connection error / timeout: still down
+            return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -1314,22 +1438,35 @@ class ModelGateway:
         betas = [b.strip() for b in (headers.get("anthropic-beta") or "").split(",") if b.strip()]
         return ",".join(b for b in betas if b.lower().startswith(_BETA_PREFIXES) and b.isascii() and b.isprintable())
 
-    def _upstream_request(self, path_qs: str, body: dict, headers: Mapping[str, str]) -> urllib.request.Request:
-        url = self.config.upstream.rstrip("/") + path_qs
+    def _upstream_request(self, path_qs: str, body: dict, headers: Mapping[str, str],
+                          account: "Optional[gc.ProviderAccount]" = None) -> urllib.request.Request:
+        upstream = account.upstream if account is not None else self.config.upstream
+        api_key = account.api_key if account is not None else self.config.api_key
+        url = upstream.rstrip("/") + path_qs
         if self.config.egress_check is not None:
             try:
+                # G1: the egress allowlist and the TLS/loopback pinning are RE-VALIDATED for the account that will be
+                # reached, not only for the configured default — so a failover to another workspace's upstream is
+                # checked afresh and never crosses a boundary the default would not.
                 self.config.egress_check(url)
             except Exception as exc:  # noqa: BLE001 — the sovereignty tier refused: never egress
                 raise _Refusal(403, "permission_error", f"model egress refused by the sovereignty tier: {exc}")
+        if account is not None:
+            _check_upstream(upstream)                 # re-pin https/loopback for this account's upstream
         version = headers.get("anthropic-version") or DEFAULT_ANTHROPIC_VERSION
         if not version.isascii() or not version.replace("-", "").isalnum():
             raise _bad("anthropic-version is not valid")
-        h = {"content-type": "application/json", "x-api-key": self.config.api_key, "anthropic-version": version,
+        h = {"content-type": "application/json", "x-api-key": api_key, "anthropic-version": version,
              "accept": "text/event-stream" if body.get("stream") is True else "application/json"}
         beta = self._beta(headers)
         if beta:
             h["anthropic-beta"] = beta
         return urllib.request.Request(url, data=json.dumps(body).encode(), headers=h, method="POST")
+
+    def _account_request(self, path_qs: str, body: dict, headers: Mapping[str, str],
+                         account: "gc.ProviderAccount") -> urllib.request.Request:
+        """A ``count_tokens`` probe against a specific account (the health thread); same pinning as a real request."""
+        return self._upstream_request(path_qs, body, headers, account)
 
     def ensure_allowance(self, grant: ModelGrant, need_mc: int) -> int:
         """W2b-2 — the launch's allowance (mc) with room, if the wallet allows, for a request whose worst-case charge
@@ -1407,6 +1544,77 @@ class ModelGateway:
         """The dearest an input token can cost on a shaped request (cache writes are pinned to 5 minutes)."""
         row = self.prices[model]
         return max(row.input, row.cache_write_5m, row.cache_read)
+
+    # -- G1: capacity, the fair share, the pool, the loss alarm ------------------------------------------------
+    def g1_fair_scheduler(self, cls: str) -> "gc.FairShareScheduler":
+        with self._fair_guard:
+            sched = self._fair.get(cls)
+            if sched is None:
+                sched = self._fair[cls] = gc.FairShareScheduler()
+            return sched
+
+    def g1_pick_account(self, grant: ModelGrant, input_tokens: int, output_tokens: int, now: float,
+                        *, exclude: "Sequence[str]" = ()) -> "Optional[tuple[gc.ProviderAccount, gc.CapacityLane]]":
+        """Choose a HEALTHY account with capacity for the request and take its capacity reservation, trying each
+        account in turn so a momentary race on one does not fail the request. None when every healthy account is
+        short or down. The reservation never exceeds the provider's remaining (the lane is seeded from it)."""
+        pool = self._pool
+        if pool is None:
+            return None
+        cls = gc.model_class(grant.model)
+        tried = list(exclude)
+        for _ in range(pool.size()):
+            account_id = pool.choose(cls, input_tokens, output_tokens, now, exclude=tried)
+            if account_id is None:
+                return None
+            lane = pool.lane(account_id, cls)
+            if lane.reserve(input_tokens, output_tokens, now):
+                return pool.account(account_id), lane
+            tried.append(account_id)
+        return None
+
+    def g1_admit(self, grant: ModelGrant, input_tokens: int, output_tokens: int, now: float
+                 ) -> "tuple[gc.ProviderAccount, gc.CapacityLane]":
+        """G1 admission, in order: the loss alarm (refuse all new reservations while it is open), the per-tenant fair
+        share (requests AND tokens per minute), then a healthy account with capacity. Raises a retryable ``_Refusal``
+        on any of them — a run is held, never failed — and returns the chosen account and its lane when all pass."""
+        if self._loss is not None and self._loss.tripped(now):
+            raise _Refusal(529, "overloaded_error",
+                           "VIGIL has paused new runs while an account reconciliation alarm is open", retry_after=60)
+        pool = self._pool
+        assert pool is not None
+        cls = gc.model_class(grant.model)
+        rpm, tpm = pool.capacity(cls, now)
+        sched = self.g1_fair_scheduler(cls)
+        sched.set_capacity(rpm, tpm)
+        need_tokens = float(input_tokens + output_tokens)
+        if not sched.admit(grant.org_id, 1.0, need_tokens, now):
+            raise _Refusal(429, "rate_limit_error",
+                           "this account's fair share of the model rate limit is used; retry shortly", retry_after=5)
+        picked = self.g1_pick_account(grant, input_tokens, output_tokens, now)
+        if picked is None:
+            if not pool.healthy_ids(now):
+                raise _Refusal(529, "overloaded_error",
+                               "every provider account is failed over right now; the run will be retried")
+            raise _Refusal(429, "rate_limit_error",
+                           "the account rate limit is reached; retry shortly", retry_after=5)
+        return picked
+
+    def g1_observe(self, account_id: str, model: str, headers: "Mapping[str, str]", now: float) -> None:
+        """Read a response's rate-limit headers and size the account's capacity from them (never exceed the
+        provider's remaining; honour ``retry-after``; a malformed header is ignored, keeping the stand-in limits)."""
+        if self._pool is None:
+            return
+        snapshot = gc.parse_rate_limit_headers(headers, now)
+        self._pool.observe(account_id, gc.model_class(model), snapshot, now)
+
+    def g1_failover_down(self, account_id: str, now: float, reason: str, retry_after: Optional[int]) -> None:
+        if self._pool is not None:
+            self._pool.mark_down(account_id, now, reason,
+                                  seconds=float(retry_after) if retry_after is not None else None)
+
+    def g1_health(self) -> "list[dict]":
+        return self._pool.health(self.config.clock()) if self._pool is not None else []
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1508,6 +1716,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._ticket: Optional[_Ticket] = None
         self._streaming = False
         self._prefix: Optional[tuple] = None
+        self._g1_account: "Optional[gc.ProviderAccount]" = None   # G1: the chosen pool account and its capacity lane
+        self._g1_lane: "Optional[gc.CapacityLane]" = None
+        self._g1_reserved: "tuple[int, int]" = (0, 0)             # the (input, output) tokens reserved on the lane
+        self._g1_tried: "list[str]" = []
         give_back: "Optional[Callable[[], None]]" = None
         self._body_back: "Optional[Callable[[], None]]" = None
         try:
@@ -1560,6 +1772,8 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             if self._ticket is not None:
                 self._ticket.release()                 # a no-op once the response was metered
+            if self._g1_lane is not None:
+                self._g1_lane.release(*self._g1_reserved)   # give the capacity back if it was not settled above
             if give_back is not None:
                 give_back()
             if self._body_back is not None:
@@ -1638,6 +1852,15 @@ class _Handler(BaseHTTPRequestHandler):
         self._ticket = _Ticket(gw.meter, grant, rid, reserved, gw.config.clock)
         self._prefix = (key, now, max(marks) if marks else -1)
         shaped["max_tokens"] = min(shaped["max_tokens"], (reserved - cost) // row.output)
+        if gw.config.g1:
+            # G1: the loss alarm, the per-tenant fair share, and a healthy account with capacity (sized from the
+            # provider's rate-limit headers). A refusal here releases the meter reservation just taken (do_POST's
+            # finally / except). The account's key is used for every upstream call of this request; its lane is
+            # settled to the real usage afterwards.
+            out_worst = shaped["max_tokens"]
+            account, lane = gw.g1_admit(grant, tokens_in, out_worst, now)
+            self._g1_account, self._g1_lane, self._g1_reserved = account, lane, (tokens_in, out_worst)
+            self._g1_tried = [account.account_id]
 
     def _remember(self, grant: ModelGrant, usage: mm.Usage) -> None:
         if self._prefix is not None:
@@ -1692,11 +1915,81 @@ class _Handler(BaseHTTPRequestHandler):
         status = e.code if e.code >= 400 else 502                     # a redirect is never followed, nor relayed
         self._send(status, body if e.code >= 400 else _error_body("api_error", "upstream error"), hdrs)
 
+    def _open_upstream(self, path_qs: str, body: dict, headers: Mapping[str, str],
+                       grant: Optional[ModelGrant]):
+        """Open the upstream for this request. Without G1 (or for the account-less count endpoint) this is exactly
+        :meth:`_open` against the default account. With G1 it opens against the chosen pool account and FAILS OVER on
+        a provider error (429 / 5xx) or a connection error to another healthy account — re-pinning the egress and the
+        TLS/loopback check for each account (:meth:`_upstream_request`). It never fails over a request that was SENT
+        but not answered (it may have run — that holds, exactly as before), and a credit-stop refusal never reaches
+        here (it is the gateway's own 403, raised before any upstream call), so it stays terminal. On a successful
+        open it sizes the account's capacity from the response's rate-limit headers and restores its health."""
+        gw = self.gw
+        if not gw.config.g1 or self._g1_account is None or gw._pool is None:
+            return self._open(gw._upstream_request(path_qs, body, headers))
+        while True:
+            account = self._g1_account
+            req = gw._upstream_request(path_qs, body, headers, account)
+            try:
+                resp = gw._opener.open(req, timeout=gw.config.upstream_timeout_s)
+            except urllib.error.HTTPError as e:
+                if e.code == 429 or e.code >= 500:        # a provider error worth another account
+                    retry_after = gc.parse_retry_after(e.headers.get("retry-after") if e.headers else None)
+                    if self._g1_try_failover(grant, account, f"http {e.code}", retry_after):
+                        continue
+                    return None, e                        # no healthy account left: relay the last provider error
+                return None, e                            # a 4xx that is not 429: a real error, relay it (no failover)
+            except urllib.error.URLError as exc:          # connecting / sending failed: nothing ran — safe to retry
+                _log.warning("model gateway: upstream unreachable on account %s (%s)", account.account_id,
+                             type(getattr(exc, "reason", exc)).__name__)
+                if self._g1_try_failover(grant, account, "connection", None):
+                    continue
+                raise _Refusal(502, "api_error", "the model provider could not be reached") from None
+            except (OSError, http.client.HTTPException) as exc:   # sent, no answer: may have run — never fail over
+                _log.warning("model gateway: no answer from account %s (%s)", account.account_id, type(exc).__name__)
+                r = _Refusal(504, "api_error", "the model provider did not answer")
+                r.sent = True                             # type: ignore[attr-defined]
+                raise r from None
+            gw._pool.mark_up(account.account_id, gw.config.clock())
+            model = grant.model if grant is not None else mm.run_model()
+            gw.g1_observe(account.account_id, model,
+                          {k.lower(): v for k, v in resp.headers.items()}, gw.config.clock())
+            return resp, None
+
+    def _g1_try_failover(self, grant: Optional[ModelGrant], old: "gc.ProviderAccount", reason: str,
+                         retry_after: Optional[int]) -> bool:
+        """Mark ``old`` down, give back its capacity reservation (the request never ran on it) and pick another
+        healthy account with room. True when one was found (``self._g1_account`` / ``self._g1_lane`` now point at
+        it), False when every account has been tried."""
+        gw = self.gw
+        now = gw.config.clock()
+        if self._g1_lane is not None:
+            self._g1_lane.release(*self._g1_reserved)
+        gw.g1_failover_down(old.account_id, now, reason, retry_after)
+        self._g1_tried.append(old.account_id)
+        picked = (gw.g1_pick_account(grant, self._g1_reserved[0], self._g1_reserved[1], now, exclude=self._g1_tried)
+                  if grant is not None else None)
+        if picked is None:
+            self._g1_account, self._g1_lane = None, None
+            return False
+        self._g1_account, self._g1_lane = picked
+        return True
+
+    def _g1_settle_lane(self, usage: mm.Usage) -> None:
+        """Give the chosen account's lane back the unused part of its reservation, now that the response's real usage
+        is known (the next snapshot re-seeds the lane from the provider's truth anyway). Idempotent."""
+        if self._g1_lane is None:
+            return
+        reserved_in, reserved_out = self._g1_reserved
+        actual_in = (usage.input_tokens + usage.cache_write_5m_tokens + usage.cache_write_1h_tokens)
+        self._g1_lane.settle(reserved_in, reserved_out, actual_in, usage.output_tokens)
+        self._g1_lane = None
+
     def _forward_plain(self, path_qs: str, body: dict, headers: Mapping[str, str], *,
                        grant: Optional[ModelGrant]) -> None:
         ticket = self._ticket if grant is not None else None
         try:
-            resp, err = self._open(self.gw._upstream_request(path_qs, body, headers))
+            resp, err = self._open_upstream(path_qs, body, headers, grant)
         except _Refusal as r:
             if ticket is not None and getattr(r, "sent", False):
                 ticket.hold()                          # it may have run: unconfirmed spend, never free
@@ -1731,15 +2024,17 @@ class _Handler(BaseHTTPRequestHandler):
             usage, cost = mm.Usage(), self._ticket.reserved
             self._ticket.commit(usage, cost, request_id=request_id, charge_reservation=True)
             self._remember(grant, usage)
+            self._g1_settle_lane(usage)
             return
         self._ticket.commit(usage, cost, request_id=request_id)
         self._remember(grant, usage)
+        self._g1_settle_lane(usage)
 
     def _forward_stream(self, path_qs: str, body: dict, headers: Mapping[str, str], grant: ModelGrant) -> None:
         assert self._ticket is not None
         ticket = self._ticket
         try:
-            resp, err = self._open(self.gw._upstream_request(path_qs, body, headers))
+            resp, err = self._open_upstream(path_qs, body, headers, grant)
         except _Refusal as r:
             if getattr(r, "sent", False):
                 ticket.hold()
@@ -1814,6 +2109,7 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 ticket.commit(usage, cost, request_id=request_id)
                 self._remember(grant, usage)
+            self._g1_settle_lane(usage)           # give the account's lane back whatever the stream did not use
 
 
 class _Ticket:
@@ -2035,7 +2331,7 @@ def config_from_env(allowance: Any = None) -> GatewayConfig:
     a bad value."""
     from . import config, sovereignty
     from .governor.identity import owner_pubkey
-    from .provider_key import provider_key
+    from .provider_key import pool_accounts, provider_key
     key = provider_key()                      # ProviderKeyError (a ValueError) when it cannot be obtained
 
     owner = owner_pubkey()
@@ -2045,6 +2341,20 @@ def config_from_env(allowance: Any = None) -> GatewayConfig:
     def egress_check(url: str) -> None:
         sovereignty.assert_endpoint_permitted(url, purpose="customer-run model call")
 
+    # PRICING G1 — the account pool and the loss alarm, OFF unless VIGIL_GATEWAY_G1. The pool is several workspace
+    # keys of the same provider (from VIGIL_GATEWAY_POOL); unset => the single default key is the only account. The
+    # loss ledger is seeded from the meter files' day split so a restart still knows the day's confirmed /
+    # unconfirmed spend.
+    g1 = config.gateway_g1_enabled()
+    accounts: "list[Any]" = []
+    loss_file: Optional[Path] = None
+    if g1:
+        pool = pool_accounts()                # [] => the single default key is the only account (built in __init__)
+        accounts = [gc.ProviderAccount(account_id=a["id"], api_key=a["key"],
+                                       workspace_id=a["workspace_id"], kind=a["kind"],
+                                       upstream=a["upstream"] or "https://api.anthropic.com") for a in pool]
+        loss_file = config.SIGIL_HOME / "alarms" / gl.LOSS_ALARM_NAME
+
     from vigil_core.rate_card import rate_card
     return GatewayConfig(api_key=key, owner_pubkey=owner, meter_dir=config.MODEL_METER_DIR,
                          egress_check=egress_check, prices=mm.price_table(), rate_card=rate_card(),
@@ -2052,7 +2362,8 @@ def config_from_env(allowance: Any = None) -> GatewayConfig:
                          global_concurrency=_int_env("VIGIL_GATEWAY_GLOBAL_CONCURRENCY", 32),
                          daily_limit_nano=_daily_limit_nano(),
                          allowance=allowance, allowance_required=config.metered_billing_enabled(),
-                         allowance_chunk_credits=mm.allowance_chunk_credits())
+                         allowance_chunk_credits=mm.allowance_chunk_credits(),
+                         g1=g1, accounts=accounts, loss_alarm_file=loss_file)
 
 
 def start_from_env(allowance: Any = None) -> "Optional[_Server]":

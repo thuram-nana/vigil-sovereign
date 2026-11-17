@@ -1352,6 +1352,32 @@ def cmd_fold_cache(a) -> None:
           f"{fold_warm.ack_log_path()}")
 
 
+def cmd_gateway_loss(a) -> None:
+    """PRICING G1 — `sigil gateway-loss`: inspect or acknowledge the model gateway's LOSS ALARM. The gateway raises
+    it when the day's unconfirmed provider spend passes 2% of the day's confirmed spend and refuses new runs until
+    the day reconciles. `status` prints the current alarm (if any); `ack` acknowledges it once reconciled, which
+    resumes runs for the day (a durable marker the running gateway honours) and clears the alarm file."""
+    from . import config
+    from . import gateway_loss as gl
+    alarm_file = config.SIGIL_HOME / "alarms" / gl.LOSS_ALARM_NAME
+    if a.action == "status":
+        rec = gl.read_alarm(config.SIGIL_HOME)
+        if rec is None:
+            print("gateway-loss: no loss alarm is open")
+        elif rec.get("unreadable"):
+            print(f"gateway-loss: the alarm record {alarm_file} cannot be read", file=sys.stderr)
+            sys.exit(2)
+        else:
+            print(f"gateway-loss: OPEN for {rec.get('day')} — the day's unconfirmed provider spend has passed 2% of "
+                  f"the day's confirmed spend; new runs are refused. Reconcile, then `sigil gateway-loss ack`.")
+        return
+    by = a.by if a.by is not None else _login_name()
+    ledger = gl.LossLedger(alarm_file)
+    entry = ledger.acknowledge(by)
+    print(f"gateway-loss ack: {entry['by']} acknowledged the loss alarm for {entry['day']}; new runs resume for the "
+          f"day and the alarm is cleared (recorded in {alarm_file.parent / (alarm_file.stem + '.ack.jsonl')}).")
+
+
 def cmd_status(a) -> None:
     store, vi = SpineStore(), VectorIndex()
     ok, msg = store.verify()
@@ -3222,6 +3248,59 @@ def _signed_head_doctor() -> tuple[bool, str]:
         return False, f"spine unreadable — cannot confirm a signed head: {type(e).__name__}: {e}"
 
 
+def _redpen_doctor() -> "tuple[bool, str, str]":
+    """Red-Pen (code review) preflight (sovereign — the App key + registries are sovereign, FATAL-2). Returns
+    ``(ok, state, detail)``: the GitHub App credential must be present IFF Red-Pen is on (a hard issue when on
+    without it; informational when off but provisioned), the webhook secret must be set when on, and an org over its
+    per-repo MONTHLY LIMIT is INFORMATIONAL, never hard (reviews simply pause for that repo until next month). With
+    Red-Pen off the whole pipeline is inert, so this is a clean OFF line."""
+    import time as _time
+    from .config import redpen_enabled
+    from .governor import github_app as _ga
+    on = redpen_enabled()
+    key_present = _ga.github_app_configured()
+    if not on:
+        detail = "Red-Pen off (VIGIL_REDPEN_ENABLED)"
+        if key_present:
+            detail += "; a GitHub App credential is provisioned but inert until Red-Pen is turned on"
+        return True, "OFF", detail
+    issues: "list[str]" = []
+    if not key_present:
+        issues.append("the GitHub App id + private key are not provisioned (VIGIL_GITHUB_APP_ID + "
+                      "VIGIL_GITHUB_APP_PRIVATE_KEY or its SSM ref)")
+    if not _ga.webhook_secret_configured():
+        issues.append("the repo-connect webhook secret is not set (VIGIL_GH_WEBHOOK_SECRET)")
+    info = ""
+    try:                                   # per-repo limit sanity + over-limit count: informational, best-effort
+        from .governor.connected_repos import ConnectedRepoRegistry
+        from .governor.redpen_spend import RedPenSpendLedger
+        store = SpineStore()
+        pub = _owner_pub_for_doctor()
+        reg = ConnectedRepoRegistry(store, owner_key=None, trusted_pubkey=pub)
+        spend = RedPenSpendLedger(store, owner_key=None, trusted_pubkey=pub)
+        now = _time.time()
+        all_active = reg.active_records()            # read-only cross-tenant active view (owner-side)
+        limited = [d for d in all_active if d.monthly_limit_credits > 0]
+        over = sum(1 for d in limited
+                   if spend.charged(d.org_id, d.repo, now=now) >= d.monthly_limit_credits)
+        info = (f"{len(all_active)} repo(s) connected, {len(limited)} with a monthly limit, {over} at/over "
+                f"this month (informational)")
+    except Exception as e:  # noqa: BLE001 — the doctor reports, never crashes
+        info = f"connected-repo state unread ({type(e).__name__})"
+    if issues:
+        return False, "ON", "Red-Pen on but: " + "; ".join(issues) + (f" | {info}" if info else "")
+    return True, "ON", f"App key via {_ga.credential_source()}, webhook secret set" + (f"; {info}" if info else "")
+
+
+def _owner_pub_for_doctor() -> "str | None":
+    """The owner pubkey for the Red-Pen doctor's pure-READ registry folds, fail-closed to None."""
+    try:
+        from .governor.identity import owner_pubkey
+        return owner_pubkey()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def sigil_doctor_report() -> dict:
     """Build the SIGIL doctor report dict — the SAME data `sigil doctor --json` emits. Shared by the CLI
     (`cmd_doctor`) and the `/api/doctor` UI read (in-process, same venv). Driven by the shared
@@ -3265,6 +3344,8 @@ def sigil_doctor_report() -> dict:
     _shok, _shdetail = _signed_head_doctor()
     checks.append(Check(id="signed_head", ok=_shok, required=True,
                         state=("OK" if _shok else "NO-HEAD"), detail=_shdetail))
+    _rpok, _rpstate, _rpdetail = _redpen_doctor()
+    checks.append(Check(id="redpen", ok=_rpok, required=False, state=_rpstate, detail=_rpdetail))
     drift = list(config_drift())
     from vigil_integration import doctor as _idoc
     repo = _idoc.find_repo_root()
@@ -4022,6 +4103,11 @@ def main(argv=None) -> None:
     pfc.add_argument("action", choices=["ack"])
     pfc.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
     pfc.set_defaults(fn=cmd_fold_cache)
+    pgl = sub.add_parser("gateway-loss", help="the model gateway's loss alarm (G1): `status` shows it, `ack` "
+                                              "acknowledges it once reconciled (resumes runs for the day)")
+    pgl.add_argument("action", choices=["status", "ack"])
+    pgl.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
+    pgl.set_defaults(fn=cmd_gateway_loss)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")

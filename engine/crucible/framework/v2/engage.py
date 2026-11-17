@@ -41,6 +41,7 @@ from .agents.http_executor import (
 )
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
+from .common.errors import CreditsExhausted
 from .phase_ledger import (
     P_ASSESS_FINDINGS,
     P_CHAINING,
@@ -628,14 +629,17 @@ def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int |
         try:
             from urllib.parse import urlsplit
 
-            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
-
             from .common.tenant import tenant_id
             from .launch_lease import customer_engagement_requires_lease, read_verified_launch_units
             if customer_engagement_requires_lease(slug):
                 host = urlsplit(seed_url).hostname or ""
+                # W2c-2 (k): a METERED lease names its depth, so read_verified_launch_units returns None for it — its
+                # run is bounded by the gateway allowance + the grant cap, not units x E. Only a FLAT lease has a
+                # units-based envelope, so ENVELOPE_TOKENS_PER_CREDIT is imported + read ONLY on the flat branch and
+                # is never read on a metered path.
                 units = read_verified_launch_units(slug, host, tenant_id())
                 if units is not None and int(units) >= 1:
+                    from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
                     ceiling = int(units) * int(ENVELOPE_TOKENS_PER_CREDIT)
         except Exception:  # noqa: BLE001 — a lease/ceiling read failure leaves the run unarmed, never sinks it
             ceiling = None
@@ -2030,11 +2034,16 @@ def run_fusion_only(slug: str, *, spine: object = None, run_dir: "str | None" = 
     except Exception:
         pass
 
-    # Opt-in event-spine mirror (only when --spine attached). Best-effort; never sinks the run.
+    # Opt-in event-spine mirror (only when --spine attached). Best-effort; never sinks the run — EXCEPT a
+    # metered run's terminal credit stop (M1c-2b), which must NOT be swallowed here any more than in the
+    # PhaseLedger wrappers: a credit stop is a reversible PAUSE the worker holds the lease for, not a best-effort
+    # degrade, so it re-raises for the engage seam instead of settling a half-reasoned run as complete.
     if sink is not None:
         try:
             _run_reasoning_pass(sink, spine, slug, report, result, world)
             _persist_plan_input(slug, report, world)
+        except CreditsExhausted:
+            raise
         except Exception:
             pass
     return result

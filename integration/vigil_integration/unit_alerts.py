@@ -604,6 +604,44 @@ def read_billing_holds(path: Path) -> "Optional[list[tuple[str, int]]]":
         return sorted(out)
     except (OSError, ValueError):
         return None
+# ── PRICING G1: the model gateway's loss alarm (an owner alert) ──────────────────────────────────────────
+# The sovereign model gateway raises a durable alarm at $SIGIL_HOME/alarms/gateway-loss.json when the day's
+# UNCONFIRMED provider spend passes 2% of the day's CONFIRMED spend (sigil.gateway_loss). It refuses new runs
+# until the day reconciles. This reads that inert JSON and turns a raised alarm into an owner-pushed alert — the
+# "unit alert" half of the owner notification (the other half is the `vigil doctor` hard issue). FATAL-2 clean:
+# it imports no sigil and reaches no target, only reads a JSON file under SIGIL_HOME.
+GATEWAY_LOSS_ALARM_KIND = "gateway-loss"
+
+
+def _gateway_loss_alarm_path(sigil_home: "str | os.PathLike | None" = None) -> Path:
+    home = Path(sigil_home) if sigil_home is not None else Path(
+        os.path.expanduser(os.environ.get("SIGIL_HOME", "~/.sigil")))
+    return home / "alarms" / "gateway-loss.json"
+
+
+def gateway_loss_alarm(sigil_home: "str | os.PathLike | None" = None, *, now: Optional[float] = None
+                       ) -> "Optional[Alarm]":
+    """One ``error`` :class:`Alarm` when the model gateway's loss alarm is raised, else None. An unreadable record
+    is itself surfaced (fail-closed). Never raises."""
+    now = time.time() if now is None else now
+    p = _gateway_loss_alarm_path(sigil_home)
+    try:
+        if not p.exists() and not p.is_symlink():
+            return None
+        if p.is_symlink() or p.stat().st_size > 1_048_576:
+            raise ValueError("unreadable")
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(rec, dict) or rec.get("tripped") is not True:
+            raise ValueError("unreadable")
+    except (OSError, ValueError):
+        return Alarm(ts=_now_iso(now), severity="error", kind=GATEWAY_LOSS_ALARM_KIND, home=str(p.parent),
+                     detail=f"the model gateway loss alarm record {p} cannot be read — the gateway may be refusing "
+                            f"new runs; investigate and `sigil gateway-loss ack` once reconciled")
+    day = str(rec.get("day", "?"))
+    return Alarm(ts=_now_iso(now), severity="error", kind=GATEWAY_LOSS_ALARM_KIND, home=str(p.parent),
+                 detail=f"model gateway loss alarm OPEN for {day}: the day's unconfirmed provider spend has passed "
+                        f"2% of confirmed — new runs are refused until it reconciles or is acknowledged "
+                        f"(`sigil gateway-loss ack`)", checks=[rec])
 
 
 def run_alert_monitor(
@@ -678,6 +716,14 @@ def run_alert_monitor(
             if notifier is not None:
                 res = notifier.deliver(alarm, now=now)
                 delivered += 1 if res.delivered else 0
+    # PRICING G1 — the model gateway's loss alarm is an owner alert too (one per cycle while it is open).
+    gw_loss = gateway_loss_alarm(now=now)
+    if gw_loss is not None:
+        alarms += 1
+        sink.emit(gw_loss)
+        if notifier is not None:
+            res = notifier.deliver(gw_loss, now=now)
+            delivered += 1 if res.delivered else 0
 
     delivery_stale, delivery_detail = delivery_is_stale(sd, now=now)
     out = {

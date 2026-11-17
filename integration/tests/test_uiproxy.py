@@ -491,6 +491,53 @@ def test_child_env_never_leaks_owner_signing_key(monkeypatch):
     assert env.get("ANTHROPIC_API_KEY") == "sk-legit-offense-key"   # a legitimate key is not over-stripped
 
 
+# M1c-2b — a metered OFFENSE child holds no provider key -------------------------------------------
+def test_metered_offense_child_excludes_the_provider_key_and_the_hot_reload(monkeypatch):
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    monkeypatch.setenv("SIGIL_ANTHROPIC_API_KEY", "sk-persisted")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-provider")
+    off = uiproxy._child_env(offense=True)
+    assert "SIGIL_ANTHROPIC_API_KEY" not in off and "ANTHROPIC_API_KEY" not in off   # no provider key
+    assert "VIGIL_LIVE_KEY_RELOAD" not in off                       # and never hot-reload one
+
+
+def test_metered_sovereign_child_keeps_the_key(monkeypatch):
+    # the SOVEREIGN cockpit hosts the gateway and legitimately holds the key — only OFFENSE children are stripped.
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-provider")
+    sov = uiproxy._child_env(offense=False)
+    assert sov.get("ANTHROPIC_API_KEY") == "sk-provider"
+    assert sov.get("VIGIL_LIVE_KEY_RELOAD") == "1"
+
+
+def test_offense_child_is_byte_identical_when_metered_billing_is_off(monkeypatch):
+    monkeypatch.delenv("VIGIL_METERED_BILLING", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-provider")
+    off = uiproxy._child_env(offense=True)
+    assert off.get("ANTHROPIC_API_KEY") == "sk-provider"           # default-OFF: the offense child keeps the key
+    assert off.get("VIGIL_LIVE_KEY_RELOAD") == "1"
+
+
+def test_the_offense_allowlist_filter_drops_the_key_when_metered(monkeypatch):
+    monkeypatch.setenv("VIGIL_METERED_BILLING", "1")
+    filtered = uiproxy._filter_offense_runtime_env(
+        {"ANTHROPIC_API_KEY": "sk-sealed", "CRUCIBLE_ANTHROPIC_MODEL": "claude-opus-4-8"}, None)
+    assert "ANTHROPIC_API_KEY" not in filtered                      # the sealed key is dropped in metered mode
+    assert filtered.get("CRUCIBLE_ANTHROPIC_MODEL") == "claude-opus-4-8"   # the model still flows
+
+
+def test_the_offense_allowlist_filter_keeps_the_key_when_flat(monkeypatch):
+    monkeypatch.delenv("VIGIL_METERED_BILLING", raising=False)
+    filtered = uiproxy._filter_offense_runtime_env({"ANTHROPIC_API_KEY": "sk-sealed"}, None)
+    assert filtered.get("ANTHROPIC_API_KEY") == "sk-sealed"         # default-OFF: byte-identical
+
+
+def test_the_affirmative_set_matches_config():
+    # uiproxy stays stdlib-only, so it restates the affirmative set — pin it equal to sigil.config's.
+    config = pytest.importorskip("sigil.config")     # sovereign leg only; skip cleanly in the offense leg
+    assert uiproxy._AFFIRMATIVE_ENV == config._OIDC_AFFIRMATIVE
+
+
 # ==================================================================================================
 # SSE — the response must stream through live, not be buffered
 # ==================================================================================================
@@ -934,7 +981,7 @@ def test_plane_control_start_offense_reresolves_the_tier(monkeypatch):
     session token is asserted to WIN, proving a re-resolve can never clobber the credential."""
     captured: dict = {}
 
-    def _fake_spawn(argv, log_path, *, extra_env=None):
+    def _fake_spawn(argv, log_path, *, extra_env=None, offense=False):
         captured[argv[0]] = dict(extra_env or {})
         return _FakeAliveProc()
     monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)
@@ -974,7 +1021,7 @@ def test_plane_control_start_offense_fails_closed_when_resolver_errors(monkeypat
     the fallback path is load-bearing (a deliberately bad resolver result is rejected in-run)."""
     captured: dict = {}
 
-    def _fake_spawn(argv, log_path, *, extra_env=None):
+    def _fake_spawn(argv, log_path, *, extra_env=None, offense=False):
         captured[argv[0]] = dict(extra_env or {})
         return _FakeAliveProc()
     monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)
@@ -999,7 +1046,7 @@ def test_plane_control_without_resolver_respawns_the_captured_env(monkeypatch):
     (byte-identical to the legacy behaviour) — the split-env path must not change a resolver-less caller."""
     captured: dict = {}
 
-    def _fake_spawn(argv, log_path, *, extra_env=None):
+    def _fake_spawn(argv, log_path, *, extra_env=None, offense=False):
         captured[argv[0]] = dict(extra_env or {})
         return _FakeAliveProc()
     monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)

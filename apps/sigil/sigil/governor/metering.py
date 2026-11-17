@@ -56,7 +56,7 @@ from . import key_history as _kh  # noqa: E402  (succession-aware owner-key reso
 from .authn import signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import org_tenant_id  # noqa: E402  (org_id == tenant-id validation; same-plane reuse)
-from .wallet import _as_credits, _check_credits, _check_entry_id  # noqa: E402  (shared ledger helpers)
+from .wallet import _as_credits, _check_credits, _check_entry_id, _issued_at  # noqa: E402  (shared ledger helpers)
 from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors wallet._fold)
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0c — the verified incremental fold)
 from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
@@ -344,6 +344,33 @@ class PlanCreditLedger:
         which scopes plan credits to the ACTIVE subscription's CURRENT period (one allotment live at a time). With
         `now` omitted every tranche counts (status-only); a caller testing spend MUST pass `now`."""
         return sum(t.remaining for t in self.tranches(org_id) if t.is_live(now))
+
+    def grant_events(self, org_id: str) -> "list[tuple[float, int, float]]":
+        """W2c-2 — the org's plan-credit GRANTS as ``(issued_at, credits, period_end)``, oldest first: each
+        owner-signed ``governor.plan_grant`` tranche, for the statement's balance-after timeline (a tranche ENTERS at
+        ``issued_at`` and its unspent remainder EXPIRES at ``period_end`` — non-rollover). Verified under the owner key
+        valid AT ITS SEQ (succession-aware), fail-closed; a replayed ``entry_id`` counts once. PURE read; a LIVE scan
+        of the spine window (a pruned grant is no longer shown; the prune-durable position is ``tranches``)."""
+        if not isinstance(org_id, str) or not org_id:
+            return []
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        seen: set = set()
+        out: "list[tuple[float, int, float]]" = []
+        for r in self.store.iter_records():
+            p = r.payload
+            if not isinstance(p, dict) or p.get("signal") != PLAN_GRANT_SIGNAL or p.get("org_id") != org_id:
+                continue
+            eid = p.get("entry_id")
+            if not (isinstance(eid, str) and eid) or not verify_signed(p, _PLAN_GRANT_CORE, resolver.at(r.seq)):
+                continue
+            key = (org_id, eid)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((_issued_at(p.get("issued_at")), _as_credits(p.get("credits")),
+                        _as_period(p.get("period_end"))))
+        out.sort(key=lambda e: e[0])
+        return out
 
     def remaining_for_period(self, org_id: str, period_end: float) -> int:
         """The remaining credits of the ONE tranche keyed `(org_id, period_end)` — granted − debited, clamped
