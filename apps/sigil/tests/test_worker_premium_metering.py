@@ -111,6 +111,25 @@ def test_worker_time_is_measured_and_bounded_by_the_slot(tmp_path):
     assert [r["seconds"] for r in worker] == [30, 60] and sum(r["charge_mc"] for r in worker) == 1_500
 
 
+def test_every_billed_worker_second_re_derives_from_the_meter_file(tmp_path):
+    """ATTESTABLE: each ``worker`` line's billed seconds re-derive from the meter file ALONE — the ``ts`` of the
+    ``worker_open`` it commits and its own ``ts``, clamped to the reserved slot — and its charge from those seconds at
+    the RECORDED rate. An auditor needs nothing but the hash-chained file (no worker report, no live clock)."""
+    m = gw.GrantMeter(tmp_path, rate_card=DEFAULT_RATE_CARD)
+    g = _grant()
+    for t in (0.0, 30.0, 230.0, 231.0, 290.5):                 # an interval, a stall, a short one, a fractional one
+        m.worker_heartbeat(g, slot_s=60, allowance_mc=None, now=t)
+    lines = [json.loads(x) for x in (tmp_path / f"{g.meter_id}.jsonl").read_text().splitlines()]
+    assert gw.GrantMeter(tmp_path).verify(g.meter_id) is not None           # the chain verifies
+    opened = {ln["wid"]: ln for ln in lines if ln["kind"] == "worker_open"}
+    commits = [ln for ln in lines if ln["kind"] == "worker"]
+    assert [c["billed_s"] for c in commits] == [30, 60, 1, 59]
+    for c in commits:
+        o = opened[c["wid"]]
+        assert c["billed_s"] == max(0, min(int(c["ts"] - o["ts"]), o["reserved_s"]))
+        assert c["charge_mc"] == -(-c["billed_s"] * c["rate_mc"] // c["rate_per"])   # ceil(seconds x rate / per)
+
+
 def test_the_first_and_lapsed_worker_slots_are_never_billed(tmp_path):
     m = gw.GrantMeter(tmp_path, rate_card=DEFAULT_RATE_CARD)
     g = _grant()
