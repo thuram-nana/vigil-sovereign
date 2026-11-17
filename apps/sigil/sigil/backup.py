@@ -182,9 +182,11 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "operator": "in-flight operator plan/journal pre-images — operational scratch, off the trust root",
     "customer": "ephemeral customer-edge operational markers (cookie sessions + single-use email "
                 "verify/recover tokens + login/signup/member rate-limit lockouts + the onboarding tour's "
-                "finished/skipped marks) — the AUTHORITATIVE customer accounts/orgs/memberships/wallet are "
-                "owner-signed on the spine (captured); these regenerate (re-login / re-request / limits reset / "
-                "the tour shows once more), never recovery state",
+                "finished/skipped marks + the app's copies of launches reserved and not started yet) — the "
+                "AUTHORITATIVE customer accounts/orgs/memberships/wallet/reservations are owner-signed on the spine "
+                "(captured); these regenerate (re-login / re-request / limits reset / the tour shows once more), "
+                "never recovery state (a lost launch copy leaves its reservation on the spine: a later launch of the "
+                "same host supersedes it and `ops-sweep reservations` releases it)",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "

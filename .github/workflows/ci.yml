@@ -881,8 +881,9 @@ jobs:
   sigil-governor:
     name: SIGIL governor gates (P7 — offense gate + authn)
     runs-on: ubuntu-latest
-    # 45, not 30: the whole apps/sigil suite grew with the customer-app node-DOM tests, pushing this whole-suite
-    # job near the old 30-min wall and cancelling it under runner load. 45 is the repo's heavy-leg cap.
+    # 45, not 30: the whole apps/sigil suite grew with the customer-app node-DOM tests (Team / Monitoring /
+    # Launch / Account security / onboarding each spawn node per test), pushing this whole-suite job near the
+    # old 30-min wall and cancelling it under runner load. 45 is the repo's standard cap for the heavy legs.
     timeout-minutes: 45
     env:
       # where sigil/vectors/embed.py caches the pinned model files (outside the throwaway SIGIL_HOME)
@@ -1038,7 +1039,8 @@ jobs:
     # docs/tests/test_required_checks_canonical.py keeps every doc count in step with.
     # apps/sigil/tests/test_ci_suite_legs.py fails if no ci.yml step runs the whole suite with the flag ON.
     runs-on: ubuntu-latest
-    # 45, not 30: same reason as the P7 whole-suite job — the grown node-DOM test set pushes this past 30 min.
+    # 45, not 30: same reason as the P7 whole-suite job above — the grown customer-app node-DOM test set pushes
+    # this whole-suite-with-fold-cache job past the old 30-min wall under runner load.
     timeout-minutes: 45
     env:
       # the same model cache as the governor job
