@@ -35,6 +35,11 @@
  * adds a Guide screen (#/guide) covering the whole app to the top bar, and shows the VIGIL wordmark brightening and
  * dimming while a screen loads. Off, all of it is absent (no call is made) and every screen renders exactly as before.
  *
+ * LAUNCHING. When the edge has launching from the app on (data-launch-ui="1", VIGIL_CUSTOMER_LAUNCH_UI), the
+ * Assessments screen offers Launch on each verified host — one of the depths the server offers, never a price — and
+ * lists the workspace's launches from api/customer/launches with the controls the server accepts (Start / Cancel
+ * before a launch starts, Pause / Resume while it runs), refreshing while one runs and the screen is visible. Off, the
+ * screen is read-only exactly as before and that read is never made.
  * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
  * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
  * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
@@ -844,11 +849,13 @@
     } catch (e) { flowCard("#asset-verify", flowMsg(e, "Verification did not pass — publish the token and retry.")); }
   }
 
-  // ---- Assessments: read-only results (operator-role only; org_admin sees the honest 403 card). Launching a
-  //      NEW assessment arrives with the run driver (K4), so it is not offered here yet. --------------------
+  // ---- Assessments: results (operator-role only; org_admin sees the honest 403 card). Launching and controlling
+  //      an assessment from here is the C1a block below, shown only while the edge has VIGIL_CUSTOMER_LAUNCH_UI on;
+  //      off, this screen is read-only exactly as before. ------------------------------------------------------
   function viewAssessments() {
     return dataView("#/assessments", "Assessments", API + "/assessments", function (d) {
       var items = (d && d.assessments) || [];
+      if (LAUNCH_ON) return assessmentsLaunchView(items);
       var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
         + "Launching a new assessment arrives with the run driver." });
       if (!items.length) {
@@ -890,6 +897,357 @@
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
   }
+
+  // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
+  // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:
+  // one of the depths the SERVER offers this workspace (api/customer/launches lists them — never a price, credits or
+  // units: VIGIL never estimates what an assessment costs), then the app reserves (launch/reserve) and starts
+  // (launch/start) it. The same read lists the workspace's launches with the actions the server would accept and, for a
+  // member who may run them, the signed lease each action presents — so no control depends on a lease kept in this
+  // page. Cancel asks first, in the page. While a launch runs or is paused and this screen is visible, the list
+  // refreshes; it stops when the screen is left or hidden. A refusal is told in fixed words chosen from what the
+  // server refused, never the server's own text (it can name amounts and internals). Off: nothing here runs.
+  var LAUNCH_ON = pageFlag("launchUi");
+  var LAUNCH_POLL_MS = 15000;
+  var DEPTH_LABELS = { quick: "Quick", deep: "Deep" };
+  var DEPTH_HINTS = { quick: "a focused first pass", deep: "broader and more thorough" };
+  var STATE_LABELS = { reserved: "Not started", running: "Running", paused: "Paused" };
+  var FINISHED_LABELS = { completed: "Completed", canceled: "Cancelled", failed: "Did not complete" };
+  // The controls, in the order they show; a launch offers only the ones the server listed for it.
+  var LAUNCH_ACTIONS = [
+    { id: "start", label: "Start", path: "/launch/start", done: "Assessment started" },
+    { id: "pause", label: "Pause", path: "/launch/pause", done: "Assessment paused" },
+    { id: "resume", label: "Resume", path: "/launch/resume", done: "Assessment resumed" },
+    { id: "cancel", label: "Cancel", path: "/launch/cancel", done: "Launch cancelled" },
+  ];
+  var launchUi = { data: null, hosts: [], slots: Object.create(null), other: null, done: null, timer: null, gen: 0,
+                   notes: Object.create(null), busy: Object.create(null), used: Object.create(null),
+                   picker: null, confirm: null };
+
+  // a label for a value the server sent, from OUR table only (never an inherited member of the object)
+  function own(table, key) {
+    return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : "";
+  }
+  function launchesFor(slug) {
+    return ((launchUi.data && launchUi.data.launches) || []).filter(function (l) { return l && l.slug === slug; });
+  }
+  // What Launch offers: the depths the server lists (Quick / Deep; any other depth is never shown), else its one
+  // default launch (no depth to choose).
+  function launchChoices() {
+    var cs = ((launchUi.data && launchUi.data.choices) || []).filter(function (c) { return !!c; });
+    var depths = cs.filter(function (c) { return c.product_id && own(DEPTH_LABELS, c.depth); });
+    if (depths.length) return depths;
+    return cs.filter(function (c) { return c.product_id === ""; }).slice(0, 1);
+  }
+
+  function assessmentsLaunchView(items) {
+    launchUi.hosts = items.map(function (a) { return { slug: a.slug, host: a.host }; });
+    launchUi.slots = Object.create(null);
+    launchUi.notes = Object.create(null);
+    launchUi.data = null; launchUi.picker = null; launchUi.confirm = null;
+    var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
+      + "Launch an assessment of a verified host, then follow it here while it runs." });
+    var cards = items.map(function (a) {
+      var slot = h("div.cust-launch", {});
+      launchUi.slots[a.slug] = slot;
+      return h("div.card", {}, [
+        h("div.cust-kv", {}, [h("span.k", { text: a.host }), h("span", { text: (a.findings || 0) + " finding(s)" })]),
+        slot,
+        h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+          onClick: function () { loadFindings(a.slug, a.host); } })]),
+      ]);
+    });
+    launchUi.other = h("div#cust-launch-other", {});
+    launchUi.done = h("div#cust-launch-done", {});
+    var body = [note, items.length ? h("div.cust-grid", {}, cards)
+      : h("div.card.cust-soon", { text: "No verified hosts yet — prove you control a host in Assets, then launch an "
+          + "assessment of it here." })];
+    loadLaunches();
+    return h("div", {}, body.concat([launchUi.other, launchUi.done, h("div#assess-findings")]));
+  }
+
+  // Draw every launch area of the screen from what the server last said (and what this page is doing right now).
+  function renderLaunches() {
+    if (here() !== "#/assessments") return;
+    launchUi.hosts.forEach(function (a) {
+      var slot = launchUi.slots[a.slug];
+      if (slot) VUI.mount(slot, launchSlot(a));
+    });
+    if (launchUi.other) VUI.mount(launchUi.other, otherLaunches());
+    if (launchUi.done) VUI.mount(launchUi.done, finishedLaunches());
+  }
+  function launchSlot(a) {
+    if (!launchUi.data) return null;                       // still loading
+    var mine = launchesFor(a.slug);
+    var note = launchUi.notes[a.slug];
+    return mine.map(launchRow).concat([note ? launchNote(note) : null, mine.length ? null : launchPicker(a)]);
+  }
+  function launchRow(l) {
+    var key = l.slug + ":" + l.launch;
+    var depth = own(DEPTH_LABELS, l.depth);
+    var rows = [h("p.cust-launch-status", { text: own(STATE_LABELS, l.state) + (depth ? " · " + depth : "") })];
+    if (l.expired) {
+      rows.push(h("p.cust-muted", { text: "This launch can no longer start. Cancel it to release its credits." }));
+    }
+    if (launchUi.confirm === key) {
+      rows.push(h("div.cust-launch-confirm", {}, [
+        h("p", { text: "Cancel this launch? It has not started, so nothing is charged." }),
+        h("div.row", {}, [
+          h("button.btn.btn-primary", { type: "button", text: "Yes, cancel",
+            onClick: function () { launchAction(l, "cancel"); } }),
+          h("button.btn", { type: "button", text: "Keep it",
+            onClick: function () { launchUi.confirm = null; renderLaunches(); } }),
+        ]),
+      ]));
+      return h("div.cust-launch-item", {}, rows);
+    }
+    var allowed = l.actions || [];
+    var busy = !!launchUi.busy[l.slug];
+    var buttons = LAUNCH_ACTIONS.filter(function (x) { return allowed.indexOf(x.id) >= 0; }).map(function (x) {
+      var go = x.id === "cancel" ? function () { launchUi.confirm = key; renderLaunches(); }
+                                 : function () { launchAction(l, x.id); };
+      return h("button.btn", { type: "button", text: x.label, disabled: busy, onClick: go });
+    });
+    if (buttons.length) rows.push(h("div.row", {}, buttons));
+    return h("div.cust-launch-item", {}, rows);
+  }
+  function launchPicker(a) {
+    var offered = launchChoices();
+    if (!offered.length) return null;                    // nothing this member may launch here
+    var busy = !!launchUi.busy[a.slug];
+    if (launchUi.picker !== a.slug) {
+      return h("div.row", {}, [h("button.btn.btn-primary", { type: "button", text: "Launch", disabled: busy,
+        onClick: function () { launchUi.picker = a.slug; delete launchUi.notes[a.slug]; renderLaunches(); } })]);
+    }
+    var depths = offered.filter(function (c) { return c.product_id; });
+    var rows = [h("p", { text: depths.length ? "Choose a depth to start an assessment of " + a.host + ":"
+                                             : "Start an assessment of " + a.host + "?" })];
+    offered.forEach(function (c) {
+      var label = c.product_id ? own(DEPTH_LABELS, c.depth) : "Start";
+      rows.push(h("div.cust-launch-choice", {}, [
+        h("button.btn.btn-primary", { type: "button", text: label, disabled: busy,
+          onClick: function () { doLaunch(a, c); } }),
+        c.product_id ? h("span.cust-muted", { text: own(DEPTH_HINTS, c.depth) }) : null,
+      ]));
+    });
+    rows.push(h("p.cust-muted", { text: "No price is shown: VIGIL never estimates what an assessment costs." }));
+    rows.push(h("div.row", {}, [h("button.btn", { type: "button", text: "Not now",
+      onClick: function () { launchUi.picker = null; renderLaunches(); } })]));
+    return h("div.cust-launch-picker", {}, rows);
+  }
+  function launchNote(note) {
+    return h("div.cust-launch-note", { role: "status" }, [
+      h("p", { text: note.text }),
+      note.go ? h("button.btn", { type: "button", text: note.goText, onClick: function () { nav(note.go); } }) : null,
+    ]);
+  }
+  // Launches on hosts that are not on the verified list any more (a proof can lapse while an assessment runs): they
+  // keep their controls here.
+  function otherLaunches() {
+    var d = launchUi.data;
+    if (d && d.unavailable) {
+      return h("p.cust-muted", { text: "Launching and following assessments is not available right now." });
+    }
+    var listed = Object.create(null);
+    launchUi.hosts.forEach(function (a) { listed[a.slug] = true; });
+    var rest = ((d && d.launches) || []).filter(function (l) { return l && !listed[l.slug]; });
+    if (!rest.length) return null;
+    return h("div", {}, [h("h3", { text: "Other launches" }), h("div.cust-grid", {}, rest.map(function (l) {
+      var note = launchUi.notes[l.slug];
+      return h("div.card", {}, [h("div.cust-asset-head", {}, [h("span.host", { text: l.host })]), launchRow(l),
+        note ? launchNote(note) : null]);
+    }))]);
+  }
+  function finishedLaunches() {
+    var fs = ((launchUi.data && launchUi.data.finished) || []).filter(function (f) { return !!f; });
+    if (!fs.length) return null;
+    return VUI.card("Finished assessments", null, fs.map(function (f) {
+      var used = f.state === "completed" ? launchUi.used[f.slug + ":" + f.launch] : "";
+      return h("div.cust-kv", {}, [h("span.k", { text: f.host }), h("span", { text: (own(FINISHED_LABELS, f.state)
+        || "Ended") + (f.ended_at ? " · " + fmtDate(f.ended_at) : "") + (used ? " · used " + used + " credits" : "") })]);
+    }));
+  }
+
+  // The server's answer to the launches read; while a launch runs or is paused, asked again every LAUNCH_POLL_MS.
+  async function loadLaunches() {
+    if (here() !== "#/assessments") return;
+    var gen = ++launchUi.gen;                              // only the newest answer is drawn
+    var d;
+    try { d = await VUI.getJSON(API + "/launches"); }
+    catch (e) {
+      if (gen !== launchUi.gen || here() !== "#/assessments") return;
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      if (!launchUi.data) {                                // never loaded on this visit: no controls
+        launchUi.data = { unavailable: true, choices: [], launches: [], finished: [] };
+        renderLaunches();
+        return;
+      }
+      scheduleLaunchPoll();                                // a refresh that failed: keep what is shown, ask again
+      return;
+    }
+    if (gen !== launchUi.gen || here() !== "#/assessments") return;
+    launchUi.data = d || {};
+    renderLaunches();
+    loadUsage();
+    scheduleLaunchPoll();
+  }
+  function scheduleLaunchPoll() {
+    if (launchUi.timer || here() !== "#/assessments" || document.hidden) return;
+    var live = ((launchUi.data && launchUi.data.launches) || []).some(function (l) {
+      return l && (l.state === "running" || l.state === "paused");
+    });
+    if (!live) return;
+    launchUi.timer = setTimeout(function () { launchUi.timer = null; loadLaunches(); }, LAUNCH_POLL_MS);
+  }
+  function stopLaunchPoll() {
+    if (launchUi.timer) { clearTimeout(launchUi.timer); launchUi.timer = null; }
+    launchUi.gen++;                                        // an answer already on its way is dropped
+  }
+  function onLaunchRoute() {
+    if (here() !== "#/assessments") stopLaunchPoll();
+  }
+  function onLaunchVisibility() {
+    if (document.hidden) stopLaunchPoll();
+    else if (here() === "#/assessments" && launchUi.data) loadLaunches();
+  }
+
+  // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
+  // launch, in credits) — never computed here. Shown for a COMPLETED launch whose statement has usage; asked once
+  // per newly finished launch.
+  async function loadUsage() {
+    var want = ((launchUi.data && launchUi.data.finished) || []).filter(function (f) {
+      return f && f.state === "completed" && !Object.prototype.hasOwnProperty.call(launchUi.used, f.slug + ":" + f.launch);
+    });
+    if (!want.length) return;
+    var u = null;
+    try { u = await VUI.getJSON(API + "/billing/usage"); } catch (e) { u = null; }
+    var byLaunch = Object.create(null);
+    ((u && u.scans) || []).forEach(function (s) {
+      if (s && s.status === "ok" && s.requests > 0 && typeof s.credits === "string") {
+        byLaunch[s.scan + ":" + s.launch] = s.credits;
+      }
+    });
+    want.forEach(function (f) { var k = f.slug + ":" + f.launch; launchUi.used[k] = byLaunch[k] || ""; });
+    renderLaunches();
+  }
+
+  // Launch: reserve, then start. A refusal of either is told in the host's card; a reservation whose start was
+  // refused stays listed (Start / Cancel) — the server kept it.
+  async function doLaunch(a, choice) {
+    clearErr();
+    var slug = a.slug;
+    launchUi.picker = null; launchUi.busy[slug] = true; delete launchUi.notes[slug];
+    renderLaunches();
+    var body = { host: a.host };
+    if (choice.product_id) body.product_id = choice.product_id;
+    var r;
+    try { r = await VUI.postJSON(API + "/launch/reserve", body); }
+    catch (e) { delete launchUi.busy[slug]; return launchRefused(slug, "reserve", e); }
+    try { await VUI.postJSON(API + "/launch/start", { lease: r && r.lease }); }
+    catch (e) { delete launchUi.busy[slug]; await launchRefused(slug, "start", e); return loadLaunches(); }
+    delete launchUi.busy[slug];
+    VUI.toast("Assessment started");
+    return loadLaunches();
+  }
+  async function launchAction(l, which) {
+    clearErr();
+    var act = LAUNCH_ACTIONS.filter(function (x) { return x.id === which; })[0];
+    if (!act) return;
+    var slug = l.slug;
+    launchUi.confirm = null; launchUi.busy[slug] = true; delete launchUi.notes[slug];
+    renderLaunches();
+    var r;
+    try { r = await VUI.postJSON(API + act.path, { lease: l.lease }); }
+    catch (e) { delete launchUi.busy[slug]; await launchRefused(slug, which, e); return loadLaunches(); }
+    delete launchUi.busy[slug];
+    if (which === "resume" && r && r.expired) {
+      launchUi.notes[slug] = { text: "Resumed. This launch's time window has closed: an assessment still running "
+        + "carries on, but one that had not started, or had stopped for the pause, will not start again." };
+    }
+    VUI.toast(which === "cancel" && r && r.already_settled ? "This launch had already ended" : act.done);
+    return loadLaunches();
+  }
+  async function launchRefused(slug, which, e) {
+    if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); return; }
+    launchUi.notes[slug] = launchMessage(which, e);
+    renderLaunches();
+  }
+  // Fixed words for each refusal the server gives a launch control (matched on what it refused), and where to fix
+  // it: Billing for credits, Assets for a host's proof or authorization. The step-up answer asks for the
+  // authenticator, as a purchase does. The refusals that name a host are matched first and every phrase matched has
+  // a space in it, so no host name can be mistaken for another refusal.
+  function launchMessage(which, e) {
+    var status = e && e.status, data = (e && e.data) || {};
+    var why = String(data.error || "").toLowerCase();
+    var after = which === "reserve" ? " Nothing was charged." : which === "start" ? "" : " Nothing changed.";
+    var billing = { go: "#/billing", goText: "Go to Billing" }, assets = { go: "#/assets", goText: "Go to Assets" };
+    function has(s) { return why.indexOf(s) >= 0; }
+    function msg(text, where) { return { text: text, go: where ? where.go : null, goText: where ? where.goText : null }; }
+    if (status === 401 && data.step_up_required) {
+      return msg("For your security, this needs a fresh second-factor check. Verify with your authenticator, then "
+        + "try again." + after);
+    }
+    if (status === 503) return msg("VIGIL is updating. Try again in a few seconds." + after);
+    if (status === 429) return msg("Too many attempts — wait a moment and try again." + after);
+    if (status === 404 || has("pause/resume is not enabled")) return msg("This is not available right now." + after);
+    if (has("insufficient credits")) return msg("Not enough credits to start an assessment. Add credits in Billing.", billing);
+    if (has("ownership proof")) {
+      return msg("This host's proof of control is missing or has expired. Verify it again in Assets, then launch.", assets);
+    }
+    if (has("engagement authority")) {
+      return msg("Testing is not authorized for this host right now. Verify it again in Assets, confirming you are "
+        + "authorized to test it, then launch.", assets);
+    }
+    if (has("not settled yet")) {
+      return msg("An assessment of this host is already in progress. Let it finish, or cancel it if it has not "
+        + "started, before launching another.");
+    }
+    if (has("still finishing")) return msg("An earlier assessment of this host is still finishing. Try again shortly.");
+    if (has("may not launch") || has("may not manage launches")) {
+      return msg("Your role cannot launch or control assessments. The founder can, and so can a teammate VIGIL has "
+        + "made an Operator.");
+    }
+    if (has("new assessment launches are paused") || has("global cost pool")) {
+      return msg("New assessments cannot start right now. Please try again later." + after);
+    }
+    if (has("line is overdue")) return msg("Your workspace has an invoice past its due date. Settle it before launching "
+      + "new assessments.");
+    if (has("postpaid credit line")) return msg("Your workspace's credit line has no room for another assessment right now.");
+    if (has("trial scans are not available")) return msg("Trial scans are not available yet. Buy credits in Billing to "
+      + "run an assessment.", billing);
+    if (has("trial covers the trial scan only")) return msg("Your trial covers the trial scan only. Buy credits in "
+      + "Billing for other assessments.", billing);
+    if (has("registered domain")) return msg("Trial scans need your own registered domain. Buy credits in Billing to "
+      + "test this host.", billing);
+    if (has("one workspace per domain")) return msg("Trial scans are limited to one workspace per domain. Buy credits "
+      + "in Billing to test this host.", billing);
+    if (has("trial covers one domain")) return msg("Your trial covers one domain. Buy credits in Billing to test "
+      + "another.", billing);
+    if (has("paused for today")) return msg("Trial scans are paused for today. Try again later, or buy credits in "
+      + "Billing.", billing);
+    if (has("has been started")) return msg("This assessment has already started, so it can no longer be cancelled.");
+    if (has("cannot be released automatically")) {
+      return msg("This launch is cancelled, but its credits cannot be returned automatically right now: they stay "
+        + "reserved, not spent, until VIGIL returns them. VIGIL has been alerted.");
+    }
+    if (has("was cancelled and cannot be started")) {
+      return msg("This launch was cancelled, so it cannot start. Its credits stay reserved, not spent, until VIGIL "
+        + "returns them.");
+    }
+    if (has("already been settled")) return msg("This launch has already ended.");
+    if (has("billing changed")) {
+      return msg("Billing changed after this launch was reserved, so it cannot start. Cancel it (nothing is charged) "
+        + "and launch again.");
+    }
+    if (has("launch product")) return msg("That depth is not available right now. Reload the page and choose again.");
+    if (has("is busy")) return msg("VIGIL is busy right now. Try again in a moment." + after);
+    if (which === "reserve") return msg("The assessment could not be launched. Nothing was charged. Try again in a moment.");
+    if (which === "start") {
+      return msg("The assessment could not start. It stays reserved: select Start to try again, or Cancel it.");
+    }
+    return msg("That did not go through. Nothing changed. Try again in a moment.");
+  }
+  // ---- end of launching and controlling assessments (C1a) -------------------------------------------------------
 
   // ---- Monitoring (AEGIS) -------------------------------------------------------------------------------------------
   // #/monitoring, only while the edge has customer monitoring on. GET api/customer/monitoring answers for the SESSION
@@ -1622,6 +1980,10 @@
   document.addEventListener("visibilitychange", function () { if (!document.hidden) resumeHandoff(); });
   window.addEventListener("pageshow", function () { resumeHandoff(); });
   window.addEventListener("resize", setTopbarVar);   // keep the fixed notification panel pinned below the topbar
+  if (LAUNCH_ON) {                                   // C1a: the launch list refreshes only on a visible Assessments
+    window.addEventListener("hashchange", onLaunchRoute);
+    document.addEventListener("visibilitychange", onLaunchVisibility);
+  }
   // monitoring on: the events stop refreshing while the page is hidden, and refresh at once when it is back in view
   if (MONITORING_ON) { document.addEventListener("visibilitychange", onMonVisibility); }
   state.sub(render);

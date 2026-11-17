@@ -845,9 +845,9 @@ def test_negative_controls_whole_suite_legs(real_fold_flag):
     assert any("operator" in b for b in integrity(_perturb_on_leg(text, "apps/sigil/tests/ -rs", "apps/sigil/tests/ -rs || true")))
     assert any("operator" in b for b in integrity(_perturb_on_leg(text, "apps/sigil/tests/ -rs", "apps/sigil/tests/ -rs; true")))
     assert any("continue-on-error" in b for b in integrity(_perturb_on_leg(
-        text, "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    continue-on-error: true\n")))
+        text, "    timeout-minutes: 45\n", "    timeout-minutes: 45\n    continue-on-error: true\n")))
     assert any("job-level `if:`" in b for b in integrity(_perturb_on_leg(
-        text, "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    if: false\n")))
+        text, "    timeout-minutes: 45\n", "    timeout-minutes: 45\n    if: false\n")))
     assert any("step-level `if:`" in b for b in integrity(_perturb_on_leg(text, _ON_STEP, _ON_STEP + "        if: false\n")))
     assert any("set +e" in b for b in integrity(_perturb_on_leg(text, _ON_LINE, "          set +e\n" + _ON_LINE)))
     # an in-shell export / unset of the fold flag before pytest

@@ -167,6 +167,17 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); flex-wrap: wrap; }
 .cust-offer p { margin: 2px 0 0; }
 
+/* C1a — launching and controlling an assessment (Assessments) */
+.cust-launch { margin: 6px 0; }
+.cust-launch .row, .cust-launch-item .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+.cust-launch-item { padding: 8px 0; border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); }
+.cust-launch-status { margin: 0 0 4px; font-weight: 600; }
+.cust-launch-picker p { margin: 6px 0; }
+.cust-launch-choice { display: flex; align-items: center; gap: 10px; margin: 6px 0; flex-wrap: wrap; }
+.cust-launch-confirm p { margin: 6px 0; }
+.cust-launch-note { margin: 8px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--warn, #d9b34a); }
+.cust-launch-note p { margin: 0 0 6px; }
+#cust-launch-other, #cust-launch-done { margin-top: 16px; }
 /* C4 — the Monitoring (AEGIS) screen: host states, the in-place turn-off confirm, the events table */
 .cust-badge-on     { color: var(--ok, #6cd08a); border-color: var(--ok, #6cd08a); }
 .cust-badge-off    { opacity: 0.75; }
