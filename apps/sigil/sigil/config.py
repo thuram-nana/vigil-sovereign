@@ -361,6 +361,18 @@ def customer_team_ui_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_TEAM_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_overview_enabled() -> bool:
+    """True iff the customer app's home screen is the fuller Overview (`VIGIL_CUSTOMER_OVERVIEW` affirmative; C7):
+    compact summary cards that pull from the SAME session-org-scoped reads the full screens use — credits available
+    (billing), verified, expired and awaiting hosts (assets), authorized assessments and their findings (assessments),
+    monitoring (monitoring, only while that screen is on) and unread notifications (the bell's read) — each card
+    opening its full screen. Every read is the server's own tenant-scoped one (the UI never sends an org id); a card whose read a role
+    may not make degrades to an honest line, never an error, and no card ever shows an estimate, a predicted cost or an
+    engine name. OFF by default: the home screen is the Account-only dashboard exactly as before (byte-identical). Read
+    when the customer edge starts (it is written into the page), so a change takes effect at the edge's next start."""
+    return (os.environ.get("VIGIL_CUSTOMER_OVERVIEW") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_ios_install_banner_enabled() -> bool:
     """True iff the customer app shows iPhone and iPad visitors a dismissible "Share → Add to Home Screen" banner and
     carries the iOS home-screen tags (`VIGIL_CUSTOMER_IOS_INSTALL_BANNER` affirmative). OFF by default, and it stays

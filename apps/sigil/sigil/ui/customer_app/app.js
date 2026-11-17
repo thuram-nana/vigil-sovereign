@@ -57,6 +57,11 @@
  * members (GET api/customer/members) and lets the founder or an admin add an existing VIGIL account by its email, change
  * a member's role and remove a member (confirmed in the page). Off, #/team is the "being wired" card it always was and
  * nothing is fetched.
+ * OVERVIEW. When the edge has the fuller Overview on (data-overview="1", VIGIL_CUSTOMER_OVERVIEW), the home screen (#/)
+ * shows summary cards — credits available, verified and lapsed hosts, assessments and their findings, monitoring (while
+ * that screen is on) and unread notifications — each read from the SAME session-scoped read its full screen uses and
+ * each opening that screen; a card whose read a role may not make says so plainly. Off, the home screen is the Account
+ * card exactly as before and none of those reads is made.
  */
 (function () {
   "use strict";
@@ -577,7 +582,14 @@
   }
 
   // ---- views: logged in ---------------------------------------------------------------------------
+  // C7: the home screen is the fuller Overview when the edge has it on (data-overview="1", VIGIL_CUSTOMER_OVERVIEW).
+  // Off (the default), viewDashboard returns the exact Account-only screen below, node-for-node as before — the same
+  // top-of-function gate viewAssessments uses for LAUNCH_ON, so the router and every test that stubs viewDashboard
+  // see no change.
+  var OVERVIEW_ON = pageFlag("overview");
+
   function viewDashboard() {
+    if (OVERVIEW_ON) { return viewOverview(); }
     var w = state.get().who || {};
     var body = h("div", {}, [
       h("h2", { text: "Overview" }),
@@ -588,6 +600,120 @@
         + "panels come online. Every panel is scoped to this workspace by the server." }),
     ]);
     return shell(body, "#/");
+  }
+
+  // The Overview (#/) with the flag on: compact summary cards that bring together what the full screens show, each
+  // pulled from the SAME session-org-scoped read the full screen uses. This UI never sends an org id — the edge
+  // scopes every read to the session org (admit_customer) — so a card shows only what the signed-in member may read:
+  // a card whose read a role may not make (a billing role has no view of findings, say) degrades to an honest line,
+  // an empty read reads as "none yet", and an unreachable read as "could not load" — never a raw error. No card ever
+  // shows an estimate, a predicted cost or an engine name; the only amount shown is credits the customer holds.
+  function viewOverview() {
+    var w = state.get().who || {};
+    // One context per render: the route it was drawn for (each async fill checks the customer is still there) and
+    // whether a card already found the session ended (so sign-in is asked for once, not once per card).
+    var view = { at: here(), ended: false };
+    var cards = [
+      VUI.card("Account", null, [kv("Signed in as", w.username), kv("Workspace", w.org_id)]),
+      overviewCard(view, "Credits", API + "/billing", "Billing", creditsFill),
+      overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
+      overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
+    ];
+    // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
+    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
+    cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
+    var body = h("div", {}, [
+      h("h2", { text: "Overview" }),
+      h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
+        + "this workspace by the server. Open any card for its full screen." }),
+      h("div.cust-grid", {}, cards),
+    ]);
+    return shell(body, "#/");
+  }
+
+  // One async summary card: render the card + a loading holder now, then fetch its OWN tenant-scoped read and fill it.
+  // A 401 means the session ended: the first card to see it asks who is signed in and routes to sign-in, the others
+  // stand down. A 403 is the honest role line; anything else (a read this deployment does not serve, a network
+  // failure) is an honest "could not load" line — never a raw error and never the server's own words. A read that
+  // resolves after the customer left the screen changes nothing.
+  function overviewCard(view, title, path, label, fill) {
+    var holder = h("div.cust-ov-cell", {}, loadingHolder("Loading…"));
+    (async function () {
+      var data;
+      try { data = await VUI.getJSON(path); }
+      catch (e) {
+        if (here() !== view.at) { return; }
+        if (e && e.status === 401) {
+          if (!view.ended) { view.ended = true; await refreshWho(); nav("#/login"); }
+          return;
+        }
+        var msg = (e && e.status === 403) ? ("Your role does not have access to " + label + ".")
+                                          : ("Could not load " + label + " right now.");
+        return VUI.mount(holder, h("p.cust-muted", { text: msg }));
+      }
+      if (here() !== view.at) { return; }
+      VUI.mount(holder, fill(data));
+    })();
+    return VUI.card(title, null, holder);
+  }
+  // The button that opens a card's full screen (a hash the app routes to).
+  function overviewLink(label, hash) {
+    return h("div.row", {}, [h("button.btn", { type: "button", text: "Open " + label,
+      onClick: function () { nav(hash); } })]);
+  }
+
+  // The per-card bodies. Each reads only what its server read returned, tolerates missing fields, and ends with the
+  // link to its full screen. Credits shows the exact balance the customer holds — never a scan estimate.
+  function creditsFill(d) {
+    var c = (d && d.credits) || {};
+    return h("div", {}, [kv("Available", c.available), overviewLink("Billing", "#/billing")]);
+  }
+  function hostsFill(d) {
+    var assets = (d && d.assets) || [];
+    var verified = 0, expired = 0, pending = 0;
+    assets.forEach(function (a) {
+      if (!a) { return; }
+      if (a.status === "verified") { verified++; }
+      else if (a.status === "expired") { expired++; }
+      else if (a.status === "pending") { pending++; }
+    });
+    var rows = assets.length ? [kv("Verified", verified)]
+                             : [h("p.cust-muted", { text: "No hosts registered yet." })];
+    if (expired) { rows.push(kv("Expired", expired)); }       // a lapsed proof — re-prove it in Assets
+    if (pending) { rows.push(kv("Awaiting proof", pending)); }
+    rows.push(overviewLink("Assets", "#/assets"));
+    return h("div", {}, rows);
+  }
+  function assessFill(d) {
+    var items = (d && d.assessments) || [];
+    var findings = 0;
+    items.forEach(function (a) { findings += (parseInt(a && a.findings, 10) || 0); });
+    var rows = items.length ? [kv("Authorized", items.length), kv("Findings", findings)]
+                            : [h("p.cust-muted", { text: "No authorized assessments yet." })];
+    rows.push(overviewLink("Assessments", "#/assessments"));
+    return h("div", {}, rows);
+  }
+  // The server sends the AEGIS plan only to a member who may manage monitoring; anyone else is told just which hosts are
+  // monitored, so "no plan" is said only to a manager the server told there is none — never guessed from its absence.
+  function monFill(d) {
+    var grants = (d && d.grants) || [];
+    var active = grants.filter(function (g) { return g && g.active; }).length;
+    var plan = d && d.plan;
+    var rows = [kv("Monitored", plan ? (active + " of " + (parseInt(plan.host_slots, 10) || 0)) : active)];
+    if (d && d.can_manage && !plan) { rows.push(h("p.cust-muted", { text: "No active AEGIS plan." })); }
+    rows.push(overviewLink("Monitoring", "#/monitoring"));
+    return h("div", {}, rows);
+  }
+  function ntfFill(d) {
+    var items = (d && d.notifications) || [];
+    var seen = seenSet(), unread = 0;
+    items.forEach(function (n) { if (n && n.id && !seen[n.id]) { unread++; } });
+    var rows = items.length ? [kv("Unread", unread), kv("Total", items.length)]
+                            : [h("p.cust-muted", { text: "No notifications yet." })];
+    // the bell is this card's full screen: the button opens its panel (never closes one already open)
+    rows.push(h("div.row", {}, [h("button.btn", { type: "button", text: "Open notifications",
+      onClick: function () { if (!ntf.open) { toggleNtf(); } } })]));
+    return h("div", {}, rows);
   }
 
   function viewSoon(title) {
