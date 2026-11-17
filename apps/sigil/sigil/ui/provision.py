@@ -2091,7 +2091,15 @@ class Provisioner:
 
     def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                      now: "Optional[float]" = None) -> dict:
-        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership)."""
+        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership), and whether
+        the requester may turn monitoring on or off (``can_manage``: ``manage_monitoring``, decided HERE — the
+        founder or an org_admin — never by the client).
+
+        Only for such a requester, what the Monitoring screen needs to turn monitoring on: ``hosts``, the org's hosts
+        with a CURRENT ownership proof (host + the proof's expiry; never a challenge token), and ``plan``, the org's
+        active monitoring plan (host slots + whether it includes respond + its period end; no price) or None. An
+        org_admin cannot read the assets view (``view_assessments``), so the verified hosts come from here. A role that
+        cannot manage monitoring reads exactly the grants, as before."""
         t = self._now() if now is None else float(now)
         from ..governor.monitoring_authority import MonitoringAuthorityRegistry
         with self._lock:
@@ -2100,7 +2108,27 @@ class Provisioner:
             rows = [{"host": g.host, "mode": g.mode, "not_before": g.not_before, "not_after": g.not_after,
                      "active": reg.active_at(requester_org_id, g.host, now=t) is not None}
                     for g in reg.grants(requester_org_id)]
-        return {"org_id": requester_org_id, "grants": rows}
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            out: dict = {"org_id": requester_org_id, "grants": rows, "can_manage": can_manage}
+            if can_manage:
+                out["hosts"], out["plan"] = self._monitor_setup(requester_org_id, t)
+        return out
+
+    def _monitor_setup(self, org_id: str, now: float) -> "tuple[list[dict], Optional[dict]]":
+        """For ``monitor_list`` (a monitoring manager only): the org's hosts whose ownership proof is current at ``now``
+        (the proof ``grant`` requires) and its ACTIVE monitoring plan as the CATALOG defines it. Caller holds the lock."""
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        hosts = [{"host": a["host"], "expires_at": a["expires_at"]}
+                 for a in AssetOwnershipRegistry(self.store, owner_key=None).assets_overview(org_id, now=now)
+                 if a.get("status") == "verified"]
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            return hosts, None
+        return hosts, {"host_slots": plan.host_slots, "respond": plan.respond, "period_end": float(sub.period_end)}
 
     def monitor_events(self, requester: str, requester_org_id: str, *, ip: str = "", limit: int = 200) -> dict:
         """The SESSION org's drained AEGIS monitoring events (gateway-reported; org-scoped read)."""

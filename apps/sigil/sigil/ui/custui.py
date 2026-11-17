@@ -177,21 +177,24 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     asset URLs in the page stamped with their digests, the build id written into the page and the worker, and the
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
     the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
-    "Continue with Google" button), whether an installed app finishes it through the app hand-off, and whether the
-    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader). Each is a non-secret
-    on/off value and each counts in the build id."""
+    "Continue with Google" button), whether an installed app finishes it through the app hand-off, whether the
+    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), and whether customer
+    monitoring is on (the Monitoring screen: the same VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes, so the
+    screen and its API are never out of step). Each is a non-secret on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
     handoff = google and _config.customer_oidc_handoff_enabled()
     onboarding = _config.customer_onboarding_enabled()
+    monitoring = _config.customer_monitoring_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
                                      _IOS_TAGS_SLOT: _IOS_TAGS if ios else "",
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
-                                     "__VIGIL_ONBOARDING__": "1" if onboarding else "0"})
+                                     "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
+                                     "__VIGIL_MONITORING__": "1" if monitoring else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
