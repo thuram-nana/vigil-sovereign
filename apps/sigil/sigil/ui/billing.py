@@ -73,7 +73,6 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
         "active": active is not None,                   # is the plan live right now (in-period + active)?
         "now": now,
     }
-    from .. import config
     if config.billing_reversals_enabled():
         # W5: a billing HOLD (credits owed after a chargeback or refund) — in credits; absent while reversals are off
         from ..governor.billing_reversal import BillingReversalLedger
