@@ -58,6 +58,10 @@ from .monitoring_authority import (
     MonitoringAuthority, MonitoringMode, SignedMonitoringAuthority, monitoring_authority_signing_bytes,
     sign_monitoring_authority, verify_monitoring_authority,
 )
+from .connected_repo_record import (
+    BlockThreshold, ConnectedRepoRecord, SignedConnectedRepoRecord, check_repo as check_connected_repo,
+    connected_repo_signing_bytes, repo_owner_name, sign_connected_repo_record, verify_connected_repo_record,
+)
 from .engagement_completion import (
     EngagementCompletion, EngagementOutcome, SignedEngagementCompletion,
     engagement_completion_signing_bytes, sign_engagement_completion, verify_engagement_completion,
@@ -110,6 +114,8 @@ __all__ = [
     "sign_engagement_authority", "verify_engagement_authority",
     "MonitoringAuthority", "MonitoringMode", "SignedMonitoringAuthority", "monitoring_authority_signing_bytes",
     "sign_monitoring_authority", "verify_monitoring_authority",
+    "BlockThreshold", "ConnectedRepoRecord", "SignedConnectedRepoRecord", "check_connected_repo",
+    "connected_repo_signing_bytes", "repo_owner_name", "sign_connected_repo_record", "verify_connected_repo_record",
     "EngagementCompletion", "EngagementOutcome", "SignedEngagementCompletion",
     "engagement_completion_signing_bytes", "sign_engagement_completion", "verify_engagement_completion",
     "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",

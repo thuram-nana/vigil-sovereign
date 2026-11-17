@@ -250,6 +250,18 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def redpen_enabled() -> bool:
+    """True iff the Red-Pen (code-review) surfaces are ON (`VIGIL_REDPEN_ENABLED` affirmative). OFF by default
+    (mirrors `customer_monitoring_enabled`): with it off EVERY Red-Pen route / action / worker / check-run / schedule
+    is absent (404 exactly as an unknown route), the GitHub App egress refuses, `reserve_redpen_review` refuses, no
+    connected-repo record is minted and no installation token is ever requested — so the server is byte-identical to a
+    build without Red-Pen. The master flag over the whole Red-Pen pipeline (the GitHub App auth, the connected-repo
+    registry, per-repo settings + review metering, the PR-review worker and the Code screen). Read at call time.
+    Even when ON, each leg still fails closed unless its own credential is provisioned (the App id + private key, the
+    webhook secret) — the owner registers the real GitHub App (with `checks:write`) as the last step before go-live."""
+    return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_pause_resume_enabled() -> bool:
     """True iff the customer pause/resume launch routes are ON (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`
     affirmative). OFF by default (pause/resume PR-4b): the edge routes and provisioner actions are absent (404)
@@ -849,6 +861,15 @@ STRIPE_EGRESS_ALLOWLIST = frozenset({"api.stripe.com"})
 # The ONLY host a Stripe hosted-checkout link may point at (`billing._https_link_on`, exact match). A link pin, never
 # fetched — it is deliberately NOT in the egress allowlist above.
 STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
+
+
+# --- GitHub App OUTBOUND egress (Red-Pen R2 — SHIPPED OFF BY DEFAULT) --------------------
+# The outbound host allowlist for the customer-facing GitHub App API calls in `governor.github_app_egress`
+# (App-JWT -> installation-token exchange, repository list, check-run write), enforced BEFORE any socket opens
+# (mirrors STRIPE_EGRESS_ALLOWLIST above). Gated DEFAULT-OFF on the master flag `redpen_enabled()` AND on the App
+# credentials (`VIGIL_GITHUB_APP_ID` + `VIGIL_GITHUB_APP_PRIVATE_KEY`/SSM): unset ⇒ nothing is wired and no GitHub
+# egress exists. There is no API-base override, so the credential-holding egress can only ever reach this host.
+GITHUB_APP_EGRESS_ALLOWLIST = frozenset({"api.github.com"})
 
 
 def customer_oidc_enabled() -> bool:
