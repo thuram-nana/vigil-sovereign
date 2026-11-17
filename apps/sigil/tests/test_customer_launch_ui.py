@@ -619,12 +619,35 @@ out.html = ser(finishedLaunches());
     assert "7.000" not in out["html"] and "0.000" not in out["html"]  # the failed launch's stale figure never shows
 
 
+#: The pre-C1a `viewAssessments`, captured verbatim from the branch base (BASE_REF) as a committed golden so this
+#: byte-identical proof needs no git history (CI checks out shallow — `git show <BASE_REF>` is not available there).
+#: If a legitimate change to viewAssessments lands on the base, re-capture this with
+#: `git show <base>:apps/sigil/sigil/ui/customer_app/app.js` + the _fn extractor.
+_BASE_VIEWASSESSMENTS = r"""  function viewAssessments() {
+    return dataView("#/assessments", "Assessments", API + "/assessments", function (d) {
+      var items = (d && d.assessments) || [];
+      var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
+        + "Launching a new assessment arrives with the run driver." });
+      if (!items.length) {
+        return h("div", {}, [note, h("div.card.cust-soon", { text: "No authorized assessments yet — register and "
+          + "verify an asset, then the owner authorizes the target." })]);
+      }
+      var rows = items.map(function (a) {
+        return h("div.card", {}, [
+          h("div.cust-kv", {}, [h("span.k", { text: a.host }), h("span", { text: (a.findings || 0) + " finding(s)" })]),
+          h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+            onClick: function () { loadFindings(a.slug, a.host); } })]),
+        ]);
+      });
+      return h("div", {}, [note, h("div.cust-grid", {}, rows), h("div#assess-findings")]);
+    });
+  }"""
+
+
 def test_with_the_flag_off_the_assessments_view_is_byte_identical():
-    # viewAssessments with LAUNCH_ON false must render exactly what the base build renders for the same inputs.
-    base = subprocess.run(["git", "-C", str(APP.parents[3]), "show", f"{BASE_REF}:apps/sigil/sigil/ui/customer_app/app.js"],
-                          capture_output=True, text=True, timeout=30)
-    assert base.returncode == 0, base.stderr
-    base_view = _fn(base.stdout, "viewAssessments")
+    # viewAssessments with LAUNCH_ON false must render exactly what the pre-C1a build renders for the same inputs:
+    # the current view is run with the flag off and its output compared, node-for-node, to the golden base view.
+    base_view = _BASE_VIEWASSESSMENTS
     cur_view = _fn(APP_JS.read_text(encoding="utf-8"), "viewAssessments")
     inputs = r"""
 var cases = [{ assessments: [{ slug: "cust_a", host: "a.example", findings: 2 }, { slug: "cust_b", host: "b.example" }] },
