@@ -206,6 +206,10 @@ CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-creden
 # Whether each customer account has finished or skipped the onboarding tour (ui/onboarding_store.py): a UI preference,
 # never money or authority — one hashed-name JSON file per account. Losing it only shows the tour once more.
 CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
+# C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
+# a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
+# reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
+CUSTOMER_LAUNCHES_DIR = _customer / "launches"
 # Slice E3c — step-up MFA. How recently a customer must have proven a fresh factor (TOTP code / passkey
 # assertion) for a sensitive op (launch / target-verify / member grant+revoke) to proceed when enforcement
 # is ON. The session's `mfa_at` is stamped by the edge on a fresh factor proof; the provisioner refuses a
@@ -312,6 +316,19 @@ def customer_onboarding_enabled() -> bool:
     monitoring screen). Read when the customer edge starts (it is written into the page), so a change takes effect at
     the edge's next start."""
     return (os.environ.get("VIGIL_CUSTOMER_ONBOARDING") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_launch_ui_enabled() -> bool:
+    """True iff customers launch and control assessments from the app (`VIGIL_CUSTOMER_LAUNCH_UI` affirmative; C1a):
+    the Assessments screen offers Launch on each verified host (one of the depths the server offers, then
+    ``launch/reserve`` and ``launch/start``) and lists the org's launches with the controls the server would accept
+    (Start and Cancel before a launch starts; Pause and Resume while it runs, when VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED
+    is on too), read from the edge's ``api/customer/launches`` route; the provisioner keeps each lease reserved while
+    it is on (``ui/customer_launches.py``) so the app can start or cancel it after a reload.
+    OFF by default: that route and its provisioner read are absent (404), nothing is kept, and the Assessments screen
+    is exactly as before. Read by the customer edge when it starts (it is written into the page) and by the cockpit
+    on each request."""
+    return (os.environ.get("VIGIL_CUSTOMER_LAUNCH_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_ios_install_banner_enabled() -> bool:

@@ -1669,6 +1669,13 @@ class Handler(BaseHTTPRequestHandler):
                                       mfa_at=body.get("mfa_at"))
             return p.launch_resume(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
                                    mfa_at=body.get("mfa_at"))
+        # C1a — the session org's launches for the customer app's Assessments screen. Absent (unknown action -> 404)
+        # unless VIGIL_CUSTOMER_LAUNCH_UI is on, the same flag that gates the edge route; org from the edge SESSION.
+        if action == "launch_list":
+            from .. import config as _config
+            if not _config.customer_launch_ui_enabled():
+                return None
+            return p.customer_launches(requester, str(body.get("org_id", "")), ip=ip)
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
         if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):

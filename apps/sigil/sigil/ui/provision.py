@@ -1409,11 +1409,59 @@ class Provisioner:
             raise ProvisionDenied(str(r.get("error") or "launch reservation refused"))
         self._audit("launch_reserve", requester=requester, org_id=requester_org_id, target=host,
                     outcome="reserved", critical=True)
+        self._keep_launch(r["lease"], now=t)          # C1a: the app can start / cancel it after a reload (flag on)
         out = {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
                                  "lease", "trust_root") if k in r}
         if pid:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
+
+    def _keep_launch(self, signed_lease, *, now: float) -> None:
+        """C1a — while VIGIL_CUSTOMER_LAUNCH_UI is on, keep a just-reserved lease so the customer app can start or
+        cancel it after a reload (``ui/customer_launches``). Best effort: the reservation stands and its lease is in
+        the reply either way, so a failure here is logged and never raised — refusing the reply would strand the
+        credits the gate has just reserved."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            return
+        from . import customer_launches as _cl
+        try:
+            with self._lock:
+                _cl.remember(signed_lease, now=now)
+        except Exception as e:  # noqa: BLE001 — a cache write never fails a reservation that already happened
+            import logging
+            logging.getLogger(__name__).warning("a reserved launch could not be kept for the customer app (%s)",
+                                                type(e).__name__)
+
+    def _drop_launch(self, doc) -> None:
+        """C1a — forget the kept lease of a launch that was started (the seam holds it now) or cancelled, so the app
+        never offers to start it again. Best effort, like ``_keep_launch``; off with the flag."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            return
+        from . import customer_launches as _cl
+        try:
+            with self._lock:
+                _cl.forget(str(doc.org_id), str(doc.engagement_slug), str(doc.nonce))
+        except Exception as e:  # noqa: BLE001 — a cache write never fails the start / cancel it follows
+            import logging
+            logging.getLogger(__name__).warning("a started or cancelled launch could not be dropped from the "
+                                                "customer app's kept reservations (%s)", type(e).__name__)
+
+    def _launch_choices(self, org_id: str) -> "list[dict]":
+        """C1a — what the app's Launch may offer ``org_id``: exactly what ``launch_reserve`` accepts from it, and never
+        an amount. Each offered tiered launch product as ``{product_id, depth}`` (its units are never projected); a
+        locked trial-preview org only the trial product (``_trial_launch_check`` refuses every other); with no tiered
+        product on offer, the one server-decided default launch (``product_id`` "")."""
+        from .. import config
+        from ..governor import catalog
+        products = catalog.launch_products()
+        if self._preview_locked(org_id):
+            trial = config.trial_product_id()
+            return [{"product_id": p.product_id, "depth": p.run_tier} for p in products if p.product_id == trial]
+        if not products:
+            return [{"product_id": "", "depth": None}]
+        return [{"product_id": p.product_id, "depth": p.run_tier} for p in products]
 
     def _trial_launch_refuse(self, requester: str, org_id: str, host: str, reason: str, text: str) -> "NoReturn":
         self._audit("launch_reserve", requester=requester, org_id=org_id, target=host,
@@ -1817,6 +1865,7 @@ class Provisioner:
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refund_held", reason=PLAN_DEBIT_PRUNED,
                         critical=True)
+            self._drop_launch(_cdoc)                 # C1a: cancelled (no seam marker yet): never offered to start again
             raise ProvisionDenied(LAUNCH_REFUND_HELD_DETAIL)
         if r.get("refused"):
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
@@ -1826,6 +1875,7 @@ class Provisioner:
         if not r.get("ok"):
             msg = str(r.get("error") or "launch cancel refused")
             raise ProvisionDenied(msg + (" (retry)" if r.get("retry") else ""))
+        self._drop_launch(_cdoc)                     # C1a: settled one way or another: no longer a kept reservation
         if r.get("action") == "launch_already_settled":
             if r.get("rolled_forward"):
                 # this cancel FINISHED an earlier settle a crash interrupted — at that settle's RECORDED amounts
@@ -1882,6 +1932,7 @@ class Provisioner:
             raise ProvisionDenied(str(r.get("error") or "launch start refused"))
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
+        self._drop_launch(lease_doc)                 # C1a: the seam holds it now (a later re-lease never revives it)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
 
     def launch_pause(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
@@ -2169,6 +2220,27 @@ class Provisioner:
             lambda s, o: _assess.assessment_findings(
                 s, o, now=_t.time(), preview=self._preview_locked(o),
                 can_buy=self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")))
+
+    def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
+                          now: "Optional[float]" = None) -> dict:
+        """C1a — the SESSION org's assessment launches for the customer app (``ui/customer_launches.launches``): those
+        reserved, running or paused with the actions the server would accept, those that finished, and what Launch
+        may offer. Absent unless VIGIL_CUSTOMER_LAUNCH_UI is on. Gated like the assessments read
+        (``admit_customer(view_assessments)`` on the session org, no global leg); the actions, the launch choices and
+        each launch's signed lease (what start / cancel / pause / resume must present) are included only for a member
+        who may run assessments (``run_engagement``). Credits only: no amount, no units, no estimate."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            raise ProvisionDenied("launching assessments from the app is not enabled")
+        t = self._now() if now is None else float(now)
+        from . import customer_launches as _cl
+
+        def project(store, org: str) -> dict:
+            control = self.orgs.admit_customer(username=requester, org_id=org, permission="run_engagement")
+            return _cl.launches(store, org, now=t, trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None),
+                                control=control, pause_resume=config.customer_pause_resume_enabled(),
+                                choices=self._launch_choices(org) if control else [])
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
 
     def _preview_locked(self, org_id: str) -> bool:
         """Pricing S5: is this org's finding detail locked (trial preview, not unlocked)? Server-side only."""
