@@ -342,9 +342,10 @@ def customer_checkout_enabled() -> bool:
     """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
     default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
     and nothing ever posts to the payment processor. Even when ON, checkout still refuses unless the owner has
-    provisioned the processor named by VIGIL_BILLING_PROVIDER (unset = Flutterwave: VIGIL_BILLING_WEBHOOK_SECRET +
-    VIGIL_FLW_SECRET_KEY; stripe: the Stripe adapter opt-in, VIGIL_STRIPE_WEBHOOK_SECRET, VIGIL_STRIPE_SECRET_KEY and
-    VIGIL_STRIPE_API_VERSION; any other value: not configured) — the amount is always the OWNER CATALOG's, and
+    provisioned the processor named by VIGIL_BILLING_PROVIDER (unset = Stripe, the default: the Stripe adapter
+    opt-in VIGIL_BILLING_ENABLE_STRIPE, VIGIL_STRIPE_WEBHOOK_SECRET, VIGIL_STRIPE_SECRET_KEY and
+    VIGIL_STRIPE_API_VERSION; flutterwave: VIGIL_BILLING_WEBHOOK_SECRET + VIGIL_FLW_SECRET_KEY; any other value:
+    not configured) — the amount is always the OWNER CATALOG's, and
     credit is granted ONLY by the verified inbound webhook drain, never here."""
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 

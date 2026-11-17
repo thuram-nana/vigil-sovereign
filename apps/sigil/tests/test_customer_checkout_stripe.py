@@ -1,9 +1,10 @@
 """Stripe parity ST-9: the customer checkout picks its processor from VIGIL_BILLING_PROVIDER.
 
-Unset or `flutterwave` is the Flutterwave provider exactly as before; `stripe` builds the Stripe provider only when
-every precondition of the Stripe lane holds; any other value is "not configured" and never falls back to the other
-processor (which would take a payment the configured drain does not credit). The customer-facing checkout edge
-(admit, offers, the second-plan guard, the AEGIS monitoring plan on its own flag) is unchanged when Stripe serves it.
+Unset (the DEFAULT) or `stripe` builds the Stripe provider when every precondition of the Stripe lane holds;
+`flutterwave` still selects the retained Flutterwave provider (kept, not deleted, development paused); any other
+value is "not configured" and never falls back to the other processor (which would take a payment the configured
+drain does not credit). The customer-facing checkout edge (admit, offers, the second-plan guard, the AEGIS
+monitoring plan on its own flag) is unchanged when Stripe serves it.
 """
 from __future__ import annotations
 
@@ -166,14 +167,49 @@ def test_stripe_with_an_unrecognisable_key_or_only_flutterwave_secrets_is_refuse
     assert p._checkout_provider() is None                         # stripe chosen: Flutterwave secrets never serve
 
 
-@pytest.mark.parametrize("value", [None, "", "flutterwave", " Flutterwave "])
-def test_unset_or_flutterwave_is_the_flutterwave_provider(monkeypatch, value):
-    from sigil.governor.billing import FlutterwaveBillingProvider
-    _stripe_on(monkeypatch)                                       # Stripe fully set: still not used
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_unset_or_blank_billing_provider_defaults_to_the_stripe_provider(monkeypatch, value):
+    """The default-selection guard: VIGIL_BILLING_PROVIDER unset (or blank) selects Stripe — Stripe is the default
+    now, not Flutterwave. Flutterwave fully provisioned alongside is still not used."""
+    from sigil.governor.billing import StripeBillingProvider
+    _on(monkeypatch)
+    _stripe_on(monkeypatch)                                       # Stripe fully provisioned
     if value is None:
         monkeypatch.delenv("VIGIL_BILLING_PROVIDER")
     else:
         monkeypatch.setenv("VIGIL_BILLING_PROVIDER", value)
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "flw-" + "x")   # Flutterwave also provisioned: never chosen
+    monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "flw-" + "key")
+    p, *_rest = _provisioner()
+    assert isinstance(p._checkout_provider(), StripeBillingProvider)
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_the_default_stripe_lane_fails_closed_without_stripe_secrets_and_never_falls_back(monkeypatch, value):
+    """Unset ⇒ Stripe, and with no Stripe secrets it fails closed to None exactly as the old Flutterwave default
+    did — never a silent fall-back to Flutterwave even when the Flutterwave secrets are present (which would take a
+    payment the Stripe drain does not credit)."""
+    from sigil.ui.provision import ProvisionDenied
+    _on(monkeypatch)                                              # the Stripe env is left unset by _stripe_env
+    if value is None:
+        monkeypatch.delenv("VIGIL_BILLING_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("VIGIL_BILLING_PROVIDER", value)
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "flw-" + "x")   # Flutterwave fully provisioned
+    monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "flw-" + "key")
+    p, admin, _t, org, _o, _w = _provisioner()
+    assert p._checkout_provider() is None
+    with pytest.raises(ProvisionDenied, match="not configured"):
+        p.billing_checkout(admin, org, "vigil_topup_1k")
+
+
+@pytest.mark.parametrize("value", ["flutterwave", " Flutterwave "])
+def test_explicit_flutterwave_still_selects_the_flutterwave_provider(monkeypatch, value):
+    """Flutterwave is kept (code not deleted): an explicit VIGIL_BILLING_PROVIDER=flutterwave still builds the
+    Flutterwave provider, even with Stripe fully provisioned."""
+    from sigil.governor.billing import FlutterwaveBillingProvider
+    _stripe_on(monkeypatch)                                       # Stripe fully set: still not used
+    monkeypatch.setenv("VIGIL_BILLING_PROVIDER", value)
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "flw-" + "x")
     monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "flw-" + "key")
     p, *_rest = _provisioner()

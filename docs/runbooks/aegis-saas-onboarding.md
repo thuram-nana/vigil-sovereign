@@ -93,7 +93,7 @@ VIGIL_CUSTOMER_MONITORING_ENABLED=1 sigil monitoring-reconcile
 
 ### Down-event routing and renewal grace (AE-5 fold 2)
 - Cancel / payment_failed events are routed by the FULL catalog (flag-independent): a known AEGIS price only ever
-  touches the monitoring line, never the credit plan. The Stripe reference adapter (disabled by default) needs
+  touches the monitoring line, never the credit plan. The Stripe adapter (the default provider) needs
   `metadata.price_id` on the subscription so `invoice.payment_failed` carries the AEGIS price; without it the event
   falls back to the pre-AEGIS (credit-line) behaviour.
 - When a monitoring period ends with no down event, grants (clamped to `period_end`, so already inert at the

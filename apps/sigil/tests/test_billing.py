@@ -457,8 +457,8 @@ def test_stripe_secret_fetcher_and_mode_required():
                                   enable_reference_adapter=True)
 
 
-# ---- Stripe disabled-by-default guard ----------------------------------------------------------------
-def test_stripe_disabled_by_default():
+# ---- Stripe adapter construction opt-in (money-safety belt, retained now that Stripe is the default) -------
+def test_stripe_adapter_requires_an_explicit_construction_opt_in():
     fetch = lambda kind, oid: {}                                                    # noqa: E731
     with pytest.raises(UnsupportedCapability):
         StripeBillingProvider("whsec_x", fetcher=fetch, expected_mode="test")       # no opt-in -> refuses
