@@ -65,7 +65,7 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
     pos = meter.position(org_id, now)
     sub = subs.subscription(org_id)                     # current subscription (may be past_due/lapsed) — display
     active = subs.active_subscription(org_id, now)      # the ACTIVE + in-period one (None when lapsed/dunning)
-    out = {
+    out: dict[str, Any] = {
         "org_id": org_id,
         "credits": {"available": pos.available, "persistent": pos.persistent, "plan_live": pos.plan_live},
         "wallet": {"granted": bal.granted, "debited": bal.debited, "available": bal.available},
@@ -73,6 +73,11 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
         "active": active is not None,                   # is the plan live right now (in-period + active)?
         "now": now,
     }
+    if config.billing_reversals_enabled():
+        # W5: a billing HOLD (credits owed after a chargeback or refund) — in credits; absent while reversals are off
+        from ..governor.billing_reversal import BillingReversalLedger
+        owed = BillingReversalLedger(store, wallet=wallet).owed(org_id)
+        out["hold"] = {"on_hold": owed > 0, "owed": owed}
     if config.metered_billing_enabled():
         out["exact_available_mc"] = bal.exact_available_mc
         out["exact_available"] = bal.exact_available_mc // 1000   # floor (display never shows more than is held)

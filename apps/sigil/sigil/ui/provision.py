@@ -2475,6 +2475,26 @@ class Provisioner:
                               "title": "Out of assessment credits",
                               "body": "You have no assessment credits available. Top up to launch new assessments.",
                               "ts": None})
+            # W5 (VIGIL_BILLING_REVERSALS): a billing HOLD — credits owed after a reversed payment (the overview
+            # carries it). Stable id: it is shown once per hold, until a top-up repays it.
+            hold = ov.get("hold") or {}
+            if hold.get("on_hold"):
+                items.append({"id": "billing:hold", "kind": "billing", "severity": "high",
+                              "title": "Billing on hold",
+                              "body": (f"A payment was reversed and {int(hold.get('owed') or 0)} credits are owed. "
+                                       "Top up to repay them; new assessments can start again once they are repaid."),
+                              "ts": None})
+            # W5 (VIGIL_BILLING_LOW_BALANCE_ALERT): the low-balance notice, once per crossing (its id carries the last
+            # top-up, so the next top-up re-arms it). A threshold in credits — never an estimate.
+            if _cfg.low_balance_alert_enabled():
+                from ..governor.low_balance import low_balance_of
+                lb = low_balance_of(self.store, requester_org_id, now=t)
+                if lb is not None:
+                    items.append({"id": "billing:low_balance:" + lb.key, "kind": "billing", "severity": "medium",
+                                  "title": "Low credit balance",
+                                  "body": (f"Your available credits are below {lb.threshold}. Top up to keep your "
+                                           "assessments running."),
+                                  "ts": None})
 
         # 3) Monitoring alerts — AEGIS-SaaS. monitor_events self-gates on the default-OFF flag AND
         #    admit_customer, raising ProvisionDenied when off or not permitted; we treat that as "no source"

@@ -366,6 +366,9 @@ class LaunchGate:
             if not self._authority_ok(h, slug, t):
                 return (f"no current owner-signed engagement authority for {h} (org {oid}) — the owner must "
                         f"authorize this target (offense_authority stays at the owner key)")
+            held = self._billing_hold_refusal(oid)     # W5: an org that owes credits after a reversal is on hold
+            if held is not None:
+                return held
             acct = self.postpaid.account(oid)
             if acct is not None and acct.is_enabled():
                 # POSTPAID (PP-1): the credit conjunct is the owner-signed credit LINE, not the prepaid balance —
@@ -420,13 +423,24 @@ class LaunchGate:
                 re = self._one_launch_locked(held, kp.public_key_b64, oid, h, slug, non, ix, now_ts=now_ts)
             if re is not None:
                 return {"ok": False, "error": re}
-            if depth is not None and not one:
+            reversals_on = config.billing_reversals_enabled()
+            if (depth is not None or reversals_on) and not one:
                 # W2c-1: a metered reserve is sized from the org's EXACT balance, whose remainder only a settle moves
                 # (under the cross-process settle lock), so it holds that lock from the sizing through the debit. E7
-                # took it above already.
+                # took it above already. W5: a payment reversal debits the wallet from the billing drain's process
+                # under the same lock, so with reversals on every reserve holds it.
                 locked = self._settle_lock_into(held)
                 if locked is not None:
                     return locked
+            if reversals_on:
+                # W5: re-check, under the settle lock, what a reversal in another process may have changed since
+                # _gated(): the hold, and the balance a flat prepaid reserve debits without re-sizing
+                hold = self._billing_hold_refusal(oid)
+                if hold is not None:
+                    return {"ok": False, "error": hold}
+                if depth is None and not self.postpaid.is_postpaid(oid) and self.meter.available(oid, now_ts) < u:
+                    return {"ok": False, "error": f"insufficient credits: need {u}, have "
+                            f"{self.meter.available(oid, now_ts)}"}
             acct = self.postpaid.account(oid)
             split: "dict[str, Any]" = {}
             if acct is not None and acct.is_enabled():
@@ -649,6 +663,27 @@ class LaunchGate:
                     "moment"}
         return None
 
+    def _billing_hold_refusal(self, oid: str) -> Optional[str]:
+        """W5 — the customer-facing refusal while ``oid`` is on a billing HOLD (it owes credits after a chargeback or a
+        refund, ``governor.billing_reversal``), else None. None whenever reversals are off (no read). A hold that cannot
+        be read refuses (fail-closed)."""
+        from .. import config
+        if not config.billing_reversals_enabled():
+            return None
+        try:
+            from ..governor.billing_reversal import BillingReversalLedger
+            owed = BillingReversalLedger(self.store, owner_key=self.owner_key, trusted_pubkey=self._owner_pub(),
+                                         wallet=self.wallet).owed(oid)
+        except Exception as e:  # noqa: BLE001 — an unreadable hold never green-lights billable work
+            import logging
+            logging.getLogger(__name__).warning("billable work was refused: the billing hold could not be read (%s)",
+                                                type(e).__name__)
+            return "billing cannot be checked right now; please retry in a moment"
+        if owed <= 0:
+            return None
+        return (f"billing is on hold: a payment was reversed and {owed} credits are owed; top up to repay them and "
+                f"continue")
+
     @staticmethod
     def metered_use_mc(slug: str, nonce: str) -> int:
         """W2c-1 — what metered launch ``(slug, nonce)`` used, EXACTLY, in milli-credits: the sum of its meter's
@@ -707,9 +742,11 @@ class LaunchGate:
         the spine (a postpaid credit line is not extended yet — the run pauses instead); the seam has not marked it
         settled; and the wallet holds ``credits``. The extension is decided and written under ``self._lock`` and the
         cross-process ``settle_lock``. W2c-1: "holds ``credits``" is the wallet's EXACT balance — less the org's
-        sub-credit usage remainder — in whole credits (``Balance.spendable``). Returns ``{ok, k, credits, extended,
-        reserved_base_known}`` or ``{ok: False, error, insufficient?}`` (``insufficient``: the wallet cannot cover it —
-        the caller pauses the run, W3)."""
+        sub-credit usage remainder — in whole credits (``Balance.spendable``). W5: refused, under the same locks, while
+        the org is on a billing HOLD (it owes credits after a reversal) — ``{ok: False, insufficient: True,
+        billing_hold: True, reason: "billing_hold"}``: the gateway stops the run exactly as when the wallet is empty,
+        and W3 pauses it for the hold. Returns ``{ok, k, credits, extended, reserved_base_known}`` or ``{ok: False,
+        error, insufficient?}`` (``insufficient``: the wallet cannot cover it — the caller pauses the run, W3)."""
         from contextlib import ExitStack
         from .. import config
         from ..governor.launch_reservations import extension_entry_id
@@ -765,6 +802,13 @@ class LaunchGate:
                     return {"ok": False, "retry": True, "error": "this launch's pause state cannot be read"}
             except (OSError, ValueError):
                 return busy
+            hold = self._billing_hold_refusal(oid)   # W5: decided under the settle lock the reversals write under
+            if hold is not None:
+                # `insufficient` keeps the model gateway's terminal stop (credits exhausted, never retried); `reason`
+                # tells W3 why: the run pauses for the hold, and a top-up that repays the arrears lifts it
+                from ..governor.billing_reversal import BILLING_HOLD
+                return {"ok": False, "insufficient": True, "billing_hold": True, "reason": BILLING_HOLD,
+                        "error": hold}
             k = 1
             while self.wallet.has_debit_entry(oid, extension_entry_id(s, non, k)):
                 k += 1

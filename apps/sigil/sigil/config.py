@@ -399,6 +399,24 @@ def billing_topup_alarm_enabled() -> bool:
     return (os.environ.get("VIGIL_BILLING_TOPUP_ALARM") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def billing_reversals_enabled() -> bool:
+    """W5 — chargebacks, refunds and the billing hold (``VIGIL_BILLING_REVERSALS`` affirmative; default OFF). ON: the
+    Stripe drain acts on dispute and refund events (each re-fetched from Stripe) through the owner-signed reversal
+    ledger (``governor.billing_reversal``): disputed or refunded credits leave the wallet, a part already spent is
+    owed, an org that owes credits is on a billing HOLD (no new launch, no allowance extension) until a top-up repays
+    it, and the owner is alerted (``vigil doctor``, ``vigil alerts``). OFF: those events are ignored exactly as before,
+    no reversal record is written or read and no launch consults a hold. Read at call time by each process."""
+    return (os.environ.get("VIGIL_BILLING_REVERSALS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def low_balance_alert_enabled() -> bool:
+    """W5 — the LOW-BALANCE alert (``VIGIL_BILLING_LOW_BALANCE_ALERT`` affirmative; default OFF). ON: an org whose
+    available credits fall below max(100, 20% of its last top-up) gets one notification-centre item and one email
+    per crossing (re-armed by the next top-up); the cockpit runs the email sweep in the background. It states the
+    balance threshold in credits and never an estimate. OFF: no item, no sweep, no email."""
+    return (os.environ.get("VIGIL_BILLING_LOW_BALANCE_ALERT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_billing_return_url() -> "str | None":
     """The optional post-payment return URL handed to the processor (`VIGIL_CUSTOMER_BILLING_RETURN_URL`, e.g.
     ``https://app.example.com/#/billing/return``). Unset ⇒ None (the processor's own completion page). A set value

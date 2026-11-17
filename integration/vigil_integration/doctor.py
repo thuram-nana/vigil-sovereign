@@ -2274,6 +2274,45 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the held-settle probe must never crash the report
         report.setdefault("launch_settlements", {})["held_record"] = f"{type(exc).__name__}: {exc}"
         _note(f"the record of held customer launch settles could not be read: {exc}")
+    # W5 — customer orgs on a BILLING HOLD: a chargeback or refund took credits back that were already spent, so the
+    # org owes them and can start no billable work until a top-up repays them. The sovereign reversal ledger names
+    # each held org in this durable alarm ($SIGIL_HOME/alarms/billing-hold.json, written by the billing drain and
+    # `sigil billing-reversal`). A HARD issue while it names an org (`billing_holds`, org ids + credits owed); an
+    # unreadable record is a HARD issue too. Absent alarm (or reversals off) => nothing is added. Never raises.
+    try:
+        _hold_alarm = home / "alarms" / "billing-hold.json"
+        if _hold_alarm.exists() or _hold_alarm.is_symlink():
+            _holds: "list[tuple[str, int]]" = []
+            _bad = False
+            try:
+                import json as _json
+                if _hold_alarm.is_symlink():
+                    raise ValueError("a symlink")
+                _rec = _json.loads(_hold_alarm.read_text(encoding="utf-8"))
+                _entries = _rec.get("held") if isinstance(_rec, dict) else None
+                if not isinstance(_entries, list) or not all(
+                        isinstance(e, dict) and isinstance(e.get("org_id"), str) and e["org_id"]
+                        and isinstance(e.get("owed"), int) and not isinstance(e.get("owed"), bool)
+                        for e in _entries):
+                    raise ValueError("malformed")
+                _holds = sorted((e["org_id"][:96], int(e["owed"])) for e in _entries)
+            except (OSError, ValueError, AttributeError, TypeError):
+                _bad = True
+            if _bad:
+                report["billing_holds"] = ["(unreadable)"]
+                _issue(f"the record of customer orgs on a billing hold ({_display_path(_hold_alarm)}) cannot be read: "
+                       f"an org may owe credits after a chargeback or refund. Check the file (JSON, written by the "
+                       f"billing drain), or rebuild it from the spine with `sigil billing-reversal status --sync`.")
+            elif _holds:
+                report["billing_holds"] = [{"org_id": o, "owed": n} for o, n in _holds]
+                _listed = ", ".join(f"{o} ({n} credits)" for o, n in _holds[:10])
+                _more = f" and {len(_holds) - 10} more" if len(_holds) > 10 else ""
+                _issue(f"{len(_holds)} customer org(s) are on a billing hold after a chargeback or refund: {_listed}"
+                       f"{_more}. Each owes credits it had already spent and can start no assessment until a top-up "
+                       f"repays them (`sigil billing-reversal status`); review the dispute at the payment processor.")
+    except Exception as exc:  # noqa: BLE001 — the billing-hold probe must never crash the report
+        report["billing_holds_record"] = f"{type(exc).__name__}: {exc}"
+        _note(f"the record of customer orgs on a billing hold could not be read: {exc}")
 
     # PRICING G1 — the model gateway's LOSS ALARM ($SIGIL_HOME/alarms/gateway-loss.json). The gateway raises it when
     # the day's UNCONFIRMED provider spend runs past 2% of the day's CONFIRMED spend (a crash loop / a leaking

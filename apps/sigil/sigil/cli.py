@@ -2070,8 +2070,15 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
     from .governor.report_unlock import ReportUnlockRegistry
     from .governor.subscription import SubscriptionRegistry
     from .governor.wallet import WalletRegistry
-    return BillingSigner(provider, alarm_unaccounted_plans=alarm,
-                         wallet=WalletRegistry(store), subscriptions=SubscriptionRegistry(store),
+    from . import config
+    wallet = WalletRegistry(store)
+    reversals = None
+    if config.billing_reversals_enabled():
+        # W5: the reversal ledger, so a verified dispute / refund moves credits and every top-up repays arrears first
+        from .governor.billing_reversal import BillingReversalLedger
+        reversals = BillingReversalLedger(store, wallet=wallet)
+    return BillingSigner(provider, alarm_unaccounted_plans=alarm, reversals=reversals,
+                         wallet=wallet, subscriptions=SubscriptionRegistry(store),
                          plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
                          expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
                          # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
@@ -2140,7 +2147,7 @@ def _stripe_billing_watcher(a):
     # silent no-op — whatever the plan-checkout or top-up alarm flags in this unit's environment say.
     alarm = True
     provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm,
-                                     strict=True)
+                                     strict=True, reversals=config.billing_reversals_enabled())
     del secret
     signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True, alarm_topups=alarm)
     return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
@@ -2509,6 +2516,76 @@ def _reconcile_once(store) -> list:
     for oid, host in retired:
         print(f"  retired monitoring grant {host} (org {oid}): monitoring plan no longer covers it")
     return retired
+
+
+def cmd_billing_reversal(a) -> None:
+    """W5 — owner control of payment reversals (``VIGIL_BILLING_REVERSALS``; refused while it is off).
+
+    ``refund <org> <topup> <credits> --reason`` returns UNUSED credits of one top-up (its id is the billing-history
+    line's invoice id, e.g. a Stripe Checkout Session id) through the same reversal path as a processor refund
+    (reason ``refund``): it is refused unless the org's spendable balance covers it, and a later refund of the same money
+    at the processor removes nothing more. Return the money to the customer at the processor yourself; this verb moves
+    credits only. ``status [<org>] [--sync]`` lists the orgs on a billing hold (what each owes); ``--sync`` rewrites the
+    owner alarm file from the spine. Exit 2 on a refusal, 3 when the billing lock is busy (retry)."""
+    import time as _time
+
+    from . import config
+    if not config.billing_reversals_enabled():
+        print("billing-reversal is disabled (set VIGIL_BILLING_REVERSALS=1 to enable)", file=sys.stderr)
+        sys.exit(2)
+    from .governor.billing_hold import sync_all, sync_hold
+    from .governor.billing_reversal import REASON_REFUND, BillingReversalLedger, ReversalRefused, ReversalRetry
+    from .governor.identity import owner_keypair
+    from .governor.invoices import InvoiceRegistry
+    from .governor.orgs import org_tenant_id
+    from .governor.wallet import WalletRegistry
+    owner = owner_keypair()
+    if owner is None:
+        print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+        sys.exit(2)
+    store = SpineStore()
+    wallet = WalletRegistry(store, owner_key=owner)
+    ledger = BillingReversalLedger(store, owner_key=owner, wallet=wallet)
+    if a.reversal_cmd == "status":
+        holds = [(o, n) for o, n in ledger.holds() if not a.org or o == a.org]
+        if a.sync and not a.org:
+            sync_all(holds)
+        if not holds:
+            print(f"  {a.org}: not on hold" if a.org else "  no org is on a billing hold")
+            return
+        for o, n in holds:
+            print(f"  {o}: ON HOLD, owes {n} credits (the next top-up repays it)")
+        return
+    try:
+        org = org_tenant_id(str(a.org or ""))
+        credits = int(a.credits)
+    except (TypeError, ValueError) as exc:
+        print(f"  refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    topup = str(a.topup or "")
+    if credits < 1 or not (a.reason or "").strip():
+        print("  refused: refund needs <org> <topup> <credits >= 1> and --reason", file=sys.stderr)
+        sys.exit(2)
+    line = next((i for i in InvoiceRegistry(store, owner_key=owner).invoices(org)
+                 if i.invoice_id == topup and i.kind == "topup"), None)
+    if line is None or line.credits <= 0 or not wallet.has_grant_entry(org, topup):
+        print(f"  refused: {topup!r} is not a credited top-up of {org}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        res = ledger.reconcile(org, topup, cap=int(line.credits), reason=REASON_REFUND, now=_time.time(),
+                               owner_refund=credits, unused_only=True, note=str(a.reason))
+    except ReversalRefused as exc:
+        print(f"  refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except ReversalRetry as exc:
+        print(f"  busy: {exc}", file=sys.stderr)
+        sys.exit(3)
+    sync_hold(org, res.owed)
+    if res.seq is None or res.moved <= 0:
+        print(f"  nothing removed: those credits of {topup} are already out of {org}'s wallet")
+    else:
+        print(f"  {res.moved} credits removed from {org} (top-up {topup}, owner refund, seq {res.seq}); "
+              f"return the money at the processor")
 
 
 def cmd_reports(a) -> None:
@@ -4136,6 +4213,17 @@ def main(argv=None) -> None:
     ppp.add_argument("--now", type=float, default=None,
                      help="(invoice) issued_at override (POSIX); default = now")
     ppp.set_defaults(fn=cmd_postpaid)
+    prv = sub.add_parser("billing-reversal",
+                         help="W5 payment reversals (default-OFF: VIGIL_BILLING_REVERSALS=1): refund unused credits "
+                              "of a top-up | status of the orgs on a billing hold")
+    prv.add_argument("reversal_cmd", choices=["refund", "status"])
+    prv.add_argument("org", nargs="?", default=None, help="tenant org_id (== tenant_id)")
+    prv.add_argument("topup", nargs="?", default=None,
+                     help="(refund) the top-up's id: its billing-history invoice id (e.g. a Stripe Checkout Session id)")
+    prv.add_argument("credits", nargs="?", default=None, help="(refund) the unused credits to refund")
+    prv.add_argument("--reason", default="", help="(refund) why — recorded beside the owner-signed step")
+    prv.add_argument("--sync", action="store_true", help="(status) rewrite the owner alarm file from the spine")
+    prv.set_defaults(fn=cmd_billing_reversal)
     pmd = sub.add_parser("monitoring-drain",
                          help="drain/watch the AEGIS-SaaS monitoring-report spool into tenant monitoring events "
                               "(per-(org,host) MAC + freshness + active authority; fail-closed; default-OFF)")
