@@ -197,6 +197,54 @@ def test_arm_operator_env_ceiling_without_a_lease(monkeypatch):
     assert rb.current_ceiling() == 12345
 
 
+def test_arm_leaves_a_metered_lease_unarmed_and_reads_no_envelope(monkeypatch):
+    # W2c-2 (k): a METERED lease has no units-based envelope — read_verified_launch_units returns None for it, so the
+    # EC-3 hard budget stays UNARMED and ENVELOPE_TOKENS_PER_CREDIT is never read. A sentinel E would surface a
+    # fictional huge ceiling if the metered path ever multiplied by it.
+    _on(monkeypatch)
+    monkeypatch.setattr("vigil_core.ENVELOPE_TOKENS_PER_CREDIT", 10 ** 9)
+    monkeypatch.setattr(LL, "customer_engagement_requires_lease", lambda slug: True)
+    monkeypatch.setattr(LL, "read_verified_launch_units", lambda slug, host, tenant, **k: None)   # a metered lease
+    assert engage_mod._arm_run_budget("cust_x", "http://target.example/") is None
+    assert rb.current_ceiling() is None
+    # positive control: a FLAT lease (units returned) DOES read E and arms units x E (byte-identical to before)
+    monkeypatch.setattr(LL, "read_verified_launch_units", lambda slug, host, tenant, **k: 5)
+    assert engage_mod._arm_run_budget("cust_x", "http://target.example/") == 5 * 10 ** 9
+
+
+def test_read_verified_launch_units_is_none_for_a_metered_lease(monkeypatch):
+    # The REAL verify path: a version-3 lease that NAMES its depth (metered) yields None (no units-based ceiling); a
+    # flat lease of the same shape yields its units_reserved.
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+
+    pytest.importorskip("vigil_integration.live.credit_lease_broker")
+    from vigil_integration.live import credit_lease_broker as clb
+    from vigil_core import (
+        AuthorizerKey, CreditLaunchLease, TrustRoot, generate_keypair, sign_credit_launch_lease,
+    )
+    from vigil_core.credit_lease import LEASE_DEPTH_VERSION
+    host, org = "apme.cm", "org_a"
+    owner = generate_keypair()
+    root = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)])
+    t = datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda: root)
+
+    def _write(slug, **extra):
+        doc = CreditLaunchLease(engagement_slug=slug, org_id=org, scope_host=host, units_reserved=10,
+                                not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=8),
+                                nonce="n1", issued_at=1000.0, **extra)
+        base = tempfile.mkdtemp()
+        clb.write_credit_lease(base, slug, sign_credit_launch_lease(doc, {"owner": owner.private_key_b64}), root)
+        return base
+
+    metered = _write("cust_metered", run_tier="quick", version=LEASE_DEPTH_VERSION)
+    flat = _write("cust_flat")
+    assert LL.read_verified_launch_units("cust_metered", host, org, base_dir=metered, now=1000.0) is None
+    assert LL.read_verified_launch_units("cust_flat", host, org, base_dir=flat, now=1000.0) == 10
+
+
 # =============================================================================== engage partial result
 _CHARTER = """\
 # Engagement charter — `{slug}`

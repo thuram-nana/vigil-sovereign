@@ -165,3 +165,17 @@ def test_lease_depth_reads_a_lease_document(monkeypatch):
     assert rt.lease_depth(_Doc(3, "max")) == "max"
     assert rt.lease_depth(_Doc(20)) == "deep" and rt.lease_depth(_Doc(3)) == "quick"
     assert rt.lease_depth(object()) == "quick"            # nothing readable: the smaller-impact depth
+
+
+def test_lease_names_depth_marks_a_metered_lease():
+    # W2c-2 (k): a lease NAMES its depth (metered; units are an allowance chunk, not a token envelope) iff run_tier
+    # is a real depth. A flat lease (run_tier None) or an unreadable doc names none.
+    class _Doc:
+        def __init__(self, units, tier=None):
+            self.units_reserved, self.run_tier = units, tier
+
+    assert rt.lease_names_depth(_Doc(10, "quick")) is True
+    assert rt.lease_names_depth(_Doc(3, "max")) is True
+    assert rt.lease_names_depth(_Doc(10)) is False        # flat: no named depth
+    assert rt.lease_names_depth(_Doc(10, "bogus")) is False   # not a real depth ⇒ names none (fail-safe)
+    assert rt.lease_names_depth(object()) is False

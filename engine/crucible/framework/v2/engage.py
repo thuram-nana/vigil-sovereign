@@ -628,14 +628,17 @@ def _arm_run_budget(slug: str, seed_url: str, *, resume: bool = False) -> "int |
         try:
             from urllib.parse import urlsplit
 
-            from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
-
             from .common.tenant import tenant_id
             from .launch_lease import customer_engagement_requires_lease, read_verified_launch_units
             if customer_engagement_requires_lease(slug):
                 host = urlsplit(seed_url).hostname or ""
+                # W2c-2 (k): a METERED lease names its depth, so read_verified_launch_units returns None for it — its
+                # run is bounded by the gateway allowance + the grant cap, not units x E. Only a FLAT lease has a
+                # units-based envelope, so ENVELOPE_TOKENS_PER_CREDIT is imported + read ONLY on the flat branch and
+                # is never read on a metered path.
                 units = read_verified_launch_units(slug, host, tenant_id())
                 if units is not None and int(units) >= 1:
+                    from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
                     ceiling = int(units) * int(ENVELOPE_TOKENS_PER_CREDIT)
         except Exception:  # noqa: BLE001 — a lease/ceiling read failure leaves the run unarmed, never sinks it
             ceiling = None

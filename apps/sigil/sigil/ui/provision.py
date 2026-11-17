@@ -2103,7 +2103,10 @@ class Provisioner:
             raise ProvisionDenied("the published rates are unavailable") from None
 
     def customer_billing_usage(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
-        """The session org's per-charge usage statement (credits only)."""
+        """The session org's per-charge usage statement (credits only). ``now`` is the DISPLAY instant — it decides
+        which plan tranches have expired for the balance-after timeline (W2c-2), exactly as ``billing_overview``'s
+        ``now`` reads a lapsed subscription."""
+        import time as _t
         from vigil_core.rate_card import RateCardError
 
         from .. import config as _config
@@ -2112,7 +2115,8 @@ class Provisioner:
         try:
             return self._customer_read(
                 requester, requester_org_id, "view_billing",
-                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR))
+                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR,
+                                                    now=_t.time()))
         except RateCardError:
             raise ProvisionDenied("the published rates are unavailable") from None
 
