@@ -42,7 +42,7 @@ __all__ = [
     "CANCEL_ENV", "CANCEL_POLICIES", "DEFAULT_RUN_MODEL", "MARGIN_ENV", "OBSOLETE_PRICING_ENVS", "RUN_MODEL_ENV",
     "billing_markup", "cancel_settlement", "cost_nano_usd", "run_model", "credits_for_cost", "format_usd",
     "obsolete_pricing_settings", "obsolete_setting_refusal", "price_table", "target_margin",
-    "usage_from_api", "usd_cap_nano_for_credits",
+    "usage_from_api", "usd_cap_nano_for_credits", "GATEWAY_POOL_ENV", "GATEWAY_POOL_KINDS", "gateway_pool_spec",
 ]
 
 #: One credit is $0.01 at list (100 credits per $1).
@@ -488,6 +488,56 @@ def allowance_chunk_credits(env: Optional[Mapping[str, str]] = None) -> int:
         raise MeteringError(f"{ALLOWANCE_CHUNK_ENV} must be a whole number of credits from 1 to "
                             f"{MAX_ALLOWANCE_CHUNK_CREDITS}, got {raw!r}")
     return int(raw)
+
+
+GATEWAY_POOL_ENV = "VIGIL_GATEWAY_POOL"
+#: the one provider the G1 pool federates today (several workspace keys of it). A second cloud (Bedrock / Vertex) as
+#: overflow needs its own request API and egress allowlist and is NOT wired — a pool account of another kind is refused.
+GATEWAY_POOL_KINDS = ("anthropic",)
+_ENV_NAME_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def gateway_pool_spec(env: Optional[Mapping[str, str]] = None) -> "list[dict[str, str]]":
+    """PRICING G1 — the provider-account POOL spec from ``VIGIL_GATEWAY_POOL`` (a JSON array). Each account is an
+    object ``{"id", "key_env"[, "workspace_id", "upstream", "kind"]}``: ``key_env`` NAMES the environment variable
+    that holds that account's provider key (the key itself is never in the spec, which may be committed), ``id`` is a
+    distinct label, ``kind`` defaults to ``"anthropic"``. Returns the validated, normalised accounts (the key
+    values are NOT read here — that is the sovereign ``provider_key``'s job); ``[]`` when unset (the gateway then
+    runs the single default account). Fail-closed: a malformed array, a missing or non-env-name ``key_env``, a
+    duplicate or empty ``id``, or a ``kind`` other than ``anthropic`` raises :class:`MeteringError`."""
+    env = os.environ if env is None else env
+    raw = (env.get(GATEWAY_POOL_ENV) or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise MeteringError(f"{GATEWAY_POOL_ENV} must be a JSON array of account objects") from None
+    if not isinstance(parsed, list) or not parsed:
+        raise MeteringError(f"{GATEWAY_POOL_ENV} must be a non-empty JSON array of account objects")
+    out: "list[dict[str, str]]" = []
+    seen: "set[str]" = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise MeteringError(f"{GATEWAY_POOL_ENV}: each account must be a JSON object")
+        acc_id = str(item.get("id") or "").strip()
+        key_env = str(item.get("key_env") or "").strip()
+        kind = str(item.get("kind") or "anthropic").strip()
+        if not acc_id:
+            raise MeteringError(f"{GATEWAY_POOL_ENV}: every account needs a non-empty id")
+        if acc_id in seen:
+            raise MeteringError(f"{GATEWAY_POOL_ENV}: duplicate account id {acc_id!r}")
+        seen.add(acc_id)
+        if not key_env or any(c not in _ENV_NAME_CHARS for c in key_env):
+            raise MeteringError(f"{GATEWAY_POOL_ENV}: account {acc_id!r} needs a key_env naming the environment "
+                                f"variable that holds its key")
+        if kind not in GATEWAY_POOL_KINDS:
+            raise MeteringError(f"{GATEWAY_POOL_ENV}: account {acc_id!r} is kind {kind!r}; the pool federates one "
+                                f"provider's workspace keys only (a second cloud as overflow is not wired)")
+        out.append({"id": acc_id, "key_env": key_env, "kind": kind,
+                    "workspace_id": str(item.get("workspace_id") or "").strip(),
+                    "upstream": str(item.get("upstream") or "").strip()})
+    return out
 
 
 def _check_int(name: str, v: Any) -> int:

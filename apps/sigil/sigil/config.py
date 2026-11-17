@@ -738,6 +738,17 @@ def model_gateway_enabled() -> bool:
     return (os.environ.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def gateway_g1_enabled() -> bool:
+    """True iff the model gateway runs at SCALE (PRICING G1; design §5.2): capacity sized from the provider's live
+    rate-limit response headers, a per-tenant fair share, a pool of provider accounts with health checks and
+    failover, and the loss alarm (`sigil.gateway_capacity`, `sigil.gateway_loss`). OFF by default
+    (`VIGIL_GATEWAY_G1` unset): the gateway reads no rate-limit headers, builds no pool, runs no health thread and no
+    loss ledger, and the account protections are the stand-in semaphores (`VIGIL_GATEWAY_TENANT_CONCURRENCY` /
+    `VIGIL_GATEWAY_GLOBAL_CONCURRENCY`) exactly as before — byte-identical. Read when the gateway is built; a change
+    takes effect when the cockpit restarts."""
+    return (os.environ.get("VIGIL_GATEWAY_G1") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 _MODEL_GATEWAY_DEFAULT_PORT = 8742
 
 
