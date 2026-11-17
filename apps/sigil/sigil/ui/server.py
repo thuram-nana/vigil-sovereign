@@ -1957,6 +1957,10 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     from ..governor import fold_warm
     if fold_warm.start_background(srv.store, name="cockpit") is not None:
         print("  (fold cache: warming in the background; periodic audit → `vigil doctor`)")
+    # W5: with VIGIL_BILLING_LOW_BALANCE_ALERT, the low-balance email sweep (once per crossing). A no-op when off.
+    from . import billing_alerts
+    if billing_alerts.start_background(srv.store) is not None:
+        print("  (low-balance alerts: emailing billing admins once per crossing)")
     # PRICING M1c: with VIGIL_MODEL_GATEWAY_ENABLED, the sovereign model gateway every metered customer run's
     # model requests go through (loopback; holds the provider key; meters per launch). A no-op when disabled.
     from .. import model_gateway

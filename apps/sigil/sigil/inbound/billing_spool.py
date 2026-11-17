@@ -381,11 +381,14 @@ class BillingSpoolWatcher:
 
     @staticmethod
     def _is_transient(exc: BaseException) -> bool:
-        """True ONLY for a failure the outbound egress explicitly marked retry-curable. Anything else — a raw
-        ``OSError`` from a spine write, ``UnaccountedPayment`` (the plan alarm), a guard refusal — is NOT."""
+        """True ONLY for a failure the outbound egress explicitly marked retry-curable — or (W5) a reversal that moved
+        nothing and may succeed later (``ReversalRetry``: the settle lock was busy, or the top-up it reverses is not
+        credited yet). Anything else — a raw ``OSError`` from a spine write, ``UnaccountedPayment`` (the plan alarm), a
+        guard refusal — is NOT."""
+        from ..governor.billing_reversal import ReversalRetry
         from ..governor.flutterwave_egress import FlutterwaveEgressError
         from ..governor.stripe_egress import StripeEgressError
-        return isinstance(exc, (FlutterwaveEgressError, StripeEgressError)) and exc.transient is True
+        return isinstance(exc, (FlutterwaveEgressError, StripeEgressError, ReversalRetry)) and exc.transient is True
 
     def _state_path(self, name: str) -> Path:
         return self.retry / (name + ".state")

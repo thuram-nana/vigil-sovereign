@@ -318,12 +318,14 @@ def _marker(s):
     return s.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
 
 
-def test_schema_is_v11_and_an_older_snapshot_loads_with_empty_fields():
-    assert _MAX_SNAPSHOT_SCHEMA == 11 and SnapshotState().schema_version == 11
+def test_schema_is_v12_and_an_older_snapshot_loads_with_empty_fields():
+    assert _MAX_SNAPSHOT_SCHEMA == 12 and SnapshotState().schema_version == 12
     old = SnapshotState.from_folded({"schema_version": 9})
     assert old.trial_claim_row == [] and old.report_unlock_billing == [] and old.report_unlock_owner == []
     v10 = SnapshotState.from_folded({"schema_version": 10})          # W2c-1: written before the exact-usage carry
     assert v10.wallet_usage_mc == [] and v10.wallet_usage_map() == {}
+    v11 = SnapshotState.from_folded({"schema_version": 11})          # W5: written before the reversal-ledger carry
+    assert v11.billing_reversal_owed == [] and v11.billing_reversal_ref == [] and v11.billing_reversal_seen == []
 
 
 def test_claims_and_unlocks_survive_a_hard_prune(monkeypatch):

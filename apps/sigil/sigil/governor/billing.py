@@ -44,7 +44,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, cast
 from urllib.parse import urlsplit
 
 from ..reuse import assert_no_offense
@@ -62,6 +62,10 @@ EVENT_SUBSCRIPTION_CANCELED = "subscription_canceled"  # ended -> subscription.c
 EVENT_PAYMENT_FAILED = "payment_failed"      # dunning -> subscription.mark_past_due (safe direction)
 _EVENT_KINDS = frozenset({EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED,
                           EVENT_PAYMENT_FAILED})
+#: W5 — a processor took (part of) a paid top-up back: a dispute or a refund. Produced only by a provider built with
+#: ``reversals=True`` (``config.billing_reversals_enabled``) and applied only by a signer given a reversal ledger;
+#: never a mock-provider kind (``_EVENT_KINDS``), so it cannot arrive while the flag is off.
+EVENT_REVERSAL = "payment_reversal"
 
 # Default Stripe signature tolerance: reject an event whose timestamp is more than this many seconds from `now`
 # (replay-window bound, matching Stripe's documented default).
@@ -87,6 +91,13 @@ class UnaccountedPayment(ValueError):
     tenant, or a price absent from the owner catalog). Raised ONLY when the owner opted in (plan checkout ON):
     the inbound spool then QUARANTINES the envelope — the drain unit stays FAILED and the dead-man alarms — instead
     of archiving a paid-but-uncredited charge as a silent no-op. Mints nothing either way (never act on a guess)."""
+
+
+class ReversalUnaccounted(ValueError):
+    """W5 — a SIGNED processor reversal (a dispute or a refund) VIGIL cannot account for in the wallet: the charge is
+    not a credited top-up (a subscription payment, an unknown payment), its dispute has a status this build does not
+    know, more than one dispute or checkout session claims it, or its currency differs from the purchase's. Nothing
+    moves; the drain QUARANTINES the envelope and the owner reconciles it by hand (never a guessed removal)."""
 
 
 class UnsupportedCapability(RuntimeError):
@@ -216,6 +227,23 @@ _STRIPE_EVENT_TYPES = frozenset({"checkout.session.completed", "checkout.session
 _STRIPE_CS_ID = re.compile(r"cs_(?:test|live)_[A-Za-z0-9]{1,255}")
 _STRIPE_IN_ID = re.compile(r"in_[A-Za-z0-9]{1,255}")
 _STRIPE_SUB_ID = re.compile(r"sub_[A-Za-z0-9]{1,255}")
+# W5 — the reversal events (verified names, docs.stripe.com/api/events/types). Acted on only by a provider built with
+# reversals=True; each one names (or leads to) a CHARGE, which is re-fetched with its disputes and its checkout session.
+_STRIPE_REVERSAL_TYPES = frozenset({"charge.dispute.created", "charge.dispute.funds_withdrawn",
+                                    "charge.dispute.updated", "charge.dispute.closed",
+                                    "charge.dispute.funds_reinstated", "charge.refunded", "charge.refund.updated",
+                                    "refund.created", "refund.updated", "refund.failed"})
+_STRIPE_DISPUTE_ID = re.compile(r"(?:du|dp)_[A-Za-z0-9]{1,255}")
+_STRIPE_REFUND_ID = re.compile(r"(?:re|pyr)_[A-Za-z0-9]{1,255}")
+_STRIPE_CHARGE_ID = re.compile(r"(?:ch|py)_[A-Za-z0-9]{1,255}")
+_STRIPE_PI_ID = re.compile(r"pi_[A-Za-z0-9]{1,255}")
+# The dispute statuses (docs.stripe.com/api/disputes/object). The owner's decision (2026-11-16): the disputed credits
+# leave when the dispute OPENS (an inquiry too) and stay out while it is open, under appeal or LOST; they come back
+# when it is WON, when an inquiry closes without becoming a dispute (warning_closed) and when it was PREVENTED from
+# becoming a chargeback. Any other status is refused (quarantine), never guessed.
+_DISPUTE_HOLDS_FUNDS = frozenset({"warning_needs_response", "warning_under_review", "needs_response",
+                                  "under_review", "appeal_needs_response", "appeal_under_review", "lost"})
+_DISPUTE_RETURNS_FUNDS = frozenset({"won", "warning_closed", "prevented"})
 # Only a NEW-PERIOD invoice advances the plan period; a mid-cycle one (an update / proration / manual invoice) must
 # never re-grant a full allotment for an overlapping window.
 _STRIPE_NEW_PERIOD_REASONS = frozenset({"subscription_create", "subscription_cycle"})
@@ -255,6 +283,10 @@ class StripeBillingProvider(BillingProvider):
       * `invoice.payment_failed`: a subscription invoice still `open` / `uncollectible` -> PAYMENT_FAILED with the
         invoice's `created` as the down-latch freshness key (a failure later cured by payment is older than the
         activation it would contradict, so it is inert).
+      * (W5, only with ``reversals=True``) a dispute or refund event: the dispute / refund is re-fetched for its
+        charge, the CHARGE is re-fetched (amount, amount_refunded), its disputes and its checkout session are read as
+        filtered lists -> EVENT_REVERSAL for the top-up (session) that charge paid, carrying how much is refunded and
+        how much an open (or lost) dispute holds. Anything it cannot account for raises ``ReversalUnaccounted``.
       * Anything else -> None.
 
     Tenant: `client_reference_id` / `metadata.tx_ref` (`vigil:<org>:<nonce>`) and `metadata.org_id`; when more than
@@ -268,7 +300,8 @@ class StripeBillingProvider(BillingProvider):
     def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
                  alarm_unaccounted_plans: bool = False, checkout_creator: "Optional[StripeCheckoutCreator]" = None,
-                 plan_periods: "Optional[Mapping[str, float]]" = None, strict: bool = False):
+                 plan_periods: "Optional[Mapping[str, float]]" = None, strict: bool = False,
+                 reversals: bool = False):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
@@ -297,6 +330,9 @@ class StripeBillingProvider(BillingProvider):
         # altered at rest), or that is not a JSON object, is an anomaly to QUARANTINE (unit FAILED, alarm), never a
         # silent no-op that buries a paid charge.
         self._strict = bool(strict)
+        # W5 (config.billing_reversals_enabled): act on the dispute and refund events. False (the default) maps them to
+        # None exactly as every other unhandled event type.
+        self._reversals = bool(reversals)
 
     def capabilities(self) -> frozenset[str]:
         # Webhook verification + the server-side object re-fetch, and hosted checkout (card, one-off or recurring)
@@ -473,6 +509,8 @@ class StripeBillingProvider(BillingProvider):
             raise StripeEventRefused(f"signed Stripe event is not a {self._mode}-mode event")
         etype = obj.get("type")
         if etype not in _STRIPE_EVENT_TYPES:
+            if self._reversals and etype in _STRIPE_REVERSAL_TYPES:
+                return self._reversal(str(etype), obj)
             return None
         data = obj.get("data")
         body_obj = data.get("object") if isinstance(data, dict) else None
@@ -504,6 +542,106 @@ class StripeBillingProvider(BillingProvider):
         if obj.get("livemode") is not self._livemode:
             raise StripeEventRefused(f"fetched Stripe {object_type} is not a {self._mode}-mode object")
         return obj
+
+    # -- W5: reversals (disputes and refunds) ----------------------------------------------------------------------
+    def _listed(self, kind: str, filter_id: str, item_type: str) -> "list[Mapping[str, Any]]":
+        """The items of the AUTHORITATIVE Stripe list ``kind`` filtered by ``filter_id``: every item must be a
+        ``item_type`` of this endpoint's mode, and the list complete (``has_more`` false) — else refused."""
+        lst = self._fetch(kind, filter_id)
+        if not isinstance(lst, Mapping) or lst.get("object") != "list" or not isinstance(lst.get("data"), list) \
+                or lst.get("has_more") is not False:
+            raise ReversalUnaccounted(f"the Stripe {kind} list for {filter_id} is not one complete list")
+        items: "list[Mapping[str, Any]]" = []
+        for it in lst["data"]:
+            if not isinstance(it, Mapping) or it.get("object") != item_type or not isinstance(it.get("id"), str):
+                raise ReversalUnaccounted(f"the Stripe {kind} list for {filter_id} holds an unexpected object")
+            if it.get("livemode") is not self._livemode:
+                raise StripeEventRefused(f"fetched Stripe {item_type} is not a {self._mode}-mode object")
+            items.append(it)
+        return items
+
+    def _reversal(self, etype: str, obj: "Mapping[str, Any]") -> Optional[BillingEvent]:
+        """A dispute or refund event -> the CHARGE it concerns -> ``_map_reversal``. The body names only the object to
+        fetch; the dispute / refund is re-fetched to find its charge, and the charge itself is re-fetched."""
+        data = obj.get("data")
+        body_obj = data.get("object") if isinstance(data, dict) else None
+        object_id = body_obj.get("id") if isinstance(body_obj, dict) else None
+        if not isinstance(object_id, str):
+            return None
+        if etype.startswith("charge.dispute."):
+            if not _STRIPE_DISPUTE_ID.fullmatch(object_id):
+                return None
+            parent = self._fetched("dispute", object_id, "dispute")
+            trigger = "dispute"
+        elif etype == "charge.refunded":
+            if not _STRIPE_CHARGE_ID.fullmatch(object_id):
+                return None
+            parent, trigger = {"charge": object_id}, "refund"
+        else:
+            if not _STRIPE_REFUND_ID.fullmatch(object_id):
+                return None
+            parent = self._fetched("refund", object_id, "refund")
+            trigger = "refund"
+        if parent is None:
+            return None
+        charge_id = _stripe_ref(parent.get("charge"))
+        if charge_id is None or not _STRIPE_CHARGE_ID.fullmatch(charge_id):
+            raise ReversalUnaccounted(f"Stripe {etype} {object_id} names no charge VIGIL can read")
+        charge = self._fetched("charge", charge_id, "charge")
+        if charge is None:
+            raise ReversalUnaccounted(f"Stripe {etype} {object_id}: its charge {charge_id} could not be read")
+        return self._map_reversal(charge, trigger)
+
+    def _map_reversal(self, charge: "Mapping[str, Any]", trigger: str) -> BillingEvent:
+        """The reversal facts of a re-fetched CHARGE (pure but for the two authoritative lists): how much of it is
+        refunded, how much a dispute that holds the funds covers, and the top-up (Checkout Session) and tenant it
+        paid for. Anything VIGIL cannot account for raises ``ReversalUnaccounted`` (quarantine)."""
+        cid = str(charge["id"])
+        amount, refunded = charge.get("amount"), charge.get("amount_refunded")
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or isinstance(refunded, bool) \
+                or not isinstance(refunded, int) or refunded < 0:
+            raise ReversalUnaccounted(f"Stripe charge {cid} carries no usable amount / amount_refunded")
+        _amt, ccy = _stripe_amount(amount, charge.get("currency"))
+        if not ccy:
+            raise ReversalUnaccounted(f"Stripe charge {cid} has no currency")
+        created = _stripe_ts(charge.get("created"))
+        if created is None:
+            raise ReversalUnaccounted(f"Stripe charge {cid} has no usable timestamp")
+        disputes = self._listed("disputes_for_charge", cid, "dispute")
+        if any(_stripe_ref(d.get("charge")) != cid for d in disputes) or len(disputes) > 1:
+            raise ReversalUnaccounted(f"Stripe charge {cid} does not have one dispute VIGIL can read")
+        disputed, status = 0, ""
+        if disputes:
+            d = disputes[0]
+            _status = d.get("status")
+            status = _status if isinstance(_status, str) else ""
+            if status not in _DISPUTE_HOLDS_FUNDS and status not in _DISPUTE_RETURNS_FUNDS:
+                raise ReversalUnaccounted(f"Stripe dispute {d.get('id')} has a status VIGIL does not know ({status!r})")
+            d_amount, d_ccy = _stripe_amount(d.get("amount"), d.get("currency"))
+            if d_ccy != ccy or isinstance(d.get("amount"), bool) or not isinstance(d.get("amount"), int):
+                raise ReversalUnaccounted(f"Stripe dispute {d.get('id')} is not in the charge's currency")
+            if status in _DISPUTE_HOLDS_FUNDS:
+                disputed = d_amount
+        pi = _stripe_ref(charge.get("payment_intent"))
+        if pi is None or not _STRIPE_PI_ID.fullmatch(pi):
+            raise ReversalUnaccounted(f"Stripe charge {cid} was not paid through a checkout top-up")
+        sessions = self._listed("checkout_sessions_for_payment_intent", pi, "checkout.session")
+        if len(sessions) != 1:
+            raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one checkout session")
+        sess = sessions[0]
+        sid = str(sess["id"])
+        if not _STRIPE_CS_ID.fullmatch(sid) or sess.get("mode") != "payment" \
+                or _stripe_ref(sess.get("payment_intent")) != pi:
+            raise ReversalUnaccounted(f"Stripe charge {cid} was not paid through a checkout top-up")
+        meta = sess.get("metadata")
+        org = _stripe_tenant(sess.get("client_reference_id"), meta)
+        if org is None:
+            raise ReversalUnaccounted(f"Stripe checkout session {sid} has no single recoverable tenant")
+        return BillingEvent(event_id=f"reversal:{cid}", kind=EVENT_REVERSAL, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"topup": sid, "charge": cid, "refunded_minor": min(refunded, amount),
+                                  "disputed_minor": min(disputed, amount), "dispute_status": status,
+                                  "trigger": trigger, "tx_ref": sess.get("client_reference_id")})
 
     def _invoice_subscription(self, invoice: "Mapping[str, Any]") -> "Optional[Mapping[str, Any]]":
         """The fetched subscription an invoice belongs to. The id is read from `subscription` (older API versions)
@@ -620,6 +758,13 @@ def _stripe_plan_days(period_s: object, price_id: str) -> int:
 def _stripe_meta(meta: object, key: str) -> str:
     v = meta.get(key) if isinstance(meta, Mapping) else None
     return v if isinstance(v, str) else ""
+
+
+def _stripe_ref(v: object) -> Optional[str]:
+    """The id of a Stripe reference field: the string itself, or the ``id`` of an expanded object; None otherwise."""
+    if isinstance(v, Mapping):
+        v = v.get("id")
+    return v if isinstance(v, str) and v else None
 
 
 def _stripe_tenant(tx_ref: object, meta: object) -> Optional[str]:
@@ -1150,8 +1295,12 @@ class BillingSigner:
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
                  on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None,
-                 require_verified_amount: bool = False, alarm_unaccounted_topups: bool = False):
+                 require_verified_amount: bool = False, alarm_unaccounted_topups: bool = False, reversals=None):
         self.provider = provider
+        # W5: the owner-signed reversal ledger (governor.billing_reversal), given only while
+        # config.billing_reversals_enabled(). With it, a verified EVENT_REVERSAL moves credits out of (or back into)
+        # the wallet, and every top-up first repays what the org owes. None keeps every path byte-identical.
+        self.reversals = reversals
         # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
         # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
         # billing unlock — decided once, here, at mint time. None keeps every record byte-identical to before.
@@ -1232,6 +1381,8 @@ class BillingSigner:
     def _apply_outcome(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
         """``apply`` with the reason (``IngestOutcome.reason``) beside the seq. Every money decision is ``apply``'s;
         the reason only names which of them was taken."""
+        if event.kind == EVENT_REVERSAL:
+            return self._apply_reversal(event, now=now)
         oid = event.org_id                            # already validated in verify_and_parse (_parse_org_id)
         ent = self.catalog.get(event.price_id)
         # Route by the FULL, flag-independent catalog (never the flag-filtered entitlements): a down event for a
@@ -1323,6 +1474,7 @@ class BillingSigner:
             if seq is not None:                       # record the history line only for a mint that took effect
                 self._maybe_unlock(oid, event, "topup")
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
+            self._repay_arrears(oid, event, now=now)  # W5: a top-up first repays what the org owes (re-drive safe)
             return self._done(seq)
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0 and monitoring:
@@ -1356,6 +1508,53 @@ class BillingSigner:
                 return None, OUTCOME_ALREADY_MINTED   # this event's period is the honoured, delivered one
             return self._done(seq)
         return None, "no_entitlement"
+
+    # -- W5: reversals and the arrears they leave ----------------------------------------------------------------
+    def _repay_arrears(self, oid: str, event: BillingEvent, *, now: float) -> None:
+        """After a top-up's grant, repay what the org owes from its wallet (``BillingReversalLedger.repay``: exactly
+        once per debt, so a duplicate or a re-drive of the event repays nothing twice), then mirror the hold for the
+        owner's alarms. No-op without a reversal ledger (flag off)."""
+        if self.reversals is None:
+            return
+        res = self.reversals.repay(oid, event.event_id, now=float(now))
+        from .billing_hold import sync_hold
+        sync_hold(oid, res.owed)
+
+    def _apply_reversal(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
+        """A verified reversal of a top-up: move that purchase's removed credits to its target (``reconcile``) from the
+        processor's facts, converted to credits at the purchase's own rate (``credits x amount / charge amount``, rounded
+        down: never more than the purchase granted). The purchase's credits come from its owner-signed billing-history
+        line and its grant must be on the spine; a purchase not credited YET is retried (``ReversalRetry``), one VIGIL
+        cannot account for is refused (``ReversalUnaccounted``)."""
+        if self.reversals is None:
+            return None, "not_mintable"               # unreachable: a provider maps reversals only with the flag on
+        from .billing_hold import sync_hold
+        from .billing_reversal import ReversalRetry
+        oid, data = event.org_id, event.data or {}
+        topup, trigger = data.get("topup"), data.get("trigger")
+        refunded, disputed, amount = data.get("refunded_minor"), data.get("disputed_minor"), event.amount_minor
+
+        def _nn_int(v: object) -> bool:
+            return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+        if not (isinstance(topup, str) and topup and trigger in ("dispute", "refund")
+                and _nn_int(refunded) and _nn_int(disputed) and isinstance(amount, int)
+                and not isinstance(amount, bool) and amount > 0):
+            raise ReversalUnaccounted(f"reversal {event.event_id} for org {oid!r} is malformed")
+        if self.invoices is None:
+            raise ReversalUnaccounted(f"reversal {event.event_id} for org {oid!r}: no billing history to price it")
+        line = next((i for i in self.invoices.invoices(oid) if i.invoice_id == topup and i.kind == "topup"), None)
+        if line is None or line.credits <= 0 or not self.wallet.has_grant_entry(oid, topup):
+            raise ReversalRetry(f"purchase {topup} of org {oid!r} is not credited yet; its reversal is retried")
+        if line.currency and event.currency and line.currency.upper() != event.currency.upper():
+            raise ReversalUnaccounted(f"reversal {event.event_id} for org {oid!r} is in {event.currency}, the purchase "
+                                      f"{topup} in {line.currency}")
+        cap, amt = int(line.credits), int(amount)                  # amount is narrowed to int above
+        sr, dd = cast(int, refunded), cast(int, disputed)          # validated non-negative ints above
+        res = self.reversals.reconcile(oid, topup, cap=cap, reason=str(trigger), now=float(now),
+                                       processor_refunded=cap * min(sr, amt) // amt,
+                                       disputed=cap * min(dd, amt) // amt)
+        sync_hold(oid, res.owed)
+        return self._done(res.seq)
 
     def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> "tuple[Optional[int], str]":
         """A paid AEGIS monitoring period: mint the SEPARATE monitoring line (no credit refill; the credit-plan

@@ -252,7 +252,9 @@ def test_fetch_gets_the_named_object_and_reads_the_key_at_call_time(monkeypatch,
     ("invoice", "../v1/charges"), ("invoice", "in_a/b"), ("invoice", "in_"), ("invoice", "pi_123"),
     ("invoice", "evt_123"), ("invoice", "in_١٢"), ("subscription", "sub_abc\n"), ("subscription", ""),
     ("checkout_session", "cs_abc"), ("checkout_session", "cs_prod_abc"), ("checkout_session", "cs_test_a%2F"),
-    ("invoice", "in_" + "a" * 256), ("charge", "ch_1"), ("invoice", None),
+    ("invoice", "in_" + "a" * 256), ("charge", "ch_a/b"), ("charge", "ch_"), ("dispute", "du_a\n"),
+    ("refund", "re_a b"), ("disputes_for_charge", "ch_a/b"), ("checkout_sessions_for_payment_intent", "pi_"),
+    ("invoice", None),  # W5: `charge`/`dispute`/`refund` and the two list kinds are now supported — a bad id still refuses
 ])
 def test_fetch_refuses_a_malformed_id_or_kind_before_any_call(monkeypatch, kind, oid):
     monkeypatch.setenv("VIGIL_STRIPE_SECRET_KEY", _key())

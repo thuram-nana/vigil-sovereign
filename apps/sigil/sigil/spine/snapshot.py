@@ -52,7 +52,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 11  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 12  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
@@ -64,7 +64,8 @@ _MAX_SNAPSHOT_SCHEMA = 11  # refuse-newer gate (W5-3): a snapshot schema above t
 #                            envelope ledger (cost_reserved/cost_settled/cost_seen); v10 (pricing S2) ADDED the
 #                            governor.trial_claim claims (trial_claim_row) and the governor.report_unlock ledger
 #                            (report_unlock_billing/report_unlock_owner); v11 (W2c-1) ADDED the wallet's exact
-#                            metered usage total (wallet_usage_mc). Every bump is
+#                            metered usage total (wallet_usage_mc); v12 (W5) ADDED the governor.billing_reversal
+#                            ledger (billing_reversal_owed/ref/seen). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -76,14 +77,14 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 11  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    schema_version: int = 12  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
     #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
     #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
     #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
     #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger);
     #                           9->10 pricing S2 (trial claims + report unlocks); 10->11 W2c-1 (the wallet's
-    #                           exact metered usage total).
-    #                           Every snapshot this build emits carries the v11 keys; a pre-bump build refuses it
+    #                           exact metered usage total); 11->12 W5 (the billing reversal ledger).
+    #                           Every snapshot this build emits carries the v12 keys; a pre-bump build refuses it
     #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
@@ -233,6 +234,12 @@ class SnapshotState(BaseModel):
     trial_claim_row: list = []        # [[key_kind, key_digest, org_id, issued_at], ...] — first verified claim wins
     report_unlock_billing: list = []  # [[org_id, entry_id, source_kind, source_ref, issued_at], ...] — first wins
     report_unlock_owner: list = []    # [[org_id, entry_id, action, source_ref, issued_at], ...] — latest wins
+    # W5 (schema v12): the owner-signed billing reversal ledger (governor.billing_reversal). Lifetime state, so it MUST
+    # cross a prune: a dropped owed total would lift a billing hold without repayment, a dropped purchase state would
+    # remove a disputed purchase's credits a second time, a dropped seen key would re-open step replay.
+    billing_reversal_owed: list = []  # [[org_id, owed_booked, owed_repaid, last_repay_index], ...]
+    billing_reversal_ref: list = []   # [[org_id, ref, k, cap, removed, owner_refunded, processor_refunded, disputed], ...]
+    billing_reversal_seen: list = []  # [[org_id, entry_id], ...] — consumed reversal step keys
     invoice_row: list = []            # [[org_id, invoice_id, kind, price_id, amount_minor, currency, credits,
     #                                   period_start, period_end, issued_at], ...] — governor.invoice billing
     #                                   HISTORY (Slice H schema v4). ADDITIVE append-only (NOT LWW), idempotent
@@ -688,6 +695,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                         seed_rows as _tc_seed)
     from ..governor.report_unlock import (REPORT_UNLOCK_SIGNAL as _RU_SIGNAL, apply_report_unlock as _ru_apply,
                                           seed_state as _ru_seed)
+    # W5: the billing reversal ledger's ONE fold step (registry, fold cache, this build, the prune tripwire).
+    from ..governor.billing_reversal import (REVERSAL_SIGNAL as _RV_SIGNAL, ReversalFold as _RvFold,
+                                             apply_billing_reversal as _rv_apply, fold_rows as _rv_rows,
+                                             seed_fold as _rv_seed)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -769,6 +780,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                     if isinstance(r, (list, tuple)) and len(r) >= 10} if s else {})
     tc_rows: dict = _tc_seed(s) if s else {}
     ru_billing, ru_owner = _ru_seed(s) if s else ({}, {})
+    rv_state = _rv_seed(s) if s else _RvFold()
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -1120,6 +1132,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             _tc_apply(p, vpk, tc_rows)
         if sig == _RU_SIGNAL:
             _ru_apply(p, vpk, ru_billing, ru_owner)
+        # --- W5: billing reversals (owed per org, per-purchase state, the consumed step keys) ---
+        if sig == _RV_SIGNAL:
+            _rv_apply(p, vpk, rv_state)
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -1146,6 +1161,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             if pkey is not None:
                 (refused if r.kind == "refusal" else grounded).add(pkey)
 
+    rv_owed, rv_ref, rv_seen = _rv_rows(rv_state)
     return SnapshotState(
         base_seq=base_seq, snapshot_seq=snapshot_seq, trusted_pubkey=tp,
         nonce_highwater=nonce,
@@ -1210,6 +1226,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         trial_claim_row=[[k[0], k[1], *r] for k, r in tc_rows.items()],
         report_unlock_billing=[[o, *r] for o, r in ru_billing.items()],
         report_unlock_owner=[[o, *r] for o, r in ru_owner.items()],
+        billing_reversal_owed=rv_owed, billing_reversal_ref=rv_ref, billing_reversal_seen=rv_seen,
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

@@ -251,6 +251,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_ru:
         raise PruneUnsafe(f"K={K} would strand report unlock(s) for tenant(s) {stranded_ru}: a below-K unlock or "
                           f"relock would not be carried into the snapshot seed; lower K or resolve")
+    # (c, W5 billing reversals) the reversal ledger is lifetime state: a seed that dropped an org's owed total would
+    # lift its billing hold without a repayment, a dropped purchase state would remove a disputed purchase's credits
+    # a second time, and a dropped step key would re-open step replay. Fail-closed, value-aware.
+    stranded_rv = stranded_billing_reversals(store, archived, K)
+    if stranded_rv:
+        raise PruneUnsafe(f"K={K} would strand billing reversal state for tenant(s) {stranded_rv}: a below-K owed "
+                          f"total, purchase state or consumed step would not be carried into the snapshot seed; "
+                          f"lower K or resolve")
     # (c, PP-1 postpaid) the SAME floor for governor.postpaid: an ENABLED credit line whose only owner-signed
     # set_account sits below K must be carried into the seed, or the prune drops the line + resets the per-org
     # high-water (re-opening replay of a disabled line). Fail-closed, like the subscription floor.
@@ -823,6 +831,27 @@ def stranded_report_unlocks(store, archived: list[Segment], K: int) -> list[str]
     # Both directions: a dropped / altered record, and a row the seed invents (e.g. a phantom owner relock).
     bad = {o for o in set(billing) | set(c_billing) if billing.get(o) != c_billing.get(o)}
     bad |= {o for o in set(owner) | set(c_owner) if owner.get(o) != c_owner.get(o)}
+    return sorted(str(o) for o in bad)
+
+
+def stranded_billing_reversals(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, W5) — the tenants whose below-K billing reversal state (owed totals and repay index, per-purchase state,
+    consumed step keys) the snapshot seed would NOT carry exactly (value-aware, both directions). EMPTY in the happy
+    path. The genesis fold uses the module's own fold step (`billing_reversal.apply_billing_reversal`). Read-only."""
+    from ..governor.billing_reversal import ReversalFold, apply_billing_reversal, seed_fold
+    below, seed, resolver = _below_seed(store, archived, K)
+    st = ReversalFold()
+    for r in below:
+        apply_billing_reversal(r.payload, resolver.at(r.seq), st)
+    carried = seed_fold(seed)
+    bad: set = set()
+    for o in set(st.owed_up) | set(st.owed_down) | set(st.repays) | set(carried.owed_up) | set(carried.owed_down) \
+            | set(carried.repays):
+        if (st.owed_up.get(o, 0), st.owed_down.get(o, 0), st.repays.get(o, 0)) != (
+                carried.owed_up.get(o, 0), carried.owed_down.get(o, 0), carried.repays.get(o, 0)):
+            bad.add(o)
+    bad |= {k[0] for k in set(st.refs) | set(carried.refs) if st.refs.get(k) != carried.refs.get(k)}
+    bad |= {k[0] for k in st.seen ^ carried.seen}
     return sorted(str(o) for o in bad)
 
 

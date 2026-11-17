@@ -573,6 +573,39 @@ def _default_alarm_log(state_dir: Path) -> Path:
     return state_dir / "unit-alarms.jsonl"
 
 
+#: W5 — the sovereign plane's record of customer orgs on a BILLING HOLD (``sigil.governor.billing_hold`` writes it;
+#: ``vigil doctor`` reads it too). Read as inert JSON: this module never imports sigil (FATAL-2).
+BILLING_HOLD_KIND = "billing-hold"
+
+
+def default_billing_hold_path() -> Path:
+    """``$SIGIL_HOME/alarms/billing-hold.json`` (resolved at call time)."""
+    return Path(os.path.expanduser(os.environ.get("SIGIL_HOME", "~/.sigil"))) / "alarms" / "billing-hold.json"
+
+
+def read_billing_holds(path: Path) -> "Optional[list[tuple[str, int]]]":
+    """``[(org_id, owed), ...]`` named by the hold record at ``path`` ([] when there is none), or None when it exists
+    but cannot be read (a symlink, unparseable, malformed) — which the monitor alarms on too."""
+    try:
+        if path.is_symlink():
+            return None
+        if not path.exists():
+            return []
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        held = rec.get("held") if isinstance(rec, dict) else None
+        if not isinstance(held, list):
+            return None
+        out: "list[tuple[str, int]]" = []
+        for e in held:
+            if not (isinstance(e, dict) and isinstance(e.get("org_id"), str) and e["org_id"]
+                    and isinstance(e.get("owed"), int) and not isinstance(e.get("owed"), bool)):
+                return None
+            out.append((e["org_id"][:96], int(e["owed"])))
+        return sorted(out)
+    except (OSError, ValueError):
+        return None
+
+
 def run_alert_monitor(
     state_dir: str | os.PathLike,
     *,
@@ -581,13 +614,19 @@ def run_alert_monitor(
     sink: Optional[AlarmSink] = None,
     notifier: Optional[Notifier] = None,
     require_push: bool = False,
+    billing_hold_path: Optional[Path] = None,
 ) -> dict:
     """One monitor cycle: classify every watched unit; for each non-HEALTHY unit emit EXACTLY ONE alarm
     (durable local sink + push notifier); return a summary. Fail-CLOSED: an absent heartbeat is an alarm.
 
     ``require_push`` makes a missing push configuration itself an alarm (a monitor with nowhere to send is
     not "push-based alerting"). Returns ``{checked, healthy, failed, stale, alarms, delivered, push_configured,
-    delivery_ok, delivery_detail, statuses}``."""
+    delivery_ok, delivery_detail, statuses}``.
+
+    W5: when the sovereign billing-hold record exists (``billing_hold_path``, default
+    ``$SIGIL_HOME/alarms/billing-hold.json``), each org it names raises one ``billing-hold`` alarm per cycle (pushed
+    like a failed unit, until a top-up repays what the org owes), and an unreadable record raises one; the summary
+    then gains ``billing_holds``. No record => the cycle and its summary are exactly as before."""
     now = time.time() if now is None else now
     sd = Path(state_dir).expanduser()
     sink = sink or AlarmSink(log_path=_default_alarm_log(sd))
@@ -620,8 +659,28 @@ def run_alert_monitor(
             res = notifier.deliver(alarm, now=now)  # exactly one push attempt per non-healthy unit
             delivered += 1 if res.delivered else 0
 
+    hold_path = billing_hold_path if billing_hold_path is not None else default_billing_hold_path()
+    holds_count: Optional[int] = None
+    if hold_path.exists() or hold_path.is_symlink():
+        holds = read_billing_holds(hold_path)
+        hold_alarms = ([Alarm(ts=_now_iso(now), severity="error", kind=BILLING_HOLD_KIND, home=str(sd),
+                              detail=f"the billing-hold record {hold_path} cannot be read: a customer org may owe "
+                                     f"credits after a chargeback or refund (`sigil billing-reversal status --sync`)")]
+                       if holds is None else
+                       [Alarm(ts=_now_iso(now), severity="error", kind=BILLING_HOLD_KIND, home=str(sd),
+                              detail=f"customer org {o} is on a billing hold: it owes {n} credits after a chargeback "
+                                     f"or refund and can start no assessment until a top-up repays them",
+                              checks=[{"org_id": o, "owed": n}]) for o, n in holds])
+        holds_count = len(hold_alarms) if holds is not None else 1
+        for alarm in hold_alarms:
+            alarms += 1
+            sink.emit(alarm)
+            if notifier is not None:
+                res = notifier.deliver(alarm, now=now)
+                delivered += 1 if res.delivered else 0
+
     delivery_stale, delivery_detail = delivery_is_stale(sd, now=now)
-    return {
+    out = {
         "checked": len(statuses),
         "healthy": sum(1 for s in statuses if s.state == HEALTHY),
         "failed": sum(1 for s in statuses if s.state == FAILED),
@@ -637,6 +696,9 @@ def run_alert_monitor(
         "statuses": [s.to_dict() for s in statuses],
         "state_dir": str(sd),
     }
+    if holds_count is not None:
+        out["billing_holds"] = holds_count
+    return out
 
 
 def run_alert_monitor_loop(

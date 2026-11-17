@@ -161,9 +161,10 @@ def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
     """One cached read per cached fold, each through the registry's public read path or its `_cached` hook, under
     the persisted owner identity (exactly the registries the request paths construct)."""
     from ..ui import assessments, margin
-    from . import (accounts, asset_ownership, budget, capability, cost_ledger, customer_credentials, customers,
-                   invoices, killswitch, metering, monitoring_authority, monitoring_subscription, orgs, postpaid,
-                   promotion, report_unlock, subscription, trial_claim, wallet)
+    from . import (accounts, asset_ownership, billing_reversal, budget, capability, cost_ledger,
+                   customer_credentials, customers, invoices, killswitch, metering, monitoring_authority,
+                   monitoring_subscription, orgs, postpaid, promotion, report_unlock, subscription, trial_claim,
+                   wallet)
     from .identity import owner_pubkey
 
     def touch(registry) -> Callable[[], Any]:
@@ -183,6 +184,7 @@ def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
         ("invoices", touch(invoices.InvoiceRegistry(store, owner_key=None))),
         ("trial claims", touch(trial_claim.TrialClaimRegistry(store, owner_key=None))),
         ("report unlocks", touch(report_unlock.ReportUnlockRegistry(store, owner_key=None))),
+        ("billing reversals", touch(billing_reversal.BillingReversalLedger(store, owner_key=None))),
         ("cost ledger", touch(cost_ledger.CostEnvelopeLedger(store, owner_key=None))),
         ("postpaid accounts", touch(postpaid.PostpaidRegistry(store, owner_key=None))),
         ("postpaid arrears", touch(postpaid.PostpaidArrearsLedger(store, owner_key=None))),

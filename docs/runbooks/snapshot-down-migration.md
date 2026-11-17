@@ -18,6 +18,8 @@ longer read that `SIGIL_HOME`.
 
 | Version | Adds | Rollback past it |
 |---|---|---|
+| v12 | `billing_reversal_owed` / `billing_reversal_ref` / `billing_reversal_seen` (governor.billing_reversal: W5 chargebacks, refunds and the arrears the billing hold is derived from) | A v11 build refuses a v12 `SIGIL_HOME` (`SchemaTooNew`). Restore a pre-upgrade backup, or stay on v12. Rolling back past it loses which orgs owe credits after a reversal — a hold would not re-arm. |
+| v11 | `wallet_usage_mc` (governor.wallet: W2c-1 exact milli-credit metered usage total) | A v10 build refuses a v11 `SIGIL_HOME` (`SchemaTooNew`). Restore a pre-upgrade backup, or stay on v11. |
 | v10 | `trial_claim_row` (governor.trial_claim: first-wins trial claims per canonical mailbox / registrable domain) and `report_unlock_billing` / `report_unlock_owner` (governor.report_unlock) | A v9 build refuses a v10 `SIGIL_HOME` (`SchemaTooNew`). Restore a pre-upgrade backup, or stay on v10. |
 
 Earlier versions are described inline at `_MAX_SNAPSHOT_SCHEMA`.
