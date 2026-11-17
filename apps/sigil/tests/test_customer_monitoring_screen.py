@@ -238,7 +238,7 @@ def _wiring(flag: str, script: str) -> dict:
     src = _src()
     i = src.index("  var ROUTES = {")
     table = src[i:src.index("\n  };", i) + 5]
-    stubs = ("function ntfWidget() { return null; }\nasync function doLogout() {}\n"
+    stubs = ("var SECURITY_ON = false;\nfunction ntfWidget() { return null; }\nasync function doLogout() {}\n"
              "function viewSoon(t) { return \"viewSoon:\" + t; }\n"
              + "\n".join(f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS))
     return _node(stubs + "\n" + _fn(src, "navLink") + _fn(src, "shell") + table + "\n" + script, flag=flag)

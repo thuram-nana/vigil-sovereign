@@ -330,6 +330,15 @@ def customer_onboarding_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_ONBOARDING") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_security_ui_enabled() -> bool:
+    """True iff the customer app shows its account-security screens (`VIGIL_CUSTOMER_SECURITY_UI` affirmative): the
+    Account security screen (set up an authenticator app, add a passkey), "Sign in with a passkey" on the sign-in screen
+    (also needs `customer_passkey_enabled()`), and the inline "Verify with your authenticator" prompt a sensitive action
+    shows when the server asks for a fresh second factor. The screen's status read (the edge's
+    ``api/customer/security`` route and the cockpit's ``security_status`` action) exists only while this is on.
+    OFF by default: the app is exactly as before. The edge reads it at startup (it is written into the page) and on each
+    status request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_SECURITY_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
 def customer_launch_ui_enabled() -> bool:
     """True iff customers launch and control assessments from the app (`VIGIL_CUSTOMER_LAUNCH_UI` affirmative; C1a):
     the Assessments screen offers Launch on each verified host (one of the depths the server offers, then

@@ -989,6 +989,25 @@ class Provisioner:
         uri = _totp.provisioning_uri(secret, account_name=(acct.email or requester), issuer="VIGIL")
         return {"ok": True, "method": "totp", "provisioning_uri": uri, "secret": secret}
 
+    def security_status(self, requester: str) -> dict:
+        """The Account security screen's read for the requesting customer's OWN account: whether an authenticator app
+        (TOTP) is set up, the passkeys registered (credential id — not a secret: the browser is told it to avoid a
+        duplicate — and when each was added), and the name an authenticator shows for the account (its email, as in the
+        TOTP setup link). Never a secret, a sealed blob or a public key. Account-level like MFA: the requester is the
+        hop-bound session principal, never a body field, and must be an ACTIVE customer. Fail-closed when customer MFA
+        is not enabled on this deployment."""
+        if self.customer_credentials is None:
+            raise ProvisionError("customer MFA is not enabled on this deployment")
+        acct = self.customers.customer(requester)
+        if acct is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from ..governor.customer_credentials import KIND_PASSKEY, KIND_TOTP
+        creds = self.customer_credentials.for_user(requester)
+        passkeys = sorted((c for c in creds if c.kind == KIND_PASSKEY), key=lambda c: (c.issued_at, c.cred_key))
+        return {"ok": True, "totp": any(c.kind == KIND_TOTP for c in creds),
+                "passkeys": [{"id": c.cred_key, "added_at": c.issued_at} for c in passkeys],
+                "account_name": acct.email or requester}
+
     def onboarding_state(self, requester: str) -> dict:
         """The onboarding tour's state for the requesting customer's OWN account (``ui/onboarding_store``): ``pending``
         until they finish (``done``) or skip (``skipped``) it. Account-level, like MFA: the requester is the

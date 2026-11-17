@@ -35,6 +35,13 @@
  * adds a Guide screen (#/guide) covering the whole app to the top bar, and shows the VIGIL wordmark brightening and
  * dimming while a screen loads. Off, all of it is absent (no call is made) and every screen renders exactly as before.
  *
+ * ACCOUNT SECURITY. When the edge has the security screens on (data-security="1", VIGIL_CUSTOMER_SECURITY_UI), the top
+ * bar shows the account's name, which opens Account security (#/security, security.js: an authenticator app and
+ * passkeys, read through GET api/customer/security for the session's account only), next to Sign out; the sign-in
+ * screen offers "Sign in with a passkey" when the edge also serves passkeys (data-passkey="1"); and withStepUp() — the
+ * one name every sensitive action goes through (buying credits today) — answers the server's request for a fresh
+ * second factor with an inline code box, then sends the action ONCE more. Off, all of it is absent: withStepUp(action)
+ * is action(), #/security is the home screen, and every screen renders exactly as before.
  * LAUNCHING. When the edge has launching from the app on (data-launch-ui="1", VIGIL_CUSTOMER_LAUNCH_UI), the
  * Assessments screen offers Launch on each verified host — one of the depths the server offers, never a price — and
  * lists the workspace's launches from api/customer/launches with the controls the server accepts (Start / Cancel
@@ -138,6 +145,46 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
   function routeShown(route) { return route !== "#/monitoring" || MONITORING_ON; }
 
+  // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
+  var SECURITY = window.VIGIL_SECURITY;
+  var SECURITY_ON = !!(SECURITY && pageFlag("security"));
+  // STEP-UP — the one name every screen uses for a sensitive action (buying credits, changing the team, turning
+  // monitoring on, launching): withStepUp(action, where) runs action() — a function returning the promise of ONE
+  // request — and settles with its answer. When the server refuses it with 401 {step_up_required: true}, a "Verify with
+  // your authenticator" box opens inside `where` (an element; else at the top of the screen), and once the person's code
+  // is verified, action() runs ONE more time: never a loop, a second refusal rejects like any error. Closing the box
+  // rejects with e.stepUpCancelled === true (nothing was sent again). With the security screens off it is action().
+  function withStepUp(action, where) {
+    if (!SECURITY_ON) return action();
+    return SECURITY.stepUp({ h: h, VUI: VUI, api: API, where: where, nav: nav }, action);
+  }
+  function viewSecurityScreen() {
+    return shell(h("div", {}, [h("h2", { text: "Account security" }),
+      SECURITY.viewSecurity({ h: h, VUI: VUI, api: API, who: state.get().who, passkeys: pageFlag("passkey"), nav: nav,
+        here: here, loading: loadingHolder,
+        onAuthLost: function () { refreshWho().then(function () { nav("#/login"); }); } })]),
+    "#/security");
+  }
+  // "Sign in with a passkey" on the sign-in screen: only with the security screens on and passkeys served here.
+  function passkeyBlock() {
+    if (!SECURITY_ON || !pageFlag("passkey")) return null;
+    if (SECURITY.webauthnSupport() === "none") {
+      return h("p.muted.cust-passkey-none", { text: "Passkey sign-in needs a browser that supports passkeys." });
+    }
+    return h("div.cust-passkey-block", {}, [
+      h("div.cust-or", {}, h("span", { text: "or" })),
+      h("button.btn.cust-passkey", { type: "button", text: "Sign in with a passkey", onClick: doPasskeyLogin }),
+    ]);
+  }
+  async function doPasskeyLogin() {
+    clearErr();
+    try {
+      var r = await SECURITY.passkeySignIn({ VUI: VUI, api: API });
+      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); }
+      else { err("Sign-in failed."); }
+    } catch (e) { err(SECURITY.signInMessage(e)); }
+  }
+
   function field(id, label, type) {
     return [h("label", { for: id, text: label }),
             h("input#" + id, { type: type || "text", autocomplete: "off", spellcheck: "false" })];
@@ -179,6 +226,7 @@
         h("button.btn.btn-primary", { type: "button", text: "Sign in", onClick: doLogin }),
         h("button.cust-nav-link", { type: "button", text: "Create an account", onClick: function () { nav("#/signup"); } }),
       ]),
+      passkeyBlock(),
       h("div.row", {}, [
         h("button.cust-nav-link", { type: "button", text: "Forgot your password?", onClick: function () { nav("#/recover"); } }),
       ]),
@@ -630,7 +678,9 @@
   async function startCheckout(o, btn) {
     btn.disabled = true;
     try {
-      var r = await VUI.postJSON(API + "/billing/checkout", { price_id: o.price_id });
+      // when the server asks for a fresh second factor, withStepUp checks one inline and sends the purchase ONCE more
+      var r = await withStepUp(function () { return VUI.postJSON(API + "/billing/checkout", { price_id: o.price_id }); },
+        btn.parentNode);
       if (!r || !isCheckoutUrl(r.checkout_url)) {
         err("The payment link we received was not a secure https link, so we did not open it. Nothing was charged.");
         btn.disabled = false; return;
@@ -638,6 +688,7 @@
       location.assign(r.checkout_url);            // leave for the processor's hosted page
     } catch (e) {
       btn.disabled = false;
+      if (e && e.stepUpCancelled) return;          // the person closed the check: nothing was sent again or charged
       if (e && e.status === 401 && e.data && e.data.step_up_required) {
         return err("For your security, this purchase needs a fresh second-factor check. Verify with your "
           + "authenticator, then try again. Nothing was charged.");
@@ -1878,7 +1929,8 @@
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
-      ? h("button.cust-nav-link", { type: "button", text: "Sign out (" + (w.username || "") + ")", onClick: doLogout })
+      ? (SECURITY_ON ? accountLinks(w)
+        : h("button.cust-nav-link", { type: "button", text: "Sign out (" + (w.username || "") + ")", onClick: doLogout }))
       : h("button.cust-nav-link", { type: "button", text: "Sign in", onClick: function () { nav("#/login"); } });
     return h("div.cust-shell", {}, [
       h("div.cust-topbar", {}, [
@@ -1894,6 +1946,15 @@
       ]),
       h("div#cust-main", {}, inner),
     ]);
+  }
+
+  // With the security screens on, the top bar's right side is the account's name (it opens Account security) and Sign out.
+  function accountLinks(w) {
+    var name = String(w.username || "");
+    var me = navLink(name, "#/security");
+    me.setAttribute("title", "Account security");
+    me.setAttribute("aria-label", "Account security (" + name + ")");
+    return [me, h("button.cust-nav-link", { type: "button", text: "Sign out", onClick: doLogout })];
   }
 
   async function doLogout() {
@@ -1940,6 +2001,8 @@
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
+    // the security screens off: #/security is the home screen, exactly as any unknown route is
+    "#/security": function () { return authed() ? (SECURITY_ON ? viewSecurityScreen() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

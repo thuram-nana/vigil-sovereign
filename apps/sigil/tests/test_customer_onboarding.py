@@ -218,7 +218,8 @@ out.blockedAfterClose = G.shouldOpen({ enabled: true, username: "cy", storage: b
 
 # --- the tour -------------------------------------------------------------------------------------------------------
 _NAV = r"""
-const navbar = h("div.cust-topbar", {}, ["#/billing", "#/team", "#/assets", "#/assessments", "#/monitoring", "#/guide"].map(r =>
+const navbar = h("div.cust-topbar", {}, ["#/billing", "#/team", "#/assets", "#/assessments", "#/monitoring", "#/guide",
+                                         "#/security"].map(r =>
   h("button.cust-nav-link", { type: "button", dataset: { route: r }, text: r })));
 document.body.appendChild(navbar);
 const lit = () => document.querySelectorAll(".cust-nav-spot").map(e => e.dataset.route);
@@ -255,8 +256,10 @@ out.back = text(panel().querySelector(".cust-tour-count"));
     assert by_title["Buy credits"]["lit"] == ["#/billing"] and by_title["Bring in your team"]["lit"] == ["#/team"]
     assert by_title["Register the host"]["lit"] == ["#/assets"] and by_title["Launch an assessment"]["lit"] == ["#/assessments"]
     assert by_title["Read your statement"]["lit"] == ["#/billing"] and by_title["You're ready"]["lit"] == ["#/guide"]
+    # Account security opens from the account's name in the top bar; monitoring from its own tab
+    assert by_title["Protect your account"]["lit"] == ["#/security"]
     assert by_title["Turn on monitoring for a host"]["lit"] == ["#/monitoring"]
-    for title in ("Welcome to VIGIL", "Protect your account", "Notifications", "Connect your GitHub account"):
+    for title in ("Welcome to VIGIL", "Notifications", "Connect your GitHub account"):
         assert by_title[title]["lit"] == [], title
     # the journey is click by click: every chapter step in the tour lists its clicks and where they happen
     for s in steps[1:-1]:
@@ -318,7 +321,8 @@ const steps = () => g.querySelectorAll(".cust-guide-step");
 out.openFirst = steps().map(e => !e.querySelector(".cust-guide-detail").hidden);
 steps()[1].querySelector(".cust-guide-step-head").click();
 out.afterToggle = steps().map(e => !e.querySelector(".cust-guide-detail").hidden);
-out.goFirst = g.querySelectorAll("button").filter(b => b.textContent.indexOf("Go to ") === 0).length;
+out.goFirst = g.querySelectorAll("button").filter(b => b.textContent.indexOf("Go to ") === 0).map(b => b.textContent);
+button(g, "Go to Account security").click();
 button(steps()[0], "Mark as done").click();
 out.doneLabel = steps()[0].querySelectorAll("button").map(b => b.textContent);
 out.doneKey = Object.keys(s._m);
@@ -348,8 +352,9 @@ out.navs = navs; out.replays = replays;
                            "Test a host", "Red-Pen and GitHub", "AEGIS monitoring", "Statement and invoices", "Questions"]
     assert out["pressed"][0] == "true" and set(out["pressed"][1:]) == {"false"}
     assert out["openFirst"] == [True] + [False] * 5 and out["afterToggle"] == [True, True] + [False] * 4
-    assert out["goFirst"] == 0                         # sign-in steps happen before the top bar: no "Go to" button
-    assert out["navs"] == ["#/team", "#/", "#/invoices"] and out["replays"] == 1
+    # the sign-in steps happen before the top bar; only Account security (opened from the name in it) has a "Go to"
+    assert out["goFirst"] == ["Go to Account security"]
+    assert out["navs"] == ["#/security", "#/team", "#/", "#/invoices"] and out["replays"] == 1
     assert "✓ Done" in out["doneLabel"] and out["doneKey"] == ["vigil.guide.v1.step.ana.start.account"]
     assert out["workspace"] == ["The Overview", "Bring in your team", "Notifications"]
     assert out["redpen"] == ["Connect your GitHub account", "Red-Pen reviews every pull request",
@@ -437,9 +442,9 @@ def test_the_team_step_offers_only_the_roles_a_customer_can_grant():
 
 def test_the_guide_covers_every_screen_of_the_app():
     """The census: every route app.js knows is covered by the guide — a top-bar screen by steps that happen on it
-    (with its "Go to" button), the screens before sign-in and the payment return page by name — and so are the bell,
-    sign-out, installing the app, and the screens still to come (Account security, Code). A new screen in app.js fails
-    here until the guide covers it (the Monitoring tab, shown while customer monitoring is on, is one of them)."""
+    (with its "Go to" button), the screens before sign-in, the payment return page and Account security (opened from
+    the account's name) by name — and so are the bell, sign-out, installing the app, and the one screen still to come
+    (Code). A new screen in app.js fails here until the guide covers it."""
     src = APP_JS.read_text(encoding="utf-8")
     i = src.index("  var ROUTES = {")
     routes = set(re.findall(r'^    "(#/[^"]*)": function', src[i:src.index("\n  };", i)], re.M))
@@ -454,6 +459,7 @@ def test_the_guide_covers_every_screen_of_the_app():
         "#/recover": (("start", "recover"), "Forgot your password?"),
         "#/google-code": (("start", "signin"), "6-digit code"),
         "#/billing/return": (("credits", "buy"), "Payment received"),
+        "#/security": (("start", "security"), "Open Account security from your name in the top bar"),
     }
     assert routes == top_bar | set(by_name), "a new screen in app.js must be added to the guide (and to this census)"
     assert top_bar - {"#/guide"} <= step_routes                                  # every tab has its steps

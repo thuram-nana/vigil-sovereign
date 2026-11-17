@@ -178,15 +178,18 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
     the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
     "Continue with Google" button), whether an installed app finishes it through the app hand-off, whether the
-    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), whether assessments
-    are launched and controlled from the app (C1a), whether customer monitoring is on (the Monitoring screen: the same
-    VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes, so the screen and its API are never out of step), and
-    whether the Team screen is on. Each is a non-secret on/off value and each counts in the build id."""
+    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), whether the
+    account-security screens are on (Account security and the step-up prompt) and, with them, whether this edge serves
+    passkeys, whether assessments are launched and controlled from the app (C1a), whether customer monitoring is on
+    (the Monitoring screen: the same VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes), and whether the Team
+    screen is on. Each is a non-secret on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
     handoff = google and _config.customer_oidc_handoff_enabled()
     onboarding = _config.customer_onboarding_enabled()
+    security = _config.customer_security_ui_enabled()
+    passkey = security and _config.customer_passkey_enabled()
     launch_ui = _config.customer_launch_ui_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
@@ -197,6 +200,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
                                      "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
+                                     "__VIGIL_SECURITY__": "1" if security else "0",
+                                     "__VIGIL_PASSKEY__": "1" if passkey else "0",
                                      "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0"})
@@ -585,6 +590,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay(_READS[path])
         if path == "/api/customer/onboarding" and _onboarding_on():     # the tour's state (flag OFF -> unknown-route 404)
             return self._onboarding(None)
+        if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
+            return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("members_list")
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
@@ -1132,6 +1139,16 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("onboarding_set", requester, {"state": str(body.get("state", "")), "ip": self._ip()})
         return self._json(r, c)
 
+    def _security_status(self):
+        """The Account security screen's read: which second factors the SESSION's account has (an authenticator app,
+        its passkeys) — never a secret. Account-level like MFA: the REQUESTER is the server-side session username, never
+        a query or body field, so no one can read another account's factors."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        c, r = self._provision("security_status", str(rec.get("username") or ""), {"ip": self._ip()})
+        return self._json(r, c)
+
     def _mfa(self, action: str, body: dict):
         """Customer MFA (E3b TOTP): the acting REQUESTER is taken from the SERVER-side session — NEVER the
         body. MFA is ACCOUNT-level (a customer enrolls/verifies their OWN factor, not an org's), so the gate
@@ -1227,6 +1244,9 @@ def _onboarding_on() -> bool:
     return _config.customer_onboarding_enabled()
 
 
+def _security_on() -> bool:
+    from .. import config as _config
+    return _config.customer_security_ui_enabled()
 def _team_on() -> bool:
     from .. import config as _config
     return _config.customer_team_ui_enabled()
