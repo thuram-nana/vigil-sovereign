@@ -758,8 +758,37 @@ _THINK_RETRYABLE_NAMES = frozenset({
 })
 
 
+def _is_metered_credit_stop(exc: BaseException) -> bool:
+    """M1c-2b — True iff ``exc`` is the model gateway's terminal METERED credit stop (its ``x-vigil-stop:
+    credits_exhausted`` refusal). Checks ``metered_mode()`` first (fast + unmetered ⇒ False, byte-identical), then
+    reads the stop header via ``kernel.metered.stop_reason``. Lazy (two-env). Never raises."""
+    try:
+        from framework.v2.kernel import metered as _metered  # noqa: PLC0415 — lazy (FATAL-2: no framework at scope)
+        if not _metered.metered_mode():
+            return False
+        from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED
+        return _metered.stop_reason(exc) == STOP_CREDITS_EXHAUSTED
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ not a credit stop (fall through to the normal degrade)
+        return False
+
+
+def _credits_exhausted_from(exc: BaseException) -> BaseException:
+    """M1c-2b — the engine's terminal ``CreditsExhausted`` to RAISE from the think step on a metered credit stop,
+    so the run PAUSES (not ASK_USER). Falls back to a plain ``RuntimeError`` if the engine type is unresolvable —
+    still a raise, so a credit stop never silently degrades to an ASK_USER pause. Secret-free message."""
+    try:
+        from framework.v2.common.errors import CreditsExhausted
+        return CreditsExhausted("the model gateway stopped this metered run: credits exhausted")
+    except Exception:  # noqa: BLE001 — engine type unavailable ⇒ still raise (never a silent ASK_USER on a stop)
+        return RuntimeError("the model gateway stopped this metered run: credits exhausted")
+
+
 def _think_retryable(exc: Exception) -> bool:
-    """True iff a TRANSIENT error worth retrying (a connection/timeout, or a retryable HTTP status)."""
+    """True iff a TRANSIENT error worth retrying (a connection/timeout, or a retryable HTTP status). M1c-2b — a
+    metered run's terminal credit stop is NEVER retryable (it cannot clear without a top-up), mirroring the kernel
+    Anthropic backend's terminal ``CreditsExhausted`` handling (never retried, never failed over)."""
+    if _is_metered_credit_stop(exc):
+        return False
     if type(exc).__name__ in _THINK_RETRYABLE_NAMES:
         return True
     code = getattr(exc, "status_code", None)
@@ -887,6 +916,14 @@ def _think_via_client_raw(client: Any, system: str, user: str, *, model: str, ma
     try:
         resp = _invoke_with_backoff(client, params)   # auto-heal a transient blip before giving up (W2b)
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
+        if _is_metered_credit_stop(exc):
+            # M1c-2b — the model gateway STOPPED this metered run for want of prepaid credit (its terminal credit
+            # 403 / ``x-vigil-stop`` header). That is NOT a model-output failure to degrade from: a metered live
+            # run must PAUSE for a top-up, not ASK_USER (which would silently stall it). RAISE the engine's
+            # terminal ``CreditsExhausted`` — the ONE deliberate exception to this module's never-raises contract —
+            # so the OODA loop / engage seam halts the run cleanly and the worker holds the lease for resume
+            # (the gateway re-raises it through the egress chokepoint; see ``engine._think``).
+            raise _credits_exhausted_from(exc)
         ec = _think_error_class(exc)                  # W6b: classify network vs API so the box can show WHY
         logger.warning("live think call failed (%s, class=%s) — fail-closed to safest action",
                        type(exc).__name__, ec)
@@ -985,7 +1022,15 @@ def _resolve_key(api_key: Optional[str]) -> Optional[str]:
     The flag SCOPES the re-read to the long-running engine uiproxy spawns, so a test or a bare-shell
     ``vigil engage`` keeps the plain-env behaviour and never reads a stray ``~/.sigil`` key. A persisted key
     (the UI's source of truth) wins over the spawn-frozen env (the stale snapshot the engine started with);
-    when nothing is persisted, the frozen env is used unchanged, so a shell-only operator is unaffected."""
+    when nothing is persisted, the frozen env is used unchanged, so a shell-only operator is unaffected.
+
+    M1c-2b — a METERED run PREFERS its owner-signed model grant (``VIGIL_MODEL_GRANT``) over every other source:
+    the grant is the only credential a metered live think may send (it spends through the gateway, never a provider
+    key), so it wins over the explicit ``api_key`` arg, the persisted key and the env key, and the ``~/.sigil``
+    hot-reload below is never consulted. Unmetered ⇒ this branch is skipped (byte-identical)."""
+    grant = (os.environ.get("VIGIL_MODEL_GRANT") or "").strip()
+    if grant:
+        return grant
     if isinstance(api_key, str) and api_key.strip():
         return api_key
     if os.environ.get("VIGIL_LIVE_KEY_RELOAD") == "1":
@@ -998,16 +1043,54 @@ def _resolve_key(api_key: Optional[str]) -> Optional[str]:
     return None
 
 
+#: M1c-2b — the URL patterns an environment proxy is mounted on; a metered client mounts each to no proxy (a grant
+#: is a bearer token, so no ambient HTTP(S)_PROXY / ALL_PROXY may sit between the run and its loopback gateway).
+_METERED_PROXY_PATTERNS = ("http://", "https://", "all://")
+
+
+def _metered_gateway_base() -> Optional[str]:
+    """M1c-2b — the LOOPBACK model gateway's base URL when this is a METERED run (a model grant is in scope), else
+    ``None`` (unmetered: byte-identical, no ``base_url``). Lazy (two-env): the engine's ``kernel.metered`` reader —
+    the SAME rule the kernel Anthropic backend uses, so the two agree. Never raises."""
+    try:
+        from framework.v2.kernel import metered as _metered  # noqa: PLC0415 — lazy (FATAL-2: no framework at scope)
+        if not _metered.metered_mode():
+            return None
+        return _metered.gateway_base()
+    except Exception:  # noqa: BLE001 — reader unavailable ⇒ treat as unmetered (no base_url)
+        return None
+
+
+def _metered_http_client(anthropic_mod: Any) -> Optional[Any]:
+    """M1c-2b — an SDK http client with NO ambient proxy, for a metered run's loopback-gateway client (a grant is a
+    bearer credential, so no ``HTTP(S)_PROXY`` / ``ALL_PROXY`` may intercept the run↔gateway hop). Mirrors the
+    kernel Anthropic backend: ``trust_env=False`` AND the proxy patterns mounted to no proxy (SDK 2.x mounts the
+    environment's proxies whatever ``trust_env`` says). ``None`` when the SDK exposes no factory (a test double)."""
+    factory = getattr(anthropic_mod, "DefaultHttpxClient", None)
+    if factory is None:
+        return None
+    return factory(trust_env=False, mounts=dict.fromkeys(_METERED_PROXY_PATTERNS))
+
+
 def _build_live_client(api_key: str) -> Optional[Any]:
     """Build a real ``anthropic.Anthropic`` from ``api_key`` (lazy import so fake/replay runs need no
     SDK). Returns ``None`` on any import/construction failure (→ caller fails closed). Secret-free: the
-    key is passed to the constructor only; the exception path logs the type name, never the message."""
+    key is passed to the constructor only; the exception path logs the type name, never the message.
+
+    M1c-2b — in a METERED run the client is pointed at the LOOPBACK model gateway (``base_url``) and never at
+    api.anthropic.com, with the grant as its key and no ambient proxy on the loopback hop (``max_retries=0`` — the
+    think step's own ``_invoke_with_backoff`` is the single retry policy, exactly as the kernel backend). Unmetered
+    ⇒ the shared bounded http client, no ``base_url`` (byte-identical)."""
     try:
         import anthropic  # lazy: a keyless/fake run must not require the SDK to import
     except Exception as exc:  # noqa: BLE001 — SDK missing/broken → no live client
         logger.warning("anthropic SDK unavailable (%s) — cannot build a live client", type(exc).__name__)
         return None
     try:
+        base_url = _metered_gateway_base()
+        if base_url is not None:
+            return anthropic.Anthropic(api_key=api_key, base_url=base_url, max_retries=0,
+                                       http_client=_metered_http_client(anthropic))
         from vigil_core.sdk_retry import bounded_http_client  # SDK 2.x: never honour a Retry-After over 60 s
         return anthropic.Anthropic(api_key=api_key, http_client=bounded_http_client())
     except Exception as exc:  # noqa: BLE001 — never surface the key via the exception text

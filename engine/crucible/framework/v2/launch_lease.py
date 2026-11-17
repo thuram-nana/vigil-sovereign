@@ -249,13 +249,22 @@ def read_verified_launch_units(slug: str, host: str, tenant: Optional[str], *,
 
     The engine multiplies this by :data:`vigil_core.ENVELOPE_TOKENS_PER_CREDIT` to get the token ceiling, so
     the hard run budget enforces the SAME reserved envelope the sovereign plane minted — one shared constant,
-    no money number in the engine, no drift test."""
+    no money number in the engine, no drift test.
+
+    W2c-2 (k) — a METERED lease (one that NAMES its assessment depth) has NO units-based token envelope: its
+    ``units_reserved`` is only an allowance CHUNK, and its run is bounded by the gateway allowance (per-request
+    admission) + the grant cap, never units x E. For such a lease this returns ``None`` (no ceiling derivable), so
+    the engine leaves the EC-3 hard budget unarmed and ``ENVELOPE_TOKENS_PER_CREDIT`` is never read on a metered
+    path. A FLAT lease (no named depth) is unchanged — it returns its ``units_reserved`` exactly as before."""
     base = base_dir if base_dir is not None else _base_dir()
     t = time.time() if now is None else float(now)
     ok, _reason, doc = _verify_and_bind_lease(slug, host, tenant, base=base, t=t)
     if not ok or doc is None:
         return None
     try:
+        from vigil_core.run_tier import lease_names_depth
+        if lease_names_depth(doc):    # metered: units are an allowance chunk, not a token envelope (W2c-2 k)
+            return None
         return int(doc.units_reserved)
     except (TypeError, ValueError):   # a doc that validated already has units_reserved>=1; defence-in-depth
         return None

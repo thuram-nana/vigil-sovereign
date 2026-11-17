@@ -206,6 +206,10 @@ CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-creden
 # Whether each customer account has finished or skipped the onboarding tour (ui/onboarding_store.py): a UI preference,
 # never money or authority — one hashed-name JSON file per account. Losing it only shows the tour once more.
 CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
+# C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
+# a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
+# reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
+CUSTOMER_LAUNCHES_DIR = _customer / "launches"
 # Slice E3c — step-up MFA. How recently a customer must have proven a fresh factor (TOTP code / passkey
 # assertion) for a sensitive op (launch / target-verify / member grant+revoke) to proceed when enforcement
 # is ON. The session's `mfa_at` is stamped by the edge on a fresh factor proof; the provisioner refuses a
@@ -248,6 +252,18 @@ def customer_monitoring_enabled() -> bool:
     affirmative). OFF by default: the edge routes and provisioner actions are absent (404) exactly as an
     unknown route, and nothing is minted or published."""
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def redpen_enabled() -> bool:
+    """True iff the Red-Pen (code-review) surfaces are ON (`VIGIL_REDPEN_ENABLED` affirmative). OFF by default
+    (mirrors `customer_monitoring_enabled`): with it off EVERY Red-Pen route / action / worker / check-run / schedule
+    is absent (404 exactly as an unknown route), the GitHub App egress refuses, `reserve_redpen_review` refuses, no
+    connected-repo record is minted and no installation token is ever requested — so the server is byte-identical to a
+    build without Red-Pen. The master flag over the whole Red-Pen pipeline (the GitHub App auth, the connected-repo
+    registry, per-repo settings + review metering, the PR-review worker and the Code screen). Read at call time.
+    Even when ON, each leg still fails closed unless its own credential is provisioned (the App id + private key, the
+    webhook secret) — the owner registers the real GitHub App (with `checks:write`) as the last step before go-live."""
+    return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_pause_resume_enabled() -> bool:
@@ -323,6 +339,26 @@ def customer_security_ui_enabled() -> bool:
     OFF by default: the app is exactly as before. The edge reads it at startup (it is written into the page) and on each
     status request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
     return (os.environ.get("VIGIL_CUSTOMER_SECURITY_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+def customer_launch_ui_enabled() -> bool:
+    """True iff customers launch and control assessments from the app (`VIGIL_CUSTOMER_LAUNCH_UI` affirmative; C1a):
+    the Assessments screen offers Launch on each verified host (one of the depths the server offers, then
+    ``launch/reserve`` and ``launch/start``) and lists the org's launches with the controls the server would accept
+    (Start and Cancel before a launch starts; Pause and Resume while it runs, when VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED
+    is on too), read from the edge's ``api/customer/launches`` route; the provisioner keeps each lease reserved while
+    it is on (``ui/customer_launches.py``) so the app can start or cancel it after a reload.
+    OFF by default: that route and its provisioner read are absent (404), nothing is kept, and the Assessments screen
+    is exactly as before. Read by the customer edge when it starts (it is written into the page) and by the cockpit
+    on each request."""
+    return (os.environ.get("VIGIL_CUSTOMER_LAUNCH_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+def customer_team_ui_enabled() -> bool:
+    """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
+    ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account
+    (``POST api/customer/member/add`` → ``member_add``), and the change-role / remove buttons over the existing
+    member/grant and member/revoke routes. OFF by default: both routes and both cockpit actions are absent (404, exactly
+    an unknown route) and the Team tab shows the "being wired" card it always showed. Read when the customer edge starts
+    for the page (it is written into the page, so a change takes effect at the edge's next start) and on every request
+    by the edge and the cockpit for the routes."""
+    return (os.environ.get("VIGIL_CUSTOMER_TEAM_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_ios_install_banner_enabled() -> bool:
@@ -764,6 +800,17 @@ def model_gateway_enabled() -> bool:
     return (os.environ.get("VIGIL_MODEL_GATEWAY_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def gateway_g1_enabled() -> bool:
+    """True iff the model gateway runs at SCALE (PRICING G1; design §5.2): capacity sized from the provider's live
+    rate-limit response headers, a per-tenant fair share, a pool of provider accounts with health checks and
+    failover, and the loss alarm (`sigil.gateway_capacity`, `sigil.gateway_loss`). OFF by default
+    (`VIGIL_GATEWAY_G1` unset): the gateway reads no rate-limit headers, builds no pool, runs no health thread and no
+    loss ledger, and the account protections are the stand-in semaphores (`VIGIL_GATEWAY_TENANT_CONCURRENCY` /
+    `VIGIL_GATEWAY_GLOBAL_CONCURRENCY`) exactly as before — byte-identical. Read when the gateway is built; a change
+    takes effect when the cockpit restarts."""
+    return (os.environ.get("VIGIL_GATEWAY_G1") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 _MODEL_GATEWAY_DEFAULT_PORT = 8742
 
 
@@ -860,6 +907,15 @@ STRIPE_EGRESS_ALLOWLIST = frozenset({"api.stripe.com"})
 # The ONLY host a Stripe hosted-checkout link may point at (`billing._https_link_on`, exact match). A link pin, never
 # fetched — it is deliberately NOT in the egress allowlist above.
 STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
+
+
+# --- GitHub App OUTBOUND egress (Red-Pen R2 — SHIPPED OFF BY DEFAULT) --------------------
+# The outbound host allowlist for the customer-facing GitHub App API calls in `governor.github_app_egress`
+# (App-JWT -> installation-token exchange, repository list, check-run write), enforced BEFORE any socket opens
+# (mirrors STRIPE_EGRESS_ALLOWLIST above). Gated DEFAULT-OFF on the master flag `redpen_enabled()` AND on the App
+# credentials (`VIGIL_GITHUB_APP_ID` + `VIGIL_GITHUB_APP_PRIVATE_KEY`/SSM): unset ⇒ nothing is wired and no GitHub
+# egress exists. There is no API-base override, so the credential-holding egress can only ever reach this host.
+GITHUB_APP_EGRESS_ALLOWLIST = frozenset({"api.github.com"})
 
 
 def customer_oidc_enabled() -> bool:

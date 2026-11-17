@@ -223,6 +223,8 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/launch_settlement.py", "governor/metering.py", "governor/monitoring_authority.py",
     "governor/offense_gate.py", "governor/orgs.py", "governor/postpaid.py", "governor/promotion.py",
     "governor/report_unlock.py", "governor/subscription.py", "governor/trial_claim.py", "governor/wallet.py",
+    "governor/connected_repos.py",    # Red-Pen R2: owner-signed connected-repo registry (its own literal signal)
+    "governor/redpen_spend.py",       # Red-Pen R2: owner-signed per-(repo,month) spend record (its own literal signal)
     "seam_migrate.py",                # the owner-signed seam-migration audit record (its own signal, no latch)
 })
 

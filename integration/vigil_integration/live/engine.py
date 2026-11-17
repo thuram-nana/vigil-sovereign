@@ -54,6 +54,17 @@ from .approval_token import APPROVAL_REJECTED_REASON, APPROVAL_REJECTED_PAUSE
 # target-produced evidence, so the loop must NEVER feed it to oracle intake (it can never mint a FACT).
 _TERMINAL_TOOL = "terminal.run"
 
+
+def _is_credits_exhausted(exc: BaseException) -> bool:
+    """M1c-2b — True iff ``exc`` is the engine's terminal METERED credit stop
+    (``framework.v2.common.errors.CreditsExhausted``). Lazy + guarded (FATAL-2: no ``framework`` at module scope).
+    SAFE DEFAULT = False (a think error that cannot be classified keeps the ordinary ASK_USER human-pause)."""
+    try:
+        from framework.v2.common.errors import CreditsExhausted
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ not a credit stop (ordinary degrade)
+        return False
+    return isinstance(exc, CreditsExhausted)
+
 # ---------------------------------------------------------------------------------------------------
 # seam types — the fixed, simple callables the loop drives. build_engine adapts the real binders to
 # these; tests inject fakes. Every seam is Optional and its absence is fail-closed (never a fake pass).
@@ -728,6 +739,12 @@ class VigilEngine:
         try:
             d = self.seams.think(state)
         except Exception as exc:  # noqa: BLE001 — a think error pauses for a human, never proceeds
+            # M1c-2b — a metered run's terminal credit stop (``CreditsExhausted``) is NOT a think error to degrade
+            # from: it must PAUSE the run for a top-up, not ASK_USER (which would silently stall it). Let it
+            # propagate out of the loop to the engage seam, which holds the lease for resume. Lazy + guarded
+            # (FATAL-2: no framework at module scope); any other error keeps the ASK_USER human-pause fallback.
+            if _is_credits_exhausted(exc):
+                raise
             return LLMDecision(action=ActionType.ASK_USER,
                                reasoning=f"think backend error: {type(exc).__name__}",
                                question="the think backend errored — how should I proceed?")

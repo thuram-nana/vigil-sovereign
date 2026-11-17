@@ -218,7 +218,7 @@ out.blockedAfterClose = G.shouldOpen({ enabled: true, username: "cy", storage: b
 
 # --- the tour -------------------------------------------------------------------------------------------------------
 _NAV = r"""
-const navbar = h("div.cust-topbar", {}, ["#/billing", "#/team", "#/assets", "#/assessments", "#/guide",
+const navbar = h("div.cust-topbar", {}, ["#/billing", "#/team", "#/assets", "#/assessments", "#/monitoring", "#/guide",
                                          "#/security"].map(r =>
   h("button.cust-nav-link", { type: "button", dataset: { route: r }, text: r })));
 document.body.appendChild(navbar);
@@ -256,9 +256,10 @@ out.back = text(panel().querySelector(".cust-tour-count"));
     assert by_title["Buy credits"]["lit"] == ["#/billing"] and by_title["Bring in your team"]["lit"] == ["#/team"]
     assert by_title["Register the host"]["lit"] == ["#/assets"] and by_title["Launch an assessment"]["lit"] == ["#/assessments"]
     assert by_title["Read your statement"]["lit"] == ["#/billing"] and by_title["You're ready"]["lit"] == ["#/guide"]
-    # Account security opens from the account's name in the top bar (a cust-nav-link carrying its route)
+    # Account security opens from the account's name in the top bar; monitoring from its own tab
     assert by_title["Protect your account"]["lit"] == ["#/security"]
-    for title in ("Welcome to VIGIL", "Notifications", "Connect your GitHub account", "Turn on monitoring for a host"):
+    assert by_title["Turn on monitoring for a host"]["lit"] == ["#/monitoring"]
+    for title in ("Welcome to VIGIL", "Notifications", "Connect your GitHub account"):
         assert by_title[title]["lit"] == [], title
     # the journey is click by click: every chapter step in the tour lists its clicks and where they happen
     for s in steps[1:-1]:
@@ -442,8 +443,8 @@ def test_the_team_step_offers_only_the_roles_a_customer_can_grant():
 def test_the_guide_covers_every_screen_of_the_app():
     """The census: every route app.js knows is covered by the guide — a top-bar screen by steps that happen on it
     (with its "Go to" button), the screens before sign-in, the payment return page and Account security (opened from
-    the account's name) by name — and so are the bell, sign-out, installing the app, and the screens still to come
-    (Code, Monitoring). A new screen in app.js fails here until the guide covers it."""
+    the account's name) by name — and so are the bell, sign-out, installing the app, and the one screen still to come
+    (Code). A new screen in app.js fails here until the guide covers it."""
     src = APP_JS.read_text(encoding="utf-8")
     i = src.index("  var ROUTES = {")
     routes = set(re.findall(r'^    "(#/[^"]*)": function', src[i:src.index("\n  };", i)], re.M))
@@ -470,9 +471,10 @@ def test_the_guide_covers_every_screen_of_the_app():
     # the parts of the app that are not a screen of their own
     for key in (("workspace", "notifications"), ("start", "signout"), ("start", "install"), ("start", "security")):
         assert key in steps, key
-    # the screens still to come are described where they will be
+    # the screens still to come are described where they will be, and the Monitoring steps happen on its tab
     wheres = {st["where"] for st in steps.values()}
     assert {"Account security", "Code", "Monitoring", "GitHub"} <= wheres
+    assert {key[1] for key, st in steps.items() if st.get("route") == "#/monitoring"} == {"monitor", "events", "manage"}
     # the questions tab answers the cost question without a number
     faq = {f["q"]: f["a"] for f in out["faq"]}
     assert "does not estimate" in faq["How much will an assessment cost?"]

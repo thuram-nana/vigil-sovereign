@@ -42,6 +42,21 @@
  * one name every sensitive action goes through (buying credits today) — answers the server's request for a fresh
  * second factor with an inline code box, then sends the action ONCE more. Off, all of it is absent: withStepUp(action)
  * is action(), #/security is the home screen, and every screen renders exactly as before.
+ * LAUNCHING. When the edge has launching from the app on (data-launch-ui="1", VIGIL_CUSTOMER_LAUNCH_UI), the
+ * Assessments screen offers Launch on each verified host — one of the depths the server offers, never a price — and
+ * lists the workspace's launches from api/customer/launches with the controls the server accepts (Start / Cancel
+ * before a launch starts, Pause / Resume while it runs), refreshing while one runs and the screen is visible. Off, the
+ * screen is read-only exactly as before and that read is never made.
+ * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
+ * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
+ * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
+ * The server decides who may change monitoring, which hosts are proven and what the plan includes; this page sends
+ * only a host the server listed and a mode. Off, there is no tab, #/monitoring is the home screen exactly as any unknown
+ * route, and no call or timer is made.
+ * TEAM. When the edge has the Team screen on (data-team="1", VIGIL_CUSTOMER_TEAM_UI), #/team lists the workspace's
+ * members (GET api/customer/members) and lets the founder or an admin add an existing VIGIL account by its email, change
+ * a member's role and remove a member (confirmed in the page). Off, #/team is the "being wired" card it always was and
+ * nothing is fetched.
  */
 (function () {
   "use strict";
@@ -123,9 +138,12 @@
   function viewGuideScreen() {
     var w = state.get().who || {};
     return shell(h("div", {}, [h("h2", { text: "Guide" }),
-      GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour })]),
+      GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour,
+                        shown: routeShown })]),
     "#/guide");
   }
+  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
+  function routeShown(route) { return route !== "#/monitoring" || MONITORING_ON; }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -632,10 +650,30 @@
     try { var p = new URL(String(u)); return p.protocol === "https:" && !!p.hostname && !p.username && !p.password; }
     catch (e) { return false; }
   }
+  // An AEGIS monitoring plan buys protected-host slots (monitor_hosts), never credits.
+  function isMonitoringOffer(o) { return !!o && o.kind !== TOPUP && (parseInt(o.monitor_hosts, 10) || 0) > 0; }
+  function aegisPlanName(hosts, respond) {
+    var n = parseInt(hosts, 10) || 0;
+    return "AEGIS " + (respond ? "Respond" : "Observe") + ", " + n + (n === 1 ? " host" : " hosts");
+  }
   function offerLine(o) {
     if (o.kind === TOPUP) return (o.credits != null ? String(o.credits) + " credits" : "Credit top-up");
     var per = o.period_days ? " every " + String(o.period_days) + " days" : "";
+    if (isMonitoringOffer(o)) {
+      var days = Number(o.period_days) || 0;
+      return aegisPlanName(o.monitor_hosts, !!o.monitor_respond) + (days >= 28 && days <= 31 ? " — monthly" : per ? " —" + per : "")
+        + (o.monitor_respond ? ": watches traffic, reports attacks and can block them" : ": watches traffic and reports attacks");
+    }
     return "Plan: " + String(o.allotment != null ? o.allotment : "") + " credits" + per;
+  }
+  // Checkout refuses a second plan OF THE SAME KIND, so the buy list hides a plan exactly then: a credit plan while the
+  // workspace's credit plan is live or a credit-plan checkout is in progress; an AEGIS plan while its AEGIS plan is live
+  // or an AEGIS checkout is in progress. One kind never hides the other, and top-ups are always offered. (Checkout sells
+  // no AEGIS plan yet; the read that offers one must also report has_monitoring_plan and monitoring_checkout_pending.)
+  function offerShown(d, o) {
+    if (o.kind === TOPUP) return true;
+    if (isMonitoringOffer(o)) return !(d.has_monitoring_plan || d.monitoring_checkout_pending);
+    return !(d.has_active_plan || d.plan_checkout_pending);
   }
   async function startCheckout(o, btn) {
     btn.disabled = true;
@@ -667,9 +705,8 @@
       // Absent while checkout is off (404) and hidden for a role that cannot spend money (403): no buy section.
       try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { return; }
       if (here() !== "#/billing") return;
-      // a live plan, or a plan checkout still in progress (not yet drained): checkout refuses a second plan.
-      var noPlan = !!(d && (d.has_active_plan || d.plan_checkout_pending));
-      var offers = ((d && d.offers) || []).filter(function (o) { return !(noPlan && o.kind !== TOPUP); });
+      // a live plan, or a plan checkout still in progress (not yet drained): checkout refuses a second plan of its kind.
+      var offers = ((d && d.offers) || []).filter(function (o) { return offerShown(d, o); });
       if (!offers.length) return;
       var rows = offers.map(function (o) {
         var btn = h("button.btn", { type: "button", text: "Buy " + money(o.amount_minor, o.currency) });
@@ -863,11 +900,13 @@
     } catch (e) { flowCard("#asset-verify", flowMsg(e, "Verification did not pass — publish the token and retry.")); }
   }
 
-  // ---- Assessments: read-only results (operator-role only; org_admin sees the honest 403 card). Launching a
-  //      NEW assessment arrives with the run driver (K4), so it is not offered here yet. --------------------
+  // ---- Assessments: results (operator-role only; org_admin sees the honest 403 card). Launching and controlling
+  //      an assessment from here is the C1a block below, shown only while the edge has VIGIL_CUSTOMER_LAUNCH_UI on;
+  //      off, this screen is read-only exactly as before. ------------------------------------------------------
   function viewAssessments() {
     return dataView("#/assessments", "Assessments", API + "/assessments", function (d) {
       var items = (d && d.assessments) || [];
+      if (LAUNCH_ON) return assessmentsLaunchView(items);
       var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
         + "Launching a new assessment arrives with the run driver." });
       if (!items.length) {
@@ -908,6 +947,779 @@
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
+  }
+
+  // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
+  // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:
+  // one of the depths the SERVER offers this workspace (api/customer/launches lists them — never a price, credits or
+  // units: VIGIL never estimates what an assessment costs), then the app reserves (launch/reserve) and starts
+  // (launch/start) it. The same read lists the workspace's launches with the actions the server would accept and, for a
+  // member who may run them, the signed lease each action presents — so no control depends on a lease kept in this
+  // page. Cancel asks first, in the page. While a launch runs or is paused and this screen is visible, the list
+  // refreshes; it stops when the screen is left or hidden. A refusal is told in fixed words chosen from what the
+  // server refused, never the server's own text (it can name amounts and internals). Off: nothing here runs.
+  var LAUNCH_ON = pageFlag("launchUi");
+  var LAUNCH_POLL_MS = 15000;
+  var DEPTH_LABELS = { quick: "Quick", deep: "Deep" };
+  var DEPTH_HINTS = { quick: "a focused first pass", deep: "broader and more thorough" };
+  var STATE_LABELS = { reserved: "Not started", running: "Running", paused: "Paused" };
+  var FINISHED_LABELS = { completed: "Completed", canceled: "Cancelled", failed: "Did not complete" };
+  // The controls, in the order they show; a launch offers only the ones the server listed for it.
+  var LAUNCH_ACTIONS = [
+    { id: "start", label: "Start", path: "/launch/start", done: "Assessment started" },
+    { id: "pause", label: "Pause", path: "/launch/pause", done: "Assessment paused" },
+    { id: "resume", label: "Resume", path: "/launch/resume", done: "Assessment resumed" },
+    { id: "cancel", label: "Cancel", path: "/launch/cancel", done: "Launch cancelled" },
+  ];
+  var launchUi = { data: null, hosts: [], slots: Object.create(null), other: null, done: null, timer: null, gen: 0,
+                   notes: Object.create(null), busy: Object.create(null), used: Object.create(null),
+                   picker: null, confirm: null };
+
+  // a label for a value the server sent, from OUR table only (never an inherited member of the object)
+  function own(table, key) {
+    return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : "";
+  }
+  function launchesFor(slug) {
+    return ((launchUi.data && launchUi.data.launches) || []).filter(function (l) { return l && l.slug === slug; });
+  }
+  // What Launch offers: the depths the server lists (Quick / Deep; any other depth is never shown), else its one
+  // default launch (no depth to choose).
+  function launchChoices() {
+    var cs = ((launchUi.data && launchUi.data.choices) || []).filter(function (c) { return !!c; });
+    var depths = cs.filter(function (c) { return c.product_id && own(DEPTH_LABELS, c.depth); });
+    if (depths.length) return depths;
+    return cs.filter(function (c) { return c.product_id === ""; }).slice(0, 1);
+  }
+
+  function assessmentsLaunchView(items) {
+    launchUi.hosts = items.map(function (a) { return { slug: a.slug, host: a.host }; });
+    launchUi.slots = Object.create(null);
+    launchUi.notes = Object.create(null);
+    launchUi.data = null; launchUi.picker = null; launchUi.confirm = null;
+    var note = h("p.cust-muted", { text: "Your authorized assessments and their oracle-confirmed findings. "
+      + "Launch an assessment of a verified host, then follow it here while it runs." });
+    var cards = items.map(function (a) {
+      var slot = h("div.cust-launch", {});
+      launchUi.slots[a.slug] = slot;
+      return h("div.card", {}, [
+        h("div.cust-kv", {}, [h("span.k", { text: a.host }), h("span", { text: (a.findings || 0) + " finding(s)" })]),
+        slot,
+        h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+          onClick: function () { loadFindings(a.slug, a.host); } })]),
+      ]);
+    });
+    launchUi.other = h("div#cust-launch-other", {});
+    launchUi.done = h("div#cust-launch-done", {});
+    var body = [note, items.length ? h("div.cust-grid", {}, cards)
+      : h("div.card.cust-soon", { text: "No verified hosts yet — prove you control a host in Assets, then launch an "
+          + "assessment of it here." })];
+    loadLaunches();
+    return h("div", {}, body.concat([launchUi.other, launchUi.done, h("div#assess-findings")]));
+  }
+
+  // Draw every launch area of the screen from what the server last said (and what this page is doing right now).
+  function renderLaunches() {
+    if (here() !== "#/assessments") return;
+    launchUi.hosts.forEach(function (a) {
+      var slot = launchUi.slots[a.slug];
+      if (slot) VUI.mount(slot, launchSlot(a));
+    });
+    if (launchUi.other) VUI.mount(launchUi.other, otherLaunches());
+    if (launchUi.done) VUI.mount(launchUi.done, finishedLaunches());
+  }
+  function launchSlot(a) {
+    if (!launchUi.data) return null;                       // still loading
+    var mine = launchesFor(a.slug);
+    var note = launchUi.notes[a.slug];
+    return mine.map(launchRow).concat([note ? launchNote(note) : null, mine.length ? null : launchPicker(a)]);
+  }
+  function launchRow(l) {
+    var key = l.slug + ":" + l.launch;
+    var depth = own(DEPTH_LABELS, l.depth);
+    var rows = [h("p.cust-launch-status", { text: own(STATE_LABELS, l.state) + (depth ? " · " + depth : "") })];
+    if (l.expired) {
+      rows.push(h("p.cust-muted", { text: "This launch can no longer start. Cancel it to release its credits." }));
+    }
+    if (launchUi.confirm === key) {
+      rows.push(h("div.cust-launch-confirm", {}, [
+        h("p", { text: "Cancel this launch? It has not started, so nothing is charged." }),
+        h("div.row", {}, [
+          h("button.btn.btn-primary", { type: "button", text: "Yes, cancel",
+            onClick: function () { launchAction(l, "cancel"); } }),
+          h("button.btn", { type: "button", text: "Keep it",
+            onClick: function () { launchUi.confirm = null; renderLaunches(); } }),
+        ]),
+      ]));
+      return h("div.cust-launch-item", {}, rows);
+    }
+    var allowed = l.actions || [];
+    var busy = !!launchUi.busy[l.slug];
+    var buttons = LAUNCH_ACTIONS.filter(function (x) { return allowed.indexOf(x.id) >= 0; }).map(function (x) {
+      var go = x.id === "cancel" ? function () { launchUi.confirm = key; renderLaunches(); }
+                                 : function () { launchAction(l, x.id); };
+      return h("button.btn", { type: "button", text: x.label, disabled: busy, onClick: go });
+    });
+    if (buttons.length) rows.push(h("div.row", {}, buttons));
+    return h("div.cust-launch-item", {}, rows);
+  }
+  function launchPicker(a) {
+    var offered = launchChoices();
+    if (!offered.length) return null;                    // nothing this member may launch here
+    var busy = !!launchUi.busy[a.slug];
+    if (launchUi.picker !== a.slug) {
+      return h("div.row", {}, [h("button.btn.btn-primary", { type: "button", text: "Launch", disabled: busy,
+        onClick: function () { launchUi.picker = a.slug; delete launchUi.notes[a.slug]; renderLaunches(); } })]);
+    }
+    var depths = offered.filter(function (c) { return c.product_id; });
+    var rows = [h("p", { text: depths.length ? "Choose a depth to start an assessment of " + a.host + ":"
+                                             : "Start an assessment of " + a.host + "?" })];
+    offered.forEach(function (c) {
+      var label = c.product_id ? own(DEPTH_LABELS, c.depth) : "Start";
+      rows.push(h("div.cust-launch-choice", {}, [
+        h("button.btn.btn-primary", { type: "button", text: label, disabled: busy,
+          onClick: function () { doLaunch(a, c); } }),
+        c.product_id ? h("span.cust-muted", { text: own(DEPTH_HINTS, c.depth) }) : null,
+      ]));
+    });
+    rows.push(h("p.cust-muted", { text: "No price is shown: VIGIL never estimates what an assessment costs." }));
+    rows.push(h("div.row", {}, [h("button.btn", { type: "button", text: "Not now",
+      onClick: function () { launchUi.picker = null; renderLaunches(); } })]));
+    return h("div.cust-launch-picker", {}, rows);
+  }
+  function launchNote(note) {
+    return h("div.cust-launch-note", { role: "status" }, [
+      h("p", { text: note.text }),
+      note.go ? h("button.btn", { type: "button", text: note.goText, onClick: function () { nav(note.go); } }) : null,
+    ]);
+  }
+  // Launches on hosts that are not on the verified list any more (a proof can lapse while an assessment runs): they
+  // keep their controls here.
+  function otherLaunches() {
+    var d = launchUi.data;
+    if (d && d.unavailable) {
+      return h("p.cust-muted", { text: "Launching and following assessments is not available right now." });
+    }
+    var listed = Object.create(null);
+    launchUi.hosts.forEach(function (a) { listed[a.slug] = true; });
+    var rest = ((d && d.launches) || []).filter(function (l) { return l && !listed[l.slug]; });
+    if (!rest.length) return null;
+    return h("div", {}, [h("h3", { text: "Other launches" }), h("div.cust-grid", {}, rest.map(function (l) {
+      var note = launchUi.notes[l.slug];
+      return h("div.card", {}, [h("div.cust-asset-head", {}, [h("span.host", { text: l.host })]), launchRow(l),
+        note ? launchNote(note) : null]);
+    }))]);
+  }
+  function finishedLaunches() {
+    var fs = ((launchUi.data && launchUi.data.finished) || []).filter(function (f) { return !!f; });
+    if (!fs.length) return null;
+    return VUI.card("Finished assessments", null, fs.map(function (f) {
+      var used = f.state === "completed" ? launchUi.used[f.slug + ":" + f.launch] : "";
+      return h("div.cust-kv", {}, [h("span.k", { text: f.host }), h("span", { text: (own(FINISHED_LABELS, f.state)
+        || "Ended") + (f.ended_at ? " · " + fmtDate(f.ended_at) : "") + (used ? " · used " + used + " credits" : "") })]);
+    }));
+  }
+
+  // The server's answer to the launches read; while a launch runs or is paused, asked again every LAUNCH_POLL_MS.
+  async function loadLaunches() {
+    if (here() !== "#/assessments") return;
+    var gen = ++launchUi.gen;                              // only the newest answer is drawn
+    var d;
+    try { d = await VUI.getJSON(API + "/launches"); }
+    catch (e) {
+      if (gen !== launchUi.gen || here() !== "#/assessments") return;
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      if (!launchUi.data) {                                // never loaded on this visit: no controls
+        launchUi.data = { unavailable: true, choices: [], launches: [], finished: [] };
+        renderLaunches();
+        return;
+      }
+      scheduleLaunchPoll();                                // a refresh that failed: keep what is shown, ask again
+      return;
+    }
+    if (gen !== launchUi.gen || here() !== "#/assessments") return;
+    launchUi.data = d || {};
+    renderLaunches();
+    loadUsage();
+    scheduleLaunchPoll();
+  }
+  function scheduleLaunchPoll() {
+    if (launchUi.timer || here() !== "#/assessments" || document.hidden) return;
+    var live = ((launchUi.data && launchUi.data.launches) || []).some(function (l) {
+      return l && (l.state === "running" || l.state === "paused");
+    });
+    if (!live) return;
+    launchUi.timer = setTimeout(function () { launchUi.timer = null; loadLaunches(); }, LAUNCH_POLL_MS);
+  }
+  function stopLaunchPoll() {
+    if (launchUi.timer) { clearTimeout(launchUi.timer); launchUi.timer = null; }
+    launchUi.gen++;                                        // an answer already on its way is dropped
+  }
+  function onLaunchRoute() {
+    if (here() !== "#/assessments") stopLaunchPoll();
+  }
+  function onLaunchVisibility() {
+    if (document.hidden) stopLaunchPoll();
+    else if (here() === "#/assessments" && launchUi.data) loadLaunches();
+  }
+
+  // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
+  // launch, in credits) — never computed here. Shown for a COMPLETED launch whose statement has usage; asked once
+  // per newly finished launch.
+  async function loadUsage() {
+    var want = ((launchUi.data && launchUi.data.finished) || []).filter(function (f) {
+      return f && f.state === "completed" && !Object.prototype.hasOwnProperty.call(launchUi.used, f.slug + ":" + f.launch);
+    });
+    if (!want.length) return;
+    var u = null;
+    try { u = await VUI.getJSON(API + "/billing/usage"); } catch (e) { u = null; }
+    var byLaunch = Object.create(null);
+    ((u && u.scans) || []).forEach(function (s) {
+      if (s && s.status === "ok" && s.requests > 0 && typeof s.credits === "string") {
+        byLaunch[s.scan + ":" + s.launch] = s.credits;
+      }
+    });
+    want.forEach(function (f) { var k = f.slug + ":" + f.launch; launchUi.used[k] = byLaunch[k] || ""; });
+    renderLaunches();
+  }
+
+  // Launch: reserve, then start. A refusal of either is told in the host's card; a reservation whose start was
+  // refused stays listed (Start / Cancel) — the server kept it.
+  async function doLaunch(a, choice) {
+    clearErr();
+    var slug = a.slug;
+    launchUi.picker = null; launchUi.busy[slug] = true; delete launchUi.notes[slug];
+    renderLaunches();
+    var body = { host: a.host };
+    if (choice.product_id) body.product_id = choice.product_id;
+    var r;
+    try { r = await VUI.postJSON(API + "/launch/reserve", body); }
+    catch (e) { delete launchUi.busy[slug]; return launchRefused(slug, "reserve", e); }
+    try { await VUI.postJSON(API + "/launch/start", { lease: r && r.lease }); }
+    catch (e) { delete launchUi.busy[slug]; await launchRefused(slug, "start", e); return loadLaunches(); }
+    delete launchUi.busy[slug];
+    VUI.toast("Assessment started");
+    return loadLaunches();
+  }
+  async function launchAction(l, which) {
+    clearErr();
+    var act = LAUNCH_ACTIONS.filter(function (x) { return x.id === which; })[0];
+    if (!act) return;
+    var slug = l.slug;
+    launchUi.confirm = null; launchUi.busy[slug] = true; delete launchUi.notes[slug];
+    renderLaunches();
+    var r;
+    try { r = await VUI.postJSON(API + act.path, { lease: l.lease }); }
+    catch (e) { delete launchUi.busy[slug]; await launchRefused(slug, which, e); return loadLaunches(); }
+    delete launchUi.busy[slug];
+    if (which === "resume" && r && r.expired) {
+      launchUi.notes[slug] = { text: "Resumed. This launch's time window has closed: an assessment still running "
+        + "carries on, but one that had not started, or had stopped for the pause, will not start again." };
+    }
+    VUI.toast(which === "cancel" && r && r.already_settled ? "This launch had already ended" : act.done);
+    return loadLaunches();
+  }
+  async function launchRefused(slug, which, e) {
+    if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); return; }
+    launchUi.notes[slug] = launchMessage(which, e);
+    renderLaunches();
+  }
+  // Fixed words for each refusal the server gives a launch control (matched on what it refused), and where to fix
+  // it: Billing for credits, Assets for a host's proof or authorization. The step-up answer asks for the
+  // authenticator, as a purchase does. The refusals that name a host are matched first and every phrase matched has
+  // a space in it, so no host name can be mistaken for another refusal.
+  function launchMessage(which, e) {
+    var status = e && e.status, data = (e && e.data) || {};
+    var why = String(data.error || "").toLowerCase();
+    var after = which === "reserve" ? " Nothing was charged." : which === "start" ? "" : " Nothing changed.";
+    var billing = { go: "#/billing", goText: "Go to Billing" }, assets = { go: "#/assets", goText: "Go to Assets" };
+    function has(s) { return why.indexOf(s) >= 0; }
+    function msg(text, where) { return { text: text, go: where ? where.go : null, goText: where ? where.goText : null }; }
+    if (status === 401 && data.step_up_required) {
+      return msg("For your security, this needs a fresh second-factor check. Verify with your authenticator, then "
+        + "try again." + after);
+    }
+    if (status === 503) return msg("VIGIL is updating. Try again in a few seconds." + after);
+    if (status === 429) return msg("Too many attempts — wait a moment and try again." + after);
+    if (status === 404 || has("pause/resume is not enabled")) return msg("This is not available right now." + after);
+    if (has("insufficient credits")) return msg("Not enough credits to start an assessment. Add credits in Billing.", billing);
+    if (has("ownership proof")) {
+      return msg("This host's proof of control is missing or has expired. Verify it again in Assets, then launch.", assets);
+    }
+    if (has("engagement authority")) {
+      return msg("Testing is not authorized for this host right now. Verify it again in Assets, confirming you are "
+        + "authorized to test it, then launch.", assets);
+    }
+    if (has("not settled yet")) {
+      return msg("An assessment of this host is already in progress. Let it finish, or cancel it if it has not "
+        + "started, before launching another.");
+    }
+    if (has("still finishing")) return msg("An earlier assessment of this host is still finishing. Try again shortly.");
+    if (has("may not launch") || has("may not manage launches")) {
+      return msg("Your role cannot launch or control assessments. The founder can, and so can a teammate VIGIL has "
+        + "made an Operator.");
+    }
+    if (has("new assessment launches are paused") || has("global cost pool")) {
+      return msg("New assessments cannot start right now. Please try again later." + after);
+    }
+    if (has("line is overdue")) return msg("Your workspace has an invoice past its due date. Settle it before launching "
+      + "new assessments.");
+    if (has("postpaid credit line")) return msg("Your workspace's credit line has no room for another assessment right now.");
+    if (has("trial scans are not available")) return msg("Trial scans are not available yet. Buy credits in Billing to "
+      + "run an assessment.", billing);
+    if (has("trial covers the trial scan only")) return msg("Your trial covers the trial scan only. Buy credits in "
+      + "Billing for other assessments.", billing);
+    if (has("registered domain")) return msg("Trial scans need your own registered domain. Buy credits in Billing to "
+      + "test this host.", billing);
+    if (has("one workspace per domain")) return msg("Trial scans are limited to one workspace per domain. Buy credits "
+      + "in Billing to test this host.", billing);
+    if (has("trial covers one domain")) return msg("Your trial covers one domain. Buy credits in Billing to test "
+      + "another.", billing);
+    if (has("paused for today")) return msg("Trial scans are paused for today. Try again later, or buy credits in "
+      + "Billing.", billing);
+    if (has("has been started")) return msg("This assessment has already started, so it can no longer be cancelled.");
+    if (has("cannot be released automatically")) {
+      return msg("This launch is cancelled, but its credits cannot be returned automatically right now: they stay "
+        + "reserved, not spent, until VIGIL returns them. VIGIL has been alerted.");
+    }
+    if (has("was cancelled and cannot be started")) {
+      return msg("This launch was cancelled, so it cannot start. Its credits stay reserved, not spent, until VIGIL "
+        + "returns them.");
+    }
+    if (has("already been settled")) return msg("This launch has already ended.");
+    if (has("billing changed")) {
+      return msg("Billing changed after this launch was reserved, so it cannot start. Cancel it (nothing is charged) "
+        + "and launch again.");
+    }
+    if (has("launch product")) return msg("That depth is not available right now. Reload the page and choose again.");
+    if (has("is busy")) return msg("VIGIL is busy right now. Try again in a moment." + after);
+    if (which === "reserve") return msg("The assessment could not be launched. Nothing was charged. Try again in a moment.");
+    if (which === "start") {
+      return msg("The assessment could not start. It stays reserved: select Start to try again, or Cancel it.");
+    }
+    return msg("That did not go through. Nothing changed. Try again in a moment.");
+  }
+  // ---- end of launching and controlling assessments (C1a) -------------------------------------------------------
+
+  // ---- Monitoring (AEGIS) -------------------------------------------------------------------------------------------
+  // #/monitoring, only while the edge has customer monitoring on. GET api/customer/monitoring answers for the SESSION
+  // workspace: the hosts with monitoring (grants) and can_manage (the founder or an admin — the server decides); only to
+  // such a person also the hosts whose proof of control is current (hosts) and the AEGIS plan (plan: host slots, whether
+  // it includes Respond, its period end). Turning monitoring on or changing its mode may need a fresh second factor (the
+  // server answers 401 step_up_required); turning it off never does, and is confirmed here first. The page shows only
+  // what the server sent, and nothing internal of an event (no record number, report id, certificate hash or org id).
+  var MONITORING_ON = pageFlag("monitoring");
+  var MON_POLL_MS = 30000;                                // the events refresh this often while the screen is in view
+  var mon = { timer: null, gen: 0, loaded: false };
+  var MON_MODE = { observe: "Observe", block: "Respond" };
+  var MON_ACTION = { block: "Blocked", observe: "Observed", challenge: "Challenged", throttle: "Slowed down",
+                     allow: "Allowed" };
+  function own(table, key) {                              // the label for a server value; never an inherited member
+    var k = String(key == null ? "" : key);
+    return Object.prototype.hasOwnProperty.call(table, k) ? table[k] : "";
+  }
+  function fmtWhen(ts) {
+    try { return new Date(Number(ts || 0) * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC"; }
+    catch (e) { return "—"; }
+  }
+
+  function viewMonitoring() {
+    var holder = h("div#mon-body", {}, loadingHolder("Loading…"));
+    mon.loaded = false;
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring"); }
+      catch (e) {
+        if (here() !== "#/monitoring") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Monitoring"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/monitoring") return;              // the customer navigated away before the load resolved
+      VUI.mount(holder, monitoringBody(d || {}));
+      pollMonEvents();                                    // the events fill in now, then every MON_POLL_MS
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Monitoring" }),
+      h("p.cust-muted", { text: "AEGIS watches live traffic to the hosts your workspace proved and reports attacks as "
+        + "they happen. Only this workspace sees its hosts and events." }),
+      holder]), "#/monitoring");
+  }
+
+  function monitoringBody(d) {
+    var rows = monHostRows(d);
+    var top = d.can_manage ? monPlanCard(d)
+      : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can turn monitoring on or "
+          + "off. You can see which hosts are monitored and what AEGIS reported." });
+    var hosts = rows.length ? h("div.cust-grid", {}, rows.map(function (r) { return monHostCard(r, d); }))
+      : h("div.card.cust-soon", { text: d.can_manage
+          ? "No host of this workspace has a current proof of control. Monitoring needs a host that shows Verified in Assets."
+          : "No host of this workspace is monitored." });
+    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts, h("h3", { text: "Events" }),
+      h("div#mon-events", {}, loadingHolder("Loading events…"))]);
+  }
+
+  // One row per host: each host with a current proof (sent to a manager only) and each host with monitoring.
+  function monHostRows(d) {
+    var by = Object.create(null), out = [];
+    function row(host) { if (!by[host]) { by[host] = { host: host }; out.push(by[host]); } return by[host]; }
+    (d.hosts || []).forEach(function (x) {
+      if (x && x.host) { var r = row(String(x.host)); r.verified = true; r.expires_at = x.expires_at; }
+    });
+    (d.grants || []).forEach(function (g) { if (g && g.host) { row(String(g.host)).grant = g; } });
+    return out.sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+  }
+  function monActive(d) { return (d.grants || []).filter(function (g) { return g && g.active; }).length; }
+
+  function monPlanCard(d) {
+    var p = d.plan;
+    if (!p) {
+      var help = h("div#mon-plan-help", {}, h("p.cust-muted", { text: "Checking where to get one…" }));
+      monPlanHelp(help);
+      return h("div.card", {}, [h("h3", { text: "AEGIS plan" }),
+        h("p", { text: "This workspace has no active AEGIS plan, so monitoring cannot be turned on yet." }), help]);
+    }
+    return h("div.card", {}, [h("h3", { text: "AEGIS plan" }),
+      kv("Plan", aegisPlanName(p.host_slots, !!p.respond)),
+      kv("Hosts monitored", monActive(d) + " of " + (parseInt(p.host_slots, 10) || 0)),
+      kv("Current period ends", fmtDate(p.period_end)),
+      h("p.cust-muted", { text: p.respond ? "Observe watches traffic and reports attacks. Respond also blocks them."
+        : "Observe watches traffic and reports attacks. Blocking attacks needs an AEGIS Respond plan." })]);
+  }
+  // Where a workspace without a plan gets one: Billing, but only while Billing really offers an AEGIS plan.
+  function monPlanHelp(holder) {
+    (async function () {
+      var d = null;
+      try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { d = null; }
+      if (here() !== "#/monitoring") return;
+      var sold = ((d && d.offers) || []).some(isMonitoringOffer);
+      VUI.mount(holder, sold
+        ? [h("p.cust-muted", { text: "Choose an AEGIS plan on Billing, then turn monitoring on here." }),
+           h("div.cust-mon-actions", {}, monButton("Go to Billing", function () { nav("#/billing"); }))]
+        : h("p.cust-muted", { text: "AEGIS plans are not sold in the app yet. To add one to this workspace, "
+            + "contact VIGIL." }));
+    })();
+  }
+
+  function monHostCard(r, d) {
+    var g = r.grant, on = !!(g && g.active);
+    var badge = on ? h("span.cust-badge.cust-badge-on", { text: "Monitoring · " + (own(MON_MODE, g.mode) || "On") })
+      : h("span.cust-badge.cust-badge-off", { text: "Not monitored" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: r.host }), badge])];
+    if (on) { body.push(kv("Until", fmtDate(g.not_after))); }
+    else if (g) { body.push(h("p.cust-muted", { text: "Monitoring of this host has ended." })); }
+    if (r.verified) { body.push(kv("Proof expires", fmtDate(r.expires_at))); }
+    else if (d.can_manage) {
+      body.push(h("p.cust-muted", { text: "Its proof of control is not current: verify it again in Assets before "
+        + "monitoring can be turned on." }));
+    }
+    if (d.can_manage) {
+      var actions = h("div.cust-mon-actions", {});
+      VUI.mount(actions, monActions(r, d, actions));
+      body.push(actions);
+    }
+    return h("div.card", {}, body);
+  }
+  // A manager's choices for one host. Turn on needs a plan, a current proof and a free host on the plan; Respond only
+  // when the plan includes it. A monitored host can switch mode (it keeps its place) or be turned off, after a confirm.
+  function monActions(r, d, holder) {
+    var p = d.plan, g = r.grant, on = !!(g && g.active), out = [];
+    if (on) {
+      if (p && p.respond && g.mode === "observe") {
+        out.push(monButton("Switch to Respond", function (b) { monTurnOn(r.host, "block", b); }));
+      }
+      if (p && g.mode === "block") {
+        out.push(monButton("Switch to Observe", function (b) { monTurnOn(r.host, "observe", b); }));
+      }
+      out.push(monButton("Turn off", function () { monConfirmOff(r, d, holder); }, "danger"));
+    } else if (p && r.verified) {
+      if (monActive(d) >= (parseInt(p.host_slots, 10) || 0)) {
+        out.push(h("p.cust-muted", { text: "Every host your plan covers is monitored. Turn off another host to "
+          + "monitor this one." }));
+      } else {
+        out.push(monButton("Turn on Observe", function (b) { monTurnOn(r.host, "observe", b); }, "primary"));
+        if (p.respond) { out.push(monButton("Turn on Respond", function (b) { monTurnOn(r.host, "block", b); }, "primary")); }
+      }
+    }
+    return out;
+  }
+  function monButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // Turning monitoring off is asked here first, in place of the host's buttons; nothing is sent until it is confirmed.
+  function monConfirmOff(r, d, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
+      h("p", { text: "Stop monitoring " + r.host + "? Its traffic then passes through AEGIS uninspected, and attacks on "
+        + "it are no longer reported." }),
+      h("div.cust-mon-actions", {}, [
+        monButton("Yes, turn off", function (b) { monTurnOff(r.host, b); }, "danger"),
+        monButton("Keep monitoring", function () { VUI.mount(holder, monActions(r, d, holder)); }),
+      ]),
+    ]));
+  }
+  async function monTurnOn(host, mode, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/authorize", { host: host, mode: mode });
+      VUI.toast("Monitoring is on for " + host + " (" + own(MON_MODE, mode) + ").");
+      if (here() === "#/monitoring") render();            // show the host's new state
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  async function monTurnOff(host, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/revoke", { host: host });
+      VUI.toast("Monitoring is off for " + host + ".");
+      if (here() === "#/monitoring") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  async function monFailed(e) {
+    if (e && e.status === 401 && e.data && e.data.step_up_required) {
+      return err("For your security, this change to monitoring needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.");
+    }
+    if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+    err("Monitoring was not changed" + ((e && e.data && e.data.error) ? ": " + e.data.error : "."));
+  }
+
+  function monEventsList(events) {
+    var list = (Array.isArray(events) ? events : []).filter(function (ev) { return ev && typeof ev === "object"; });
+    list.sort(function (a, b) { return (Number(b.ts) || 0) - (Number(a.ts) || 0); });     // newest first
+    if (!list.length) {
+      return h("div.card.cust-soon", { text: "No events yet. When AEGIS reports an attack on a monitored host, it "
+        + "appears here." });
+    }
+    var head = h("tr", {}, ["When", "Host", "Attack", "Result", "AEGIS action"].map(function (t) {
+      return h("th", { text: t });
+    }));
+    var rows = list.map(function (ev) {
+      var confirmed = ev.decision === "confirmed";
+      return h("tr", {}, [
+        h("td", { text: fmtWhen(ev.ts) }), h("td", { text: String(ev.host || "—") }),
+        h("td", { text: String(ev.attack_class || "—").replace(/_/g, " ") }),
+        h("td", {}, h("span.cust-badge.cust-badge-" + (confirmed ? "attack" : "signal"),
+          { text: confirmed ? "Confirmed" : "Not confirmed" })),
+        h("td", { text: own(MON_ACTION, ev.action) || "—" }),
+      ]);
+    });
+    return h("div.card.cust-mon-events", {}, h("table.cust-table", {}, [h("thead", {}, head), h("tbody", {}, rows)]));
+  }
+
+  // The events refresh politely: every MON_POLL_MS, and only while the Monitoring screen is shown to someone signed in
+  // and the page is visible. render() and the page's visibility changes re-decide, so leaving the screen, hiding the
+  // page or signing out stops it; an answer that comes back after any of those is dropped (the generation moved on).
+  function monVisible() { return MONITORING_ON && authed() && here() === "#/monitoring" && !document.hidden; }
+  function startMonPoll() { if (!mon.timer) { mon.timer = setInterval(function () { pollMonEvents(); }, MON_POLL_MS); } }
+  function stopMonPoll() { if (mon.timer) { clearInterval(mon.timer); mon.timer = null; } mon.gen++; }
+  function syncMonPoll() { if (monVisible()) { startMonPoll(); } else { stopMonPoll(); } }
+  function onMonVisibility() { syncMonPoll(); if (monVisible()) { pollMonEvents(); } }
+  async function pollMonEvents() {
+    if (!monVisible()) { stopMonPoll(); return; }
+    var gen = mon.gen, d;
+    try { d = await VUI.getJSON(API + "/monitoring/events"); }
+    catch (e) {
+      if (e && (e.status === 401 || e.status === 404)) { stopMonPoll(); }  // signed out, or monitoring was switched off
+      if (e && e.status === 401) { await refreshWho(); return; }
+      var box = VUI.$("#mon-events");
+      if (box && gen === mon.gen && !mon.loaded) {
+        VUI.mount(box, h("div.card.cust-soon", { text: "Events could not be loaded just now. VIGIL tries again shortly." }));
+      }
+      return;                                             // keep what is shown; the next tick tries again
+    }
+    if (gen !== mon.gen || !monVisible()) { return; }     // the screen was left, hidden or signed out meanwhile
+    var holder = VUI.$("#mon-events");
+    if (!holder) { return; }
+    mon.loaded = true;
+    VUI.mount(holder, monEventsList(d && d.events));
+  }
+
+  // ---- Team (VIGIL_CUSTOMER_TEAM_UI): the workspace's members — add, change a role, remove -------------------------
+  // Shown only while the edge writes data-team="1"; off, #/team is the "being wired" card it always was and nothing is
+  // fetched. The SERVER decides everything: GET api/customer/members lists the session's workspace only, and only to
+  // someone who may manage its team (anyone else gets the honest card below). Each change is one request for the
+  // session's workspace — never an org this page names: member/add (an existing VIGIL account, named by its email),
+  // member/grant (a new role) or member/revoke (Remove, confirmed in the page, never with a browser dialog) — and then
+  // the list is read again. Only the roles a customer may grant are offered, and the founder's row has no buttons: only
+  // VIGIL changes the founder.
+  var TEAM_ON = pageFlag("team");
+  var TEAM_ROLES = [["org_admin", "Admin"], ["analyst", "Analyst"], ["viewer", "Viewer"]];
+  var ROLE_LABELS = { founder: "Founder", operator: "Operator", org_admin: "Admin", analyst: "Analyst", viewer: "Viewer" };
+  function roleLabel(role) {
+    var r = String(role || "");
+    return Object.prototype.hasOwnProperty.call(ROLE_LABELS, r) ? ROLE_LABELS[r] : (r || "—");
+  }
+  function teamGrantable(role) {
+    for (var i = 0; i < TEAM_ROLES.length; i++) { if (TEAM_ROLES[i][0] === role) return true; }
+    return false;
+  }
+  function teamName(m) { return String((m && (m.email || m.username)) || ""); }
+  // A role picker offering exactly the grantable roles. A current role a customer cannot grant (an Operator) is shown
+  // as a first, unselectable option, so the row reads truthfully and any change is a deliberate choice.
+  function teamRoleSelect(id, current, label) {
+    var sel = h("select" + (id ? "#" + id : ""), label ? { "aria-label": label } : {});
+    if (current && !teamGrantable(current)) {
+      sel.appendChild(h("option", { value: "", text: roleLabel(current), disabled: true }));
+    }
+    TEAM_ROLES.forEach(function (r) { sel.appendChild(h("option", { value: r[0], text: r[1] })); });
+    sel.value = teamGrantable(current) ? current : "";
+    return sel;
+  }
+  // The server's own words for a refusal, without its "denied: " style prefix (while VIGIL restarts: the kit's words).
+  function teamWhy(e) {
+    var d = (e && e.data) || {};
+    if (d.error === "updating") return String((e && e.message) || "");
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+  // True when no answer came back (a 5xx other than "updating", or no response at all): whether the change happened is
+  // not known, so the page reads the list again. While VIGIL restarts the request reached nothing.
+  function teamUnsure(e) {
+    var status = e && e.status;
+    return !status || (status >= 500 && !(status === 503 && e.data && e.data.error === "updating"));
+  }
+  // Why a change did not go through. The provisioner refuses before it writes anything, so a refusal says "Nothing was
+  // changed."; when no answer came back that cannot be said — the list is read again instead.
+  function teamRefusal(e, name) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (status === 401 && d.step_up_required) {
+      return "For your security, changing your team needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.";
+    }
+    if (status === 429) return "Too many team changes in a short time. Wait a minute, then try again. Nothing was changed.";
+    if (teamUnsure(e)) return "VIGIL could not confirm the change. The list shows your team as it is now.";
+    if (status === 503) return String(e.message);                      // "updating": the kit's own words
+    var why = teamWhy(e);
+    if (/last administrator/i.test(why)) {
+      return name + " is the last person who can manage this workspace's team. Make another member an Admin first. "
+        + "Nothing was changed.";
+    }
+    return (why ? why.replace(/\.?$/, ".") : "The change was refused.") + " Nothing was changed.";
+  }
+  function teamNoAccess() {
+    return h("div.card.cust-soon", { text: "Only the workspace's founder and admins can see and change its team. Ask "
+      + "one of them to add someone or to change a role." });
+  }
+  function teamRow(m, isMe, act) {
+    var name = teamName(m);
+    var rows = [
+      h("div.cust-member-head", {}, [
+        h("strong.cust-member-name", { text: name }),
+        isMe ? h("span.chip", { text: "You" }) : null,
+        h("span.cust-badge", { text: roleLabel(m.role) }),
+      ]),
+      m.since ? h("p.cust-muted", { text: "Role since " + fmtDate(m.since) }) : null,
+    ];
+    if (m.role === "founder") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL changes or removes the founder." }));
+      return h("div.card.cust-member", {}, rows);
+    }
+    if (m.role === "operator") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL makes someone an Operator: after a change, only VIGIL can make "
+        + "them one again." }));
+    }
+    var pick = teamRoleSelect(null, m.role, "New role for " + name);
+    var change = h("button.btn", { type: "button", text: "Change role" });
+    change.addEventListener("click", function () {
+      var role = String(pick.value || "");
+      if (!teamGrantable(role) || role === m.role) { act.say("Choose a new role for " + name + " first.", true); return; }
+      act.change(m, role, change);
+    });
+    var ask = h("div.cust-member-confirm", {});
+    ask.hidden = true;
+    var remove = h("button.btn.danger", { type: "button", text: "Remove" });
+    remove.addEventListener("click", function () {
+      var yes = h("button.btn.danger", { type: "button", text: "Yes, remove" });
+      yes.addEventListener("click", function () { act.remove(m, yes); });
+      VUI.mount(ask, [
+        h("p", { text: isMe ? "Remove yourself from this workspace? You lose access to it straight away."
+                            : "Remove " + name + " from this workspace? They lose access to it straight away." }),
+        h("div.cust-member-actions", {}, [yes, h("button.btn", { type: "button", text: "Cancel",
+          onClick: function () { ask.hidden = true; VUI.clear(ask); } })]),
+      ]);
+      ask.hidden = false;
+    });
+    rows.push(h("div.cust-member-actions", {}, [pick, change, remove]), ask);
+    return h("div.card.cust-member", {}, rows);
+  }
+  function teamMembers(list, act) {
+    if (!list.length) return h("div.card.cust-soon", { text: "No members yet." });
+    var me = String((state.get().who || {}).username || "");
+    return h("div.cust-team-list", {}, list.map(function (m) { return teamRow(m, !!me && m.username === me, act); }));
+  }
+  function teamAddCard(act) {
+    var email = h("input#team-add-email", { type: "email", autocomplete: "off", spellcheck: "false" });
+    var role = teamRoleSelect("team-add-role", "viewer");
+    var add = h("button.btn.primary", { type: "button", text: "Add member" });
+    add.addEventListener("click", function () {
+      var e = String(email.value || "").trim().toLowerCase(), r = String(role.value || "");   // as the list shows it
+      if (!e) { act.say("Enter your teammate's work email.", true); return; }
+      if (!teamGrantable(r)) { act.say("Choose a role: Admin, Analyst or Viewer.", true); return; }
+      act.add(e, r, add);
+    });
+    return h("div.card.cust-team-add", {}, [
+      h("h3", { text: "Add member" }),
+      h("p.cust-muted", { text: "Your teammate needs a VIGIL account first. Enter the email they sign in to VIGIL with "
+        + "and choose their role." }),
+      h("label", { for: "team-add-email", text: "Work email" }), email,
+      h("label", { for: "team-add-role", text: "Role" }), role,
+      h("div.cust-member-actions", {}, [add]),
+    ]);
+  }
+  function viewTeam() {
+    var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
+    var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
+    function say(text, bad) {
+      note.textContent = text || "";
+      note.className = "cust-team-msg" + (bad ? " bad" : "");
+      if (bad) { try { note.scrollIntoView({ block: "nearest" }); } catch (e) { /* a convenience */ } }
+    }
+    async function load() {
+      var d;
+      try { d = await VUI.getJSON(API + "/members"); }
+      catch (e) {
+        if (here() !== "#/team") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) { VUI.mount(holder, teamNoAccess()); return; }
+        VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load your team"
+          + (teamWhy(e) ? ": " + teamWhy(e) : ".") }));
+        return;
+      }
+      if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
+      VUI.mount(holder, [teamMembers((d && d.members) || [], act), teamAddCard(act)]);
+    }
+    async function send(path, body, done, name, btn) {
+      say("");
+      if (btn) btn.disabled = true;
+      try { await VUI.postJSON(API + path, body); }
+      catch (e) {
+        if (btn) btn.disabled = false;
+        if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); return; }
+        say(teamRefusal(e, name), true);
+        if (teamUnsure(e)) await load();
+        return;
+      }
+      VUI.toast(done);
+      await load();
+    }
+    var act = {
+      say: say,
+      add: function (email, role, btn) {
+        return send("/member/add", { email: email, role: role }, email + " was added as " + roleLabel(role) + ".",
+          email, btn);
+      },
+      change: function (m, role, btn) {
+        return send("/member/grant", { member_username: m.username, role: role },
+          teamName(m) + " is now " + roleLabel(role) + ".", teamName(m), btn);
+      },
+      remove: function (m, btn) {
+        return send("/member/revoke", { member_username: m.username },
+          teamName(m) + " was removed from this workspace.", teamName(m), btn);
+      },
+    };
+    load();
+    return shell(h("div", {}, [h("h2", { text: "Team" }), note, holder]), "#/team");
   }
 
   // ---- notification centre --------------------------------------------------------------------
@@ -1113,6 +1925,7 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -1183,7 +1996,9 @@
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
-    "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
+    "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
+    // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
+    "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is
@@ -1219,6 +2034,7 @@
     VUI.mount(root, view());
     setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it
     syncNtf();                     // start/stop the notification poll to match the live session + pref
+    syncMonPoll();                 // monitoring on: the events refresh only while their screen is in view
     maybeOpenTour();               // the guide on: the first-sign-in tour (once per account in this browser)
   }
 
@@ -1227,6 +2043,12 @@
   document.addEventListener("visibilitychange", function () { if (!document.hidden) resumeHandoff(); });
   window.addEventListener("pageshow", function () { resumeHandoff(); });
   window.addEventListener("resize", setTopbarVar);   // keep the fixed notification panel pinned below the topbar
+  if (LAUNCH_ON) {                                   // C1a: the launch list refreshes only on a visible Assessments
+    window.addEventListener("hashchange", onLaunchRoute);
+    document.addEventListener("visibilitychange", onLaunchVisibility);
+  }
+  // monitoring on: the events stop refreshing while the page is hidden, and refresh at once when it is back in view
+  if (MONITORING_ON) { document.addEventListener("visibilitychange", onMonVisibility); }
   state.sub(render);
 
   // ---- boot ---------------------------------------------------------------------------------------

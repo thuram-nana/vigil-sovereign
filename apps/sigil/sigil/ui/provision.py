@@ -30,6 +30,9 @@ Workflows:
     tenant's resources, or any assessment target (the grantable set excludes `operator`/`founder`/`owner`).
     A founder's own membership is never changed or revoked here: that is an owner act
     (`owner_set_member_role` / `owner_demote_founders`, the `sigil org` verbs).
+  * customer_members / add_member — the customer app's Team screen (VIGIL_CUSTOMER_TEAM_UI): the session org's member
+    list, and adding an EXISTING customer by the email of their account. Both are `manage_members` acts. There is no
+    invitation flow: a person without a VIGIL account is refused in plain words and nothing is recorded for them.
 
 FATAL-2: sovereign-side (`assert_no_offense` at import); no framework/strix.
 """
@@ -69,6 +72,15 @@ _ORG_ID_PREFIX = "org_"
 _CUSTOMER_GRANTABLE_ROLES = frozenset({"viewer", "analyst", "org_admin"})
 # The per-org role only the service owner grants or changes (vigil_core.rbac `founder`).
 _FOUNDER_ROLE = "founder"
+# The Team screen (VIGIL_CUSTOMER_TEAM_UI): the order its member list is shown in (then by name), and the refusals of
+# Add member a customer reads. A teammate is named by the email of their VIGIL account; there is no invitation flow,
+# so a person without an account is told to create one first. The labels named here are the app's own.
+_TEAM_ORDER = {"founder": 0, "org_admin": 1, "operator": 2, "analyst": 3, "viewer": 4}
+_ADD_NO_ACCOUNT = ("there is no VIGIL account for that email. Ask your teammate to create one with Create an account "
+                   "on the sign-in screen, then add them again")
+_ADD_ALREADY_MEMBER = ("that person is already a member of this workspace. To give them another role, use Change role "
+                       "on their row")
+_ADD_BAD_EMAIL = "enter the email address your teammate signs in to VIGIL with"
 # The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
 # one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
 _SIGNUP_CODE_EMAIL = (
@@ -1317,6 +1329,75 @@ class Provisioner:
             seq = self.orgs.revoke_membership(requester_org_id, member_username)
         return {"org_id": requester_org_id, "username": member_username, "seq": seq}
 
+    # -- the Team screen (VIGIL_CUSTOMER_TEAM_UI; the cockpit dispatch is absent while it is off) --------------------
+    def customer_members(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """The Team screen's read: the members of the SESSION org. Listing the team is an administrator's act —
+        `manage_members` (an `org_admin` or the `founder`) — because no per-org role lets members see each other
+        today; any other member, a non-member and a revoked member are refused (403). ``requester`` /
+        ``requester_org_id`` are the hop-bound session principal, never a body field, so no org's members are ever read
+        but the session's own.
+
+        Each row: the canonical ``username``, the per-org ``role`` as stored (a founder stays ``founder`` whatever the
+        founder kill switch admits it as — the app shows that row read-only), ``since`` (when the CURRENT grant was
+        signed: a role change restarts it) and ``email`` only when the customer registry holds an ACTIVE account with
+        one (an inactive account's member is listed without it). Founder first, then admins, operators, analysts and
+        viewers, each by name. A read: no lock, nothing minted, no owner key used."""
+        def project(_store, org_id: str) -> dict:
+            rows: "list[dict[str, object]]" = []
+            for m in self.orgs.memberships(org_id):
+                row: "dict[str, object]" = {"username": m.username, "role": m.role, "since": m.issued_at}
+                acct = self.customers.customer(m.username)
+                if acct is not None and acct.email:
+                    row["email"] = acct.email
+                rows.append(row)
+            rows.sort(key=lambda r: (_TEAM_ORDER.get(str(r["role"]), len(_TEAM_ORDER)),
+                                     str(r.get("email") or r["username"])))
+            return {"org_id": org_id, "members": rows, "count": len(rows)}
+        return self._customer_read(requester, requester_org_id, "manage_members", project)
+
+    def add_member(self, requester: str, requester_org_id: str, email: str, role: str, *, ip: str = "",
+                   mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """The Team screen's Add member: an administrator of THEIR org adds an EXISTING VIGIL customer, named by the
+        email of that customer's account, with a customer-grantable role. A member is otherwise identified by their
+        opaque server-made username, which no person knows, and there is NO invitation flow: an email with no active
+        account is refused in plain words, and nothing is sent to it or recorded about it.
+
+        Order (each step fail-closed, nothing written before the last): the role must be customer-grantable and the
+        email well-formed (pure input checks); then, inside the transaction lock and the cross-process membership lock
+        `grant_member` holds, the requester must hold `manage_members` in the SESSION org FIRST — so someone who may not
+        manage the team learns nothing about whether an email has an account — then the E3c step-up, then the per-org
+        rate guard (it counts every authorised attempt, a refused lookup included, so an administrator's probing is
+        bounded per org); then the lookup; then a current member of the org is refused (Add never changes an existing
+        member's role — that is member/grant); then the critical audit and the owner-signed grant, exactly as
+        `grant_member` writes them. Returns {org_id, username, role, seq}."""
+        t = self._now() if now is None else float(now)
+        if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
+            raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
+        from ..governor.customers import _check_email
+        try:
+            email_l = _check_email(email)
+        except ValueError:
+            raise ProvisionError(_ADD_BAD_EMAIL) from None
+        with self._lock, _members_lock(self.store):
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_members"):
+                self._audit("add_member", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            self._member_rate_guard(requester_org_id, now=t)   # after admit: only authorised churn is metered
+            acct = self.customers.by_email(email_l)
+            if acct is None:
+                raise ProvisionDenied(_ADD_NO_ACCOUNT)
+            member_username = _member_target(acct.username)
+            if self.orgs.membership_role(member_username, requester_org_id) is not None:
+                raise ProvisionDenied(_ADD_ALREADY_MEMBER)
+            # durable audit BEFORE the owner-signed grant (fail-closed; committed implies audited), as grant_member
+            self._audit("add_member", requester=requester, org_id=requester_org_id, target=member_username,
+                        outcome=f"role={role}", critical=True)
+            seq = self.orgs.grant_membership(requester_org_id, member_username, role,
+                                             issued_at=self._next_issued())
+        return {"org_id": requester_org_id, "username": member_username, "role": role, "seq": seq}
+
     # -- asset-ownership target registration (Slice G0 — billing != testing) ------------------------
     def target_challenge(self, requester: str, requester_org_id: str, host: str, *,
                          ip: str = "", now: "Optional[float]" = None) -> dict:
@@ -1428,11 +1509,59 @@ class Provisioner:
             raise ProvisionDenied(str(r.get("error") or "launch reservation refused"))
         self._audit("launch_reserve", requester=requester, org_id=requester_org_id, target=host,
                     outcome="reserved", critical=True)
+        self._keep_launch(r["lease"], now=t)          # C1a: the app can start / cancel it after a reload (flag on)
         out = {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
                                  "lease", "trust_root") if k in r}
         if pid:
             out["product_id"] = pid                  # echo the resolved product for the edge/UI
         return out
+
+    def _keep_launch(self, signed_lease, *, now: float) -> None:
+        """C1a — while VIGIL_CUSTOMER_LAUNCH_UI is on, keep a just-reserved lease so the customer app can start or
+        cancel it after a reload (``ui/customer_launches``). Best effort: the reservation stands and its lease is in
+        the reply either way, so a failure here is logged and never raised — refusing the reply would strand the
+        credits the gate has just reserved."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            return
+        from . import customer_launches as _cl
+        try:
+            with self._lock:
+                _cl.remember(signed_lease, now=now)
+        except Exception as e:  # noqa: BLE001 — a cache write never fails a reservation that already happened
+            import logging
+            logging.getLogger(__name__).warning("a reserved launch could not be kept for the customer app (%s)",
+                                                type(e).__name__)
+
+    def _drop_launch(self, doc) -> None:
+        """C1a — forget the kept lease of a launch that was started (the seam holds it now) or cancelled, so the app
+        never offers to start it again. Best effort, like ``_keep_launch``; off with the flag."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            return
+        from . import customer_launches as _cl
+        try:
+            with self._lock:
+                _cl.forget(str(doc.org_id), str(doc.engagement_slug), str(doc.nonce))
+        except Exception as e:  # noqa: BLE001 — a cache write never fails the start / cancel it follows
+            import logging
+            logging.getLogger(__name__).warning("a started or cancelled launch could not be dropped from the "
+                                                "customer app's kept reservations (%s)", type(e).__name__)
+
+    def _launch_choices(self, org_id: str) -> "list[dict]":
+        """C1a — what the app's Launch may offer ``org_id``: exactly what ``launch_reserve`` accepts from it, and never
+        an amount. Each offered tiered launch product as ``{product_id, depth}`` (its units are never projected); a
+        locked trial-preview org only the trial product (``_trial_launch_check`` refuses every other); with no tiered
+        product on offer, the one server-decided default launch (``product_id`` "")."""
+        from .. import config
+        from ..governor import catalog
+        products = catalog.launch_products()
+        if self._preview_locked(org_id):
+            trial = config.trial_product_id()
+            return [{"product_id": p.product_id, "depth": p.run_tier} for p in products if p.product_id == trial]
+        if not products:
+            return [{"product_id": "", "depth": None}]
+        return [{"product_id": p.product_id, "depth": p.run_tier} for p in products]
 
     def _trial_launch_refuse(self, requester: str, org_id: str, host: str, reason: str, text: str) -> "NoReturn":
         self._audit("launch_reserve", requester=requester, org_id=org_id, target=host,
@@ -1836,6 +1965,7 @@ class Provisioner:
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
                         target=str(_cdoc.engagement_slug), outcome="refund_held", reason=PLAN_DEBIT_PRUNED,
                         critical=True)
+            self._drop_launch(_cdoc)                 # C1a: cancelled (no seam marker yet): never offered to start again
             raise ProvisionDenied(LAUNCH_REFUND_HELD_DETAIL)
         if r.get("refused"):
             self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
@@ -1845,6 +1975,7 @@ class Provisioner:
         if not r.get("ok"):
             msg = str(r.get("error") or "launch cancel refused")
             raise ProvisionDenied(msg + (" (retry)" if r.get("retry") else ""))
+        self._drop_launch(_cdoc)                     # C1a: settled one way or another: no longer a kept reservation
         if r.get("action") == "launch_already_settled":
             if r.get("rolled_forward"):
                 # this cancel FINISHED an earlier settle a crash interrupted — at that settle's RECORDED amounts
@@ -1901,6 +2032,7 @@ class Provisioner:
             raise ProvisionDenied(str(r.get("error") or "launch start refused"))
         self._audit("launch_start", requester=requester, org_id=requester_org_id,
                     target=str(r.get("slug", "")), outcome="started", critical=True)
+        self._drop_launch(lease_doc)                 # C1a: the seam holds it now (a later re-lease never revives it)
         return {"slug": r.get("slug"), "scope_host": r.get("scope_host"), "governance_delegation": deleg_path}
 
     def launch_pause(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "",
@@ -2110,7 +2242,15 @@ class Provisioner:
 
     def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                      now: "Optional[float]" = None) -> dict:
-        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership)."""
+        """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership), and whether
+        the requester may turn monitoring on or off (``can_manage``: ``manage_monitoring``, decided HERE — the
+        founder or an org_admin — never by the client).
+
+        Only for such a requester, what the Monitoring screen needs to turn monitoring on: ``hosts``, the org's hosts
+        with a CURRENT ownership proof (host + the proof's expiry; never a challenge token), and ``plan``, the org's
+        active monitoring plan (host slots + whether it includes respond + its period end; no price) or None. An
+        org_admin cannot read the assets view (``view_assessments``), so the verified hosts come from here. A role that
+        cannot manage monitoring reads exactly the grants, as before."""
         t = self._now() if now is None else float(now)
         from ..governor.monitoring_authority import MonitoringAuthorityRegistry
         with self._lock:
@@ -2119,7 +2259,27 @@ class Provisioner:
             rows = [{"host": g.host, "mode": g.mode, "not_before": g.not_before, "not_after": g.not_after,
                      "active": reg.active_at(requester_org_id, g.host, now=t) is not None}
                     for g in reg.grants(requester_org_id)]
-        return {"org_id": requester_org_id, "grants": rows}
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            out: dict = {"org_id": requester_org_id, "grants": rows, "can_manage": can_manage}
+            if can_manage:
+                out["hosts"], out["plan"] = self._monitor_setup(requester_org_id, t)
+        return out
+
+    def _monitor_setup(self, org_id: str, now: float) -> "tuple[list[dict], Optional[dict]]":
+        """For ``monitor_list`` (a monitoring manager only): the org's hosts whose ownership proof is current at ``now``
+        (the proof ``grant`` requires) and its ACTIVE monitoring plan as the CATALOG defines it. Caller holds the lock."""
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        hosts = [{"host": a["host"], "expires_at": a["expires_at"]}
+                 for a in AssetOwnershipRegistry(self.store, owner_key=None).assets_overview(org_id, now=now)
+                 if a.get("status") == "verified"]
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            return hosts, None
+        return hosts, {"host_slots": plan.host_slots, "respond": plan.respond, "period_end": float(sub.period_end)}
 
     def monitor_events(self, requester: str, requester_org_id: str, *, ip: str = "", limit: int = 200) -> dict:
         """The SESSION org's drained AEGIS monitoring events (gateway-reported; org-scoped read)."""
@@ -2155,7 +2315,10 @@ class Provisioner:
             raise ProvisionDenied("the published rates are unavailable") from None
 
     def customer_billing_usage(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
-        """The session org's per-charge usage statement (credits only)."""
+        """The session org's per-charge usage statement (credits only). ``now`` is the DISPLAY instant — it decides
+        which plan tranches have expired for the balance-after timeline (W2c-2), exactly as ``billing_overview``'s
+        ``now`` reads a lapsed subscription."""
+        import time as _t
         from vigil_core.rate_card import RateCardError
 
         from .. import config as _config
@@ -2164,7 +2327,8 @@ class Provisioner:
         try:
             return self._customer_read(
                 requester, requester_org_id, "view_billing",
-                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR))
+                lambda s, o: _billing.billing_usage(s, o, trusted_pubkey=pub, meter_dir=_config.MODEL_METER_DIR,
+                                                    now=_t.time()))
         except RateCardError:
             raise ProvisionDenied("the published rates are unavailable") from None
 
@@ -2188,6 +2352,27 @@ class Provisioner:
             lambda s, o: _assess.assessment_findings(
                 s, o, now=_t.time(), preview=self._preview_locked(o),
                 can_buy=self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")))
+
+    def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
+                          now: "Optional[float]" = None) -> dict:
+        """C1a — the SESSION org's assessment launches for the customer app (``ui/customer_launches.launches``): those
+        reserved, running or paused with the actions the server would accept, those that finished, and what Launch
+        may offer. Absent unless VIGIL_CUSTOMER_LAUNCH_UI is on. Gated like the assessments read
+        (``admit_customer(view_assessments)`` on the session org, no global leg); the actions, the launch choices and
+        each launch's signed lease (what start / cancel / pause / resume must present) are included only for a member
+        who may run assessments (``run_engagement``). Credits only: no amount, no units, no estimate."""
+        from .. import config
+        if not config.customer_launch_ui_enabled():
+            raise ProvisionDenied("launching assessments from the app is not enabled")
+        t = self._now() if now is None else float(now)
+        from . import customer_launches as _cl
+
+        def project(store, org: str) -> dict:
+            control = self.orgs.admit_customer(username=requester, org_id=org, permission="run_engagement")
+            return _cl.launches(store, org, now=t, trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None),
+                                control=control, pause_resume=config.customer_pause_resume_enabled(),
+                                choices=self._launch_choices(org) if control else [])
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
 
     def _preview_locked(self, org_id: str) -> bool:
         """Pricing S5: is this org's finding detail locked (trial preview, not unlocked)? Server-side only."""

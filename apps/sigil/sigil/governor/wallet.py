@@ -89,6 +89,21 @@ def _as_credits(v: object) -> int:
     return 0
 
 
+def _issued_at(v: object) -> float:
+    """A folded ``issued_at`` → float for ordering a statement timeline; junk / non-finite ⇒ 0.0 (sorts oldest, a
+    safe default for a record whose own signature already carries a finite ``issued_at``)."""
+    import math
+    if isinstance(v, bool):
+        return 0.0
+    if isinstance(v, (int, float, str)):
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        return f if math.isfinite(f) else 0.0
+    return 0.0
+
+
 def _check_credits(credits: int) -> int:
     """Validate a credits amount at BINDING time (a clean ValueError now, never a silent bad record later).
     Must be a positive whole number (a grant/debit of 0 or negative is meaningless and refused)."""
@@ -327,6 +342,38 @@ class WalletRegistry:
     def remainder_mc(self, org_id: str) -> int:
         """W2c-1: the org's sub-credit metered usage not yet debited (0..999 milli-credits; 0 for unknown)."""
         return self.balance(org_id).remainder_mc
+
+    def purchase_events(self, org_id: str) -> "list[tuple[float, int]]":
+        """W2c-2 — the org's PURCHASED/trial credit grants as ``(issued_at, credits)``, oldest first: the owner-signed
+        ``topup`` and ``trial`` grants that ADD spendable credits. It EXCLUDES ``refund`` settlement returns (which
+        only give back a scan's unused reservation — already netted by that scan's metered charges) and
+        ``subscription_refill`` (the plan ledger carries plan credits). Each record is verified under the owner key
+        valid AT ITS SEQ (succession-aware), fail-closed: an unsigned / forged / wrong-epoch grant is ignored, and a
+        replayed ``entry_id`` counts once. PURE read (no key, no lock, no write) for the statement's balance-after
+        timeline (``ui.billing.billing_usage``). It is a LIVE scan of the spine window (like the statement's charges),
+        not snapshot-seeded — a grant a hard prune removed is no longer shown; the prune-durable position is the
+        wallet fold (``balance``)."""
+        if not isinstance(org_id, str) or not org_id:
+            return []
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        seen: set = set()
+        out: "list[tuple[float, int]]" = []
+        for r in self.store.iter_records():
+            p = r.payload
+            if not isinstance(p, dict) or p.get("signal") != CREDIT_GRANT_SIGNAL or p.get("org_id") != org_id:
+                continue
+            if p.get("kind") not in ("topup", "trial"):
+                continue                               # refund / subscription_refill are not a purchase
+            eid = p.get("entry_id")
+            if not (isinstance(eid, str) and eid) or not verify_signed(p, _GRANT_CORE, resolver.at(r.seq)):
+                continue                               # fail-closed: unsigned / forged / wrong-epoch
+            key = (org_id, eid)
+            if key in seen:
+                continue                               # idempotent: a replayed grant counts once
+            seen.add(key)
+            out.append((_issued_at(p.get("issued_at")), _as_credits(p.get("credits"))))
+        out.sort(key=lambda e: e[0])
+        return out
 
     def has_grant_entry(self, org_id: str, entry_id: str) -> bool:
         """True iff an owner-signed GRANT with this (org_id, entry_id) has been folded — membership of the fold's

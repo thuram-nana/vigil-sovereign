@@ -261,9 +261,20 @@ class LaunchGate:
         conservative credit-envelope PROXY ``consumed * E`` until the keyless actual-token delivery lands),
         CLAMPED to the reserved envelope ``reserved * E`` so a forged over-report can never over-settle. All
         arguments come from the VERIFIED lease (never a wire value). Gated DEFAULT-OFF + idempotent per
-        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve)."""
+        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve).
+
+        W2c-2 (k): a launch published METERED writes NO cost-settle proxy — ``consumed`` is the whole-credit customer
+        charge and ``reserved`` the allowance chunk, so ``* E`` would be a fictional token count; its real provider
+        cost is metered by the model gateway (GrantMeter cost_nano). So ``ENVELOPE_TOKENS_PER_CREDIT`` is never read
+        on a metered launch's settle; a flat launch is byte-identical. An unreadable billing mode fails closed to
+        'metered' (skip) — advisory metering never over-reports, and the real cost is on the gateway meter."""
         from .. import config
         if not config.cost_ledger_write_enabled():
+            return
+        try:
+            if self._launch_was_metered(slug, nonce):
+                return
+        except OSError:
             return
         try:
             from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
@@ -460,7 +471,12 @@ class LaunchGate:
             # EC-5: after the real (incremental) reserve succeeds, write the cost-ledger RESERVE for the pool
             # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
             # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
-            self._write_cost_reserve(oid, u, slug, non, now_ts)
+            # W2c-2 (k): ONLY a flat launch (depth is None) writes the `u * E` proxy. A metered launch's `u` is an
+            # allowance CHUNK, not a token estimate, so `u * E` would be a fictional cost; its real provider cost is
+            # metered by the model gateway (GrantMeter cost_nano). So ENVELOPE_TOKENS_PER_CREDIT is never read on a
+            # metered launch, and the flat path is byte-identical.
+            if depth is None:
+                self._write_cost_reserve(oid, u, slug, non, now_ts)
             if depth is not None:                         # W2b-3: the depth, named under the owner signature, in a
                 from vigil_core.credit_lease import LEASE_DEPTH_VERSION    # lease version an older reader refuses
                 split.update(run_tier=depth, version=LEASE_DEPTH_VERSION)
@@ -476,6 +492,138 @@ class LaunchGate:
             "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
             "lease": signed.model_dump(mode="json"),
             "trust_root": trust_root.model_dump(mode="json"),
+        }
+
+    def reserve_redpen_review(self, *, org_id: str, repo: str, now: Any, depth: str = "quick",
+                              nonce: Optional[str] = None, duration_hours: Any = _DEFAULT_LEASE_HOURS) -> dict:
+        """Red-Pen R2 — authorize + reserve + mint for ONE pull-request review of a CONNECTED repository, reusing
+        the whole W2 lease/settle/meter path. Returns ``{ok: True, lease, trust_root, slug, ...}`` with the signed
+        ``CreditLaunchLease`` (``scope_host = github.com/org/repo``, ``engagement_slug = _customer_slug(org, repo)``),
+        or ``{ok: False, error}`` (fail-closed; nothing debited, no lease minted, on any failing conjunct).
+
+        The decisive substitution (decision O-3): the OWNER-SIGNED CONNECTED-REPO RECORD stands in for the
+        host-ownership-proof + engagement-authority conjuncts a host launch uses — connecting a repository you
+        administer on GitHub IS the white-box, owner-authorized basis for VIGIL to review it (``own-a-repo !=
+        own-a-host != offense-test``). The other conjuncts are unchanged: the owner kill switch + ``customer_launch``
+        latch, the per-repo MONTHLY SPENDING LIMIT (decision O-2 — at the limit new reviews are refused + notified,
+        in-flight finishes), the prepaid wallet credit floor (one useful model request, EXACT balance) and the global
+        cost pool. The slug + nonce mean ``settle_launch`` / the metering settle the W2 path already runs are reused
+        VERBATIM (settles exactly, idempotent per (slug, nonce)).
+
+        Behind the master flag ``config.redpen_enabled()`` (default OFF ⇒ this refuses, byte-identical). A BILLED
+        review additionally needs ``VIGIL_METERED_BILLING`` on (decision O-6); the lease is metered either way (it
+        names the depth), so the charge is exact with NO estimate. Prepaid wallet only in this slice — a postpaid
+        credit-line org's repo review is a documented follow-on (it refuses here rather than drawing a line)."""
+        from contextlib import ExitStack
+        from .. import config
+        from ..governor.asset_ownership import _check_org_id
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        from ..governor.redpen_spend import RedPenSpendLedger
+        from vigil_core import (AuthorizerKey, CreditLaunchLease, TrustRoot, check_connected_repo, run_tier,
+                                sign_credit_launch_lease)
+        from vigil_core import model_metering as mm
+        from vigil_core.credit_lease import LEASE_DEPTH_VERSION
+        from vigil_core.rate_card import rate_card
+        from ..model_gateway import min_request_mc
+        from .target_authorization import _customer_slug
+
+        if not config.redpen_enabled():
+            return {"ok": False, "error": "Red-Pen is off (VIGIL_REDPEN_ENABLED): refusing a review (fail-closed)"}
+        kp = self.owner_key
+        if kp is None:
+            return {"ok": False, "error": "a review lease must be owner-signed (internal: no owner key)"}
+        try:
+            oid = _check_org_id(org_id)
+            repo_ref = check_connected_repo(repo)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if depth not in run_tier.DEPTHS:
+            return {"ok": False, "error": f"depth must be one of {run_tier.DEPTHS}"}
+        try:
+            dur = float(duration_hours)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "duration_hours must be a number"}
+        if not (0 < dur <= _MAX_LEASE_HOURS):
+            return {"ok": False, "error": f"duration_hours must be in (0, {_MAX_LEASE_HOURS}]"}
+        try:
+            t = self._as_dt(now)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        now_ts = t.timestamp()
+        host = repo_ref                                   # the lease's scope_host is the repo reference itself
+        slug = _customer_slug(oid, host)                  # the SAME tenant-namespaced slug the W2 path keys on
+        non = str(nonce) if nonce is not None else secrets.token_urlsafe(16)
+        if not non or ":" in non:
+            return {"ok": False, "error": "nonce must be a non-empty string without ':'"}
+        try:
+            min_mc = min_request_mc(rate_card())          # the least one useful model request is charged (mc)
+            chunk = mm.allowance_chunk_credits()          # the engineering holding granularity (same as a launch)
+        except (ValueError, mm.MeteringError):            # RateCardError / a retired pricing setting → fail-closed
+            return {"ok": False, "error": "reviews cannot start right now: the published usage rates cannot be "
+                    "read (fail-closed)"}
+        # Pure-READ sovereign registries (owner_key=None → never unseal the signing key on this read path).
+        pub = self._owner_pub()
+        connected = ConnectedRepoRegistry(self.store, owner_key=None, trusted_pubkey=pub).active(oid, repo_ref)
+        spend = RedPenSpendLedger(self.store, owner_key=None, trusted_pubkey=pub)
+
+        def _gated() -> Optional[str]:
+            switched = self._new_launch_refusal()         # the owner's kill switch and customer_launch latch first
+            if switched is not None:
+                return switched
+            if connected is None:
+                return (f"{repo_ref} is not connected (org {oid}): connect the repository before a review can run "
+                        f"— the owner-signed connection is the authorization")
+            refusal = spend.review_refusal(oid, repo_ref, monthly_limit_credits=connected.monthly_limit_credits,
+                                           now=now_ts)
+            if refusal is not None:
+                return refusal["reason"]
+            # prepaid wallet floor (W2c-1 EXACT balance less the org's sub-credit remainder): one useful request
+            if self._exact_room(oid, self.meter.available(oid, now_ts)) * MC_PER_CREDIT < min_mc:
+                return "insufficient credits to start a review: top up your wallet to continue"
+            review_pool_refusal = self._pool.gate_refusal()
+            if review_pool_refusal is not None:
+                return review_pool_refusal
+            return None
+
+        pre = _gated()                                    # cheap pre-check outside the lock (fast refusal)
+        if pre is not None:
+            return {"ok": False, "error": pre}
+        if connected is None:                             # unreachable (the conjunct refused above); narrows + defence
+            return {"ok": False, "error": f"{repo_ref} is not connected (org {oid})"}
+        with ExitStack() as held:
+            held.enter_context(self._lock)
+            re = _gated()                                 # TOCTOU: re-check every conjunct inside the lock
+            if re is not None:
+                return {"ok": False, "error": re}
+            locked = self._settle_lock_into(held)         # a metered reserve holds the settle lock through the debit
+            if locked is not None:
+                return locked
+            before = self.meter.available(oid, now_ts)
+            # Size the chunk from the EXACT balance (mirrors reserve_launch's prepaid metered branch): at least one
+            # useful request, at most what the wallet holds in whole credits.
+            u = min(max(int(chunk), -(-min_mc // MC_PER_CREDIT)), self._exact_room(oid, before))
+            if u < 1 or u * MC_PER_CREDIT < min_mc:
+                return {"ok": False, "error": "insufficient credits to start a review: top up your wallet to "
+                        "continue"}
+            plan_part = self._spend(oid, u, slug, non, now_ts)   # plan-first then wallet (idempotent per slug,nonce)
+            if before - self.meter.available(oid, now_ts) < u:
+                return {"ok": False, "error": "this review reservation did not apply (nonce already used)"}
+            split: "dict[str, Any]" = {}
+            if config.lease_plan_split_enabled():
+                split = {"plan_reserved": plan_part[0], "plan_period_end": plan_part[1]}
+            self._write_cost_reserve(oid, u, slug, non, now_ts)   # EC-5 advisory cost meter (gated off; fail-safe)
+            split.update(run_tier=depth, version=LEASE_DEPTH_VERSION)
+            doc = CreditLaunchLease(
+                engagement_slug=slug, org_id=oid, scope_host=host, units_reserved=u,
+                not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts, **split)
+            signed = sign_credit_launch_lease(doc, {"owner": kp.private_key_b64})
+            trust_root = TrustRoot(threshold=1, authorizers=[
+                AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        return {
+            "ok": True, "action": "redpen_review_reserved", "org_id": oid, "repo": repo_ref, "host": host,
+            "slug": slug, "installation_id": connected.installation_id, "units_reserved": u, "nonce": non,
+            "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
+            "lease": signed.model_dump(mode="json"), "trust_root": trust_root.model_dump(mode="json"),
         }
 
     # -- W2c-1: the exact (milli-credit) balance ---------------------------------------------------------------------

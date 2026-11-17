@@ -115,6 +115,17 @@ def lease_depth(doc: Any) -> str:
     return depth_of(getattr(doc, "run_tier", None), getattr(doc, "units_reserved", None))
 
 
+def lease_names_depth(doc: Any) -> bool:
+    """W2c-2 — whether the lease EXPLICITLY names its assessment depth (``run_tier`` set to a :data:`DEPTHS` value),
+    i.e. it was reserved with metered billing: its ``units_reserved`` is only an allowance CHUNK, never a token
+    envelope (the engine must not multiply it by ``ENVELOPE_TOKENS_PER_CREDIT``). A flat lease — or any lease minted
+    before W2b-3 — names none and keeps the tier derived from its units. The lease model refuses an unknown depth
+    when it is read, so a verified doc's ``run_tier`` (if set) is already a valid depth; this is fail-safe (an
+    unreadable / non-depth value reads as 'names none')."""
+    rt = getattr(doc, "run_tier", None)
+    return isinstance(rt, str) and rt in DEPTHS
+
+
 def effort_for(run_tier: str) -> str:
     """The effort a run of depth ``run_tier`` is pinned to; an unknown depth resolves to the quick depth's (the
     cheaper, smaller-impact default — never a silent escalation)."""
