@@ -564,9 +564,9 @@ class LaunchGate:
             # prepaid wallet floor (W2c-1 EXACT balance less the org's sub-credit remainder): one useful request
             if self._exact_room(oid, self.meter.available(oid, now_ts)) * MC_PER_CREDIT < min_mc:
                 return "insufficient credits to start a review: top up your wallet to continue"
-            pool_refusal = self._pool.gate_refusal()
-            if pool_refusal is not None:
-                return pool_refusal
+            review_pool_refusal = self._pool.gate_refusal()
+            if review_pool_refusal is not None:
+                return review_pool_refusal
             return None
 
         pre = _gated()                                    # cheap pre-check outside the lock (fast refusal)
