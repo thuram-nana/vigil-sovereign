@@ -65,7 +65,7 @@ class _Up(BaseHTTPRequestHandler):
         if self.path.startswith("/v1/messages/count_tokens"):
             return self._send(200, {"input_tokens": 10}, [])
         mode = srv.mode
-        if mode in (429, 500, 503):
+        if mode in (400, 429, 500, 503):
             extra = [("retry-after", str(srv.retry_after))] if srv.retry_after else []
             return self._send(mode, {"type": "error", "error": {"type": "api_error", "message": "x"}}, extra)
         doc = {"id": "m", "type": "message", "role": "assistant", "model": OPUS, "stop_reason": "end_turn",
@@ -230,6 +230,35 @@ def test_a_5xx_with_no_healthy_account_left_relays_the_error(tmp_path):
             _stop(server)
     finally:
         bad.shutdown(); bad.server_close()
+
+
+def test_a_relayed_provider_error_gives_the_lane_back_before_the_client_sees_it(tmp_path, monkeypatch):
+    """A 4xx the provider refuses (not a 429, so no failover) is relayed with the account's capacity lane ALREADY
+    given back: a client that retries at once is not held back by capacity its failed call still had reserved.
+    Ordered, so deterministic: the lane's release is recorded before the relay is written."""
+    up = _serve()
+    up.mode = 400
+    order = []
+    real_release, real_relay = gc.CapacityLane.release, gw._Handler._relay_error
+
+    def _release(self, *a):
+        order.append("lane")
+        return real_release(self, *a)
+
+    def _relay(self, e):
+        order.append("relay")
+        return real_relay(self, e)
+    monkeypatch.setattr(gc.CapacityLane, "release", _release)
+    monkeypatch.setattr(gw._Handler, "_relay_error", _relay)
+    try:
+        server = _start(tmp_path, [_account("only", up)], upstream=_url(up))
+        try:
+            assert _call(server, _tok())[0] == 400                      # a real error: relayed, never failed over
+            assert order == ["lane", "relay"]
+        finally:
+            _stop(server)
+    finally:
+        up.shutdown(); up.server_close()
 
 
 def _until_down(server, aid):
